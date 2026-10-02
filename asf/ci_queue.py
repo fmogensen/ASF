@@ -1283,9 +1283,9 @@ def _job_class(job, by_name, labels):
 
 
 def _job_labels(job):
-    """The job's own labels, normalised: a plain string or ``{'name': …}`` per entry."""
+    """The job's own labels, normalised: a plain string or ``{'name': …}`` per entry; an empty one dropped."""
     return frozenset(ci_pool._norm(l if isinstance(l, str) else (l or {}).get('name', ''))
-                     for l in job.get('labels') or ())
+                     for l in job.get('labels') or ()) - {''}
 
 
 def peak_concurrent(jobs, by_name, labels, split=None):
@@ -3220,11 +3220,6 @@ def _item_of_run(branch, title, items):
         if tok in legacy:
             return legacy[tok]
     return None
-
-
-def _job_labels(job):
-    return frozenset(ci_pool._norm(l if isinstance(l, str) else (l or {}).get('name', ''))
-                     for l in job.get('labels') or ()) - {''}
 
 
 def _required_names(product, sha):

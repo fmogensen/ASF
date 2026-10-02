@@ -998,7 +998,7 @@ class Conventions:
 
     def queue_status(self):
         """``ci.queue_status``: the commit status context the merge queue posts on the sha it
-        lands (:func:`asf.merge_queue.attest`) — :data:`DEFAULT_QUEUE_STATUS` unless set."""
+        lands (:func:`asf.merge_queue.post_queue_status`) — :data:`DEFAULT_QUEUE_STATUS` unless set."""
         value = self.map_of('ci').get('queue_status')
         return value.strip() if isinstance(value, str) and value.strip() \
             else DEFAULT_QUEUE_STATUS

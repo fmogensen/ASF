@@ -561,7 +561,7 @@ def land(lane, batch, members, trunk_sha, runs=None):
         why = f'{trunk} moved under the batch'
         push = None
     else:
-        attest(lane, batch)
+        post_queue_status(lane, batch)
         started = time.monotonic()
         push = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{trunk}'], lane.repo,
                             refs_only=True, timeout=gitpush.push_timeout(lane.conv), log=out)
@@ -610,7 +610,7 @@ def run_url(runs):
     return ''
 
 
-def attest(lane, batch):
+def post_queue_status(lane, batch):
     """Post :meth:`asf.conventions.Conventions.queue_status` = success on the batch sha, just
     before the trunk push: the one door. The trunk's ruleset requires that status, so a sha the
     queue did not land (a direct ``gh pr merge``, a hand push) is refused by the host itself —

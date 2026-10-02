@@ -2,7 +2,7 @@
 
 Under ``merge: queue`` the merge queue posts the commit status
 :meth:`asf.conventions.Conventions.queue_status` (``asf/queue``) = success on the batch sha just
-before it fast-forwards the trunk (:func:`asf.merge_queue.attest`). A repository ruleset on the
+before it fast-forwards the trunk (:func:`asf.merge_queue.post_queue_status`). A repository ruleset on the
 trunk — no bypass actors, no force-push, no deletion, that status required — then refuses every
 other way onto the trunk: a ``gh pr merge``, a hand push, a web merge button. Every session and
 worker shares one GitHub user, so a bypass actor would protect nothing; the status is the key.

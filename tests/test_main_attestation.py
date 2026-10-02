@@ -37,8 +37,9 @@ class Attestation(QueueRepo):
         self.addCleanup(patch.stop)
 
     def statuses(self):
+        # the queue also posts its own door status (asf/queue) on the sha: only the attestation
         return [c for c in self.gh.calls if c[:3] == ['api', '-X', 'POST']
-                and '/statuses/' in c[3]]
+                and '/statuses/' in c[3] and f'context={merge_queue.ATTEST_CONTEXT}' in c]
 
     def cut(self):
         self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
@@ -52,7 +53,7 @@ class Attestation(QueueRepo):
         main_at_status = []
 
         def spy(args):
-            if args[:3] == ['api', '-X', 'POST']:
+            if args[:3] == ['api', '-X', 'POST'] and f'context={merge_queue.ATTEST_CONTEXT}' in args:
                 main_at_status.append(self.heads()['main'])
             return self.gh(args)
         self.reroute(spy)
@@ -123,3 +124,22 @@ class AttestedRuns(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NoShadowedDefinitions(unittest.TestCase):
+    """#607 and #608 each added a top-level ``attest`` to merge_queue: the later one silently
+    replaced the earlier, and every green-batch landing crashed with a TypeError for 19 h."""
+
+    def test_no_module_defines_a_top_level_function_twice(self):
+        import ast
+        import pathlib
+        root = pathlib.Path(merge_queue.__file__).parent
+        dupes = []
+        for path in sorted(root.rglob('*.py')):
+            seen = set()
+            for node in ast.parse(path.read_text()).body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if node.name in seen:
+                        dupes.append(f'{path.relative_to(root)}:{node.lineno} {node.name}')
+                    seen.add(node.name)
+        self.assertEqual(dupes, [])

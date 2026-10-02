@@ -12,7 +12,9 @@ from tests import test_merge_queue as tmq
 
 
 def _statuses(calls):
-    return [c for c in calls if c[:3] == ['api', '-X', 'POST'] and '/statuses/' in c[3]]
+    # the queue also attests the sha (asf/attested, tests/test_main_attestation.py): only the door
+    return [c for c in calls if c[:3] == ['api', '-X', 'POST'] and '/statuses/' in c[3]
+            and not any(str(a) == f'context={merge_queue.ATTEST_CONTEXT}' for a in c)]
 
 
 def _field(call, key):
@@ -56,7 +58,8 @@ class QueueAttests(tmq.QueueRepo):
         inner = self.gh
 
         def gh(args):
-            if args[:3] == ['api', '-X', 'POST'] and '/statuses/' in args[3]:
+            if args[:3] == ['api', '-X', 'POST'] and '/statuses/' in args[3] \
+                    and f'context={merge_queue.ATTEST_CONTEXT}' not in args:
                 order.append('status')
             return inner(args)
         self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
