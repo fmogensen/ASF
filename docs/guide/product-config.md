@@ -269,6 +269,14 @@ The newest `asf/attested` status per sha is the first in the list, so the `[0]` 
 current one. A push whose sha has none — a hotfix pushed past the queue, a refused status — runs
 the matrix as before.
 
+ASF reads the attestation back wherever it judges the trunk's required checks: the deploy's pick
+(`deploy_sha`, prod auto-deploy, the scorecard's prod evidence), `trunk_red`, a PR's checks on a
+head that is a trunk sha, and the CI queue's trunk relief. On a sha with `asf/attested` =
+`success`, a required job that concluded `skipped` counts as green. A required job that ran there
+and failed (the gate, a rules job) is still red, one still queued or running is still pending,
+and a `pending` or `failure` attestation counts for nothing. `ci.attest_status` renames the
+context, for both the status the queue posts and the one ASF reads.
+
 ### `models` — the model a session runs on
 
 Three labels, `heavy`, `light` and `cheap` — not a model id. `worker_pool.models` in

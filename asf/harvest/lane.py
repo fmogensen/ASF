@@ -119,7 +119,7 @@ import subprocess
 import tempfile
 import time
 
-from asf import approvals, customer_content, env, gitpush, refguard, reviews
+from asf import approvals, attestation, customer_content, env, gitpush, refguard, reviews
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -3521,6 +3521,7 @@ class GitHubHost(Host):
         self._queue = None
         self._required = None
         self._trunk_runs = {}  # sha -> that commit's check runs (None: unreadable), one pass
+        self._attested = {}  # sha -> carries the merge queue's attestation (one read a pass)
 
     def prs(self):
         """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest.
@@ -3570,7 +3571,8 @@ class GitHubHost(Host):
                        'number,state,headRefOid,mergeCommit,autoMergeRequest'], {})
         required = self.required_checks(self.lane.state_dir) if p and self.lane else ()
         state, _detail, _checks = (pr_checks(self.slug, p.get('number'), required, self.rerun_ids(),
-                                             head=p.get('headRefOid')) if p
+                                             head=p.get('headRefOid'),
+                                             attest_context=attestation.context(self.product)) if p
                                    else ('none', '', []))
         return {'pr': p.get('number'), 'state': p.get('state'), 'head': p.get('headRefOid'),
                 'checks': {'green': 'passed', 'red': 'failed'}.get(state, state),
@@ -3627,7 +3629,8 @@ class GitHubHost(Host):
         if required is None:
             return f'required checks unknown: {why}'
         state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
-                                          head=exact_head(f))
+                                          head=exact_head(f),
+                                          attest_context=attestation.context(self.product))
         if state == 'red' or (state != 'green' and f.get('how') == 'ci'):
             return f'required checks {state} at merge: {detail}'
         if f.get('on_checks') and required:
@@ -3825,7 +3828,8 @@ class GitHubHost(Host):
         if required is None:
             return None
         state, _detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
-                                           head=head)
+                                           head=head,
+                                           attest_context=attestation.context(self.product))
         from asf import flake
         out = self.lane.out if callable(getattr(self.lane, 'out', None)) else print
         flake.settle(self.product, self.lane.state_dir, self.slug, head, checks, out=out)
@@ -3973,7 +3977,8 @@ class GitHubHost(Host):
             wait(lane, f, f'required checks unknown: {why}', state=WAITING_CI)
             return None
         state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
-                                          head=exact_head(f))
+                                          head=exact_head(f),
+                                          attest_context=attestation.context(self.product))
         ignored = not_required_red(checks, required)
         if ignored:
             lane.out(f'harvest: {b}: PR #{number} check(s) red but not required — '
@@ -4074,6 +4079,14 @@ class GitHubHost(Host):
         return 'gate'
 
 
+    def attested(self, sha):
+        """True when trunk ``sha`` carries the merge queue's attestation
+        (:func:`asf.attestation.product_attested`), read once a pass."""
+        if sha not in self._attested:
+            self._attested[sha] = attestation.attested(
+                self.slug, sha, attestation.context(self.product))
+        return self._attested[sha]
+
     def trunk_red(self, names):
         """``{name: sha}`` — each of ``names`` with a completed run on the trunk that failed or timed
         out (a cancelled run judges nothing), with the commit that run judged. The trunk's first-parent history
@@ -4082,7 +4095,10 @@ class GitHubHost(Host):
         sha with more than one completed run for a name (a rerun) is red if any of them is —
         a retry that flipped a failure to green is flaky, not clean (B-0129), and the flip does
         not erase the failure it needed to overturn. Unreadable (no ``gh``, no access) reads as
-        not red — the PR's own checks and the gate still judge it, as before."""
+        not red — the PR's own checks and the gate still judge it, as before. A check that
+        only ``skipped`` judges by the attestation (:mod:`asf.attestation`): on a sha the merge
+        queue attested it is green there (the batch run judged that exact sha), on any other it
+        is no verdict and the commit before judges."""
         want = [n for n in dict.fromkeys(names or ()) if n]
         repo = getattr(self.lane, 'repo', None)
         if not want or not repo:
@@ -4106,6 +4122,9 @@ class GitHubHost(Host):
                         and r.get('conclusion') != 'cancelled']
                 if not done:
                     continue
+                if all(r.get('conclusion') in attestation.ATTESTED_CONCLUSIONS for r in done) \
+                        and not self.attested(sha):
+                    continue  # skipped on a sha nobody attested: no verdict, the one before judges
                 left.discard(name)
                 if any(r.get('conclusion') in TRUNK_RED_CONCLUSIONS for r in done):
                     red[name] = sha
@@ -4165,7 +4184,8 @@ def head_runs(slug, sha, rollup=()):
     return out
 
 
-def pr_checks(slug, number, required=(), rerun=(), head=None):
+def pr_checks(slug, number, required=(), rerun=(), head=None,
+              attest_context=attestation.CONTEXT):
     """``('green'|'pending'|'red'|'unknown', detail, checks)`` for PR ``number``'s checks. No
     checks at all is green. With ``required`` names (``landing_checks`` or branch protection) only
     those judge: a failed required one is red (a cancelled one is pending, never red), else an unfinished required one is
@@ -4180,7 +4200,12 @@ def pr_checks(slug, number, required=(), rerun=(), head=None):
 
     ``head``: the PR's exact head sha — its check runs from every event (:func:`head_runs`) join
     the rollup's, the newest run per workflow and name judging (a CI-queue dispatched run on the
-    head counts, green or red; a run on any other sha never does)."""
+    head counts, green or red; a run on any other sha never does).
+
+    ``attest_context``: a required check that only ``skipped`` on ``head`` passes when ``head``
+    carries that status = ``success`` (:mod:`asf.attestation`) — a trunk sha the merge queue
+    attested, whose push run skipped the heavy jobs the batch run already passed there. Read
+    only when such a check is there; any other bucket is judged as before."""
     rollup = pr_graph.checks_for(slug, number, head)  # one query a tick for every open PR
     if rollup is None:  # the snapshot cannot vouch for this PR: read it the REST way
         rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
@@ -4202,6 +4227,11 @@ def pr_checks(slug, number, required=(), rerun=(), head=None):
     checks = latest_checks(rollup)
     judged = ([c for c in checks if required_name(c.get('name'), required)] if required
               else checks)
+    skipped = [c for c in judged if c.get('bucket') == SKIP_BUCKET] if required and head else []
+    if skipped and attestation.attested(slug, head, attest_context):
+        ids = {id(c) for c in skipped}  # copies: the rollup snapshot is never written
+        checks = [dict(c, bucket=PASS_BUCKETS[0], attested=attest_context) if id(c) in ids
+                  else c for c in checks]
     held = {str(i) for i in rerun or ()}
 
     def rerun_of(c):
