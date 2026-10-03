@@ -213,7 +213,7 @@ conventions:
   # unset flag is its documented default; a name this release does not read is listed by
   # `asf doctor`'s `product` row (asf.conventions.KNOWN_FLAGS).
   # flags:
-  #   mechanical: true
+  #   mechanical: on     # conflict → the lane rebases it; footprint → the widening verdict in the hold (default off)
   #   plan_ahead: 2
   #   verdict_block: warn   # off (default) | warn | on: a review's ```verdict block is read
   #                         # first (the table is the fallback); at `on` the Stop gate refuses

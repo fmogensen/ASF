@@ -140,6 +140,7 @@ from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
+from asf.harvest import mechanical
 from asf.harvest import pr_graph
 from asf.harvest import transplant as transplant_mod
 from asf.workers import githooks
@@ -1147,12 +1148,16 @@ def widen_candidates(files, item_writes, touched=(), read=None, own=False):
 
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
                          touched=(), conv=None, own=False, read=None, head=None, finding=None,
-                         main=None):
+                         main=None, lane=None, f=None):
     """Hold ``branch`` and hand it back to its session (:func:`asf.workers.lifecycle.hold`).
     ``'held'`` — or ``'foreign'`` for a red naming only files outside its footprint (no round),
     or ``'timed-out'`` for a gate that ran out of time (no round). ``own``: the red is this
     branch's whatever files it names (gated on a trunk green alone). ``finding``: the hold's
-    finding when the caller knows it — a review's C-list files (:func:`lifecycle.finding_of`)."""
+    finding when the caller knows it — a review's C-list files (:func:`lifecycle.finding_of`).
+    ``lane``/``f``: the pass and the branch's facts — with them, under ``flags.mechanical: on``,
+    a cause in :data:`asf.harvest.mechanical.MECHANICAL` is tried by code first
+    (:func:`asf.harvest.mechanical.apply`): ``'mechanical'`` when it resolved it (no hold), else
+    the hold's text carries what the lane tried."""
     job = record.get('job') or branch
     if kind == 'gate' and text.startswith(H.TIMED_OUT):  # B-0082: a clock is not a defect
         out(f'{H.TIMED_OUT} {branch}: {text} — retried next tick')
@@ -1171,6 +1176,15 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
             and footprint.overlaps(reach, files) is None:
         out(f'foreign {branch}: gate red outside its {what}: {files[0]} — re-gated next tick')
         return 'foreign'
+    cause = lifecycle.FOOTPRINT if needs else kind
+    if lane is not None and f is not None \
+            and mechanical.handles(getattr(lane, 'product', None), cause):
+        got = mechanical.apply(lane, f, {'kind': cause, 'text': text, 'files': list(files or ()),
+                                         'needs': needs, 'tests': tests})
+        if got is not None and got.resolved:
+            return 'mechanical'
+        if got is not None and got.why:
+            text = f'{text}\n{got.why}'
     if needs:
         fact = f'gate: {", ".join(tests) or files[0]} red alone, trunk green'
         fields, line = lifecycle.footprint_hold(
@@ -3221,7 +3235,16 @@ def send_back(lane, f, kind, text, files, rebase=True):
     the conflict is not with the trunk (a batch ahead of it in the merge queue), which a rebase
     onto the trunk cannot clear."""
     b, run = f['branch'], f.get('run') or {}
-    if kind == 'conflict' and rebase and getattr(lane, 'repo', None) \
+    on = kind == 'conflict' and mechanical.handles(getattr(lane, 'product', None), kind)
+    if on and rebase and getattr(lane, 'repo', None) and not getattr(lane, 'dry_run', False):
+        # flags.mechanical: the table's rebase, its event written, reason mechanical:conflict
+        got = mechanical.apply(lane, f, {'kind': kind, 'text': text, 'files': list(files or ())})
+        if got is not None and got.resolved:
+            return 'mechanical'
+        if got is not None and got.why:
+            text = f'{text}. {got.why}'
+            files = list(got.files) or list(files or ())
+    elif kind == 'conflict' and rebase and getattr(lane, 'repo', None) \
             and not getattr(lane, 'dry_run', False):
         got = lane.rebase_onto_trunk(f) or {}
         if got.get('pushed'):
@@ -3260,7 +3283,10 @@ def send_back(lane, f, kind, text, files, rebase=True):
     res = hold_with_correction(lane.state_dir, b, run, kind, text, lane.out, files,
                                item_footprint(lane.items, f.get('item')), f.get('files') or (),
                                lane.conv, own=True, read=gate_reader(lane.repo, b),
-                               head=f.get('head'), main=lane.trunk)
+                               head=f.get('head'), main=lane.trunk,
+                               **({'lane': lane, 'f': f} if kind != 'conflict' else {}))
+    if res == 'mechanical':  # code settled it after all (flags.mechanical)
+        return res
     if res != 'held':  # foreign / timed-out: no one's fault after all
         wait(lane, f, res)
     lane.results[b] = res
