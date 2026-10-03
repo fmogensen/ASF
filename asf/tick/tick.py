@@ -345,9 +345,17 @@ def cmd_tick(args, root=None):
     if getattr(args, 'shadow', False):
         return run_shadow(product, fresh=fresh)  # record only, never a command step
 
+    if getattr(args, 'with_venv', None) or getattr(args, 'state_copy', None):
+        if not getattr(args, 'dry_run', False):
+            print('tick: --with-venv and --state-copy go with --dry-run')
+            return 2
     if getattr(args, 'dry_run', False):
         from asf.tick import dry_run
-        return dry_run.run(product, fresh=fresh)  # a throwaway copy; never pushes, never launches
+        if getattr(args, 'with_venv', None):  # that venv's own rehearsal, on the same snapshot
+            return dry_run.run_with_venv(product, args.with_venv, fresh=fresh,
+                                         state_copy=getattr(args, 'state_copy', None))
+        return dry_run.run(product, fresh=fresh,  # a throwaway copy; never pushes or launches
+                           state_copy=getattr(args, 'state_copy', None))
 
     try:
         chosen = steps.parse_steps(args.steps) if getattr(args, 'steps', None) else None
@@ -668,6 +676,13 @@ def register(subparsers):
                    help='record, the lane pass, wave planning and the harvest gate, against a '
                         'throwaway copy of the state directory — never pushes, opens or merges a '
                         'PR, or launches a session (plan §6 rollout)')
+    p.add_argument('--state-copy', metavar='DIR',
+                   help='with --dry-run: the state snapshot to rehearse — made at DIR when absent '
+                        '(the caller removes it), read as it is when present; two runs that name '
+                        'one DIR rehearse the same state')
+    p.add_argument('--with-venv', metavar='VENV',
+                   help="with --dry-run: run the rehearsal under that venv's own interpreter "
+                        '(any release), on --state-copy (the ab-dry-run.sh tool)')
     p.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
     p.add_argument('--steps', help=f"comma list, a subset of {','.join(steps.STEPS)} (default: all)")
     p.add_argument('--manifest', action='store_true', help='print step / owner / command and exit')

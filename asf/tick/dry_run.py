@@ -51,10 +51,20 @@ Prints, in order:
 
 Two runs back to back, with the real state and the product's origins unchanged in between, print
 the same thing: no step here writes a wall-clock timestamp into what it prints.
+
+**Two venvs, one state** (``--state-copy <dir>``, ``--with-venv <venv>``). ``--state-copy``
+names a frozen snapshot of the state directory: made there on first use (the caller removes it),
+read — never written — by every run that names it; each run still works on its own private copy
+of it. ``--with-venv`` runs the rehearsal as a subprocess of that venv's own interpreter (no
+``PYTHONPATH``, cwd ``/``) against the snapshot: the child gets a throwaway ``ASF_HOME`` whose
+entries link to the real ones, except ``state/<product>``, which links to the snapshot — so any
+release's ``asf tick --dry-run``, one that predates both flags included, rehearses the same
+state as its pair (the ``ab-dry-run.sh`` tool: the pinned venv and a candidate, side by side).
 """
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from asf import env
@@ -66,23 +76,82 @@ from asf import env
 _NOT_COPIED = ('worktrees',)
 
 
-def _copy_state(product):
-    """A throwaway copy of ``product``'s state directory, under a fresh temp dir — all of it but
-    :data:`_NOT_COPIED`, symlinks copied as links, never followed. Returns ``(tmp, copy_path)``;
-    the caller removes ``tmp`` when done, and a copy that fails removes it here. Never mutates
-    ``real``."""
-    real = env.state_dir(product)  # makes it if missing; read-only below, never written to
+def _copy_tree(src, dest):
+    shutil.copytree(src, dest, symlinks=True, ignore=shutil.ignore_patterns(*_NOT_COPIED))
+    for name in _NOT_COPIED:
+        os.makedirs(os.path.join(dest, name), exist_ok=True)
+
+
+def _copy_state(product, source=None):
+    """A throwaway copy of ``product``'s state directory (or of the snapshot ``source``), under
+    a fresh temp dir — all of it but :data:`_NOT_COPIED`, symlinks copied as links, never
+    followed. Returns ``(tmp, copy_path)``; the caller removes ``tmp`` when done, and a copy that
+    fails removes it here. Never mutates ``real``."""
+    real = source or env.state_dir(product)  # makes it if missing; read-only below
     tmp = tempfile.mkdtemp(prefix='asf-dry-run-')
     copy_path = os.path.join(tmp, 'state')
     try:
-        shutil.copytree(real, copy_path, symlinks=True,
-                        ignore=shutil.ignore_patterns(*_NOT_COPIED))
-        for name in _NOT_COPIED:
-            os.makedirs(os.path.join(copy_path, name), exist_ok=True)
+        _copy_tree(real, copy_path)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     return tmp, copy_path
+
+
+def snapshot(product, dest):
+    """``dest`` as the frozen state snapshot two runs share: copied from the real state
+    directory when ``dest`` is absent or empty, else taken as it is. Returns ``dest``."""
+    dest = os.path.abspath(dest)
+    if os.path.isdir(dest) and os.listdir(dest):
+        return dest
+    if os.path.isdir(dest):
+        os.rmdir(dest)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    _copy_tree(env.state_dir(product), dest)
+    return dest
+
+
+def shadow_home(product_name, snap, base):
+    """A throwaway ``ASF_HOME`` under ``base``: every entry of the real one linked, ``state/``
+    a dir of links to the real per-product state dirs except ``state/<product>``, which links
+    to ``snap``. Returns its path."""
+    real = os.path.abspath(env.ASF_HOME)
+    home = os.path.join(base, 'home')
+    os.makedirs(os.path.join(home, 'state'))
+    for entry in sorted(os.listdir(real)) if os.path.isdir(real) else []:
+        if entry != 'state':
+            os.symlink(os.path.join(real, entry), os.path.join(home, entry))
+    real_state = os.path.join(real, 'state')
+    for entry in sorted(os.listdir(real_state)) if os.path.isdir(real_state) else []:
+        if entry != product_name:
+            os.symlink(os.path.join(real_state, entry), os.path.join(home, 'state', entry))
+    os.symlink(snap, os.path.join(home, 'state', product_name))
+    return home
+
+
+def run_with_venv(product, venv, fresh=False, state_copy=None, run=subprocess.run, err=None):
+    """``asf tick --dry-run --with-venv <venv>``: the rehearsal run by ``venv``'s interpreter
+    against the snapshot ``state_copy`` (made there when absent; a throwaway one when not
+    given). Returns the child's exit status; its output is the child's own."""
+    err = err or (lambda line: print(line, file=sys.stderr))
+    venv = os.path.abspath(os.path.expanduser(venv))
+    python = os.path.join(venv, 'bin', 'python')
+    if not os.path.exists(python):
+        err(f'tick --dry-run --with-venv: {python} is not on disk')
+        return 2
+    base = tempfile.mkdtemp(prefix='asf-dry-run-venv-')
+    try:
+        snap = snapshot(product, state_copy or os.path.join(base, 'snapshot'))
+        home = shadow_home(product.name, snap, base)
+        child = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
+        child['ASF_HOME'] = home
+        argv = [python, '-m', 'asf.cli', 'tick', '--dry-run', '--product', product.name]
+        if fresh:
+            argv.append('--fresh')
+        err(f'tick --dry-run --with-venv {venv}: state {snap}')
+        return run(argv, env=child, cwd='/').returncode
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 class _StateDirOverride:
@@ -161,7 +230,7 @@ def _wave_rows(product, root, out):
     return planned
 
 
-def run(product, fresh=False, out=print):
+def run(product, fresh=False, out=print, state_copy=None):
     """``asf tick --dry-run``. Returns 0; a step's own failure is one line, same as a live tick —
     never worth losing the rest of the rehearsal over.
 
@@ -175,7 +244,7 @@ def run(product, fresh=False, out=print):
     from asf.tick import step_wave
     from asf.tick.tick import Context, run_step0
 
-    tmp, copy_path = _copy_state(product)
+    tmp, copy_path = _copy_state(product, snapshot(product, state_copy) if state_copy else None)
     try:
         with mutation_guard.active(), _StateDirOverride(product.name, copy_path):
             ctx = Context(product, fresh=fresh)

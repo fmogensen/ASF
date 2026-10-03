@@ -361,6 +361,8 @@ def build_parser():
     deploy.register(sub)
     from asf import merge_queue
     merge_queue.register(sub)
+    from asf import product_check
+    product_check.register(sub)
 
     return p
 

@@ -36,7 +36,15 @@ the snapshot sha the clock last ticked from when the package runs from a checkou
 (:mod:`asf.snapshot`). **clock install** (:func:`check_clock_installs`) reads each clock's own
 plist — which install will run the next tick, its sha, its distance from ``origin/main`` — and is
 red when what ticks is editable, a bare checkout, unplaceable, an unmerged sha, or a snapshot on a
-product that is not the factory's own source (:mod:`asf.clockinstall`, F-0104).
+product that is not the factory's own source (:mod:`asf.clockinstall`, F-0104). Each clock's
+*effective import* is probed as well — the plist's own interpreter, environment and working
+directory run ``import asf`` — and a pinned product's clock must land in ``install.json``'s venv;
+a damaged pin (a record that does not parse, or a clock on a per-product venv no record names) is
+red. **product loads under venv** loads the product file with the loader of the venv the clocks
+run (the pin's, else the clock plist's); **cli dispatcher** (:func:`check_cli_dispatcher`) runs
+``~/.local/bin/asf`` and requires the CLI it resolves for this product to sit in the pin; the
+**product** rows name unknown keys (:attr:`asf.env.Product.warnings`) and unknown
+``conventions.flags`` names as ``warn``, never red.
 
 A twelfth row, **console permissions** (:func:`asf.console_perms.check_doctor`, B-0131), is red
 when the operator's own console — not a worker account's — would still hit a permission prompt on
@@ -410,16 +418,140 @@ def _clock_install_red(inst, factory, merged):
     return True, ''
 
 
-def check_clock_installs(cfg, product):
+# ---- the effective import: what a clock's plist really runs ------------------------------
+
+#: The one line a probe interpreter runs: where ``import asf`` lands under that environment.
+_IMPORT_PROBE = 'import asf,sys;print(asf.__file__)'
+
+
+def _plist_cwd(path):
+    """The plist's ``WorkingDirectory`` (the probe's cwd: ``python -c`` puts it first on
+    ``sys.path``), else ``/``."""
+    import plistlib
+    try:
+        with open(path, 'rb') as f:
+            data = plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return '/'
+    cwd = data.get('WorkingDirectory') if isinstance(data, dict) else None
+    return cwd if isinstance(cwd, str) and os.path.isdir(cwd) else '/'
+
+
+def effective_import(interpreter, env_vars, cwd='/', timeout=60):
+    """``(path, error)`` — where ``import asf`` resolves when ``interpreter`` runs with exactly
+    the plist's ``EnvironmentVariables`` (launchd passes nothing else) from ``cwd``: the real
+    path of ``asf/__init__.py``, or ``('', why)``."""
+    probe_env = {k: str(v) for k, v in (env_vars or {}).items()}
+    probe_env.setdefault('PATH', '/usr/bin:/bin')
+    try:
+        p = subprocess.run([interpreter, '-c', _IMPORT_PROBE], capture_output=True, text=True,
+                           env=probe_env, cwd=cwd, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return '', f'{interpreter} did not run ({e})'
+    lines = (p.stdout or '').strip().splitlines()
+    if p.returncode != 0 or not lines:
+        err = (p.stderr or '').strip().splitlines()
+        return '', f"import asf failed under {interpreter} ({err[-1] if err else f'exit {p.returncode}'})"
+    return os.path.realpath(lines[-1]), ''
+
+
+def _under_dir(path, root):
+    root = os.path.realpath(root)
+    return bool(path) and (path == root or path.startswith(root.rstrip(os.sep) + os.sep))
+
+
+def _pin_venv(rec):
+    """The pin's venv as an absolute, real dir (a bare name is under pipx's venvs dir)."""
+    from asf import installs
+    venv = os.path.expanduser(rec.venv)
+    if not os.path.isabs(venv):
+        venv = os.path.join(installs.venvs_root(), venv)
+    return os.path.realpath(venv)
+
+
+def pin_state(product_name):
+    """``(rec, damage)`` — the product's :class:`asf.installs.Install` (or None) and, when the
+    pin is damaged, one phrase saying how. :func:`asf.installs.read` reads a record that is
+    there but will not parse as *no pin* (the scheduler and the dispatcher then run the shared
+    install), so a damaged record is told apart here: the file exists and is no pin."""
+    from asf import installs
+    rec = installs.read(product_name)
+    path = installs.record_path(product_name)
+    if rec is not None or not os.path.exists(path):
+        return rec, ''
+    try:
+        own = [os.path.basename(v) for v in installs.list_venvs(product_name)]
+    except OSError:
+        own = []
+    tail = (f'; per-product venv(s) on disk: {", ".join(own)}' if own else '')
+    return None, (f'pin unreadable: {path} is there but names no sha and venv — the scheduler '
+                  f'and the dispatcher treat {product_name} as unpinned{tail}')
+
+
+def _pin_phrase(rec):
+    prev = rec.previous_sha[:7] if rec.previous_sha else '-'
+    return (f'pin={rec.sha[:7]} venv={os.path.basename(rec.venv.rstrip(os.sep))} '
+            f'previous={prev}')
+
+
+def _per_product_venv(product_name, path):
+    """The ``asf-factory-<product>-<sha7>`` dir name ``path`` sits in, else ''."""
+    from asf import installs
+    prefix = f'{installs.DIST}-{product_name}-'
+    for part in path.split(os.sep):
+        if part.startswith(prefix) and len(part) == len(prefix) + 7:
+            return part
+    return ''
+
+
+def _import_verdict(product_name, inst, rec, damage, probe):
+    """``(ok, phrase)`` for one clock's effective import against the product's pin: ``ok`` None
+    when nothing was probed (a snapshot launcher, or an interpreter that is not on disk on an
+    unpinned product — the clock-install rule already judges those)."""
+    path_ = scheduler.plist_path(inst.label)
+    interpreter = inst.interpreter
+    if inst.kind == 'snapshot' or not interpreter:
+        return None, ''
+    if not os.path.exists(interpreter) and rec is None and not damage:
+        return None, ''
+    _argv, env_vars = clockinstall.read(path_)
+    got, err = probe(interpreter, env_vars, _plist_cwd(path_))
+    if err:
+        return False, err
+    if rec is not None:
+        venv = _pin_venv(rec)
+        if not _under_dir(got, venv):
+            return False, f'clock {inst.label} imports asf from {got}, pin is {venv}'
+        return True, 'effective import ok'
+    own = _per_product_venv(product_name, got)
+    if own:
+        return False, (f'clock {inst.label} imports asf from {got} ({own}) but no pin names '
+                       f'it — {damage or "install.json is missing"}')
+    return True, f'unpinned · imports asf from {got}'
+
+
+def check_clock_installs(cfg, product, probe=None):
     """[(required, ok, detail)] — one row per product clock: which install it runs, its sha, how
-    far behind origin/main, and RED when what ticks is not a pinned, merged install (F-0104)."""
+    far behind origin/main, and RED when what ticks is not a pinned, merged install (F-0104).
+
+    Each clock's *effective import* is probed too (:func:`effective_import`: the plist's own
+    interpreter, environment and working directory): for a pinned product it must land inside
+    ``install.json``'s venv, else RED ``clock <label> imports asf from <path>, pin is <venv>``.
+    A damaged pin is RED as well — a record that is there but does not parse (the scheduler and
+    the dispatcher read it as *unpinned*), or a clock importing a per-product venv no record
+    names."""
+    probe = probe or effective_import
+    rec, damage = pin_state(product.name)
     job_kind = scheduler.kind(cfg)
     if job_kind != 'launchd':
         return [(False, None, f'kind:{job_kind} · no launchd plist to read')]
     insts = clockinstall.for_product(product.name, cfg)
     if not insts:
-        return [(False, None, '(none) · no clock plist in ~/Library/LaunchAgents — the '
+        rows = [(False, None, '(none) · no clock plist in ~/Library/LaunchAgents — the '
                               'SCHEDULER section names the clocks')]
+        if damage:
+            rows.insert(0, (True, False, damage))
+        return rows
     repo, head = clockinstall.trunk(cfg)
     factory = is_factory_repo(product)
     ref = head[:7] if head else 'main'
@@ -450,8 +582,182 @@ def check_clock_installs(cfg, product):
             else:
                 tail = f'behind by {behind}'
             detail = f'{inst.label} · {phrase} · {trunk_phrase} · {tail}'
+        imp_ok, imp = _import_verdict(product.name, inst, rec, damage, probe)
+        if rec is not None and imp_ok:
+            detail = (f'{inst.label} · pinned {os.path.basename(_pin_venv(rec))} ({imp}) · '
+                      f'{_pin_phrase(rec)} · ' + detail.split(' · ', 2)[-1])
+        elif imp_ok is False:
+            ok = False
+            detail = f'{detail} · {imp}' + (f' · {_pin_phrase(rec)}' if rec is not None else '')
+        elif imp:
+            detail = f'{detail} · {imp}'
         rows.append((True, ok, detail))
+    if damage and not any(damage in d for _r, _o, d in rows):
+        rows.insert(0, (True, False, damage))
     return rows
+
+
+#: Loads the product the way the venv's own clock would and prints one JSON line. Written for
+#: every release's reader: one before ``Product.warnings`` existed answers no warnings.
+_LOAD_PROBE = r'''
+import json, sys
+import asf
+from asf import env
+out = {'asf': asf.__file__}
+try:
+    p = env.load_product(sys.argv[1])
+except Exception as e:
+    out.update(ok=False, error=(str(e) or type(e).__name__).strip().splitlines()[0])
+else:
+    out.update(ok=True, warnings=[list(w) for w in getattr(p, 'warnings', ()) or ()])
+print(json.dumps(out))
+'''
+
+
+def _venv_of(interpreter):
+    """``<venv>`` for ``<venv>/bin/python``."""
+    return os.path.dirname(os.path.dirname(interpreter))
+
+
+def _clean_env(extra=None):
+    """A child environment with no ``PYTHONPATH`` (a venv interpreter finds its own ``asf``) and
+    this process's ``ASF_HOME``."""
+    child = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
+    child.update(extra or {})
+    child['ASF_HOME'] = env.ASF_HOME
+    return child
+
+
+def load_under(interpreter, product_name, env_vars=None, cwd='/', timeout=120):
+    """``(result, error)`` — :data:`_LOAD_PROBE` run by ``interpreter``: ``result`` is its JSON
+    (``ok``, ``error`` or ``warnings``, ``asf``), ``error`` a phrase when the probe itself did
+    not answer."""
+    import json
+    child = _clean_env() if env_vars is None else dict(
+        {k: str(v) for k, v in env_vars.items()}, ASF_HOME=env.ASF_HOME)
+    child.setdefault('PATH', '/usr/bin:/bin')
+    try:
+        p = subprocess.run([interpreter, '-c', _LOAD_PROBE, product_name], capture_output=True,
+                           text=True, env=child, cwd=cwd, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f'{interpreter} did not run ({e})'
+    for line in reversed((p.stdout or '').strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and 'ok' in data:
+            return data, ''
+    err = (p.stderr or '').strip().splitlines()
+    return None, f"{interpreter}: {err[-1] if err else f'exit {p.returncode}'}"
+
+
+def _load_target(product_name, cfg):
+    """``(interpreter, env_vars, cwd, label)`` the product's clocks load it with: the pin's own
+    interpreter (no ``PYTHONPATH``), else the first clock plist whose interpreter is on disk —
+    with that plist's environment — else None."""
+    from asf import installs
+    rec = installs.read(product_name)
+    if rec is not None:
+        venv = _pin_venv(rec)
+        return installs.interpreter(venv), None, '/', f'pin {os.path.basename(venv)}'
+    try:
+        insts = (clockinstall.for_product(product_name, cfg)
+                 if scheduler.product_labels(product_name, cfg) else [])
+    except Exception:  # noqa: BLE001 — no plist to read is no target, the row says so
+        insts = []
+    for inst in insts:
+        if inst.kind == 'snapshot' or not inst.interpreter or not os.path.exists(inst.interpreter):
+            continue
+        path_ = scheduler.plist_path(inst.label)
+        _argv, env_vars = clockinstall.read(path_)
+        return inst.interpreter, env_vars, _plist_cwd(path_), f'clock {inst.label} (unpinned)'
+    return None
+
+
+def check_product_loads_under_venv(cfg, product, target=None):
+    """[(required, ok, detail)] — the product file loads under the venv its clocks run (the
+    pin's, else the clock plist's): a key this checkout tolerates but that venv's loader
+    refuses is a clock that ticks ``ConfigError``. Its warnings ride on the detail."""
+    target = target or _load_target(product.name, cfg)
+    if target is None:
+        return [(False, None, 'no pinned venv and no clock plist to load it under')]
+    interpreter, env_vars, cwd, label = target
+    if not os.path.exists(interpreter):
+        return [(True, False, f'{label}: {interpreter} is not on disk')]
+    data, err = load_under(interpreter, product.name, env_vars, cwd)
+    if data is None:
+        return [(True, False, f'{label}: {err}')]
+    from asf import installs
+    sha = installs.commit_of(_venv_of(interpreter))[:7]
+    at = f' @ {sha}' if sha else ''
+    if not data.get('ok'):
+        return [(True, False, f'{label}{at}: refuses products/{product.name}.yaml — '
+                              f'{data.get("error")}')]
+    warns = data.get('warnings') or []
+    tail = f' · {len(warns)} warning(s): ' + ', '.join(str(w[1]) for w in warns) if warns else ''
+    return [(True, True, f'{label}{at}: loads{tail}')]
+
+
+def check_product_warnings(product):
+    """[(ok, detail)] — the ``product`` rows: each unknown key the file carries (a warning, it
+    still loads — :attr:`asf.env.Product.warnings`) and each ``conventions.flags`` name this
+    release does not read (:meth:`asf.conventions.Conventions.unknown_flags`, a typo is a switch
+    that never flips). ``'warn'`` rows, never red; one ok row when there is neither."""
+    rows = []
+    for line, key, problem in getattr(product, 'warnings', ()) or ():
+        at = f'line {line}: ' if line else ''
+        rows.append(('warn', f'{at}{key} {problem}'))
+    conv = getattr(product, 'conventions', None)
+    unknown = conv.unknown_flags() if hasattr(conv, 'unknown_flags') else []
+    if unknown:
+        rows.append(('warn', f'conventions.flags: {", ".join(unknown)} — not a flag this release '
+                             f'reads ({", ".join(conventions.KNOWN_FLAGS)})'))
+    return rows or [(True, 'no unknown keys, no unknown flags')]
+
+
+def check_cli_dispatcher(product, path=None, timeout=60):
+    """[(required, ok, detail)] — the CLI every hook and session calls (``~/.local/bin/asf``,
+    :mod:`asf.dispatch`) resolves this product into its pin. The dispatcher is run with
+    ``ASF_DISPATCH_TRACE=1 … --product <p> --version`` and the CLI its trace names must sit in
+    ``install.json``'s venv: RED when it does not. A pinned product whose path still holds the
+    shared install's link is a ``warn`` (its hooks run the shared install, not the pin)."""
+    from asf import dispatch
+    path = path or dispatch.default_path()
+    rec, damage = pin_state(product.name)
+    if damage:
+        return [(True, False, damage)]
+    if not os.path.lexists(path):
+        if rec is None:
+            return [(False, None, f'{path} absent (unpinned)')]
+        return [(True, False, f'{path} absent — hooks and sessions have no asf to run')]
+    if not dispatch.is_ours(path):
+        target = os.path.realpath(path)
+        if rec is None:
+            return [(True, True, f'{path} → {target} (shared install; unpinned, so the same '
+                                 'one the clocks run)')]
+        return [(False, 'warn', f'{path} → {target} is not the dispatcher — hooks run that, '
+                                f'not the pin {os.path.basename(_pin_venv(rec))}')]
+    child = _clean_env({'ASF_DISPATCH_TRACE': '1'})
+    child.pop('ASF_PRODUCT', None)
+    try:
+        p = subprocess.run(['/bin/sh', path, '--product', product.name, '--version'],
+                           capture_output=True, text=True, env=child, cwd='/', timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [(True, False, f'{path} did not run ({e})')]
+    cli = ''
+    for line in (p.stderr or '').splitlines():
+        if line.startswith('asf-dispatch:') and ' cli=' in line:
+            cli = line.split(' cli=', 1)[1].strip()
+    if not cli or cli == 'none':
+        return [(True, False, f'{path} resolves no asf for {product.name} (exit {p.returncode})')]
+    real = os.path.realpath(cli)
+    if rec is None:
+        return [(True, True, f'{path} → {real} (unpinned: the default)')]
+    venv = _pin_venv(rec)
+    if not _under_dir(real, venv):
+        return [(True, False, f'{path} runs {real} for {product.name}, pin is {venv}')]
+    return [(True, True, f'ok · {product.name} → {os.path.basename(venv)} ({_pin_phrase(rec)})')]
 
 
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
@@ -945,6 +1251,12 @@ def run(product_name):
     rows.append(('clock code', False, ok, detail))
     for required, ok, detail in check_clock_installs(cfg, product):
         rows.append(('clock install', required, ok, detail))
+    for required, ok, detail in check_product_loads_under_venv(cfg, product):
+        rows.append(('product loads under venv', required, ok, detail))
+    for required, ok, detail in check_cli_dispatcher(product):
+        rows.append(('cli dispatcher', required, ok, detail))
+    for ok, detail in check_product_warnings(product):
+        rows.append(('product', False, ok, detail))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
     ok, detail = check_rule_checks(product)
@@ -1224,6 +1536,8 @@ def format_table(product_name, rows):
     for name, required, ok, detail in rows:
         if ok is None:
             status = 'skip'
+        elif ok == 'warn':
+            status = 'warn'
         elif ok:
             status = 'ok'
         else:

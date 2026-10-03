@@ -361,6 +361,9 @@ class DoctorClockInstallRowTests(unittest.TestCase):
                                              return_value=self.venvs)
         self.patch_venvs.start()
         self.addCleanup(self.patch_venvs.stop)
+        self.patch_home = mock.patch.object(env, 'ASF_HOME', os.path.join(self.tmp, 'asf-home'))
+        self.patch_home.start()                 # the pin record is read under a temp home
+        self.addCleanup(self.patch_home.stop)
 
         self.repo = os.path.join(self.tmp, 'trunk')
         os.makedirs(self.repo)
@@ -566,7 +569,9 @@ class DoctorClockInstallRowTests(unittest.TestCase):
                 mock.patch.object(doctor, 'check_approvals_hook', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_drift', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_worker_secrets', return_value=(True, '')), \
-                mock.patch.object(doctor, 'check_clock_code', return_value=(True, 'stubbed')):
+                mock.patch.object(doctor, 'check_clock_code', return_value=(True, 'stubbed')), \
+                mock.patch.object(doctor, 'check_product_loads_under_venv', return_value=[]), \
+                mock.patch.object(doctor, 'check_cli_dispatcher', return_value=[]):
             rows = doctor.run('sample')
         clock_code = [r for r in rows if r[0] == 'clock code']
         clock_install = [r for r in rows if r[0] == 'clock install']
