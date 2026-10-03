@@ -253,8 +253,12 @@ the latest) drops what can no longer start, one line each —
 ``ci queue: drop <key> — <reason>``: (a) a branch whose PR merged or closed (a PR start, a trunk
 start or a held re-run), (b) a branch whose PR is a draft, (c) a held re-run whose branch head
 moved on to a newer sha (the host runs the new head on its own) or whose head sha already has a
-live or finished run, a PR start whose open PR's head already has a run, and a re-run entry whose
-relief record is gone. A re-run is keyed by its branch (``rerun:<branch>``, the sha carried in
+live or finished run created after the cancelled one, a PR start whose open PR's head already has
+a run, and a re-run entry whose relief record is gone. An older run on the same sha never covers a
+cancelled one (the light run before a heavy-CI label asked for the cancelled one), and the cancelled
+run still listed queued while the host winds it down is not "running again" — only a later attempt
+is (each record carries the ``attempt`` it cancelled). 2026-10-01/02: both slips dropped a relief
+record minutes after its cancel, and two open PRs sat 34 h on ``cancelled, awaiting a re-run``. A re-run is keyed by its branch (``rerun:<branch>``, the sha carried in
 the entry): one branch holds at most one entry, and of two records for one branch and sha the
 newest stays. A ``pr:`` start carries the head sha the lane asked for (``sha``), re-set on a new
 push, so a merged PR on an older sha never drops a reused branch's new start. An unreadable PR
@@ -1867,7 +1871,9 @@ def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
             relief = {'id': rid, 'kind': kind, 'item': rec['item'], 'prio': prio,
                       'label': rec['label'], 'workflow': rec['workflow'], 'at': _iso(now),
                       'branch': branch, 'sha': sha, 'stall': STEP_SILENCE,
-                      'stall_step': rec['step'], 'stalls': prior + 1}
+                      'stall_step': rec['step'], 'stalls': prior + 1,
+                      # each earlier stall on this sha was re-run: the attempt cancelled now
+                      'attempt': prior + 1}
             if prio == RANKED:
                 relief['rank'] = record_rank(rec['item'], items)[0]
             data['relief'].append(relief)
@@ -2679,7 +2685,13 @@ def trunk_workflows(product):
 #: (either case: a lane branch is ``fix-bug/fix-bug-b-1382``)
 _ITEM_IN_BRANCH_RE = re.compile(r'\b[A-Za-z]-\d{4,}\b')
 _RUN_FIELDS = ('databaseId,status,conclusion,event,headBranch,headSha,createdAt,startedAt,'
-               'displayTitle')
+               'displayTitle,attempt')
+
+
+def _attempt(r):
+    """A listed run's attempt number (``attempt``), 1 when the listing does not carry it."""
+    a = (r or {}).get('attempt')
+    return a if isinstance(a, int) and not isinstance(a, bool) and a >= 1 else 1
 
 
 def _dur(seconds):
@@ -3211,6 +3223,14 @@ def _pr_state(pr):
     return 'merged' if s == 'merged' else 'closed' if s == 'closed' else s
 
 
+def _newer(run_id, than):
+    """``run_id`` was created after run ``than`` (run ids grow); False when either is unreadable."""
+    try:
+        return int(run_id) > int(than)
+    except (TypeError, ValueError):
+        return False
+
+
 def sweep(q, src, listed, out=print, dry_run=False):
     """Drop what can no longer start (see the module doc, *Stale entries*): relief records and
     their ``rerun:`` entries, and ``pr:`` / ``trunk:`` entries. One line per drop; the number
@@ -3258,9 +3278,12 @@ def sweep(q, src, listed, out=print, dry_run=False):
         if prs is not None and rec.get('kind') == 'pr' and b and sha:
             pr = open_.get(b)
             me = byid.get(str(rid)) or {}
+            # only a run created after the cancelled one replaces it: an older run on the same
+            # sha (the light run before a heavy-CI label asked for this one) never covers it
             cover = [r for r in runs_on(rec.get('workflow'), b, sha, but=rid)
-                     if r.get('status') != 'completed'
-                     or str(r.get('conclusion') or '') not in NO_VERDICT]
+                     if _newer(r.get('databaseId'), rid)
+                     and (r.get('status') != 'completed'
+                          or str(r.get('conclusion') or '') not in NO_VERDICT)]
             if pr is None:
                 gone = closed.get(b)
                 why = (f"PR #{gone.get('number')} {_pr_state(gone)}" if gone else 'no open PR')
@@ -3268,7 +3291,10 @@ def sweep(q, src, listed, out=print, dry_run=False):
                 why = f"PR #{pr.get('number')} is a draft, parked by its owner"
             elif pr.get('headRefOid') and pr['headRefOid'] != sha:
                 why = f"superseded, head is now {pr['headRefOid'][:9]}"
-            elif me.get('status') and me.get('status') != 'completed':
+            elif (me.get('status') and me.get('status') != 'completed'
+                  and _attempt(me) > int(rec.get('attempt') or 1)):
+                # a later attempt is live; the cancelled attempt itself, still listed queued
+                # while the host winds it down, is not a re-run
                 why = f'run {rid} runs again already'
             elif cover:
                 why = f"run {cover[0].get('databaseId')} covers {sha[:9]}"
@@ -3792,7 +3818,8 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
             rec = {'id': rid, 'kind': kind, 'item': item, 'prio': prio, 'label': label,
                    'workflow': wf, 'at': _iso(now), 'trunk_id': tid,
                    'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created),
-                   'branch': r.get('headBranch'), 'sha': r.get('headSha')}
+                   'branch': r.get('headBranch'), 'sha': r.get('headSha'),
+                   'attempt': _attempt(r)}
             if r.get('displayTitle'):
                 rec['title'] = r.get('displayTitle')
             if prio == RANKED:

@@ -2889,6 +2889,73 @@ class TestStaleSweep(ReliefBase):
                       self.lines)
         self.assertEqual(ci_queue.load('p'), before)
 
+    def _one_record(self, runs, attempt=None):
+        """One relief record for run 401 on open PR #31 (task/T-0490 at k1), the listing ``runs``."""
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        data = ci_queue.load('p')
+        stamp = self.at(self.t0 - datetime.timedelta(minutes=2))
+        rec = {'id': 401, 'kind': 'pr', 'item': 'T-0490', 'prio': 3, 'label': 'Task',
+               'workflow': 'pr.yml', 'at': stamp, 'trunk_id': 900, 'trunk_sha': 'f' * 40,
+               'trunk_created': stamp, 'branch': 'task/T-0490', 'sha': 'k1'}
+        if attempt is not None:
+            rec['attempt'] = attempt
+        data['relief'] = [rec]
+        ci_queue.save('p', data)
+        listing = self.listing()
+        listing['pr.yml'] = runs
+        gh, base = self.gh(listing)
+        prs = [{'number': 31, 'headRefName': 'task/T-0490', 'headRefOid': 'k1', 'state': 'OPEN',
+                'isDraft': False}]
+
+        def run(argv, **kw):
+            if argv[:3] == ['gh', 'pr', 'list']:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(prs), '')
+            return base(argv, **kw)
+        self.relieve(p, run)
+        return [r['id'] for r in ci_queue.load('p')['relief']]
+
+    def run_(self, i, status='completed', conclusion='cancelled', attempt=1, minutes=-10):
+        return {'databaseId': i, 'status': status, 'conclusion': conclusion,
+                'event': 'pull_request', 'headBranch': 'task/T-0490', 'headSha': 'k1',
+                'attempt': attempt,
+                'createdAt': self.at(self.t0 + datetime.timedelta(minutes=minutes))}
+
+    def test_the_run_just_cancelled_still_listed_queued_is_not_running_again(self):
+        """2026-10-01 09:08, a product: relief cancelled PR #997's queued run and the next sweep
+        read the same run, still ``queued`` while the host wound it down, as "runs again
+        already" — the record went, no re-run was ever asked for, the PR sat 34 h."""
+        self.assertEqual(self._one_record([self.run_(401, 'queued', '')], attempt=1), [401])
+        self.assertFalse([l for l in self.lines if ' drop ' in l], self.lines)
+
+    def test_a_later_attempt_of_the_cancelled_run_is_running_again(self):
+        self.assertEqual(self._one_record([self.run_(401, 'in_progress', '', attempt=2)],
+                                          attempt=1), [])
+        self.assertIn('ci queue: drop rerun:401 — task/T-0490: run 401 runs again already',
+                      self.lines)
+
+    def test_an_older_green_run_on_the_same_sha_never_covers_the_cancelled_one(self):
+        """2026-10-02 09:22, a product: PR #1029's heavy run (asked for by the heavy-CI label
+        after review) was cancelled by relief; the sweep saw the light run of the same sha, green
+        an hour earlier, as covering it and dropped the record — the gate never ran."""
+        runs = [self.run_(401, attempt=1), self.run_(399, conclusion='success', minutes=-60)]
+        self.assertEqual(self._one_record(runs, attempt=1), [401])
+        self.assertFalse([l for l in self.lines if ' drop ' in l], self.lines)
+
+    def test_a_newer_run_on_the_same_sha_covers_the_cancelled_one(self):
+        runs = [self.run_(401), self.run_(402, 'queued', '', minutes=-1)]
+        self.assertEqual(self._one_record(runs, attempt=1), [])
+        self.assertIn('ci queue: drop rerun:401 — task/T-0490: run 402 covers k1', self.lines)
+
+    def test_new_relief_records_carry_their_attempt(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        self.assertEqual(ci_queue.load('p')['relief'][0]['attempt'], 1)
+
     def test_new_relief_records_carry_branch_and_sha(self):
         p = self.product()
         os.makedirs(env.state_dir('p'), exist_ok=True)
