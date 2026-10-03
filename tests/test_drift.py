@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from asf import __version__, doctor, drift, env
-from asf.tick import tick
+from asf.tick import network, tick
 
 
 def git(cwd, *argv):
@@ -37,6 +37,11 @@ class DriftTestCase(unittest.TestCase):
         self.clear_last = lambda: os.path.exists(upgrade.last_path()) and os.remove(upgrade.last_path())
         self.clear_last()
         self.addCleanup(self.clear_last)
+        # hermetic: the upgrade's reachability probe never touches the network here
+        self.net = mock.patch('asf.tick.network.reachable',
+                              return_value=network.Reachability(0.0, True, ''))
+        self.net.start()
+        self.addCleanup(self.net.stop)
 
     def commit(self, path, text, message):
         with open(os.path.join(self.repo, path), 'w') as f:
@@ -82,6 +87,22 @@ class TickPrintsTheDriftLine(DriftTestCase):
         lines = self.run_tick('auto', upgrade)
         upgrade.assert_called_once()
         self.assertTrue(any(ln.startswith('tick: ran asf upgrade') for ln in lines), lines)
+
+    def test_offline_the_upgrade_is_skipped_and_says_so(self):
+        upgrade = mock.Mock(return_value=0)
+        with mock.patch('asf.tick.network.reachable',
+                        return_value=network.Reachability(0.0, False, 'DNS: no route')):
+            lines = self.run_tick('auto', upgrade)
+        upgrade.assert_not_called()
+        self.assertIn('tick: asf upgrade skipped — offline (DNS: no route)', lines)
+        self.assertFalse(any(ln.startswith('tick: ran asf upgrade') for ln in lines), lines)
+
+    def test_an_unknown_network_skips_too(self):
+        upgrade = mock.Mock(return_value=0)
+        with mock.patch('asf.tick.network.reachable', return_value=network.Reachability(0.0, None, '')):
+            lines = self.run_tick('auto', upgrade)
+        upgrade.assert_not_called()
+        self.assertIn('tick: asf upgrade skipped — offline (unknown)', lines)
 
     def test_it_installs_the_head_it_read_and_the_steps_wait_for_the_next_tick(self):
         upgrade = mock.Mock(return_value=0)

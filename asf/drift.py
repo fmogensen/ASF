@@ -134,10 +134,14 @@ def line(d):
     return f'factory: asf {d.version} @ {(d.installed or "?")[:7]} · trunk {d.head[:7]} · {tail}'
 
 
-def report(product, out=print, autonomy='human-now', upgrade=None):
+def report(product, out=print, autonomy='human-now', upgrade=None, reachable=None):
     """Print :func:`line` and, when the trunk changed the package, ``UPGRADE AVAILABLE``; under
     ``autonomy == 'auto'`` run ``upgrade(head)`` (``asf upgrade --ref <head>``) and say so. Returns the :class:`Drift`
-    (``None`` for a product that is not the factory)."""
+    (``None`` for a product that is not the factory).
+
+    An upgrade needs the forge: when ``reachable()`` (:func:`asf.tick.network.reachable`) is not
+    ok the upgrade is not attempted and the tick says ``tick: asf upgrade skipped — offline
+    (<reason>)`` — a line the release-readiness gate counts as skipped, never as failed."""
     try:
         d = check(product)
     except Exception as e:  # noqa: BLE001 — a drift check never stops a tick
@@ -153,6 +157,13 @@ def report(product, out=print, autonomy='human-now', upgrade=None):
             due = upgrading.batch_hold(product.repo_dir, d.installed, d.head)
             if due is not None:
                 out(f'upgrade due at {time.strftime("%H:%M", time.localtime(due))} (batching)')
+                return d
+            if reachable is None:
+                from asf.tick import network
+                reachable = network.reachable
+            net = reachable()
+            if net.ok is not True:
+                out(f'tick: asf upgrade skipped — offline ({net.reason or net.label()})')
                 return d
             rc = upgrade(d.head)
             if rc != DEFERRED:  # a deferred upgrade said why itself and is due again next tick

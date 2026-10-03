@@ -39,7 +39,7 @@ import time
 
 from asf import capacity, ci_queue, env
 from asf.record.index import do_index
-from asf.tick import steps, summary
+from asf.tick import network, steps, summary
 
 
 def _ns(**kw):
@@ -592,23 +592,14 @@ def _first_line(text):
     return lines[0].strip() if lines else ''
 
 
-#: Substrings a git/network failure prints when the host has no route out at all — DNS down,
-#: cable unplugged, VPN dropped. B-0124: a tick that fails this way says "offline", not the raw
-#: git error, so the reason is legible on the status table and in the digest without cross
-#: referencing a tick log.
-_OFFLINE_MARKERS = (
-    'could not resolve host',
-    'temporary failure in name resolution',
-    'name or service not known',
-    'network is unreachable',
-    'no route to host',
-    'connection timed out',
-)
+#: B-0124: a tick that fails offline says "offline", not the raw git error, so the reason is
+#: legible on the status table and in the digest. The markers live in :mod:`asf.tick.network`.
+_OFFLINE_MARKERS = network.OFFLINE_MARKERS
 
 
 def _reason(detail):
     text = _first_line(detail)
-    return 'offline' if any(m in text.lower() for m in _OFFLINE_MARKERS) else text
+    return 'offline' if network.is_offline_text(text) else text
 
 
 def run_asf_step(step, ctx):

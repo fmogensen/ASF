@@ -15,6 +15,7 @@ and printed met or unmet with its evidence. Nothing is written.
    ``ci_steps.install_from_zero`` (the release-tag install path), and ``requires.install`` landed.
 5. **upgrade safety** — at least ``min_upgrades`` auto-upgrades in the window, none failed, no
    torn tick (an ``ImportError`` after an upgrade) and no rollback; ``requires.upgrade`` landed.
+   An upgrade the tick skipped while offline (``asf.tick.network``) counts neither way.
 6. **genericity** — the latest finished trunk run has the ``ci_steps.generic`` step and the
    ``ci_steps.second_product`` step green; ``requires.generic`` landed.
 7. **first-user docs** — the trunk's README has every ``readme_sections`` heading, the latest
@@ -40,7 +41,7 @@ DEFAULTS = {
     'min_upgrades': 3,
     'hand_types': ['fix', 'hotfix', 'revert'],
     'readme_sections': ['Install', 'Quick start', 'Configuration', 'Upgrade'],
-    'ci_steps': {'install_from_zero': 'install.sh', 'generic': 'check generic',
+    'ci_steps': {'install_from_zero': 'asf install, zero to green', 'generic': 'check generic',
                  'second_product': 'sample product'},
     'requires': {},
     'blocking': [],
@@ -49,6 +50,7 @@ KEYS = ('stability', 'repair', 'ci', 'install', 'upgrade', 'generic', 'docs', 'b
 
 _UPGRADE_RE = re.compile(r'tick: ran asf upgrade \((?:\S*@)?([0-9a-f]{7,40}) → (?:\S*@)?([0-9a-f]{7,40})\), '
                          r'exit (-?\d+)')
+_SKIPPED_RE = re.compile(r'tick: asf upgrade skipped — offline \((.*)\)\s*$')
 _TORN_RE = re.compile(r'^(ImportError|ModuleNotFoundError)\b')
 _ROLLBACK_RE = re.compile(r'\brolled back\b|\brollback:', re.I)
 UTC = datetime.timezone.utc
@@ -144,13 +146,16 @@ def commit_dates(repo, shas, git=_git):
 
 
 def parse_tick_log(text):
-    """One tick log → ordered events: ``('upgrade', from, to, rc)``, ``('torn', line)``,
-    ``('rollback', line)``."""
+    """One tick log → ordered events: ``('upgrade', from, to, rc)``, ``('upgrade-skipped', reason)``,
+    ``('torn', line)``, ``('rollback', line)``."""
     events = []
     for line in (text or '').splitlines():
         m = _UPGRADE_RE.search(line)
+        s = None if m else _SKIPPED_RE.search(line)
         if m:
             events.append(('upgrade', m.group(1), m.group(2), int(m.group(3))))
+        elif s:
+            events.append(('upgrade-skipped', s.group(1)))
         elif _TORN_RE.search(line):
             events.append(('torn', line.strip()[:120]))
         elif _ROLLBACK_RE.search(line):
@@ -173,8 +178,9 @@ def upgrade_facts(logs, dates, since):
     """Over every tick log's events: the auto-upgrades dated in the window (an upgrade is dated by
     the commit it installed), the failed ones, the torn ticks and rollbacks after the first
     in-window upgrade, and the hand installs — breaks in the upgrade chain, dated by the commit
-    the next upgrade started from."""
-    ups, failed, torn, rollbacks, breaks = [], [], [], [], []
+    the next upgrade started from. An upgrade the tick skipped because the host was offline is
+    ``skipped`` — neither an upgrade nor a failure."""
+    ups, failed, torn, rollbacks, breaks, skipped = [], [], [], [], [], []
     chain = []
     for _name, events in logs:
         live = False
@@ -186,6 +192,8 @@ def upgrade_facts(logs, dates, since):
                 if when and when >= since:
                     live = True
                     (ups if rc == 0 else failed).append({'from': frm, 'to': to, 'rc': rc, 'date': when})
+            elif ev[0] == 'upgrade-skipped':
+                skipped.append(ev[1])
             elif live and ev[0] == 'torn':
                 torn.append(ev[1])
             elif live and ev[0] == 'rollback':
@@ -199,7 +207,7 @@ def upgrade_facts(logs, dates, since):
         if rc == 0:
             prev_to = to
     return {'upgrades': ups, 'failed': failed, 'torn': torn, 'rollbacks': rollbacks,
-            'chain_breaks': breaks}
+            'chain_breaks': breaks, 'skipped': skipped}
 
 
 def install_log(log_dir, since):
@@ -339,7 +347,8 @@ def evaluate(f, cfg):
           and not up['rollbacks'] and req_ok)
     out.append(Criterion('upgrade', f"Upgrade safety (≥ {cfg['min_upgrades']} auto-upgrades, none torn)", ok,
                          f"{len(up['upgrades'])} auto-upgrade(s), {len(up['failed'])} failed, "
-                         f"{len(up['torn'])} torn tick(s), {len(up['rollbacks'])} rollback(s) in {w:g} d"
+                         + (f"{len(up.get('skipped') or ())} skipped offline, " if up.get('skipped') else '')
+                         + f"{len(up['torn'])} torn tick(s), {len(up['rollbacks'])} rollback(s) in {w:g} d"
                          + req_ev))
 
     gp, sp = cfg['ci_steps']['generic'], cfg['ci_steps']['second_product']
