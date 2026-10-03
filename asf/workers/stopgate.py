@@ -17,6 +17,12 @@ handles any unpushed end — publish what is there, or hold it back. It never co
 commands, because a hook that wrote to git from inside a live session would race the session's
 own git, and the session is the one that knows what its commit message should say.
 
+A review session is held to one more thing (``flags.verdict_block``, :mod:`asf.evidence.review`):
+when its brief asked for the ```verdict block, its stop is refused at ``on`` until the review it
+leaves in its worktree carries a valid block bound to the worktree's head — the same bound, the
+same counter; at ``warn`` the gate says so once per stop and lets it through. A run whose brief
+predates the block is never asked for it.
+
 Every exception lets the stop through and says the hook broke, not the session — the inversion of
 :mod:`asf.approvals`' own fail-closed rule: a gate that cannot judge must not trap the session it
 cannot judge (B-0125, inverted).
@@ -175,6 +181,49 @@ def stood_aside_line(branch, detail, n):
             'The gate stands aside; the factory\'s own publish is now the net.')
 
 
+#: The run kind of a review session: its work is the review file it leaves uncommitted in its
+#: worktree for the factory to file (:mod:`asf.evidence.review_store`) — never a commit or a push.
+REVIEW_KIND = 'review'
+
+#: The line the session reads when its review's verdict block is missing or bound elsewhere.
+VERDICT_REFUSAL = ('REFUSED: {why} — end `{path}` with exactly one fenced block:\n'
+                   '  ```verdict\n  verdict: approved | changes\n  head: {head}\n'
+                   '  asks: [C1, …] | []\n  ```\n'
+                   'The factory reads this block, not your prose; `head` is `git rev-parse HEAD`.')
+#: The ``warn`` line: the same finding, the stop let through.
+VERDICT_WARN = 'verdict block (warn): {why} in `{path}` — the stop is let through'
+
+
+def verdict_check(prod, run, worktree):
+    """``(mode, why, path, head)`` for a review run whose brief asked for the verdict block —
+    ``why`` '' when the review in ``worktree`` holds a valid block on the worktree's head — or
+    None: the flag is off, the run's brief predates the block (or is not a review's), or it
+    cannot be read. Pure reads: the brief, the worktree's review file, ``git rev-parse HEAD``."""
+    import subprocess
+
+    from asf.evidence import review as review_mod
+    mode = review_mod.block_mode(prod)
+    if mode == review_mod.BLOCK_OFF or (run or {}).get('kind') != REVIEW_KIND:
+        return None
+    brief = (run or {}).get('brief')
+    try:
+        with open(brief, encoding='utf-8', errors='replace') as f:
+            if review_mod.BLOCK_MARK not in f.read():
+                return None
+    except (OSError, TypeError):
+        return None
+    item = run.get('item')
+    head = subprocess.run(['git', '-C', worktree, 'rev-parse', 'HEAD'], capture_output=True,
+                          text=True, timeout=60).stdout.strip()
+    found = review_mod.worktree_review(prod.conventions, worktree, item)
+    if found is None:
+        path = prod.conventions.review_path(str(item or '').lower(), 1) \
+            if hasattr(prod.conventions, 'review_path') else 'the review file'
+        return mode, 'your review file is missing — no ```verdict block', path, head
+    _n, path, text = found
+    return mode, review_mod.block_problem(text, head), path, head
+
+
 def run_hook(stdin_text, environ=None, out=sys.stderr, product=None):
     """``asf hook unpushed`` — the rc the runtime reads: 0 lets the stop through, 2 blocks it and
     feeds ``out`` back to the model, which then keeps working.
@@ -215,6 +264,23 @@ def _run(stdin_text, environ, out, product, job):
     if not lifecycle.lands(run, pool.sessions_path(prod)):
         return 0
     if not branch or branch == 'HEAD':
+        return 0
+    verdict = verdict_check(prod, run, worktree)
+    if verdict and verdict[1]:
+        from asf.evidence import review as review_mod
+        mode, why, path, head = verdict
+        if mode == review_mod.BLOCK_WARN:
+            print(VERDICT_WARN.format(why=why, path=path), file=out)
+        elif spent(prod, job, prod.conventions, payload):
+            print(f'STOOD ASIDE: refused {refusals(prod, job)} time(s) — {why} in `{path}`. '
+                  'The gate stands aside; the lane reads the table.', file=out)
+        else:
+            print(VERDICT_REFUSAL.format(why=why, path=path, head=head or '<sha>'), file=out)
+            return 2
+    if run.get('kind') == REVIEW_KIND:
+        # a review never touches its branch (briefs/templates/review.md): its uncommitted review
+        # file is the factory's to file, not work to push — telling it to commit and push moved
+        # the PR head and restarted CI
         return 0
     protected = refguard.patterns(prod.main, refguard.listed(prod.conventions))
     if any(branch == p or fnmatch.fnmatchcase(branch, p) for p in protected):

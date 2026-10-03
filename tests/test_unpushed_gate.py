@@ -20,6 +20,7 @@ import unittest
 from unittest import mock
 
 from asf import env
+from asf.evidence import review as review_mod
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
@@ -214,6 +215,93 @@ class BoundTests(GateHome):
         rc, out = self.call(job=other)
         self.assertEqual(rc, 2)
         self.assertEqual(stopgate.refusals(PRODUCT, other), 1)
+
+
+class VerdictBlockGateTests(GateHome):
+    """W2-PR4: a review run whose brief asked for the ```verdict block may not end at
+    ``flags.verdict_block: on`` until the review in its worktree carries one bound to the
+    worktree's head; ``warn`` says so and lets it through; ``off`` and an older brief are never
+    asked. A review's own uncommitted file is never "work off origin"."""
+
+    RJOB = 'review-t-0522'
+    EXTRA = 'conventions:\n  stop_gate_rounds: 2\n  flags:\n    verdict_block: on\n'
+
+    def review_run(self, brief_text=None):
+        brief = os.path.join(self.home, 'brief.md')
+        with open(brief, 'w', encoding='utf-8') as f:
+            f.write(brief_text if brief_text is not None else
+                    'THE VERDICT IS A TABLE.\n' + review_mod.BLOCK_MARK + ' — exactly one\n')
+        self.write_session(job=self.RJOB, kind='review', brief=brief)
+
+    def write_review(self, text):
+        os.makedirs(os.path.join(self.wt, 'docs', 'reviews'), exist_ok=True)
+        with open(os.path.join(self.wt, 'docs', 'reviews', '1-t-0522.md'), 'w') as f:
+            f.write(text)
+
+    def block(self, head):
+        return f'| check | result | evidence |\n\n```verdict\nverdict: approved\nhead: {head}\n' \
+               'asks: []\n```\n'
+
+    def test_on_without_a_block_is_refused(self):
+        self.review_run()
+        self.write_review('verdict: approved\n')
+        rc, out = self.call(job=self.RJOB)
+        self.assertEqual(rc, 2)
+        self.assertIn('your review has no ```verdict block', out)
+        self.assertIn(self.git('rev-parse', 'HEAD'), out)
+
+    def test_on_with_no_review_file_is_refused(self):
+        self.review_run()
+        rc, out = self.call(job=self.RJOB)
+        self.assertEqual(rc, 2)
+        self.assertIn('review file is missing', out)
+
+    def test_on_with_a_block_on_another_head_is_refused(self):
+        self.review_run()
+        self.write_review(self.block('a' * 40))
+        rc, out = self.call(job=self.RJOB)
+        self.assertEqual(rc, 2)
+        self.assertIn('is not the branch head', out)
+
+    def test_on_with_a_block_on_the_head_lets_the_stop_through(self):
+        self.review_run()
+        self.write_review(self.block(self.git('rev-parse', 'HEAD')))
+        rc, out = self.call(job=self.RJOB)
+        self.assertEqual((rc, out), (0, ''))   # the untracked review is not unpushed work
+
+    def test_on_is_bounded_then_stands_aside(self):
+        self.review_run()
+        self.write_review('verdict: approved\n')
+        rcs = [self.call(job=self.RJOB)[0] for _ in range(3)]
+        self.assertEqual(rcs, [2, 2, 0])
+
+    def test_warn_says_so_and_lets_it_through(self):
+        self.write_product('conventions:\n  flags:\n    verdict_block: warn\n')
+        self.review_run()
+        self.write_review('verdict: approved\n')
+        rc, out = self.call(job=self.RJOB)
+        self.assertEqual(rc, 0)
+        self.assertIn('verdict block (warn): your review has no ```verdict block', out)
+
+    def test_off_never_asks(self):
+        self.write_product('')
+        self.review_run()
+        self.write_review('verdict: approved\n')
+        self.assertEqual(self.call(job=self.RJOB), (0, ''))
+
+    def test_a_brief_from_before_the_block_is_never_asked(self):
+        self.review_run(brief_text='THE VERDICT IS A TABLE.\nverdict: approved\n')
+        self.write_review('verdict: approved\n')
+        self.assertEqual(self.call(job=self.RJOB), (0, ''))
+
+    def test_a_task_run_quoting_a_block_is_not_a_review(self):
+        brief = os.path.join(self.home, 'brief.md')
+        with open(brief, 'w', encoding='utf-8') as f:
+            f.write(review_mod.BLOCK_MARK + '\n')
+        self.write_session(brief=brief)
+        rc, out = self.call()
+        self.assertEqual(rc, 0)
+        self.assertNotIn('verdict', out)
 
 
 class SpawnClearTests(Home):

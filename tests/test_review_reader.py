@@ -309,5 +309,158 @@ class ReadNewestReviewAtForwardRequired(unittest.TestCase):
                                           required=self.REQUIRED)['verdict'], review.CHANGES)
 
 
+def block(kind='approved', head='a' * 40, asks='[]'):
+    return f'```verdict\nverdict: {kind}\nhead: {head}\nasks: {asks}\n```\n'
+
+
+class VerdictBlock(unittest.TestCase):
+    """W2-PR4: the review's fenced ``verdict`` block is the verdict once ``flags.verdict_block``
+    is past ``off``; the table and the ``verdict:`` line stay as the fallback."""
+
+    TABLE_FAIL = TableVerdictOf.table(fail=TableVerdictOf.MECH[0]) + '\n## C\n1. `a.py:1` fix\n'
+
+    def test_a_valid_block_is_parsed(self):
+        v = review.verdict_block('text\n' + block('changes', 'ABCDEF1', '[C1, C2]'))
+        self.assertEqual((v.kind, v.head, v.asks, v.carried_from),
+                         (review.CHANGES, 'abcdef1', ('C1', 'C2'), ''))
+        self.assertEqual(review.verdict_block(block().encode()).kind, review.APPROVED)
+
+    def test_invalid_blocks_are_not_verdicts(self):
+        for text in (block('approved | changes'), block(head='<sha>'), 'verdict: approved\n',
+                     '```\nverdict: approved\nhead: ' + 'a' * 40 + '\n```\n', ''):
+            with self.subTest(text=text):
+                self.assertIsNone(review.verdict_block(text))
+
+    def test_the_first_valid_block_wins(self):
+        text = block('approved | changes') + block('changes', 'b' * 40) + block()
+        self.assertEqual(review.verdict_block(text).kind, review.CHANGES)
+
+    def test_an_approval_that_asks_reads_changes(self):
+        self.assertEqual(review.verdict_block(block(asks='[C1]')).kind, review.CHANGES)
+        self.assertEqual(review.verdict_block(block(asks='none')).kind, review.APPROVED)
+
+    def test_the_block_beats_the_table_only_when_on(self):
+        text = self.TABLE_FAIL + block('approved', asks='[]')
+        self.assertEqual(review.verdict_of(text), review.CHANGES)              # off: the table
+        self.assertEqual(review.verdict_of(text, block=True), review.APPROVED)
+
+    def test_no_block_falls_back_to_the_table(self):
+        self.assertEqual(review.verdict_of(self.TABLE_FAIL, block=True), review.CHANGES)
+        self.assertEqual(review.verdict_of('verdict: approved\n', block=True), review.APPROVED)
+
+    def test_the_old_reader_still_reads_a_block(self):
+        # the template's block holds a verdict line and a head line the off-mode reader reads
+        self.assertEqual(review.verdict_of(block('changes')), review.CHANGES)
+        self.assertEqual(review.head_of(block(head='c' * 40)), 'c' * 40)
+
+    def test_head_prefers_the_block(self):
+        text = 'head: ' + 'd' * 40 + '\n' + block(head='e' * 40)
+        self.assertEqual(review.head_of(text), 'd' * 40)
+        self.assertEqual(review.head_of(text, block=True), 'e' * 40)
+
+    def test_block_mode(self):
+        for value, want in ((None, 'off'), ('off', 'off'), ('warn', 'warn'), ('on', 'on'),
+                            ('require', 'on'), ('bogus', 'off')):
+            with self.subTest(value=value):
+                flags = {} if value is None else {'flags': {'verdict_block': value}}
+                self.assertEqual(review.block_mode(Conventions.from_mapping(flags)), want)
+        self.assertEqual(review.block_mode(None), 'off')
+
+    def test_block_problem(self):
+        self.assertIn('no ```verdict block', review.block_problem('verdict: approved\n', 'a' * 40))
+        self.assertEqual(review.block_problem(block(), 'a' * 40), '')
+        self.assertIn('is not the branch head', review.block_problem(block(), 'b' * 40))
+
+
+class JudgeStaleAndCarry(unittest.TestCase):
+    """A block names the head it read: on that head it is the verdict; on a rebuilt head of the
+    same patch over the trunk it carries (``carried_from``); on other code it is ``Stale``."""
+
+    def setUp(self):
+        import tempfile
+        self.repo = tempfile.mkdtemp()
+        self.addCleanup(__import__('shutil').rmtree, self.repo, True)
+        git(self.repo, 'init', '-q', '-b', 'main')
+        self.write('app.py', 'x = 1\n')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'base')
+        git(self.repo, 'checkout', '-qb', 'worker/T-1')
+        self.write('app.py', 'x = 2\n')
+        git(self.repo, 'commit', '-qam', 'task(T-1): the change')
+        self.code = git(self.repo, 'rev-parse', 'HEAD')
+        self.conv = Conventions()
+
+    def write(self, path, text):
+        with open(os.path.join(self.repo, path), 'w') as fh:
+            fh.write(text)
+
+    def judge(self):
+        tip = git(self.repo, 'rev-parse', 'worker/T-1')
+        return review.judge(self.repo, self.conv, block(head=self.code), tip, trunk='main'), tip
+
+    def test_the_head_it_names_is_its_verdict(self):
+        v, _tip = self.judge()
+        self.assertIsInstance(v, review.Verdict)
+        self.assertEqual((v.kind, v.carried_from), (review.APPROVED, ''))
+
+    def test_a_rebase_onto_a_newer_trunk_carries_the_verdict(self):
+        git(self.repo, 'checkout', '-q', 'main')
+        self.write('other.py', 'y = 1\n')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'trunk moves')
+        git(self.repo, 'checkout', '-q', 'worker/T-1')
+        git(self.repo, 'rebase', '-q', 'main')
+        v, tip = self.judge()
+        self.assertNotEqual(tip, self.code)
+        self.assertIsInstance(v, review.Verdict)
+        self.assertEqual((v.head, v.carried_from), (tip, self.code))
+
+    def test_new_code_makes_it_stale(self):
+        self.write('app.py', 'x = 3\n')
+        git(self.repo, 'commit', '-qam', 'more code')
+        v, tip = self.judge()
+        self.assertEqual(v, review.Stale(self.code, tip))
+
+    def test_no_block_is_none(self):
+        self.assertIsNone(review.judge(self.repo, self.conv, 'verdict: approved\n', self.code))
+
+
+class ReviewAtReadsTheBlock(unittest.TestCase):
+    """``review_at`` reads the block first, by ``flags.verdict_block`` — its verdict, and its head
+    over the head the branch file names."""
+
+    def setUp(self):
+        import tempfile
+        self.repo = tempfile.mkdtemp()
+        self.addCleanup(__import__('shutil').rmtree, self.repo, True)
+        git(self.repo, 'init', '-q', '-b', 'main')
+        os.makedirs(os.path.join(self.repo, 'docs/reviews'))
+        with open(os.path.join(self.repo, 'docs/reviews/1-t-1.md'), 'w') as fh:
+            fh.write(VerdictBlock.TABLE_FAIL + 'head: ' + 'd' * 40 + '\n' + block(head='e' * 40))
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'base')
+
+    def test_off_reads_the_table(self):
+        rv = review.review_at(self.repo, Conventions(), 'main', 'T-1')
+        self.assertEqual((rv['verdict'], rv['head']), (review.CHANGES, 'd' * 40))
+
+    def test_warn_reads_the_block(self):
+        conv = Conventions.from_mapping({'flags': {'verdict_block': 'warn'}})
+        rv = review.review_at(self.repo, conv, 'main', 'T-1')
+        self.assertEqual((rv['verdict'], rv['head']), (review.APPROVED, 'e' * 40))
+
+
+class TheTemplateAsksForTheBlock(unittest.TestCase):
+    def test_the_review_template_carries_the_mark_and_a_parseable_block(self):
+        path = os.path.join(os.path.dirname(review.__file__), '..', 'briefs', 'templates',
+                            'review.md')
+        with open(path, encoding='utf-8') as fh:
+            text = fh.read()
+        self.assertIn(review.BLOCK_MARK, text)
+        filled = text.replace('<the 40-hex sha `git rev-parse HEAD` printed — the code you read>',
+                              'f' * 40)
+        self.assertEqual(review.verdict_block(filled), review.Verdict(review.APPROVED, 'f' * 40))
+
+
 if __name__ == '__main__':
     unittest.main()

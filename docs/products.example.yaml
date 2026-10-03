@@ -215,6 +215,9 @@ conventions:
   # flags:
   #   mechanical: true
   #   plan_ahead: 2
+  #   verdict_block: warn   # off (default) | warn | on: a review's ```verdict block is read
+  #                         # first (the table is the fallback); at `on` the Stop gate refuses
+  #                         # a review that ends without one bound to its head
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:
