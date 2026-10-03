@@ -177,7 +177,7 @@ def build_parser():
     p_new.add_argument('type')
     p_new.add_argument('--title', required=True)
     p_new.add_argument('--parent')
-    p_new.add_argument('--priority', choices=['need', 'nice'])
+    p_new.add_argument('--priority', choices=['need', 'nice', 'later'])
     p_new.add_argument('--area')
     p_new.add_argument('--legacy-id')
     p_new.add_argument('--body-file')
