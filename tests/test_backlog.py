@@ -835,6 +835,118 @@ class CheckOverlapTests(unittest.TestCase):
         self.assertEqual(self.lines(r.stdout), [])
 
 
+class SupersessionCheckTests(unittest.TestCase):
+    """§3.2 / T-0256: `asf check` fails a supersession that dangles, cycles or is written on only
+    one card — a record built with `write_item`, then `asf index`, then `asf check`."""
+
+    def setUp(self):
+        self.root = make_repo()
+        for f in STREAM_FOLDERS:
+            os.makedirs(os.path.join(self.root, f))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def decision(self, id_, typed_lines=()):
+        write_item(self.root, id_, 'decision', id_, typed_lines=typed_lines)
+
+    def rule(self, id_, typed_lines=()):
+        write_item(self.root, id_, 'rule', id_, typed_lines=typed_lines)
+
+    def check(self):
+        run(['index'], self.root)
+        return run(['check'], self.root)
+
+    def test_dangling_supersedes_finding(self):
+        self.decision('D-0051', typed_lines=('supersedes: [D-0099]',))
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('decisions/D-0051.md:', r.stdout)
+        self.assertIn('supersedes references missing item D-0099', r.stdout)
+
+    def test_dangling_superseded_by_finding(self):
+        self.decision('D-0042', typed_lines=('superseded_by: D-0099',))
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('decisions/D-0042.md:', r.stdout)
+        self.assertIn('superseded_by references missing item D-0099', r.stdout)
+
+    def test_half_written_pair_names_the_other_card_and_the_fix(self):
+        self.decision('D-0051', typed_lines=('supersedes: [D-0042]',))
+        self.decision('D-0042')
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('decisions/D-0042.md:', r.stdout)
+        self.assertIn('D-0051 supersedes D-0042, which carries no superseded_by: D-0051', r.stdout)
+        self.assertIn('asf set D-0042 superseded_by=D-0051', r.stdout)
+        # the fix the message names is run, not just printed — the two SETTABLE lines proved
+        r = run(['set', 'D-0042', 'superseded_by=D-0051'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_half_written_pair_mirror(self):
+        self.decision('D-0042', typed_lines=('superseded_by: D-0051',))
+        self.decision('D-0051')
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('decisions/D-0051.md:', r.stdout)
+        self.assertIn('D-0042 is superseded_by D-0051, which does not list D-0042 in supersedes:', r.stdout)
+        self.assertIn('asf set D-0051 supersedes=[D-0042]', r.stdout)
+        r = run(['set', 'D-0051', 'supersedes=[D-0042]'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_three_card_ring_is_one_finding(self):
+        self.decision('D-0001', typed_lines=('superseded_by: D-0002',))
+        self.decision('D-0002', typed_lines=('superseded_by: D-0003',))
+        self.decision('D-0003', typed_lines=('superseded_by: D-0001',))
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        rings = [l for l in r.stdout.splitlines() if 'supersession cycle' in l]
+        self.assertEqual(len(rings), 1, r.stdout)
+        self.assertTrue(rings[0].startswith('decisions/D-0001.md:'), rings[0])
+        self.assertIn('supersession cycle D-0001 → D-0002 → D-0003 → D-0001', rings[0])
+
+    def test_self_ring(self):
+        self.decision('D-0001', typed_lines=('supersedes: [D-0001]', 'superseded_by: D-0001'))
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('supersession cycle D-0001 → D-0001', r.stdout)
+
+    def test_a_correct_pair_and_a_five_card_chain_pass_clean(self):
+        self.decision('D-0010', typed_lines=('supersedes: [D-0011]',))
+        self.decision('D-0011', typed_lines=('superseded_by: D-0010',))
+        chain = [f'D-00{i}' for i in range(20, 25)]
+        for idx, id_ in enumerate(chain):
+            typed = []
+            if idx > 0:
+                typed.append(f'superseded_by: {chain[idx - 1]}')
+            if idx < len(chain) - 1:
+                typed.append(f'supersedes: [{chain[idx + 1]}]')
+            self.decision(id_, typed_lines=tuple(typed))
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn('supersedes', r.stdout)
+        self.assertNotIn('supersession', r.stdout)
+
+    def test_cross_type_pair_is_not_a_finding(self):
+        self.rule('R-0007', typed_lines=('superseded_by: D-0051',))
+        self.decision('D-0051', typed_lines=('supersedes: [R-0007]',))
+        r = self.check()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_findings_sort_among_the_others_by_path_then_line(self):
+        # a record with both a dangling parent and a dangling successor prints both, ordered
+        self.decision('D-0001', typed_lines=('supersedes: [D-0098]', 'superseded_by: D-0099'))
+        r = self.check()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        lines = [l for l in r.stdout.splitlines() if 'decisions/D-0001.md:' in l
+                 and ('references missing item' in l)]
+        self.assertEqual(len(lines), 2, r.stdout)
+        parsed = [(l.split(':')[0], int(l.split(':')[1])) for l in lines]
+        self.assertEqual(parsed, sorted(parsed))
+
+
 class IndexCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
