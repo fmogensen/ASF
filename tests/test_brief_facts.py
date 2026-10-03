@@ -11,8 +11,10 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 from asf import env
+from asf import reservations as reservations_mod
 from asf.briefs import facts
 from asf.briefs import preamble as preamble_mod
 from asf.env import Product
@@ -103,6 +105,31 @@ class ContractTests(FactsCase):
         self.assertEqual(set(out), set(preamble_mod.REPO_FACT_KEYS))
         self.assertIs(out['branch_exists'], False)
         self.assertEqual((out['files'], out['tests']), ({}, []))
+
+    def test_reservations_is_empty_with_no_snapshot_on_disk(self):
+        self.assertEqual(self.facts_for()['reservations'], {})
+
+    def test_reservations_is_read_from_the_snapshot_on_disk(self):
+        product = self.product()
+        snap = {'at': 'now', 'trunk': 'main', 'refs': [], 'prs': {},
+                'sequences': {'bands': {'width': 4, 'held': {'289': ['worker/T-0361']}}},
+                'errors': []}
+        reservations_mod.save(env.state_dir(product), snap)
+        out = facts.repo_facts(product, make_row(), make_index())
+        self.assertEqual(out['reservations'], snap)
+
+    def test_no_fetch_and_no_gh_call_reads_it(self):
+        calls = []
+        real_run = subprocess.run
+
+        def fake_run(args, **kwargs):
+            calls.append(list(args))
+            return real_run(args, **kwargs)
+
+        with unittest.mock.patch('asf.briefs.facts.subprocess.run', fake_run):
+            self.facts_for()
+        self.assertFalse([c for c in calls if c[:1] == ['gh']])
+        self.assertFalse([c for c in calls if 'fetch' in c])
 
 
 class RelaunchFactsTests(FactsCase):
