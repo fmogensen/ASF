@@ -503,6 +503,13 @@ def trunk_stall_cell(product):
     return trunk_watch.stall_cell(product)
 
 
+def trunk_red_cell(product):
+    """``RED TRUNK RED: <check> (seen on #a, #b) — …`` while a required check is red on the
+    trunk itself (:func:`asf.trunk_red.status_cell`, off its state file), else None (no row)."""
+    from asf import trunk_red
+    return trunk_red.status_cell(product)
+
+
 def land_red_cell(product):
     """``RED #N <why>`` for each ``asf land`` request the queue marked red (a conflict with the
     trunk, red checks) — it waits for a new head, so it must show; None (no row) when none."""
@@ -583,7 +590,8 @@ def render(root, product, cfg=None):
                        ('Lane pushes', lambda: lane_push_cell(product)),
                        ('Queue bypass', lambda: bypass_cell(product)),
                        ('Land requests', lambda: land_red_cell(product)),
-                       ('Trunk stall', lambda: trunk_stall_cell(product))):
+                       ('Trunk stall', lambda: trunk_stall_cell(product)),
+                       ('Trunk red', lambda: trunk_red_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table

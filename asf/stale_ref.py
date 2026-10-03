@@ -1,0 +1,184 @@
+"""asf.stale_ref — a PR red on a merge ref the trunk has moved past is no verdict: a fresh run.
+
+A ``pull_request`` run tests the PR's merge with the trunk **as the trunk was when the run was
+created**, and a re-run (``gh run rerun``, the flake triage's) replays that same merge ref. Once
+the trunk has moved, such a red judges an old trunk, not the PR on today's: a fix that landed on
+the trunk since is not in it (2026-10-02, a product: two hotfix PRs stayed red ~12 h on an e2e
+check the trunk had fixed at 13:26Z — their runs predated the fix, and every re-run reused the old
+merge ref; the stall alarm then read the trunk as broken).
+
+So the first step on a red PR head — an ``asf land`` request (:func:`asf.merge_queue.
+requested_ready`) or a factory PR (:meth:`asf.harvest.lane.GitHubHost.head_red`, the gate) —
+before any flake re-run, any correct round, any trunk-red count (:mod:`asf.trunk_red`):
+
+* :func:`stale` — the red checks whose run is a ``pull_request`` run created before the trunk's
+  current tip arrived (:func:`arrival`: when the trunk watch saw it move, else its commit time);
+* :func:`refresh` — such a PR is closed and reopened (``gh pr close`` / ``gh pr reopen``): the
+  ``reopened`` event starts a fresh run on a **new merge ref** with the current trunk, on the same
+  head — no commit on anyone's branch, and the newest run per check is what the gate reads
+  (:func:`asf.harvest.lane.latest_checks`, :func:`asf.merge_queue.newest`). Once per PR, head and
+  trunk tip; while its fresh run has not shown the PR waits (pending, never red). A reopen that
+  starts no run within :data:`WAIT_S` is given up on: the red is judged as it stands.
+
+Only a red on a fresh merge ref is a verdict. State: ``state/<product>/stale-ref.json``
+(``{"<pr>": {head, tip, at}}``). Never raises.
+"""
+import datetime
+import json
+import os
+import time
+
+STATE_FILE = 'stale-ref.json'
+#: how long a reopened PR's fresh run may take to show before the red is judged as it stands
+WAIT_S = 1800
+#: records older than this are dropped
+KEEP_S = 3 * 86400
+
+_RUNS = {}      # run id -> (event, created epoch), read once a process
+
+
+def _sd(product):
+    from asf import env
+    return env.state_dir(product)
+
+
+def _epoch(iso):
+    try:
+        return int(datetime.datetime.fromisoformat(str(iso).replace('Z', '+00:00')).timestamp())
+    except (TypeError, ValueError):
+        return None
+
+
+def _gh():
+    from asf.harvest import harvest as H
+    return H
+
+
+def arrival(product, repo, tip):
+    """Epoch the trunk's tip ``tip`` arrived: when the trunk watch saw the trunk move to it (or,
+    the watch having last read an older tip, its last look), and never before the tip's own
+    commit time. None when nothing reads."""
+    from asf import trunk_watch
+    H = _gh()
+    times = []
+    if repo and tip:
+        got = H.sh(['git', 'log', '-1', '--format=%ct', tip], cwd=repo)
+        ct = (got.stdout or '').strip() if got.returncode == 0 else ''
+        if ct.isdigit():
+            times.append(int(ct))
+    tw = trunk_watch.load(_sd(product))
+    if tw.get('checked') == tip and isinstance(tw.get('moved_at'), (int, float)):
+        times.append(int(tw['moved_at']))
+    elif tw.get('checked') and tw.get('checked') != tip and isinstance(tw.get('at'), (int, float)):
+        times.append(int(tw['at']))
+    return max(times) if times else None
+
+
+def run_of(slug, link):
+    """``(event, created epoch)`` of the workflow run a check's link names, or None."""
+    from asf.harvest import lane as lane_mod
+    m = lane_mod._RUN_RE.search(link or '')
+    if not m:
+        return None
+    rid = m.group(1)
+    if rid not in _RUNS:
+        got = _gh().gh_json(['api', f'repos/{slug}/actions/runs/{rid}'], None)
+        _RUNS[rid] = ((got.get('event'), _epoch(got.get('created_at')))
+                      if isinstance(got, dict) else None)
+    return _RUNS[rid]
+
+
+def stale(product, slug, red, tip, repo):
+    """The names of the ``red`` checks (dicts with ``name`` and ``link`` or ``html_url``) whose
+    run is a ``pull_request`` run created before the trunk's tip ``tip`` arrived — a merge ref of
+    an older trunk. ``[]`` when the arrival or a run does not read (judged as before)."""
+    at = arrival(product, repo, tip)
+    if not at or not red:
+        return []
+    out = []
+    for c in red:
+        got = run_of(slug, c.get('link') or c.get('html_url'))
+        if got and got[0] == 'pull_request' and got[1] is not None and got[1] < at:
+            out.append(c.get('name') or '?')
+    return list(dict.fromkeys(out))
+
+
+def path(state_dir):
+    return os.path.join(state_dir, STATE_FILE)
+
+
+def load(state_dir):
+    try:
+        with open(path(state_dir), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def save(state_dir, data):
+    os.makedirs(state_dir, exist_ok=True)
+    tmp = path(state_dir) + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, sort_keys=True, indent=1)
+    os.replace(tmp, path(state_dir))
+
+
+def refresh(product, slug, number, head, tip, names, out=print, now=None):
+    """A fresh run on a new merge ref for PR ``number`` red at ``head`` on ``names`` judged
+    against an older trunk: ``'fresh'`` (closed and reopened now), ``'waiting'`` (reopened for
+    this head and tip already, its run not shown yet), or None — not refreshed (the reopen was
+    refused, or its run never showed within :data:`WAIT_S`): the caller judges the red as it
+    stands. Never raises."""
+    now = time.time() if now is None else now
+    sd = _sd(product)
+    try:
+        data = {k: v for k, v in load(sd).items()
+                if isinstance(v, dict) and now - (v.get('at') or 0) < KEEP_S}
+        rec = data.get(str(number))
+        if rec and rec.get('head') == head and rec.get('tip') == tip:
+            if now - (rec.get('at') or 0) < WAIT_S:
+                return 'waiting'
+            if not rec.get('gave_up'):
+                rec['gave_up'] = True
+                save(sd, data)
+                out(f'stale merge ref: PR #{number} reopened {int((now - rec["at"]) // 60)} min '
+                    f'ago and no fresh run showed — its red is judged as it stands')
+            return None
+        if getattr(product, 'conventions', None) is None:
+            return None
+        trunk = product.conventions.main
+        H = _gh()
+        why = (f'ASF: the red {", ".join(names)} ran on a merge ref of {trunk} from before '
+               f'{trunk} moved to {tip[:9]}; a re-run would replay it. Closed and reopened for a '
+               f'fresh run on today\'s {trunk} (asf.stale_ref).')
+        rc, _o, err = H._gh(['pr', 'close', str(number), '-R', slug, '--comment', why])
+        if rc != 0:
+            out(f'stale merge ref: closing PR #{number} for a fresh run refused — '
+                f'{(err or "").strip()[-200:]}')
+            return None
+        rc, _o, err = H._gh(['pr', 'reopen', str(number), '-R', slug])
+        if rc != 0:
+            rc, _o, err = H._gh(['pr', 'reopen', str(number), '-R', slug])
+        if rc != 0:
+            out(f'stale merge ref: PR #{number} closed but its reopen was refused — '
+                f'{(err or "").strip()[-200:]}; reopen it')
+            return None
+        data[str(number)] = {'head': head, 'tip': tip, 'at': int(now), 'names': list(names)}
+        save(sd, data)
+        out(f'stale merge ref: PR #{number} red on {", ".join(names)} at {head[:9]} ran on a '
+            f'merge ref from before {trunk} moved to {tip[:9]} — closed and reopened for a fresh '
+            f'run (never a re-run of the old ref)')
+        return 'fresh'
+    except Exception as e:  # noqa: BLE001 — no fresh run: judged as before
+        out(f'stale merge ref: PR #{number} — {type(e).__name__}: {e}')
+        return None
+
+
+def in_flight(product, now=None):
+    """The PR numbers reopened for a fresh run whose run may still show (within
+    :data:`WAIT_S`) — what the stall reaction waits on before it reads the trunk as broken."""
+    now = time.time() if now is None else now
+    return sorted(int(k) for k, v in load(_sd(product)).items()
+                  if isinstance(v, dict) and str(k).isdigit() and not v.get('gave_up')
+                  and now - (v.get('at') or 0) < WAIT_S)

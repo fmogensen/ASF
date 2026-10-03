@@ -92,7 +92,7 @@ import shutil
 import tempfile
 import time
 
-from asf import attestation, ci_queue, flake, gitpush, refguard
+from asf import attestation, ci_queue, flake, gitpush, refguard, stale_ref
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.workers import lifecycle
@@ -424,7 +424,14 @@ def run(lane, ready):
             checks, red = detail
             roots = root_failures(checks, why) or [c for c in checks
                                                    if flake.job_key(c.get('name')) in red]
-            on_trunk = _red_on_trunk(lane, [c.get('name') for c in roots] or red)
+            names = [c.get('name') for c in roots] or red
+            on_trunk = _red_on_trunk(lane, names)
+            found = None
+            if not on_trunk:
+                # the same check red on unrelated landings is the trunk's (asf.trunk_red): this
+                # red is recorded first, so the second such landing is already spared
+                found = failure_findings(lane.slug, roots)
+                on_trunk = _trunk_red_seen(lane, batch, members, names, found)
             if on_trunk:
                 # the trunk fails the same check: not this batch's defect — nobody is sent back
                 # and nobody is split out; the members wait and are gated again
@@ -436,7 +443,6 @@ def run(lane, ready):
                                    f'too ({said}) — not this PR\'s', green=f.get('green'))
                 settled |= {f['branch'] for f in members}
             else:
-                found = failure_findings(lane.slug, roots)
                 culprits = blame(lane, batch, members, found)
                 if len(members) == 1:
                     culprits = culprits or {members[0]['branch']: []}
@@ -655,6 +661,28 @@ def _red_on_trunk(lane, names):
         return dict(reader(list(dict.fromkeys(n for n in names if n))) or {})
     except Exception:   # a reading that fails is no verdict: the batch is judged as before
         return {}
+
+
+def _trunk_red_seen(lane, batch, members, names, found):
+    """Record the red batch with :func:`asf.trunk_red.observe` (its PRs, its members' files, the
+    files the failing logs name), then ``{name: trunk sha}`` for the ``names``
+    :func:`asf.trunk_red.held` reads as trunk red — every one of them, else ``{}``. Never raises."""
+    from asf import trunk_red
+    product = getattr(lane, 'product', None)
+    if product is None:
+        return {}
+    try:
+        files = set()
+        for f in members:
+            files |= _member_files(lane, batch, f)
+        trunk_red.observe(product, names, f"batch {batch['ref']}", [_pr(f) for f in members],
+                          batch['sha'], batch.get('base'), files,
+                          [p for item in found or () for p, _n, _t in item['paths']],
+                          {trunk_red.job(i['name']): i.get('link') for i in found or ()})
+        got = trunk_red.held(product, names)
+    except Exception:   # noqa: BLE001 — no reading: the batch is judged as before
+        return {}
+    return got if got and all(n in got for n in names) else {}
 
 
 def failure_findings(slug, roots):
@@ -1275,7 +1303,9 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             else:
                 lane.out(f'merge queue: asf land PR #{n}: {b} is not on origin — waits')
             continue
-        if (r.get('red') or {}).get('head') == head:
+        red = r.get('red') or {}
+        if red.get('head') == head and not (red.get('kind') == 'checks'
+                                             and _judged_before_trunk(lane, red, trunk_sha)):
             continue
         if r.get('red'):
             # the head moved: the old head's red is not this head's verdict
@@ -1291,6 +1321,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
         if runs is None:
             lane.out(f'merge queue: asf land PR #{n} waits — check runs unreadable')
             continue
+        runs = newest(runs)     # a fresh run (asf.stale_ref) supersedes the stale one it replaced
         state, why = verdict(admission_runs(runs), required)
         if state == 'pending' and runs and all(r.get('status') == 'completed' for r in runs) \
                 and all(w.endswith('(not started)') for w in why.split(', ')):
@@ -1311,6 +1342,17 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                       for c in runs if c.get('status') == 'completed'
                       and c.get('conclusion') not in (None, 'success', 'skipped', 'neutral',
                                                       'cancelled')]
+            # first: a red judged on a merge ref of an older trunk is no verdict — never kept
+            # red, never re-run (a re-run replays the old ref): a fresh run on today's trunk
+            old = stale_ref.stale(lane.product, lane.slug, failed, trunk_sha, lane.repo)
+            if old and stale_ref.refresh(lane.product, lane.slug, n, head, trunk_sha, old,
+                                         out=lane.out):
+                lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — a fresh run on '
+                         f'{lane.trunk} {trunk_sha[:9]} (its red {", ".join(old)} ran on a merge '
+                         f'ref from before {lane.trunk} moved)')
+                if r.pop('red', None) is not None:
+                    changed = True
+                continue
             lost = failed and all(
                 flake.infra_red(lane.slug, flake._ids(c['link'])[1], H._gh) for c in failed)
             defects, held = ([], [])
@@ -1323,6 +1365,9 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                          f"{', '.join(held)} (infra, flake triage)")
                 continue
         if state == 'red':
+            trunk_red = _land_red_seen(lane, n, head, trunk_sha, failed, required)
+            if trunk_red:
+                why = f'{why} — trunk red too ({trunk_red}), not this PR\'s'
             lane.out(f'merge queue: asf land PR #{n} red at its head {head[:12]} — {why}; '
                      f'taken once a new head is green')
             r['red'] = {'head': head, 'kind': 'checks', 'why': why, 'at': now_iso()}
@@ -1341,6 +1386,61 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
     if changed:
         save_requests(lane.state_dir, reqs)
     return out
+
+
+def _land_red_seen(lane, n, head, trunk_sha, failed, required):
+    """Record an ``asf land`` head red on its required checks (runner loss already excluded) with
+    :func:`asf.trunk_red.observe` — its diff's files, the files its failing logs name — and the
+    names :func:`asf.trunk_red.held` reads as trunk red, as one string (empty when none). Its logs
+    are read once per head. Never raises."""
+    from asf import trunk_red
+    product = getattr(lane, 'product', None)
+    if product is None:
+        return ''
+    try:
+        names = [c['name'] for c in failed
+                 if not required or lane_mod.required_name(c.get('name'), required)]
+        key = f'#{n}'
+        if names and not trunk_red.known(product, key, head, names):
+            files = [l for l in H.sh(['git', 'diff', '--name-only', f'{trunk_sha}...{head}'],
+                                     cwd=lane.repo).stdout.splitlines() if l.strip()]
+            roots = [c for c in failed if c['name'] in names]
+            found = failure_findings(lane.slug, roots)
+            trunk_red.observe(product, names, key, [n], head, trunk_sha, files,
+                              [p for item in found for p, _n, _t in item['paths']],
+                              {trunk_red.job(c['name']): c.get('link') for c in roots})
+        got = trunk_red.held(product, names)
+    except Exception:   # noqa: BLE001 — no reading: the request is judged as before
+        return ''
+    return ', '.join(sorted(got))
+
+
+def _judged_before_trunk(lane, red, trunk_sha):
+    """True when a request's red (``red['at']``) was judged before the trunk's tip ``trunk_sha``
+    arrived: the trunk moved since, so the head is read again — a red on an old merge ref gets a
+    fresh run (:mod:`asf.stale_ref`), never a red kept until the head moves."""
+    try:
+        at = stale_ref._epoch(red.get('at'))
+        moved = stale_ref.arrival(lane.product, lane.repo, trunk_sha)
+    except Exception:   # noqa: BLE001 — unreadable: the red stands
+        return False
+    return bool(at and moved and at < moved)
+
+
+def newest(runs):
+    """One check run per name — the newest (by ``started_at``; one not started yet is the
+    newest): a fresh run of a check supersedes an older run of it on the same sha, the way
+    :func:`asf.harvest.lane.latest_checks` judges a PR. The list's order is kept."""
+    def when(r):
+        at = str(r.get('started_at') or '')
+        return '9999' if not at else at
+    best = {}
+    for i, r in enumerate(runs or ()):
+        k = r.get('name')
+        if k not in best or (when(r), i) >= (when(runs[best[k]]), best[k]):
+            best[k] = i
+    keep = set(best.values())
+    return [r for i, r in enumerate(runs or ()) if i in keep]
 
 
 def admission_runs(runs):

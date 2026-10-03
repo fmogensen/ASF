@@ -346,6 +346,9 @@ DEFAULT_HEAVY_CI_LABEL = 'asf:heavy-ci'
 #: ``ci.trunk_stall_hours``'s default: the trunk standing still this long while landings
 #: wait is the stall alarm (:mod:`asf.trunk_watch`)
 DEFAULT_TRUNK_STALL_HOURS = 4
+#: ``ci.trunk_full_every_hours``'s default: an attested trunk push skips the heavy jobs, so the
+#: trunk's full workflow is dispatched on its tip at least this often (:mod:`asf.trunk_red`)
+DEFAULT_TRUNK_FULL_EVERY_HOURS = 6
 #: ``ci.queue_status``'s default: the commit status the merge queue posts (success) on a batch sha
 #: just before it moves the trunk there — the context the trunk's ruleset requires, so only a
 #: sha the queue landed can reach the trunk.
@@ -1022,6 +1025,18 @@ class Conventions:
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
             return value
         return DEFAULT_TRUNK_STALL_HOURS
+
+    def trunk_full_every_hours(self):
+        """``ci.trunk_full_every_hours``: the longest the trunk may go without a full run of its
+        workflow (every heavy job, never the attested skip) before :mod:`asf.trunk_red`
+        dispatches one on its tip — :data:`DEFAULT_TRUNK_FULL_EVERY_HOURS` unless set to a
+        positive number; ``0``/``false`` turns the safety net off."""
+        value = self.map_of('ci').get('trunk_full_every_hours')
+        if value is False or value == 0:
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return value
+        return DEFAULT_TRUNK_FULL_EVERY_HOURS
 
     def is_signoff_check(self, name):
         """True when a PR check called ``name`` is the product's sign-off check."""
