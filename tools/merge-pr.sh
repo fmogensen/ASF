@@ -9,12 +9,17 @@
 #      rebase is refused), then wait for the checks on the NEW head, polling with backoff
 #   2. `gh pr merge --squash --delete-branch --match-head-commit <sha>`; if main moved in between,
 #      go round again (at most MERGE_PR_ATTEMPTS, default 3, then exit non-zero)
+#   0. before step 1, take a host-wide lock (mkdir lock dir with a pid file, stock macOS has no
+#      flock): update -> wait -> merge is one critical section, so ten agents no longer rebase on
+#      each other's merges and burn 2 CI jobs a round. A waiting PR neither rebases nor runs CI.
 #   3. print the merged sha and what the caller does next
 #
 # Env: MERGE_PR_CHECKS     required check names, ';'-separated (default "tests (3.12);tests (3.13)")
 #      MERGE_PR_ATTEMPTS   rounds before giving up (default 3)
 #      MERGE_PR_POLL       first poll delay in seconds (default 10, doubles up to 120)
 #      MERGE_PR_TIMEOUT    seconds to wait for checks per round (default 3600)
+#      MERGE_PR_LOCK       0 disables the host-wide lock (tests)
+#      MERGE_PR_LOCK_POLL  seconds between lock polls (default 15)
 set -euo pipefail
 
 pr="${1:-}"
@@ -66,6 +71,65 @@ wait_green() {
 contains_main() { git merge-base --is-ancestor origin/main "$1"; }
 
 fetch() { git fetch -q origin main "refs/pull/$pr/head"; }
+
+# ---- host-wide lock: mkdir is atomic everywhere. Stale = holder pid dead, or older than
+# MERGE_PR_TIMEOUT + 600 s (a holder cannot legitimately outlive one round's wait).
+lock="${XDG_CACHE_HOME:-$HOME/.cache}/asf/merge-pr.lock"
+lock_poll="${MERGE_PR_LOCK_POLL:-15}"
+have_lock=0
+
+lock_stale() {
+  local hp since now
+  hp="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -z "$hp" ]; then
+    # holder between mkdir and writing its pid, or died there: give it a minute
+    [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; return
+  fi
+  kill -0 "$hp" 2>/dev/null || return 0
+  since="$(cat "$lock/since" 2>/dev/null || echo 0)"; now="$(date +%s)"
+  [ $((now - since)) -gt $((timeout_s + 600)) ]
+}
+
+lock_break() {
+  local junk="$lock.stale.$$"
+  mv "$lock" "$junk" 2>/dev/null || return 0
+  rm -rf "$junk"
+}
+
+lock_release() {
+  if [ "$have_lock" = 1 ] && [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ]; then
+    rm -rf "$lock"
+  fi
+  have_lock=0
+}
+
+lock_acquire() {
+  local last=0 now
+  mkdir -p "$(dirname "$lock")"
+  while :; do
+    if mkdir "$lock" 2>/dev/null; then
+      echo "$$" > "$lock/pid"; echo "$pr" > "$lock/pr"; date +%s > "$lock/since"
+      have_lock=1; return 0
+    fi
+    if lock_stale; then
+      echo "merge-pr: breaking a stale merge lock (held by PR #$(cat "$lock/pr" 2>/dev/null || echo ?), pid $(cat "$lock/pid" 2>/dev/null || echo ?))"
+      lock_break; continue
+    fi
+    now="$(date +%s)"
+    if [ $((now - last)) -ge 60 ]; then
+      echo "merge-pr: waiting for the merge lock (held by PR #$(cat "$lock/pr" 2>/dev/null || echo ?), pid $(cat "$lock/pid" 2>/dev/null || echo ?))"
+      last="$now"
+    fi
+    sleep "$lock_poll"
+  done
+}
+
+if [ "${MERGE_PR_LOCK:-1}" != 0 ]; then
+  trap lock_release EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  lock_acquire
+fi
 
 for round in $(seq 1 "$attempts"); do
   fetch
