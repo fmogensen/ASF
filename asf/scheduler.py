@@ -606,6 +606,40 @@ def render_host(cfg=None):
     return job
 
 
+def host_label(cfg=None):
+    return label_for(HOST_PRODUCT, HOST_CLOCK, cfg)
+
+
+def uninstall_host(cfg=None):
+    """Boot out and delete the host clock's plist and clear its pause — the inverse of
+    :func:`install_host`. Nothing installed is one line, not a failure."""
+    label = host_label(cfg)
+    path = plist_path(label)
+    paused = bool(read_pauses(HOST_PRODUCT))
+    if not os.path.exists(path) and not paused and not status(label).get('loaded'):
+        return [f'scheduler: {label} is not installed']
+    lines = uninstall(label)
+    if HOST_CLOCK in read_pauses(HOST_PRODUCT):
+        pauses = read_pauses(HOST_PRODUCT)
+        pauses.pop(HOST_CLOCK, None)
+        _write_pauses(HOST_PRODUCT, pauses)
+    return lines
+
+
+def install_host(cfg=None):
+    """Render and install the host clocks (``asf scheduler install --host``). Idempotent: the
+    plist is rewritten and the label booted out and in again, so a second run leaves the same
+    state. While ``network.probe`` is off the clock is removed instead — the flag going off
+    takes the job with it."""
+    cfg = env.load_config() if cfg is None else cfg
+    job = render_host(cfg)
+    if job is None:
+        if os.path.exists(plist_path(host_label(cfg))) or status(host_label(cfg)).get('loaded'):
+            return uninstall_host(cfg)
+        return ['scheduler: network.probe is off (config.yaml) — no host clock to install']
+    return install(job)
+
+
 # ---- the smoke a move runs before it resumes the clocks ----------------------
 
 #: Run by the plist's own interpreter: imports the CLI it ticks and loads the product file with
@@ -1164,8 +1198,12 @@ def register(sub):
     """``asf scheduler render|install|status|list`` — wired into ``asf.cli``'s subparsers."""
     p = sub.add_parser('scheduler', help='the factory clock: render, install and read back jobs')
     p.add_argument('scheduler_command',
-                   choices=['render', 'install', 'status', 'list', 'pause', 'resume'])
+                   choices=['render', 'install', 'status', 'list', 'pause', 'resume',
+                            'uninstall'])
     p.add_argument('--product')
+    p.add_argument('--host', action='store_true',
+                   help='the host-level clocks (asf.host.net-probe, while config.yaml '
+                        'network.probe is on) instead of a product\'s')
     p.add_argument('--clock', help='the clock name from products/<p>.yaml (default: every clock); '
                                    'pause/resume take a comma-separated list')
     p.add_argument('--reason', help='pause: why the clocks are stopped (recorded, required)')
@@ -1217,6 +1255,37 @@ def _cmd_pause_resume(args, command, product_name, cfg):
     return 1 if any('failed' in line for line in lines) else 0
 
 
+def _cmd_host(args, command, cfg):
+    if kind(cfg) != 'launchd':
+        print(f'scheduler: --host needs scheduler kind launchd, not {kind(cfg)!r}')
+        return 2
+    if command in ('pause', 'resume'):
+        args.product, args.clock = HOST_PRODUCT, HOST_CLOCK
+        return _cmd_pause_resume(args, command, HOST_PRODUCT, cfg)
+    if command == 'install':
+        lines = install_host(cfg)
+    elif command == 'uninstall':
+        lines = uninstall_host(cfg)
+    elif command == 'status':
+        info = status(host_label(cfg))
+        info['label'] = host_label(cfg)
+        lines = [_status_line(info)]
+        if not info.get('loaded') and pause_record(host_label(cfg)) is None:
+            print(lines[0])
+            return 1
+    else:
+        job = render_host(cfg)
+        if job is None:
+            lines = ['scheduler: network.probe is off (config.yaml) — no host clock']
+        else:
+            lines = [f"# {job['label']}", render_plist(job).rstrip('\n')] \
+                if job['kind'] == 'launchd' else [job['needs_operator']]
+    for line in lines:
+        print(line)
+    # a bootout of a clock launchd never held is the ordinary case, not a failure
+    return 1 if any('failed' in line and 'bootout' not in line for line in lines) else 0
+
+
 def cmd_scheduler(args, root=None):
     import json as _json
     cfg = env.load_config()
@@ -1235,6 +1304,12 @@ def cmd_scheduler(args, root=None):
             for path in job['paths']:
                 print(f"    {path}")
         return 0
+
+    if command == 'uninstall' and not getattr(args, 'host', False):
+        print('scheduler: uninstall only takes --host (a product clock is retired by install)')
+        return 2
+    if getattr(args, 'host', False):
+        return _cmd_host(args, command, cfg)
 
     product_name = args.product or env.default_product_name()
 
