@@ -116,11 +116,31 @@ if [ -n "$own" ] && [ -d "$own" ]; then
     [ "$resolved" = "$here" ] && same=1
 fi
 
+# a scratch push: a repo that is not a linked worktree (a session's worktree always is) pushing
+# to a local path — a product test's throwaway fixture repo. The session's guard, trunk check and
+# push log are not for it: they inherit core.hooksPath through GIT_CONFIG_* and refused every
+# fixture push of a branch named main (2026-10-02: five sessions ended "hook refused")
+scratch=0
+if [ "$name" = "pre-push" ]; then
+    case "$2" in
+        file://*) local_url=1 ;;
+        *://*) local_url=0 ;;
+        *:*) case "${2%%:*}" in */*) local_url=1 ;; *) local_url=0 ;; esac ;;
+        *) local_url=1 ;;
+    esac
+    if [ "$local_url" = 1 ]; then
+        gd=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)
+        cd_=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+        [ -n "$gd" ] && [ "$gd" = "$cd_" ] && scratch=1
+    fi
+fi
+
 # one push per correction round (asf.workers.pushlog): a push the product's own pre-push hook
 # passed is logged — its local sha, one line — and a correction session is told on its second.
 # A session pushes only to factory branches (ASF_PUSH_ALLOW, asf.workers.spawn.push_allow): a
 # refs/heads/ ref under none of its prefixes is refused before anything else runs
-if [ "$name" = "pre-push" ] && { [ -n "$ASF_PUSH_LOG" ] || [ -n "$ASF_PUSH_ALLOW" ]; }; then
+if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
+        && { [ -n "$ASF_PUSH_LOG" ] || [ -n "$ASF_PUSH_ALLOW" ]; }; then
     input=$(cat)
     if [ -n "$ASF_PUSH_ALLOW" ] && [ -n "$input" ]; then
         bad=$(printf '%s\n' "$input" | awk -v allow="$ASF_PUSH_ALLOW" '
