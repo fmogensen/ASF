@@ -457,7 +457,7 @@ def _card(root, iid, writes, state='Active', after=(), removed=None):
 class R9RecordStepInTheTick(TickTestCase):
     """A writer of the record step writes one card that intersects an Active Task's ``writes:``
     (I3) and one that does not. The tick puts back only the first, commits the second, files
-    one Bug for ``(I3, the path)`` — and a second tick files no second Bug that day."""
+    one Bug for ``(I3, the cause)`` — and a second tick files no second Bug that day."""
 
     def setUp(self):
         super().setUp()
@@ -490,7 +490,9 @@ class R9RecordStepInTheTick(TickTestCase):
         bugs = self.origin_files('bugs')
         self.assertEqual(len(bugs), 1, out)
         text = _git(['show', f'main:bugs/{bugs[0]}'], self.origin)
-        self.assertIn('signature: "invariant I3: tasks/T-0002.md"', text)
+        # one Bug per (invariant, cause): the cause has its ids taken out, the path is evidence
+        self.assertIn('signature: "invariant I3: writes: intersects Active task …\'s writes:"', text)
+        self.assertIn('- tasks/T-0002.md — T-0002:', text)
         # the same refusal the same day bumps nothing and files nothing new
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0, out)

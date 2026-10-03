@@ -554,7 +554,7 @@ def finish(ctx, ran):
 def file_invariant_bugs(ctx):
     """The record check point's last half (R9): every write a staged writer was refused on this
     tick (:func:`asf.record.stage.drain` — the offending paths were already put back, the rest
-    stands) becomes one Bug per ``(invariant, path)`` in the record clone, committed with the
+    stands) becomes one Bug per ``(invariant, cause)`` in the record clone, committed with the
     tick. Printed, never raised: an invariant never aborts a tick."""
     from asf.record import stage
     findings = stage.drain()
