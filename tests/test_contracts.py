@@ -193,7 +193,9 @@ class StubsImport(unittest.TestCase):
         from asf.evidence import review
         self.assertEqual(list(inspect.signature(review.newest).parameters),
                          ['product', 'branch', 'item', 'required'])
-        self.assertEqual(list(inspect.signature(review.verdict_of).parameters), ['text', 'required'])
+        # W2-PR4 adds `block` (flags.verdict_block past off) — a keyword with a default, additive
+        self.assertEqual(list(inspect.signature(review.verdict_of).parameters),
+                         ['text', 'required', 'block'])
 
     def test_invariants(self):
         from asf import invariants

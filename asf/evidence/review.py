@@ -27,9 +27,29 @@ existed is read by its first verdict word (``APPROVED``/``CHANGES REQUESTED``/``
 
 A review is *current* for a head when the head it names (its ``head:`` line) is that head; a
 review of an older head is history, not a verdict.
+
+**The verdict block** (``flags.verdict_block``: ``off`` | ``warn`` | ``on``, default ``off``):
+the review brief asks for one fenced block at the end of the review —
+
+    ```verdict
+    verdict: approved | changes
+    head: <the 40-hex sha the review read>
+    asks: [C1, C2] | []
+    ```
+
+— and with the flag past ``off`` the reader takes the block first (:func:`verdict_block`),
+keeping the table and the ``verdict:`` line as the fallback for a review that carries none (every
+review filed before the block). The block's ``head`` is the head the verdict is bound to: on any
+other head it is :class:`Stale` unless the two heads carry the same own patch over the trunk
+(``git patch-id --stable`` of ``merge-base..old`` and ``merge-base..new`` — a rebase or a
+mechanical rebuild), when the verdict carries over (``Verdict.carried_from``, :func:`judge`). At
+``on`` the session's Stop gate (:mod:`asf.workers.stopgate`) refuses a review that ends without
+a valid block on its worktree's head; at ``warn`` it says so and lets the stop through.
 """
+import os
 import re
 import subprocess
+from dataclasses import dataclass, field
 
 from asf import reviews
 from asf.evidence import review_store
@@ -57,7 +77,155 @@ LEGACY_NAME_RE = re.compile(r'(?P<prefix>.+)-review-r(?P<n>\d+)[a-z]?\.md')
 READ_CHARS = 1_000_000
 
 
-def verdict_of(text, required=()):
+#: ``flags.verdict_block`` values; ``require`` is read as ``on``, anything else as ``off``.
+BLOCK_OFF, BLOCK_WARN, BLOCK_ON = 'off', 'warn', 'on'
+#: What the review template (``briefs/templates/review.md``) writes to ask for the block — the
+#: stop gate checks a review run only when its brief carries it, so a session cut from the older
+#: template is never refused for it. Not the fence itself: a brief quoting a filed review carries
+#: that.
+BLOCK_MARK = 'End the review with THE VERDICT BLOCK'
+#: One fenced ``verdict`` block: ```` ```verdict ```` … ```` ``` ````.
+BLOCK_RE = re.compile(r'^[ \t>]*```verdict[ \t]*\n(?P<body>.*?)^[ \t>]*```', re.M | re.S)
+#: A ``key: value`` line inside the block.
+BLOCK_KEY_RE = re.compile(r'^[ \t>]*(?P<k>verdict|head|asks|as_of)[ \t]*:[ \t]*(?P<v>.*?)[ \t]*$',
+                          re.I | re.M)
+#: A block's ``head``: the sha, 7–40 hex.
+BLOCK_HEAD_RE = re.compile(r'^`?(?P<sha>[0-9a-f]{7,40})`?$', re.I)
+#: An ``asks`` value that holds nothing.
+NO_ASKS = ('', 'none', '-', '[]', 'nothing')
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A review's verdict block: ``kind`` (:data:`APPROVED`/:data:`CHANGES`), the ``head`` it is
+    bound to, the C ids it ``asks`` for, its ``as_of`` (optional, as written), and — when the
+    verdict was carried to a rebuilt head of the same patch — ``carried_from``, the head the
+    review read."""
+    kind: str
+    head: str
+    asks: tuple = field(default_factory=tuple)
+    as_of: str = ''
+    carried_from: str = ''
+
+
+@dataclass(frozen=True)
+class Stale:
+    """A verdict block bound to a head that is not the branch's: ``head`` the block names,
+    ``expected`` the branch's head — history, not a verdict."""
+    head: str
+    expected: str
+
+
+def block_mode(conv):
+    """``flags.verdict_block`` of ``conv`` (a :class:`asf.conventions.Conventions`, a product, or
+    None): :data:`BLOCK_OFF` | :data:`BLOCK_WARN` | :data:`BLOCK_ON`; unset or unknown is off."""
+    conv = getattr(conv, 'conventions', conv)
+    reader = getattr(conv, 'flag', None)
+    value = reader('verdict_block', BLOCK_OFF) if callable(reader) else BLOCK_OFF
+    value = str(value).strip().lower()
+    if value in ('on', 'require', 'true'):
+        return BLOCK_ON
+    return BLOCK_WARN if value == 'warn' else BLOCK_OFF
+
+
+def _asks(value):
+    value = (value or '').strip()
+    if value.lower() in NO_ASKS:
+        return ()
+    value = value.strip('[]')
+    return tuple(a.strip().strip('`\'"') for a in value.split(',')
+                 if a.strip().strip('`\'"') and a.strip().lower() not in NO_ASKS)
+
+
+def _kind(value):
+    word = (value or '').strip().strip('`*_ ').lower()
+    if word == 'approved':
+        return APPROVED
+    if word in ('changes', 'changes requested', 'changes-requested'):
+        return CHANGES
+    return None
+
+
+def verdict_block(text):
+    """The first valid ``verdict`` block of a review: a :class:`Verdict`, or None when the text
+    carries none — a block whose ``verdict`` is not exactly ``approved`` or ``changes`` (the
+    template's own ``approved | changes`` copied back), or whose ``head`` is not a sha, is not
+    valid. An ``approved`` block that still ``asks`` for something reads :data:`CHANGES`: a C
+    item is a request, whatever the verdict word says."""
+    if isinstance(text, (bytes, bytearray)):
+        text = bytes(text[:READ_CHARS]).decode('utf-8', 'replace')
+    for m in BLOCK_RE.finditer((text or '')[:READ_CHARS]):
+        keys = {}
+        for k in BLOCK_KEY_RE.finditer(m.group('body')):
+            keys.setdefault(k.group('k').lower(), k.group('v'))
+        kind = _kind(keys.get('verdict'))
+        head = BLOCK_HEAD_RE.match((keys.get('head') or '').strip())
+        if not kind or not head:
+            continue
+        asks = _asks(keys.get('asks'))
+        if kind == APPROVED and asks:
+            kind = CHANGES
+        return Verdict(kind, head.group('sha').lower(), asks, (keys.get('as_of') or '').strip())
+    return None
+
+
+def judge(repo, conv, text, head, trunk=None):
+    """The verdict block of ``text`` for the branch head ``head``: the :class:`Verdict` when the
+    block names that head; the same verdict with ``carried_from`` set when the block names
+    another head whose own patch over ``trunk`` (``origin/<trunk>``) is the same
+    (``git patch-id --stable`` of ``merge-base..old`` and ``merge-base..new`` — a rebase or a
+    mechanical rebuild, nothing re-reviewed); else :class:`Stale`. None when ``text`` carries
+    no valid block."""
+    v = verdict_block(text)
+    if v is None:
+        return None
+    head = (head or '').strip().lower()
+    if head and head.startswith(v.head):
+        return v
+    if head and repo and trunk:
+        old = (_git(repo, 'rev-parse', '--verify', '--quiet', f'{v.head}^{{commit}}') or '').strip()
+        if old:
+            mine, theirs = _own_patch(repo, conv, trunk, old), _own_patch(repo, conv, trunk, head)
+            if mine and mine == theirs:
+                return Verdict(v.kind, head, v.asks, v.as_of, carried_from=v.head)
+    return Stale(v.head, head)
+
+
+def block_problem(text, head):
+    """Why a review ``text`` does not hold a valid verdict block bound to ``head`` (the
+    worktree's ``git rev-parse HEAD``), or '' when it does — the stop gate's one question."""
+    v = verdict_block(text)
+    if v is None:
+        return 'your review has no ```verdict block'
+    if head and not head.lower().startswith(v.head):
+        return f'your ```verdict block\'s head {v.head} is not the branch head {head}'
+    return ''
+
+
+def worktree_review(conv, wt, item):
+    """``(round, path, text)`` of the newest review of ``item`` in worktree ``wt`` — the file a
+    review session writes at ``conventions.review_path`` and leaves uncommitted — or None."""
+    if not wt or not item:
+        return None
+    slug = str(item).lower()
+    rdir = _dir_of(conv)
+    top = os.path.join(wt, rdir)
+    paths = []
+    for base, _dirs, files in os.walk(top):
+        for name in files:
+            paths.append(os.path.relpath(os.path.join(base, name), wt).replace(os.sep, '/'))
+    hit = pick(conv, paths, slug)
+    if hit is None:
+        return None
+    n, path, _legacy = hit
+    try:
+        with open(os.path.join(wt, path), encoding='utf-8', errors='replace') as f:
+            return n, path, f.read(READ_CHARS)
+    except OSError:
+        return None
+
+
+def verdict_of(text, required=(), block=False):
     """A review's verdict, derived from its check table first (:func:`asf.reviews.verdict`,
     ``BOUNCE`` mapped to :data:`CHANGES` so the lane's two-value vocabulary is never stranded):
     :data:`APPROVED`, :data:`CHANGES`, or — a file with no table at all — its own ``verdict:``
@@ -70,10 +238,17 @@ def verdict_of(text, required=()):
     correction whose brief — "answer its C list" — held nothing to answer; the rounds ran out and
     the item went to adjudication (69 of 1,526 reviews over 8 days on two products: a Bug with no
     plan marked "acceptance tests byte-identical" ``fail``, a Gate the reviewer's sandbox could not
-    run while CI is green). An unfilled or missing row (``BOUNCE``) still reads :data:`CHANGES`."""
+    run while CI is green). An unfilled or missing row (``BOUNCE``) still reads :data:`CHANGES`.
+
+    ``block`` (``flags.verdict_block`` past ``off``, :func:`block_mode`): a valid verdict block
+    (:func:`verdict_block`) answers first; the table and the line are its fallback."""
     if isinstance(text, (bytes, bytearray)):
         text = bytes(text[:READ_CHARS]).decode('utf-8', 'replace')
     text = (text or '')[:READ_CHARS]
+    if block:
+        v = verdict_block(text)
+        if v is not None:
+            return v.kind
     v = reviews.verdict(text, required)
     if v == reviews.APPROVED:
         return APPROVED
@@ -105,10 +280,15 @@ def legacy_verdict_of(text):
     return APPROVED if m.group(0).upper() == 'APPROVED' else CHANGES
 
 
-def head_of(text):
-    """The sha a review names on its ``head:`` line, or None."""
+def head_of(text, block=False):
+    """The sha a review names on its ``head:`` line, or None — its verdict block's ``head``
+    first when ``block`` (:func:`block_mode` past ``off``)."""
     if isinstance(text, (bytes, bytearray)):
         text = bytes(text[:READ_CHARS]).decode('utf-8', 'replace')
+    if block:
+        v = verdict_block(text)
+        if v is not None:
+            return v.head
     m = HEAD_LINE_RE.search((text or '')[:READ_CHARS])
     return m.group('sha').lower() if m else None
 
@@ -157,9 +337,12 @@ def pick(conv, paths, slug, legacy_prefixes=()):
     return found[-1] if found else None
 
 
-def read(text, legacy=False, required=()):
-    """``(verdict, head)`` of a review's text, the legacy word fallback for a legacy file."""
-    return (legacy_verdict_of(text) if legacy else verdict_of(text, required)), head_of(text)
+def read(text, legacy=False, required=(), block=False):
+    """``(verdict, head)`` of a review's text, the legacy word fallback for a legacy file; the
+    verdict block first when ``block`` (:func:`block_mode` past ``off``)."""
+    if legacy and not (block and verdict_block(text)):
+        return legacy_verdict_of(text), head_of(text)
+    return verdict_of(text, required, block), head_of(text, block)
 
 
 def _git(repo, *args):
@@ -251,9 +434,13 @@ def review_at(repo, conv, ref, item, required=(), store=None):
     the branch is bound to the head it reviewed (``head``), and its ``path`` is the one the
     convention names (``conventions.review_path``), as if it were on the branch — plus
     ``stored``, the entry's own file. The branch's own review files (every review before the
-    store, and a cloud session's) still answer, and win only with a strictly higher round."""
+    store, and a cloud session's) still answer, and win only with a strictly higher round.
+
+    With ``flags.verdict_block`` past ``off`` (:func:`block_mode`) a review's verdict block
+    answers first — its verdict, and its ``head`` over the head the store bound it to."""
     if not item:
         return None
+    blk = block_mode(conv) != BLOCK_OFF
     slug = str(item).lower()
     branch_rv = None
     listed = _git(repo, 'ls-tree', '-r', '--name-only', ref, '--', _dir_of(conv)) if repo else None
@@ -263,15 +450,17 @@ def review_at(repo, conv, ref, item, required=(), store=None):
     if hit is not None:
         n, path, legacy = hit
         body = _git(repo, 'show', f'{ref}:{path}') or ''
-        verdict, head = read(body, legacy, required)
+        verdict, head = read(body, legacy, required, blk)
         branch_rv = {'round': n, 'verdict': verdict, 'text': verdict_text(body) or (verdict or ''),
                      'head': head, 'path': path, 'body': body[:READ_CHARS]}
     stored = review_store.newest(store, slug, ref) if store else None
     if review_store.prefer(stored, branch_rv['round'] if branch_rv else None):
         body = stored['text']
-        verdict = verdict_of(body, required)
+        verdict = verdict_of(body, required, blk)
         return {'round': stored['round'], 'verdict': verdict,
-                'text': verdict_text(body) or (verdict or ''), 'head': stored['head'],
+                'text': verdict_text(body) or (verdict or ''),
+                'head': (head_of(body, True) if blk and verdict_block(body) else None)
+                or stored['head'],
                 'path': conv.review_path(slug, stored['round']) if hasattr(conv, 'review_path')
                 else stored['file'],
                 'body': body[:READ_CHARS], 'stored': stored['file']}

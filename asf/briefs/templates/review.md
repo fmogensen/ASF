@@ -15,8 +15,19 @@ row without evidence; a result with no evidence counts as `fail`:
 | the Gate commands are green | pass \| fail | each command's last line |
 | no secret value printed, no background process, no skipped check | pass \| fail | what you looked at |{delivery_checks}
 
-Then, on its own line, `verdict: approved` or `verdict: changes requested`, then the C list (each
-one: file:line and the exact fix) and the I list (what you would change, but will not block on).
+Then the C list (each one: file:line and the exact fix) and the I list (what you would change,
+but will not block on). End the review with THE VERDICT BLOCK — exactly one, fenced, these three
+keys and nothing else; the factory reads this block, not your prose:
+
+```verdict
+verdict: approved
+head: <the 40-hex sha `git rev-parse HEAD` printed — the code you read>
+asks: []
+```
+
+`verdict:` is `approved` or `changes`; `asks:` lists the C ids you block on (`[C1, C2]`), `[]`
+when there are none — an `approved` that asks for anything reads as `changes`. A block naming
+another head is a verdict on other code: it does not count for this branch.
 
 Round 1 finds everything: run the whole table before writing a single finding. In a later round,
 anything already visible in round 1's diff is not a new C — record it under
@@ -30,4 +41,4 @@ watcher. When you finish, the factory files the file off the branch, bound to th
 (`git rev-parse HEAD`). This overrides the push rule of the report section below: your REPORT
 says `pushed: n/a — review left for the factory to file`, and `commits: none`.
 
-Final message: the verdict line, the failing rows, the gate lines.
+Final message: the verdict block, the failing rows, the gate lines.
