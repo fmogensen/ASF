@@ -182,9 +182,14 @@ class HookTests(unittest.TestCase):
                'exit 0\n', 0o755)
         self.remote = os.path.join(self.tmp, 'remote.git')
         _git(['init', '-q', '--bare', self.remote], self.tmp)
+        # a session's worktree is a linked worktree of the product clone
+        clone = os.path.join(self.tmp, 'clone')
+        _git(['init', '-q', '-b', 'main', clone], self.tmp)
+        _git(['remote', 'add', 'origin', self.remote], clone)
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q',
+              '--allow-empty', '-m', 'root'], clone)
         self.wt = os.path.join(self.tmp, 'wt')
-        _git(['init', '-q', '-b', 'cloud/T-0001', self.wt], self.tmp)
-        _git(['remote', 'add', 'origin', self.remote], self.wt)
+        _git(['worktree', 'add', '-q', '-b', 'cloud/T-0001', self.wt], clone)
         self.env = {'PATH': os.environ.get('PATH', ''), 'HOME': self.tmp,
                     'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.hooksPath',
                     'GIT_CONFIG_VALUE_0': self.hooks, 'ASF_PRODUCT': 'p',
