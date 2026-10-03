@@ -979,6 +979,8 @@ def run(product_name):
         rows.append(('trunk ruleset', required, ok, detail))
     for required, ok, detail in check_trunk_stall(product):
         rows.append(('trunk stall', required, ok, detail))
+    for required, ok, detail in check_trunk_red(product):
+        rows.append(('trunk red', required, ok, detail))
     for required, ok, detail in check_ci_classes(product):
         rows.append(('ci classes', required, ok, detail))
     for required, ok, detail in check_cloud(cfg, product):
@@ -1091,6 +1093,18 @@ def check_trunk_stall(product):
         return trunk_watch.stall_rows(product)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(True, None, f'cannot read the trunk watch — {e}')]
+
+
+def check_trunk_red(product):
+    """[(required, ok, detail)] — ``TRUNK RED: <check> (seen on #a, #b)`` while a required check
+    is red on the trunk itself, suspected from unrelated landings or confirmed by a full run
+    (:func:`asf.trunk_red.doctor_rows`, off its state file); else the last full run's age. No rows
+    for a product not on ``merge: queue``."""
+    from asf import trunk_red
+    try:
+        return trunk_red.doctor_rows(product)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(True, None, f'cannot read the trunk red watch — {e}')]
 
 
 def check_trunk_ruleset(product, gh=None):

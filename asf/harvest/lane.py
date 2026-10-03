@@ -4063,14 +4063,74 @@ class GitHubHost(Host):
         names = [n for n in failed if n not in on_trunk]
         if not names:
             return None
+        red = [c for c in checks if c.get('bucket') == 'fail' and c.get('name') in names]
+        # first: a red judged on a merge ref of an older trunk is no verdict — never a correct
+        # round, never a re-run (it would replay the old ref): a fresh run (asf.stale_ref)
+        if self.stale_red(f, number, head, red):
+            return None
         # flake-vs-defect triage (asf.flake): a red job is re-run once on this head before any
         # correct round; green on its re-run is a flake (quarantined), red again a defect
-        red = [c for c in checks if c.get('bucket') == 'fail' and c.get('name') in names]
         names, _held = flake.triage(self.product, self.lane.state_dir, self.slug, head, red,
                                     where=f'PR #{number}', out=out)
         if not names:
             return None
+        # a real red: recorded for the trunk red watch (asf.trunk_red); a check it reads as red
+        # on the trunk itself is not this head's, and goes to no correct round
+        trunk = self.trunk_red_seen(f, number, head, [c for c in red if c.get('name') in names])
+        if trunk:
+            out(f"waiting {f['branch']}: PR #{number} checks red: {', '.join(names)} — trunk red "
+                f"({', '.join(sorted(trunk))}), not its fault")
+            names = [n for n in names if n not in trunk]
+            if not names:
+                return None
         return {'names': names, 'detail': ', '.join(names), 'checks': checks}
+
+    def stale_red(self, f, number, head, red):
+        """True when PR ``number``'s ``red`` checks ran on a merge ref from before the trunk's
+        tip arrived and a fresh run was started for it, or is on its way (:mod:`asf.stale_ref`):
+        the caller judges nothing this pass. Never raises."""
+        from asf import stale_ref
+        repo = getattr(self.lane, 'repo', None)
+        if not red or not repo:
+            return False
+        out = self.lane.out if callable(getattr(self.lane, 'out', None)) else print
+        try:
+            tip = H.sh(['git', 'rev-parse', f'origin/{self.trunk}'], cwd=repo).stdout.strip()
+            old = stale_ref.stale(self.product, self.slug, red, tip, repo)
+            if not old or not stale_ref.refresh(self.product, self.slug, number, head, tip, old,
+                                                out=out):
+                return False
+        except Exception:  # noqa: BLE001 — no reading: judged as before
+            return False
+        out(f"waiting {f['branch']}: PR #{number} red on {', '.join(old)} ran on a merge ref "
+            f"from before {self.trunk} moved to {tip[:9]} — a fresh run, never a correct round")
+        return True
+
+    def trunk_red_seen(self, f, number, head, red):
+        """Record PR ``number``'s red ``head`` (its checks ``red``, after triage) with
+        :func:`asf.trunk_red.observe` — its diff's files, the files the failing logs name, read
+        once per head — and return :func:`asf.trunk_red.held` for those names. Never raises."""
+        from asf import trunk_red
+        names = [c.get('name') for c in red if c.get('name')]
+        if not names or not head:
+            return {}
+        try:
+            key = f'#{number}'
+            if not trunk_red.known(self.product, key, head, names):
+                from asf import merge_queue
+                repo = getattr(self.lane, 'repo', None)
+                base = H.sh(['git', 'rev-parse', f'origin/{self.trunk}'],
+                            cwd=repo).stdout.strip() if repo else ''
+                files = [l for l in H.sh(['git', 'diff', '--name-only', f'{base}...{head}'],
+                                         cwd=repo).stdout.splitlines() if l.strip()] \
+                    if repo and base else list(f.get('files') or ())
+                found = merge_queue.failure_findings(self.slug, red)
+                trunk_red.observe(self.product, names, key, [number], head, base, files,
+                                  [p for item in found for p, _n, _t in item['paths']],
+                                  {trunk_red.job(c.get('name')): c.get('link') for c in red})
+            return trunk_red.held(self.product, names)
+        except Exception:  # noqa: BLE001 — no reading: the head is judged as before
+            return {}
 
     def unmark_heavy(self, number, branch=None):
         """Take the heavy-CI label off PR ``number`` — only under ``ci.heavy_after_review``;
@@ -4224,7 +4284,17 @@ class GitHubHost(Host):
             unsigned = [n for n in red if conv.is_signoff_check(n)]
             if unsigned and lane.repair_signoff(f, unsigned[0]) is not None:
                 return None  # a new head: its checks run again, next pass reads them
+            if self.stale_red(f, number, exact_head(f) or f.get('head'),
+                              [c for c in checks if c.get('bucket') in RED_BUCKETS
+                               and c.get('name') in red]):
+                wait(lane, f, f'checks red on a stale merge ref: {detail} — a fresh run')
+                return None
             on_trunk = self.trunk_red(red)
+            try:
+                from asf import trunk_red
+                on_trunk = {**trunk_red.held(self.product, red), **on_trunk}
+            except Exception:  # noqa: BLE001 — no reading: the host's alone
+                pass
             if red and all(n in on_trunk for n in red):
                 lane.out(f'waiting {b}: PR #{number} checks red: {detail} — red on {self.trunk} '
                          f'too, not its fault; it lands once {self.trunk} is green')

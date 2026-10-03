@@ -24,6 +24,11 @@ has not moved for more than ``conventions.ci.trunk_stall_hours`` (default 4) whi
 — a batch in the merge queue, or an ``asf land`` request — is one ``trunk watch: STALL`` line
 every tick and a red ``Trunk stall`` row in ``asf status`` and ``asf doctor`` (:func:`stall`).
 
+**Trunk red.** The same look hands the stall alarm to :mod:`asf.trunk_red`, which dispatches
+the trunk's full workflow on its tip (once per tip) when the alarm fires or the same check is red
+on unrelated landings, confirms a trunk red from that run and files its fix card, and keeps a
+full run at least every ``ci.trunk_full_every_hours``.
+
 Detection only: nothing is ever reverted.
 """
 import datetime
@@ -259,10 +264,12 @@ def _refresh_ruleset(product, state, now, gh=None):
         state['ruleset_since'], state['ruleset_id'] = at, rid
 
 
-def tick(product, out=print, now=None, gh=None):
+def tick(product, out=print, now=None, gh=None, src=None):
     """The harvest step's look: one ``trunk watch:`` line per new bypass commit (after
-    :func:`since`), and one ``trunk watch: STALL`` line while :func:`stall` holds. Never
-    raises, never reverts. The bypasses now counted (a list), or None when not watched."""
+    :func:`since`), and one ``trunk watch: STALL`` line while :func:`stall` holds; then the trunk
+    red pass (:func:`asf.trunk_red.tick`: the full run on the trunk when the stall alarm fires, a
+    trunk red is suspected or the safety net is due — ``src``, its ``gh`` door). Never raises,
+    never reverts. The bypasses now counted (a list), or None when not watched."""
     if not watched(product):
         return None
     trunk = product.conventions.main
@@ -285,6 +292,8 @@ def tick(product, out=print, now=None, gh=None):
     got = stall(product, now, state)
     if got:
         out(f'trunk watch: STALL {got}')
+    from asf import trunk_red
+    trunk_red.tick(product, stall=got, out=out, now=now, src=src)
     return bypasses(product, now, state) or []
 
 

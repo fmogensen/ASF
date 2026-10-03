@@ -218,6 +218,27 @@ replace (made on a workflow the trunk has changed since, or STUCK) never holds t
 start queue drops it from the line and the merge queue cuts its members again on the trunk's tip
 on its next pass — a new batch sha, a fresh run.
 
+**Stale merge refs first.** A `pull_request` run tests the PR merged with the trunk as it was
+when the run was created, and a re-run replays that same merge ref. A red PR head — an `asf land`
+request or a factory PR — whose failing run was created before the trunk's current tip arrived is
+therefore never kept red, never re-run and never sent to a correct round: ASF closes and reopens
+the PR for a fresh run on today's trunk (no commit on the branch; the newest run per check is
+what counts), once per head and tip. Only a red on the fresh merge ref is a verdict
+(`asf.stale_ref`). An `asf land` request marked red before the trunk moved is read again.
+
+**Trunk red.** An attested trunk push skips the heavy jobs, so a check that breaks on the trunk
+itself shows only on the landings. The same required check red (after flake/infra triage) on two
+unrelated landings — no PR in common, neither diff touching a file the failing logs name — is
+trunk red, suspected: `asf status` and `asf doctor` show `TRUNK RED: <check> (seen on #a, #b)`,
+no batch member is blamed and no PR goes to a correct round. When that holds, or the stall alarm
+fires (after the fresh runs above have shown), the trunk's full workflow is dispatched on its tip once per tip (`gh workflow run <wf>
+--ref <trunk>`: a `workflow_dispatch` run, never the attested skip). Red there confirms it — one
+`trunk watch: TRUNK RED` line and one S1 fix card in the intake (check, test, log tail, first red
+sha; an open card with signature `trunk-red <check>` is linked instead); green clears it and the
+landings' reds are their own. As a safety net the full workflow runs at least every
+`conventions.ci.trunk_full_every_hours` (default 6, `0` turns it off), counting scheduled and
+dispatched runs (`asf.trunk_red`).
+
 **Break-glass.** Only when the queue itself cannot land and the trunk must move now — the queue
 is broken and its fix has to land, or a production incident needs a hotfix the queue cannot
 carry — and only with the operator told. Disable, land the one change, re-enable at once:
