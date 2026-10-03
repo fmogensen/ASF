@@ -30,8 +30,12 @@ jobs:
         run: bash tools/check_conventions.sh
       - name: check generic
         run: bash tools/check_generic.sh
+      # HEAD^1 is the trunk this change lands on (a pull request's merge commit, or main before
+      # a push): a site another change landed meanwhile never turns this one red.
       - name: no new raw gh/git call site (the client ratchet)
-        run: bash tools/check_clients.sh
+        run: |
+          git fetch --no-tags --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
+          bash tools/check_clients.sh --against HEAD^1
       - name: plugin is generated from the CLI
         run: asf plugin check
       # B-0068: one test module per process, min(cpu_count, 8) at a time — the same modules

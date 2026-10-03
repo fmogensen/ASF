@@ -19,12 +19,14 @@ door takes a ref guard): every ``gitpush.push(`` call in asf/ passes ``guard=``.
 that module attribute, not on a list of paths that moves.
 
   python3 tools/check_clients.py                   check (exit 1 on a rise)
+  python3 tools/check_clients.py --against HEAD^1  CI: only what this change adds can fail
   python3 tools/check_clients.py --write-baseline  rewrite the baseline from the tree
 """
 import argparse
 import ast
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,6 +69,27 @@ def count_tree(root):
         with open(os.path.join(root, rel), encoding='utf-8') as f:
             for kind, n in count_text(rel, f.read()).items():
                 out[(kind, rel)] = n
+    return out
+
+
+def count_rev(root, rev):
+    """``{(kind, path): n}`` over ``asf/**/*.py`` as committed at ``rev``; ``None`` when the
+    revision cannot be read (a shallow checkout without it)."""
+    def git(*args):
+        argv = ['git', '-C', root, *args]  # client-exempt: a lint, not the factory
+        return subprocess.run(argv, capture_output=True, text=True)
+    ls = git('ls-tree', '-r', '--name-only', rev, '--', PACKAGE)
+    if ls.returncode != 0:
+        return None
+    out = {}
+    for rel in ls.stdout.split():
+        if not rel.endswith('.py'):
+            continue
+        shown = git('show', f'{rev}:{rel}')
+        if shown.returncode != 0:
+            return None
+        for kind, n in count_text(rel, shown.stdout).items():
+            out[(kind, rel)] = n
     return out
 
 
@@ -132,11 +155,21 @@ def unguarded_pushes(rel, text):
     return hits
 
 
-def check(root, out=print):
+def check(root, out=print, against=None):
     """0 when nothing rose above its baseline (and, with the push door open, every push is
-    guarded); 1 otherwise. Prints one line per finding."""
+    guarded); 1 otherwise. Prints one line per finding. ``against``: a revision (CI passes the
+    trunk this change lands on); a file's ceiling is the higher of its baseline line and its count
+    there, so a site another change landed meanwhile never turns this one red — only the sites
+    this change adds do."""
     counts = count_tree(root)
     base = read_baseline(os.path.join(root, BASELINE))
+    if against:
+        there = count_rev(root, against)
+        if there is None:
+            out(f'check_clients: {against} unreadable — checking against the baseline alone')
+        else:
+            for key, n in there.items():
+                base[key] = max(base.get(key, 0), n)
     rc = 0
     for key in sorted(set(counts) | set(base)):
         kind, rel = key
@@ -166,11 +199,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--root', default=ROOT)
     ap.add_argument('--write-baseline', action='store_true')
+    ap.add_argument('--against', metavar='REV',
+                    help='also allow each file the count it has at REV (the trunk it lands on)')
     a = ap.parse_args(argv)
     if a.write_baseline:
         write_baseline(os.path.join(a.root, BASELINE), count_tree(a.root))
         return 0
-    return check(a.root)
+    return check(a.root, against=a.against)
 
 
 if __name__ == '__main__':

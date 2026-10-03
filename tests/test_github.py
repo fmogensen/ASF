@@ -256,6 +256,22 @@ class Ratchet(unittest.TestCase):
         self.assertEqual([ln for ln in lines if 'guard=' in ln],
                          ['check_clients: asf/a.py:2: gitpush.push( without guard='])
 
+    def test_against_a_revision_a_site_landed_there_is_not_this_changes(self):
+        root = self.tree({'asf/a.py': "x(['git', 'a'])\n"})
+        env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                   GIT_COMMITTER_EMAIL='t@t')
+        for cmd in (['init', '-q'], ['add', '-A'], ['commit', '-qm', 'trunk']):
+            subprocess.run(['git', '-C', root, *cmd], check=True, env=env, capture_output=True)
+        self.assertEqual(self.run_check(root)[0], 1)                    # baseline alone: red
+        rc, lines = check_clients.check(root, out=lambda s: None, against='HEAD'), None
+        self.assertEqual(rc, 0)                                          # it was on the trunk
+        with open(os.path.join(root, 'asf/a.py'), 'a') as f:
+            f.write("x(['git', 'b'])\n")
+        self.assertEqual(check_clients.check(root, out=lambda s: None, against='HEAD'), 1)
+        lines = []
+        check_clients.check(root, out=lines.append, against='nope')
+        self.assertIn('unreadable', lines[0])
+
     def test_the_repository_is_within_its_baseline(self):
         self.assertEqual(self.run_check(ROOT)[0], 0)
 

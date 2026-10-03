@@ -7,6 +7,9 @@
 # The rules and the counting live in tools/check_clients.py.
 #
 #   check_clients.sh                    check the tree (exit 1 on a rise)
+#   check_clients.sh --against <rev>    a file may also keep the count it has at <rev> — CI passes
+#                                       the trunk the change lands on, so a site another change
+#                                       landed meanwhile never turns this one red
 #   check_clients.sh --write-baseline   rewrite the baseline (only ever to lower it)
 set -euo pipefail
 
