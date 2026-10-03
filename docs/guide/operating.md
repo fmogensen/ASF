@@ -301,6 +301,18 @@ Other holds you will see:
 A held branch is not a failed step. Nothing is lost: the worktree and branch stay until the item
 lands or is closed.
 
+### A wrong landing: `asf reset`, not `asf correct`
+
+`asf correct <item> --why …` asks for one more round on work that has not landed. When the ledger
+says an item landed and it did not — a PR merged that carried another card's work, a run closed
+on a commit that is not the item's — the row sits on NEEDS DECISION and no correction reaches it.
+`asf reset <item> --why "<reason>" --product <p>` voids that claim: a reset line naming its
+`(pr, head)` in the session ledger, the run's `harvested` cleared, a History line on the card.
+The item starts over; a *different* PR of it lands normally, while the voided PR's merge never
+counts again, and a session that reports the voided sha again is parked
+(`claims voided landing <sha7>`) instead of closing the card. A live session refuses the reset.
+`asf reset --undo <item> --why "<reason>"` takes the newest void back.
+
 ## `asf workers health --fix`
 
 `asf workers health --product <p>` reconciles the ledger and lists every worktree and lane branch

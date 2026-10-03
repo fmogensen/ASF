@@ -208,5 +208,139 @@ class CorrectTests(unittest.TestCase):
         self.assertEqual(self.run_cmd(item='nope')[0], 2)
 
 
+
+class ResetTests(unittest.TestCase):
+    """``asf reset <item> --why``: an operator voids a wrong landing claim ``(pr, head)``; the
+    item starts over, a different PR lands normally, the same claim re-reported closes nothing;
+    ``--undo`` takes it back."""
+    SHA = '53c00ae' + '0' * 33
+    LANDED = {'job': 'coder-t-0091', 'item': 'T-0091', 'kind': 'coder', 'pid': 1,
+              'branch': 'cloud/T-0091', 'started': '2026-09-01T09:00:00Z',
+              'ended': '2026-09-01T09:30:00Z', 'end_reason': 'finished', 'harvested': SHA,
+              'lane': {'state': 'MERGED', 'pr': 966, 'sha': SHA, 'at': '2026-09-01T10:00:00Z'}}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='reset_test_')
+        self._home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        with open(env.product_path('sample'), 'w') as f:
+            f.write('product: sample\nrepo_slug: x/y\n')
+        self.path = os.path.join(env.state_dir('sample'), 'sessions.jsonl')
+        self.history = []
+        from unittest import mock
+        p = mock.patch.object(correct, 'file_history',
+                              side_effect=lambda product, item, line, msg, step='': self.history.append(line) or '')
+        p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        env.ASF_HOME = self._home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def ledger(self, *records):
+        with open(self.path, 'a') as f:
+            for r in records:
+                f.write(json.dumps(r) + '\n')
+
+    def reset(self, undo=False, why='#966 merged but did not land T-0091', alive=None):
+        args = argparse.Namespace(item='t-0091', why=why, undo=undo, product='sample')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = correct.cmd_reset(args, alive=alive or (lambda pid: False))
+        return rc, out.getvalue()
+
+    def lines(self, key):
+        with open(self.path) as f:
+            return [json.loads(x) for x in f if key in json.loads(x)]
+
+    def test_reset_voids_the_claim_clears_harvested_writes_history_and_is_idempotent(self):
+        self.ledger(self.LANDED)
+        rc, out = self.reset()
+        self.assertEqual(rc, 0, out)
+        [line] = self.lines('reset')
+        self.assertEqual((line['reset']['pr'], line['reset']['head'], line['reset']['void']),
+                         (966, self.SHA, True))
+        self.assertIsNone(lifecycle.latest(self.path)['coder-t-0091'].get('harvested'))
+        self.assertEqual(len(self.history), 1)
+        self.assertIn('reset (operator): landing 53c00ae (PR #966) voided', self.history[0])
+        rc, out = self.reset()
+        self.assertEqual(rc, 0, out)
+        self.assertIn('already void', out)
+        self.assertEqual(len(self.lines('reset')), 1)
+
+    def test_a_live_run_refuses_and_writes_nothing(self):
+        live = dict(self.LANDED, job='correct-t-0091', pid=4242, started='2026-09-02T09:00:00Z')
+        for k in ('ended', 'end_reason', 'harvested', 'lane'):
+            live.pop(k)
+        self.ledger(self.LANDED, live)
+        rc, out = self.reset(alive=lambda pid: pid == 4242)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('running', out)
+        self.assertEqual(self.lines('reset'), [])
+
+    def test_no_landing_claim_and_missing_why(self):
+        self.ledger(dict(self.LANDED, harvested='superseded', lane={}))
+        self.assertEqual(self.reset()[0], 1)
+        self.assertEqual(self.reset(why=' ')[0], 2)
+
+    def test_the_item_is_no_longer_landed_and_undo_restores_it(self):
+        self.ledger(self.LANDED)
+        self.assertEqual(lifecycle.occupancy(self.path, alive=lambda pid: False)['landed'],
+                         {'T-0091': self.SHA})
+        self.reset()
+        self.assertEqual(lifecycle.occupancy(self.path, alive=lambda pid: False)['landed'], {})
+        self.assertEqual(len(lifecycle.voids(self.path, 'T-0091')), 1)
+        rc, out = self.reset(undo=True, why='it did land')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(lifecycle.voids(self.path, 'T-0091'), [])
+        self.assertEqual(lifecycle.latest(self.path)['coder-t-0091']['harvested'], self.SHA)
+        self.assertEqual(lifecycle.occupancy(self.path, alive=lambda pid: False)['landed'],
+                         {'T-0091': self.SHA})
+        self.assertIn('restored', self.history[-1])
+        self.assertEqual(self.reset(undo=True, why='again')[0], 1)  # nothing left to undo
+
+    def test_merge_facts_ignores_the_voided_claim_and_lands_a_new_pr(self):
+        from asf.evidence import evidence
+        product = env.load_product('sample')
+        self.ledger(self.LANDED)
+        self.assertEqual(evidence.merge_facts(product, self.path)['code']['T-0091']['pr'], 966)
+        self.reset()
+        # the host still says #966 merged (its lane record stands): no merge fact for T-0091
+        self.assertNotIn('T-0091', evidence.merge_facts(product, self.path)['code'])
+        sha2 = 'a1b2c3d' + '0' * 33
+        self.ledger({'job': 'coder-t-0091', 'item': 'T-0091', 'kind': 'coder', 'pid': 2,
+                     'branch': 'cloud/T-0091', 'started': '2099-01-01T09:00:00Z'},
+                    {'job': 'coder-t-0091', 'ended': '2099-01-01T09:30:00Z',
+                     'end_reason': 'finished', 'harvested': sha2,
+                     'lane': {'state': 'MERGED', 'pr': 1001, 'sha': sha2}})
+        self.assertEqual(evidence.merge_facts(product, self.path)['code']['T-0091'],
+                         {'sha': sha2, 'branch': 'cloud/T-0091', 'pr': 1001})
+
+    def test_the_same_claim_re_reported_closes_nothing_and_parks_with_the_reason(self):
+        from unittest import mock
+        from asf.workers import relaunch, trunkclose
+        self.ledger(self.LANDED)
+        self.reset()
+        again = {'job': 'coder-t-0091', 'item': 'T-0091', 'kind': 'coder', 'pid': 3,
+                 'branch': 'cloud/T-0091', 'started': '2099-01-01T09:00:00Z',
+                 'launch_head': 'f' * 40, 'ended': '2099-01-01T09:10:00Z',
+                 'end_reason': 'finished'}
+        self.ledger(again)
+        text = f'REPORT\nstatus: done\nleft out: already on origin/main at {self.SHA[:7]}\n'
+        with mock.patch.object(relaunch, '_result_text', return_value=text), \
+                mock.patch.object(trunkclose, 'trunk_sha', return_value=self.SHA), \
+                mock.patch.object(trunkclose, 'unlanded', return_value=False), \
+                mock.patch.object(trunkclose.landing, 'open_work', return_value=False):
+            self.assertIsNone(trunkclose.evidence(self.path, 'T-0091', self.tmp))
+        with mock.patch.object(relaunch, '_result_text', return_value=text), \
+                mock.patch.object(relaunch, 'on_trunk', return_value=self.SHA), \
+                mock.patch.object(relaunch.landing, 'open_work', return_value=False):
+            reason, landed = relaunch.assess(self.path, 'coder-t-0091', 'T-0091', head='f' * 40,
+                                             repo=self.tmp)
+        self.assertEqual(landed, '')
+        self.assertIn('claims voided landing 53c00ae', reason)
+
+
 if __name__ == '__main__':
     unittest.main()

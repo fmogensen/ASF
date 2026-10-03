@@ -1134,7 +1134,8 @@ def merge_facts(product, path=None):
     the lane's merge facts off the product's run lines (``sessions.jsonl``): every run whose
     branch merged (:func:`_merge_sha`), newest merge per item. A spec/plan lane branch
     (:func:`lane_kind`) is a document's merge and goes under ``docs``; any other lands its item.
-    Read-only; ``{}`` halves when the product has no ledger."""
+    Read-only; ``{}`` halves when the product has no ledger. A claim ``asf reset`` voided
+    (:func:`asf.workers.lifecycle.voided_run`) is no merge fact, whatever the host says."""
     out = {"code": {}, "docs": {}}
     if product is None:
         return out
@@ -1151,6 +1152,8 @@ def merge_facts(product, path=None):
             item = str(run.get("item") or "").upper()
             if not sha or not item:
                 continue
+            if lifecycle.voided_run(path, run, sha):
+                continue  # `asf reset` voided this claim: the host's merge is not the item's
             lane = run.get("lane") if isinstance(run.get("lane"), dict) else {}
             # a run closed on verified trunk evidence (asf.workers.trunkclose) lands its item
             # whatever lane its branch was: the sha is the item's work, not a document's merge
