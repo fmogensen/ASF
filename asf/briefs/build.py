@@ -51,8 +51,9 @@ KINDS = ('spec', 'spec-amend', 'plan', 'coder', 'review', 'fixer', 'rebase', 'cl
          'delivery-plan', 'delivery-code', 'replan')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug', 'spec_plan': 'spec-plan'}
-#: The class of an item, for picking its model within a kind: a Bug's severity, else its type.
-MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
+#: The class of an item, for picking its model within a kind: a Bug's severity, else its type;
+#: ``cardless`` for a pull request the factory adopted with no card of its own (``PR-<n>``).
+MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic', 'cardless')
 #: The built-in model per brief kind AND item class — the one place the defaults live, so the
 #: saving is a code default, not a setting someone has to remember. ``default`` is the label for
 #: a class the kind does not name (and for a brief with no item). Judgement over a small change
@@ -60,6 +61,9 @@ MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
 #: a spec, a plan and a Feature-level review run heavy. Adjudicate runs light for every class but
 #: S1 (operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on heavy).
 #: A rebase, a close and the groom's clerical pass run cheap — no judgement, a right answer.
+#: A cardless PR's review runs light (no card, no spec: a diff read against its own description
+#: — 78 of them, every one on heavy, cost $212 in 5.5 days), and so do reshape and replan: a
+#: re-cut of a plan already written, not a plan.
 #: ``conventions.models.<kind>`` overrides a row, as one label or as a map of this shape
 #: (:func:`model_for`).
 MODEL_TABLE = {
@@ -70,9 +74,10 @@ MODEL_TABLE = {
     'direct':     {'default': HEAVY},
     'groom':      {'default': HEAVY},
     'groom-clerk': {'default': CHEAP},
-    'reshape':    {'default': HEAVY},
-    'replan':     {'default': HEAVY},
-    'review':     {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
+    'reshape':    {'default': LIGHT},
+    'replan':     {'default': LIGHT},
+    'review':     {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT,
+                   'cardless': LIGHT},
     'adjudicate': {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
     'correct':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
     'fix-bug':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT},
@@ -201,10 +206,20 @@ def render(text, ctx):
 
 # ---- model and grants --------------------------------------------------------
 
-def item_class(item):
-    """The model class of an index item: a Bug's severity (``S1``..``S3``), else its type
+def is_cardless(item_id):
+    """True for a ``PR-<n>`` item: a pull request adopted with no card
+    (:func:`asf.harvest.lane.is_pr_item`; imported here, the lane imports the feeder)."""
+    from asf.harvest.lane import is_pr_item
+    return is_pr_item(item_id)
+
+
+def item_class(item, item_id=None):
+    """The model class of an index item: ``cardless`` for a ``PR-<n>`` item (``item_id``, else
+    the item's own ``id``), a Bug's severity (``S1``..``S3``), else its type
     (``task``/``story``/``feature``/``epic``); ``default`` when the item says neither."""
     item = item if isinstance(item, dict) else {}
+    if is_cardless(item_id or item.get('id')):
+        return 'cardless'
     kind = str(item.get('type') or '').strip().lower()
     if kind == 'bug':
         sev = str(item.get('severity') or '').strip().upper()
@@ -216,13 +231,14 @@ def _pick(row, cls):
     return row.get(cls) or row.get('default')
 
 
-def model_for(product, kind, item=None):
-    """The model label for a ``kind`` brief about ``item`` (an index item, or None).
+def model_for(product, kind, item=None, item_id=None):
+    """The model label for a ``kind`` brief about ``item`` (an index item, or None; ``item_id``
+    names it when the item has no card — a ``PR-<n>``).
 
     ``conventions.models.<kind>`` wins: one label for every class, or a map by class whose
     ``default:`` covers the classes it does not name. A class it covers neither way — and a
     value of any other shape, which doctor reports — falls to :data:`MODEL_TABLE`."""
-    cls = item_class(item)
+    cls = item_class(item, item_id)
     builtin = MODEL_TABLE.get(kind, {'default': LIGHT})
     override = preamble_mod.conventions(product).map_of('models').get(kind)
     if not conventions_mod.model_value_ok(override):
@@ -240,6 +256,8 @@ def model_table(product):
 
 
 def _class_item(cls):
+    if cls == 'cardless':
+        return {'id': 'PR-0'}
     return {'type': 'bug', 'severity': cls} if cls.startswith('S') else {'type': cls}
 
 
@@ -651,7 +669,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
              + stored_review_section(product, kind, facts['branch'], ctx['item_id']),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
-                 model=model_for(product, kind, facts['item']), add_dirs=add_dirs_for(product, row, kind),
+                 model=model_for(product, kind, facts['item'], ctx['item_id']), add_dirs=add_dirs_for(product, row, kind),
                  id_ranges_needed=id_ranges_needed(kind),
                  card_digest=card_digest(product, ctx['item_id'], index))
 
