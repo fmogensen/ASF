@@ -1663,7 +1663,8 @@ def hold_unlanded(rows, items, landed_shas=None, product=None):
     """B-0080: ``after:`` holds every row kind, not only PLAN → CODE. An item whose predecessor
     has not landed is not in dispute, it is waiting: a launching row for it (code, correct,
     adjudicate, rebase, close) becomes ``WAITS ON <id>`` — no session, no round. The groom row
-    speaks for a day's questions, not for the item it names, so it is left alone.
+    speaks for a day's questions, not for the item it names, so it is left alone; so is a
+    ``PUSHED → REVIEW`` row — a review of work already pushed conflicts with nothing.
 
     A :data:`DELIVERY_PLAN`/:data:`DELIVERY_CODE` row's scan reads the lead **and** every member
     of its ``delivers:`` — an ``after:`` any of them names holds the whole delivery on the first
@@ -1696,8 +1697,10 @@ def hold_unlanded(rows, items, landed_shas=None, product=None):
             pending = [a for a in after_of(items, items.get(r.item_id) or {}, absorbed)
                        if a not in landed]
         # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
-        # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print
-        keeps = r.kind in (GROOM_ADJUDICATE, GROOM_CLERK) \
+        # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print.
+        # A review of a pushed branch reads a diff and changes nothing the predecessor writes:
+        # it conflicts with nothing, so after: never holds it (25 ASF reviews held 1,776 item-h)
+        keeps = r.kind in (GROOM_ADJUDICATE, GROOM_CLERK, PUSHED_REVIEW) \
             or r.action.startswith((ON_TRUNK, PARKED, NEEDS_DECISION))
         if pending and not keeps and (r.launches or r.waits_on):
             if r.item_id in said:  # a Task with a correction also has its PLAN → CODE row: once
