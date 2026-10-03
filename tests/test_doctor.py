@@ -640,6 +640,8 @@ class CheapTierAdviceTests(unittest.TestCase):
     def test_an_unmapped_cheap_is_named_and_never_red(self):
         findings, rows = self._rows({'worker_pool': {'models': {'heavy': 'h', 'light': 'l'}}})
         self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0][0], 'warn')  # yellow: cheap falls back to light
+        self.assertIn('models  warn', doctor.format_table('p', rows))
         for word in ('cheap', 'rebase', 'close', 'light'):
             self.assertIn(word, findings[0][1])
         self.assertFalse(doctor.is_red(rows))
