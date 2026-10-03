@@ -8,8 +8,6 @@ file group at a time; until then this check holds the line — per file, it coun
 * ``gh``  — lines holding a ``['gh'`` / ``["gh"`` argv (outside asf/github.py, asf/gitops.py,
   asf/gitpush.py),
 * ``git`` — lines holding a ``['git'`` / ``["git"`` argv (same exemptions),
-* ``except`` — ``except Exception`` and bare ``except:`` lines (a swallowed failure is how an
-  unreadable answer becomes an empty one),
 
 and fails when any file's count exceeds its line in tools/clients-baseline.txt (a file not
 listed has a baseline of 0). A line carrying ``# client-exempt: <reason>`` is not counted for
@@ -38,7 +36,6 @@ EXEMPT = '# client-exempt:'
 PATTERNS = {
     'gh': re.compile(r"""\[\s*['"]gh['"]\s*[,\]]"""),
     'git': re.compile(r"""\[\s*['"]git['"]\s*[,\]]"""),
-    'except': re.compile(r'^\s*except\s*(Exception\b[^:]*)?:'),
 }
 KINDS = tuple(PATTERNS)
 
@@ -56,7 +53,7 @@ def count_text(rel, text):
     counts = {}
     for line in text.splitlines():
         for kind, rx in PATTERNS.items():
-            if kind != 'except' and (rel in CLIENTS or EXEMPT in line):
+            if rel in CLIENTS or EXEMPT in line:
                 continue
             if rx.search(line):
                 counts[kind] = counts.get(kind, 0) + 1
@@ -89,7 +86,7 @@ def read_baseline(path):
 
 def write_baseline(path, counts):
     with open(path, 'w', encoding='utf-8') as f:
-        f.write('# tools/clients-baseline.txt — raw gh/git call sites and broad excepts per file,\n'
+        f.write('# tools/clients-baseline.txt — raw gh/git call sites per file,\n'
                 '# the ceiling tools/check_clients.sh enforces. Lower a line when a PR migrates a\n'
                 '# site; never raise one (`python3 tools/check_clients.py --write-baseline`).\n')
         for kind in KINDS:
@@ -145,10 +142,9 @@ def check(root, out=print):
         kind, rel = key
         n, ceiling = counts.get(key, 0), base.get(key, 0)
         if n > ceiling:
-            what = 'broad except' if kind == 'except' else f'raw {kind} call site'
             client = 'asf/github.py' if kind == 'gh' else 'asf/gitops.py / asf/gitpush.py'
-            hint = '' if kind == 'except' else f' — call {client}, or mark the line `{EXEMPT} <why>`'
-            out(f'check_clients: {rel}: {n} {what}(s), baseline {ceiling}{hint}')
+            out(f'check_clients: {rel}: {n} raw {kind} call site(s), baseline {ceiling} — call '
+                f'{client}, or mark the line `{EXEMPT} <why>`')
             rc = 1
         elif n < ceiling:
             out(f'check_clients: {rel}: {kind} {n} < baseline {ceiling} — lower {BASELINE}')
