@@ -5,8 +5,8 @@
 2. every agent home's ``$HOME/.local/bin/asf`` follows the operator's path through any move, is
    relinked by ``asf hooks install``, and the doctor names a home whose link does not resolve;
 3. the redaction hooks asf writes run where no asf is installed (a cloud container): the
-   repository's own check, else REDACTION UNCHECKED, loudly, marked by a trailer the landing
-   re-scans before it merges;
+   repository's own check, else the commit or push is refused, loudly (a pushed branch is public
+   before any landing re-scan); a commit marked by the trailer is still re-scanned at landing;
 4. the move's smoke replays each written plist's exact env and interpreter (tests/test_upgrade
    covers the rollback it triggers).
 
@@ -264,13 +264,20 @@ class CloudSafeHooksTest(unittest.TestCase):
             self.assertTrue(hooks.is_git_hook_ours(body, name))
             self.assertIn(f'exec "/operator/.local/bin/asf" redact --{name} --product demo', body)
 
-    def test_no_asf_and_no_repo_check_commits_loudly_and_flags_it(self):
+    def test_no_asf_and_no_repo_check_refuses_the_commit_loudly(self):
         p = self.commit()
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn('REDACTION UNCHECKED (pre-commit)', p.stderr)
-        self.assertIn(redact.UNCHECKED_TRAILER, p.stderr)
+        self.assertNotEqual(p.returncode, 0, p.stderr)
+        self.assertIn('REDACTION REFUSED (pre-commit)', p.stderr)
+        self.assertEqual(git(self.repo, 'rev-list', '--all').stdout.strip(), '')  # nothing made
         flag = git(self.repo, 'rev-parse', '--git-path', redact.UNCHECKED_FLAG).stdout.strip()
-        self.assertTrue(os.path.isfile(os.path.join(self.repo, flag)))
+        self.assertFalse(os.path.isfile(os.path.join(self.repo, flag)))
+
+    def test_no_asf_and_no_repo_check_refuses_the_push_loudly(self):
+        hook = os.path.join(self.hooks_dir, 'pre-push')
+        p = subprocess.run(['sh', hook, 'origin', 'x'], cwd=self.repo, input='', text=True,
+                           capture_output=True, env={'HOME': self.home, 'PATH': '/usr/bin:/bin'})
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn('REDACTION REFUSED (pre-push)', p.stderr)
 
     def test_the_repositorys_own_check_runs_and_can_refuse(self):
         stub(os.path.join(self.repo, 'tools', 'checks'), 'redact.sh',
@@ -278,7 +285,7 @@ class CloudSafeHooksTest(unittest.TestCase):
         p = self.commit()
         self.assertNotEqual(p.returncode, 0)
         self.assertIn('repo check --pre-commit', p.stderr)
-        self.assertNotIn('REDACTION UNCHECKED', p.stderr)
+        self.assertNotIn('REDACTION REFUSED', p.stderr)
 
     def test_an_agent_homes_asf_is_taken_first(self):
         stub(os.path.join(self.home, '.local', 'bin'), 'asf', 'echo "home asf $*" >&2; exit 0')
