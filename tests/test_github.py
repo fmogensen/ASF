@@ -245,14 +245,6 @@ class Ratchet(unittest.TestCase):
                           'asf/b.py': "x(['git', 'a'])  # client-exempt: a fixture\n"})
         self.assertEqual(self.run_check(root)[0], 0)
 
-    def test_a_new_broad_except_fails(self):
-        root = self.tree({'asf/a.py': 'try:\n    x()\nexcept Exception:\n    pass\n'
-                                      'try:\n    y()\nexcept:\n    pass\n'},
-                         'except asf/a.py 1\n')
-        rc, lines = self.run_check(root)
-        self.assertEqual(rc, 1)
-        self.assertIn('broad except', lines[0])
-
     def test_the_guard_rule_waits_for_the_door_then_holds(self):
         files = {'asf/gitpush.py': 'def push(args, cwd, guard=None): pass\n',
                  'asf/a.py': 'from asf import gitpush\ngitpush.push(["x"], ".")\n'

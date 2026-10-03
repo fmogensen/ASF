@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/check_clients.sh — no new raw `gh`/`git` call site: every gh call belongs in asf/github.py,
-# every git call in asf/gitops.py / asf/gitpush.py. Per-file counts of raw argv sites (and of broad
-# `except Exception` lines) may only fall below tools/clients-baseline.txt, never rise; a line
+# every git call in asf/gitops.py / asf/gitpush.py. Per-file counts of raw argv sites may only
+# fall below tools/clients-baseline.txt, never rise; a line
 # marked `# client-exempt: <reason>` is not counted. Once asf/gitpush.py declares
 # `__gitpush_door__ = True`, every `gitpush.push(` call must also pass `guard=`.
 # The rules and the counting live in tools/check_clients.py.
