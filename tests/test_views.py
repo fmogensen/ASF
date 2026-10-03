@@ -373,8 +373,10 @@ class RecordCellTests(ViewsTestCase):
              for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
 
     def test_a_healthy_record_says_zero_no_rule(self):
-        self.assertEqual(status.record_cell(self.root), '2 open · 0 Active · 0 blocked · 0 no rule')
-        self.assertEqual(self.rows()[1]['Record'], '2 open · 0 Active · 0 blocked · 0 no rule')
+        self.assertEqual(status.record_cell(self.root),
+                         '2 work · 0 Resolved · 0 records · 0 Active · 0 blocked · 0 no rule')
+        self.assertEqual(self.rows()[1]['Record'],
+                         '2 work · 0 Resolved · 0 records · 0 Active · 0 blocked · 0 no rule')
 
     def test_a_shapeless_story_is_counted(self):
         self._index({
@@ -387,7 +389,8 @@ class RecordCellTests(ViewsTestCase):
             'S-0004': {'id': 'S-0004', 'type': 'story', 'folder': 'stories', 'parent': 'F-0001',
                        'state': 'New', 'removed': 'groom 2026-09-01', 'evidence': ['rule: no-rule']},
         })
-        self.assertEqual(status.record_cell(self.root), '4 open · 1 Active · 1 blocked · 1 no rule')
+        self.assertEqual(status.record_cell(self.root),
+                         '4 work · 0 Resolved · 0 records · 1 Active · 1 blocked · 1 no rule')
 
     def test_no_index_or_an_unreadable_one_is_not_configured(self):
         nowhere = os.path.join(self.tmp, 'nowhere')
@@ -401,6 +404,85 @@ class RecordCellTests(ViewsTestCase):
     def test_the_row_sits_directly_above_ready_to_launch(self):
         names, _ = self.rows()
         self.assertEqual(names[names.index('Ready to launch') - 1], 'Record')
+
+
+class RecordSplitTests(ViewsTestCase):
+    def _index(self, extra):
+        items = dict(INDEX['items'])
+        items.update(extra)
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def test_the_open_set_splits_into_work_resolved_and_records(self):
+        self._index({
+            'T-0100': {'id': 'T-0100', 'type': 'task', 'folder': 'tasks', 'state': 'Resolved'},
+            'D-0100': {'id': 'D-0100', 'type': 'decision', 'folder': 'decisions', 'state': 'New'},
+            'R-0100': {'id': 'R-0100', 'type': 'rule', 'folder': 'rules', 'state': 'New'},
+            'D-0101': {'id': 'D-0101', 'type': 'decision', 'folder': 'decisions', 'state': 'Resolved'},
+            'B-0100': {'id': 'B-0100', 'type': 'bug', 'folder': 'bugs', 'state': 'Active',
+                       'blocked': True},
+            'T-0101': {'id': 'T-0101', 'type': 'task', 'folder': 'tasks', 'state': 'Closed'},
+        })
+        cell = status.record_cell(self.root)
+        self.assertEqual(cell, '3 work · 1 Resolved · 3 records · 1 Active · 1 blocked · 0 no rule')
+        counts = {}
+        for part in cell.split(' · '):
+            num, word = part.split(' ', 1)
+            counts[word] = int(num)
+        items, _generated = ix.load(self.root)
+        self.assertEqual(counts['work'] + counts['Resolved'] + counts['records'],
+                         len([v for v in items.values() if v.get('state', 'New') != 'Closed']))
+
+    def test_a_resolved_decision_is_a_record_not_a_resolved(self):
+        self._index({
+            'D-0100': {'id': 'D-0100', 'type': 'decision', 'folder': 'decisions', 'state': 'Resolved'},
+        })
+        self.assertEqual(status.record_cell(self.root),
+                         '2 work · 0 Resolved · 1 records · 0 Active · 0 blocked · 0 no rule')
+
+    def test_a_typeless_row_counts_as_work(self):
+        self._index({'X-0100': {'id': 'X-0100', 'state': 'New'}})
+        self.assertEqual(status.record_cell(self.root),
+                         '3 work · 0 Resolved · 0 records · 0 Active · 0 blocked · 0 no rule')
+
+    def test_a_closed_no_rule_item_still_counts_in_no_rule_and_nothing_else(self):
+        self._index({
+            'T-0100': {'id': 'T-0100', 'type': 'task', 'folder': 'tasks', 'state': 'Closed',
+                       'evidence': ['rule: no-rule']},
+        })
+        self.assertEqual(status.record_cell(self.root),
+                         '2 work · 0 Resolved · 0 records · 0 Active · 0 blocked · 1 no rule')
+
+    def test_every_item_type_is_either_work_or_a_record(self):
+        from asf.record.core import TYPES
+        from asf.record.match import WORK_TYPES
+        self.assertEqual(set(status.RECORD_TYPES) | WORK_TYPES, set(TYPES))
+        self.assertEqual(set(status.RECORD_TYPES) & WORK_TYPES, set())
+
+
+class RecordFlagTests(ViewsTestCase):
+    def _index(self, extra):
+        items = dict(INDEX['items'])
+        items.update(extra)
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def test_an_active_or_blocked_record_does_not_count_as_a_flag(self):
+        self._index({
+            'D-0100': {'id': 'D-0100', 'type': 'decision', 'folder': 'decisions', 'state': 'Active'},
+            'D-0101': {'id': 'D-0101', 'type': 'decision', 'folder': 'decisions', 'state': 'New',
+                       'blocked': True},
+        })
+        self.assertEqual(status.record_cell(self.root),
+                         '2 work · 0 Resolved · 2 records · 0 Active · 0 blocked · 0 no rule')
+
+    def test_a_blocked_resolved_task_does_not_count_as_a_flag(self):
+        self._index({
+            'T-0100': {'id': 'T-0100', 'type': 'task', 'folder': 'tasks', 'state': 'Resolved',
+                       'blocked': True},
+        })
+        self.assertEqual(status.record_cell(self.root),
+                         '2 work · 1 Resolved · 0 records · 0 Active · 0 blocked · 0 no rule')
 
 
 class CapacityTable(ViewsTestCase):

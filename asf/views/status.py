@@ -16,8 +16,11 @@ Every row is filled from what exists, or says which key would fill it —
 * **Features in build** — X / N: the Features in build against ``feeder.max_features_in_build``
   and the inputs ``auto`` sized it from (:func:`asf.feeder.rows.build_load`) — while X >= N no
   new Feature starts;
-* **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
-  closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
+* **Record** — the record's counts from ``index.json``, with the open set **split** rather than
+  totalled: work still to do, work Resolved and waiting to close, and the record-only cards
+  (``decision``, ``rule``) that are never work (F-0139); then the Active and blocked counts of that
+  work, and the items no closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf
+  check`` names each);
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
   ``index.json``, less the sessions in flight);
 * **Decisions** — the undecided cards (D6's one ranking) and the first few to decide;
@@ -258,9 +261,29 @@ def stale_cell(root, product):
     return f"STALE since {ix.local_stamp(generated, '%H:%M')} — no fresh record in {ix.span(age_s)}"
 
 
+#: The record-only types: a `decision` and a `rule` are things the record *says*, not work anybody
+#: does — nobody is assigned one, none of them lands, and no closing rule ever moves one, so they
+#: are open for ever and are never part of "how much work is outstanding" (F-0139). They are the
+#: complement of :data:`asf.record.match.WORK_TYPES` in :data:`asf.record.core.TYPES`, written
+#: here as the *positive* test so a card whose ``type`` is missing or unrecognised counts as work,
+#: where an operator is looking, rather than vanishing into the bucket they skip.
+RECORD_TYPES = ('decision', 'rule')
+
+
 def record_cell(root):
-    """``<n> open · <n> Active · <n> blocked · <n> no rule`` from ``index.json``'s live items —
-    ``no rule`` is an ``evidence:`` list whose last entry is ``rule: no-rule``, the residue."""
+    """``<n> work · <n> Resolved · <n> records · <n> Active · <n> blocked · <n> no rule`` from
+    ``index.json``'s live items.
+
+    The first three are the split of what used to print as one ``open`` total, and they partition
+    it: ``work`` is an item somebody still has to do — the feeder's own
+    :func:`asf.feeder.rows.is_open`, to which ``Resolved`` is *not* open; ``Resolved`` is work that
+    is done and waiting to close; ``records`` is every open ``decision`` or ``rule``
+    (:data:`RECORD_TYPES`), which is never work whatever its state says. ``Active`` and ``blocked``
+    count over ``work`` — the number they sit beside, not the wider set. ``no rule`` is unchanged:
+    an ``evidence:`` list whose last entry is ``rule: no-rule``, the residue, over every live item,
+    Closed ones included.
+    """
+    from asf.feeder import rows as feeder_rows
     from asf.views import index_reader as ix
     if not root or not os.path.exists(os.path.join(root, 'index.json')):
         return not_configured('backlog_dir (no index.json)')
@@ -270,10 +293,15 @@ def record_cell(root):
     except (OSError, ValueError, KeyError, AttributeError):
         return not_configured('backlog_dir (index.json unreadable)')
     opened = [v for v in live if v.get('state', 'New') != 'Closed']
-    active = sum(1 for v in opened if v.get('state') == 'Active')
-    blocked = sum(1 for v in opened if v.get('blocked') is True)
+    records = [v for v in opened if v.get('type') in RECORD_TYPES]
+    typed_work = [v for v in opened if v.get('type') not in RECORD_TYPES]
+    work = [v for v in typed_work if feeder_rows.is_open(v)]
+    resolved = len(typed_work) - len(work)   # C8: `opened` holds no Closed item for this to catch
+    active = sum(1 for v in work if v.get('state') == 'Active')
+    blocked = sum(1 for v in work if v.get('blocked') is True)
     no_rule = sum(1 for v in live if _residue(v))
-    return f"{len(opened)} open · {active} Active · {blocked} blocked · {no_rule} no rule"
+    return (f"{len(work)} work · {resolved} Resolved · {len(records)} records · "
+            f"{active} Active · {blocked} blocked · {no_rule} no rule")
 
 
 def _residue(item):
