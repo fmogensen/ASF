@@ -420,6 +420,6 @@ clocks:
 #   min_upgrades: 3                # auto-upgrades in the window, none failed, torn or rolled back
 #   hand_types: [fix, hotfix, revert]
 #   readme_sections: [Install, Quick start, Configuration, Upgrade]
-#   ci_steps: {install_from_zero: install.sh, generic: check generic, second_product: sample product}
+#   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product}
 #   requires: {install: [], upgrade: [], generic: [], docs: []}   # Features each criterion also needs landed
 #   blocking: []                   # Features that must be landed before a release

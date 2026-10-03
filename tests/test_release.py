@@ -34,7 +34,8 @@ def good_facts(**over):
         'upgrade': {'upgrades': [{'to': 'a'}, {'to': 'b'}, {'to': 'c'}], 'failed': [], 'torn': [],
                     'rollbacks': [], 'chain_breaks': []},
         'ci_runs': [{'conclusion': 'success', 'headSha': 'x' * 40}] * 10,
-        'ci_steps': [('tests', 'bash install.sh sample v0.1.0', 'success'),
+        'ci_steps': [('tests', 'asf install, zero to green (a temp HOME, sample/, doctor, a dry run, '
+                               'then again)', 'success'),
                      ('tests', 'check generic', 'success'),
                      ('tests', 'the sample product, end to end', 'success')],
         'docs': {'headings': ['Install', 'Quick start', 'Configuration', 'Upgrade'], 'tag': 'v0.1.0',
@@ -130,6 +131,21 @@ class TickLogTest(unittest.TestCase):
         self.assertEqual(f['chain_breaks'], [{'installed': '9999999', 'after': '3333333',
                                               'date': '2026-09-20T00:00:00Z'}])
 
+    def test_an_upgrade_skipped_offline_is_neither_an_upgrade_nor_a_failure(self):
+        log = '\n'.join([
+            'tick: ran asf upgrade (0.1.0@3333333 → 0.1.0@4444444), exit 0; the next tick runs the new one',
+            'tick: asf upgrade skipped — offline (DNS: nodename nor servname provided, or not known)',
+        ])
+        ev = release.parse_tick_log(log)
+        self.assertEqual(ev[1], ('upgrade-skipped', 'DNS: nodename nor servname provided, or not known'))
+        dates = {'3333333': '2026-09-19T00:00:00Z', '4444444': '2026-09-21T00:00:00Z'}
+        f = release.upgrade_facts([('tick-p.log', ev)], dates, SINCE)
+        self.assertEqual((len(f['upgrades']), len(f['failed']), len(f['skipped'])), (1, 0, 1))
+        out = {x.key: x for x in release.evaluate(good_facts(upgrade=dict(
+            good_facts()['upgrade'], skipped=['DNS: x'])), cfg())}
+        self.assertTrue(out['upgrade'].met)
+        self.assertIn('0 failed, 1 skipped offline', out['upgrade'].evidence)
+
     def test_logs_and_install_log_from_disk(self):
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, 'tick-p-a.log'), 'w') as f:
@@ -168,6 +184,18 @@ class CiTest(unittest.TestCase):
         self.assertIn('--branch', seen[0])
         self.assertIsNone(release.ci_runs('o/r', 'main', 10, lambda a: None))
 
+    def test_the_install_criterion_matches_the_ci_step_the_workflow_names(self):
+        """The default ``install_from_zero`` pattern finds the step the workflow really runs."""
+        wf = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          '.github', 'workflows', 'tests.yml')
+        with open(wf, encoding='utf-8') as f:
+            names = [ln.split('name:', 1)[1].strip() for ln in f if ln.strip().startswith('- name:')]
+        steps = [('tests (3.12)', n, 'success') for n in names]
+        pat = release.DEFAULTS['ci_steps']['install_from_zero']
+        self.assertEqual(release.step_state(steps, pat), (True, True), names)
+        out = {x.key: x for x in release.evaluate(good_facts(ci_steps=steps), cfg())}
+        self.assertIn(f"'{pat}' green", out['install'].evidence)
+
     def test_steps_and_state(self):
         data = {'jobs': [{'name': 't (3.12)', 'steps': [{'name': 'check generic', 'conclusion': 'success'}]},
                          {'name': 't (3.13)', 'steps': [{'name': 'check generic', 'conclusion': 'failure'}]}]}
@@ -204,7 +232,7 @@ class EvaluateTest(unittest.TestCase):
         self.assertIn('abc1234', out['stability'].evidence)
         self.assertIn('= 9.1', out['repair'].evidence)
         self.assertIn('9/10 green', out['ci'].evidence)
-        self.assertIn("'install.sh' absent", out['install'].evidence)
+        self.assertIn("'asf install, zero to green' absent", out['install'].evidence)
         self.assertIn('F-0009 not in the record', out['install'].evidence)
         self.assertIn('1 torn tick', out['upgrade'].evidence)
         self.assertIn("'sample product' absent", out['generic'].evidence)
