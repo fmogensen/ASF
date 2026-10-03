@@ -1525,6 +1525,25 @@ class AfterCountsTheTrunkTests(unittest.TestCase):
                 self.assertIn('would launch', got)
                 self.assertFalse([a for a in got if a.startswith('WAITS ON')])
 
+    def test_a_review_of_a_pushed_branch_never_waits_on_after(self):
+        """W8-PR2: T-0002's predecessor has not landed, but T-0002 is pushed and its lane asks
+        for a review — the review conflicts with nothing, so it launches, waiting on nothing."""
+        o = occ(review={'T-0002': {'branch': 'task/T-0002', 'pr': 30, 'round': 1}})
+        out = [r for r in rows.candidates(self.items(), product(), [], occupancy=o, landed_shas=None)
+               if r.item_id == 'T-0002' and r.kind == rows.PUSHED_REVIEW]
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].launches, out[0].action)
+        self.assertEqual(out[0].waits_on, '')
+        self.assertNotIn('after:', out[0].reason)
+
+    def test_hold_unlanded_still_holds_a_code_row_beside_the_review(self):
+        review = rows.Row(tier=2, kind=rows.PUSHED_REVIEW, item_id='T-0002', feature_id='F-0001',
+                          action=rows.LAUNCH, brief_kind='review', branch='task/T-0002', reason='')
+        code = rows.Row(tier=2, kind=rows.PLAN_CODE, item_id='T-0002', feature_id='F-0001',
+                        action=rows.LAUNCH, brief_kind='task', branch='task/T-0002', reason='')
+        got = rows.hold_unlanded([review, code], self.items()['items'])
+        self.assertEqual([r.action for r in got], [rows.LAUNCH, 'WAITS ON T-0001'])
+
     def test_an_after_naming_a_task_of_another_feature_no_longer_waits_for_ever(self):
         self.assertEqual(self.action_of('T-0002', None, index=self.items(other_feature=True)),
                          ['would launch'])
