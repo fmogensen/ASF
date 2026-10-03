@@ -1,8 +1,11 @@
 # The product file
 
 `~/.ASF/products/<product>.yaml`, key by key, for the keys that change what the factory does. The
-full annotated shape is [`docs/products.example.yaml`](../products.example.yaml); an unknown
-top-level key is refused on load (`NEEDS OPERATOR: … is not a field of the product file`). Shared,
+full annotated shape is [`docs/products.example.yaml`](../products.example.yaml). An unknown key —
+at the top level, or inside `ci:`, `capacity:`, `feeder:`, `improve:` or `release:` — is a
+*warning*, not a refusal: the file loads, and `asf doctor`'s `product` row names the key in yellow
+(`… is not a field of the product file`), so a typo is visible and a file written for a newer `asf`
+never takes an older one down. A value of the wrong shape is still refused on load. Shared,
 machine-wide settings live in `~/.ASF/config.yaml` ([`docs/config.example.yaml`](../config.example.yaml)).
 
 The file is YAML, but read by a small built-in reader: nested block maps, `- item` lists, inline
@@ -14,7 +17,7 @@ strings. A key's shape is checked: `customer_paths` must be a list (`- apps/web/
 ### Old keys, and where they went
 
 A file written for an earlier release, or copied from an older product, may carry these. The
-product file refuses an unknown key; the operator config keeps reading its deprecated ones, and
+product file warns on an unknown key; the operator config keeps reading its deprecated ones, and
 the doctor's `capacity` row names the two old capacity keys.
 
 | old | new | notes |
@@ -31,6 +34,26 @@ the doctor's `capacity` row names the two old capacity keys.
 | `worker_pool.reserve_for_s1` (config) | `capacity.reserve_for_s1` | still read |
 | `worker_pool.quota_guard: {max_5h, max_7d}` (fractions) | `quota_guards.stop` (percent) | still read, as the stop for those windows; so is a flat `quota_guards: five_h: 95` |
 | `worker_pool.accounts[].share` | `worker_pool.accounts[].cap` | `share` is not read |
+
+### Flags: `conventions.flags`
+
+Every behaviour switch lives in one map, `conventions.flags`, read through `Product.flag(name,
+default)`. The map is never validated and every earlier reader keeps it verbatim, so a product
+whose venv is pinned to an older sha still loads a file that sets a flag it does not know — a new
+switch is a name in that map, never a new top-level or checked key. An unset flag is its default;
+`flags.models.cheap_kinds` may be written dotted or nested. A name this release does not read is
+listed on the doctor's `product` row.
+
+```yaml
+conventions:
+  flags:
+    mechanical: true
+    plan_ahead: 2
+```
+
+Before editing a pinned product's file, check it loads under that product's own venv.
+`tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
+every planned flag under that sha's own loader.
 
 ## Repos and directories
 

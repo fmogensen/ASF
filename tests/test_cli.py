@@ -22,7 +22,8 @@ class RefusedProductFileTests(unittest.TestCase):
         env.ASF_HOME = self.tmp
         os.makedirs(os.path.join(self.tmp, 'products'))
         with open(env.product_path('sample'), 'w') as f:
-            f.write('repo_slug: x/y\nnot_a_declared_key: 1\n')
+            # a value of the wrong shape refuses the load (an unknown key is only a warning)
+            f.write('repo_slug: x/y\ngroom: TODO\n')
 
     def tearDown(self):
         env.ASF_HOME = self._orig_home
