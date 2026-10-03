@@ -31,6 +31,10 @@ and the harness's own verbs, which move the forge the way a person or CI would:
 * ``e2e required <name> ...`` — the trunk's branch-protection required checks
 * ``e2e squash-subject '<text with {number} and {title}>'`` — the subject a squash writes (the
   host's default is the PR title and number; a person may edit it)
+* ``e2e rate-limit on|off`` — while on, every other call fails the way GitHub answers a spent
+  token (exit 1, ``API rate limit exceeded``): the host knows its state but tells nothing
+* ``e2e close-unmerged <n>`` — the host closes PR ``n`` without merging it (a person, or the
+  host itself): ``CLOSED``, no ``mergedAt``, no merge commit, its head branch kept
 
 Anything else exits 1 with ``fake gh: unsupported``.
 """
@@ -432,11 +436,24 @@ def e2e(state, argv):
     if verb == 'squash-subject':
         state['squash_subject'] = argv[1]
         return
+    if verb == 'rate-limit':
+        state['rate_limited'] = argv[1] == 'on'
+        return
+    if verb == 'close-unmerged':
+        pr_close(state, [argv[1]])
+        return
     raise Refusal(f'fake gh: unsupported e2e verb {verb}')
+
+
+#: What GitHub answers every call while the token's hourly limit is spent (``e2e rate-limit``).
+RATE_LIMITED = ('gh: API rate limit exceeded for user ID 1. If you reach out to GitHub Support '
+                'for help, please include the request ID 0000:0000. (HTTP 403)')
 
 
 def dispatch(state, argv):
     head = argv[:2]
+    if state.get('rate_limited') and argv[:1] != ['e2e']:
+        raise Refusal(RATE_LIMITED)
     if head == ['pr', 'create']:
         return pr_create(state, argv[2:])
     if head == ['pr', 'list']:
