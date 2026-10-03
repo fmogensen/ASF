@@ -1,0 +1,17 @@
+{
+ "argv": [
+  "run",
+  "list",
+  "-R",
+  "example/repo",
+  "--branch",
+  "main",
+  "--json",
+  "databaseId,headSha,status,conclusion",
+  "-L",
+  "20"
+ ],
+ "rc": 1,
+ "stderr": "HTTP 403: API rate limit exceeded for user ID 10001. If you reach out to GitHub Support for help, please include the request ID REDACTED\n",
+ "stdout": ""
+}

@@ -1,0 +1,19 @@
+{
+ "argv": [
+  "api",
+  "repos/example/repo/commits/ca48329a83c1938f6ce39bd20890024dc015703a"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "commit": {
+   "committer": {
+    "date": "2026-10-03T18:06:55Z"
+   },
+   "url": "https://api.github.com/repos/example/repo/git/commits/ca48329a83c1938f6ce39bd20890024dc015703a"
+  },
+  "html_url": "https://github.com/example/repo/commit/ca48329a83c1938f6ce39bd20890024dc015703a",
+  "sha": "ca48329a83c1938f6ce39bd20890024dc015703a",
+  "url": "https://api.github.com/repos/example/repo/commits/ca48329a83c1938f6ce39bd20890024dc015703a"
+ }
+}

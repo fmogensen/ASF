@@ -1,0 +1,40 @@
+{
+ "argv": [
+  "api",
+  "repos/example/repo/commits/ca48329a83c1938f6ce39bd20890024dc015703a/status?per_page=100"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "sha": "ca48329a83c1938f6ce39bd20890024dc015703a",
+  "state": "success",
+  "statuses": [
+   {
+    "context": "asf/attested",
+    "created_at": "2026-10-03T12:10:13Z",
+    "id": 10082,
+    "state": "success",
+    "updated_at": "2026-10-03T12:10:13Z",
+    "url": "https://api.github.com/repos/example/repo/statuses/ca48329a83c1938f6ce39bd20890024dc015703a"
+   },
+   {
+    "context": "asf/queue",
+    "created_at": "2026-10-03T12:10:14Z",
+    "id": 10083,
+    "state": "success",
+    "updated_at": "2026-10-03T12:10:14Z",
+    "url": "https://api.github.com/repos/example/repo/statuses/ca48329a83c1938f6ce39bd20890024dc015703a"
+   },
+   {
+    "context": "deploy/dev",
+    "created_at": "2026-10-03T12:25:16Z",
+    "id": 10084,
+    "state": "success",
+    "updated_at": "2026-10-03T12:25:16Z",
+    "url": "https://api.github.com/repos/example/repo/statuses/ca48329a83c1938f6ce39bd20890024dc015703a"
+   }
+  ],
+  "total_count": 3,
+  "url": "https://api.github.com/repos/example/repo/commits/ca48329a83c1938f6ce39bd20890024dc015703a/status"
+ }
+}

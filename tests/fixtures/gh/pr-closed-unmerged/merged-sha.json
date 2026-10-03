@@ -1,0 +1,16 @@
+{
+ "argv": [
+  "pr",
+  "view",
+  "1027",
+  "-R",
+  "example/repo",
+  "--json",
+  "mergeCommit",
+  "-q",
+  ".mergeCommit.oid"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": "\n"
+}
