@@ -292,6 +292,47 @@ def _on_origin(repo, sha):
     return p.returncode == 0 and bool(p.stdout.strip())
 
 
+def _new_patches(repo, tip, upstreams):
+    """The ``git cherry`` lines of ``tip``'s commits no upstream in ``upstreams`` carries an
+    equivalent patch of (same patch-id: a reworded or rebased copy counts as carried). An
+    upstream git cannot read is skipped; with none readable every commit is new. Merge commits
+    are not listed by ``git cherry`` — the caller archives the tip before trusting this."""
+    new = None
+    for up in upstreams:
+        if not up:
+            continue
+        p = subprocess.run(['git', 'cherry', '-v', up, tip], cwd=repo, capture_output=True,
+                           text=True)
+        if p.returncode != 0:
+            continue
+        plus = [ln.strip() for ln in p.stdout.splitlines() if ln.startswith('+')]
+        keys = {ln.split()[1] for ln in plus if len(ln.split()) > 1}
+        if new is None:
+            new = {ln.split()[1]: ln for ln in plus if len(ln.split()) > 1}
+        else:
+            new = {sha: ln for sha, ln in new.items() if sha in keys}
+    if new is None:
+        return [f'+ {tip} (no upstream git could compare against)']
+    return list(new.values())
+
+
+def _archive_tip(product, repo, branch, tip, timeout):
+    """Push ``tip`` to its ``archive/<branch>-wip-<sha9>`` ref and verify it with
+    ``ls-remote``; the ref name. Raises :class:`SpawnError` when it is not there after the push —
+    nothing is deleted without its archive."""
+    from asf import gitpush
+    ref = _archive_ref(branch, tip)
+    if refguard.refusal(ref, f'archive {branch}', product.main, None):
+        raise SpawnError(f'retire {branch} refused: {ref} is a protected ref')
+    r = gitpush.push(['-q', 'origin', f'{tip}:refs/heads/{ref}'], repo, refs_only=True,
+                     timeout=timeout)
+    have = _git(['ls-remote', '--heads', 'origin', f'refs/heads/{ref}'], repo).split()
+    if r.returncode != 0 or tip not in have:
+        raise SpawnError(f'retire {branch} refused: {tip[:9]} could not be archived to {ref}: '
+                         f'{(r.stderr or "").strip() or "not on origin after the push"}')
+    return ref
+
+
 def _archive_unpushed(product, repo, holder, branch):
     """Push every commit the dead ``holder`` carries that origin does not — its HEAD (a WIP the
     factory committed detached, B-0094) and the local ``branch`` tip — to an ``archive/`` ref.
@@ -444,12 +485,22 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
         _reclaim(product, repo, job, holder, branch)
     if _local_branch_exists(repo, branch):
         tip = _git(['rev-parse', f'refs/heads/{branch}'], repo).strip()
-        kept = tip == dead or subprocess.run(
+        fast = tip == dead or subprocess.run(
             ['git', 'merge-base', '--is-ancestor', tip, dead], cwd=repo,
             capture_output=True).returncode == 0 or _on_origin(repo, tip)
-        if not kept:
-            raise SpawnError(f'branch {branch} exists locally with commits past the closed '
-                             f'PR #{reset.get("pr")} and not on origin — look before relaunching')
+        if not fast:
+            # archive first: whatever the patch-id check below decides, the local tip is on
+            # origin before anything is deleted or refused (git cherry skips merge commits)
+            ref = _archive_tip(product, repo, branch, tip, limit)
+            new = _new_patches(repo, tip, (dead, f'origin/{product.main}'))
+            if new:
+                raise SpawnError(f'branch {branch} exists locally with commits past the closed '
+                                 f'PR #{reset.get("pr")} and not on origin (archived as {ref}); '
+                                 f'git cherry: {"; ".join(new[:3])}'
+                                 + (f' and {len(new) - 3} more' if len(new) > 3 else '')
+                                 + ' — look before relaunching')
+            print(f'retire {branch}: local tip {tip[:9]} carries no new patch (reworded or '
+                  f'rebased copy); archived as {ref}', file=sys.stderr)
         _git(['branch', '-D', branch], repo)
     r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{branch}:{dead}', 'origin',
                       f':refs/heads/{branch}'], repo, refs_only=True, timeout=limit)

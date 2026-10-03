@@ -295,7 +295,9 @@ def ready_cell(root, product):
     if not launching:
         return f"0 ({len(rows)} row(s) waiting)" if rows else "0"
     first = launching[0]
-    return f"{len(launching)} — first: {first.kind} {first.item_id}"
+    failing = sum(1 for r in launching if feeder_rows.FAILING_TO_SPAWN in r.action)
+    return (f"{len(launching)} — first: {first.kind} {first.item_id}"
+            + (f"; {failing} {feeder_rows.FAILING_TO_SPAWN.lower()}" if failing else ''))
 
 
 def build_cell(root, product):

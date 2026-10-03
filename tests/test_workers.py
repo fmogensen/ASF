@@ -1090,6 +1090,33 @@ class TestSpawnFailureMemoryForgets(Home):
         self.assertNotIn('adjudicate-t-0349', wave_mod.Failures(self.product, now=1000).seen)
 
 
+class TestFailingToSpawnIsRead(Home):
+    """W2-PR8: a job failing to spawn twice in a row is readable without writing — the plan's
+    rows say FAILING TO SPAWN from it; once and stale are not."""
+
+    def test_read_names_repeats_only_and_forgets_the_stale(self):
+        f = wave_mod.Failures(self.product, now=1000)
+        f.note('task-t-0001', 'spawn failed: held')
+        f.note('task-t-0001', 'spawn failed: held')
+        f.note('task-t-0002', 'spawn failed: once')
+        got = wave_mod.Failures.read(self.product, now=1000)
+        self.assertEqual(list(got), ['task-t-0001'])
+        self.assertEqual(got['task-t-0001']['count'], 2)
+        self.assertEqual(wave_mod.Failures.read(self.product, now=1000 + wave_mod.Failures.FORGET_S + 1), {})
+        # read only: the file still holds both
+        self.assertEqual(set(wave_mod.Failures(self.product, now=1000).seen), {'task-t-0001', 'task-t-0002'})
+
+    def test_summary_names_each_repeating_job(self):
+        f = wave_mod.Failures(self.product, now=1000)
+        for _ in range(3):
+            f.note('task-t-0001', 'spawn failed: branch cloud/T-0001 exists locally')
+        f.note('task-t-0002', 'spawn failed: once')
+        self.assertEqual(f.summary(['task-t-0001', 'task-t-0002']),
+                         'spawn: 1 job(s) failing every tick — task-t-0001 ×3 '
+                         '(branch cloud/T-0001 exists locally)')
+        self.assertIsNone(f.summary(['task-t-0002']))
+
+
 class TestNoWorktreeHandedOverMidRebase(Home):
     """A product's F-0037, 2026-09-27: a correct session's worktree started with a rebase in
     progress whose ``onto`` was the branch's stale ``asf: report`` commit, replaying 257
@@ -1347,8 +1374,13 @@ class TestWave(Home):
         self.assertIn('— spawn failed: worktree already exists', outs[0][0])
         self.assertIn('NEEDS OPERATOR: spec-9 fails to spawn each tick', outs[1][0])
         self.assertIn(f'worktree remove --force {orphan}', outs[1][0])
-        self.assertEqual(outs[2], [])   # nothing changed: nothing more to say
-        self.assertEqual(outs[3], [])
+        # nothing changed: no per-launch line, but never silent — one summary line per wave
+        self.assertEqual(len(outs[2]), 1)
+        self.assertTrue(outs[2][0].startswith('spawn: 1 job(s) failing every tick — spec-9 ×3 '
+                                              '(worktree already exists'), outs[2])
+        self.assertTrue(outs[3][0].startswith('spawn: 1 job(s) failing every tick — spec-9 ×4 ('))
+        self.assertEqual(len(outs[3]), 1)
+        self.assertTrue(outs[1][-1].startswith('spawn: 1 job(s) failing every tick — spec-9 ×2'))
         # the obstacle goes: the row launches and the memory of it is cleared
         shutil.rmtree(orphan)
         launched, _, lines = self.run_wave([feature_row('spec-9')], 5, [acct])

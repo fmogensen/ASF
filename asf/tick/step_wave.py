@@ -299,7 +299,18 @@ def plan_inputs(product, root, index=None):
             'bandwidth': capacity_mod.bandwidth(product),
             'landed_shas': landed_shas, 'unverified_landed': unverified,
             'adjudicated': adjudications(product, index, tries),
+            'failing': failing(product),
             **triage}
+
+
+def failing(product):
+    """The jobs failing to spawn tick after tick (:meth:`asf.workers.wave.Failures.read`) —
+    ``plan_rows`` marks their rows FAILING TO SPAWN. Never a failure: none read is none."""
+    try:
+        from asf.workers.wave import Failures
+        return Failures.read(product)
+    except Exception:  # noqa: BLE001 — a display fact
+        return {}
 
 
 def landings(product, occ, index):

@@ -1548,6 +1548,23 @@ class AfterCountsTheTrunkTests(unittest.TestCase):
         self.assertEqual(self.action_of('T-0002', None, index=self.items(other_feature=True)),
                          ['would launch'])
 
+    def test_a_job_failing_to_spawn_says_so_on_its_row_and_still_launches(self):
+        """W2-PR8: a row whose job failed to spawn twice in a row reads FAILING TO SPAWN in
+        ``asf next`` — it keeps its tier and still launches (the retry is what might succeed)."""
+        from asf.feeder import render
+        failing = {'task-t-0002': {'reason': 'spawn failed: branch cloud/T-0002 exists locally',
+                                   'count': 3, 'at': 0}}
+        out = rows.plan_rows(self.items(), product(), [], 5, landed_shas=self.TRUNK,
+                             failing=failing)
+        row = [r for r in out if r.item_id == 'T-0002'][0]
+        self.assertTrue(row.launches)
+        self.assertEqual(row.action, 'would launch — FAILING TO SPAWN: branch cloud/T-0002 '
+                                     'exists locally ×3')
+        self.assertIn('FAILING TO SPAWN: branch cloud/T-0002 exists locally ×3',
+                      render.table(out))
+        plain = rows.plan_rows(self.items(), product(), [], 5, landed_shas=self.TRUNK)
+        self.assertEqual([r for r in plain if r.item_id == 'T-0002'][0].action, 'would launch')
+
     def test_landed_ids_is_the_record_union_the_trunk(self):
         items = {'T-1': {'state': 'Closed'}, 'T-2': {'state': 'New'}, 'T-3': {'state': 'New'}}
         self.assertEqual(rows.landed_ids(items), {'T-1'})
