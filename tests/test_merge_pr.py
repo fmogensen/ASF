@@ -38,6 +38,26 @@ GREEN = 'tests (3.12)\tcompleted\tsuccess\ntests (3.13)\tcompleted\tsuccess\n'
 RED = 'tests (3.12)\tcompleted\tsuccess\ntests (3.13)\tcompleted\tfailure\n'
 
 
+def setup(d, merge_sleep=0):
+    """fake gh/git in d/bin; returns the env. merge_sleep makes `gh pr merge` slow."""
+    bindir = os.path.join(d, 'bin')
+    os.makedirs(bindir, exist_ok=True)
+    gh = FAKE_GH.replace('"pr merge") exit', '"pr merge") echo "merge-start $3" >> "$FAKE/log"; sleep %s; '
+                         'echo "merge-end $3" >> "$FAKE/log"; exit' % merge_sleep)
+    for name, body in (('git', FAKE_GIT), ('gh', gh)):
+        p = os.path.join(bindir, name)
+        with open(p, 'w') as f:
+            f.write(body)
+        os.chmod(p, os.stat(p).st_mode | stat.S_IEXEC)
+    for name, val in (('head', 'oldhead000\n'), ('behind', '0\n'), ('checks', GREEN),
+                      ('checks_after', GREEN), ('merge_rc', '0\n')):
+        with open(os.path.join(d, name), 'w') as f:
+            f.write(val)
+    return dict(os.environ, FAKE=d, PATH=bindir + os.pathsep + os.environ['PATH'],
+                XDG_CACHE_HOME=os.path.join(d, 'cache'), MERGE_PR_LOCK_POLL='0.2',
+                MERGE_PR_POLL='0', MERGE_PR_TIMEOUT='0')
+
+
 def run(behind='0', checks=GREEN, checks_after=GREEN, merge_rc=0, attempts=3):
     with tempfile.TemporaryDirectory() as d:
         bindir = os.path.join(d, 'bin')
@@ -52,7 +72,8 @@ def run(behind='0', checks=GREEN, checks_after=GREEN, merge_rc=0, attempts=3):
             with open(os.path.join(d, name), 'w') as f:
                 f.write(val + ('\n' if name in ('head', 'behind', 'merge_rc') else ''))
         env = dict(os.environ, FAKE=d, PATH=bindir + os.pathsep + os.environ['PATH'],
-                   MERGE_PR_POLL='0', MERGE_PR_TIMEOUT='0', MERGE_PR_ATTEMPTS=str(attempts))
+                   MERGE_PR_POLL='0', MERGE_PR_TIMEOUT='0', MERGE_PR_LOCK_POLL='0.2',
+                   XDG_CACHE_HOME=os.path.join(d, 'cache'), MERGE_PR_ATTEMPTS=str(attempts))
         r = subprocess.run(['bash', SCRIPT, '7'], env=env, capture_output=True, text=True)
         with open(os.path.join(d, 'log')) as f:
             log = f.read()
@@ -107,6 +128,64 @@ class MergePrTests(unittest.TestCase):
         r, log = run(merge_rc=1, attempts=2)
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(log.count('pr merge'), 2)
+
+
+def _write_lock(d, pid):
+    lock = os.path.join(d, 'cache', 'asf', 'merge-pr.lock')
+    os.makedirs(lock)
+    for n, v in (('pid', str(pid)), ('pr', '99'), ('since', '0')):
+        with open(os.path.join(lock, n), 'w') as f:
+            f.write(v + '\n')
+    return lock
+
+
+class MergePrLockTests(unittest.TestCase):
+    def test_two_concurrent_invocations_serialize(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = setup(d, merge_sleep=1)
+            ps = [subprocess.Popen(['bash', SCRIPT, n], env=env, stdout=subprocess.PIPE, text=True)
+                  for n in ('7', '8')]
+            for p in ps:
+                p.communicate(timeout=60)
+            self.assertEqual([p.returncode for p in ps], [0, 0])
+            with open(os.path.join(d, 'log')) as f:
+                marks = [l.split() for l in f if l.startswith(('merge-start', 'merge-end'))]
+            # start A, end A, start B, end B: never two merges in flight
+            self.assertEqual([m[0] for m in marks], ['merge-start', 'merge-end'] * 2)
+            self.assertEqual(marks[0][1], marks[1][1])
+            self.assertEqual(marks[2][1], marks[3][1])
+            self.assertNotEqual(marks[0][1], marks[2][1])
+            self.assertFalse(os.path.exists(os.path.join(d, 'cache', 'asf', 'merge-pr.lock')))
+
+    def test_stale_lock_with_dead_pid_is_broken(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = setup(d)
+            dead = subprocess.Popen(['true'])
+            dead.wait()
+            lock = _write_lock(d, dead.pid)
+            r = subprocess.run(['bash', SCRIPT, '7'], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('breaking a stale merge lock', r.stdout)
+            self.assertFalse(os.path.exists(lock))
+
+    def test_live_lock_older_than_timeout_plus_600_is_broken(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = setup(d)
+            _write_lock(d, os.getpid())  # alive, but since=0
+            r = subprocess.run(['bash', SCRIPT, '7'], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('breaking a stale merge lock', r.stdout)
+
+    def test_lock_disabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = setup(d)
+            env['MERGE_PR_LOCK'] = '0'
+            lock = _write_lock(d, os.getpid())
+            with open(os.path.join(lock, 'since'), 'w') as f:
+                f.write(str(2 ** 31) + '\n')
+            r = subprocess.run(['bash', SCRIPT, '7'], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(os.path.exists(lock))
 
 
 if __name__ == '__main__':
