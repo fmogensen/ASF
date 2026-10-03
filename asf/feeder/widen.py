@@ -292,6 +292,23 @@ def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_
     return Verdict(WIDEN, paths)
 
 
+def widen(items, task_id, paths, limit=MAX_FILES, protected=None, running=(),
+          widened_before=0, shared=(), closed=None, whole=False):
+    """The ``widen_footprint`` verdict for ``task_id`` needing ``paths``, its facts read off
+    ``items`` the way the health step reads them: the Feature footprint (:func:`delivery_footprint`
+    → ``in_feature``) and the paths a landed/closed Task already delivered with no live owner
+    beside it (:func:`attributed_paths`, ``running`` the live ones). The one composition of the
+    rule both its callers make — the health step and the lane's mechanical step
+    (:mod:`asf.harvest.mechanical`) — so neither can read the cap or the Feature differently.
+    Pure: plain values in, a :class:`Verdict` out."""
+    paths = [p for p in paths or () if p]
+    in_feature = inside_feature(paths, delivery_footprint(items, task_id))
+    live = {t for t, _w in running or () if t != task_id}
+    attributed = attributed_paths(items, task_id, paths, live, closed=closed)
+    return decide(task_id, paths, limit, protected, running, widened_before, shared,
+                  in_feature=in_feature, attributed=attributed, whole=whole)
+
+
 # ---- a widening that overlaps: undone ------------------------------------------
 
 def widened_paths(body):
