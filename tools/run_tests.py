@@ -62,12 +62,24 @@ def default_shards():
 
 
 def discover(tests_dir):
-    """``{module: tests it carries}`` for every ``test_*.py`` under ``tests_dir``."""
+    """``{module: tests it carries}`` for every ``test_*.py`` under ``tests_dir``, and under each
+    package directly below it (``scenarios/test_close_paths.py`` is the module
+    ``scenarios.test_close_paths``) — the modules ``unittest discover -s tests`` finds."""
     out = {}
     for name in sorted(os.listdir(tests_dir)):
+        sub = os.path.join(tests_dir, name)
+        if os.path.isfile(os.path.join(sub, '__init__.py')):
+            out.update({f'{name}.{m}': n for m, n in _modules(sub).items()})
+    out.update(_modules(tests_dir))
+    return dict(sorted(out.items()))
+
+
+def _modules(d):
+    out = {}
+    for name in sorted(os.listdir(d)):
         if not (name.startswith('test_') and name.endswith('.py')):
             continue
-        with open(os.path.join(tests_dir, name), encoding='utf-8') as f:
+        with open(os.path.join(d, name), encoding='utf-8') as f:
             out[name[:-3]] = len(TEST_DEF_RE.findall(f.read()))
     return out
 
