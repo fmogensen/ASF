@@ -20,6 +20,13 @@ the running interpreter and the installed package, and never written by hand:
   ``<ASF_HOME>/state/<product>/code/launch.py`` at install, which ticks from an immutable
   worktree of the checkout's HEAD sha (``code/<sha>``). ``WorkingDirectory`` is that code dir
   and the launcher sets ``PYTHONPATH`` to the snapshot.
+* When the product is **pinned** (``<ASF_HOME>/state/<product>/install.json`` names a venv),
+  the job is rendered from *that* venv, not from the process running the install: its
+  ``bin/python`` is the interpreter, its ``site-packages`` the working directory, there is **no**
+  ``PYTHONPATH`` (it would sit before the venv's own ``site-packages`` and import the installing
+  process's ``asf`` instead of the pinned one), and ``PATH`` drops every entry inside a git
+  checkout. A pinned product whose venv is not on disk refuses to render
+  (:class:`SchedulerError` ``pinned venv missing``): ``install`` writes no plist for it.
 
 The ``kind`` comes from ``config.yaml``'s ``scheduler.kind`` (default ``launchd``). ``launchd``
 is implemented end to end; ``cron`` renders the crontab line for an operator to install; any
@@ -47,6 +54,7 @@ import sys
 from collections import namedtuple
 
 from asf import env
+from asf import installs
 from asf import snapshot
 
 # this repo's own cutover script (relative to the ASF checkout) — named once, here, not per mention
@@ -126,18 +134,64 @@ def log_path(product_name, clock_name):
     return os.path.join(env.ASF_HOME, 'logs', f'tick-{product_name}-{clock_name}.log')
 
 
-def _absolute_path_entries():
+def _in_checkout(directory):
+    """Whether ``directory`` sits inside a git checkout (it or a parent holds ``.git``)."""
+    d = os.path.abspath(directory)
+    while True:
+        if os.path.exists(os.path.join(d, '.git')):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def _absolute_path_entries(drop_checkouts=False):
     """The current ``PATH``'s absolute entries, order preserved, duplicates dropped.
 
     A relative entry (``.``, ``bin``) resolves against the *job's* cwd under a scheduler, not
     the shell's — it would silently mean something else, so it is dropped rather than carried.
+    With ``drop_checkouts`` (a pinned product) an entry inside a git checkout is dropped too: a
+    pinned clock must not reach the moving checkout's scripts through ``PATH``.
     """
     out, seen = [], set()
     for d in os.environ.get('PATH', '').split(os.pathsep):
         if d and os.path.isabs(d) and d not in seen:
             seen.add(d)
+            if drop_checkouts and _in_checkout(d):
+                continue
             out.append(d)
     return os.pathsep.join(out)
+
+
+# ---- the product's pinned venv ----------------------------------------------
+
+
+def pinned_venv(product_name):
+    """The venv directory the product is pinned to (:func:`asf.installs.read`), or None for an
+    unpinned product. A bare venv name is taken under pipx's venvs directory, as the
+    dispatcher takes it."""
+    inst = installs.read(product_name)
+    if inst is None:
+        return None
+    venv = os.path.expanduser(inst.venv)
+    if not os.path.isabs(venv):
+        venv = os.path.join(installs.venvs_root(), venv)
+    return os.path.abspath(venv)
+
+
+def venv_site_packages(venv):
+    """The venv's ``lib/python*/site-packages`` — the job's cwd — else the venv itself."""
+    return installs.site_packages(venv) or venv
+
+
+def check_venv(product_name, venv):
+    """Raise :class:`SchedulerError` unless ``venv`` is on disk with a runnable interpreter."""
+    python = installs.interpreter(venv)
+    if not os.path.isdir(venv) or not os.access(python, os.X_OK):
+        raise SchedulerError(
+            f'pinned venv missing: product {product_name} is pinned to {venv} '
+            f'({installs.record_path(product_name)}) but {python} is not on disk')
 
 
 # ---- the snapshot the clock runs from ---------------------------------------
@@ -198,14 +252,15 @@ def clock_code(product_name):
     return {'snapshot': True, 'root': repo, 'sha': sha, 'at': at, 'head': head}
 
 
-def tick_argv(product_name, clock):
-    """``asf tick`` as the scheduler will run it — absolute interpreter, module form. The
-    queue's clock runs ``asf ci queue --apply`` instead: no ``tick`` in it, so the upgrade
-    drain neither skips nor counts it (:data:`asf.upgrade.TICK_PATTERN`)."""
+def tick_argv(product_name, clock, interpreter=None):
+    """``asf tick`` as the scheduler will run it — absolute interpreter (``interpreter``, else
+    this process's), module form. The queue's clock runs ``asf ci queue --apply`` instead: no
+    ``tick`` in it, so the upgrade drain neither skips nor counts it
+    (:data:`asf.upgrade.TICK_PATTERN`)."""
+    python = interpreter or sys.executable
     if clock.command == QUEUE_COMMAND:
-        return [sys.executable, '-m', 'asf.cli', 'ci', 'queue', '--apply', '--product',
-                product_name]
-    argv = [sys.executable, '-m', 'asf.cli', 'tick', '--product', product_name]
+        return [python, '-m', 'asf.cli', 'ci', 'queue', '--apply', '--product', product_name]
+    argv = [python, '-m', 'asf.cli', 'tick', '--product', product_name]
     if clock.shadow:
         argv.append('--shadow')
     else:  # the daily clock too: a bare ``--daily`` ran every step (B: two ticks, one clone)
@@ -342,23 +397,42 @@ def _clock_when(clock):
     return f'every {_format_duration(clock.interval_s)}'
 
 
-def render(product, clock, cfg=None):
+_PIN = object()
+
+
+def render(product, clock, cfg=None, venv=_PIN):
     """The job definition for one clock: ``{kind, label, path, plist|line, log, argv}``.
 
     ``product`` is a :class:`asf.env.Product` or a bare product name. ``clock`` is one
-    :class:`Clock` from :func:`clocks`.
+    :class:`Clock` from :func:`clocks`. ``venv`` is the venv the clock runs from; left out it
+    is the product's pin (:func:`pinned_venv`), and ``None`` renders from this process (the
+    unpinned path). A venv that is not on disk raises :class:`SchedulerError`.
     """
     cfg = env.load_config() if cfg is None else cfg
     name = getattr(product, 'name', product)
+    if venv is _PIN:
+        venv = pinned_venv(name)
+    if venv is not None:
+        venv = os.path.abspath(venv)
+        check_venv(name, venv)
 
     label = label_for(name, clock.name, cfg)
-    argv = tick_argv(name, clock)
     log = log_path(name, clock.name)
-    root = repo_root()
     job_kind = kind(cfg)
-    snap_repo = snapshot_repo(root)
-    env_vars = {'PATH': _absolute_path_entries(), 'HOME': os.path.expanduser('~'),
-                'PYTHONPATH': root, 'ASF_HOME': env.ASF_HOME}
+    if venv is not None:
+        # the pinned venv's own interpreter finds its own ``asf``; a PYTHONPATH would put the
+        # installing process's package in front of it, and the pin would be a label only
+        argv = tick_argv(name, clock, interpreter=installs.interpreter(venv))
+        root = venv_site_packages(venv)
+        snap_repo = None
+        env_vars = {'PATH': _absolute_path_entries(drop_checkouts=True),
+                    'HOME': os.path.expanduser('~'), 'ASF_HOME': env.ASF_HOME}
+    else:
+        argv = tick_argv(name, clock)
+        root = repo_root()
+        snap_repo = snapshot_repo(root)
+        env_vars = {'PATH': _absolute_path_entries(), 'HOME': os.path.expanduser('~'),
+                    'PYTHONPATH': root, 'ASF_HOME': env.ASF_HOME}
     launcher = None
     if snap_repo is not None:
         # the tick runs from a snapshot of the checkout's HEAD, never the checkout itself
@@ -370,6 +444,8 @@ def render(product, clock, cfg=None):
 
     job = {'kind': job_kind, 'label': label, 'log': log, 'argv': argv, 'product': name,
            'clock': clock.name, 'steps': clock.steps}
+    if venv is not None:
+        job['venv'] = venv
     if launcher:
         job['launcher'] = launcher
     if clock.interval_s is not None:
@@ -1023,8 +1099,16 @@ def cmd_scheduler(args, root=None):
     else:
         selected = clock_list
 
+    try:
+        jobs = [render(product, c, cfg=cfg) for c in selected] \
+            if command in ('render', 'install') else []
+    except SchedulerError as e:
+        # every clock renders before any is written: a refused render leaves the plists as
+        # they are, never half of them moved
+        print(f'NEEDS OPERATOR: {e}')
+        return 2
+
     if command == 'render':
-        jobs = [render(product, c, cfg=cfg) for c in selected]
         if args.json:
             print(_json.dumps(jobs, indent=2, sort_keys=True, default=str))
             return 0
@@ -1060,8 +1144,8 @@ def cmd_scheduler(args, root=None):
     # install
     job_kind = kind(cfg)
     lines = []
-    for c in selected:
-        lines.extend(install(render(product, c, cfg=cfg)))
+    for job in jobs:
+        lines.extend(install(job))
     if not args.clock and job_kind == 'launchd':
         declared_labels = [label_for(product_name, c.name, cfg) for c in clock_list]
         for label in retire_candidates(product_name, declared_labels, cfg):
