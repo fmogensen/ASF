@@ -1,0 +1,17 @@
+# The improvement program's targets, read by `asf scorecard --check docs/program/targets.yaml`.
+# Each key is a program-row key (asf/scorecard/program.py); a dotted path reaches inside.
+# Wave A measures: every op is `measured` (the key is read), the baseline the later waves beat.
+wave: A
+targets:
+  - {key: idle_hours, op: measured, why: launch gaps over 2 h}
+  - {key: offline_ticks, op: measured, why: ticks whose record step failed offline}
+  - {key: waste_by_class.failed.usd, op: measured, why: runs the process or the push gave out}
+  - {key: waste_by_class.loop.usd, op: measured, why: 4th+ run of one job on one head}
+  - {key: mechanical_only_corrects.usd, op: measured, why: corrections code could resolve}
+  - {key: max_runs_job_head.runs, op: measured, why: the run caps hold}
+  - {key: heavy_share, op: measured, why: share of spend on the heavy model (W2-PR1)}
+  - {key: cardless_heavy_reviews, op: measured, why: cardless PR reviews on heavy (W2-PR1)}
+  - {key: infra_ended.runs, op: measured, why: runs the platform ended}
+  - {key: rows_waiting_on_item, op: measured, why: board rows behind another item}
+  - {key: top_roots, op: measured, why: the items at the root of the waits}
+  - {key: reviews_held_after, op: measured, why: review rows waiting on an item (W8-PR2)}

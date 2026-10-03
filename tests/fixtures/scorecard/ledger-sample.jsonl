@@ -1,0 +1,467 @@
+{"correction": {"at": "2026-09-27T08:12:11Z", "kind": "review"}, "job": "review-t-0386"}
+{"item": "T-0386", "job": "review-t-0386", "kind": "review", "launch_head": "de5e14d", "model": "light-model", "pid": 0, "started": "2026-09-27T08:37:11Z", "usd": 1.0113}
+{"end_reason": "finished", "ended": "2026-09-27T08:50:57Z", "job": "review-t-0386"}
+{"correction": {"at": "2026-09-27T09:49:53Z", "kind": "gate"}, "job": "review-t-0386"}
+{"correction": {"at": "2026-09-27T10:35:04Z", "kind": "gate"}, "job": "correct-t-0386"}
+{"correction": {"at": "2026-09-27T10:50:05Z", "kind": "unpushed"}, "job": "correct-t-0386"}
+{"item": "T-0386", "job": "correct-t-0386", "kind": "correct", "launch_head": "675b91e", "model": "light-model", "pid": 0, "started": "2026-09-27T10:51:56Z", "usd": 0.589}
+{"end_reason": "finished", "ended": "2026-09-27T11:00:54Z", "job": "correct-t-0386"}
+{"correction": {"at": "2026-09-27T11:13:59Z", "kind": "gate"}, "job": "correct-t-0386"}
+{"correction": {"at": "2026-09-27T11:54:53Z", "kind": "review"}, "job": "review-pr-0877"}
+{"item": "PR-0877", "job": "review-pr-0877", "kind": "review", "launch_head": "030ea71", "model": "heavy-model", "pid": 0, "started": "2026-09-30T05:14:41Z", "usd": 1.0513}
+{"end_reason": "finished", "ended": "2026-09-30T05:22:15Z", "job": "review-pr-0877"}
+{"correction": {"at": "2026-09-30T05:24:31Z", "kind": "review"}, "job": "review-pr-0877"}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "56d367a", "model": "light-model", "pid": 0, "started": "2026-09-30T12:34:19Z", "usd": 3.2079}
+{"correction": {"at": "2026-09-30T12:51:55Z", "kind": "hook refused"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-09-30T12:51:55Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-09-30T12:51:55Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-09-30T12:51:55Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"end_reason": "finished", "ended": "2026-09-30T12:59:53Z", "job": "review-t-0483"}
+{"correction": {"at": "2026-09-30T13:01:05Z", "kind": "gate"}, "job": "review-t-0483"}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "56d367a", "model": "light-model", "pid": 0, "started": "2026-09-30T13:01:39Z", "usd": 0.5031}
+{"end_reason": "finished", "ended": "2026-09-30T13:08:41Z", "job": "correct-t-0483"}
+{"correction": {"at": "2026-09-30T13:08:54Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-09-30T13:08:54Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-09-30T13:44:56Z", "kind": "incomplete"}, "job": "delivery-code-t-0517"}
+{"item": "T-0517", "job": "delivery-code-t-0517", "kind": "delivery-code", "launch_head": "d54a15d", "model": "light-model", "pid": 0, "started": "2026-09-30T13:45:27Z", "usd": 1.5416}
+{"end_reason": "finished", "ended": "2026-09-30T13:52:50Z", "job": "delivery-code-t-0517"}
+{"correction": {"at": "2026-09-30T13:53:55Z", "kind": "incomplete"}, "job": "delivery-code-t-0517"}
+{"correction": {"at": "2026-10-01T09:45:24Z", "kind": "review"}, "job": "review-t-0500"}
+{"correction": {"at": "2026-10-01T09:52:27Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-01T09:52:27Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"item": "T-0500", "job": "review-t-0500", "kind": "review", "launch_head": "a05c6bb", "model": "light-model", "pid": 0, "started": "2026-10-01T10:03:20Z", "usd": 1.7449}
+{"end_reason": "finished", "ended": "2026-10-01T10:17:52Z", "job": "review-t-0500"}
+{"correction": {"at": "2026-10-01T10:18:59Z", "kind": "review"}, "job": "review-t-0500"}
+{"item": "T-0500", "job": "correct-t-0500", "kind": "correct", "launch_head": "a05c6bb", "model": "light-model", "pid": 0, "started": "2026-10-01T10:19:55Z", "usd": 0.5005}
+{"end_reason": "finished", "ended": "2026-10-01T10:27:06Z", "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-01T10:29:03Z", "kind": "relaunch cap"}, "job": "review-t-0500"}
+{"correction": {"at": "2026-10-01T10:36:28Z", "kind": "review"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-01T10:37:13Z", "kind": "relaunch cap"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-01T11:06:50Z", "kind": "conflict"}, "job": "review-t-0537"}
+{"item": "T-0537", "job": "correct-t-0537", "kind": "correct", "launch_head": "6dfc1ab", "model": "light-model", "pid": 0, "started": "2026-10-01T11:35:02Z", "usd": 0.4204}
+{"end_reason": "finished", "ended": "2026-10-01T11:41:23Z", "job": "correct-t-0537"}
+{"item": "T-0537", "job": "review-t-0537", "kind": "review", "launch_head": "88b1d06", "model": "light-model", "pid": 0, "started": "2026-10-01T11:43:21Z", "usd": 0.7697}
+{"end_reason": "finished", "ended": "2026-10-01T11:50:27Z", "job": "review-t-0537"}
+{"item": "PR-1024", "job": "adopt-pr-1024", "kind": "coder", "launch_head": "", "model": "", "pid": 0, "started": "2026-10-02T06:00:58Z"}
+{"end_reason": "finished", "ended": "2026-10-02T06:00:58Z", "harvested": true, "job": "adopt-pr-1024"}
+{"correction": {"at": "2026-10-02T06:01:30Z", "kind": "relaunch cap"}, "job": "review-t-0537"}
+{"correction": {"at": "2026-10-02T06:01:33Z", "kind": "relaunch cap"}, "job": "review-t-0500"}
+{"item": "inbox:sample.md", "job": "groom-clerk-2026-10-02", "kind": "groom-clerk", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T06:01:39Z", "usd": 1.7616}
+{"item": "PR-0877", "job": "review-pr-0877", "kind": "review", "launch_head": "c40049e", "model": "heavy-model", "pid": 0, "started": "2026-10-02T06:01:44Z", "usd": 0.8715}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "56d367a", "model": "light-model", "pid": 0, "started": "2026-10-02T06:01:50Z", "usd": 1.7794}
+{"end_reason": "finished", "ended": "2026-10-02T06:08:02Z", "job": "review-pr-0877"}
+{"correction": {"at": "2026-10-02T06:09:17Z", "kind": "review"}, "job": "review-pr-0877"}
+{"item": "F-1138", "job": "spec-f-1138", "kind": "spec", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T06:09:53Z", "usd": 7.114}
+{"end_reason": "finished", "ended": "2026-10-02T06:16:05Z", "job": "review-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T06:16:05Z", "harvested": true, "job": "groom-clerk-2026-10-02"}
+{"correction": {"at": "2026-10-02T06:17:19Z", "kind": "review"}, "job": "review-t-0483"}
+{"item": "F-0011", "job": "groom-2026-10-02", "kind": "groom", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T06:18:18Z", "usd": 5.2644}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "56d367a", "model": "light-model", "pid": 0, "started": "2026-10-02T06:18:26Z", "usd": 0.4384}
+{"end_reason": "finished", "ended": "2026-10-02T06:24:33Z", "job": "correct-t-0483"}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "aea7f64", "model": "light-model", "pid": 0, "started": "2026-10-02T06:26:20Z", "usd": 0.9022}
+{"end_reason": "finished", "ended": "2026-10-02T06:33:31Z", "job": "review-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T06:33:31Z", "job": "groom-2026-10-02"}
+{"correction": {"at": "2026-10-02T06:35:13Z", "kind": "review"}, "job": "review-t-0483"}
+{"correction": {"at": "2026-10-02T06:35:13Z", "kind": "review"}, "job": "correct-t-0500"}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "aea7f64", "model": "light-model", "pid": 0, "started": "2026-10-02T06:35:59Z", "usd": 0.4528}
+{"item": "T-0500", "job": "correct-t-0500", "kind": "correct", "launch_head": "a05c6bb", "model": "light-model", "pid": 0, "started": "2026-10-02T06:36:04Z", "usd": 0.431}
+{"end_reason": "finished", "ended": "2026-10-02T06:42:19Z", "harvested": true, "job": "spec-f-1138"}
+{"end_reason": "finished", "ended": "2026-10-02T06:42:19Z", "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T06:42:19Z", "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-02T06:42:37Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T06:42:37Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-02T06:42:37Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T06:42:37Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"item": "T-0483", "job": "reshape-t-0483", "kind": "reshape", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T06:44:34Z", "usd": 3.7342}
+{"item": "T-0517", "job": "delivery-code-t-0517", "kind": "delivery-code", "launch_head": "d54a15d", "model": "light-model", "pid": 0, "started": "2026-10-02T06:44:44Z", "usd": 1.9791}
+{"item": "T-0500", "job": "reshape-t-0500", "kind": "reshape", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T06:44:48Z", "usd": 1.3355}
+{"end_reason": "finished", "ended": "2026-10-02T06:54:14Z", "harvested": true, "job": "reshape-t-0500"}
+{"end_reason": "finished", "ended": "2026-10-02T06:54:14Z", "job": "delivery-code-t-0517"}
+{"correction": {"at": "2026-10-02T06:55:59Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T06:56:00Z", "kind": "incomplete"}, "job": "delivery-code-t-0517"}
+{"item": "T-0500", "job": "review-t-0500", "kind": "review", "launch_head": "a05c6bb", "model": "light-model", "pid": 0, "started": "2026-10-02T06:57:06Z", "usd": 2.5151}
+{"item": "T-0542", "job": "delivery-code-t-0542", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T07:08:27Z", "usd": 3.5559}
+{"end_reason": "finished", "ended": "2026-10-02T07:17:58Z", "job": "review-t-0500"}
+{"item": "PR-1025", "job": "adopt-pr-1025", "kind": "coder", "launch_head": "", "model": "", "pid": 0, "started": "2026-10-02T07:20:48Z"}
+{"end_reason": "finished", "ended": "2026-10-02T07:20:48Z", "harvested": true, "job": "adopt-pr-1025"}
+{"correction": {"at": "2026-10-02T07:20:53Z", "kind": "review"}, "job": "review-t-0500"}
+{"item": "T-0500", "job": "adjudicate-t-0500", "kind": "adjudicate", "launch_head": "a05c6bb", "model": "light-model", "pid": 0, "started": "2026-10-02T07:22:17Z", "usd": 1.237}
+{"end_reason": "finished", "ended": "2026-10-02T07:41:02Z", "job": "delivery-code-t-0542"}
+{"end_reason": "finished", "ended": "2026-10-02T07:41:02Z", "job": "reshape-t-0483"}
+{"item": "PR-1027", "job": "adopt-pr-1027", "kind": "coder", "launch_head": "", "model": "", "pid": 0, "started": "2026-10-02T07:43:08Z"}
+{"end_reason": "finished", "ended": "2026-10-02T07:43:08Z", "job": "adopt-pr-1027"}
+{"end_reason": "finished", "ended": "2026-10-02T07:51:52Z", "job": "adjudicate-t-0500"}
+{"item": "T-0500", "job": "review-t-0500", "kind": "review", "launch_head": "98a064b", "model": "light-model", "pid": 0, "started": "2026-10-02T07:54:02Z", "usd": 2.0578}
+{"correction": {"at": "2026-10-02T07:54:36Z", "kind": "operator"}, "job": "review-t-0537"}
+{"item": "T-0537", "job": "correct-t-0537", "kind": "correct", "launch_head": "88b1d06", "model": "light-model", "pid": 0, "started": "2026-10-02T08:04:13Z", "usd": 0.4604}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "269b205", "model": "light-model", "pid": 0, "started": "2026-10-02T08:04:17Z", "usd": 2.055}
+{"end_reason": "finished", "ended": "2026-10-02T08:11:09Z", "job": "correct-t-0537"}
+{"end_reason": "finished", "ended": "2026-10-02T08:11:09Z", "job": "review-t-0500"}
+{"correction": {"at": "2026-10-02T08:12:37Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "B-1400", "job": "fix-bug-b-1400", "kind": "fix-bug", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T08:13:41Z", "usd": 5.4536}
+{"item": "T-0537", "job": "review-t-0537", "kind": "review", "launch_head": "ff3f541", "model": "light-model", "pid": 0, "started": "2026-10-02T08:13:48Z", "usd": 0.748}
+{"end_reason": "finished", "ended": "2026-10-02T08:20:42Z", "job": "review-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T08:20:42Z", "job": "review-t-0537"}
+{"correction": {"at": "2026-10-02T08:23:32Z", "kind": "review"}, "job": "review-t-0537"}
+{"correction": {"at": "2026-10-02T08:23:45Z", "kind": "review"}, "job": "review-t-0483"}
+{"item": "T-0537", "job": "correct-t-0537", "kind": "correct", "launch_head": "ff3f541", "model": "light-model", "pid": 0, "started": "2026-10-02T08:24:17Z", "usd": 1.6148}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "269b205", "model": "light-model", "pid": 0, "started": "2026-10-02T08:24:20Z", "usd": 3.4573}
+{"item": "T-0542", "job": "review-t-0542", "kind": "review", "launch_head": "057d29d", "model": "light-model", "pid": 0, "started": "2026-10-02T08:24:24Z", "usd": 1.7096}
+{"end_reason": "finished", "ended": "2026-10-02T08:48:32Z", "job": "correct-t-0537"}
+{"item": "PR-1030", "job": "adopt-pr-1030", "kind": "coder", "launch_head": "", "model": "", "pid": 0, "started": "2026-10-02T09:01:04Z"}
+{"end_reason": "finished", "ended": "2026-10-02T09:01:04Z", "harvested": true, "job": "adopt-pr-1030"}
+{"correction": {"at": "2026-10-02T09:01:20Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0537", "job": "review-t-0537", "kind": "review", "launch_head": "89eef1a", "model": "light-model", "pid": 0, "started": "2026-10-02T09:03:10Z", "usd": 1.0082}
+{"end_reason": "finished", "ended": "2026-10-02T09:12:26Z", "job": "fix-bug-b-1400"}
+{"end_reason": "finished", "ended": "2026-10-02T09:12:26Z", "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T09:12:26Z", "job": "review-t-0537"}
+{"end_reason": "finished", "ended": "2026-10-02T09:12:26Z", "job": "review-t-0542"}
+{"correction": {"at": "2026-10-02T09:13:53Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "66cb616", "model": "light-model", "pid": 0, "started": "2026-10-02T09:14:54Z", "usd": 2.1177}
+{"item": "B-1400", "job": "review-b-1400", "kind": "review", "launch_head": "9f60a39", "model": "heavy-model", "pid": 0, "started": "2026-10-02T09:14:58Z", "usd": 3.3402}
+{"correction": {"at": "2026-10-02T09:23:20Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "F-1137", "job": "plan-f-1137", "kind": "plan", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T09:24:35Z", "usd": 5.9168}
+{"item": "F-1138", "job": "plan-f-1138", "kind": "plan", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T09:24:41Z", "usd": 8.5276}
+{"correction": {"at": "2026-10-02T09:25:16Z", "kind": "conflict"}, "job": "review-t-0537"}
+{"end_reason": "finished", "ended": "2026-10-02T09:31:48Z", "job": "review-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T09:31:48Z", "harvested": true, "job": "review-b-1400"}
+{"correction": {"at": "2026-10-02T09:33:16Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T09:33:23Z", "kind": "review"}, "job": "review-t-0483"}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "66cb616", "model": "light-model", "pid": 0, "started": "2026-10-02T09:34:15Z", "usd": 1.1788}
+{"item": "T-0537", "job": "correct-t-0537", "kind": "correct", "launch_head": "89eef1a", "model": "light-model", "pid": 0, "started": "2026-10-02T09:34:18Z", "usd": 2.1752}
+{"correction": {"at": "2026-10-02T09:42:46Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T09:50:37Z", "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T09:50:37Z", "harvested": true, "job": "plan-f-1138"}
+{"correction": {"at": "2026-10-02T09:52:17Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "0b5e0a0", "model": "light-model", "pid": 0, "started": "2026-10-02T09:53:10Z", "usd": 1.7167}
+{"end_reason": "finished", "ended": "2026-10-02T10:06:54Z", "job": "review-t-0483"}
+{"end_reason": "failed: hook refused", "ended": "2026-10-02T10:06:54Z", "job": "correct-t-0537"}
+{"end_reason": "finished", "ended": "2026-10-02T10:06:54Z", "harvested": true, "job": "plan-f-1137"}
+{"correction": {"at": "2026-10-02T10:06:54Z", "kind": "hook refused"}, "job": "correct-t-0537"}
+{"correction": {"at": "2026-10-02T10:06:54Z", "kind": "hook refused"}, "job": "correct-t-0537"}
+{"correction": {"at": "2026-10-02T10:09:06Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T10:09:29Z", "kind": "review"}, "job": "review-t-0483"}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "0b5e0a0", "model": "light-model", "pid": 0, "started": "2026-10-02T10:10:48Z", "usd": 0.5894}
+{"item": "T-0537", "job": "correct-t-0537", "kind": "correct", "launch_head": "89eef1a", "model": "light-model", "pid": 0, "started": "2026-10-02T10:11:47Z", "usd": 1.161}
+{"end_reason": "finished", "ended": "2026-10-02T10:19:02Z", "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T10:19:17Z", "kind": "operator"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T10:21:30Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "0b5e0a0", "model": "light-model", "pid": 0, "started": "2026-10-02T10:22:35Z", "usd": 1.1141}
+{"end_reason": "failed: hook refused", "ended": "2026-10-02T10:29:11Z", "job": "correct-t-0537"}
+{"correction": {"at": "2026-10-02T10:29:11Z", "kind": "hook refused"}, "job": "correct-t-0537"}
+{"correction": {"at": "2026-10-02T10:29:11Z", "kind": "hook refused"}, "job": "correct-t-0537"}
+{"correction": {"at": "2026-10-02T10:30:38Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T10:31:53Z", "kind": "relaunch cap"}, "job": "correct-t-0537"}
+{"end_reason": "finished", "ended": "2026-10-02T10:38:06Z", "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T10:39:33Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "d419b25", "model": "light-model", "pid": 0, "started": "2026-10-02T10:40:23Z", "usd": 0.7769}
+{"end_reason": "finished", "ended": "2026-10-02T10:46:36Z", "job": "review-t-0483"}
+{"correction": {"at": "2026-10-02T10:48:00Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T10:48:13Z", "kind": "review"}, "job": "review-t-0483"}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "d419b25", "model": "light-model", "pid": 0, "started": "2026-10-02T10:49:00Z", "usd": 2.0772}
+{"correction": {"at": "2026-10-02T10:58:49Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:08:38Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:11:39Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"end_reason": "failed: hook refused", "ended": "2026-10-02T11:17:53Z", "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:17:53Z", "kind": "hook refused"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:17:53Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:17:53Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:19:15Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0483", "job": "correct-t-0483", "kind": "correct", "launch_head": "d7033a8", "model": "light-model", "pid": 0, "started": "2026-10-02T11:19:46Z", "usd": 0.5894}
+{"correction": {"at": "2026-10-02T11:24:27Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T11:28:01Z", "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:29:29Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0483", "job": "adjudicate-t-0483", "kind": "adjudicate", "launch_head": "d7033a8", "model": "light-model", "pid": 0, "started": "2026-10-02T11:30:04Z", "usd": 0.7677}
+{"item": "B-1399", "job": "fix-bug-b-1399", "kind": "fix-bug", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T11:30:06Z", "usd": 15.6691}
+{"end_reason": "finished", "ended": "2026-10-02T11:36:19Z", "job": "adjudicate-t-0483"}
+{"correction": {"at": "2026-10-02T11:37:39Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0483", "job": "review-t-0483", "kind": "review", "launch_head": "d7033a8", "model": "light-model", "pid": 0, "started": "2026-10-02T11:38:30Z", "usd": 0.8646}
+{"end_reason": "finished", "ended": "2026-10-02T11:45:23Z", "harvested": true, "job": "review-t-0483"}
+{"correction": {"at": "2026-10-02T11:45:35Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:45:35Z", "kind": "footprint"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T11:47:02Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0163", "job": "coder-t-0163", "kind": "coder", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T11:47:58Z", "usd": 1.9714}
+{"item": "F-0037", "job": "adjudicate-f-0037", "kind": "adjudicate", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T11:48:02Z", "usd": 1.5264}
+{"correction": {"at": "2026-10-02T11:56:20Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0416", "job": "delivery-code-t-0416", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T11:57:07Z", "usd": 5.0024}
+{"item": "T-0547", "job": "delivery-code-t-0547", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T11:57:10Z", "usd": 15.7126}
+{"item": "T-0510", "job": "delivery-code-t-0510", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T11:57:12Z", "usd": 6.5762}
+{"end_reason": "failed: hook refused", "ended": "2026-10-02T12:04:02Z", "job": "coder-t-0163"}
+{"correction": {"at": "2026-10-02T12:04:02Z", "kind": "hook refused"}, "job": "coder-t-0163"}
+{"correction": {"at": "2026-10-02T12:04:02Z", "kind": "footprint"}, "job": "coder-t-0163"}
+{"correction": {"at": "2026-10-02T12:04:02Z", "kind": "footprint"}, "job": "coder-t-0163"}
+{"correction": {"at": "2026-10-02T12:05:36Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T12:07:12Z", "kind": "gate"}, "job": "review-t-0500"}
+{"correction": {"at": "2026-10-02T12:16:09Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0500", "job": "correct-t-0500", "kind": "correct", "launch_head": "98a064b", "model": "light-model", "pid": 0, "started": "2026-10-02T12:17:24Z", "usd": 0.4866}
+{"item": "T-0386", "job": "delivery-code-t-0386", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T12:17:29Z", "usd": 12.2098}
+{"end_reason": "finished", "ended": "2026-10-02T12:24:27Z", "job": "fix-bug-b-1399"}
+{"end_reason": "finished", "ended": "2026-10-02T12:24:27Z", "harvested": true, "job": "adjudicate-f-0037"}
+{"end_reason": "finished", "ended": "2026-10-02T12:24:27Z", "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-02T12:24:40Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-02T12:24:40Z", "kind": "footprint"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-02T12:26:06Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0500", "job": "correct-t-0500", "kind": "correct", "launch_head": "98a064b", "model": "light-model", "pid": 0, "started": "2026-10-02T12:27:14Z", "usd": 3.6565}
+{"item": "B-1399", "job": "review-b-1399", "kind": "review", "launch_head": "03f7969", "model": "heavy-model", "pid": 0, "started": "2026-10-02T12:27:17Z", "usd": 3.1878}
+{"end_reason": "finished", "ended": "2026-10-02T12:36:32Z", "job": "delivery-code-t-0510"}
+{"end_reason": "failed: unpushed work", "ended": "2026-10-02T12:36:32Z", "job": "delivery-code-t-0416"}
+{"correction": {"at": "2026-10-02T12:36:32Z", "kind": "unpushed"}, "job": "delivery-code-t-0416"}
+{"correction": {"at": "2026-10-02T12:38:29Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0373", "job": "coder-t-0373", "kind": "coder", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T12:39:33Z", "usd": 2.0084}
+{"item": "T-0416", "job": "correct-t-0416", "kind": "correct", "launch_head": "2d27d7a", "model": "light-model", "pid": 0, "started": "2026-10-02T12:39:37Z", "usd": 0.4885}
+{"end_reason": "finished", "ended": "2026-10-02T12:47:26Z", "job": "review-b-1399"}
+{"end_reason": "finished", "ended": "2026-10-02T12:47:26Z", "job": "correct-t-0416"}
+{"correction": {"at": "2026-10-02T12:51:29Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T12:51:30Z", "kind": "review"}, "job": "review-b-1399"}
+{"item": "B-1399", "job": "correct-b-1399", "kind": "correct", "launch_head": "03f7969", "model": "heavy-model", "pid": 0, "started": "2026-10-02T12:52:34Z", "usd": 4.0104}
+{"end_reason": "failed: hook refused", "ended": "2026-10-02T13:01:31Z", "job": "delivery-code-t-0547"}
+{"correction": {"at": "2026-10-02T13:01:31Z", "kind": "hook refused"}, "job": "delivery-code-t-0547"}
+{"correction": {"at": "2026-10-02T13:05:07Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0547", "job": "correct-t-0547", "kind": "correct", "launch_head": "9cf55ec", "model": "light-model", "pid": 0, "started": "2026-10-02T13:06:53Z", "usd": 3.2189}
+{"item": "T-0554", "job": "delivery-code-t-0554", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T13:06:58Z", "usd": 17.7694}
+{"end_reason": "failed: unpushed work", "ended": "2026-10-02T13:19:49Z", "job": "correct-t-0500"}
+{"end_reason": "failed: hook refused", "ended": "2026-10-02T13:19:49Z", "job": "delivery-code-t-0386"}
+{"end_reason": "finished", "ended": "2026-10-02T13:19:49Z", "job": "correct-b-1399"}
+{"correction": {"at": "2026-10-02T13:19:49Z", "kind": "hook refused"}, "job": "delivery-code-t-0386"}
+{"correction": {"at": "2026-10-02T13:19:49Z", "kind": "blocked"}, "job": "correct-t-0500"}
+{"correction": {"at": "2026-10-02T13:22:43Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0386", "job": "correct-t-0386", "kind": "correct", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T13:24:15Z", "usd": 1.3024}
+{"item": "B-1399", "job": "review-b-1399", "kind": "review", "launch_head": "0b0e13a", "model": "heavy-model", "pid": 0, "started": "2026-10-02T13:24:15Z", "usd": 3.1561}
+{"item": "T-0510", "job": "review-t-0510", "kind": "review", "launch_head": "a5ac1f2", "model": "light-model", "pid": 0, "started": "2026-10-02T13:24:22Z", "usd": 0.9017}
+{"item": "T-0416", "job": "review-t-0416", "kind": "review", "launch_head": "2d27d7a", "model": "light-model", "pid": 0, "started": "2026-10-02T13:24:27Z", "usd": 1.3692}
+{"end_reason": "finished", "ended": "2026-10-02T13:32:33Z", "job": "review-t-0416"}
+{"end_reason": "finished", "ended": "2026-10-02T13:32:33Z", "harvested": true, "job": "review-t-0510"}
+{"correction": {"at": "2026-10-02T13:34:58Z", "kind": "review"}, "job": "review-t-0416"}
+{"correction": {"at": "2026-10-02T13:35:03Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0416", "job": "correct-t-0416", "kind": "correct", "launch_head": "2d27d7a", "model": "light-model", "pid": 0, "started": "2026-10-02T13:36:41Z", "usd": 0.4634}
+{"end_reason": "finished", "ended": "2026-10-02T13:44:07Z", "harvested": true, "job": "coder-t-0373"}
+{"end_reason": "finished", "ended": "2026-10-02T13:44:07Z", "job": "correct-t-0386"}
+{"end_reason": "finished", "ended": "2026-10-02T13:44:07Z", "job": "review-b-1399"}
+{"end_reason": "finished", "ended": "2026-10-02T13:44:07Z", "job": "correct-t-0416"}
+{"correction": {"at": "2026-10-02T13:45:39Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T13:46:24Z", "kind": "relaunch cap"}, "job": "review-t-0416"}
+{"end_reason": "finished", "ended": "2026-10-02T13:53:08Z", "job": "correct-t-0547"}
+{"correction": {"at": "2026-10-02T13:54:39Z", "kind": "review"}, "job": "correct-t-0416"}
+{"correction": {"at": "2026-10-02T13:54:43Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T13:55:30Z", "kind": "relaunch cap"}, "job": "correct-t-0416"}
+{"correction": {"at": "2026-10-02T13:56:14Z", "kind": "conflict"}, "job": "review-b-1399"}
+{"correction": {"at": "2026-10-02T13:56:27Z", "kind": "landing-gate"}, "job": "adjudicate-f-0037"}
+{"correction": {"at": "2026-10-02T14:03:26Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "B-1399", "job": "correct-b-1399", "kind": "correct", "launch_head": "0b0e13a", "model": "heavy-model", "pid": 0, "started": "2026-10-02T14:04:20Z", "usd": 2.8308}
+{"item": "T-0386", "job": "review-t-0386", "kind": "review", "launch_head": "782ba24", "model": "light-model", "pid": 0, "started": "2026-10-02T14:04:24Z", "usd": 1.407}
+{"end_reason": "finished", "ended": "2026-10-02T14:12:36Z", "job": "delivery-code-t-0554"}
+{"correction": {"at": "2026-10-02T14:14:06Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0547", "job": "review-t-0547", "kind": "review", "launch_head": "29a4b34", "model": "light-model", "pid": 0, "started": "2026-10-02T14:15:24Z", "usd": 1.9889}
+{"item": "T-0485", "job": "coder-t-0485", "kind": "coder", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T14:15:25Z", "usd": 5.9434}
+{"end_reason": "finished", "ended": "2026-10-02T14:23:34Z", "job": "review-t-0386"}
+{"end_reason": "finished", "ended": "2026-10-02T14:23:35Z", "job": "correct-b-1399"}
+{"correction": {"at": "2026-10-02T14:25:03Z", "kind": "review"}, "job": "review-t-0386"}
+{"correction": {"at": "2026-10-02T14:25:07Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0386", "job": "correct-t-0386", "kind": "correct", "launch_head": "782ba24", "model": "light-model", "pid": 0, "started": "2026-10-02T14:25:46Z", "usd": 0.5432}
+{"item": "B-1399", "job": "review-b-1399", "kind": "review", "launch_head": "d9b6400", "model": "heavy-model", "pid": 0, "started": "2026-10-02T14:25:50Z", "usd": 2.9341}
+{"end_reason": "finished", "ended": "2026-10-02T14:34:06Z", "job": "correct-t-0386"}
+{"end_reason": "finished", "ended": "2026-10-02T14:34:06Z", "job": "review-t-0547"}
+{"correction": {"at": "2026-10-02T14:35:58Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T14:35:58Z", "kind": "review"}, "job": "review-t-0547"}
+{"correction": {"at": "2026-10-02T14:36:43Z", "kind": "relaunch cap"}, "job": "review-t-0386"}
+{"item": "T-0547", "job": "correct-t-0547", "kind": "correct", "launch_head": "29a4b34", "model": "light-model", "pid": 0, "started": "2026-10-02T14:36:50Z", "usd": 1.2471}
+{"end_reason": "failed: hook refused", "ended": "2026-10-02T14:44:20Z", "job": "coder-t-0485"}
+{"end_reason": "finished", "ended": "2026-10-02T14:44:20Z", "harvested": true, "job": "review-b-1399"}
+{"correction": {"at": "2026-10-02T14:44:20Z", "kind": "hook refused"}, "job": "coder-t-0485"}
+{"correction": {"at": "2026-10-02T14:44:20Z", "kind": "hook refused"}, "job": "coder-t-0485"}
+{"correction": {"at": "2026-10-02T14:45:51Z", "kind": "review"}, "job": "correct-t-0386"}
+{"correction": {"at": "2026-10-02T14:45:55Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T14:46:41Z", "kind": "relaunch cap"}, "job": "correct-t-0386"}
+{"item": "T-0485", "job": "correct-t-0485", "kind": "correct", "launch_head": "62b1e31", "model": "light-model", "pid": 0, "started": "2026-10-02T14:46:48Z", "usd": 0.6016}
+{"item": "T-0431", "job": "delivery-code-t-0431", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T14:46:49Z", "usd": 6.3149}
+{"end_reason": "finished", "ended": "2026-10-02T14:54:41Z", "job": "correct-t-0485"}
+{"end_reason": "finished", "ended": "2026-10-02T14:54:41Z", "job": "correct-t-0547"}
+{"correction": {"at": "2026-10-02T14:56:19Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0547", "job": "review-t-0547", "kind": "review", "launch_head": "05dabbc", "model": "light-model", "pid": 0, "started": "2026-10-02T14:56:59Z", "usd": 0.702}
+{"end_reason": "finished", "ended": "2026-10-02T15:03:33Z", "job": "review-t-0547"}
+{"correction": {"at": "2026-10-02T15:05:22Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T15:05:24Z", "kind": "review"}, "job": "review-t-0547"}
+{"item": "T-0485", "job": "review-t-0485", "kind": "review", "launch_head": "62b1e31", "model": "light-model", "pid": 0, "started": "2026-10-02T15:06:15Z", "usd": 1.0582}
+{"item": "T-0547", "job": "correct-t-0547", "kind": "correct", "launch_head": "05dabbc", "model": "light-model", "pid": 0, "started": "2026-10-02T15:06:17Z", "usd": 1.1635}
+{"end_reason": "finished", "ended": "2026-10-02T15:13:56Z", "job": "delivery-code-t-0431"}
+{"correction": {"at": "2026-10-02T15:15:23Z", "kind": "incomplete"}, "job": "delivery-code-t-0431"}
+{"correction": {"at": "2026-10-02T15:15:26Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0431", "job": "delivery-code-t-0431", "kind": "delivery-code", "launch_head": "38bd6ab", "model": "light-model", "pid": 0, "started": "2026-10-02T15:16:12Z", "usd": 8.016}
+{"end_reason": "finished", "ended": "2026-10-02T15:23:00Z", "job": "review-t-0485"}
+{"end_reason": "finished", "ended": "2026-10-02T15:23:00Z", "job": "correct-t-0547"}
+{"correction": {"at": "2026-10-02T15:23:13Z", "kind": "footprint"}, "job": "correct-t-0547"}
+{"correction": {"at": "2026-10-02T15:23:13Z", "kind": "footprint"}, "job": "correct-t-0547"}
+{"correction": {"at": "2026-10-02T15:24:25Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T15:24:26Z", "kind": "review"}, "job": "review-t-0485"}
+{"item": "T-0485", "job": "correct-t-0485", "kind": "correct", "launch_head": "62b1e31", "model": "light-model", "pid": 0, "started": "2026-10-02T15:25:13Z", "usd": 1.2565}
+{"correction": {"at": "2026-10-02T15:33:43Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "F-0037", "job": "replan-f-0037", "kind": "replan", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-02T15:34:53Z", "usd": 5.8983}
+{"item": "T-0568", "job": "delivery-code-t-0568", "kind": "delivery-code", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T15:34:56Z", "usd": 10.2434}
+{"end_reason": "finished", "ended": "2026-10-02T15:41:42Z", "job": "correct-t-0485"}
+{"correction": {"at": "2026-10-02T15:41:56Z", "kind": "footprint"}, "job": "correct-t-0485"}
+{"correction": {"at": "2026-10-02T15:41:56Z", "kind": "footprint"}, "job": "correct-t-0485"}
+{"correction": {"at": "2026-10-02T15:41:56Z", "kind": "footprint"}, "job": "correct-t-0485"}
+{"correction": {"at": "2026-10-02T15:41:56Z", "kind": "footprint"}, "job": "correct-t-0485"}
+{"correction": {"at": "2026-10-02T15:43:19Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T15:50:35Z", "job": "delivery-code-t-0431"}
+{"correction": {"at": "2026-10-02T15:53:42Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0431", "job": "review-t-0431", "kind": "review", "launch_head": "800fa83", "model": "light-model", "pid": 0, "started": "2026-10-02T15:55:33Z", "usd": 3.1946}
+{"end_reason": "finished", "ended": "2026-10-02T16:03:46Z", "harvested": true, "job": "replan-f-0037"}
+{"correction": {"at": "2026-10-02T16:05:17Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T16:14:21Z", "job": "review-t-0431"}
+{"correction": {"at": "2026-10-02T16:15:43Z", "kind": "review"}, "job": "review-t-0431"}
+{"correction": {"at": "2026-10-02T16:15:47Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0431", "job": "correct-t-0431", "kind": "correct", "launch_head": "800fa83", "model": "light-model", "pid": 0, "started": "2026-10-02T16:16:34Z", "usd": 0.4196}
+{"end_reason": "finished", "ended": "2026-10-02T16:22:52Z", "job": "correct-t-0431"}
+{"correction": {"at": "2026-10-02T16:24:16Z", "kind": "review"}, "job": "correct-t-0431"}
+{"correction": {"at": "2026-10-02T16:24:20Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0431", "job": "correct-t-0431", "kind": "correct", "launch_head": "f878ea2", "model": "light-model", "pid": 0, "started": "2026-10-02T16:25:07Z", "usd": 0.4463}
+{"end_reason": "finished", "ended": "2026-10-02T16:31:50Z", "job": "correct-t-0431"}
+{"correction": {"at": "2026-10-02T16:33:17Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0431", "job": "review-t-0431", "kind": "review", "launch_head": "f878ea2", "model": "light-model", "pid": 0, "started": "2026-10-02T16:33:51Z", "usd": 1.1045}
+{"end_reason": "finished", "ended": "2026-10-02T16:40:19Z", "harvested": true, "job": "review-t-0431"}
+{"end_reason": "finished", "ended": "2026-10-02T16:40:19Z", "job": "delivery-code-t-0568"}
+{"correction": {"at": "2026-10-02T16:42:14Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T16:51:09Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T17:00:32Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T17:09:07Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T17:18:17Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T17:26:30Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T17:35:03Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T17:43:36Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0512", "job": "coder-t-0512", "kind": "coder", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-02T17:44:20Z", "usd": 3.4473}
+{"correction": {"at": "2026-10-02T17:52:57Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"end_reason": "finished", "ended": "2026-10-02T17:59:55Z", "job": "coder-t-0512"}
+{"correction": {"at": "2026-10-02T18:01:24Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"item": "T-0512", "job": "review-t-0512", "kind": "review", "launch_head": "5a33622", "model": "light-model", "pid": 0, "started": "2026-10-02T18:02:25Z", "usd": 1.0305}
+{"end_reason": "finished", "ended": "2026-10-02T18:09:00Z", "harvested": true, "job": "review-t-0512"}
+{"correction": {"at": "2026-10-02T18:10:27Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T18:19:18Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T18:27:55Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T18:36:32Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T18:45:15Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T18:53:46Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T19:02:22Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T19:11:35Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T19:20:04Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T19:28:55Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T19:37:27Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T19:45:53Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T19:54:25Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T20:03:00Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T20:11:25Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T20:19:38Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T20:28:13Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T20:36:52Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T20:45:22Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T20:53:41Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T21:02:09Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T21:10:47Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T21:19:15Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T21:27:26Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T21:35:51Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T21:44:18Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T21:52:46Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:01:15Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:09:47Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:17:59Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:26:20Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:34:50Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:43:00Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:51:24Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T22:59:54Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T23:08:25Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T23:16:35Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T23:25:02Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T23:33:25Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T23:41:44Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T23:50:11Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-02T23:58:39Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T00:06:49Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T00:15:15Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T00:23:35Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T00:31:58Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T00:40:49Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T00:49:04Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T00:58:28Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T01:09:53Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T01:18:04Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T01:26:12Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T01:34:32Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T01:42:48Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T01:51:06Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T01:59:24Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T02:07:39Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T02:16:01Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T02:24:17Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T02:32:30Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T02:40:45Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T02:49:01Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T02:57:16Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T03:05:37Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T03:13:54Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T03:22:10Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T03:30:30Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T03:38:51Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T03:47:07Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T03:55:08Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T04:03:17Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T04:11:36Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T04:19:56Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T04:28:21Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T04:36:49Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T04:45:17Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T04:53:42Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T05:02:20Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T05:10:22Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T05:18:39Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T05:27:01Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T05:35:16Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T05:43:43Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T05:52:12Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:00:27Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:09:02Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:17:41Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:26:13Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:34:42Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:43:38Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:56:09Z", "kind": "gate"}, "job": "correct-t-0483"}
+{"correction": {"at": "2026-10-03T06:57:56Z", "kind": "operator"}, "job": "correct-t-0547"}
+{"correction": {"at": "2026-10-03T06:57:57Z", "kind": "operator"}, "job": "coder-t-0163"}
+{"correction": {"at": "2026-10-03T06:58:04Z", "kind": "operator"}, "job": "correct-t-0386"}
+{"item": "T-0547", "job": "correct-t-0547", "kind": "correct", "launch_head": "8306eeb", "model": "light-model", "pid": 0, "started": "2026-10-03T07:11:25Z", "usd": 1.1008}
+{"item": "T-0163", "job": "correct-t-0163", "kind": "correct", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-03T07:11:27Z", "usd": 0.9302}
+{"item": "inbox:sample.md", "job": "groom-clerk-2026-10-03", "kind": "groom-clerk", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-03T07:11:29Z", "usd": 0.7666}
+{"end_reason": "finished", "ended": "2026-10-03T07:17:51Z", "harvested": true, "job": "groom-clerk-2026-10-03"}
+{"item": "F-1139", "job": "spec-f-1139", "kind": "spec", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-03T07:20:11Z", "usd": 4.4642}
+{"item": "F-0011", "job": "groom-2026-10-03", "kind": "groom", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-03T07:20:14Z", "usd": 8.2177}
+{"end_reason": "failed: empty branch", "ended": "2026-10-03T07:27:15Z", "job": "correct-t-0163"}
+{"end_reason": "finished", "ended": "2026-10-03T07:27:15Z", "job": "correct-t-0547"}
+{"correction": {"at": "2026-10-03T07:27:15Z", "kind": "blocked"}, "job": "correct-t-0163"}
+{"item": "T-0547", "job": "review-t-0547", "kind": "review", "launch_head": "88f4107", "model": "light-model", "pid": 0, "started": "2026-10-03T07:30:33Z", "usd": 1.7549}
+{"end_reason": "finished", "ended": "2026-10-03T07:37:52Z", "harvested": true, "job": "spec-f-1139"}
+{"end_reason": "finished", "ended": "2026-10-03T07:37:52Z", "job": "groom-2026-10-03"}
+{"item": "F-1137", "job": "replan-f-1137", "kind": "replan", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-03T07:40:34Z", "usd": 3.8958}
+{"end_reason": "finished", "ended": "2026-10-03T07:47:01Z", "job": "review-t-0547"}
+{"correction": {"at": "2026-10-03T07:48:28Z", "kind": "review"}, "job": "review-t-0547"}
+{"item": "T-0547", "job": "correct-t-0547", "kind": "correct", "launch_head": "88f4107", "model": "light-model", "pid": 0, "started": "2026-10-03T07:49:20Z", "usd": 0.5156}
+{"end_reason": "finished", "ended": "2026-10-03T07:56:46Z", "harvested": true, "job": "replan-f-1137"}
+{"end_reason": "finished", "ended": "2026-10-03T07:56:46Z", "job": "correct-t-0547"}
+{"item": "T-0547", "job": "review-t-0547", "kind": "review", "launch_head": "868064a", "model": "light-model", "pid": 0, "started": "2026-10-03T07:59:21Z", "usd": 0.67}
+{"end_reason": "finished", "ended": "2026-10-03T08:05:40Z", "job": "review-t-0547"}
+{"item": "T-0514", "job": "correct-t-0514", "kind": "correct", "launch_head": "fc4d3ec", "model": "light-model", "pid": 0, "started": "2026-10-03T08:07:56Z", "usd": 1.6674}
+{"correction": {"at": "2026-10-03T08:16:01Z", "kind": "review"}, "job": "correct-t-0416"}
+{"end_reason": "finished", "ended": "2026-10-03T08:25:11Z", "job": "correct-t-0514"}
+{"item": "T-0514", "job": "review-t-0514", "kind": "review", "launch_head": "4e0862c", "model": "light-model", "pid": 0, "started": "2026-10-03T08:54:09Z", "usd": 1.1336}
+{"end_reason": "finished", "ended": "2026-10-03T09:08:49Z", "harvested": true, "job": "review-t-0514"}
+{"item": "F-1139", "job": "plan-f-1139", "kind": "plan", "launch_head": "", "model": "heavy-model", "pid": 0, "started": "2026-10-03T09:11:05Z", "usd": 6.8922}
+{"end_reason": "finished", "ended": "2026-10-03T09:27:26Z", "harvested": true, "job": "plan-f-1139"}
+{"correction": {"at": "2026-10-03T09:57:16Z", "kind": "gate"}, "job": "review-t-0547"}
+{"item": "T-0571", "job": "coder-t-0571", "kind": "coder", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-03T10:54:46Z", "usd": 9.4622}
+{"item": "T-0515", "job": "coder-t-0515", "kind": "coder", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-03T10:54:48Z", "usd": 1.1775}
+{"end_reason": "finished", "ended": "2026-10-03T11:09:48Z", "job": "coder-t-0515"}
+{"item": "T-0515", "job": "review-t-0515", "kind": "review", "launch_head": "0c5de9c", "model": "light-model", "pid": 0, "started": "2026-10-03T11:12:01Z", "usd": 0.7465}
+{"end_reason": "finished", "ended": "2026-10-03T11:18:16Z", "harvested": true, "job": "review-t-0515"}
+{"end_reason": "finished", "ended": "2026-10-03T11:27:05Z", "job": "coder-t-0571"}
+{"item": "T-0516", "job": "coder-t-0516", "kind": "coder", "launch_head": "", "model": "light-model", "pid": 0, "started": "2026-10-03T12:18:18Z", "usd": 1.3711}
+{"end_reason": "finished", "ended": "2026-10-03T12:33:13Z", "job": "coder-t-0516"}
