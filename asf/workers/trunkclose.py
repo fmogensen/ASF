@@ -133,6 +133,8 @@ def evidence(path, item, repo, main='main', writes=(), ask_gh=True):
     sha = trunk_sha(repo, main, run, text, item, writes, landing.run_prs(path, item))
     if not sha or unlanded(repo, main, run.get('branch')):
         return None
+    if lifecycle.voided_sha(path, item, sha):
+        return None  # the operator voided that landing (`asf reset`): it closes nothing
     if landing.open_work(repo, main, path, item, [run.get('branch')], ask_gh=ask_gh):
         return None  # the item's own work is unmerged: nothing on the trunk closes it
     return full_sha(repo, sha) or sha, run, claim

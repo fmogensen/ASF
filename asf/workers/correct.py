@@ -126,6 +126,13 @@ def file_ruling(product, item, text, stamp):
     """Appends ``- <stamp> adjudicate (operator): <text>`` to ``item``'s card ``## History``
     in the product's record and publishes it (commit and push, when the record is a checkout).
     ``''`` when filed, else why not."""
+    line = f'- {stamp} adjudicate ({OPERATOR}): {" ".join(text.split())}'
+    return file_history(product, item, line, f'record: {item} operator ruling (asf correct)')
+
+
+def file_history(product, item, line, message, step='correct'):
+    """Appends ``line`` to ``item``'s card ``## History`` through the record's stage and
+    publishes it with ``message``. ``''`` when filed, else why not."""
     from asf.evidence import rulings
     from asf.record import frontmatter, publish, stage
     from asf.record.ingest import append_history_lines
@@ -133,7 +140,6 @@ def file_ruling(product, item, text, stamp):
     card = rulings._card_file(product, item)
     if not root or not card or not os.path.isfile(card):
         return f'no card for {item} in the record'
-    line = f'- {stamp} adjudicate ({OPERATOR}): {" ".join(text.split())}'
     rel = os.path.relpath(card, root)
 
     def _write(_root, path, relpath):
@@ -142,11 +148,11 @@ def file_ruling(product, item, text, stamp):
         with open(path, 'w', encoding='utf-8') as f:
             f.write(frontmatter.render(meta, append_history_lines(body, [line])))
 
-    _r, _staged, findings = stage.guarded(root, 'correct', _write, (card, rel), product=product,
+    _r, _staged, findings = stage.guarded(root, step, _write, (card, rel), product=product,
                                           only=[rel])
     if findings:
         return 'refused: ' + '; '.join(f'{f.invariant}: {f.message}' for f in findings)
-    if not publish.publish(root, card, f'record: {item} operator ruling (asf correct)'):
+    if not publish.publish(root, card, message):
         return 'filed, but the record push was refused'
     return ''
 
@@ -178,3 +184,116 @@ def register(sub):
                    help='a reference PR whose commits the session cherry-picks (never landed)')
     env.add_product_arg(p)
     p.set_defaults(func=cmd_correct)
+
+
+# ---- asf reset: void a wrong landing -------------------------------------------------------
+
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def landing_claim(run):
+    """``(sha, pr)`` of ``run``'s landing claim — its ``harvested`` sha (never ``superseded``),
+    else its lane's merge sha — or ``('', None)``."""
+    lane = run.get('lane') if isinstance(run.get('lane'), dict) else {}
+    sha = str(run.get('harvested') or '')
+    if not sha or sha in lifecycle.NOT_A_LANDING:
+        sha = str(lane.get('sha') or '') if lane.get('state') == 'MERGED' else ''
+    return (sha if re.fullmatch(r'[0-9a-f]{7,40}', sha) else ''), lane.get('pr')
+
+
+def _alive(product, path, alive):
+    if alive is None:
+        from asf.workers import health
+        alive = health.alive_for(product, list(lifecycle.latest(path).values()))
+    return alive
+
+
+def cmd_reset(args, alive=None):
+    """``asf reset <item> --why TEXT`` voids the item's newest landing claim: a reset line
+    naming its ``(pr, head)`` (:func:`asf.workers.lifecycle.note_reset`), the run's
+    ``harvested`` cleared, a History line on the card. ``--undo`` takes the newest void back."""
+    product = env.load_product(getattr(args, 'product', None))
+    why = str(getattr(args, 'why', '') or '').strip()
+    item = (args.item or '').strip().upper()
+    if not why:
+        print('asf reset: --why is required — it is the reason the landing is void')
+        return 2
+    if not ITEM_RE.fullmatch(item):
+        print(f'asf reset: {args.item} is no item id')
+        return 2
+    path = pool_mod.sessions_path(product)
+    if getattr(args, 'undo', False) is True:
+        return undo_reset(product, path, item, why)
+    alive = _alive(product, path, alive)
+    if any(lifecycle.occupies(r, alive) for r in lifecycle.item_runs(path, item)):
+        print(f'asf reset: {item} has a session running — reset it when it ends')
+        return 1
+    every = [r for rs in lifecycle.runs(path).values() for r in rs if r.get('item') == item]
+    claims = [(r, *landing_claim(r)) for r in every]
+    claims = [c for c in claims if c[1]]
+    if not claims:
+        print(f'asf reset: {item} has no landing claim in the ledger — nothing to void')
+        return 1
+    standing = [c for c in claims if not lifecycle.voided_run(path, c[0], c[1])]
+    if not standing:
+        print(f'asf reset: {item}: its landing {claims[-1][1][:7]} is already void')
+        return 0
+    run, sha, pr = max(standing, key=lambda c: c[0].get('started') or '')
+    now = _now()
+    reset = {'pr': pr, 'branch': run.get('branch') or '', 'head': sha, 'archive': '',
+             'why': why, 'by': OPERATOR}
+    if not lifecycle.note_reset(path, item, reset, now=now, alive=alive):
+        print(f'asf reset: {item}: landing {sha[:7]} is already void')
+        return 0
+    if lifecycle.latest(path).get(run['job'], {}).get('started') == run.get('started'):
+        pool_mod.update_session(product, run['job'], harvested=None,
+                                landing_voided={'sha': sha, 'pr': pr, 'at': now, 'why': why,
+                                                'by': OPERATOR})
+    stamp = now[:16].replace('T', ' ')
+    filed = file_history(product, item,
+                         f'- {stamp} reset ({OPERATOR}): landing {sha[:7]}'
+                         + (f' (PR #{pr})' if pr else '') + f' voided — {" ".join(why.split())}',
+                         f'record: {item} landing {sha[:7]} voided (asf reset)', step='reset')
+    print(f'reset {item}: landing {sha[:7]}' + (f' (PR #{pr})' if pr else '')
+          + f' voided, job {run["job"]} — the item starts over: {why}'
+          + (f'; card History: {filed}' if filed else ''))
+    return 0
+
+
+def undo_reset(product, path, item, why):
+    """``asf reset --undo <item>``: the newest void of ``item`` is taken back — an unreset line
+    naming its ``(pr, head)``, the run's ``harvested`` restored, a History line."""
+    vs = lifecycle.voids(path, item)
+    if not vs:
+        print(f'asf reset --undo: {item} has no voided landing to restore')
+        return 1
+    v = max(vs, key=lambda v: v.get('at') or '')
+    now = _now()
+    lifecycle.note_unreset(path, item, v, why=why, by=OPERATOR, now=now)
+    for job, rs in lifecycle.runs(path).items():
+        last = rs[-1] if rs else {}
+        lv = last.get('landing_voided') if isinstance(last.get('landing_voided'), dict) else {}
+        if last.get('item') == item and lv.get('sha') == v.get('head'):
+            pool_mod.update_session(product, job, harvested=v['head'], landing_voided=None)
+    stamp = now[:16].replace('T', ' ')
+    filed = file_history(product, item,
+                         f'- {stamp} reset undone ({OPERATOR}): landing {str(v.get("head"))[:7]} '
+                         f'restored — {" ".join(why.split())}',
+                         f'record: {item} landing {str(v.get("head"))[:7]} restored (asf reset --undo)',
+                         step='reset')
+    print(f'reset undone {item}: landing {str(v.get("head"))[:7]} restored: {why}'
+          + (f'; card History: {filed}' if filed else ''))
+    return 0
+
+
+def register_reset(sub):
+    """``asf reset <item> --why TEXT [--undo] [--product P]``."""
+    p = sub.add_parser('reset', help='record that an item\'s landing claim was wrong: void it and '
+                                     'start the item over (--undo takes it back)')
+    p.add_argument('item', help='the item id')
+    p.add_argument('--why', required=True, help='why the landing is void (or why it is restored)')
+    p.add_argument('--undo', action='store_true', help='restore the newest voided landing')
+    env.add_product_arg(p)
+    p.set_defaults(func=cmd_reset)
+    return p

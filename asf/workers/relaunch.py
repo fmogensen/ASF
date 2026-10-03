@@ -207,6 +207,9 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
     if landed and landing.open_work(repo, main, path, item, [r.get('branch') for r in runs],
                                     ask_gh=False):
         landed = ''  # the item's own commits are unmerged: nothing on the trunk is its landing
+    if landed and lifecycle.voided_sha(path, item, landed):
+        why += f' — claims voided landing {landed[:7]}'
+        landed = ''  # the operator voided it (`asf reset`): parked, never closed on it
     if landed:
         why += (f' — the work it names is on origin/{main} at {landed[:9]} (verified): close '
                 f'{item} on that evidence')
