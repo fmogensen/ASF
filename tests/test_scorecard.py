@@ -180,6 +180,36 @@ class ScoreTests(unittest.TestCase):
         self.assertFalse(score.is_dead(run('j', '2026-09-01T00:00:00Z', 'failed', landed=True)))
 
 
+class RepairPrefixTests(unittest.TestCase):
+    """score.REPAIR_PREFIXES carries 'precheck' (F-0224 S-36505): a precheck session is repair
+    load in its own right, and no other kind's numbers move because of it."""
+
+    def test_precheck_is_repair(self):
+        self.assertTrue(score.is_repair('precheck'))
+
+    def test_a_precheck_job_name_reads_kind_precheck(self):
+        self.assertEqual(score.session_kind({'task': 'precheck-t-0271', 'item': 'T-0271'}), 'precheck')
+
+    def test_a_precheck_cause_can_cross_the_kind_share_gate(self):
+        sessions = sessions_fixture() + [{'ts': '2026-09-06T10:00:00Z', 'task': 'precheck-t-0271',
+                                          'item': 'T-0001', 'usd': 5.0, 'minutes': 5}]
+        f = facts_fixture(sessions=sessions)
+        found = {c.key for c in diagnose.causes(f, *diagnose.window(f.as_of, 7),
+                                                 {'kind_share': 0.05, 'kind_min_usd': 1})}
+        self.assertIn('kind:precheck', found)
+
+    def test_kind_review_share_is_unmoved_by_precheck_joining_repair_prefixes(self):
+        sessions = sessions_fixture() + [{'ts': '2026-09-06T10:00:00Z', 'task': 'precheck-t-0271',
+                                          'item': 'T-0001', 'usd': 5.0, 'minutes': 5}]
+        f = facts_fixture(sessions=sessions)
+        w = diagnose.window(f.as_of, 7)
+        with_precheck = diagnose.metric(f, 'kind:review', *w)
+        without_prefixes = tuple(p for p in score.REPAIR_PREFIXES if p != 'precheck')
+        with mock.patch.object(score, 'REPAIR_PREFIXES', without_prefixes):
+            without_precheck = diagnose.metric(f, 'kind:review', *w)
+        self.assertEqual(with_precheck, without_precheck)
+
+
 class TotalRowTests(unittest.TestCase):
     """score.total_row over literal stored weekly rows (F-0148) — no Facts, no file, no clock."""
 
