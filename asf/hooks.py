@@ -73,6 +73,24 @@ ACCOUNT_HOOKS = tuple((event, name) for name, events in BUILTIN.items() for even
 #: ``asf redact`` mode it execs (``--pre-commit`` / ``--pre-push``).
 GIT_HOOK_NAMES = ('pre-commit', 'pre-push')
 
+#: The real git hooks directory's own files — never tracked, so not part of the amendable set
+#: (`GIT_HOOK_GLOBS`), but never a session's to write either: the hook asf installs, and the
+#: `<hook>.local` behind it that runs on every commit (F-0121, D9).
+REAL_GIT_HOOK_GLOBS = ('.git/hooks/*', '*/.git/hooks/*')
+
+#: What a foreign hook is renamed to when `asf hooks install --chain` chains it (F-0121).
+LOCAL_SUFFIX = '.local'
+
+#: The comment line every hook `_git_hook_body` writes carries — what `asf hooks uninstall` knows
+#: this installer's own file by, and `asf init`'s (`asf.init.INIT_MARKER`) or the operator's
+#: hand-merged one by its absence (D6).
+HOOK_MARKER = 'written by asf hooks install'
+
+#: The git hooks git feeds on stdin, whose chained body buffers it once so both halves read the
+#: same bytes (D2). `pre-commit` is not one: git does not give it ref lines and does not reliably
+#: close its stdin, and a `cat` there would hang every commit in the repo.
+STDIN_HOOKS = ('pre-push',)
+
 
 def git_hooks_dir(repo):
     """``git -C <repo> rev-parse --git-path hooks``, made absolute — the real hooks directory of
@@ -94,10 +112,62 @@ def git_hooks_dir(repo):
     return out if os.path.isabs(out) else os.path.join(repo, out)
 
 
-def _git_hook_body(name, asf_path, product_name):
+def _git_hook_body(name, asf_path, product_name, chained=False):
+    """The hook script ``asf hooks install`` writes for ``name`` (F-0121). ``chained=False`` is
+    today's three lines: a shebang, the :data:`HOOK_MARKER` comment, and an ``exec`` of the gate.
+    ``chained=True`` is the body written when a foreign hook was renamed to ``<name>.local``
+    (:data:`LOCAL_SUFFIX`) behind it: the gate runs first, then the renamed hook, found at run
+    time as ``"$(dirname "$0")/<name>.local"`` (D3) and guarded by ``[ -x … ]`` so one git was
+    already ignoring stays ignored. A hook in :data:`STDIN_HOOKS` buffers stdin once into a
+    ``mktemp`` file so both halves read the same bytes (D2, D3); every other hook passes stdin
+    through untouched. Both forward ``"$@"`` and propagate whichever half's exit status is
+    nonzero first."""
+    if not chained:
+        return ('#!/bin/sh\n'
+                '# written by asf hooks install — the redaction gate (F-0075)\n'
+                f'exec "{asf_path}" redact --{name} --product {product_name}\n')
+    local = name + LOCAL_SUFFIX
+    if name in STDIN_HOOKS:
+        return ('#!/bin/sh\n'
+                f'# {HOOK_MARKER} — the redaction gate (F-0075), chaining {local}\n'
+                f'# Your own {name} was renamed to {local} and runs below, with the same arguments and\n'
+                '# the same refs. `asf hooks uninstall --product <p>` puts it back.\n'
+                '# git writes the pushed refs on stdin and both halves need them: buffered once, read twice.\n'
+                'refs="$(mktemp "${TMPDIR:-/tmp}/asf-pre-push.XXXXXX")" || exit 1\n'
+                'trap \'rm -f "$refs"\' EXIT HUP INT TERM\n'
+                'cat > "$refs"\n'
+                f'"{asf_path}" redact --{name} --product {product_name} < "$refs" || exit $?\n'
+                f'own="$(dirname "$0")/{local}"\n'
+                '[ -x "$own" ] || exit 0\n'
+                '"$own" "$@" < "$refs"\n'
+                'exit $?\n')
     return ('#!/bin/sh\n'
-            '# written by asf hooks install — the redaction gate (F-0075)\n'
-            f'exec "{asf_path}" redact --{name} --product {product_name}\n')
+            f'# {HOOK_MARKER} — the redaction gate (F-0075), chaining {local}\n'
+            f'# Your own {name} was renamed to {local} and runs below, with the same arguments\n'
+            '# and the same stdin. `asf hooks uninstall --product <p>` puts it back.\n'
+            f'"{asf_path}" redact --{name} --product {product_name} || exit $?\n'
+            f'own="$(dirname "$0")/{local}"\n'
+            '[ -x "$own" ] || exit 0\n'
+            'exec "$own" "$@"\n')
+
+
+def chained_local(text, name):
+    """``<name>.local`` when ``text`` is a chained hook this installer wrote for ``name`` — it
+    carries :data:`HOOK_MARKER` and names ``<name><LOCAL_SUFFIX>`` — else None. The name only: the
+    file sits beside the hook, in the directory the caller already has."""
+    text = text or ''
+    local = name + LOCAL_SUFFIX
+    if HOOK_MARKER in text and local in text:
+        return local
+    return None
+
+
+def _write_hook(path, body):
+    """The ``open`` / ``write`` / ``chmod 0o755`` triple every hook file this installer writes
+    goes through, so the three cannot drift between the two call sites."""
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(body)
+    os.chmod(path, 0o755)
 
 
 #: A pipx ``--suffix`` appended to the declared console-script name: empty, or starting with a
@@ -236,15 +306,18 @@ def runnable_asf(which=shutil.which):
     return asf_path, None
 
 
-def ensure_git_hooks(product, which=shutil.which):
+def ensure_git_hooks(product, which=shutil.which, chain=False):
     """Returns ``(ok, detail)`` (D10, §2.4). Writes the redaction gate's ``pre-commit`` and
     ``pre-push`` into :func:`git_hooks_dir` of each of ``product.repo_dir`` and
     ``product.backlog_dir`` that is set. A hook file already there and already asf's
     (:func:`is_git_hook_ours`) is left alone — running this twice changes nothing. One already
-    there and not asf's is left untouched too, and the call refuses with the ``NEEDS OPERATOR``
-    line naming the one line the operator adds; every other missing hook in the same call is
-    still written. An ``asf`` that does not exist or is not executable (:func:`runnable_asf`)
-    refuses before any hook is touched."""
+    there and not asf's is, with ``chain`` false, left untouched and the call refuses with the
+    ``NEEDS OPERATOR`` line naming the one line the operator adds; every other missing hook in the
+    same call is still written. With ``chain`` true (F-0121) it is instead renamed to
+    ``<name>.local`` and ASF's chained body — the gate, then the renamed hook — is written in its
+    place, unless a ``<name>.local`` is already there, which refuses rather than losing it. An
+    ``asf`` that does not exist or is not executable (:func:`runnable_asf`) refuses before any
+    hook is touched."""
     asf_path, refusal = runnable_asf(which)
     if refusal:
         return False, refusal
@@ -252,6 +325,7 @@ def ensure_git_hooks(product, which=shutil.which):
     if not repos:
         return True, 'no repo_dir or backlog_dir configured'
     refusals = []
+    moved = []
     for repo in repos:
         hooks_dir = git_hooks_dir(repo)
         if hooks_dir is None:
@@ -265,21 +339,31 @@ def ensure_git_hooks(product, which=shutil.which):
                     text = f.read()
                 upgrade = init_hook_upgrade(text, name) or staged_check_upgrade(text, name)
                 if upgrade is not None:  # ASF's own record hook, from before the gate or --staged
-                    with open(path, 'w', encoding='utf-8') as f:
-                        f.write(upgrade)
-                    os.chmod(path, 0o755)
+                    _write_hook(path, upgrade)
                     continue
                 if not is_git_hook_ours(text, name):
-                    refusals.append(f'NEEDS OPERATOR: {path} is not asf\'s — add the line: '
-                                    f'"{asf_path}" redact --{name} --product {product.name}')
+                    if not chain:
+                        refusals.append(f'NEEDS OPERATOR: {path} is not asf\'s — add the line: '
+                                        f'"{asf_path}" redact --{name} --product {product.name}')
+                        continue
+                    local = path + LOCAL_SUFFIX
+                    if os.path.exists(local):
+                        refusals.append(f'NEEDS OPERATOR: {local} is already there — asf hooks '
+                                        f'install cannot chain {path} without losing it; move it '
+                                        f'aside or merge the two')
+                        continue
+                    os.rename(path, local)
+                    moved.append((path, local))
+                    _write_hook(path, _git_hook_body(name, asf_path, product.name, chained=True))
                 continue
             os.makedirs(hooks_dir, exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(_git_hook_body(name, asf_path, product.name))
-            os.chmod(path, 0o755)
+            _write_hook(path, _git_hook_body(name, asf_path, product.name))
     if refusals:
         return False, '\n'.join(refusals)
-    return True, f'pre-commit, pre-push in {len(repos)} repos'
+    detail = f'pre-commit, pre-push in {len(repos)} repos'
+    if moved:
+        detail += '; ' + '; '.join(f'chained {path} → {local}' for path, local in moved)
+    return True, detail
 
 
 def declared_hooks(rules_dir=RULES_DIR):
