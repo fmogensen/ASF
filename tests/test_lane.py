@@ -11,6 +11,7 @@ occupancy answer (R16), and the ``NAME=value`` prefix of a test command (§12).
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -377,7 +378,7 @@ class LaneFixture(unittest.TestCase):
             f.write(text)
 
     def product(self, **conventions):
-        conv = {'test_command': f'{sys.executable} -m unittest discover -s checks -p test_*.py',
+        conv = {'test_command': f'{shlex.quote(sys.executable)} -m unittest discover -s checks -p test_*.py',
                 'specs_dir': 'specs', 'plans_dir': 'plans', 'reviews_dir': 'reviews',
                 'lane': {'review': {'code': 'none'}},
                 'branch_prefixes': {'code': 'worker/', 'plan': 'plan/', 'spec': 'spec/'}}
@@ -782,7 +783,7 @@ class LaneRepo(LaneFixture):
                  '        self.assertEqual(os.environ.get("LANE_PROBE"), "on")\n')
         self.push_lane('worker/T-0001', {'checks/test_probe.py': probe}, 'feat(T-0001): probe')
         self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
-        cmd = f'LANE_PROBE=on {sys.executable} -m unittest discover -s checks -p test_*.py'
+        cmd = f'LANE_PROBE=on {shlex.quote(sys.executable)} -m unittest discover -s checks -p test_*.py'
         results = harvest.run_product_harvest(self.product(test_command=cmd), self.state_dir,
                                               out=lambda *_: None)
         self.assertEqual(results, {'worker/T-0001': 'landed'})
