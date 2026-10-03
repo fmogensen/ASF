@@ -72,8 +72,8 @@ def cmd_new(args, root):
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    if args.priority and args.priority not in ('need', 'nice'):
-        print("error: --priority must be need or nice", file=sys.stderr)
+    if args.priority and args.priority not in ('need', 'nice', 'later'):
+        print("error: --priority must be need, nice or later", file=sys.stderr)
         return 2
 
     by_id, _errors = load_items(root)

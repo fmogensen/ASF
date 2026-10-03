@@ -14,8 +14,8 @@ Every row is filled from what exists, or says which key would fill it —
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
 * **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
 * **Features in build** — X / N: the Features in build against ``feeder.max_features_in_build``
-  and the inputs ``auto`` sized it from (:func:`asf.feeder.rows.build_load`) — while X >= N no
-  new Feature starts;
+  and the inputs ``auto`` sized it from (:func:`asf.feeder.rows.build_state`) — "no new Feature
+  starts" only while the cap holds a launching row, else "the cap holds no row now";
 * **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
   closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
@@ -308,12 +308,13 @@ def build_cell(root, product):
         return not_configured('backlog_dir (no index.json)')
     items, _generated = ix.load(root)
     inputs = plan_inputs(product, root)
-    x, n, why = feeder_rows.build_load(items, product, capacity(product), inflight(product),
-                                       inputs.get('occupancy'), bandwidth=inputs.get('bandwidth'),
-                                       attempts=inputs.get('attempts'),
-                                       groom_state=inputs.get('groom_state'),
-                                       held=inputs.get('held'), gate=inputs.get('gate'))
-    return f"{x} / {n} ({why})" + (' — no new Feature starts' if x >= n else '')
+    x, n, why, binds = feeder_rows.build_state(
+        items, product, capacity(product), inflight(product), inputs.get('occupancy'),
+        landed_shas=inputs.get('landed_shas'), bandwidth=inputs.get('bandwidth'),
+        attempts=inputs.get('attempts'), groom_state=inputs.get('groom_state'),
+        held=inputs.get('held'), gate=inputs.get('gate'), adjudicated=inputs.get('adjudicated'),
+        unverified_landed=inputs.get('unverified_landed'))
+    return f"{x} / {n} ({why})" + feeder_rows.build_binds_note(x, n, binds)
 
 
 def decisions_cell(root, product):

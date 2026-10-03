@@ -129,6 +129,10 @@ WAITS_LANDING = 'WAITS ON landing'
 WAITS_MERGE = 'WAITS ON merge'
 #: an Epic past its typed budget (F-0052): this module owns the action word, asf.budget the money
 WAITS_BUDGET = 'WAITS ON budget'
+#: ``priority: later`` on an item, its Feature or its Epic: the product put the work aside
+#: (:func:`hold_shelved`) — its new work waits, and so does every row waiting on it
+LATER = 'later'
+WAITS_LATER = 'WAITS ON later'
 PLAN_CODE = 'PLAN → CODE'
 #: A Task (or delivery) whose ``writes:`` reaches the amendable set (:mod:`asf.amendable`): no
 #: worker session may edit that set, so none is launched to be refused — the console makes the
@@ -1761,6 +1765,67 @@ def over_budget_epics(rows, items, verdicts=None):
     return out
 
 
+def shelved(items, parks=()):
+    """``{item id: why}`` for every open item the product has put aside: one with
+    ``priority: later`` on itself, its Feature or its Epic (``'F-0112 later'``, the nearest such
+    card named), or one a standing item-scope operator park holds (``'operator park'``)."""
+    later = {v['id'] for v in items.values()
+             if str(v.get('priority') or '').strip().lower() == LATER}
+    parked = {p.get('item') for p in parks or () if (p.get('scope') or 'item') == 'item'}
+    out = {}
+    for v in items.values():
+        if not is_open(v):
+            continue
+        seen, cur = set(), v
+        while cur and cur['id'] not in seen:
+            seen.add(cur['id'])
+            if cur['id'] in later:
+                out[v['id']] = f"{cur['id']} {LATER}"
+                break
+            cur = items.get(cur.get('parent'))
+        else:
+            if v['id'] in parked:
+                out[v['id']] = 'operator park'
+    return out
+
+
+_WAITED = re.compile(r'^WAITS ON (?:delivery )?([A-Z]+-\d+)\b')
+
+
+def hold_shelved(rows, items, parks=()):
+    """Work the product put aside (:func:`shelved`) is neither started nor dressed up as live:
+
+    * a launching row of new work (:data:`BUDGET_HELD_KINDS`) under a ``priority: later``
+      Feature or Epic becomes ``WAITS ON later: F-0112 later`` — no session, no slot, still
+      shown; a review, a correction or a landing of work already pushed still finishes;
+    * a row waiting on a put-aside item says why it will not move:
+      ``WAITS ON T-0377 (parked: F-0112 later)``. The ``after:`` / ``delivers:`` edge stays —
+      dropping it is the product's call, not the feeder's.
+
+    Returns ``(rows, shelved_rows)``: ``shelved_rows`` holds the ``id()`` of every row of
+    put-aside work, which :func:`candidates` orders behind the live parity work."""
+    why = shelved(items, parks)
+    if not why:
+        return rows, set()
+    out, aside = [], set()
+    for r in rows:
+        own = why.get(r.item_id) or why.get(r.feature_id)
+        if own and own.endswith(f' {LATER}') and r.launches and r.kind in BUDGET_HELD_KINDS:
+            r = dataclasses.replace(r, action=f'{WAITS_LATER}: {own}', waits_on=LATER,
+                                    reason=f'priority: {LATER} — {own}: new work waits until '
+                                           f'the product raises it')
+        elif not r.launches:
+            m = _WAITED.match(r.action)
+            target = m.group(1) if m else ''
+            if target and target in why and '(parked: ' not in r.action:
+                r = dataclasses.replace(r, action=f'{r.action} (parked: {why[target]})')
+                own = own or why[target]
+        out.append(r)
+        if own and not r.launches:
+            aside.add(id(r))
+    return out, aside
+
+
 def hold_parks(rows, items, parks):
     """A branch or job park (``asf park <branch|job>``, :func:`asf.workers.lifecycle.parks`)
     holds that branch's or that job's rows alone: each row of its item on the branch (or for the
@@ -1917,6 +1982,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     rows = hold_replanning(rows, items)
     rows = hold_classes(rows, product)
     rows = over_budget_epics(rows, items)          # F-0052
+    rows, aside = hold_shelved(rows, items, occ.get('parks'))
     cap, attempts = attempt_limit(product), attempts or {}
     rows = [_capped(r, attempts, cap, product, adjudicated)
             if r.launches and r.kind in CAPPED_KINDS else r for r in rows]
@@ -1955,7 +2021,9 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
         phase = finish_phase(items, r)
         return (r.tier, phase, near(r, f) if phase == 0 and f else (0, 0), *order,
                 KIND_ORDER.get(r.kind, 5), seq)
-    return [r for _seq, r in sorted(enumerate(rows), key=key)]
+    ordered = [r for _seq, r in sorted(enumerate(rows), key=key)]
+    # work the product put aside (:func:`hold_shelved`) ranks behind every live row of its tier
+    return sorted(ordered, key=lambda r: (r.tier, r.tier >= 2 and id(r) in aside))
 
 
 def finish_phase(items, row):
@@ -2036,40 +2104,77 @@ def features_in_build(items, busy=(), landed=()):
     return sorted(out)
 
 
-def features_moving(items, rows, busy=(), landed=(), held=()):
+def features_moving(items, rows, busy=(), landed=(), held=(), live=None):
     """The Features in build (:func:`features_in_build`) that take the factory's bandwidth now:
-    a Task held by a session or a branch waiting to land (``busy``), or a Task with a launching
-    row (:func:`buildable_features`). A Feature in build with neither — its landed Tasks behind
-    it, the rest waiting on work that is not moving — is stalled: holding new work does not
-    finish it, so it does not count against :func:`build_cap` (37 counted, 7 moving: the
-    factory's own record, 2026-09-28)."""
+    a Task held by a live session (``live``; absent, ``busy``), or a Task with a launching row
+    (:func:`buildable_features`). A Feature in build with neither — its landed Tasks behind it,
+    the rest waiting on work that is not moving — is stalled: holding new work does not finish
+    it, so it does not count against :func:`build_cap` (37 counted, 7 moving: the factory's own
+    record, 2026-09-28). A Task whose branch only waits to land (CI, review, the merge queue) is
+    not a session either: 4 of a product's 8 "moving" Features on 2026-10-03 were such Tasks,
+    and they held a STARVED → PLAN at cap 4 while 0 sessions ran."""
     busy = set(busy or ())
+    live = busy if live is None else set(live)
     ready = set(buildable_features(items, rows, set(held or ())))
     return [f for f in features_in_build(items, busy, landed)
-            if f in ready or any(t['id'] in busy for t in ix.feature_tasks(items, items[f]))]
+            if f in ready or any(t['id'] in live for t in ix.feature_tasks(items, items[f]))]
 
 
-def build_load(items, product, capacity, inflight=(), occupancy=None, landed_shas=None,
-               bandwidth=None, rows=None, attempts=None, groom_state=None, held=None, gate=None):
-    """``(X, N, why)``: the Features in build that are moving (:func:`features_moving`), the
-    cap (:func:`features_cap`), and the inputs that set it — what ``asf next`` and ``asf
-    status`` show, and what :func:`build_cap` holds by. ``rows``: the uncut candidates; absent,
-    they are drawn here as :func:`plan_rows` draws them."""
+def live_ids(inflight, occupancy):
+    """The items a session works on now: a running session's, and a live run the occupancy
+    names (``busy``) — never one whose work only waits to land (:func:`occupied` has both)."""
+    return inflight_ids(inflight) | set((occupancy or {}).get('busy') or ())
+
+
+def build_state(items, product, capacity, inflight=(), occupancy=None, landed_shas=None,
+                bandwidth=None, rows=None, attempts=None, groom_state=None, held=None, gate=None,
+                adjudicated=None, unverified_landed=None):
+    """``(X, N, why, binds)``: the Features in build that are moving (:func:`features_moving`),
+    the cap (:func:`features_cap`), the inputs that set it, and whether the cap holds anything
+    now — what ``asf next`` and ``asf status`` show. ``binds``: :func:`build_cap` turns at least
+    one launching row into ``WAITS ON finish``. X >= N alone holds nothing when no Feature in
+    build has a Task row that launches, so no view may then say the cap stops a start
+    (2026-10-03: "7 / 4 — no new Feature starts" while 0 sessions ran and the one launching row,
+    a STARVED → PLAN, launched). ``rows``: the uncut candidates; absent, they are drawn here as
+    :func:`plan_rows` draws them — the same inputs, so the count is the one the cap reads."""
     index, items = items, items_of(items)
     busy = inflight_ids(inflight) | occupied(occupancy)
     if rows is None:
         rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
-                          groom_state=groom_state, landed_shas=landed_shas)
+                          groom_state=groom_state, landed_shas=landed_shas,
+                          adjudicated=adjudicated, unverified_landed=unverified_landed)
         if gate is not None:
             rows = gate(rows, items)
-    moving = features_moving(items, rows, busy, landed_ids(items, landed_shas), held)
+    landed = landed_ids(items, landed_shas)
+    moving = features_moving(items, rows, busy, landed, held, live_ids(inflight, occupancy))
     cap, why = features_cap(product, capacity, bandwidth)
-    return len(moving), cap, why
+    capped = build_cap(rows, items, product, inflight, capacity, held, occupancy=occupancy,
+                       landed_shas=landed_shas, bandwidth=bandwidth)
+    binds = any(a.launches and not b.launches for a, b in zip(rows, capped))
+    return len(moving), cap, why, binds
 
 
-def build_load_line(x, cap, why):
-    """How every view writes :func:`build_load`: ``Features in build 7 / 6 (auto: …)``."""
-    return f"Features in build {x} / {cap} ({why})"
+def build_load(items, product, capacity, inflight=(), occupancy=None, landed_shas=None,
+               bandwidth=None, rows=None, attempts=None, groom_state=None, held=None, gate=None,
+               adjudicated=None, unverified_landed=None):
+    """``(X, N, why)`` of :func:`build_state`."""
+    return build_state(items, product, capacity, inflight, occupancy, landed_shas, bandwidth,
+                       rows, attempts, groom_state, held, gate, adjudicated,
+                       unverified_landed)[:3]
+
+
+def build_load_line(x, cap, why, binds=None):
+    """How every view writes :func:`build_load`: ``Features in build 7 / 6 (auto: …)``; with
+    ``binds`` (:func:`build_state`) it says whether the cap holds a start now."""
+    return f"Features in build {x} / {cap} ({why})" + build_binds_note(x, cap, binds)
+
+
+def build_binds_note(x, cap, binds):
+    """`` — no new Feature starts`` only while the cap holds a row (``binds``); at or over the cap
+    with nothing held, `` — the cap holds no row now``."""
+    if binds is None or x < cap:
+        return ''
+    return ' — no new Feature starts' if binds else ' — the cap holds no row now'
 
 
 def build_cap(rows, items, product, inflight, capacity, held=(), occupancy=None,
@@ -2088,7 +2193,7 @@ def build_cap(rows, items, product, inflight, capacity, held=(), occupancy=None,
     busy = inflight_ids(inflight) | occupied(occupancy)
     landed = landed_ids(items, landed_shas)
     building = set(features_in_build(items, busy, landed))
-    moving = features_moving(items, rows, busy, landed, held)
+    moving = features_moving(items, rows, busy, landed, held, live_ids(inflight, occupancy))
     cap, why = features_cap(product, capacity, bandwidth)
     if len(moving) < cap or not building & set(buildable_features(items, rows, held)):
         return rows

@@ -71,7 +71,7 @@ def action_cell(row):
 def table(rows, header=None, hidden=0, load=None):
     """The rows table — markdown, like every other ``asf`` view. ``hidden``: the undecided cards
     the decision-row cap left out; the footer is a line of the table, not a row. ``load``:
-    :func:`asf.feeder.rows.build_load`'s ``(X, N, why)``, said under the table."""
+    :func:`asf.feeder.rows.build_state`'s ``(X, N, why[, binds])``, said under the table."""
     out = [header or f"**NEXT** — {len(rows)} rows · "
                      f"{sum(1 for r in rows if r.launches)} would launch"]
     out.append('')
@@ -125,10 +125,12 @@ def cmd_next(args, root=None):
     if getattr(args, 'json', False):
         print(rows_json(rows), end='')
     else:
-        load = R.build_load(items, product, capacity, inflight, inputs.get('occupancy'),
-                            bandwidth=inputs.get('bandwidth'), attempts=inputs.get('attempts'),
-                            groom_state=inputs.get('groom_state'), held=inputs.get('held'),
-                            gate=inputs.get('gate'))
+        load = R.build_state(items, product, capacity, inflight, inputs.get('occupancy'),
+                             landed_shas=inputs.get('landed_shas'),
+                             bandwidth=inputs.get('bandwidth'), attempts=inputs.get('attempts'),
+                             groom_state=inputs.get('groom_state'), held=inputs.get('held'),
+                             gate=inputs.get('gate'), adjudicated=inputs.get('adjudicated'),
+                             unverified_landed=inputs.get('unverified_landed'))
         print(table(rows, hidden=hidden, load=load), end='')
     return 0
 

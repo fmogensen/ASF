@@ -10,6 +10,20 @@ import sys
 from asf.views import index_reader as ix
 
 STATE_STATUS = {"Closed": "done", "Resolved": "doing", "Active": "doing", "New": "todo"}
+#: a Story not done under a card the product set ``priority: later`` (itself, its Feature or its
+#: Epic): put aside — neither doing nor todo, and ranked behind the live parity work
+LATER = "later"
+
+
+def later_of(items, item):
+    """The id of the nearest card at or above ``item`` with ``priority: later``, or ''."""
+    seen = set()
+    while item and item['id'] not in seen:
+        seen.add(item['id'])
+        if str(item.get('priority') or '').strip().lower() == LATER:
+            return item['id']
+        item = items.get(item.get('parent'))
+    return ''
 
 
 def title(row):
@@ -22,12 +36,14 @@ def story_rows(items):
         feat = items.get(s.get('parent')) or {}
         epic = ix.epic_of(items, feat) if feat else None
         st = STATE_STATUS.get(s['state'])
+        aside = later_of(items, s) if st != 'done' else ''
         ftitle = re.sub(r'\*\*|`', '', feat.get('title', '')).strip()
         ftitle = (ftitle[:57] + '…') if len(ftitle) > 58 else ftitle
         rows.append(dict(
             id=s.get('legacy_id') or s['id'], area=s.get('area') or '(no area)', cap=s['title'],
-            status=st or 'todo', broken=st is None, when=f"{ftitle} ({feat['id']})" if feat else '(no Feature)',
-            order=(ix.rank(epic) if epic else ix.BIG, ix.rank(feat) if feat else ix.BIG, ftitle, s['id'])))
+            status=LATER if aside else (st or 'todo'), broken=st is None,
+            when=(f"{ftitle} ({feat['id']})" if feat else '(no Feature)') + (f" — {aside} {LATER}" if aside else ''),
+            order=(bool(aside), ix.rank(epic) if epic else ix.BIG, ix.rank(feat) if feat else ix.BIG, ftitle, s['id'])))
     return rows
 
 
@@ -47,21 +63,23 @@ def render(root, full=False):
         groups.setdefault(r['when'], []).append(r)
 
     now = datetime.datetime.now().strftime('%H:%M')
-    out = [f"**PARITY {now}** — {n['done']} of {len(rows)} Stories done; {n['doing']} doing, {n['todo']} todo, "
-           f"across {len(groups)} Features still landing. Needs you: 0. Source: `index.json` "
+    landing = sum(1 for rs in groups.values() if rs[0]['status'] != LATER)
+    later = f", {n[LATER]} later (priority: later — not parity work in progress)" if n[LATER] else ""
+    out = [f"**PARITY {now}** — {n['done']} of {len(rows)} Stories done; {n['doing']} doing, {n['todo']} todo{later}, "
+           f"across {landing} Features still landing. Needs you: 0. Source: `index.json` "
            f"(generated {ix.local_stamp(generated)}); done = the Story is Closed (impl + tests cited on disk), "
            f"not tests green."]
     out.append("")
     out.append("**BY AREA**")
     out.append("")
-    out.append("| Area | Done | Doing | Todo | Rows |")
-    out.append("|---|---:|---:|---:|---:|")
+    out.append("| Area | Done | Doing | Todo | Later | Rows |")
+    out.append("|---|---:|---:|---:|---:|---:|")
     by = collections.OrderedDict()
     for r in sorted(rows, key=lambda r: area_key(r['area'])):
         by.setdefault(r['area'], collections.Counter())[r['status']] += 1
     for a, d in by.items():
-        out.append(f"| {a} | {d['done']} | {d['doing']} | {d['todo']} | {sum(d.values())} |")
-    out.append(f"| **All** | **{n['done']}** | **{n['doing']}** | **{n['todo']}** | **{len(rows)}** |")
+        out.append(f"| {a} | {d['done']} | {d['doing']} | {d['todo']} | {d[LATER]} | {sum(d.values())} |")
+    out.append(f"| **All** | **{n['done']}** | **{n['doing']}** | **{n['todo']}** | **{n[LATER]}** | **{len(rows)}** |")
     out.append("")
     out.append(f"**NOT DONE — {len(not_done)} rows, by when**" + ("" if full else " (`*` = doing)"))
     out.append("")
