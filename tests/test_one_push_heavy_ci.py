@@ -43,9 +43,14 @@ class PrePushLog(unittest.TestCase):
                                        githooks._SHIM.format(name=name))
         self.remote = os.path.join(self.tmp, 'remote.git')
         _git(['init', '-q', '--bare', self.remote], self.tmp)
+        # a session's worktree is a linked worktree of the product clone
+        clone = os.path.join(self.tmp, 'clone')
+        _git(['init', '-q', '-b', 'main', clone], self.tmp)
+        _git(['remote', 'add', 'origin', self.remote], clone)
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q',
+              '--allow-empty', '-m', 'root'], clone)
         self.wt = os.path.join(self.tmp, 'wt')
-        _git(['init', '-q', '-b', 'fix/B-0001', self.wt], self.tmp)
-        _git(['remote', 'add', 'origin', self.remote], self.wt)
+        _git(['worktree', 'add', '-q', '-b', 'fix/B-0001', self.wt], clone)
         _git(['config', 'core.hooksPath', '.githooks'], self.wt)  # the product's own hooks
         self.own = os.path.join(self.wt, '.githooks')
         os.makedirs(self.own)
