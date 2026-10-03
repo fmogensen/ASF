@@ -115,16 +115,32 @@ def run_prs(path, item):
     return list(dict.fromkeys(out))
 
 
+#: The open PRs ``gh`` is asked for: a list that comes back this long may be cut short.
+PR_LIMIT = 300
+
+
 def open_prs(repo, item):
-    """``[head branch]`` of every open PR that names ``item`` (title or head branch). [] when
-    ``gh`` cannot answer (no remote, offline) — the git check of the item's branches stands."""
+    """``[head branch]`` of every open PR that names ``item`` (title or head branch), or
+    ``None`` — *unknown* — when ``gh`` cannot answer (no remote, offline, a failed call, an
+    unreadable answer) or answers with :data:`PR_LIMIT` PRs (the list may be cut short). A
+    rate-limit answer raises :class:`asf.gh_limit.RateLimited`: no GitHub decision this pass."""
+    from asf import gh_limit
+    args = ['pr', 'list', '--state', 'open', '--limit', str(PR_LIMIT), '--json',
+            'number,title,headRefName']
+    gh_limit.guard(args)
     try:
-        p = subprocess.run(['gh', 'pr', 'list', '--state', 'open', '--limit', '300', '--json',
-                            'number,title,headRefName'], cwd=repo, capture_output=True,
-                           text=True, timeout=60)
-        prs = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() else []
-    except Exception:  # noqa: BLE001 — gh is a second opinion, never a failure
-        return []
+        p = subprocess.run(['gh', *args], cwd=repo, capture_output=True, text=True, timeout=60)
+    except Exception:  # noqa: BLE001 — gh not there or hung: unknown, never "no open PR"
+        return None
+    gh_limit.inspect_proc(args, p)
+    if p.returncode != 0:
+        return None
+    try:
+        prs = json.loads(p.stdout) if p.stdout.strip() else []
+    except ValueError:
+        return None
+    if not isinstance(prs, list) or len(prs) >= PR_LIMIT:
+        return None
     item = (item or '').upper()
     return [pr.get('headRefName') for pr in prs
             if item in ev_mod.naming_ids(pr.get('title') or '')
@@ -134,12 +150,17 @@ def open_prs(repo, item):
 def open_work(repo, main, path, item, branches=(), ask_gh=True):
     """The first branch holding ``item``'s unmerged work — one of ``branches``, of its runs, or
     the head of an open PR naming it (a PR head not fetched counts: its commits are unknown) —
-    or ''. An item with such a branch is never closed as landed."""
+    or ''. An item with such a branch is never closed as landed. ``None`` — *unknown* — when
+    git found nothing and ``ask_gh`` could not read the open PRs (:func:`open_prs`): an
+    unknown is never read as "no open work"."""
     for b in dict.fromkeys([*(branches or ()), *run_branches(path, item)]):
         if b and unlanded(repo, main, b):
             return b
     if ask_gh:
-        for b in open_prs(repo, item):
+        heads = open_prs(repo, item)
+        if heads is None:
+            return None
+        for b in heads:
             if not b:
                 continue
             if _git(repo, ['rev-parse', '--verify', '-q', f'refs/remotes/origin/{b}']) is None:
