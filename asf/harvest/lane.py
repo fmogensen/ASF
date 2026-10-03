@@ -3574,6 +3574,49 @@ def conflict_files(repo, trunk, branch):
     return [l for l in (got.stdout or '').splitlines()[1:] if l.strip()]
 
 
+def redaction_recheck(lane, f):
+    """The landing's own redaction scan of a branch whose commits carry
+    :data:`asf.redact.UNCHECKED_TRAILER` — made where no scanner ran (a cloud container's hook
+    with no ``asf``, :func:`asf.hooks._git_hook_body`). Every commit the branch adds over
+    ``origin/<trunk>`` is scanned (:func:`asf.harvest.harvest.scan_beyond_trunk`) before it may
+    merge: a finding sends the branch back (``redact``), a scan that cannot run holds it — never
+    a merge on an unchecked commit. None when nothing is marked or the scan is clean (said so,
+    loudly); else the branch's result."""
+    from asf import redact
+    b, head, repo = f['branch'], f.get('head'), getattr(lane, 'repo', None)
+    if not head or not repo:
+        return None
+    try:
+        try:
+            marked = redact.unchecked_commits(repo, f'origin/{lane.trunk}', head)
+        except redact.RedactError:  # the head not fetched yet: fetch the branch once, read again
+            H.sh(['git', 'fetch', '-q', 'origin', f'+refs/heads/{b}:refs/remotes/origin/{b}'],
+                 cwd=repo)
+            marked = redact.unchecked_commits(repo, f'origin/{lane.trunk}', head)
+    except redact.RedactError as e:
+        lane.out(f'held {b}: redaction re-check could not read the branch — {e}')
+        wait(lane, f, f'redaction re-check failed: {e}', 'held', green=f.get('green'))
+        return 'held'
+    if not marked:
+        return None
+    lane.out(f'harvest: {b}: {len(marked)} commit(s) marked "{redact.UNCHECKED_TRAILER}" '
+             f'({", ".join(s[:9] for s in marked)}) — re-scanning before it merges')
+    try:
+        findings = H.scan_beyond_trunk(repo, head, lane.trunk, redact.patterns(repo))
+    except (OSError, subprocess.SubprocessError, redact.RedactError) as e:
+        lane.out(f'held {b}: redaction re-scan failed — {e}')
+        wait(lane, f, f'redaction re-scan failed: {e}', 'held', green=f.get('green'))
+        return 'held'
+    if not findings:
+        lane.out(f'harvest: {b}: redaction re-scan clean')
+        return None
+    lines = redact.format_findings(findings)
+    send_back(lane, f, 'redact', H.redaction_reason(lines) + ' — remove each finding, then push',
+              sorted({x.path for x in findings if not x.path.startswith('commit ')}),
+              rebase=False)
+    return 'held'
+
+
 def merge_prs(lane, ready):
     """PR mode: merge every green PR the budget has room for — MERGING first (R3), then ``gh pr
     merge`` (or ``--auto`` into a merge queue: QUEUED)."""
@@ -3596,6 +3639,8 @@ def merge_prs(lane, ready):
         if stale:
             lane.out(f'held {b}: PR #{number} not merged — {stale}')
             wait(lane, f, stale, 'held', state=WAITING_CI)
+            continue
+        if redaction_recheck(lane, f):
             continue
         lane.set(f, MERGING, f'PR #{number}', method='squash')
         sha, how = host.merge(b, number, subject=squash_subject(lane, f, number))

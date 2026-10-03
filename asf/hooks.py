@@ -95,9 +95,38 @@ def git_hooks_dir(repo):
 
 
 def _git_hook_body(name, asf_path, product_name):
-    return ('#!/bin/sh\n'
-            '# written by asf hooks install — the redaction gate (F-0075)\n'
-            f'exec "{asf_path}" redact --{name} --product {product_name}\n')
+    """The redaction gate's hook ``name`` (F-0075). It must run wherever the repository is
+    checked out — a hooks dir inside the work tree (``core.hooksPath``) is tracked, so a cloud
+    container gets the same file with no ``asf`` installed (review-t-0356: every commit aborted
+    on a missing ``asf``). So: the install's own ``asf``, else ``$HOME/.local/bin/asf`` (an agent
+    home's link), else ``asf`` on ``PATH``; without any, the repository's own
+    ``tools/checks/redact.sh``; without that, REDACTION UNCHECKED — loudly, the commit flagged
+    for the ``Redaction: unchecked`` trailer (:data:`asf.redact.UNCHECKED_TRAILER`) the landing
+    re-scans before it merges. Never a silent pass."""
+    from asf import redact
+    p = product_name
+    lines = [
+        '#!/bin/sh',
+        '# written by asf hooks install — the redaction gate (F-0075)',
+        f'if [ -x "{asf_path}" ]; then exec "{asf_path}" redact --{name} --product {p}; fi',
+        f'if [ -x "$HOME/.local/bin/asf" ]; then exec "$HOME/.local/bin/asf" redact --{name} '
+        f'--product {p}; fi',
+        f'if command -v asf >/dev/null 2>&1; then exec asf redact --{name} --product {p}; fi',
+        '# no asf here (a cloud container): the repository\'s own check, else REDACTION UNCHECKED',
+        'top=$(git rev-parse --show-toplevel 2>/dev/null)',
+        f'if [ -n "$top" ] && [ -x "$top/{CHECKS_DIR}/redact.sh" ]; then '
+        f'exec "$top/{CHECKS_DIR}/redact.sh" --{name}; fi',
+    ]
+    if name == 'pre-commit':
+        lines.append(f'flag=$(git rev-parse --git-path {redact.UNCHECKED_FLAG} 2>/dev/null) '
+                     '&& date -u +%Y-%m-%dT%H:%M:%SZ >> "$flag"')
+    lines += [
+        f'echo "asf: REDACTION UNCHECKED ({name}) — no asf and no {CHECKS_DIR}/redact.sh here: '
+        'nothing was scanned for names or secrets. The commit is marked '
+        f'\'{redact.UNCHECKED_TRAILER}\' and the landing re-scans it before it merges." >&2',
+        'exit 0',
+    ]
+    return '\n'.join(lines) + '\n'
 
 
 #: A pipx ``--suffix`` appended to the declared console-script name: empty, or starting with a
@@ -396,6 +425,19 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
             dispatch_detail = 'dispatcher: NEEDS OPERATOR (below)'
         if dispatch.is_ours(dispatcher):
             which = lambda _name, _path=dispatcher: _path  # noqa: E731 — every hook names it
+        # every agent home's $HOME/.local/bin/asf follows the operator's path (the dispatcher):
+        # a hook under any home finds a working asf, after this install and after every move
+        from asf.workers import runtime
+        operator_home = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(dispatcher))))
+        linked = runtime.link_all_homes(operator_home)
+        broken = [h for h, link in linked if link is None]
+        if linked:
+            dispatch_detail = (dispatch_detail + '; ' if dispatch_detail else '') + (
+                f'agent homes: {len(linked) - len(broken)}/{len(linked)} linked')
+        for h in broken:
+            refusals.append(f'NEEDS OPERATOR: agent home {h} has no working .local/bin/asf — '
+                            f'no asf at {dispatcher} or on PATH to link')
     asf_path, refusal = runnable_asf(which)
     if refusal:
         return 2, '\n'.join([refusal] + refusals)

@@ -382,6 +382,36 @@ def scan_unpublished(repo, head, pats, published=()):
     return findings
 
 
+#: The trailer a commit carries when no scanner ran on it (a hook with no ``asf`` and no
+#: ``tools/checks/redact.sh``, :func:`asf.hooks._git_hook_body`): the landing re-scans every such
+#: commit before it merges (:func:`asf.harvest.lane.redaction_recheck`).
+UNCHECKED_KEY = 'Redaction'
+UNCHECKED_TRAILER = f'{UNCHECKED_KEY}: unchecked'
+#: The file under the git dir a pre-commit with no scanner leaves, for the ``commit-msg`` step
+#: that turns it into :data:`UNCHECKED_TRAILER` (:mod:`asf.workers.githooks`).
+UNCHECKED_FLAG = 'asf-redaction-unchecked'
+
+
+def unchecked_commits(repo, base, head):
+    """The shas in ``base..head`` whose message carries :data:`UNCHECKED_TRAILER`, oldest
+    first. Raises :class:`RedactError` when git cannot read the range."""
+    p = _run_git(repo, ['log', '--reverse', '--format=%H%x00%B%x00%x01', f'{base}..{head}'])
+    if p.returncode != 0:
+        raise RedactError(f'git log {base}..{head}: {(p.stderr or "").strip()}')
+    out = []
+    for rec in p.stdout.split('\x01'):
+        rec = rec.strip('\n')
+        if not rec:
+            continue
+        sha, _sep, body = rec.partition('\x00')
+        trailers = _run_git(repo, ['interpret-trailers', '--parse'], input_text=body).stdout
+        if any(ln.split(':', 1)[0].strip().lower() == UNCHECKED_KEY.lower()
+               and ln.split(':', 1)[1].strip().lower() == 'unchecked'
+               for ln in trailers.splitlines() if ':' in ln):
+            out.append(sha.strip())
+    return out
+
+
 def scan_tree(repo, pats):
     """Every file of ``git ls-files`` but ``LICENSE``, every line."""
     out = _run_git(repo, ['ls-files']).stdout
