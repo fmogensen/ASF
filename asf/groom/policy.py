@@ -563,3 +563,158 @@ def suppress(sections, index, inflight, product):
                 new_lines.append(line)
         out[key] = new_lines
     return out, count
+
+
+# ---- dependency roots (``flags.roots``, W8-PR1g) --------------------------------------------
+
+#: the ``trunk_closed:`` reason an accepted unverified landing carries — the rule's own name, so
+#: the ledger says which rule closed the item
+COVERS_ACCEPT = 'groom-covers-accept'
+
+
+def decide_unverified_landing(item_id, sha, age_hours, covers, report, hours):
+    """Rule 2 of ``flags.roots``: a landing recorded for ``item_id`` but not verified as its
+    work decides itself once it is ``hours`` old — *accept* when the harvested ``sha`` covers
+    the item's ``writes:`` (``covers``) and the run's REPORT says ``done`` (``report``), else
+    *reset*: the claim is voided and the item starts over. Younger, or no age known: no answer,
+    the NEEDS DECISION row stands. Pure — the caller reads the facts
+    (:func:`unverified_landing_facts`) and applies the answer (:func:`apply_unverified_landings`)."""
+    if age_hours is None or age_hours < hours:
+        return None
+    short = str(sha or '')[:9] or 'no sha'
+    if covers and report == 'done':
+        why = (f'{COVERS_ACCEPT}: {short} covers its writes: and its report says done '
+               f'(unverified for {int(age_hours)} h)')
+        return Answer('accept', 'trunk_closed', why, why)
+    said = f'report {report}' if report else 'no report'
+    why = (f'unverified for {int(age_hours)} h: {short} '
+           f"{'covers' if covers else 'does not cover'} its writes:, {said}")
+    return Answer('reset', 'reset', why, why)
+
+
+def unverified_landing_facts(product, occupancy, unverified, items, now, path=None, repo=None):
+    """``[(item, run, sha, age_hours, covers, report)]`` for each unverified landing
+    (``unverified``: :func:`asf.workers.landing.verify_landings`' second half): its landing run
+    (the newest run of the item harvested at the recorded sha), how long since it ended, whether
+    the sha covers the item's ``writes:`` (:func:`asf.workers.landing.covers`) and the run's
+    REPORT status (:func:`asf.harvest.lane.report_status`). A run already closed by the trunk
+    rule, or none found, gives no fact."""
+    from asf.harvest.lane import report_status
+    from asf.tick.stale import parse_iso
+    from asf.workers import landing, lifecycle
+    from asf.workers import pool as pool_mod
+    path = path or pool_mod.sessions_path(product)
+    repo = repo or getattr(product, 'repo_dir', None)
+    landed = (occupancy or {}).get('landed') or {}
+    out = []
+    for iid in sorted(unverified or ()):
+        sha = landed.get(iid) or ''
+        runs = [r for r in lifecycle.item_runs(path, iid) if sha and r.get('harvested') == sha]
+        if not runs or runs[-1].get('trunk_closed'):
+            continue
+        run = runs[-1]
+        ended = parse_iso(run.get('ended'))
+        age = (now - ended).total_seconds() / 3600 if ended else None
+        writes = [str(w) for w in ((items or {}).get(iid) or {}).get('writes') or ()]
+        out.append((iid, run, sha, age, bool(repo) and landing.covers(repo, sha, writes),
+                    report_status(run)))
+    return out
+
+
+def _reset(product, item_id, why):
+    """``asf reset <item> --why`` when this release has it, else ``None`` (the answer waits)."""
+    import argparse
+    from asf.workers import correct
+    cmd = getattr(correct, 'cmd_reset', None)
+    if cmd is None:
+        return None
+    return cmd(argparse.Namespace(item=item_id, why=why, undo=False, product=product.name))
+
+
+def apply_unverified_landings(product, root, now=None, out=print, dry_run=False):
+    """Rule 2 of ``flags.roots``, once per tick (the groom step): every unverified landing at
+    least ``flags.roots_unverified_hours`` old is decided (:func:`decide_unverified_landing`) —
+    an accept closes its run on the sha (:func:`asf.workers.trunkclose.close`, reason
+    :data:`COVERS_ACCEPT`: the ingest closes the card by its ordinary rule), a reset voids the
+    claim (``asf reset``). Flag off: nothing. Returns ``[(item, word)]``."""
+    import datetime
+    import os
+    from asf.feeder import rows as feeder_rows
+    if not feeder_rows.roots_on(product):
+        return []
+    from asf.tick import step_wave
+    from asf.views import index_reader
+    from asf.workers import trunkclose
+    if not root or not os.path.isfile(os.path.join(root, 'index.json')):
+        return []
+    index, _gen = index_reader.load(root)
+    items = feeder_rows.items_of(index)
+    occ = step_wave.occupancy(product)
+    _verified, unverified = step_wave.landings(product, occ, index)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    hours = feeder_rows.roots_settings(product)[0]
+    done = []
+    for iid, run, sha, age, covers, report in unverified_landing_facts(product, occ, unverified,
+                                                                       items, now):
+        answer = decide_unverified_landing(iid, sha, age, covers, report, hours)
+        if answer is None:
+            continue
+        if dry_run:
+            out(f'roots: would {answer.word} {iid} — {answer.why}')
+        elif answer.word == 'accept':
+            trunkclose.close(product, run['job'], sha, answer.why)
+            out(f'roots: accepted {iid} — {answer.why}')
+        else:
+            rc = _reset(product, iid, answer.why)
+            if rc is None:
+                out(f'roots: {iid} needs a reset (asf reset is not in this release) — '
+                    f'{answer.why}')
+                continue
+            if rc:
+                out(f'roots: reset {iid} refused (rc {rc}) — {answer.why}')
+                continue
+            out(f'roots: reset {iid} — {answer.why}')
+        done.append((iid, answer.word))
+    return done
+
+
+def stale_park_lines(rows, canonical):
+    """Rule 3 of ``flags.roots``: one groom question per stale park the feeder surfaced
+    (:func:`asf.feeder.rows.surface_stale_parks`) — never one per dependant::
+
+        - [ ] T-0108 <title> — 31 rows wait on this park (4 d): unpark it, close it or replan it → answer: ____
+    """
+    from asf.feeder import rows as feeder_rows
+    from asf.record import frontmatter
+    lines, seen = [], set()
+    for r in rows:
+        m = feeder_rows.STALE_PARK_RE.match(r.action or '')
+        if not m or r.item_id in seen:
+            continue
+        seen.add(r.item_id)
+        rec = (canonical or {}).get(r.item_id)
+        title = frontmatter.split_machine(rec['meta'])[0].get('title', '') if rec else ''
+        age = re.search(r'\((\d+) d\)', r.action)
+        lines.append(f"- [ ] {r.item_id} {title} — {m.group(1)} rows wait on this park"
+                     f"{f' ({age.group(1)} d)' if age else ''}: unpark it (`asf unpark`), close "
+                     f"it (`close: <why>`) or replan it (`reshape: <how>`) → answer: ____")
+    return lines
+
+
+def stale_park_section(product, root, canonical):
+    """:func:`stale_park_lines` over the plan the feeder would make now; ``[]`` with
+    ``flags.roots`` off, or no index to plan from."""
+    import os
+    from asf.feeder import rows as feeder_rows
+    if not feeder_rows.roots_on(product) or not root \
+            or not os.path.isfile(os.path.join(root, 'index.json')):
+        return []
+    from asf.tick import step_wave
+    from asf.views import index_reader
+    index, _gen = index_reader.load(root)
+    inputs = step_wave.plan_inputs(product, root, index=index)
+    keep = ('attempts', 'occupancy', 'groom_state', 'landed_shas', 'adjudicated',
+            'unverified_landed', 'unverified_on_trunk')
+    rows = feeder_rows.candidates(index, product, step_wave.inflight(product),
+                                  **{k: inputs.get(k) for k in keep})
+    return stale_park_lines(rows, canonical)

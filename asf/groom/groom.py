@@ -914,7 +914,10 @@ REFUSED_QUESTIONS = ('Refused on repeat relaunches', 'refused')
 #: (:func:`groom_over_budget_section`) — the operator's ruling, or the adjudicator's under
 #: ``approvals.groom: auto``.
 OVER_BUDGET_QUESTIONS = ('Over budget', 'over_budget')
-EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS, OVER_BUDGET_QUESTIONS]
+#: Rendered only when it has lines (``flags.roots``): a parked item many rows wait on, parked
+#: for days (:func:`asf.groom.policy.stale_park_section`) — one question per root.
+STALE_PARK_QUESTIONS = ('Parked roots others wait on', 'stale_parks')
+EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS, OVER_BUDGET_QUESTIONS, STALE_PARK_QUESTIONS]
 
 _SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + EXTRA_SECTIONS}
 _HEADER_RE = re.compile(r'^## (.+)$')
@@ -1208,6 +1211,7 @@ def cmd_groom(args, root):
     sections[INBOX_QUESTIONS[1]] = inbox_mod.question_lines(root, intake_dir)
     sections[REFUSED_QUESTIONS[1]] = groom_refused_section(canonical, product)
     sections[OVER_BUDGET_QUESTIONS[1]] = groom_over_budget_section(canonical, derived, product)
+    sections[STALE_PARK_QUESTIONS[1]] = policy.stale_park_section(product, root, canonical)
 
     auto = policy.groom_auto(product)
     by_rule = 0
