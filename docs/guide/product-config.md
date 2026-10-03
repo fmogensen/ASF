@@ -51,6 +51,10 @@ conventions:
     plan_ahead: 2
 ```
 
+`plan_ahead: N` (unset: no limit) writes specs and plans just in time: a spec or plan row
+launches only while the Features moving + the spec/plan sessions in flight + the rows admitted
+this wave stay under the build cap + N; the rest say `WAITS ON build slot (plan_ahead N): …`.
+
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.

@@ -178,6 +178,12 @@ NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD,
 #: the session kinds (a run's brief kind) the finish-first cap counts as in flight
 NEW_DOC_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND, DIRECT, REPLAN_KIND)
 FINISH = 'WAITS ON finish'
+#: the rows that write a spec or a plan: what ``flags.plan_ahead`` meters (:func:`plan_ahead_cap`)
+SPEC_PLAN_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN)
+#: the session kinds :func:`plan_ahead_cap` counts as spec/plan work already in flight
+SPEC_PLAN_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND)
+#: the action of a spec/plan row :func:`plan_ahead_cap` holds
+WAITS_BUILD_SLOT = 'WAITS ON build slot'
 #: The kinds ``candidates`` caps at ``attempt_limit`` (F-0080 §2.6, P10) — §1.1's enumeration.
 #: Not here: ``BUG → FIX`` (``bug_rows`` caps it itself), ``FIX → CORRECT`` (it carries its own
 #: ``CORRECTION_ROUNDS``, and a correction is an answer the harvest asked for, not an attempt the
@@ -369,6 +375,16 @@ def max_features_in_build(product):
     if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
         return v
     return MAX_FEATURES_IN_BUILD
+
+
+def plan_ahead(product):
+    """``flags.plan_ahead`` (:meth:`asf.env.Product.flag`): how many Features the product may
+    have specified or planned ahead of its build slots (:func:`plan_ahead_cap`) — a whole number
+    >= 0. Unset, or anything else: None — no limit, every decided card is specified now."""
+    v = _conventions(product).flag('plan_ahead')
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 
 
 def features_per_session(product):
@@ -2215,6 +2231,47 @@ def build_cap(rows, items, product, inflight, capacity, held=(), occupancy=None,
     return out
 
 
+def plan_ahead_cap(rows, items, product, inflight, capacity, held=(), occupancy=None,
+                   landed_shas=None, bandwidth=None):
+    """Specs and plans just in time (``flags.plan_ahead``, :func:`plan_ahead`): a spec or plan
+    row (:data:`SPEC_PLAN_KINDS`) launches only while the Features moving
+    (:func:`features_moving`) + the spec/plan sessions in flight + the spec/plan rows admitted
+    so far stay under the build cap (:func:`features_cap`) + ``plan_ahead``; every launching
+    one past that becomes ``WAITS ON build slot (plan_ahead N): …``. A spec written weeks before
+    a build slot opens is written twice — the product moved under it (a product, 2026-10: 74
+    Features specified and waiting, spec+plan the largest line of its spend). Rows go in Feature
+    order, so the nearest card is specified first. Never held: a correction of a document the
+    lane refused, a held item, a lane experiment's arm (``ab_pair``). Unset: no limit (today)."""
+    ahead = plan_ahead(product)
+    if ahead is None:
+        return rows
+    held = set(held or ())
+    busy = inflight_ids(inflight) | occupied(occupancy)
+    landed = landed_ids(items, landed_shas)
+    moving = len(features_moving(items, rows, busy, landed, held, live_ids(inflight, occupancy)))
+    cap, why = features_cap(product, capacity, bandwidth)
+    running = sum(1 for s in inflight or () if s.get('kind') in SPEC_PLAN_SESSIONS)
+    limit = cap + ahead
+    admitted = sum(1 for r in rows if r.kind in SPEC_PLAN_KINDS and r.launches and r.correction
+                   and r.item_id not in held)
+    out = []
+    for r in rows:
+        paired = (items.get(r.feature_id) or items.get(r.item_id) or {}).get('ab_pair')
+        if (r.kind in SPEC_PLAN_KINDS and r.launches and not r.correction
+                and r.item_id not in held and not paired):
+            if moving + running + admitted < limit:
+                admitted += 1
+            else:
+                reason = (f"{moving} moving + {running} spec/plan in flight + {admitted} this "
+                          f"wave, build cap {cap} ({why}) + plan_ahead {ahead}")
+                r = dataclasses.replace(r, action=f'{WAITS_BUILD_SLOT} (plan_ahead {ahead}): '
+                                                  f'{reason}',
+                                        waits_on='build slot',
+                                        reason=f'just in time — {reason}')
+        out.append(r)
+    return out
+
+
 def finish_first(rows, items, product, inflight, held=()):
     """``feeder.max_specs_in_flight`` (default 2): while a planned Feature has Tasks ready to
     build (:func:`buildable_features`), new spec and plan sessions (:data:`NEW_DOC_KINDS`) are
@@ -2302,6 +2359,8 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
         rows = gate(rows, items_of(index))
     rows = build_cap(rows, items_of(index), product, inflight, capacity, held,
                      occupancy=occupancy, landed_shas=landed_shas, bandwidth=bandwidth)
+    rows = plan_ahead_cap(rows, items_of(index), product, inflight, capacity, held,
+                          occupancy=occupancy, landed_shas=landed_shas, bandwidth=bandwidth)
     rows = finish_first(rows, items_of(index), product, inflight, held)
     return failing_to_spawn(tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first),
                             failing)
