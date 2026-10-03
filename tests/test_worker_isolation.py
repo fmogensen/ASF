@@ -403,7 +403,9 @@ def _doctor_rows():
                 mock.patch.object(doctor, 'check_drift', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_worker_secrets', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_clock_code', return_value=(True, '')), \
-                mock.patch.object(doctor, 'check_clock_installs', return_value=[]):
+                mock.patch.object(doctor, 'check_clock_installs', return_value=[]), \
+                mock.patch.object(doctor, 'check_product_loads_under_venv', return_value=[]), \
+                mock.patch.object(doctor, 'check_cli_dispatcher', return_value=[]):
             return doctor.run('sample')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

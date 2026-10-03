@@ -745,7 +745,10 @@ class DoctorTest(unittest.TestCase):
                 mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
                 mock.patch.object(doctor, 'check_one_factory', return_value=(True, '')), \
                 mock.patch.object(console_perms, 'check_doctor', return_value=(True, '')), \
-                mock.patch.object(doctor, 'check_capacity', return_value=[]):
+                mock.patch.object(doctor, 'check_capacity', return_value=[]), \
+                mock.patch.object(doctor, 'check_clock_installs', return_value=[]), \
+                mock.patch.object(doctor, 'check_product_loads_under_venv', return_value=[]), \
+                mock.patch.object(doctor, 'check_cli_dispatcher', return_value=[]):
             rows = doctor.run('demo')
         # the claim is the order, not the tail: T-0025 appends `redaction-hooks` after these two
         names = [r[0] for r in rows]
