@@ -314,13 +314,14 @@ class _Folded:
     """One registry content, folded: ``view`` is shared and never handed out — callers get
     ``marshal`` copies (fresh objects, nested values included), exactly as a fresh parse."""
 
-    def __init__(self, data, view, resets=None, parks=None, voids=None):
+    def __init__(self, data, view, resets=None, parks=None, voids=None, standing=None):
         self.data = data
         self.view = view
         self.blob = marshal.dumps(view)
         self.resets = resets or {}
         self.parks = parks or {}
         self.voids = voids or {}
+        self.standing = standing or {}
         self._by_item = None
 
     def by_item(self):
@@ -359,7 +360,8 @@ def _folded(path):
     if hit is not None and hit.data == data:
         return hit
     lines = _parse_registry(data, _product_from_registry_dir(path))
-    hit = _Folded(data, fold(lines), _resets(lines), _parks(lines), _voids(lines))
+    hit = _Folded(data, fold(lines), _resets(lines), _parks(lines), _voids(lines),
+                  _standing(lines))
     _REGISTRY_CACHE.pop(key, None)
     while len(_REGISTRY_CACHE) >= _REGISTRY_CACHE_MAX:
         _REGISTRY_CACHE.pop(next(iter(_REGISTRY_CACHE)))
@@ -457,9 +459,10 @@ def voided_sha(path, item, sha):
 
 
 def voided_run(path, run, sha=None):
-    """The void that names ``run``'s landing claim, or None: a standing void of its item whose
-    head is ``sha`` (the run's merge sha, else its ``harvested``), or whose PR is the run's lane PR
-    on a run that started before the void."""
+    """The standing reset that names ``run``'s landing claim, or None: a void of its item whose
+    head is ``sha`` (the run's merge sha, else its ``harvested``), or any standing reset of its
+    item naming the run's lane PR — with the lane's head when both carry one — on a run that
+    started before it. A reset ``(pr, head)`` is never a merge fact, whatever the host says."""
     run = run or {}
     item = run.get('item')
     if not item or not isinstance(item, (str, int, float)):
@@ -469,9 +472,15 @@ def voided_run(path, run, sha=None):
     for v in voids(path, item):
         if sha and _sha_match(v.get('head'), sha):
             return v
-        if v.get('pr') and lane.get('pr') == v.get('pr') \
-                and (run.get('started') or '') < (v.get('at') or ''):
-            return v
+    for v in _folded(path).standing.get(item, ()):
+        if not v.get('pr') or lane.get('pr') != v.get('pr'):
+            continue
+        if (run.get('started') or '') >= (v.get('at') or ''):
+            continue
+        heads = [h for h in (lane.get('head'), sha, lane.get('sha')) if h]
+        if v.get('void') or not v.get('head') or not heads \
+                or any(_sha_match(v.get('head'), h) for h in heads):
+            return dict(v)
     return None
 
 
