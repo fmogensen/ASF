@@ -333,21 +333,52 @@ def read_stream(root, stream, days=None):
     return out
 
 
+#: The fields a `sessions` line's own registry pass owns, and may correct on a later tick. Only
+#: `result` (the registry's `end_reason`) moves today: a run re-judged after the factory published
+#: its worktree (F-0094) ends differently than it was first written, and its `ended` — the natural
+#: key — does not move. A tuple, so a second such field joins it without touching the compare.
+#: `reason` is the log's own last line and `usd` / `minutes` / the token dimensions are the
+#: meter's: an ended run's log does not grow, so none of them is corrected here.
+SESSION_OWNED = ('result',)
+
+
+def _rewrite_file(path, events):
+    """Rewrite a stream's day file from its parsed events, in order, atomically."""
+    d = os.path.dirname(path)
+    with tempfile.NamedTemporaryFile('w', dir=d, delete=False, encoding='utf-8') as f:
+        for e in events:
+            f.write(dumps(e) + '\n')
+        f.flush()
+        tmp = f.name
+    os.replace(tmp, path)
+
+
 def append_event(root, stream, ev):
-    """Append a normalised event to its day's file. Returns ('appended'|'exists', path)."""
+    """Append a normalised event to its day's file.
+    Returns ('appended'|'exists'|'updated', path)."""
     path = stream_path(root, stream, ev['ts'][:10])
     key = natural_key(stream, ev)
-    if any(natural_key(stream, e) == key for e in read_file(path)):
+    lines = read_file(path)
+    hit = next((i for i, e in enumerate(lines) if natural_key(stream, e) == key), None)
+    if hit is None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        prefix = ''
+        if os.path.isfile(path) and os.path.getsize(path):
+            with open(path, 'rb') as f:
+                f.seek(-1, os.SEEK_END)
+                prefix = '' if f.read(1) == b'\n' else '\n'
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(prefix + dumps(ev) + '\n')
+        return 'appended', path
+    if stream != 'sessions':
         return 'exists', path
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    prefix = ''
-    if os.path.isfile(path) and os.path.getsize(path):
-        with open(path, 'rb') as f:
-            f.seek(-1, os.SEEK_END)
-            prefix = '' if f.read(1) == b'\n' else '\n'
-    with open(path, 'a', encoding='utf-8') as f:
-        f.write(prefix + dumps(ev) + '\n')
-    return 'appended', path
+    stored = lines[hit]
+    if all(stored.get(f) == ev.get(f) for f in SESSION_OWNED):
+        return 'exists', path
+    for f in SESSION_OWNED:
+        stored[f] = ev[f]
+    _rewrite_file(path, lines)
+    return 'updated', path
 
 
 def cmd_append(args, root):
@@ -376,6 +407,8 @@ def cmd_append(args, root):
         rel = os.path.relpath(path, root)
         if status == 'exists':
             print(f"no-op: already in {rel} (natural key {natural_key(args.stream, ev)})")
+        elif status == 'updated':
+            print(f"updated {rel} (natural key {natural_key(args.stream, ev)})")
         else:
             print(f"appended to {rel}")
     return rc
