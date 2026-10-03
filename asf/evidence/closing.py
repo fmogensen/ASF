@@ -10,6 +10,7 @@ The rules, first match per type after the two `any` rows:
 
   any      reconciled         a typed landed sha and green CI                    -> Closed
   any      parent-closed      the parent is Closed and the item has no evidence  -> Closed
+                                  (a matrix status todo is evidence: unbuilt stays open)
   task     landed-green       a trunk commit or merged PR, and green CI          -> Closed
   task     landed             a trunk commit or merged PR                        -> Resolved
   task     in-flight          a branch or a PR                                   -> Active
@@ -81,7 +82,10 @@ def _landed(ev):
 
 
 def _own_evidence(ev):
-    return bool(ev.commit or ev.merged_sha or ev.branch or ev.pr_state or ev.open_prs
+    """Anything of its own that says the item was worked: a commit, a PR, a branch, a child with
+    evidence. ``matrix_status == 'todo'`` is evidence too, of the opposite: the plan says the
+    work is unbuilt, so a parent's close is no proof it was done (parent-closed never fires)."""
+    return bool(ev.matrix_status == 'todo' or ev.commit or ev.merged_sha or ev.branch or ev.pr_state or ev.open_prs
                 or ev.child_evidence)
 
 

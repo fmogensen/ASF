@@ -894,6 +894,21 @@ class DescentTests(IngestTestCase):
         self.assertEqual(story['evidence'][-1], 'rule: parent-closed')
         self.assertIn('F-0001 Closed (commit ' + 'b' * 7 + ')', story['evidence'])
 
+    def test_a_story_whose_matrix_row_says_todo_is_not_closed_by_its_parent(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        write(self.root, 'S-0003', 'story', 'Never built', 'stories', parent='F-0001',
+              typed_lines=['legacy_id: F-VOX-8'])
+        write(self.root, 'T-0003', 'task', 'Under the unbuilt Story', 'tasks', parent='S-0003')
+        ev = self.evidence()
+        ev['stories'] = {'F-VOX-8': {'status': 'todo'}}
+        self.assertEqual(self.run_ingest(ev), 0)
+        self.assertEqual(self.meta('features', 'F-0001')['state'], 'Closed')
+        story = self.meta('stories', 'S-0003')
+        self.assertNotIn(story['state'], ('Closed', 'Resolved'))
+        self.assertNotIn('rule: parent-closed', story['evidence'])
+        self.assertEqual(self.meta('tasks', 'T-0003')['state'], 'New')
+
     def test_a_story_whose_task_is_active_does_not_move(self):
         self.tree()
         self.run_ingest(self.evidence())

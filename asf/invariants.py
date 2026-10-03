@@ -200,8 +200,16 @@ def _state(meta):
     return _machine(meta).get('state', 'New')
 
 
+def _flat_writes(raw):
+    """``writes:`` as the paths it names: an entry a plan packed two paths into
+    (``[a.py b.py]``) is read as two, before and after a writer alike, so a ``+=`` is judged on
+    the paths it added and never on the re-spelling of the ones already there."""
+    from asf.feeder import widen
+    return widen.norm_writes(raw or ())
+
+
 def _writes_of(meta):
-    return sorted(str(w) for w in (meta.get('writes') or ()))
+    return sorted(str(w) for w in _flat_writes(meta.get('writes')))
 
 
 def _after_of(meta):
@@ -213,7 +221,7 @@ def overlap_tasks(metas):
     typed or machine block each field lives in) normalised into the shape :func:`unordered_overlaps`
     takes, ``state`` read through :func:`_state` so a machine-block value and a plain dict's
     top-level one are read alike."""
-    return {iid: {'type': m.get('type'), 'state': _state(m), 'writes': m.get('writes') or (),
+    return {iid: {'type': m.get('type'), 'state': _state(m), 'writes': _flat_writes(m.get('writes')),
                   'after': m.get('after') or (), 'removed': m.get('removed')}
             for iid, m in metas.items()}
 

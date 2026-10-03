@@ -113,6 +113,12 @@ class TotalityTests(unittest.TestCase):
         got = state_of('task', Ev(parent_closed=True, branch='worker/x'), c.NEW)
         self.assertEqual((got.state, got.rule), (c.ACTIVE, 'in-flight'))
 
+    def test_parent_closed_does_not_close_an_item_the_matrix_says_is_todo(self):
+        got = state_of('story', Ev(parent_closed=True, matrix_status='todo'), c.NEW)
+        self.assertEqual((got.state, got.rule), (c.NEW, c.NO_RULE))
+        got = state_of('task', Ev(parent_closed=True, matrix_status='todo'), c.NEW)
+        self.assertEqual(got.state, c.NEW)
+
     def test_ev_is_null_per_field(self):
         self.assertEqual(dataclasses.asdict(Ev())['commit'], '')
 
