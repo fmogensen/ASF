@@ -408,9 +408,21 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
         ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
     if not (ev.unpushed or (ev.remote_sha and not ev.head_on_remote)):
         return reason, ev, '; '.join(lines) or None
-    ok, line = lifecycle.publish(wt, branch, ev.remote_sha, main=product.main,
-                                 protected=refguard.listed(product.conventions),
-                                 push_timeout_s=gitpush.push_timeout(product.conventions))
+    from asf.harvest import mechanical  # the lane's table; harvest imports this module
+    publish_args = dict(main=product.main, protected=refguard.listed(product.conventions),
+                        push_timeout_s=gitpush.push_timeout(product.conventions))
+    if mechanical.enabled(product):
+        # flags.mechanical (W2-PR3b): review/notes rounds origin holds are dropped, a rewritten
+        # origin is replayed onto — the event on the run, as the lane's table writes it
+        ok, line, out = mechanical.publish_worktree(product, wt, branch, ev.remote_sha,
+                                                    **publish_args)
+        was = run.get('mechanical') or {}
+        if run.get('job') and (was.get('kind'), was.get('head'), was.get('resolved')) \
+                != (out.kind, out.head, out.resolved):  # once per outcome, not every pass
+            run['mechanical'] = mechanical.event(out)
+            pool_mod.update_session(product, run['job'], mechanical=run['mechanical'])
+    else:
+        ok, line = lifecycle.publish(wt, branch, ev.remote_sha, **publish_args)
     if not ok:
         return reason, ev, '; '.join(lines + [line])
     ev = lifecycle.gather(product, run, alive=alive, worktree=wt)

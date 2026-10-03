@@ -16,8 +16,12 @@ from types import SimpleNamespace
 from asf import env
 from asf.feeder import widen
 from asf.harvest import harvest, lane, mechanical
+from asf.workers import health as health_mod
 from asf.workers import lifecycle
+from asf.workers import pool as pool_mod
 from tests import test_lane as TL
+from tests import test_lifecycle as TLC
+from tests import test_workers as TW
 
 sh = TL.sh
 
@@ -268,6 +272,246 @@ class Widen(unittest.TestCase):
     def test_a_second_widening_is_reshape(self):
         v = widen.widen(self.ITEMS, 'T-1', ['x.py'], limit=5, widened_before=1)
         self.assertEqual(v.kind, widen.RESHAPE)
+
+
+class _Rounds(TLC._RebaseShape):
+    """A lane branch on origin and a session's worktree of it, for the ``unpushed`` entry."""
+
+    REVIEW = 'reviews/1-t-0001.md'
+
+    def write(self, name, text, msg, repo=None):
+        repo = repo or self.repo
+        os.makedirs(os.path.dirname(os.path.join(repo, name)) or repo, exist_ok=True)
+        return self.commit(name, text, msg, repo=repo)
+
+    def review_round_on_origin(self, text='round 1 — approved\n'):
+        """A reviewer's round committed to origin/<branch> from another clone."""
+        other = os.path.join(self.base, 'reviewer')
+        if not os.path.isdir(other):
+            self.sh(['clone', '-q', '-b', self.branch, self.origin, other], self.base)
+            self.identity(other, 'reviewer@example.com')
+        else:
+            self.sh(['pull', '-q', '--rebase', 'origin', self.branch], other)
+        sha = self.write(self.REVIEW, text, 'review(T-0001): round 1', repo=other)
+        self.sh(['push', '-q', 'origin', self.branch], other)
+        return sha
+
+    def remote(self):
+        return self.sh(['ls-remote', '--heads', 'origin', self.branch], self.repo).split()[0]
+
+    def on_origin(self, ref):
+        out = self.sh(['ls-remote', '--heads', 'origin', ref], self.repo)
+        return out.split()[0] if out else ''
+
+    def head(self):
+        return self.sh(['rev-parse', 'HEAD'], self.repo)
+
+
+def _droppable(path):
+    return path.startswith('reviews/')
+
+
+class DroppedRounds(_Rounds):
+    """W2-PR3b (2): origin holds review rounds the session's head lacks; the session wrote the
+    same review file (an adjudication), so neither a rebase onto origin nor a carry applies —
+    today a refusal every pass ("rebase conflicts", "would lose N commits"). Under the flag the
+    rounds are archived and the head published over them; any other commit still refuses."""
+
+    def setUp(self):
+        super().setUp()
+        self.commit('a', 'own a\n', 'task(T-0001): own a')
+        self.push_branch()
+
+    def test_on_its_base_a_review_only_conflict_refuses_without_the_flag(self):
+        self.review_round_on_origin()
+        self.write(self.REVIEW, 'adjudicated\n', 'review(T-0001): adjudicated')
+        self.commit('c', 'own c\n', 'task(T-0001): own c')
+        remote = self.remote()
+        ok, line = lifecycle.publish(self.repo, self.branch, remote, main='main')
+        self.assertFalse(ok, line)
+        self.assertTrue(lifecycle.rebase_conflict(line), line)
+        self.assertEqual(self.remote(), remote)
+
+    def test_on_its_base_review_rounds_are_archived_and_the_head_published(self):
+        rnd = self.review_round_on_origin()
+        self.write(self.REVIEW, 'adjudicated\n', 'review(T-0001): adjudicated')
+        head = self.commit('c', 'own c\n', 'task(T-0001): own c')
+        ok, line = lifecycle.publish(self.repo, self.branch, rnd, main='main',
+                                     droppable=_droppable)
+        self.assertTrue(ok, line)
+        self.assertIn('dropped 1 review/notes round(s)', line)
+        self.assertEqual(self.remote(), head)
+        self.assertEqual(self.on_origin(lifecycle.copies_archive(self.branch, rnd)), rnd)
+
+    def test_past_the_remote_on_the_trunk_review_rounds_are_archived_and_published(self):
+        rnd = self.review_round_on_origin()
+        self.land_on_trunk(('t', 'trunk\n', 'chore: the trunk moves'))
+        self.sh(['rebase', '-q', 'origin/main'], self.repo)
+        self.write(self.REVIEW, 'adjudicated\n', 'review(T-0001): adjudicated')
+        head = self.head()
+        ok, line = lifecycle.publish(self.repo, self.branch, rnd, main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('would lose 1 commit', line)
+        ok, line = lifecycle.publish(self.repo, self.branch, rnd, main='main',
+                                     droppable=_droppable)
+        self.assertTrue(ok, line)
+        self.assertIn('dropped 1 review/notes round(s)', line)
+        self.assertEqual(self.remote(), head)
+        self.assertEqual(self.on_origin(lifecycle.copies_archive(self.branch, rnd)), rnd)
+
+    def test_a_code_commit_on_origin_still_refuses(self):
+        self.review_round_on_origin()
+        other = os.path.join(self.base, 'reviewer')
+        self.commit('c', 'their c\n', 'task(T-0001): their c', repo=other)
+        self.sh(['push', '-q', 'origin', self.branch], other)
+        remote = self.remote()
+        self.write(self.REVIEW, 'adjudicated\n', 'review(T-0001): adjudicated')
+        self.commit('c', 'own c\n', 'task(T-0001): own c')
+        ok, line = lifecycle.publish(self.repo, self.branch, remote, main='main',
+                                     droppable=_droppable)
+        self.assertFalse(ok, line)
+        self.assertEqual(self.remote(), remote)
+        self.assertEqual(self.on_origin(lifecycle.copies_archive(self.branch, remote)), '')
+
+
+class ReplayOwn(_Rounds):
+    """W2-PR3b (3): origin was rebuilt under the worktree (the lane's rebase, another session's
+    resolution) — a rebase onto it replays the old tip over its rewritten copy and conflicts.
+    The factory replays only the session's own commits, past the fork point, and publishes."""
+
+    def setUp(self):
+        super().setUp()
+        self.commit('a', 'own a\n', 'task(T-0001): own a')
+        self.old = self.push_branch()
+        other = os.path.join(self.base, 'rebuilder')
+        self.sh(['clone', '-q', '-b', self.branch, self.origin, other], self.base)
+        self.identity(other, 'lane@example.com')
+        self.sh(['reset', '-q', '--hard', 'origin/main'], other)
+        self.rebuilt = self.commit('a', 'own a, resolved\n', 'task(T-0001): own a', repo=other)
+        self.sh(['push', '-q', '-f', 'origin', self.branch], other)
+        self.sh(['fetch', '-q', 'origin'], self.repo)   # the tracking ref's reflog sees it
+        self.own = self.commit('c', 'own c\n', 'task(T-0001): own c')
+
+    def product(self, flags=ON):
+        return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                      'conventions': {'flags': flags, 'reviews_dir': 'reviews'}})
+
+    def test_without_the_entry_the_rebase_conflicts(self):
+        ok, line = lifecycle.publish(self.repo, self.branch, self.rebuilt, main='main')
+        self.assertFalse(ok, line)
+        self.assertTrue(lifecycle.rebase_conflict(line), line)
+
+    def test_the_sessions_own_commits_are_replayed_and_published(self):
+        ok, line, out = mechanical.publish_worktree(self.product(), self.repo, self.branch,
+                                                    self.rebuilt, main='main')
+        self.assertTrue(ok, line)
+        self.assertIn('replayed 1 own commit(s)', line)
+        remote = self.remote()
+        self.assertEqual(self.sh(['rev-parse', f'{remote}~1'], self.repo), self.rebuilt)
+        self.assertEqual(self.sh(['log', '-1', '--format=%s', remote], self.repo),
+                         'task(T-0001): own c')
+        self.assertEqual((out.kind, out.resolved, out.head), (lifecycle.UNPUSHED, True, remote))
+
+    def test_an_own_commit_that_conflicts_leaves_the_worktree_as_it_was(self):
+        self.commit('a', 'own a, the session\'s\n', 'task(T-0001): own a again')
+        head = self.head()
+        ok, line, out = mechanical.publish_worktree(self.product(), self.repo, self.branch,
+                                                    self.rebuilt, main='main')
+        self.assertFalse(ok, line)
+        self.assertTrue(lifecycle.rebase_conflict(line), line)
+        self.assertIn('conflict with the rewritten', line)
+        self.assertEqual(self.head(), head)
+        self.assertEqual(self.remote(), self.rebuilt)
+        self.assertFalse(out.resolved)
+
+
+class UnpushedEntry(unittest.TestCase):
+
+    def test_the_table_holds_unpushed(self):
+        p = env.Product('sample', {'repo_dir': '/nonexistent', 'main': 'main',
+                                   'conventions': {'flags': ON}})
+        self.assertTrue(mechanical.handles(p, lifecycle.UNPUSHED))
+        self.assertIn(lifecycle.UNPUSHED, mechanical.CLEARS)
+
+    def test_round_file_reads_the_review_and_reports_dirs(self):
+        conv = env.Product('sample', {'repo_dir': '/nonexistent', 'main': 'main', 'conventions': {
+            'reviews_dir': '.sdd/reviews', 'reports_dir': 'notes'}}).conventions
+        f = mechanical.round_file(conv)
+        self.assertTrue(f('.sdd/reviews/1-x.md'))
+        self.assertTrue(f('notes/run.md'))
+        self.assertFalse(f('src/app.ts'))
+        self.assertFalse(f('.sdd/reviews-old.md'))
+
+    def test_no_worktree_is_a_residue(self):
+        ln = SimpleNamespace(product=None, trunk='main')
+        out = mechanical.unpushed(ln, {'branch': 'b', 'head': 'abc', 'run': {}}, {})
+        self.assertFalse(out.resolved)
+
+
+class UnpushedHealth(TW.Home):
+    """W2-PR3b through the health step: a run ended ``not pushed`` with an adjudication in its
+    worktree while origin gained a review round on the same file. Flag off: held, as today.
+    Flag on: published, the round archived, the run finished, the event on the run."""
+
+    spawn, commit = TW.TestHealth.spawn, TW.TestHealth.commit
+
+    def flagged(self, on):
+        conv = {'reviews_dir': 'reviews'}
+        if on:
+            conv['flags'] = ON
+        self.product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                              'job_grants': [self.grant],
+                                              'stage_limits': {'silent_min': 30},
+                                              'conventions': conv})
+
+    def shape(self):
+        rec = self.spawn('adj', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'own')
+        TW.git('push', '-q', 'origin', branch, cwd=wt)
+        other = tempfile.mkdtemp(prefix='reviewer_')
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        TW.git('clone', '-q', '-b', branch, TW.git('remote', 'get-url', 'origin', cwd=wt), other,
+               cwd=wt)
+        os.makedirs(os.path.join(other, 'reviews'))
+        self.commit(other, 'reviews/1-x.md')
+        TW.git('push', '-q', 'origin', branch, cwd=other)
+        rnd = TW.git('rev-parse', 'HEAD', cwd=other)
+        os.makedirs(os.path.join(wt, 'reviews'))
+        with open(os.path.join(wt, 'reviews', '1-x.md'), 'w') as f:
+            f.write('adjudicated')
+        TW.git('add', '-A', cwd=wt)
+        TW.git('commit', '-qm', 'adjudicated', cwd=wt)
+        reason = 'failed: not pushed: 0 uncommitted file(s), 2 unpushed commit(s)'
+        pool_mod.update_session(self.product, 'adj', ended='2026-10-03T07:00:45Z',
+                                end_reason=reason, rc=1)
+        return wt, branch, rnd
+
+    def test_flag_off_the_run_is_held(self):
+        self.flagged(False)
+        wt, branch, rnd = self.shape()
+        health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        run = pool_mod.load_sessions(self.product)['adj']
+        self.assertNotEqual(run['end_reason'], 'finished')
+        self.assertIn('rebase conflicts', run.get('publish_refused') or '')
+        self.assertNotIn('mechanical', run)
+        self.assertEqual(TW.git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0], rnd)
+
+    def test_flag_on_the_rounds_are_archived_and_the_run_published(self):
+        self.flagged(True)
+        wt, branch, rnd = self.shape()
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None)
+        run = pool_mod.load_sessions(self.product)['adj']
+        self.assertTrue(any(j == 'adj' and w == 'published' for j, w, _d in found), found)
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertEqual(TW.git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
+                         TW.git('rev-parse', 'HEAD', cwd=wt))
+        archive = lifecycle.copies_archive(branch, rnd)
+        self.assertEqual(TW.git('ls-remote', '--heads', 'origin', archive, cwd=wt).split()[0], rnd)
+        ev = run['mechanical']
+        self.assertEqual((ev['event'], ev['kind'], ev['resolved']),
+                         ('mechanical', lifecycle.UNPUSHED, True))
 
 
 if __name__ == '__main__':
