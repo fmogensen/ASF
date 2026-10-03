@@ -569,6 +569,12 @@ Until then, also:
 
 ## Token economy
 
+The model a session runs on is routed per brief kind and item class
+([product-config.md](product-config.md#models--the-model-a-session-runs-on)): a cardless PR's
+review (`PR-<n>`), a reshape and a replan run `light`; `conventions.models.<kind>: heavy` puts a
+kind back on the heavy model. Mapping `worker_pool.models.cheap` to the pool's smallest model is a
+host-wide `config.yaml` edit every product reads at once — make it inside a planned move window.
+
 Discovery — a session reading its way to what the runner already knew — is most of what a run
 costs. Two things in this factory push back on that:
 

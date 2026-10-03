@@ -306,12 +306,14 @@ Three labels, `heavy`, `light` and `cheap` — not a model id. `worker_pool.mode
 `~/.ASF/config.yaml` is where a label becomes one: `{heavy: <id>, light: <id>, cheap: <id>}`. A
 label the pool has no entry for refuses the launch, **except `cheap`, which falls back to
 `light`** — a pool configured before `cheap` existed keeps running at the price it already paid,
-rather than refusing every cheap-tier job.
+rather than refusing every cheap-tier job; `asf doctor`'s `models` row says `warn` while it does.
 
 The built-in default routes per brief kind **and** per item class: `heavy` for judgement that
 would be expensive to get wrong, `light` for a small, well-scoped change, `cheap` for clerical
 work with a right answer. A class is a Bug's severity — `S1`, `S2` or `S3` — and for anything
-that is not a Bug, its type: `task`, `story`, `feature` or `epic`. A brief with no item at all — a
+that is not a Bug, its type: `task`, `story`, `feature` or `epic` — and `cardless` for a pull
+request the factory adopted with no card of its own (`PR-<n>`), whose review reads a diff against
+its own description and runs `light`. A brief with no item at all — a
 groom day, a rebase of a branch whose card has gone — takes the kind's own `default:` rather than
 any class row, since there is no item to classify.
 
@@ -326,12 +328,12 @@ spec-plan: heavy
 direct: heavy
 groom: heavy
 groom-clerk: cheap
-reshape: heavy
-replan: heavy
-review: heavy (S1 story feature epic) · light (S2 S3 task)
-adjudicate: heavy (S1) · light (S2 S3 task story feature epic)
-correct: heavy (S1) · light (S2 S3 task story feature epic)
-fix-bug: heavy (S1) · light (S2 S3 task story feature epic)
+reshape: light
+replan: light
+review: heavy (S1 story feature epic) · light (S2 S3 task cardless)
+adjudicate: heavy (S1) · light (S2 S3 task story feature epic cardless)
+correct: heavy (S1) · light (S2 S3 task story feature epic cardless)
+fix-bug: heavy (S1) · light (S2 S3 task story feature epic cardless)
 coder: light
 fixer: light
 rebase: cheap

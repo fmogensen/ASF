@@ -391,7 +391,9 @@ class BindingTests(unittest.TestCase):
         # The one exception, by operator policy 2026-09-27: adjudicate runs light (S1 heavy) while
         # groom, its role-mate, stays heavy — a ruling over a held branch is not a groom pass.
         # And plan F-0093 §2.1: groom-clerk, the groom's clerical pass, runs on the cheap tier.
-        moved = {'adjudicate', 'groom-clerk'}
+        # And the model routing of 2026-10: reshape and replan — a re-cut of a plan already
+        # written — run light while spec and plan, their role-mates, stay heavy.
+        moved = {'adjudicate', 'groom-clerk', 'reshape', 'replan'}
         heavy = {k for k, v in build_mod.DEFAULT_MODELS.items() if v == build_mod.HEAVY}
         by_role = {}
         for kind, name in roles.BINDINGS.items():
