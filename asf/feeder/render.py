@@ -64,7 +64,9 @@ def action_cell(row):
     if row.launches:
         m = _CHECKS_RED_RE.match(row.correction or '') if row.brief_kind == 'correct' else None
         red = f" — against the red check(s): {m.group(1)}" if m else ''
-        return f"{R.LAUNCH} {row.brief_kind} on {row.branch}{red}"
+        failing = row.action.split(' — ', 1)[1] if R.FAILING_TO_SPAWN in row.action else ''
+        return (f"{R.LAUNCH} {row.brief_kind} on {row.branch}{red}"
+                + (f" — {failing}" if failing else ''))
     return row.action
 
 

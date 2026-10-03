@@ -2252,10 +2252,34 @@ def finish_first(rows, items, product, inflight, held=()):
     return out
 
 
+#: the mark a launching row carries while its job fails to spawn tick after tick
+#: (:meth:`asf.workers.wave.Failures.read`): the row still launches — the retry is what might
+#: succeed — but ``asf next`` and ``asf status`` say why nothing has started
+FAILING_TO_SPAWN = 'FAILING TO SPAWN'
+
+
+def failing_to_spawn(rows, failing):
+    """``rows`` with each launching row whose job is in ``failing`` (``{job: {'reason',
+    'count'}}``) marked ``would launch — FAILING TO SPAWN: <reason> ×<count>``; it keeps its
+    tier and still launches."""
+    if not failing:
+        return rows
+    from asf.tick.step_wave import row_job  # local: the wave step imports the feeder
+    from asf.workers.wave import short_reason
+    out = []
+    for r in rows:
+        f = failing.get(row_job(r)) if r.launches else None
+        if f and FAILING_TO_SPAWN not in r.action:
+            r = dataclasses.replace(r, action=f"{LAUNCH} — {FAILING_TO_SPAWN}: "
+                                              f"{short_reason(f.get('reason'))} ×{f.get('count')}")
+        out.append(r)
+    return out
+
+
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
               groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
               s1_first=True, gate=None, bandwidth=None, adjudicated=None,
-              unverified_landed=None):
+              unverified_landed=None, failing=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
     ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
@@ -2264,7 +2288,8 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     items) -> rows``, run before the cut — the launch-time invariants
     (:func:`asf.invariants.feeder_waits`) turn a violating row into a WAITS row, so it takes no
     seat and every view shows it waiting, never "would launch". ``bandwidth``: the facts
-    ``feeder.max_features_in_build: auto`` sizes its cap from (:func:`build_cap`)."""
+    ``feeder.max_features_in_build: auto`` sizes its cap from (:func:`build_cap`). ``failing``:
+    the jobs failing to spawn (:func:`failing_to_spawn`) — their rows say so."""
     from asf.feeder import tiers
     rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
                       groom_state=groom_state, landed_shas=landed_shas,
@@ -2278,4 +2303,5 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     rows = build_cap(rows, items_of(index), product, inflight, capacity, held,
                      occupancy=occupancy, landed_shas=landed_shas, bandwidth=bandwidth)
     rows = finish_first(rows, items_of(index), product, inflight, held)
-    return tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first)
+    return failing_to_spawn(tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first),
+                            failing)

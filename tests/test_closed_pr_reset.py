@@ -255,6 +255,61 @@ class RetireDeadBranchTests(unittest.TestCase):
                                                   "cloud/T-0009"))
         self.assertIn("refs/heads/cloud/T-0009", self.origin_refs())
 
+    def reset_at_head(self):
+        lifecycle.note_reset(self.path, "T-0009", {"pr": 12, "branch": "cloud/T-0009",
+                                                   "head": self.r.head, "archive": ""},
+                             alive=lambda _p: False)
+
+    def local_copy(self, extra=False):
+        """The local ``cloud/T-0009``: the dead head's last commit re-made with a new message
+        (same patch, new sha) — and, with ``extra``, one genuinely new commit on top."""
+        repo = self.r.repo
+        git(repo, "checkout", "-q", "-b", "cloud/T-0009", f"{self.r.head}~1")
+        git(repo, "cherry-pick", self.r.head)
+        git(repo, "commit", "-q", "--amend", "-m", "feat(F-0005): land the free plan, reworded")
+        if extra:
+            with open(os.path.join(repo, "new.txt"), "w") as f:
+                f.write("new work")
+            git(repo, "add", "new.txt")
+            git(repo, "commit", "-q", "-m", "feat(T-0009): new work")
+        tip = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-q", "--detach", "main")
+        return tip
+
+    def test_a_reworded_copy_of_the_dead_head_is_retired_and_archived(self):
+        from asf.workers import spawn
+        self.reset_at_head()
+        tip = self.local_copy()
+        self.assertNotEqual(tip, self.r.head)
+        self.assertTrue(spawn.retire_dead_branch(self.product, self.r.repo, "t-0009",
+                                                 "cloud/T-0009"))
+        refs = self.origin_refs()
+        self.assertNotIn("refs/heads/cloud/T-0009", refs)
+        self.assertIn(f"refs/heads/archive/cloud-T-0009-wip-{tip[:9]}", refs)
+        self.assertNotIn("cloud/T-0009", git(self.r.repo, "branch", "--list", "cloud/T-0009"))
+
+    def test_a_genuinely_new_commit_is_archived_then_refused(self):
+        from asf.workers import spawn
+        self.reset_at_head()
+        tip = self.local_copy(extra=True)
+        with self.assertRaises(spawn.SpawnError) as cm:
+            spawn.retire_dead_branch(self.product, self.r.repo, "t-0009", "cloud/T-0009")
+        msg = str(cm.exception)
+        self.assertIn("git cherry: +", msg)
+        self.assertIn("new work", msg)
+        self.assertNotIn("reworded", msg)       # the copied patch is not named as new
+        refs = self.origin_refs()
+        self.assertIn(f"refs/heads/archive/cloud-T-0009-wip-{tip[:9]}", refs)
+        self.assertEqual(git(self.r.repo, "rev-parse", "refs/heads/cloud/T-0009"), tip)
+
+    def test_the_fast_path_archives_nothing(self):
+        from asf.workers import spawn
+        self.reset_at_head()
+        git(self.r.repo, "branch", "cloud/T-0009", self.r.head)
+        self.assertTrue(spawn.retire_dead_branch(self.product, self.r.repo, "t-0009",
+                                                 "cloud/T-0009"))
+        self.assertFalse([r for r in self.origin_refs() if r.startswith("refs/heads/archive/")])
+
 
 if __name__ == "__main__":
     unittest.main()

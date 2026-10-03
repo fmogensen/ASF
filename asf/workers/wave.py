@@ -113,6 +113,52 @@ class Failures:
         if self.seen.pop(job, None) is not None:
             self._save()
 
+    #: from this many identical failures in a row a job's row says FAILING TO SPAWN and the
+    #: wave's summary line names it — the per-launch line went quiet after the second
+    REPEATS = 2
+
+    @classmethod
+    def read(cls, product, now=None):
+        """``{job: {'reason', 'count', 'at'}}`` of the jobs failing to spawn ``count ≥``
+        :data:`REPEATS` times in a row, the stale ones (:data:`FORGET_S`) left out — read only,
+        nothing written; an unreadable file is no failures."""
+        now = time.time() if now is None else now
+        try:
+            with open(os.path.join(env.state_dir(product), 'spawn-failures.json'),
+                      encoding='utf-8') as f:
+                seen = json.load(f)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+        if not isinstance(seen, dict):
+            return {}
+        out = {}
+        for job, v in seen.items():
+            try:
+                if (isinstance(v, dict) and int(v.get('count') or 0) >= cls.REPEATS
+                        and now - float(v.get('at') or 0) <= cls.FORGET_S):
+                    out[job] = v
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def summary(self, jobs):
+        """One line naming every job of ``jobs`` failing :data:`REPEATS` or more times in a row —
+        ``spawn: N job(s) failing every tick — <job> ×<count> (<reason>); …`` — or None."""
+        hits = [(j, self.seen[j]) for j in dict.fromkeys(jobs)
+                if isinstance(self.seen.get(j), dict)
+                and int(self.seen[j].get('count') or 0) >= self.REPEATS]
+        if not hits:
+            return None
+        parts = [f"{j} ×{v.get('count')} ({short_reason(v.get('reason'))})" for j, v in hits]
+        return f"spawn: {len(hits)} job(s) failing every tick — " + '; '.join(parts)
+
+
+def short_reason(reason, width=160):
+    """A spawn failure's reason without its ``spawn failed:`` prefix, cut to ``width``."""
+    text = ' '.join(str(reason or '').split())
+    text = text.split('spawn failed: ', 1)[-1]
+    return text if len(text) <= width else text[:width - 1] + '…'
+
 
 def order(rows):
     return sorted(rows, key=lambda r: (0 if r.is_s1_fix else 1 if r.is_fix else 2))
@@ -164,6 +210,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     running = {(s.get('product') or product.name, s.get('job')) for s in pool.live}
     launched, waits = [], []
     failures = Failures(product)
+    failed_now = []            # jobs whose spawn failed in this wave (the summary line's)
     if getattr(pool, 'unreadable', ''):
         out(f'pool: sessions unreadable ({pool.unreadable}) — counting registered sessions only')
     workers = launch_concurrency(cfg)
@@ -278,6 +325,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         else:
             reason = str(err) if str(err).startswith('NEEDS OPERATOR') else f'spawn failed: {err}'
             reason = failures.note(row.job, reason, getattr(err, 'clear', ''))
+            failed_now.append(row.job)
             # None: reported already and nothing changed — a wait that says nothing
             outcome[id(entry)] = ((f'spawn failed: {err}', '') if reason is None
                                   else (reason, None))
@@ -344,6 +392,9 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         for entry in said:
             if id(entry) in timings:
                 out(timings[id(entry)])
+        line = failures.summary(failed_now)
+        if line:
+            out(line)
     if raised is not None:
         raise raised
     if sample:
