@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2764,6 +2765,42 @@ class RuledOnThisHeadTests(unittest.TestCase):
         self.assertEqual(rec['lane']['state'], 'REVIEW')
         self.assertIn('round 3 wanted', rec['lane']['reason'])
         self.assertIn('answered by correct-b-0001 without a commit', rec['lane']['reason'])
+
+
+class GateCommandsTests(unittest.TestCase):
+    """``harvest.gate_commands`` — the one list :func:`harvest.product_gate` runs and
+    :mod:`asf.workers.worker_perms` will permit (F-0115)."""
+
+    def test_the_test_command_alone_off_a_product_repo(self):
+        conv = Conventions.from_mapping({'test_command': PRODUCT_TEST})
+        cmds, env = harvest.gate_commands(conv, asf_repo=False)
+        self.assertEqual(cmds, [shlex.split(PRODUCT_TEST)])
+        self.assertEqual(env, {})
+
+    def test_the_scripts_are_appended_only_on_asfs_own_repo(self):
+        conv = Conventions.from_mapping({'test_command': PRODUCT_TEST})
+        cmds, _env = harvest.gate_commands(conv, asf_repo=True)
+        self.assertEqual(cmds, [shlex.split(PRODUCT_TEST)] +
+                         [['bash', os.path.join('tools', name + '.sh')]
+                          for name in harvest.ASF_GATE_SCRIPTS])
+
+    def test_only_skips_the_scripts_even_on_asfs_own_repo(self):
+        conv = Conventions.from_mapping({'test_command': PRODUCT_TEST})
+        cmds, _env = harvest.gate_commands(conv, asf_repo=True, only=['tests.test_fx'])
+        self.assertEqual(cmds, [shlex.split(PRODUCT_TEST)])
+
+    def test_leading_name_value_tokens_are_lifted_into_env(self):
+        conv = Conventions.from_mapping({'test_command': 'FOO=bar BAZ=1 make test'})
+        cmds, env = harvest.gate_commands(conv, asf_repo=False)
+        self.assertEqual(cmds, [['make', 'test']])
+        self.assertEqual(env, {'FOO': 'bar', 'BAZ': '1'})
+
+    def test_no_test_command_with_scripts_still_returns_an_empty_env(self):
+        conv = Conventions.from_mapping({'test_command': ''})
+        cmds, env = harvest.gate_commands(conv, asf_repo=True)
+        self.assertEqual(cmds, [['bash', os.path.join('tools', name + '.sh')]
+                                for name in harvest.ASF_GATE_SCRIPTS])
+        self.assertEqual(env, {})
 
 
 class GateFilesTests(unittest.TestCase):
