@@ -335,6 +335,12 @@ def build_parser():
     p_scorecard.add_argument('--days', type=int, default=None,
                              help='--by-lane window in days (default: the loop\'s window_days)')
     p_scorecard.add_argument('--json', action='store_true')
+    p_scorecard.add_argument('--window', default=None,
+                             help='the program row\'s window: <n>d, <n>h or since=<iso> (default: 7d)')
+    p_scorecard.add_argument('--check', default=None, metavar='TARGETS',
+                             help='a targets file: exit 1 listing each program target missed')
+    p_scorecard.add_argument('--all', action='store_true',
+                             help='idle_hours counts every product\'s launches')
 
     p_release = sub.add_parser('release-readiness', help='the RELEASE READINESS gate: each criterion '
                                                           'for a framework release, met or not, with its evidence')
