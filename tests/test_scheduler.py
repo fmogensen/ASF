@@ -7,6 +7,8 @@ talks to the real launchd, and no test loads a job on the machine running it.
 
 :func:`fake_launchctl` is shared with ``test_doctor`` and ``test_cutover``.
 """
+import io
+import json
 import os
 import plistlib
 import shutil
@@ -14,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 
 from asf import env, scheduler, snapshot
@@ -326,6 +329,128 @@ class RenderTest(SchedulerTestCase):
         self.assertTrue(job['needs_operator'].startswith('NEEDS OPERATOR:'))
         self.assertIn('systemd', job['needs_operator'])
         self.assertEqual(scheduler.install(job), [job['needs_operator']])
+
+
+class PinnedVenvTest(SchedulerTestCase):
+    """A pinned product (``state/<p>/install.json`` names a venv) renders from that venv: its
+    interpreter, its site-packages as the cwd, no PYTHONPATH (which would import the installing
+    process's package ahead of the venv's own), and no PATH entry inside a git checkout."""
+    RECORD = Clock('record', ['record'], False, 600, None)
+    QUEUE = Clock(scheduler.QUEUE_CLOCK, ['ci-queue'], False, 60, None, scheduler.QUEUE_COMMAND)
+
+    def make_venv(self, name='asf-factory-sample-abc1234'):
+        venv = os.path.join(self.tmp, 'venvs', name)
+        site = os.path.join(venv, 'lib', 'python3.12', 'site-packages')
+        os.makedirs(os.path.join(site, 'asf'))
+        os.makedirs(os.path.join(venv, 'bin'))
+        python = os.path.join(venv, 'bin', 'python')
+        with open(python, 'w') as f:
+            f.write('#!/bin/sh\nexit 0\n')
+        os.chmod(python, 0o755)
+        return venv, site, python
+
+    def pin(self, venv):
+        state = os.path.join(self.asf_home, 'state', 'sample')
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, 'install.json'), 'w') as f:
+            json.dump({'sha': 'abc1234' + '0' * 33, 'venv': venv, 'policy': 'pinned'}, f)
+
+    def test_plist_names_the_products_venv_interpreter_and_no_pythonpath(self):
+        venv, site, python = self.make_venv()
+        self.pin(venv)
+        checkout = os.path.join(self.tmp, 'checkout')
+        os.makedirs(os.path.join(checkout, '.git'))
+        # even when the installing process runs from a checkout: no launcher, no snapshot
+        with mock.patch.object(scheduler, 'repo_root', return_value=checkout):
+            job = scheduler.render('sample', self.RECORD)
+            queue = scheduler.render('sample', self.QUEUE)
+        plist = job['plist']
+        self.assertEqual(plist['ProgramArguments'], [
+            python, '-m', 'asf.cli', 'tick', '--product', 'sample', '--steps', 'record'])
+        self.assertEqual(plist['WorkingDirectory'], site)
+        self.assertNotIn('PYTHONPATH', plist['EnvironmentVariables'])
+        self.assertEqual(plist['EnvironmentVariables']['ASF_HOME'], self.asf_home)
+        self.assertNotIn('launcher', job)
+        self.assertEqual(job['venv'], venv)
+        self.assertEqual(queue['plist']['ProgramArguments'][:4],
+                         [python, '-m', 'asf.cli', 'ci'])
+        self.assertNotIn('PYTHONPATH', queue['plist']['EnvironmentVariables'])
+        # the cron form carries the same: no PYTHONPATH, the venv's interpreter
+        line = scheduler.render('sample', self.RECORD, cfg={'scheduler': {'kind': 'cron'}})['line']
+        self.assertIn(f'cd {site} && ', line)
+        self.assertIn(python, line)
+        self.assertNotIn('PYTHONPATH', line)
+
+    def test_an_explicit_venv_is_rendered_over_the_record(self):
+        """The upgrade's move renders from the venv it is moving to."""
+        old, _s, _p = self.make_venv('asf-factory-sample-old0000')
+        new, new_site, new_python = self.make_venv('asf-factory-sample-new0000')
+        self.pin(old)
+        job = scheduler.render('sample', self.RECORD, venv=new)
+        self.assertEqual(job['plist']['ProgramArguments'][0], new_python)
+        self.assertEqual(job['plist']['WorkingDirectory'], new_site)
+
+    def test_pinned_path_drops_checkout_entries(self):
+        venv, _site, _python = self.make_venv()
+        self.pin(venv)
+        checkout = os.path.join(self.tmp, 'checkout')
+        os.makedirs(os.path.join(checkout, '.git'))
+        plugin_bin = os.path.join(checkout, 'plugin', 'bin')
+        os.makedirs(plugin_bin)
+        os.environ['PATH'] = os.pathsep.join([plugin_bin, self.bindir, '/usr/bin', checkout])
+        job = scheduler.render('sample', self.RECORD)
+        self.assertEqual(job['plist']['EnvironmentVariables']['PATH'],
+                         os.pathsep.join([self.bindir, '/usr/bin']))
+        # unpinned keeps them: the checkout entries are a pinned product's concern only
+        unpinned = scheduler.render('sample', self.RECORD, venv=None)
+        self.assertIn(plugin_bin, unpinned['plist']['EnvironmentVariables']['PATH'])
+
+    def test_unpinned_product_renders_from_this_process(self):
+        root = os.path.join(self.tmp, 'site-packages')
+        os.makedirs(os.path.join(root, 'asf'))
+        with mock.patch.object(scheduler, 'repo_root', return_value=root):
+            job = scheduler.render('sample', self.RECORD)
+            explicit = scheduler.render('sample', self.RECORD, venv=None)
+        self.assertEqual(job, explicit)
+        self.assertEqual(job['plist']['ProgramArguments'][0], sys.executable)
+        self.assertEqual(job['plist']['EnvironmentVariables']['PYTHONPATH'], root)
+        self.assertNotIn('venv', job)
+
+    def test_pinned_product_whose_venv_is_missing_refuses_to_render(self):
+        self.pin(os.path.join(self.tmp, 'venvs', 'asf-factory-sample-gone000'))
+        with self.assertRaises(scheduler.SchedulerError) as caught:
+            scheduler.render('sample', self.RECORD)
+        self.assertIn('pinned venv missing', str(caught.exception))
+
+    def test_a_bare_venv_name_is_taken_under_the_pipx_venvs_dir(self):
+        venv, site, python = self.make_venv()
+        self.pin(os.path.basename(venv))
+        os.environ['PIPX_HOME'] = os.path.join(self.tmp, 'pipx')
+        os.makedirs(os.path.join(self.tmp, 'pipx'))
+        os.symlink(os.path.dirname(venv), os.path.join(self.tmp, 'pipx', 'venvs'))
+        job = scheduler.render('sample', self.RECORD)
+        self.assertEqual(job['plist']['ProgramArguments'][0],
+                         os.path.join(self.tmp, 'pipx', 'venvs', os.path.basename(venv),
+                                      'bin', 'python'))
+
+    def test_install_of_a_pinned_product_with_no_venv_touches_no_plist(self):
+        self.write_product('  record:\n    steps: [record]\n    every: 5m\n'
+                           '  dispatch:\n    steps: [health]\n    every: 5m\n')
+        agents = os.path.join(self.home, 'Library', 'LaunchAgents')
+        os.makedirs(agents)
+        existing = os.path.join(agents, 'asf.sample.record.plist')
+        with open(existing, 'w') as f:
+            f.write('the plist as it was')
+        self.pin(os.path.join(self.tmp, 'venvs', 'asf-factory-sample-gone000'))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = scheduler.main(['install', '--product', 'sample'])
+        self.assertNotEqual(rc, 0)
+        self.assertIn('NEEDS OPERATOR: pinned venv missing', out.getvalue())
+        with open(existing) as f:
+            self.assertEqual(f.read(), 'the plist as it was')
+        self.assertEqual(sorted(os.listdir(agents)), ['asf.sample.record.plist'])
+        self.assertEqual(stub_argv(self.statedir), [])
 
 
 class InstallTest(SchedulerTestCase):
