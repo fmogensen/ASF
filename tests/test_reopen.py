@@ -134,6 +134,23 @@ class TaskFalselyClosedTests(ReopenTestCase):
         self.assertEqual(read(self.root, rel), before)  # untouched
 
 
+class ParentClosedUnbuiltTests(ReopenTestCase):
+    """S-0204's shape: a Story closed by parent-closed although its matrix row says todo. The
+    rule no longer fires, nothing derives Closed, and reopen takes the leftover back to New."""
+
+    def test_a_matrix_todo_story_closed_by_parent_closed_reopens_to_new(self):
+        write(self.root, 'E-0001', 'epic')
+        write(self.root, 'F-0001', 'feature', parent='E-0001')
+        rel = write(self.root, 'S-0001', 'story', parent='F-0001', typed=('legacy_id: F-VOX-8',),
+                    machine=('schema_version: 1', 'state: Closed', 'stage_since: 2026-01-01T00:00:00Z',
+                             'evidence:', '  - matrix status todo (F-VOX-8)',
+                             '  - F-0001 Closed (commit dc903b1)', '  - "rule: parent-closed"',
+                             'updated: 2026-01-01T00:00:00Z'))
+        ev = dict(EMPTY_EV, ci=True, stories={'F-VOX-8': {'status': 'todo'}})
+        self.assertEqual(self.reopen('S-0001', ev=ev), 0)
+        self.assertEqual(meta(self.root, rel)['state'], 'New')
+
+
 class FeatureStageTests(ReopenTestCase):
     """F-0112's shape: a Feature Resolved (`stage: landed`) by the same false PR-body mention,
     with a real spec on trunk once that evidence is discarded — reopens to Active/spec-approved,

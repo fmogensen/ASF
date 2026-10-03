@@ -17,6 +17,7 @@ derive, I1), and a ``## History`` line says what changed and why. The write goes
 staged/published path ``asf set`` uses: :func:`asf.record.stage.guarded`, then the console's
 ``_published`` commits and pushes it, hooks on.
 """
+import dataclasses
 import sys
 
 from asf import env
@@ -70,6 +71,10 @@ def cmd_reopen(args, root):
     new_state, closings, _derived, stage_val, _task_ev, _evs = derive(
         canonical, ev, product, now, date, bypass_sticky={args.id})
     c = closings[args.id]
+    if c.rule == closing.NO_RULE and c.state in (closing.RESOLVED, closing.CLOSED):
+        # no rule decides it any more (e.g. parent-closed no longer fires on a matrix-todo item):
+        # the Closed it carries is a leftover, not a derivation — it reopens to New
+        c = dataclasses.replace(c, state=closing.NEW)
     if c.state in (closing.RESOLVED, closing.CLOSED):
         print(f"error: {args.id} — current evidence still says {c.state} (rule: {c.rule}): "
               + '; '.join(c.lines), file=sys.stderr)
