@@ -905,9 +905,16 @@ class MoveOps:
             label=None, reason=None, by=None))
 
     def install_hooks(self, product_name):
-        """``asf hooks install --product <p>`` (rc, message)."""
-        from asf import hooks
-        return hooks.install(env.load_product(product_name))
+        """``asf hooks install --product <p>`` (rc, message) — as the command runs it: the
+        dispatcher refreshed first, and every agent home's ``.local/bin/asf`` linked to it."""
+        from asf import dispatch, hooks
+        return hooks.install(env.load_product(product_name), dispatcher=dispatch.default_path())
+
+    def smoke(self, product_name):
+        """``(ok_lines, failures)`` of :func:`asf.scheduler.smoke`: read-only commands under each
+        written clock plist's exact environment and interpreter."""
+        from asf import scheduler
+        return scheduler.smoke(env.load_product(product_name))
 
 
 def _mark(product_name, sha, now=None):
@@ -995,6 +1002,9 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
               f'{((previous or {}).get("sha") or "none")[:7]} {(previous or {}).get("venv") or ""}',
               f'asf scheduler install --product {product_name}',
               f'asf hooks install --product {product_name}',
+              'smoke: each clock plist\'s interpreter imports asf.cli and loads the product; '
+              'gh auth status, git/claude/toolchain --version under the plist env '
+              '(any failure: roll back)',
               f'resume clocks {", ".join(clocks) or "(none)"}']
     if dry_run:
         out(f'upgrade: dry run — the move of {product_name} to {sha[:7]}:')
@@ -1061,6 +1071,27 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
             out(line)
         if hrc:
             out(f'upgrade: WARNING — asf hooks install --product {product_name} exited {hrc}')
+        # the smoke: what the clocks will run, under their plists' exact env and interpreter —
+        # before a single clock resumes on it (2026-10-03: a render that lost gh from PATH
+        # stopped the landing lane, and nothing in the move noticed)
+        ok_lines, failures = ops.smoke(product_name)
+        for line in ok_lines:
+            out(f'upgrade: smoke {line}')
+        if failures:
+            for line in failures:
+                out(f'upgrade: smoke FAILED {line}')
+            if rec is None:
+                os.remove(installs.record_path(product_name))
+            else:
+                installs.write(product_name, rec.sha, rec.venv, previous=rec.previous, by=rec.by)
+            back = ops.install_clocks(product_name)
+            brc, bmsg = ops.install_hooks(product_name)
+            for line in (bmsg or '').splitlines():
+                out(line)
+            out(f'NEEDS OPERATOR: the smoke of {product_name} at {sha[:7]} failed — rolled back to '
+                f'{(rec.sha if rec else "the shared install")[:7]} (clocks rc {back}, hooks rc '
+                f'{brc}); the clocks resume on what they ran')
+            return 1
         out(f'upgrade: moved {product_name} to {sha[:7]}'
             + (f' (previous {(previous.get("sha") or "?")[:7]} stays on disk for --rollback)'
                if previous else ''))

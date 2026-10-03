@@ -9,6 +9,10 @@
 # the call does not name it). The dispatcher's trace names the CLI that answered; the script prints
 # one line per call and exits 0 only when every call exits 0 from the product's pinned venv.
 #
+# Then the same pre-push once per agent home (<asf home>/state/homes/<agent>): a worker session
+# runs with HOME=<that home>, and its git hooks call "$HOME/.local/bin/asf" — so the replay runs
+# under that HOME through that path, and fails when the home's link is missing or dangling.
+#
 #   dir                the directory to run from (default: the first of the product's state
 #                      worktrees, else its repo_dir)
 # Env: ASF_HOME        the asf home (default ~/.ASF)
@@ -46,12 +50,18 @@ venv=$(cd "$venv" 2>/dev/null && pwd -P || echo "$venv")
 
 zero=0000000000000000000000000000000000000000
 fail=0
-replay() {  # <label> <stdin> <args...>
+run_home="$HOME"; run_cli="$dispatcher"
+replay() {  # <label> <stdin> <args...> — runs $run_cli under HOME=$run_home
   local label=$1 input=$2; shift 2
   local err rc cli
+  if [ ! -x "$run_cli" ]; then
+    echo "FAIL  $label  no asf at $run_cli"
+    fail=1
+    return
+  fi
   err=$(cd "$dir" && printf '%s\n' "$input" |
-        env -u ASF_JOB -u ASF_PRODUCT ASF_DISPATCH_TRACE=1 ASF_HOME="$asf_home" \
-          "$dispatcher" "$@" 2>&1 >/dev/null)
+        env -u ASF_JOB -u ASF_PRODUCT HOME="$run_home" ASF_DISPATCH_TRACE=1 ASF_HOME="$asf_home" \
+          "$run_cli" "$@" 2>&1 >/dev/null)
   rc=$?
   cli=$(printf '%s\n' "$err" | sed -n 's/^asf-dispatch: .* cli=//p' | head -n 1)
   local real
@@ -71,4 +81,13 @@ replay PreToolUse \
 replay Stop '{"hook_event_name":"Stop","stop_hook_active":false}' hook unpushed
 replay pre-push "refs/heads/hook-smoke $zero refs/heads/hook-smoke $zero" \
   redact --pre-push --product "$product"
+
+for h in "$asf_home/state/homes"/*/; do
+  [ -d "$h" ] || continue
+  h=${h%/}
+  run_home="$h"; run_cli="$h/.local/bin/asf"
+  replay "pre-push@home:$(basename "$h")" \
+    "refs/heads/hook-smoke $zero refs/heads/hook-smoke $zero" \
+    redact --pre-push --product "$product"
+done
 exit $fail

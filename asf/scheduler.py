@@ -24,9 +24,12 @@ the running interpreter and the installed package, and never written by hand:
   the job is rendered from *that* venv, not from the process running the install: its
   ``bin/python`` is the interpreter, its ``site-packages`` the working directory, there is **no**
   ``PYTHONPATH`` (it would sit before the venv's own ``site-packages`` and import the installing
-  process's ``asf`` instead of the pinned one), and ``PATH`` drops every entry inside a git
-  checkout. A pinned product whose venv is not on disk refuses to render
-  (:class:`SchedulerError` ``pinned venv missing``): ``install`` writes no plist for it.
+  process's ``asf`` instead of the pinned one), and ``PATH`` drops every entry inside a checkout
+  of asf itself — and nothing else (Homebrew's prefix is a git checkout too). A pinned product
+  whose venv is not on disk refuses to render (:class:`SchedulerError` ``pinned venv missing``),
+  and so does one whose rendered ``PATH`` does not resolve every tool its clocks run
+  (:func:`required_tools`: ``git``, ``gh``, the session runtime, the lockfile's toolchain):
+  ``install`` writes no plist for it and exits 2 with ``NEEDS OPERATOR``.
 
 The ``kind`` comes from ``config.yaml``'s ``scheduler.kind`` (default ``launchd``). ``launchd``
 is implemented end to end; ``cron`` renders the crontab line for an operator to install; any
@@ -49,6 +52,7 @@ import fnmatch
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 from collections import namedtuple
@@ -134,16 +138,27 @@ def log_path(product_name, clock_name):
     return os.path.join(env.ASF_HOME, 'logs', f'tick-{product_name}-{clock_name}.log')
 
 
-def _in_checkout(directory):
-    """Whether ``directory`` sits inside a git checkout (it or a parent holds ``.git``)."""
+def _checkout_root(directory):
+    """The git work tree ``directory`` sits in (the nearest it or a parent holding ``.git``),
+    else None."""
     d = os.path.abspath(directory)
     while True:
         if os.path.exists(os.path.join(d, '.git')):
-            return True
+            return d
         parent = os.path.dirname(d)
         if parent == d:
-            return False
+            return None
         d = parent
+
+
+def _in_asf_checkout(directory):
+    """Whether ``directory`` sits inside a git checkout *of asf itself* — a work tree whose root
+    carries the ``asf`` package (``asf/__init__.py``), the moving code a pinned clock must not
+    reach. Any other git work tree on ``PATH`` is a tool's install, not asf's code: Homebrew's
+    prefix is itself a git checkout (``/opt/homebrew/.git``), and dropping it took ``gh`` off a
+    pinned product's clocks (2026-10-03: "lane: pass failed — No such file or directory: 'gh'")."""
+    root = _checkout_root(directory)
+    return root is not None and os.path.isfile(os.path.join(root, 'asf', '__init__.py'))
 
 
 def _absolute_path_entries(drop_checkouts=False):
@@ -151,17 +166,79 @@ def _absolute_path_entries(drop_checkouts=False):
 
     A relative entry (``.``, ``bin``) resolves against the *job's* cwd under a scheduler, not
     the shell's — it would silently mean something else, so it is dropped rather than carried.
-    With ``drop_checkouts`` (a pinned product) an entry inside a git checkout is dropped too: a
-    pinned clock must not reach the moving checkout's scripts through ``PATH``.
+    With ``drop_checkouts`` (a pinned product) an entry inside a checkout of asf itself
+    (:func:`_in_asf_checkout`) is dropped too: a pinned clock must not reach the moving checkout's
+    scripts through ``PATH``. Every other entry is kept.
     """
     out, seen = [], set()
     for d in os.environ.get('PATH', '').split(os.pathsep):
         if d and os.path.isabs(d) and d not in seen:
             seen.add(d)
-            if drop_checkouts and _in_checkout(d):
+            if drop_checkouts and _in_asf_checkout(d):
                 continue
             out.append(d)
     return os.pathsep.join(out)
+
+
+# ---- the tools a clock runs -------------------------------------------------
+
+#: Every clock shells out to these: the lane and retention call ``gh``, every step calls ``git``.
+BASE_TOOLS = ('git', 'gh')
+
+#: A lockfile in the product repo → the tools its gate and sessions run.
+LOCKFILE_TOOLS = (
+    ('pnpm-lock.yaml', ('node', 'pnpm')),
+    ('package-lock.json', ('node', 'npm')),
+    ('yarn.lock', ('node', 'yarn')),
+    ('bun.lock', ('bun',)),
+    ('bun.lockb', ('bun',)),
+)
+
+
+def required_tools(product, cfg=None):
+    """The commands a product's clocks need on their ``PATH``: :data:`BASE_TOOLS`, the session
+    runtime's binary (``worker_pool.binary``, default ``claude``; none for the ``fake`` backend),
+    and the toolchain the product repo's lockfile names (:data:`LOCKFILE_TOOLS`)."""
+    tools = list(BASE_TOOLS)
+    pool = (cfg or {}).get('worker_pool') or {}
+    if str(pool.get('backend') or 'claude-code') != 'fake':
+        tools.append(str(pool.get('binary') or 'claude'))
+    repo = getattr(product, 'repo_dir', None)
+    if repo and os.path.isdir(repo):
+        for lock, names in LOCKFILE_TOOLS:
+            if os.path.exists(os.path.join(repo, lock)):
+                tools.extend(names)
+    out = []
+    for t in tools:
+        if t not in out:
+            out.append(t)
+    return out
+
+
+def missing_tools(path, tools):
+    """The ``tools`` that do not resolve to an executable on ``path`` (an absolute tool is
+    checked as a file)."""
+    missing = []
+    for t in tools:
+        if os.path.isabs(t):
+            if not (os.path.isfile(t) and os.access(t, os.X_OK)):
+                missing.append(t)
+        elif shutil.which(t, path=path) is None:
+            missing.append(t)
+    return missing
+
+
+def check_tools(product, path, cfg=None):
+    """Raise :class:`SchedulerError` (``NEEDS OPERATOR``) naming every tool of
+    :func:`required_tools` that does not resolve on the rendered ``path`` — a clock that cannot
+    find ``gh`` stops the landing lane without a single error the tables show."""
+    name = getattr(product, 'name', product)
+    missing = missing_tools(path, required_tools(product, cfg))
+    if missing:
+        raise SchedulerError(
+            f'clock PATH lacks {", ".join(missing)}: product {name}\'s clocks need them, and the '
+            f'PATH they would run with does not resolve them ({path or "(empty)"}) — run the '
+            f'install from a shell whose PATH finds them; no plist is written')
 
 
 # ---- the product's pinned venv ----------------------------------------------
@@ -427,6 +504,7 @@ def render(product, clock, cfg=None, venv=_PIN):
         snap_repo = None
         env_vars = {'PATH': _absolute_path_entries(drop_checkouts=True),
                     'HOME': os.path.expanduser('~'), 'ASF_HOME': env.ASF_HOME}
+        check_tools(product, env_vars['PATH'], cfg)
     else:
         argv = tick_argv(name, clock)
         root = repo_root()
@@ -491,6 +569,79 @@ def render(product, clock, cfg=None, venv=_PIN):
         f"`{' '.join(argv)}` {_clock_when(clock)} and log it to {log}"
     )
     return job
+
+
+# ---- the smoke a move runs before it resumes the clocks ----------------------
+
+#: Run by the plist's own interpreter: imports the CLI it ticks and loads the product file with
+#: that venv's loader — read-only, any sha.
+_SMOKE_IMPORT = ('import sys, asf.cli\nfrom asf import env\nenv.load_product(sys.argv[1])\n'
+                 'print(asf.__file__)')
+
+SMOKE_TIMEOUT_S = 60
+
+
+def _tool_probe(tool):
+    if os.path.basename(tool) == 'gh':
+        return [tool, 'auth', 'status', '--active']
+    return [tool, '--version']
+
+
+def smoke(product, cfg=None, run=subprocess.run, timeout=SMOKE_TIMEOUT_S):
+    """Run read-only commands under each installed clock plist's *exact* environment, working
+    directory and interpreter — what the clock will run, not what this shell has: the plist's
+    interpreter imports ``asf.cli`` and loads the product file, ``gh auth status --active``, and
+    ``<tool> --version`` for every other tool of :func:`required_tools`, each resolved on the
+    plist's ``PATH``. Returns ``(ok_lines, failures)``; a failure names the clock and the command.
+    Only launchd plists are read (a cron line has no plist to replay); none on disk is a
+    failure — a move that leaves no clock has nothing ticking."""
+    cfg = env.load_config() if cfg is None else cfg
+    name = getattr(product, 'name', product)
+    if kind(cfg) != 'launchd':
+        return [f'smoke: scheduler kind {kind(cfg)} — no plist to replay'], []
+    paths = sorted(p for p in (plist_path(label) for label in product_labels(name, cfg))
+                   if os.path.isfile(p))
+    if not paths:
+        return [], [f'no clock plist of {name} on disk']
+    ok, failures, seen = [], [], set()
+    tools = required_tools(product, cfg)
+    for path in paths:
+        try:
+            with open(path, 'rb') as f:
+                plist = plistlib.load(f)
+        except (OSError, plistlib.InvalidFileException, ValueError) as e:
+            failures.append(f'{os.path.basename(path)}: unreadable ({e})')
+            continue
+        argv = plist.get('ProgramArguments') or []
+        job_env = {str(k): str(v) for k, v in (plist.get('EnvironmentVariables') or {}).items()}
+        cwd = plist.get('WorkingDirectory') or '/'
+        key = (tuple(argv[:1]), tuple(sorted(job_env.items())), cwd)
+        if not argv or key in seen:
+            continue
+        seen.add(key)
+        label = plist.get('Label') or os.path.basename(path)
+        commands = [[argv[0], '-c', _SMOKE_IMPORT, name]]
+        for tool in tools:
+            found = shutil.which(tool, path=job_env.get('PATH', ''))
+            if found is None:
+                failures.append(f'{label}: {tool} not on the plist PATH')
+                continue
+            commands.append(_tool_probe(found))
+        for cmd in commands:
+            shown = ' '.join(cmd[:1] + ['-c', '<import asf.cli; load product>'] + cmd[3:]) \
+                if cmd[1:2] == ['-c'] else ' '.join(cmd)
+            try:
+                p = run(cmd, env=job_env, cwd=cwd if os.path.isdir(cwd) else '/',
+                        capture_output=True, text=True, timeout=timeout)
+            except (OSError, subprocess.SubprocessError) as e:
+                failures.append(f'{label}: {shown} did not run ({e})')
+                continue
+            if p.returncode != 0:
+                tail = ((p.stderr or p.stdout or '').strip().splitlines() or [''])[-1]
+                failures.append(f'{label}: {shown} exit {p.returncode} {tail}'.rstrip())
+            else:
+                ok.append(f'{label}: {shown} ok')
+    return ok, failures
 
 
 def render_plist(job):

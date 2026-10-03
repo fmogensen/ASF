@@ -42,8 +42,9 @@ directory run ``import asf`` — and a pinned product's clock must land in ``ins
 a damaged pin (a record that does not parse, or a clock on a per-product venv no record names) is
 red. **product loads under venv** loads the product file with the loader of the venv the clocks
 run (the pin's, else the clock plist's); **cli dispatcher** (:func:`check_cli_dispatcher`) runs
-``~/.local/bin/asf`` and requires the CLI it resolves for this product to sit in the pin; the
-**product** rows name unknown keys (:attr:`asf.env.Product.warnings`) and unknown
+``~/.local/bin/asf`` and requires the CLI it resolves for this product to sit in the pin;
+**agent homes asf** (:func:`check_agent_homes`) is red for any agent home whose
+``$HOME/.local/bin/asf`` does not resolve to an executable; the **product** rows name unknown keys (:attr:`asf.env.Product.warnings`) and unknown
 ``conventions.flags`` names as ``warn``, never red.
 
 A twelfth row, **console permissions** (:func:`asf.console_perms.check_doctor`, B-0131), is red
@@ -760,6 +761,25 @@ def check_cli_dispatcher(product, path=None, timeout=60):
     return [(True, True, f'ok · {product.name} → {os.path.basename(venv)} ({_pin_phrase(rec)})')]
 
 
+def check_agent_homes(cfg=None):
+    """[(required, ok, detail)] — every agent home's ``$HOME/.local/bin/asf`` resolves to an
+    executable (:func:`asf.workers.runtime.home_cli_problems`). A session runs under its own HOME
+    and its git hooks call that path: a dangling link there refuses every commit and push of that
+    agent (2026-10-03). RED naming each broken home; skip when there are no agent homes or the
+    pool's backend is ``fake`` (no agent session runs a hook)."""
+    from asf.workers import runtime
+    if cfg and _backend_is_fake(cfg):
+        return [(False, None, 'worker_pool.backend fake runs no agent session (no hook to call asf)')]
+    homes = runtime.agent_homes()
+    if not homes:
+        return [(False, None, 'no agent homes')]
+    bad = runtime.home_cli_problems(homes)
+    if bad:
+        return [(True, False, '; '.join(f'{os.path.basename(h)}: {why}' for h, why in bad)
+                 + ' — asf hooks install --product <p> relinks every home')]
+    return [(True, True, f'{len(homes)} homes resolve .local/bin/asf')]
+
+
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
 _CLI_TOOLS = [
     ('git', True, ['git', '--version']),
@@ -1255,6 +1275,8 @@ def run(product_name):
         rows.append(('product loads under venv', required, ok, detail))
     for required, ok, detail in check_cli_dispatcher(product):
         rows.append(('cli dispatcher', required, ok, detail))
+    for required, ok, detail in check_agent_homes(cfg):
+        rows.append(('agent homes asf', required, ok, detail))
     for ok, detail in check_product_warnings(product):
         rows.append(('product', False, ok, detail))
     ok, detail = check_drift(product)

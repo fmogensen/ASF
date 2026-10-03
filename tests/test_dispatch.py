@@ -268,6 +268,30 @@ class HookSmoke(Fixture):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(p.stdout.count('beta-2222222'), 3, p.stdout)
 
+    def agent_home(self, name):
+        home = os.path.join(self.asf_home, 'state', 'homes', name)
+        os.makedirs(home)
+        return home
+
+    def test_the_smoke_script_runs_the_pre_push_under_every_agent_home(self):
+        from asf.workers import runtime
+        for name in ('agent-a', 'agent-b'):
+            self.assertIsNotNone(runtime.link_factory_cli(self.agent_home(name), self.home))
+        p = self.smoke()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(p.stdout.count('beta-2222222'), 5, p.stdout)
+        self.assertIn('pre-push@home:agent-a', p.stdout)
+        self.assertIn('pre-push@home:agent-b', p.stdout)
+
+    def test_the_smoke_script_fails_on_an_agent_home_whose_asf_dangles(self):
+        home = self.agent_home('agent-a')
+        os.makedirs(os.path.join(home, '.local', 'bin'))
+        os.symlink(os.path.join(self.tmp, 'gone-venv', 'bin', 'asf'),
+                   os.path.join(home, '.local', 'bin', 'asf'))
+        p = self.smoke()
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn('FAIL  pre-push@home:agent-a', p.stdout)
+
     def test_the_smoke_script_fails_when_the_default_answers(self):
         shutil.rmtree(os.path.join(self.venvs, 'beta-2222222'))
         p = self.smoke()

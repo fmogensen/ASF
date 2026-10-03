@@ -52,6 +52,16 @@ if [ "$name" = "prepare-commit-msg" ] && [ -n "$ASF_SESSION" ]; then
         --trailer "ASF-Session: $ASF_SESSION" "$1"
 fi
 
+# a pre-commit that found no scanner (no asf, no tools/checks/redact.sh) left the flag: the
+# commit carries "Redaction: unchecked", and the landing re-scans it before it merges
+if [ "$name" = "commit-msg" ] && [ -f "$1" ]; then
+    flag=$(git rev-parse --git-path asf-redaction-unchecked 2>/dev/null)
+    if [ -n "$flag" ] && [ -f "$flag" ]; then
+        git interpret-trailers --in-place --if-exists doNothing \
+            --trailer "Redaction: unchecked" "$1" 2>/dev/null && rm -f "$flag"
+    fi
+fi
+
 # a worker's commit names its item: a subject lacking the id gets <kind>(<ID>): — never a block
 if [ "$name" = "commit-msg" ] && [ -n "$ASF_JOB" ] && [ -f "$1" ]; then
     item=$ASF_ITEM

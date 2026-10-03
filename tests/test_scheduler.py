@@ -338,6 +338,12 @@ class PinnedVenvTest(SchedulerTestCase):
     RECORD = Clock('record', ['record'], False, 600, None)
     QUEUE = Clock(scheduler.QUEUE_CLOCK, ['ci-queue'], False, 60, None, scheduler.QUEUE_COMMAND)
 
+    def setUp(self):
+        super().setUp()
+        # a pinned render requires the clocks' tools on its PATH: git is the host's, gh and the
+        # session runtime are stubs beside the fake launchctl
+        fake_clis(self.bindir, ('gh', 'claude'))
+
     def make_venv(self, name='asf-factory-sample-abc1234'):
         venv = os.path.join(self.tmp, 'venvs', name)
         site = os.path.join(venv, 'lib', 'python3.12', 'site-packages')
@@ -395,6 +401,8 @@ class PinnedVenvTest(SchedulerTestCase):
         self.pin(venv)
         checkout = os.path.join(self.tmp, 'checkout')
         os.makedirs(os.path.join(checkout, '.git'))
+        os.makedirs(os.path.join(checkout, 'asf'))
+        open(os.path.join(checkout, 'asf', '__init__.py'), 'w').close()  # a checkout of asf
         plugin_bin = os.path.join(checkout, 'plugin', 'bin')
         os.makedirs(plugin_bin)
         os.environ['PATH'] = os.pathsep.join([plugin_bin, self.bindir, '/usr/bin', checkout])

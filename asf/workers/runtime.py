@@ -248,24 +248,31 @@ CLI_REL = os.path.join('.local', 'bin', 'asf')
 
 
 def link_factory_cli(home, operator_home):
-    """``<home>/.local/bin/asf`` → the operator's installed ``asf``, so a session under an isolated
-    HOME reaches the factory's CLI where hooks and scripts expect it (a product's pre-push that runs
-    ``$HOME/.local/bin/asf`` refused every push without it). Nothing when there is no installed
-    CLI to point at; a stale link is replaced.
+    """``<home>/.local/bin/asf`` → the operator's ``asf``, so a session under an isolated HOME
+    reaches the factory's CLI where hooks and scripts expect it (a product's pre-push that runs
+    ``$HOME/.local/bin/asf`` refused every push without it). A stale or dangling link is
+    replaced; with no CLI to point at, a dangling link is removed (a hook then falls back to
+    ``asf`` on ``PATH``) and None is returned.
 
-    When the operator's path is the dispatcher (:mod:`asf.dispatch`), the link names the
-    dispatcher itself — never a venv behind it — so the session's ``asf`` (its hooks, its own
-    ``asf land`` / ``asf set``) runs the pinned venv of the product it acts on."""
-    from asf import dispatch  # local: the session's side reads the install's script
+    The link names the operator's own *path* (``<operator_home>/.local/bin/asf``) — the
+    dispatcher (:mod:`asf.dispatch`), or a pipx link — never what it resolves to today: a link to
+    a venv's ``bin/asf`` dangles the moment an upgrade recreates or moves that venv (2026-10-03:
+    every agent home's link named a venv path, and the pin's move left "No such file or
+    directory" on every push). Following the stable path, each home tracks every move with no
+    rewrite. Only when the operator has no such path is ``asf`` on ``PATH`` taken, as found."""
     target = os.path.join(operator_home, CLI_REL)
+    link = os.path.join(home, CLI_REL)
+    if os.path.abspath(target) == os.path.abspath(link):
+        return link                               # the operator's own HOME: nothing to link
     if not os.path.exists(target):
         found = shutil.which('asf')
-        if not found:
+        if found and os.path.realpath(found) != os.path.realpath(link) \
+                and not _under(found, homes_dir()):
+            target = os.path.abspath(found)
+        else:
+            if os.path.islink(link) and not os.path.exists(link):
+                os.remove(link)
             return None
-        target = found
-    if not dispatch.is_ours(target):
-        target = os.path.realpath(target)
-    link = os.path.join(home, CLI_REL)
     if os.path.islink(link) and os.readlink(link) == target:
         return link
     os.makedirs(os.path.dirname(link), exist_ok=True)
@@ -273,6 +280,53 @@ def link_factory_cli(home, operator_home):
         os.remove(link)
     os.symlink(target, link)
     return link
+
+
+def _under(path, directory):
+    path, directory = os.path.abspath(path), os.path.abspath(directory)
+    return path == directory or path.startswith(directory.rstrip(os.sep) + os.sep)
+
+
+def agent_homes():
+    """Every agent HOME on disk: each directory under :func:`homes_dir`, sorted."""
+    root = homes_dir()
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    return [os.path.join(root, n) for n in names
+            if not n.startswith('.') and os.path.isdir(os.path.join(root, n))]
+
+
+def link_all_homes(operator_home=None):
+    """:func:`link_factory_cli` into EVERY agent home, not only the one a launch seeds — so a
+    hook in any home finds a working ``$HOME/.local/bin/asf`` after an install or a move.
+    ``[(home, link or None)]``; never raises (an unwritable home reads None)."""
+    operator_home = operator_home or os.path.expanduser('~')
+    out = []
+    for home in agent_homes():
+        try:
+            out.append((home, link_factory_cli(home, operator_home)))
+        except OSError:
+            out.append((home, None))
+    return out
+
+
+def home_cli_problems(homes=None):
+    """``[(home, why)]`` for each agent home whose ``$HOME/.local/bin/asf`` does not resolve to an
+    executable file — the doctor's ``agent homes`` row. Read-only."""
+    bad = []
+    for home in agent_homes() if homes is None else homes:
+        cli = os.path.join(home, CLI_REL)
+        if not os.path.lexists(cli):
+            bad.append((home, 'no .local/bin/asf'))
+            continue
+        real = os.path.realpath(cli)
+        if not os.path.isfile(real):
+            bad.append((home, f'.local/bin/asf → {real} (not there)'))
+        elif not os.access(real, os.X_OK):
+            bad.append((home, f'.local/bin/asf → {real} (not executable)'))
+    return bad
 
 
 # ---- the account's credentials (auth_env) -----------------------------------------------------

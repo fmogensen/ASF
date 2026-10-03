@@ -77,8 +77,9 @@ class FakeRun:
 class FakeOps:
     """The clock and hook side of a move, recorded."""
 
-    def __init__(self, clocks=('tick', 'ci-queue'), paused=(), clocks_rc=0):
+    def __init__(self, clocks=('tick', 'ci-queue'), paused=(), clocks_rc=0, smoke_failures=()):
         self.clocks, self.already, self.clocks_rc = list(clocks), set(paused), clocks_rc
+        self.smoke_failures = list(smoke_failures)
         self.log = []
 
     def clock_names(self, product):
@@ -103,6 +104,11 @@ class FakeOps:
     def install_hooks(self, product):
         self.log.append(('hooks', product))
         return 0, 'hooks: ok'
+
+    def smoke(self, product):
+        rec = installs.read(product)
+        self.log.append(('smoke', product, rec.sha if rec else None))
+        return ['tick: gh auth status --active ok'], list(self.smoke_failures)
 
 
 class MoveCase(unittest.TestCase):
@@ -147,6 +153,7 @@ class MoveTest(MoveCase):
         self.assertEqual(rec.sha, SHA)
         self.assertEqual(ops.log, [('pause', 'alpha', ('tick', 'ci-queue')),
                                    ('clocks', 'alpha', SHA), ('hooks', 'alpha'),
+                                   ('smoke', 'alpha', SHA),
                                    ('resume', 'alpha', ('tick', 'ci-queue'))])
         self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
 
@@ -381,6 +388,42 @@ class CliTest(MoveCase):
         with mock.patch.object(upgrade, 'move', return_value=0) as move:
             upgrade.cmd_upgrade(self.parse(['upgrade', '--product', 'alpha', '--rollback']))
         self.assertEqual(move.call_args.kwargs['wait_s'], 900)
+
+
+class MoveSmokeTest(MoveCase):
+    """The move's smoke runs after the render and before any clock resumes; a failure puts the
+    pin back, renders the clocks from it again and resumes them on what they ran."""
+
+    def test_a_failed_smoke_rolls_the_pin_back_before_the_clocks_resume(self):
+        old = make_venv(installs.venv_dir('alpha', OLD), OLD)
+        installs.write('alpha', OLD, old)
+        make_venv(installs.venv_dir('alpha', SHA), SHA)
+        ops = FakeOps(smoke_failures=["asf.alpha.tick: gh not on the plist PATH"])
+        rc, out = self.move(FakeRun(self.venvs), ops, to=SHA)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(installs.read('alpha').sha, OLD)
+        self.assertEqual(ops.log, [('pause', 'alpha', ('tick', 'ci-queue')),
+                                   ('clocks', 'alpha', SHA), ('hooks', 'alpha'),
+                                   ('smoke', 'alpha', SHA),
+                                   ('clocks', 'alpha', OLD), ('hooks', 'alpha'),
+                                   ('resume', 'alpha', ('tick', 'ci-queue'))])
+        text = '\n'.join(out)
+        self.assertIn('smoke FAILED asf.alpha.tick: gh not on the plist PATH', text)
+        self.assertIn('NEEDS OPERATOR', text)
+        self.assertIn('rolled back', text)
+        self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
+
+    def test_a_failed_first_pin_removes_the_record(self):
+        make_venv(installs.venv_dir('alpha', SHA), SHA)
+        ops = FakeOps(smoke_failures=['x: exit 1'])
+        rc, out = self.move(FakeRun(self.venvs), ops, to=SHA)
+        self.assertEqual(rc, 1, out)
+        self.assertIsNone(installs.read('alpha'))
+
+    def test_the_dry_run_names_the_smoke_step(self):
+        rc, out = self.move(FakeRun(self.venvs), to=SHA, dry_run=True)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(any('smoke:' in line for line in out), out)
 
 
 class MoveOpsTest(MoveCase):
