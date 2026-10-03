@@ -13,6 +13,15 @@ those causes, applied by the lane (:mod:`asf.harvest.lane`) *before* it writes a
   needs outside ``writes:``. A widening never turns a red head green: the lane only names the
   verdict in the hold (the health step's ``widen_footprint`` writes the record), so the cause is
   always a residue here. Pushing the same red head on as PUSHED would re-gate it red each pass.
+* ``unpushed`` (W2-PR3b) — a run that ended ``not pushed`` with commits in its worktree:
+  :func:`publish_worktree`, called by the health step's publish (:func:`asf.workers.health.
+  publish_gap`) and by the table for the lane. Its two refusals become git's: origin's commits
+  the head lacks that are ONLY review or notes rounds (``reviews_dir``/``reports_dir``,
+  :func:`round_file`) are archived and the head published over them under the lease; a rebase
+  onto ``origin/<branch>`` that conflicts because origin was rewritten under the worktree (a
+  lane rebuild, a transplant) is replayed from the fork point — only the session's own commits
+  onto the rewritten tip (:func:`replay_own`) — and published. Anything else origin holds that
+  the push would lose still refuses, as today; no commits is the ``empty branch`` path.
 
 Every entry is a function ``(lane, f, cause) -> Outcome`` over what the lane already does, never
 a new git path. :func:`apply` runs one, only under ``conventions.flags.mechanical: on`` (default
@@ -21,7 +30,9 @@ a resolved one also on the lane record, reason ``mechanical:<kind>``) and says o
 gate still runs on the rebuilt head: a resolved cause goes back to PUSHED, never past it.
 """
 import dataclasses
+import os
 
+from asf import gitpush, refguard
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
 from asf.workers import lifecycle
@@ -35,7 +46,8 @@ EVENT = 'mechanical'
 #: The lane state a resolved cause leaves the branch in: the gate runs again on its new head.
 PUSHED = 'PUSHED'
 #: A resolved cause clears a pending correction of these kinds — the work they asked for is done.
-CLEARS = ('conflict', lifecycle.REBASE_CONFLICT, lifecycle.NAMING, lifecycle.COPIES, 'merge')
+CLEARS = ('conflict', lifecycle.REBASE_CONFLICT, lifecycle.NAMING, lifecycle.COPIES, 'merge',
+          lifecycle.UNPUSHED)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,11 +118,117 @@ def widen_footprint(lane, f, cause):
                    f'a wider writes: alone leaves this head red — make the failing tests pass')
 
 
-#: The table: cause kind → entry. 3b/3c add ``unpushed``, ``copies``, ``hook refused``, ``naming``.
+def round_file(conv):
+    """``path -> bool``: True for a file under the product's ``reviews_dir`` or ``reports_dir`` —
+    what a review or notes round commits. A commit touching only those carries no code: the
+    factory files it in its own store (:mod:`asf.evidence.review_store`), so dropping it from a
+    branch, its tip archived, loses nothing a push must keep."""
+    dirs = []
+    for key in ('reviews_dir', 'reports_dir'):
+        d = getattr(conv, key, None)
+        if d is None and hasattr(conv, 'get'):
+            d = conv.get(key)
+        d = str(d or '').strip().rstrip('/')
+        if d:
+            dirs.append(d)
+
+    def droppable(path):
+        return any(path == d or path.startswith(d + '/') for d in dirs)
+    return droppable
+
+
+def _git(wt, *args):
+    return lifecycle._git(list(args), wt)
+
+
+def replay_own(wt, branch):
+    """``(ok, line)``: replay the worktree's OWN commits onto a rewritten ``origin/<branch>``.
+
+    A rebase onto ``origin/<branch>`` conflicts when origin was rebuilt under the worktree (the
+    lane's rebase onto the trunk, a transplant, a session's resolution): git replays the old
+    tip's commits over their own rewritten copies. The fork point — the newest tip of
+    ``origin/<branch>`` the repo's reflog saw that HEAD descends from — splits HEAD into the old
+    tip and the session's own commits; only those are replayed (``git rebase --onto``). Not a
+    rewrite (the fork point is the plain merge base), a dirty tree, or a conflict: ``(False,
+    line)`` with the worktree exactly as it was. Never a merge, never a push."""
+    st = _git(wt, 'status', '--porcelain')
+    if st.returncode != 0 or st.stdout.strip():
+        return False, ''
+    tracking = f'refs/remotes/origin/{branch}'
+    if _git(wt, 'fetch', '-q', 'origin', f'+refs/heads/{branch}:{tracking}').returncode != 0:
+        return False, ''
+    head = _git(wt, 'rev-parse', 'HEAD').stdout.strip()
+    tip = _git(wt, 'rev-parse', tracking).stdout.strip()
+    fork = _git(wt, 'merge-base', '--fork-point', tracking, 'HEAD').stdout.strip()
+    base = _git(wt, 'merge-base', tracking, 'HEAD').stdout.strip()
+    if not head or not tip or not fork or fork == base:
+        return False, ''
+    own = lifecycle._count(_git(wt, 'rev-list', '--count', f'{fork}..HEAD'))
+    r = _git(wt, 'rebase', '-q', '--onto', tracking, fork)
+    if r.returncode != 0:
+        files = _git(wt, 'diff', '--name-only', '--diff-filter=U').stdout.split()
+        _git(wt, 'rebase', '--abort')
+        _git(wt, 'reset', '-q', '--hard', head)
+        return False, (f'the session\'s own {own} commit(s) past {fork[:9]} conflict with the '
+                       f'rewritten origin/{branch} in: {", ".join(files) or "?"}')
+    return True, (f'replayed {own} own commit(s) past {fork[:9]} onto the rewritten '
+                  f'origin/{branch} ({tip[:9]})')
+
+
+def publish_worktree(product, wt, branch, remote_sha, main='main', protected=None,
+                     push_timeout_s=None):
+    """``(ok, line, outcome)``: :func:`asf.workers.lifecycle.publish` of ``wt``'s HEAD with the
+    table's two answers to its refusals — review/notes rounds dropped (``droppable``), a
+    rewritten origin replayed onto (:func:`replay_own`, then published again; a refusal there
+    leaves the worktree as it was). ``outcome``: the :class:`Outcome` (kind ``unpushed``)."""
+    droppable = round_file(getattr(product, 'conventions', None))
+    ok, line = lifecycle.publish(wt, branch, remote_sha, main=main, protected=protected,
+                                 push_timeout_s=push_timeout_s, droppable=droppable)
+    if not ok and lifecycle.rebase_conflict(line):
+        head = _git(wt, 'rev-parse', 'HEAD').stdout.strip()
+        replayed, how = replay_own(wt, branch)
+        if replayed:
+            tip = _git(wt, 'rev-parse', f'refs/remotes/origin/{branch}').stdout.strip()
+            ok2, line2 = lifecycle.publish(wt, branch, tip, main=main, protected=protected,
+                                           push_timeout_s=push_timeout_s, droppable=droppable)
+            if ok2:
+                ok, line = True, f'{how}: {line2}'
+            else:
+                _git(wt, 'reset', '-q', '--hard', head)
+                line = f'{line} (the factory {how}, and that refused too: {line2})'
+        elif how:
+            line = f'{line} ({how})'
+    new = _git(wt, 'rev-parse', 'HEAD').stdout.strip()
+    return ok, line, Outcome(UNPUSHED, bool(ok), new, line)
+
+
+def unpushed(lane, f, cause):
+    """``unpushed``: the run's worktree published (:func:`publish_worktree`) — resolved when it
+    went out. No worktree, or none on disk: a residue (the hold as today)."""
+    run = f.get('run') or {}
+    wt, b = run.get('worktree'), f.get('branch') or run.get('branch')
+    head = f.get('head') or ''
+    if not wt or not b or not os.path.isdir(wt):
+        return Outcome(UNPUSHED, False, head, '')
+    product = getattr(lane, 'product', None)
+    conv = getattr(product, 'conventions', None)
+    _ok, _line, out = publish_worktree(
+        product, wt, b, lifecycle.RemoteHeads().sha(wt, b) or '',
+        main=getattr(lane, 'trunk', None) or 'main',
+        protected=refguard.listed(conv) if conv is not None else None,
+        push_timeout_s=gitpush.push_timeout(conv))
+    return out
+
+
+#: The cause kind of a run that ended ``not pushed`` with its work in the worktree.
+UNPUSHED = lifecycle.UNPUSHED
+
+#: The table: cause kind → entry. 3c adds ``copies``, ``hook refused``, ``naming``.
 MECHANICAL = {
     'conflict': rebase,
     lifecycle.REBASE_CONFLICT: rebase,
     lifecycle.FOOTPRINT: widen_footprint,
+    lifecycle.UNPUSHED: unpushed,
 }
 
 

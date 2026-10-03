@@ -1686,7 +1686,8 @@ def _rewrite_account_names(wt, remote_sha, findings):
     return bool(new) and _git(['reset', '-q', '--hard', new], wt).returncode == 0
 
 
-def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None):
+def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None,
+            droppable=None):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -1728,7 +1729,12 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     redaction (some other repo, some other
     pattern list) has its captured output parsed the same way
     (:func:`asf.redact.parse_finding_lines`) before falling back to its raw last line.
-    ``(ok, line)``."""
+
+    ``droppable`` (a ``path -> bool``, ``flags.mechanical`` only — :mod:`asf.harvest.mechanical`):
+    where either refusal above would stand, origin's commits the head lacks that change ONLY
+    files it says yes to — review and notes rounds, filed in the factory's own store — are
+    dropped instead: the old tip archived, the head pushed over it under the lease. A commit
+    that touches anything else still refuses. ``(ok, line)``."""
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
     from asf import gitpush, redact, refguard
@@ -1754,7 +1760,8 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
             # factory carries it onto the head — never the head back onto the stale remote —
             # and one it cannot carry is named, with the trunk as the instruction
             subjects = _subjects(wt, left)
-            if not carry_onto_head(wt, left):
+            carried = carry_onto_head(wt, left)
+            if not carried and not only_touching(wt, left, droppable):
                 why = loss_refusal(branch, left, main, subjects)
                 return False, f'publish {branch} refused: {why}'
             archive = copies_archive(branch, remote_sha)
@@ -1762,13 +1769,26 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
                 return False, f'publish {branch} refused: {archive} is a protected ref'
             named = ', '.join(f'{s} {subjects[s]}' if subjects.get(s) else s for s in left)
             rebased = (f'carried {len(left)} commit(s) the rebase dropped ({named}) '
+                       f'(old tip kept as {archive})' if carried else
+                       f'{DROPPED_ROUNDS} {len(left)} review/notes round(s) origin held ({named}) '
                        f'(old tip kept as {archive})')
             lost = []
         if lost is None or lost:
             ok, fetched, rebased = rebase_onto_remote(wt, branch)
-            if not ok:
+            if not ok and only_touching(wt, lost, droppable):
+                # origin's extra commits are review/notes rounds only: kept on an archive ref,
+                # the head published over them under the lease on the tip the evidence read
+                archive = copies_archive(branch, remote_sha)
+                if refguard.refusal(archive, f'archive {branch}', main, protected):
+                    return False, f'publish {branch} refused: {archive} is a protected ref'
+                subjects = _subjects(wt, lost)
+                named = ', '.join(f'{s} {subjects[s]}' if subjects.get(s) else s for s in lost)
+                rebased = (f'{DROPPED_ROUNDS} {len(lost)} review/notes round(s) origin held '
+                           f'({named}) (old tip kept as {archive})')
+            elif not ok:
                 return False, f'publish {branch} refused: {rebased or loss_refusal(branch, lost)}'
-            remote_sha = fetched
+            else:
+                remote_sha = fetched
     findings = _redaction_findings(wt, remote_sha)
     if findings and _rewrite_account_names(wt, remote_sha, findings):
         rebased = ', '.join(x for x in (rebased, 'worker-account names rewritten to lane-N') if x)
@@ -1793,6 +1813,23 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     if rebased:
         return True, f'{rebased} and pushed: published {branch} at {head}'
     return True, f'published {branch} at {head}' + (' (rebased; lease held)' if remote_sha else '')
+
+
+#: The words a publish line opens with when it dropped origin's review/notes rounds (``droppable``).
+DROPPED_ROUNDS = 'dropped'
+
+
+def only_touching(wt, shas, droppable):
+    """True when ``droppable`` is given, ``shas`` is a non-empty list, and every one of those
+    commits changes at least one file and only files ``droppable(path)`` says yes to."""
+    if droppable is None or not shas:
+        return False
+    for sha in shas:
+        p = _git(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', sha], wt)
+        files = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+        if p.returncode != 0 or not files or not all(droppable(f) for f in files):
+            return False
+    return True
 
 
 #: The line a publish refused for a rebase onto the remote head that conflicted carries.
