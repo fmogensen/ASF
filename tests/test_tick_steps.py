@@ -1297,8 +1297,8 @@ class HarvestStepTests(StepsTestCase):
         none starts while the marker is up (the owner's tick included)."""
         from asf import upgrade
         self.finished_branch()
-        upgrade.write_pending('d' * 40, 'sample')
-        self.addCleanup(upgrade.clear_pending)
+        upgrade.write_pending('d' * 40, 'sample', 'sample')
+        self.addCleanup(upgrade.clear_pending, 'sample')
         spawn = mock.Mock(side_effect=AssertionError('a harvest under a pending upgrade'))
         with mock.patch('asf.drift.installed_commit', return_value='c' * 40):
             rc = step_harvest.run(self.ctx(), out=self.lines.append, spawn=spawn)

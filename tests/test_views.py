@@ -238,7 +238,7 @@ class StatusViewTests(ViewsTestCase):
 
         from asf import scheduler, upgrade
         at = time.time() - 300
-        upgrade.write_pending('f5aa236' + 'a' * 33, 'sample', now=at)
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'sample', self.product.name, now=at)
         jobs = [{'label': 'asf.p.record-health'}]
         with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: jobs), \
                 mock.patch.object(scheduler, 'status',
@@ -263,18 +263,19 @@ class StatusViewTests(ViewsTestCase):
                                       lambda label: {'state': 'waiting', 'last_exit': 0}):
                 return status.cron_cell({}, self.product)
 
-        upgrade.write_pending('f5aa236' + 'a' * 33, self.product.name, now=time.time() - 300)
+        upgrade.write_pending('f5aa236' + 'a' * 33, self.product.name, self.product.name,
+                              now=time.time() - 300)
         self.assertEqual(cron(), healthy)
 
-        upgrade.clear_pending()
-        upgrade.write_pending('f5aa236' + 'a' * 33, None, now=time.time() - 300)
-        data = upgrade.read_pending()
+        upgrade.clear_pending(self.product.name)
+        upgrade.write_pending('f5aa236' + 'a' * 33, None, self.product.name, now=time.time() - 300)
+        data = upgrade.read_pending(self.product.name)
         data['pid'] = 999999  # killed before its own BaseException cleanup cleared the mark
-        upgrade._write_json(upgrade.pending_path(), data)
+        upgrade._write_json(upgrade.pending_path(self.product.name), data)
         self.assertEqual(cron(), healthy)
 
-        upgrade.clear_pending()
-        upgrade.write_pending('f5aa236' + 'a' * 33, 'other', now=time.time() + 3600)
+        upgrade.clear_pending(self.product.name)
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'other', self.product.name, now=time.time() + 3600)
         self.assertEqual(cron(), healthy)
 
     def test_cron_flags_a_declared_clock_that_is_not_loaded(self):

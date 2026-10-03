@@ -179,7 +179,7 @@ def run(ctx, out=print, spawn=None):
     from asf.tick import step_wave  # R2: the lane pass is in-process — here when no wave ran it
     step_wave.lane_pass(ctx, out)
     from asf import upgrade
-    held = upgrade.pending(out=out)
+    held = upgrade.pending(product.name, out=out)
     if held is not None:
         # a detached harvest lives for many minutes: one started now keeps the gap the pending
         # install needs from coming. The floor drains; the next tick after the install starts it.

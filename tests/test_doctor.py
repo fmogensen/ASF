@@ -937,7 +937,7 @@ class TestSchedulerSection(unittest.TestCase):
         fake_loaded(self.statedir, ['asf.sample.record'])
         fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
         at = time.time() - 300
-        upgrade.write_pending('f5aa236' + 'a' * 33, 'other', now=at)
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'other', self.product.name, now=at)
 
         rows = doctor.scheduler_rows(self.cfg(), self.product)
         held = [r for r in rows if r[1] == 'upgrade']
@@ -953,7 +953,8 @@ class TestSchedulerSection(unittest.TestCase):
         drains and installs the upgrade — so its own section must not claim a wait."""
         from asf import upgrade
         fake_loaded(self.statedir, [])
-        upgrade.write_pending('f5aa236' + 'a' * 33, self.product.name, now=time.time() - 300)
+        upgrade.write_pending('f5aa236' + 'a' * 33, self.product.name, self.product.name,
+                              now=time.time() - 300)
         rows = doctor.scheduler_rows(self.cfg(), self.product)
         self.assertEqual([r for r in rows if r[1] == 'upgrade'], [], rows)
 
@@ -962,15 +963,15 @@ class TestSchedulerSection(unittest.TestCase):
         in the future, are both ignored by every tick — the section must not report them."""
         from asf import upgrade
         fake_loaded(self.statedir, [])
-        upgrade.write_pending('f5aa236' + 'a' * 33, None, now=time.time() - 300)
-        data = upgrade.read_pending()
+        upgrade.write_pending('f5aa236' + 'a' * 33, None, self.product.name, now=time.time() - 300)
+        data = upgrade.read_pending(self.product.name)
         data['pid'] = 999999  # an `asf upgrade --wait` killed before it cleared its own mark
-        upgrade._write_json(upgrade.pending_path(), data)
+        upgrade._write_json(upgrade.pending_path(self.product.name), data)
         rows = doctor.scheduler_rows(self.cfg(), self.product)
         self.assertEqual([r for r in rows if r[1] == 'upgrade'], [], rows)
 
-        upgrade.clear_pending()
-        upgrade.write_pending('f5aa236' + 'a' * 33, 'other', now=time.time() + 3600)
+        upgrade.clear_pending(self.product.name)
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'other', self.product.name, now=time.time() + 3600)
         rows = doctor.scheduler_rows(self.cfg(), self.product)
         self.assertEqual([r for r in rows if r[1] == 'upgrade'], [], rows)
 

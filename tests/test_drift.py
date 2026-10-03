@@ -100,9 +100,9 @@ class TickPrintsTheDriftLine(DriftTestCase):
 
         def deferred(args):
             self.assertEqual(args.owner, 'p')
-            upgrade.write_pending(args.ref, args.owner)
+            upgrade.write_pending(args.ref, args.owner, args.owner)
             return drift.DEFERRED
-        self.addCleanup(upgrade.clear_pending)
+        self.addCleanup(upgrade.clear_pending, 'p')
         with mock.patch.object(tick, 'run_asf_step') as step:
             out = io.StringIO()
             self.product = env.Product('p', {'repo_dir': self.repo, 'main': 'main',
@@ -119,7 +119,7 @@ class TickPrintsTheDriftLine(DriftTestCase):
         tick marks the upgrade pending, polls within upgrade.drain_wait_s, and installs once it
         ends — never deferred forever behind its own product's harvest."""
         from asf import upgrade
-        self.addCleanup(upgrade.clear_pending)
+        self.addCleanup(upgrade.clear_pending, 'p')
         polls = iter([[54171], [54171], []])
         installed = []
         self.product = env.Product('p', {'repo_dir': self.repo, 'main': 'main',
@@ -138,7 +138,7 @@ class TickPrintsTheDriftLine(DriftTestCase):
         self.assertEqual(installed, [self.head])
         self.assertEqual(sleep.call_count, 2)
         step.assert_not_called()  # the steps run on the next tick, under the new install
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('p'))
         self.assertIn('upgrade: the floor drained', out.getvalue())
 
     def test_no_line_of_drift_when_the_install_is_the_trunk(self):
