@@ -549,6 +549,28 @@ def job_key(name):
     return str(name or '').split(' ', 1)[0]
 
 
+def never_started(runs, required):
+    """The ``required`` names no run of ``runs`` answers for (:func:`job_key`), once every run
+    has completed: the CI is done and never started them — a path filter skipped a matrix job
+    under its unexpanded name (``e2e${{ matrix.suffix }}``), which no required list names.
+    Empty while any run is still going (a job not created yet may still come). The merge
+    queue's admission and the deploy's pick both read it."""
+    runs = list(runs or ())
+    if not runs or any(r.get('status') != 'completed' for r in runs):
+        return []
+    have = {job_key(r.get('name')) for r in runs}
+    return [n for n in required if n not in have]
+
+
+def unexpanded_key(name):
+    """The job a check run named with an unexpanded expression stands for — the name up to its
+    first ``${{`` (``e2e${{ matrix.suffix }}`` and ``e2e (${{ matrix.x }})`` are ``e2e``) — or
+    None for a name with no expression."""
+    s = str(name or '')
+    i = s.find('${{')
+    return (s[:i].rstrip(' (') or None) if i >= 0 else None
+
+
 def _jobs_verdict(product, run, req, sh):
     """``(green, rule)`` for one run (completed, queued or in progress) under the required-jobs
     rule, reading the jobs of its latest attempt (``gh run view --json jobs``); ``rule`` names
@@ -556,7 +578,11 @@ def _jobs_verdict(product, run, req, sh):
     job is green only when it concluded ``success``: ``skipped``, ``neutral``, ``cancelled`` or
     missing never are — except ``skipped`` on a sha the merge queue attested
     (:mod:`asf.attestation`): the batch run judged that exact sha green, so the trunk push skipped
-    its heavy jobs. A required job that ran there and did not succeed is red all the same. The run's own conclusion never stands in for its jobs — a run whose path
+    its heavy jobs. A required job the finished run never started (:func:`never_started`) counts
+    the same there when a skipped job carries its name unexpanded (:func:`unexpanded_key`: the
+    path filter skipped the matrix before expanding it); a job with no such trace is missing. A
+    required job that ran there and did not succeed is red all the same. The run's own
+    conclusion never stands in for its jobs — a run whose path
     filter skipped the suites concludes ``success`` too (2026-09-26: a docs-only tip, suites
     skipped, was announced for prod over a code commit whose run had not finished)."""
     names = ', '.join(req)
@@ -566,12 +592,16 @@ def _jobs_verdict(product, run, req, sh):
         return False, f"run {run.get('databaseId')} jobs unreadable (gh run view)"
     jobs = [j for j in view.get('jobs') or [] if isinstance(j, dict)]
     attested, covered = None, []
+    unexpanded = {n for n in never_started(jobs, req)
+                  if any(unexpanded_key(j.get('name')) == n
+                         and j.get('conclusion') in attestation.ATTESTED_CONCLUSIONS for j in jobs)}
     for name in req:
         mine = [j for j in jobs if job_key(j.get('name')) == name]
         if mine and all(j.get('conclusion') == 'success' for j in mine):
             continue
-        if mine and all(j.get('conclusion') == 'success'
-                        or j.get('conclusion') in attestation.ATTESTED_CONCLUSIONS for j in mine):
+        if (name in unexpanded or mine) and all(
+                j.get('conclusion') == 'success'
+                or j.get('conclusion') in attestation.ATTESTED_CONCLUSIONS for j in mine):
             if attested is None:  # read once, and only when a required job skipped
                 attested = attestation.product_attested(
                     product, run.get('headSha'), read=lambda p: _json(sh(['gh', 'api', p]), dict))

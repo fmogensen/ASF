@@ -116,6 +116,38 @@ class PathFilteredCheck(Base):
         state, why = merge_queue.verdict(runs, ['gate', 'e2e-d'])
         self.assertEqual((state, why), ('pending', 'e2e-d (not started)'))
 
+    def sh(self, status):
+        """The fixture's check runs as one trunk run's jobs (``gh run view --json jobs``), and
+        a commit status carrying ``asf/attested`` in ``status`` (none when None)."""
+        jobs = out('path-filtered-check', 'check-runs')['check_runs']
+        statuses = [{'context': 'asf/attested', 'state': status}] if status else []
+
+        def run(cmd, *a, **k):
+            if cmd[:3] == ['gh', 'run', 'view']:
+                return json.dumps({'jobs': jobs})
+            if cmd[:2] == ['gh', 'api'] and cmd[2].endswith('/status?per_page=100'):
+                return json.dumps({'state': 'success', 'statuses': statuses})
+            return None
+        return run
+
+    def test_the_deploy_pick_counts_it_green_on_an_attested_trunk_sha(self):
+        run = {'databaseId': 10002, 'headSha': sha_of('path-filtered-check')}
+        ok, rule = deploy._jobs_verdict(PRODUCT, run, ['gate', 'e2e-d'], self.sh('success'))
+        self.assertTrue(ok, rule)
+        self.assertIn('e2e-d skipped on the trunk, attested by asf/attested', rule)
+
+    def test_the_deploy_pick_reads_it_missing_on_an_unattested_sha(self):
+        run = {'databaseId': 10002, 'headSha': sha_of('path-filtered-check')}
+        ok, rule = deploy._jobs_verdict(PRODUCT, run, ['gate', 'e2e-d'], self.sh(None))
+        self.assertFalse(ok)
+        self.assertEqual(rule, 'required job e2e-d not green (missing)')
+
+    def test_an_absent_job_with_no_unexpanded_trace_stays_missing_when_attested(self):
+        run = {'databaseId': 10002, 'headSha': sha_of('path-filtered-check')}
+        ok, rule = deploy._jobs_verdict(PRODUCT, run, ['gate', 'e2e-z'], self.sh('success'))
+        self.assertFalse(ok)
+        self.assertEqual(rule, 'required job e2e-z not green (missing)')
+
 
 class RunSuccessHidingJob(Base):
     """A run that concluded ``success`` over a failed job: the run's conclusion never stands in
