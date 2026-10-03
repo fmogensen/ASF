@@ -487,20 +487,9 @@ def demand(items, product, running, inputs, extra=0, exclude=None, cfg=None):
     return min(wanted(rows, inputs.get('held')), max(0, ceiling - len(running)))
 
 
-def _git(repo, args):
-    p = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
-    return p.stdout.strip() if p.returncode == 0 else ''
-
-
-def repo_facts(product, branch):
-    """``{branch, pushed, remote_sha, last_commit}`` for ``branch`` on the product repo's origin."""
-    repo = product.repo_dir
-    if not repo or not branch:
-        return {'branch': branch, 'pushed': False, 'remote_sha': '', 'last_commit': ''}
-    heads = _git(repo, ['ls-remote', '--heads', 'origin', branch])
-    sha = heads.split()[0] if heads else ''
-    last = _git(repo, ['log', '-1', '--format=%H %cI %s', f'origin/{branch}']) if sha else ''
-    return {'branch': branch, 'pushed': bool(sha), 'remote_sha': sha, 'last_commit': last}
+def _repo_facts(*a, **kw):
+    from asf.briefs import facts
+    return facts.repo_facts(*a, **kw)
 
 
 def _build(*a, **kw):
@@ -727,7 +716,7 @@ def s1_refresher(ctx, items, held, texts, kinds, capacity, out=print, index_fn=N
             if row.item_id not in new or not row.launches or row.item_id in held:
                 continue
             brief = _build(product, row, fresh, running,
-                           repo_facts=repo_facts(product, row.branch))
+                           repo_facts=_repo_facts(product, row, fresh, running))
             wrow = worker_row(row, brief, fresh)
             if wrow.job in known:
                 continue
@@ -841,7 +830,7 @@ def launch(ctx, out=print):
             job = job_name(row.brief_kind, row.item_id)
             out(f'adjudicate {job:<24} {row.item_id:<10} — {la}: {ta[:60]} ↔ {lb}: {tb[:60]}{common}')
         brief = _build(product, row, items, running,
-                       repo_facts=repo_facts(product, row.branch))
+                       repo_facts=_repo_facts(product, row, items, running))
         wrow = worker_row(row, brief, items, host_load_bypass=bypass)
         parked = relaunch_capped(product, row, wrow, out)
         if parked:
