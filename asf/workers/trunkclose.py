@@ -37,6 +37,25 @@ KINDS = ('coder', 'delivery-code', 'reshape')
 #: The report claim that says the session found nothing left to do.
 DONE = 'status done'
 FULL_SHA_RE = re.compile(r'[0-9a-f]{40}')
+
+
+class Unknown:
+    """:func:`evidence` when the open PRs could not be read: not evidence (falsy — nothing
+    closes on it) and not "no evidence" either — a launch the evidence would have stopped waits
+    (:func:`closes_before_launch`)."""
+
+    def __init__(self, why):
+        self.why = why
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return f'Unknown({self.why!r})'
+
+
+#: The wait a row shows while :func:`evidence` is :class:`Unknown`.
+WAITS_UNKNOWN = 'WAITS ON gh (unknown)'
 LEAD_SHA_RE = re.compile(r'\s*([0-9a-f]{7,40})\b')
 
 
@@ -133,7 +152,10 @@ def evidence(path, item, repo, main='main', writes=(), ask_gh=True):
     sha = trunk_sha(repo, main, run, text, item, writes, landing.run_prs(path, item))
     if not sha or unlanded(repo, main, run.get('branch')):
         return None
-    if landing.open_work(repo, main, path, item, [run.get('branch')], ask_gh=ask_gh):
+    work = landing.open_work(repo, main, path, item, [run.get('branch')], ask_gh=ask_gh)
+    if work is None:
+        return Unknown('the open PRs could not be read')  # never a close on an unknown
+    if work:
         return None  # the item's own work is unmerged: nothing on the trunk closes it
     return full_sha(repo, sha) or sha, run, claim
 
@@ -156,6 +178,12 @@ def closes_before_launch(product, row_kind, item, out=print, dry_run=False):
     except Exception as e:  # noqa: BLE001 — the check never blocks a wave by failing
         out(f'trunk: evidence check failed for {item} — {e}')
         return False
+    if isinstance(hit, Unknown):
+        # the evidence would stop this launch, and the open PRs could not be read: neither a
+        # launch nor a close this tick
+        verb = 'would wait' if dry_run else 'waits   '
+        out(f'{verb} {row_kind}-{item.lower():<17} {item:<10} — {WAITS_UNKNOWN}: {hit.why}')
+        return True
     if not hit:
         return False
     sha, run, claim = hit

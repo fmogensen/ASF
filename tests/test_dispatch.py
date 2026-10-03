@@ -256,12 +256,20 @@ class SessionLink(unittest.TestCase):
 
 class HookSmoke(Fixture):
 
-    def smoke(self, product='beta'):
+    def smoke(self, product='beta', default_dir=False):
         env = {'HOME': self.home, 'PATH': '/usr/bin:/bin', 'ASF_HOME': self.asf_home,
                'PYTHONPATH': ROOT, 'ASF_DISPATCHER': self.path,
                'ASF_JOB': 'must-be-dropped', 'ASF_PRODUCT': 'must-be-dropped'}
-        return subprocess.run(['bash', SMOKE, product, self.repos[product]], env=env,
+        args = [] if default_dir else [self.repos[product]]
+        return subprocess.run(['bash', SMOKE, product, *args], env=env,
                               capture_output=True, text=True)
+
+    def test_with_no_dir_an_empty_leftover_worktree_is_passed_over_for_the_repo_dir(self):
+        os.makedirs(os.path.join(self.asf_home, 'state', 'beta', 'worktrees', 'leftover'))
+        p = self.smoke(default_dir=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn(f"hook-smoke: beta from {self.repos['beta']}\n", p.stdout)
+        self.assertEqual(p.stdout.count('beta-2222222'), 3, p.stdout)
 
     def test_the_smoke_script_answers_from_the_pin(self):
         p = self.smoke()

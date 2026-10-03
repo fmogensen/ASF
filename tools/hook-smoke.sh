@@ -13,8 +13,9 @@
 # runs with HOME=<that home>, and its git hooks call "$HOME/.local/bin/asf" — so the replay runs
 # under that HOME through that path, and fails when the home's link is missing or dangling.
 #
-#   dir                the directory to run from (default: the first of the product's state
-#                      worktrees, else its repo_dir)
+#   dir                the directory to run from (default: the product's repo_dir, else the
+#                      first of its state worktrees that is a git work tree — an empty
+#                      leftover worktree directory is no repo, and every call would fail there)
 # Env: ASF_HOME        the asf home (default ~/.ASF)
 #      ASF_DISPATCHER  the dispatcher (default $HOME/.local/bin/asf)
 set -uo pipefail
@@ -27,17 +28,21 @@ record="$asf_home/state/$product/install.json"
 
 dir="${2:-}"
 if [ -z "$dir" ]; then
-  for d in "$asf_home/state/$product/worktrees"/*/; do
-    [ -d "$d" ] && { dir="${d%/}"; break; }
-  done
-fi
-if [ -z "$dir" ]; then
   dir=$(sed -n 's/^repo_dir:[[:space:]]*//p' "$asf_home/products/$product.yaml" 2>/dev/null |
         sed 's/[[:space:]]#.*//; s/^["'"'"']//; s/["'"'"'][[:space:]]*$//' | head -n 1)
   dir="${dir/#\~/$HOME}"
+  [ -n "$dir" ] && [ -d "$dir" ] || dir=""
+fi
+if [ -z "$dir" ]; then
+  for d in "$asf_home/state/$product/worktrees"/*/; do
+    if [ -d "$d" ] && git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      dir="${d%/}"; break
+    fi
+  done
 fi
 [ -d "$dir" ] || { echo "hook-smoke: no directory for product $product (pass one)" >&2; exit 2; }
 [ -x "$dispatcher" ] || { echo "hook-smoke: no dispatcher at $dispatcher" >&2; exit 2; }
+echo "hook-smoke: $product from $dir"
 
 venv=$(python3 - "$record" "${PIPX_HOME:-$HOME/.local/pipx}/venvs" <<'PY' 2>/dev/null
 import json, os, sys
