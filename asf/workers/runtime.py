@@ -251,20 +251,27 @@ def link_factory_cli(home, operator_home):
     """``<home>/.local/bin/asf`` → the operator's installed ``asf``, so a session under an isolated
     HOME reaches the factory's CLI where hooks and scripts expect it (a product's pre-push that runs
     ``$HOME/.local/bin/asf`` refused every push without it). Nothing when there is no installed
-    CLI to point at; a stale link is replaced."""
+    CLI to point at; a stale link is replaced.
+
+    When the operator's path is the dispatcher (:mod:`asf.dispatch`), the link names the
+    dispatcher itself — never a venv behind it — so the session's ``asf`` (its hooks, its own
+    ``asf land`` / ``asf set``) runs the pinned venv of the product it acts on."""
+    from asf import dispatch  # local: the session's side reads the install's script
     target = os.path.join(operator_home, CLI_REL)
     if not os.path.exists(target):
         found = shutil.which('asf')
         if not found:
             return None
         target = found
+    if not dispatch.is_ours(target):
+        target = os.path.realpath(target)
     link = os.path.join(home, CLI_REL)
-    if os.path.realpath(link) == os.path.realpath(target) and os.path.lexists(link):
+    if os.path.islink(link) and os.readlink(link) == target:
         return link
     os.makedirs(os.path.dirname(link), exist_ok=True)
     if os.path.lexists(link):
         os.remove(link)
-    os.symlink(os.path.realpath(target), link)
+    os.symlink(target, link)
     return link
 
 
