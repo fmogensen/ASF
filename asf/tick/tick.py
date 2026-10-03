@@ -7,8 +7,10 @@ own clone of the product's backlog (:mod:`asf.tick.shadow`).
 ``step_groom``, ``step_wave``, ``step_prs``, ``step_harvest`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
 any step a product chooses to run with its own command.
 
-A step that fails prints one ``[step:<name>] FAILED <why>`` and the tick goes on to the next one;
-the exit code is 1 when any step failed. Every step shares one :class:`Context`, so the record
+Each step the tick actually runs prints a start line naming the step, its owner, the tick's pid and
+the UTC time, and an end line with the seconds and ``ok=``; a step the tick skipped prints neither
+(F-0142). A step that fails prints one ``[step:<name>] FAILED <why>`` and the tick goes on to the
+next one; the exit code is 1 when any step failed. Every step shares one :class:`Context`, so the record
 clone is made (reset to origin) once per tick however many steps read it. After the steps, one
 line goes to ``metrics/ticks/<day>.jsonl`` in the record clone — the ``ticks`` stream's schema
 (``tick``, ``launches``, ``stalls``, ...) plus ``product`` and ``steps: [{step, ok, seconds}]`` —
@@ -453,6 +455,7 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
             continue
         t0 = time.monotonic()
         if owner == 'asf':
+            print(step_start_line(step, owner), flush=True)
             step_rc = run_asf_step(step, ctx)
             if step == 'harvest':
                 lane_check(ctx)  # report only: never the step's rc, never an abort
@@ -477,6 +480,9 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
                     if not free:
                         print(f"tick: step {step} is already running — skipped")
                         continue
+                    # after the guard, never before: a start line the doctor reads as a running
+                    # step must mean a step that started (F-0142, D11)
+                    print(step_start_line(step, owner), flush=True)
                     step_rc = steps.run_command(step, command, steps.command_timeout(),
                                                 cwd=product.repo_dir or None,
                                                 extra_env=capacity.env_overlay(resolved, product))
@@ -485,7 +491,7 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
                     if step == 'daily':
                         steps.write_daily_failure(product, f"exited {step_rc}")
         ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
-        print(step_timing_line(step, ran[-1]['seconds']))
+        print(step_end_line(step, ran[-1]['seconds'], ok=not step_rc, owner=owner), flush=True)
         if step == 'daily' and step_rc == 0:
             steps.write_daily_stamp(product)
         rc = rc or (1 if step_rc else 0)
@@ -508,10 +514,25 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     return rc
 
 
-def step_timing_line(step, seconds):
-    """``[step:<name>] <seconds>s`` — printed as each step ends, so a slow step is named in the
-    log while the tick is still running."""
-    return f'[step:{step}] {seconds:.1f}s'
+def step_start_line(step, owner, pid=None, at=None):
+    """``[step:<name>] start owner=<asf|command> pid=<pid> at=<ts>`` — printed as the step begins,
+    so the tick log names the step it is inside while the step is still running, and the doctor's
+    SCHEDULER row can read it back (F-0142). ``pid`` is the tick's own process: the step's owner is
+    what the line is about, and a command step's child is named on its own
+    ``[command:<step>]`` lines (D4)."""
+    return (f'[step:{step}] start owner={owner} pid={pid or os.getpid()} '
+            f'at={at or _stamp()}')
+
+
+def step_end_line(step, seconds, ok=True, owner='asf', pid=None, at=None):
+    """``[step:<name>] <seconds>s ok=<yes|no> owner=<owner> pid=<pid> at=<ts>`` — printed as each
+    step ends, so a slow step is named in the log while the tick is still running, and the start
+    line it closes is no longer read as a running step.
+
+    The ``[step:<name>] <seconds>s`` prefix is the shape this line has always had and is what
+    `asf doctor` matches an *ended* step on (D1); the fields after it are F-0142's."""
+    return (f'[step:{step}] {seconds:.1f}s ok={"yes" if ok else "no"} owner={owner} '
+            f'pid={pid or os.getpid()} at={at or _stamp()}')
 
 
 def total_line(seconds):
