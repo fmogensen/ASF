@@ -904,6 +904,50 @@ def scheduler_is_red(rows):
     return any(level == RED for level, _label, _detail in rows)
 
 
+ROWS = (
+    ('config', "config.yaml and products/<name>.yaml both parse and carry the fields every other check needs"),
+    ('repo', "the product's repo_dir is a real git checkout"),
+    ('backlog', "the record's backlog_dir is a real git checkout"),
+    ('scheduler', "no pre-ASF job the operator config names is still live beside ASF's own"),
+    ('cli:*', "one row per CLI tool a worker session needs — git and gh required, cloud CLIs optional"),
+    ('one-factory', "no file named like an old factory tool is duplicated on PATH or in the product repo"),
+    ('approvals', "the product's approval matrix loads and names what is legal but probably not meant"),
+    ('redaction-hooks', "the redaction gate's pre-commit and pre-push are in place in every repo the product configures"),
+    ('approvals-hook', "every worker account's sessions carry the built-in approvals hook"),
+    ('console permissions', "the operator's own console carries every permission asf console-permissions offer shows"),
+    ('worker env', "no worker session can see what it should not — HOME isolation, passthrough names, login variables"),
+    ('worker secrets', "each account's auth_env file is present, named only, never its value"),
+    ('worker push auth', "each account's push credential actually works — a real git ls-remote and push --dry-run"),
+    ('clock code', "the snapshot sha the clock last ticked from, when the package runs from a checkout"),
+    ('clock install', "which install runs the next tick of each clock, its sha and its distance from origin/main"),
+    ('drift', "the running install against the trunk's head"),
+    ('rule-checks', "the rule checks that timed out or crashed on the last file-bugs run"),
+    ('briefs', "the config smoke test — one brief of every kind rendered for the product"),
+    ('capacity', "this product's own capacity.sessions and the shared pool's fair-share findings"),
+    ('savings', "the savings block's thresholds and window, read against the shared pool"),
+    ('models', "worker_pool.models names every model label a job resolves to"),
+    ('model table', "one line per brief kind — the model label each item class resolves to for this product"),
+    ('conventions', "one RED finding per map-valued convention the product file wrote in the wrong shape"),
+    ('deploy', "the resolved deploy mode per environment, and any config read differently from how it is written"),
+    ('customer content', "a product that deploys names its customer content, and its markers compile"),
+    ('token-caps', "the resolved default token cap, or one finding per override that cannot apply"),
+    ('ci pool', "the declared CI runner pool against the CI host"),
+    ('ci runners', "the runners the CI queue's pass found busy with no job"),
+    ('cloud lane', "the cloud lane's own doctor rows — worker sessions run as Claude Code cloud sessions"),
+    ('gate', "the gate ran too slow against gate_timeout_s, two timeouts in a row"),
+    ('lane pushes', "the last lane pass could not push an archive or a branch ref"),
+    ('ab pairs', "the lane experiment's pairs — direct vs full, pooled and per ab_pair"),
+    ('quota lock', "the account manager's usage lock — wedged or reclaimable"),
+    ('worktrees', "the worker worktrees now — their count, size, and how many are removable"),
+    ('branches', "the census of origin's heads by whether they carry an open PR"),
+)
+
+
+def row_names():
+    """The first column of ROWS, in table order."""
+    return tuple(name for name, _meaning in ROWS)
+
+
 def run(product_name):
     """[(row, required, ok, detail)] for every doctor row, in table order."""
     rows = []
