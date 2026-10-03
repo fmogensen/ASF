@@ -13,8 +13,9 @@ checkout. It starts this file, copied to ``<state>/<product>/code/launch.py`` at
    (created once, under a lock, and marked complete only after ``git worktree add`` finished;
    reused while ``HEAD`` stays put — a commit's tree never changes);
 3. records the sha it runs in ``code/current`` (what ``asf doctor`` shows) and stamps the
-   snapshot's use, then prunes the snapshots nothing has used for :data:`KEEP_UNUSED_S`
-   (a long tick still running from the previous one keeps it);
+   snapshot's use, then prunes to at most :data:`KEEP_MAX` snapshots plus the ones nothing has
+   used for :data:`KEEP_UNUSED_S` (a long tick still running from the previous one keeps it —
+   the :data:`IN_USE_S` grace);
 4. brings its own installed copy up to date with the snapshot's ``asf/snapshot.py``, for the
    next launch — nothing else ever rewrites it;
 5. ``exec``s the interpreter with the given arguments, ``cwd`` and ``PYTHONPATH`` the snapshot.
@@ -37,6 +38,12 @@ import time
 
 #: A snapshot nothing has launched from for this long is pruned (the current one never is).
 KEEP_UNUSED_S = 24 * 3600
+
+#: Snapshots kept beyond the current one, by last use (C4).
+KEEP_MAX = 4
+
+#: A snapshot launched from this recently is never removed — a tick may still be running from it.
+IN_USE_S = 3600
 
 #: The file in the code dir that names the sha the clock last ran.
 CURRENT = 'current'
@@ -149,11 +156,19 @@ def refresh_launcher(snapshot_dir, launcher):
     return True
 
 
-def prune(repo, code_dir, keep=(), now=None, keep_unused_s=KEEP_UNUSED_S):
-    """Remove every snapshot (complete or not) not in ``keep`` whose last use is older than
-    ``keep_unused_s``. Returns the shas removed."""
+def prune(repo, code_dir, keep=(), now=None, keep_unused_s=KEEP_UNUSED_S,
+          keep_max=KEEP_MAX, in_use_s=IN_USE_S):
+    """Remove the snapshots that are neither current, in use, nor among the most recent.
+
+    A snapshot survives when it is in ``keep`` (the sha this tick runs), when something launched
+    from it within ``in_use_s`` (a tick may still be inside it — the marker is stamped at launch
+    and not again), or when it is one of the ``keep_max`` most recently used. Everything else
+    goes, however young: the trunk of a self-hosting product takes ~150 commits a day and each
+    snapshot is a whole working tree, so age alone is not a bound (C4). ``keep_unused_s`` stays
+    the second rule, so a pool under the cap still empties when the clock stops.
+    """
     now = time.time() if now is None else now
-    removed = []
+    pairs = []
     for name in sorted(os.listdir(code_dir)) if os.path.isdir(code_dir) else ():
         if not _SHA_RE.match(name) or name in keep:
             continue
@@ -162,8 +177,14 @@ def prune(repo, code_dir, keep=(), now=None, keep_unused_s=KEEP_UNUSED_S):
             used = os.path.getmtime(marker if os.path.exists(marker) else os.path.join(code_dir, name))
         except OSError:
             continue
-        if now - used < keep_unused_s:
+        pairs.append((name, used))
+    survivors = ({n for n, u in pairs if now - u < in_use_s}
+                 | {n for n, _ in sorted(pairs, key=lambda p: (p[1], p[0]), reverse=True)[:keep_max]})
+    removed = []
+    for name, used in pairs:
+        if name in survivors and now - used < keep_unused_s:
             continue
+        marker = _marker(code_dir, name)
         _remove(repo, os.path.join(code_dir, name))
         if os.path.exists(marker):
             os.remove(marker)
