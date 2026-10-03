@@ -1,0 +1,253 @@
+{
+ "argv": [
+  "api",
+  "repos/example/repo/commits/a6d4a40b6121624e20c2c30d1b8b766cec9baf2d/check-runs?per_page=100"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "check_runs": [
+   {
+    "completed_at": "2026-10-03T11:55:22Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10001",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10001",
+    "id": 10001,
+    "name": "deploy-dev",
+    "started_at": "2026-10-03T11:55:22Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10001"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10003",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10003",
+    "id": 10003,
+    "name": "job-1",
+    "started_at": "2026-10-03T11:53:02Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10003"
+   },
+   {
+    "completed_at": "2026-09-29T14:54:32Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10004",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10004",
+    "id": 10004,
+    "name": "e2e-b",
+    "started_at": "2026-09-29T14:50:44Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10004"
+   },
+   {
+    "completed_at": "2026-09-29T15:05:28Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10005",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10005",
+    "id": 10005,
+    "name": "e2e-d",
+    "started_at": "2026-09-29T14:53:25Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10005"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10006",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10006",
+    "id": 10006,
+    "name": "job-2",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10006"
+   },
+   {
+    "completed_at": "2026-09-29T14:55:22Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10007",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10007",
+    "id": 10007,
+    "name": "e2e-d-b",
+    "started_at": "2026-09-29T14:47:04Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10007"
+   },
+   {
+    "completed_at": "2026-09-29T14:53:23Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10008",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10008",
+    "id": 10008,
+    "name": "e2e-c",
+    "started_at": "2026-09-29T14:49:22Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10008"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10009",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10009",
+    "id": 10009,
+    "name": "job-3",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10009"
+   },
+   {
+    "completed_at": "2026-09-29T14:59:18Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10010",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10010",
+    "id": 10010,
+    "name": "e2e-a",
+    "started_at": "2026-09-29T14:50:37Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10010"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10011",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10011",
+    "id": 10011,
+    "name": "job-4",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10011"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10012",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10012",
+    "id": 10012,
+    "name": "job-5",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10012"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10013",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10013",
+    "id": 10013,
+    "name": "job-6",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10013"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10014",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10014",
+    "id": 10014,
+    "name": "changes",
+    "started_at": "2026-09-29T14:45:18Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10014"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10015",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10015",
+    "id": 10015,
+    "name": "job-7",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10015"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10016",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10016",
+    "id": 10016,
+    "name": "job-8",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10016"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:45Z",
+    "conclusion": "skipped",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10017",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10017",
+    "id": 10017,
+    "name": "job-9",
+    "started_at": "2026-10-03T11:52:52Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10017"
+   },
+   {
+    "completed_at": "2026-09-29T14:47:45Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10018",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10018",
+    "id": 10018,
+    "name": "job-10",
+    "started_at": "2026-09-29T14:45:47Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10018"
+   },
+   {
+    "completed_at": "2026-10-03T11:41:28Z",
+    "conclusion": "failure",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10019",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10019",
+    "id": 10019,
+    "name": "gate",
+    "started_at": "2026-10-03T11:36:25Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10019"
+   },
+   {
+    "completed_at": "2026-10-03T11:55:21Z",
+    "conclusion": "failure",
+    "details_url": "https://github.com/example/repo/actions/runs/10002/job/10020",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10002/job/10020",
+    "id": 10020,
+    "name": "tests",
+    "started_at": "2026-10-03T11:52:53Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10020"
+   },
+   {
+    "completed_at": "2026-09-29T14:45:35Z",
+    "conclusion": "success",
+    "details_url": "https://github.com/example/repo/actions/runs/10022/job/10021",
+    "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+    "html_url": "https://github.com/example/repo/actions/runs/10022/job/10021",
+    "id": 10021,
+    "name": "dco sign-off",
+    "started_at": "2026-09-29T14:45:18Z",
+    "status": "completed",
+    "url": "https://api.github.com/repos/example/repo/check-runs/10021"
+   }
+  ],
+  "total_count": 20
+ }
+}

@@ -1,0 +1,47 @@
+{
+ "argv": [
+  "run",
+  "view",
+  "10002",
+  "-R",
+  "example/repo",
+  "--json",
+  "status,conclusion,url,jobs"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "conclusion": "success",
+  "jobs": [
+   {
+    "completedAt": "2026-10-03T09:21:39Z",
+    "conclusion": "success",
+    "databaseId": 10001,
+    "name": "job-1",
+    "startedAt": "2026-10-03T09:21:33Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10002/job/10001"
+   },
+   {
+    "completedAt": "2026-10-03T09:33:33Z",
+    "conclusion": "success",
+    "databaseId": 10003,
+    "name": "job-2",
+    "startedAt": "2026-10-03T09:21:33Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10002/job/10003"
+   },
+   {
+    "completedAt": "2026-10-03T09:43:41Z",
+    "conclusion": "failure",
+    "databaseId": 10004,
+    "name": "e2e-nightly",
+    "startedAt": "2026-10-03T09:21:33Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10002/job/10004"
+   }
+  ],
+  "status": "completed",
+  "url": "https://github.com/example/repo/actions/runs/10002"
+ }
+}

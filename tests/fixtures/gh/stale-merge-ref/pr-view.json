@@ -1,0 +1,18 @@
+{
+ "argv": [
+  "pr",
+  "view",
+  "960",
+  "-R",
+  "example/repo",
+  "--json",
+  "headRefOid,mergeStateStatus,baseRefOid"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "baseRefOid": "ca48329a83c1938f6ce39bd20890024dc015703a",
+  "headRefOid": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+  "mergeStateStatus": "DIRTY"
+ }
+}

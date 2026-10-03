@@ -1,0 +1,197 @@
+{
+ "argv": [
+  "run",
+  "view",
+  "10026",
+  "-R",
+  "example/repo",
+  "--json",
+  "jobs"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "jobs": [
+   {
+    "completedAt": "2026-10-03T12:10:49Z",
+    "conclusion": "success",
+    "databaseId": 10050,
+    "name": "changes",
+    "startedAt": "2026-10-03T12:10:21Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10050"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:24Z",
+    "conclusion": "success",
+    "databaseId": 10049,
+    "name": "rules",
+    "startedAt": "2026-10-03T12:10:21Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10049"
+   },
+   {
+    "completedAt": "2026-10-03T12:10:27Z",
+    "conclusion": "success",
+    "databaseId": 10048,
+    "name": "attested",
+    "startedAt": "2026-10-03T12:10:21Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10048"
+   },
+   {
+    "completedAt": "2026-10-03T12:10:49Z",
+    "conclusion": "skipped",
+    "databaseId": 10047,
+    "name": "job-9",
+    "startedAt": "2026-10-03T12:10:50Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10047"
+   },
+   {
+    "completedAt": "2026-10-03T12:10:49Z",
+    "conclusion": "skipped",
+    "databaseId": 10046,
+    "name": "job-11",
+    "startedAt": "2026-10-03T12:10:50Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10046"
+   },
+   {
+    "completedAt": "2026-10-03T12:10:49Z",
+    "conclusion": "skipped",
+    "databaseId": 10045,
+    "name": "job-10",
+    "startedAt": "2026-10-03T12:10:50Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10045"
+   },
+   {
+    "completedAt": "2026-10-03T12:16:57Z",
+    "conclusion": "success",
+    "databaseId": 10039,
+    "name": "job-2",
+    "startedAt": "2026-10-03T12:12:27Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10039"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10038,
+    "name": "e2e-c",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10038"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10037,
+    "name": "job-8",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10037"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10036,
+    "name": "e2e-b",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10036"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10035,
+    "name": "e2e-d${{ matrix.suffix }}",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10035"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10034,
+    "name": "job-6",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10034"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10033,
+    "name": "job-7",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10033"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10032,
+    "name": "e2e-a",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10032"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10031,
+    "name": "job-3",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10031"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10030,
+    "name": "tests",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10030"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10029,
+    "name": "job-5",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10029"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10028,
+    "name": "job-4",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10028"
+   },
+   {
+    "completedAt": "2026-10-03T12:12:25Z",
+    "conclusion": "skipped",
+    "databaseId": 10027,
+    "name": "gate",
+    "startedAt": "2026-10-03T12:12:25Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10027"
+   },
+   {
+    "completedAt": "2026-10-03T12:25:22Z",
+    "conclusion": "success",
+    "databaseId": 10025,
+    "name": "deploy-dev",
+    "startedAt": "2026-10-03T12:17:00Z",
+    "status": "completed",
+    "url": "https://github.com/example/repo/actions/runs/10026/job/10025"
+   }
+  ]
+ }
+}

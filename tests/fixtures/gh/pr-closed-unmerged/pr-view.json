@@ -1,0 +1,18 @@
+{
+ "argv": [
+  "pr",
+  "view",
+  "1027",
+  "-R",
+  "example/repo",
+  "--json",
+  "state,mergedAt,mergeCommit"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "mergeCommit": null,
+  "mergedAt": null,
+  "state": "CLOSED"
+ }
+}

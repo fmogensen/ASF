@@ -1,0 +1,22 @@
+{
+ "argv": [
+  "api",
+  "repos/example/repo/actions/runs/10002"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "conclusion": "failure",
+  "created_at": "2026-09-29T14:45:15Z",
+  "event": "pull_request",
+  "head_branch": "worker/T-0001",
+  "head_sha": "a6d4a40b6121624e20c2c30d1b8b766cec9baf2d",
+  "html_url": "https://github.com/example/repo/actions/runs/10002",
+  "id": 10002,
+  "name": "job-11",
+  "run_attempt": 5,
+  "status": "completed",
+  "updated_at": "2026-10-03T11:55:22Z",
+  "url": "https://api.github.com/repos/example/repo/actions/runs/10002"
+ }
+}
