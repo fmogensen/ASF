@@ -284,8 +284,8 @@ def fold(lines):
     runs, clock = {}, ''
     for rec in lines:
         job = rec['job']
-        if is_reset(rec):
-            clock = max([clock, rec[RESET].get('at') or ''])
+        if is_reset(rec) or is_unreset(rec):
+            clock = max([clock, (rec.get(RESET) or rec.get(UNRESET) or {}).get('at') or ''])
             continue  # a boundary on its item's runs (:func:`resets`), never a run of its own
         if is_park_line(rec):
             continue  # an operator park or its release (:func:`parks`), never a run of its own
@@ -314,12 +314,13 @@ class _Folded:
     """One registry content, folded: ``view`` is shared and never handed out — callers get
     ``marshal`` copies (fresh objects, nested values included), exactly as a fresh parse."""
 
-    def __init__(self, data, view, resets=None, parks=None):
+    def __init__(self, data, view, resets=None, parks=None, voids=None):
         self.data = data
         self.view = view
         self.blob = marshal.dumps(view)
         self.resets = resets or {}
         self.parks = parks or {}
+        self.voids = voids or {}
         self._by_item = None
 
     def by_item(self):
@@ -358,7 +359,7 @@ def _folded(path):
     if hit is not None and hit.data == data:
         return hit
     lines = _parse_registry(data, _product_from_registry_dir(path))
-    hit = _Folded(data, fold(lines), _resets(lines), _parks(lines))
+    hit = _Folded(data, fold(lines), _resets(lines), _parks(lines), _voids(lines))
     _REGISTRY_CACHE.pop(key, None)
     while len(_REGISTRY_CACHE) >= _REGISTRY_CACHE_MAX:
         _REGISTRY_CACHE.pop(next(iter(_REGISTRY_CACHE)))
@@ -382,23 +383,96 @@ def latest(path):
 RESET = 'reset'
 
 
+#: The key of a registry line that undoes a reset (``asf reset --undo``): ``{at, pr, head, by,
+#: why}`` — the reset naming that ``(pr, head)`` is dropped (:func:`resets`).
+UNRESET = 'unreset'
+
+
 def is_reset(rec):
     return isinstance((rec or {}).get(RESET), dict) and bool((rec or {}).get('item'))
+
+
+def is_unreset(rec):
+    return isinstance((rec or {}).get(UNRESET), dict) and bool((rec or {}).get('item'))
 
 
 def reset_job(item):
     return f'reset-{str(item).lower()}'
 
 
-def _resets(lines):
-    """``{item: its newest reset}`` from the registry's lines."""
+def _claim(r):
+    return (r.get('pr'), r.get('head') or '')
+
+
+def _standing(lines):
+    """``{item: [reset, …]}`` — every reset no newer unreset line names (by its ``(pr, head)``),
+    in registry order."""
     out = {}
     for rec in lines:
         if is_reset(rec):
-            r = dict(rec[RESET], item=rec['item'])
-            if (r.get('at') or '') >= ((out.get(rec['item']) or {}).get('at') or ''):
-                out[rec['item']] = r
+            out.setdefault(rec['item'], []).append(dict(rec[RESET], item=rec['item']))
+        elif is_unreset(rec):
+            u = rec[UNRESET]
+            out[rec['item']] = [r for r in out.get(rec['item'], ())
+                                if not (_claim(r) == _claim(u)
+                                        and (r.get('at') or '') <= (u.get('at') or ''))]
     return out
+
+
+def _resets(lines):
+    """``{item: its newest standing reset}`` from the registry's lines (:func:`_standing`)."""
+    out = {}
+    for item, rs in _standing(lines).items():
+        for r in rs:
+            if (r.get('at') or '') >= ((out.get(item) or {}).get('at') or ''):
+                out[item] = r
+    return out
+
+
+def _voids(lines):
+    """``{item: [void, …]}`` — the standing resets an operator wrote to void a landing
+    (:func:`note_reset` with ``why``)."""
+    out = {}
+    for item, rs in _standing(lines).items():
+        vs = [r for r in rs if r.get('void')]
+        if vs:
+            out[item] = vs
+    return out
+
+
+def voids(path, item):
+    """The standing voided landings of ``item``: ``[{at, pr, branch, head, why, by}]``."""
+    return [dict(v) for v in _folded(path).voids.get(item, ())]
+
+
+def _sha_match(a, b):
+    a, b = str(a or ''), str(b or '')
+    return len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
+
+
+def voided_sha(path, item, sha):
+    """The void of ``item`` that names ``sha`` as its landing, or None — a claim the operator
+    voided proves nothing, whoever reports it again."""
+    return next((v for v in voids(path, item) if _sha_match(v.get('head'), sha)), None)
+
+
+def voided_run(path, run, sha=None):
+    """The void that names ``run``'s landing claim, or None: a standing void of its item whose
+    head is ``sha`` (the run's merge sha, else its ``harvested``), or whose PR is the run's lane PR
+    on a run that started before the void."""
+    run = run or {}
+    item = run.get('item')
+    if not item or not isinstance(item, (str, int, float)):
+        return None
+    lane = run.get('lane') if isinstance(run.get('lane'), dict) else {}
+    sha = sha or run.get('harvested')
+    for v in voids(path, item):
+        if sha and _sha_match(v.get('head'), sha):
+            return v
+        if v.get('pr') and lane.get('pr') == v.get('pr') \
+                and (run.get('started') or '') < (v.get('at') or ''):
+            return v
+    return None
 
 
 def resets(path):
@@ -521,7 +595,11 @@ def note_reset(path, item, reset, now=None, alive=None):
     """Append one reset line for ``item`` (``reset``: ``{pr, branch, head, archive}``, from
     :func:`asf.evidence.evidence.resets_of`) unless its newest reset already names the same PR
     and head, or a run of the item holds a seat (a live session is left to finish; the next
-    pass resets it). True when a line was written."""
+    pass resets it). True when a line was written.
+
+    ``reset`` may also carry ``why`` and ``by`` (``asf reset``): the line is then a *void* —
+    the claim ``(pr, head)`` it names is a landing the operator says did not land the item
+    (:func:`voids`)."""
     if not path or not item:
         return False
     prev = _folded(path).resets.get(item) or {}
@@ -534,6 +612,19 @@ def note_reset(path, item, reset, now=None, alive=None):
            RESET: {'at': now or now_iso_utc(), 'pr': reset.get('pr'),
                    'branch': reset.get('branch') or '', 'head': reset.get('head') or '',
                    'archive': reset.get('archive') or ''}}
+    if reset.get('why'):
+        rec[RESET].update(void=True, why=reset['why'], by=reset.get('by') or 'operator')
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(rec, sort_keys=True) + '\n')
+    return True
+
+
+def note_unreset(path, item, reset, why='', by='operator', now=None):
+    """Append the line that undoes ``reset`` (one of :func:`voids` or :func:`resets`) of
+    ``item``: from now on it is not the item's reset, and its runs are the item's again."""
+    rec = {'job': reset_job(item), 'item': item,
+           UNRESET: {'at': now or now_iso_utc(), 'pr': reset.get('pr'),
+                     'head': reset.get('head') or '', 'why': why, 'by': by}}
     with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(rec, sort_keys=True) + '\n')
     return True
