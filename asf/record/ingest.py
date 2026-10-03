@@ -606,6 +606,10 @@ def descend(canonical, new_state, closings, derived, keep=()):
             d = derived[iid]
             if not (d.raw.rule == closing.NO_RULE or (d.raw.state == closing.NEW and not d.own)):
                 continue
+            # a matrix row that says todo is the item's own evidence that it was never built:
+            # the parent's close is no proof, so the item keeps the state its own rule gave it
+            if any(str(l).startswith('matrix status todo') for l in closings[iid].lines):
+                continue
             hit = closing.state_of(type_, closing.Ev(parent_closed=True))
             named = f"{parent} Closed" + (f" (commit {sha[parent][:7]})" if sha.get(parent) else '')
             kept = [l for l in closings[iid].lines

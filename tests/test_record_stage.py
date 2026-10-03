@@ -340,6 +340,51 @@ class SharedPathI3Tests(StageTestCase):
         self.assertIn('I3', err)
         self.assertEqual(meta(self.root, self.owner)['writes'], ['src/a.py'])
 
+    def test_add_only_set_is_judged_on_the_added_paths(self):
+        # T-0003 already overlaps T-0001 on src/a.py (unordered, standing); adding two paths that
+        # overlap nothing is accepted
+        self.active_task('T-0003', 'src/a.py')
+        self.assertIsNone(set_typed(self.rec('T-0003'), {'writes': ['src/a.py', 'src/n.sql', 'src/n.test.ts']},
+                                    writer='set', product=self.product))
+        self.assertEqual(meta(self.root, self.rec('T-0003')['relpath'])['writes'],
+                         ['src/a.py', 'src/n.sql', 'src/n.test.ts'])
+
+    def test_a_packed_writes_entry_is_not_a_new_overlap_when_added_to(self):
+        # the card spells its footprint as one packed entry; the standing overlap is read the same
+        # before and after the add, so only the added paths are judged
+        self.active_task('T-0003', 'src/a.py src/b.py')
+        self.assertIsNone(set_typed(self.rec('T-0003'), {'writes': ['src/a.py', 'src/b.py', 'src/n.sql']},
+                                    writer='set', product=self.product))
+
+    def test_add_only_set_onto_a_path_another_task_holds_is_refused(self):
+        self.active_task('T-0003', 'src/a.py')
+        self.active_task('T-0004', 'src/q.py')
+        err = set_typed(self.rec('T-0004'), {'writes': ['src/q.py', 'src/a.py']}, writer='set',
+                        product=self.product)
+        self.assertIn('I3', err)
+
+    def test_asf_set_warns_of_a_standing_overlap_and_still_accepts(self):
+        import io
+        import types
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest import mock
+        from asf.record import setfield
+        self.active_task('T-0003', 'src/a.py')
+        args = types.SimpleNamespace(id='T-0003', assignments=['writes+=[src/n.sql]'], product=None)
+        err = io.StringIO()
+        with mock.patch('asf.record.check.product_of', return_value=self.product), \
+                redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = setfield.cmd_set(args, self.root)
+        self.assertEqual(rc, 0)
+        self.assertIn("warning: T-0003: writes: still intersects Active task T-0001", err.getvalue())
+
+    def test_a_shared_writes_path_never_counts(self):
+        product = env.Product('sample', {'conventions': {'shared_writes': ['docs/registry.md']}})
+        self.active_task('T-0003', 'docs/registry.md')
+        self.active_task('T-0004', 'src/q.py')
+        self.assertIsNone(set_typed(self.rec('T-0004'), {'writes': ['src/q.py', 'docs/registry.md']},
+                                    writer='set', product=product))
+
     def test_asf_check_exits_0_over_the_declared_set(self):
         from asf.record.check import cmd_check
         self.active_task('T-0003', 'uv.lock')  # the shared-only pair the set must exempt

@@ -141,11 +141,33 @@ def cmd_set(args, root):
         for top, value in idempotent:
             print(f"{args.id}: {top}: already covers {' '.join(widen.norm_writes(value))} — "
                   "footprint unchanged")
+    if 'writes' in updates:
+        _warn_standing_overlaps(root, args.id, product_of(args))
     lists = LIST_FIELDS.get(rec['meta'].get('type'), ())
     if not all_noop:
         print(f"{args.id}: set " + ', '.join(
             f"{k}={' '.join(v)}" if k in lists else k for k, v in updates.items()))
     return 0
+
+
+def _warn_standing_overlaps(root, item_id, product):
+    """A ``writes:`` set that was accepted still leaves any overlap the card already had with
+    another Active Task; say so (a warning, never a refusal: I3 judges what the write added)."""
+    try:
+        from asf import invariants
+        from asf.feeder import footprint
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+        shared = footprint.shared_globs(product)
+        pairs = invariants.unordered_overlaps(
+            invariants.overlap_tasks({i: r['meta'] for i, r in canonical.items()}), shared)
+    except Exception:  # a warning must never fail the write
+        return
+    for a, b, *_globs in pairs:
+        if item_id in (a, b):
+            other = b if a == item_id else a
+            print(f"warning: {item_id}: writes: still intersects Active task {other}'s writes: "
+                  "(standing before this set; not refused)", file=sys.stderr)
 
 
 def set_typed(rec, updates, writer='set', product=None):
