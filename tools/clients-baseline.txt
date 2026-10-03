@@ -68,7 +68,7 @@ git asf/workers/landing.py 2
 git asf/workers/lifecycle.py 1
 git asf/workers/retention.py 6
 git asf/workers/runtime.py 1
-git asf/workers/spawn.py 26
+git asf/workers/spawn.py 27
 git asf/workers/trash.py 1
 git asf/workers/trunkclose.py 2
 git asf/workers/trunkmerge.py 1
@@ -102,7 +102,7 @@ except asf/tick/network.py 1
 except asf/tick/step_daily.py 1
 except asf/tick/step_harvest.py 3
 except asf/tick/step_health.py 6
-except asf/tick/step_wave.py 7
+except asf/tick/step_wave.py 8
 except asf/tick/summary.py 1
 except asf/tick/tick.py 2
 except asf/tick/widen_footprint.py 1
