@@ -263,8 +263,7 @@ class Ratchet(unittest.TestCase):
         for cmd in (['init', '-q'], ['add', '-A'], ['commit', '-qm', 'trunk']):
             subprocess.run(['git', '-C', root, *cmd], check=True, env=env, capture_output=True)
         self.assertEqual(self.run_check(root)[0], 1)                    # baseline alone: red
-        rc, lines = check_clients.check(root, out=lambda s: None, against='HEAD'), None
-        self.assertEqual(rc, 0)                                          # it was on the trunk
+        self.assertEqual(check_clients.check(root, out=lambda s: None, against='HEAD'), 0)  # trunk's
         with open(os.path.join(root, 'asf/a.py'), 'a') as f:
             f.write("x(['git', 'b'])\n")
         self.assertEqual(check_clients.check(root, out=lambda s: None, against='HEAD'), 1)
