@@ -74,7 +74,12 @@ class PlanTests(FixtureSuite):
         pool, serial = self.runner.plan(tests_dir)
         modules = sorted(n[:-3] for n in os.listdir(tests_dir)
                          if n.startswith('test_') and n.endswith('.py'))
-        self.assertEqual(sorted(pool + serial + [self.runner.HOME_MODULE]), modules)
+        modules += sorted(f'{d}.{n[:-3]}' for d in os.listdir(tests_dir)
+                          if os.path.isfile(os.path.join(tests_dir, d, '__init__.py'))
+                          for n in os.listdir(os.path.join(tests_dir, d))
+                          if n.startswith('test_') and n.endswith('.py'))
+        self.assertIn('scenarios.test_close_paths', modules)
+        self.assertEqual(sorted(pool + serial + [self.runner.HOME_MODULE]), sorted(modules))
         self.assertEqual(len(set(pool + serial)), len(pool + serial))
 
 
