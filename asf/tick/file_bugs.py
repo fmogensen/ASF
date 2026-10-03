@@ -377,31 +377,74 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
     return 'filed'
 
 
-#: An invariant refusal's signature: one Bug per ``(invariant, path)`` (R9).
-INVARIANT_SIG = 'invariant {invariant}: {path}'
+#: An invariant refusal's signature: one Bug per ``(invariant, cause)`` — the cause is the
+#: finding's message with its specifics (ids, quoted text, the paths it names) taken out, so one
+#: defect refused on thirteen cards is one Bug listing thirteen paths, not thirteen Bugs.
+INVARIANT_SIG = 'invariant {invariant}: {cause}'
+#: How many paths an invariant Bug's evidence names before it says "and N more".
+INVARIANT_PLACES = RECORD_ERROR_PLACES
+
+
+def cause_key(finding):
+    """The cause of an invariant finding: :func:`error_class` of its message, with the subject
+    and every path it names replaced by ``…`` first."""
+    message = str(finding.message or '')
+    for spec in sorted({str(x) for x in (finding.subject, *(finding.paths or ())) if x},
+                       key=len, reverse=True):
+        message = message.replace(spec, '…')
+    return error_class(message)
 
 
 def invariant_signatures(findings):
-    """One signature per ``(invariant, path)`` of the record findings a staged writer was refused
-    on (:func:`asf.record.stage.drain`); every finding on it is an evidence line."""
-    out = {}
+    """One signature per ``(invariant, cause)`` (:func:`cause_key`) of the record findings a
+    staged writer was refused on (:func:`asf.record.stage.drain`); every path refused for that
+    cause is an evidence line and counts in ``places``."""
+    out, seen = {}, {}
     for f in findings or ():
+        cause = cause_key(f)
+        sig = INVARIANT_SIG.format(invariant=f.invariant, cause=cause)
+        d = out.setdefault(sig, {
+            'title': truncate(f"Invariant {f.invariant}: {cause}", 120),
+            'severity': 'S3', 'evidence': [], 'runs': [], 'places': 0,
+            'acceptance': [f"no writer is refused on {f.invariant} for `{cause}` for "
+                           f"{CI_REFUSAL_WINDOW_H}h"]})
+        paths = seen.setdefault(sig, [])
         for path in (f.paths or (f.subject,)):
-            sig = INVARIANT_SIG.format(invariant=f.invariant, path=path)
-            d = out.setdefault(sig, {
-                'title': truncate(f"Invariant {f.invariant} refused a write to {path}", 120),
-                'severity': 'S3', 'evidence': [], 'runs': [],
-                'acceptance': [f"no writer is refused on {f.invariant} at `{path}` for "
-                               f"{CI_REFUSAL_WINDOW_H}h"]})
-            line = f"{f.subject}: {f.message}"
-            if line not in d['evidence']:
-                d['evidence'].append(line)
+            if path in paths:
+                continue
+            paths.append(path)
+            d['places'] += 1
+            if len(d['evidence']) < INVARIANT_PLACES:
+                d['evidence'].append(f"{path} — {f.subject}: {f.message}")
+    for sig, d in out.items():
+        if d['places'] > len(d['evidence']):
+            d['evidence'].append(f"and {d['places'] - len(d['evidence'])} more")
     return out
 
 
+def _note_new_places(rec, info, date):
+    """A Bug already filed today for this cause: each evidence line its body does not carry yet
+    becomes a History line — a new path refused for the same cause is recorded on the one Bug,
+    never filed as another. Returns True when a line was added."""
+    with open(rec['path'], encoding='utf-8') as f:
+        text = f.read()
+    meta, body = frontmatter.parse(text, path=rec['relpath'])
+    new = [e for e in info.get('evidence') or () if e not in body and not e.startswith('and ')]
+    if not new:
+        return False
+    hist = [f"- {date} file-bugs: also {e}" for e in new]
+    new_body = append_history_lines(body, hist)
+    if new_body == body:
+        return False
+    with open(rec['path'], 'w', encoding='utf-8') as f:
+        f.write(frontmatter.render(meta, new_body))
+    return True
+
+
 def file_invariant_bugs(root, findings, level='auto', default_bug_epic=None, out=print):
-    """File (or bump, once a day) one Bug per ``(invariant, path)`` the record step refused —
-    the write was put back and the rest committed; the Bug says what was refused and why.
+    """File (or bump, once a day) one Bug per ``(invariant, cause)`` the record step refused —
+    the writes were put back and the rest committed; the Bug says what was refused, where and
+    why. A Bug bumped now or earlier today gets a History line per path its body does not name.
     Returns ``{signature: outcome}``; under a ``file_bug`` level other than ``auto`` nothing is
     written and each signature is printed as held."""
     signatures = invariant_signatures(findings)
@@ -419,6 +462,10 @@ def file_invariant_bugs(root, findings, level='auto', default_bug_epic=None, out
     for sig in sorted(signatures):
         outcomes[sig] = _file_or_bump_bug(root, canonical, sig, signatures[sig], today(),
                                           default_bug_epic=epic)
+        if outcomes[sig] in ('skipped', 'bumped'):
+            rec = _find_bug_by_signature(canonical, sig)
+            if rec is not None and _note_new_places(rec, signatures[sig], today()):
+                outcomes[sig] = 'bumped'
         if outcomes[sig] == 'filed':
             by_id, _errors = load_items(root)
             canonical, _dupes = canonicalize(by_id)

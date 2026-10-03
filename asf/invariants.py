@@ -8,7 +8,7 @@ pure over the facts ``ctx`` carries. They run at three points of the tick, and e
 - ``record`` (I1, I2, I3, I10, I11): each staged writer's change before the tick's commit
   (:mod:`asf.record.stage`; I2 after ingest's restamp). A finding puts back only the offending
   paths, the rest of the tick commits, and :func:`asf.tick.tick.file_invariant_bugs` files one
-  Bug per ``(invariant, path)``.
+  Bug per ``(invariant, cause)`` (:func:`asf.tick.file_bugs.cause_key`), listing the paths.
 - ``feeder`` (I4, I5, I7): over ``plan_rows`` before the wave (:func:`feeder_gate`). A
   violating row is dropped and logged as ``INVARIANT <id>: <row> — <why>``.
 - ``lane`` (I8): after harvest (:func:`lane_report`). Reported only. I9 is an event there, not a

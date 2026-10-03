@@ -422,6 +422,74 @@ class FileBugsIntegrationTests(unittest.TestCase):
         self.assertNotIn('parent', meta)
 
 
+class OneBugPerCauseTests(unittest.TestCase):
+    """W4-PR3c: an invariant refusal files one Bug per ``(invariant, cause)``, not per path —
+    the same I10 cause refused on several Features is one Bug naming every path."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        run(['index'], self.root)
+
+    @staticmethod
+    def i10(fid, tid):
+        from asf.invariants import Finding
+        return Finding('I10', 'record', fid, f'Resolved with open Task(s) {tid}',
+                       paths=(f'features/{fid}.md',))
+
+    def bugs(self):
+        out = []
+        for n in sorted(os.listdir(os.path.join(self.root, 'bugs'))):
+            if n.endswith('.md'):
+                with open(os.path.join(self.root, 'bugs', n), encoding='utf-8') as f:
+                    out.append(frontmatter.parse(f.read(), path=f'bugs/{n}'))
+        return out
+
+    def test_two_findings_of_one_cause_are_one_signature(self):
+        sigs = file_bugs.invariant_signatures([self.i10('F-0001', 'T-0001'), self.i10('F-0002', 'T-0007')])
+        self.assertEqual(list(sigs), ['invariant I10: Resolved with open Task(s) …'])
+        d = sigs['invariant I10: Resolved with open Task(s) …']
+        self.assertEqual(d['places'], 2)
+        self.assertTrue(any(e.startswith('features/F-0001.md') for e in d['evidence']))
+        self.assertTrue(any(e.startswith('features/F-0002.md') for e in d['evidence']))
+
+    def test_a_different_cause_is_a_different_bug(self):
+        from asf.invariants import Finding
+        other = Finding('I10', 'record', 'F-0003', 'Closed with no landing', paths=('features/F-0003.md',))
+        sigs = file_bugs.invariant_signatures([self.i10('F-0001', 'T-0001'), other])
+        self.assertEqual(len(sigs), 2)
+
+    def test_the_cause_drops_the_paths_the_message_names(self):
+        from asf.invariants import Finding
+        f = Finding('I3', 'record', 'T-0002', "tasks/T-0002.md writes src/a.py, overlapping T-0001",
+                    paths=('tasks/T-0002.md',))
+        self.assertEqual(file_bugs.cause_key(f), '… writes src/a.py, overlapping …')
+
+    def test_one_bug_filed_and_a_later_path_of_the_same_cause_is_a_history_line(self):
+        out = []
+        got = file_bugs.file_invariant_bugs(self.root, [self.i10('F-0001', 'T-0001'),
+                                                        self.i10('F-0002', 'T-0007')], out=out.append)
+        self.assertEqual(list(got.values()), ['filed'])
+        bugs = self.bugs()
+        self.assertEqual(len(bugs), 1)
+        meta, body = bugs[0]
+        self.assertEqual(meta['signature'], 'invariant I10: Resolved with open Task(s) …')
+        self.assertEqual(meta['places'], 2)
+        self.assertIn('features/F-0001.md', body)
+        self.assertIn('features/F-0002.md', body)
+        # the same day, the same cause on a third Feature: no second Bug, a History line
+        got = file_bugs.file_invariant_bugs(self.root, [self.i10('F-0003', 'T-0009')], out=out.append)
+        self.assertEqual(list(got.values()), ['bumped'])
+        bugs = self.bugs()
+        self.assertEqual(len(bugs), 1)
+        history = bugs[0][1].split('## History', 1)[1]
+        self.assertIn('also features/F-0003.md', history)
+        # and the same path again adds nothing
+        got = file_bugs.file_invariant_bugs(self.root, [self.i10('F-0003', 'T-0009')], out=out.append)
+        self.assertEqual(list(got.values()), ['skipped'])
+
+
 class DeterministicBugIdTests(unittest.TestCase):
     """The legacy tool merges ci_signatures, then refusal_signatures, then
     rule_violation_signatures into one dict and files/bumps in `sorted(signatures)` order — so a
