@@ -263,10 +263,10 @@ class SharedWritesTests(WidenStepBase):
 
 class LiveOverlapTests(WidenStepBase):
     def test_a_record_refusal_on_a_live_task_is_a_wait_on_that_task(self):
-        # T-0001's own writes: is one packed entry, so the overlap with T-0002 shows only once
-        # the widening splits it — the record's I3 refuses, and the row waits on T-0002
+        # T-0001's own writes: is one packed entry; the widening adds tests/test_b.py, which
+        # T-0002 holds — the added path is the new overlap, I3 refuses, the row waits on T-0002
         self.active('T-0001', 'src/a.py tests/test_a.py lib/x.py')
-        self.active('T-0002', 'lib/x.py')
+        self.active('T-0002', 'tests/test_b.py')
         self.finished('coder-t-0001', 'tests/test_b.py')
         _held, verdicts = self.tick()
         self.assertEqual(verdicts, {'coder-t-0001': widen.WAITS}, self.lines)
