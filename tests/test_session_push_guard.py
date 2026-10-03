@@ -84,14 +84,18 @@ class PrePushAllow(unittest.TestCase):
                                        githooks._SHIM.format(name=name))
         self.remote = os.path.join(self.tmp, 'remote.git')
         _git(['init', '-q', '--bare', self.remote], self.tmp)
+        # a session's worktree is a linked worktree of the product clone
+        self.clone = os.path.join(self.tmp, 'clone')
+        _git(['init', '-q', '-b', 'main', self.clone], self.tmp)
+        _git(['remote', 'add', 'origin', self.remote], self.clone)
         self.wt = os.path.join(self.tmp, 'wt')
-        _git(['init', '-q', '-b', 'cloud/T-0001', self.wt], self.tmp)
-        _git(['remote', 'add', 'origin', self.remote], self.wt)
         self.env = {'PATH': os.environ.get('PATH', ''), 'HOME': self.tmp,
                     'GIT_CONFIG_COUNT': '3', 'GIT_CONFIG_KEY_0': 'user.name',
                     'GIT_CONFIG_VALUE_0': 't', 'GIT_CONFIG_KEY_1': 'user.email',
                     'GIT_CONFIG_VALUE_1': 't@example.com', 'GIT_CONFIG_KEY_2': 'core.hooksPath',
                     'GIT_CONFIG_VALUE_2': self.hooks, 'ASF_PUSH_ALLOW': 'cloud/ fix/'}
+        _git(['commit', '-q', '--allow-empty', '-m', 'root'], self.clone, self.env)
+        _git(['worktree', 'add', '-q', '-b', 'cloud/T-0001', self.wt], self.clone, self.env)
         with open(os.path.join(self.wt, 'a'), 'w', encoding='utf-8') as f:
             f.write('a')
         _git(['add', '-A'], self.wt, self.env)
@@ -118,6 +122,27 @@ class PrePushAllow(unittest.TestCase):
         e.pop('ASF_PUSH_ALLOW')
         p = _git(['push', '-q', 'origin', 'HEAD:refs/heads/ci/gate-manifest'], self.wt, e)
         self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_a_product_test_fixture_push_to_a_scratch_repo_is_not_the_sessions(self):
+        """2026-10-02, a product: its gate's self-test pushes a branch named ``main`` into a
+        throwaway bare repo; the session's core.hooksPath, inherited through GIT_CONFIG_*,
+        refused it, the gate went red on every branch, five sessions ended "hook refused"."""
+        bare = os.path.join(self.tmp, 'fixture.git')
+        _git(['init', '-q', '--bare', bare], self.tmp)
+        fx = os.path.join(self.tmp, 'fixture')
+        _git(['init', '-q', '-b', 'main', fx], self.tmp)
+        _git(['commit', '-q', '--allow-empty', '-m', 'x'], fx, self.env)
+        for url in (bare, 'file://' + bare):
+            p = _git(['push', '-q', url, 'main'], fx, self.env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(_git(['for-each-ref', '--format=%(refname:short)', 'refs/heads'],
+                              bare).stdout.split(), ['main'])
+
+    def test_the_session_worktree_pushing_to_a_local_path_is_still_guarded(self):
+        p = _git(['push', '-q', self.remote, 'HEAD:refs/heads/main'], self.wt, self.env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('pushes only to factory branches', p.stderr)
+        self.assertEqual(self.heads(), [])
 
 
 if __name__ == '__main__':
