@@ -42,7 +42,12 @@ WASTE_CLASSES = ('failed', 'loop', 'superseded', 'nothing')
 #: The run of a job on one head from which on it is a loop.
 LOOP_FROM = 4
 #: End-reason classes the process or platform caused (the run never reached its own report).
-INFRA = frozenset({'dead pid', 'stopped', 'quota-exhausted', 'failed (bare)'})
+def _infra():
+    from asf.workers import lifecycle
+    return frozenset({lifecycle.DEAD_PID, 'stopped', 'quota-exhausted', 'failed (bare)'})
+
+
+INFRA = _infra()
 #: The tick-log line an offline record step writes (``asf.tick.tick``).
 OFFLINE_LINE = 'tick: record failed — offline'
 #: Keys whose producers land later in the program; ``None`` until registered (:func:`register`).
@@ -70,8 +75,8 @@ def end_class(reason):
         return 'none'
     if er == 'finished':
         return 'finished'
-    if lifecycle.is_dead_reason(er) or er.startswith('dead'):
-        return 'dead pid'
+    if lifecycle.is_dead_reason(er) or er.startswith(lifecycle.DEAD):
+        return lifecycle.DEAD_PID
     if er.startswith('stopped'):
         return 'stopped'
     if er.startswith('failed: quota'):
@@ -86,9 +91,10 @@ def end_class(reason):
 def waste_class(run, attempt):
     """The first of :data:`WASTE_CLASSES` ``run`` falls in (``attempt`` = its run number on its
     head), or ``None`` for a run that did useful work."""
+    from asf.workers import lifecycle
     er = str(run.get('end_reason') or '')
     nothing = 'empty branch' in er or 'nothing to land' in er
-    if not nothing and er.startswith(('failed', 'dead', 'stopped')):
+    if not nothing and er.startswith(('failed', lifecycle.DEAD, 'stopped')):
         return 'failed'
     if attempt >= LOOP_FROM and not run.get('harvested'):
         return 'loop'
