@@ -22,6 +22,10 @@ edited or overwritten — save one asf's record pre-commit that still runs ``asf
 whole record, which gains ``--staged`` (:func:`staged_check_upgrade`). That refusal is reported only after every other hook — the approvals hook
 above all — has been written: one refusal never skips the others.
 
+``asf hooks install`` (the command) first writes the CLI dispatcher at ``~/.local/bin/asf``
+(:mod:`asf.dispatch`); every hook it then writes names that path, so each hook runs the pinned
+venv of the product it acts on rather than whichever ``asf`` was installed last.
+
 ``asf hook <name>`` runs a hook built into ``asf`` when :data:`BUILTIN` names it (``approvals``,
 :func:`asf.approvals.run_hook`), else ``tools/checks/<name>.sh`` (the record's, then the cwd's)
 with the hook's stdin, exiting 0 when there is no such script.
@@ -367,20 +371,34 @@ def _write_merged(path, hooks, asf_path, product):
         f.write(json.dumps(merged, indent=2) + '\n')
 
 
-def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
+def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatcher=None):
     """Returns ``(rc, message)``. Rule hooks go to the product repo's own settings when any rule
     declares one (PD5); the approvals hook always goes into every worker account's settings
     (§2.3), product-less, regardless; :func:`ensure_git_hooks` writes every missing git hook.
+
+    ``dispatcher``: the path of the CLI dispatcher (:mod:`asf.dispatch`) — ``asf hooks install``
+    passes the operator's ``~/.local/bin/asf``. It is written (or refreshed) first, and once it is
+    asf's, every hook entry and git hook written here names it, so each one runs the pinned venv
+    of the product it acts on. A foreign file there is one more refusal; a pipx link still there
+    is left alone and the hooks name whatever ``asf`` is on PATH, as before.
 
     Every hook that *can* be written is written before anything is refused: a foreign git hook
     or a missing ``repo_dir`` must never leave worker sessions without the approvals hook (the
     guard that refuses human-now actions). Each refusal is then one ``NEEDS OPERATOR`` line after
     the summary, and rc is 2 (§2.4)."""
     rule_hooks = declared_hooks(rules_dir)
+    refusals, dispatch_detail = [], ''
+    if dispatcher:
+        from asf import dispatch
+        rc, dispatch_detail = dispatch.install(dispatcher)
+        if rc:
+            refusals.append(dispatch_detail)
+            dispatch_detail = 'dispatcher: NEEDS OPERATOR (below)'
+        if dispatch.is_ours(dispatcher):
+            which = lambda _name, _path=dispatcher: _path  # noqa: E731 — every hook names it
     asf_path, refusal = runnable_asf(which)
     if refusal:
-        return 2, refusal
-    refusals = []
+        return 2, '\n'.join([refusal] + refusals)
 
     accounts = pool.accounts_from_config(cfg or env.load_config())
     for account in accounts:
@@ -401,7 +419,8 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
         written = len(rule_hooks)
 
     summary = (f'hooks: {written} rule hooks in {repo_settings}; '
-               f'approvals in {len(accounts)} worker accounts; {git_detail}')
+               f'approvals in {len(accounts)} worker accounts; {git_detail}'
+               + (f'; {dispatch_detail}' if dispatch_detail else ''))
     if refusals:
         return 2, '\n'.join([summary] + refusals)
     return 0, summary
@@ -448,7 +467,8 @@ def approvals_missing(accounts, repo_dir=None):
 
 
 def cmd_hooks(args):
-    rc, msg = install(env.load_product(args.product))
+    from asf import dispatch
+    rc, msg = install(env.load_product(args.product), dispatcher=dispatch.default_path())
     print(msg, file=sys.stderr if rc else sys.stdout)
     return rc
 
