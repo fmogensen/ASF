@@ -1286,6 +1286,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
     head now — in request order, none already in a batch (``taken``). A PR whose branch left
     origin is read once on the host: closed or merged elsewhere drops the request. A head marked
     red stays out until it moves; a pending one waits with a line."""
+    from asf.harvest import deploy
     reqs = load_requests(lane.state_dir)
     out, changed = [], False
     for key, r in ordered_requests(reqs):
@@ -1323,8 +1324,8 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             continue
         runs = newest(runs)     # a fresh run (asf.stale_ref) supersedes the stale one it replaced
         state, why = verdict(admission_runs(runs), required)
-        if state == 'pending' and runs and all(r.get('status') == 'completed' for r in runs) \
-                and all(w.endswith('(not started)') for w in why.split(', ')):
+        if state == 'pending' and all(w.endswith('(not started)') for w in why.split(', ')) \
+                and deploy.never_started(runs, required):
             # the head's CI is done and never ran these (a path filter, a matrix the filter
             # skipped under its unexpanded name): the batch run judges them
             state, why = 'green', ''
