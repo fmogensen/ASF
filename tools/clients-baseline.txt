@@ -1,4 +1,4 @@
-# tools/clients-baseline.txt — raw gh/git call sites and broad excepts per file,
+# tools/clients-baseline.txt — raw gh/git call sites per file,
 # the ceiling tools/check_clients.sh enforces. Lower a line when a PR migrates a
 # site; never raise one (`python3 tools/check_clients.py --write-baseline`).
 gh asf/capacity.py 1
@@ -73,51 +73,3 @@ git asf/workers/trash.py 1
 git asf/workers/trunkclose.py 2
 git asf/workers/trunkmerge.py 1
 git asf/workers/worktrees.py 1
-except asf/approvals.py 3
-except asf/attestation.py 1
-except asf/capacity.py 5
-except asf/ci_pool.py 2
-except asf/ci_queue.py 13
-except asf/cli.py 1
-except asf/doctor.py 12
-except asf/drift.py 1
-except asf/env.py 1
-except asf/evidence/evidence.py 7
-except asf/evidence/sources.py 6
-except asf/gh_limit.py 2
-except asf/harvest/lane.py 4
-except asf/invariants.py 5
-except asf/merge_queue.py 5
-except asf/metrics/metrics.py 2
-except asf/record/check.py 1
-except asf/record/plan_order.py 1
-except asf/record/setfield.py 1
-except asf/redact.py 2
-except asf/runner_classes.py 1
-except asf/scorecard/facts.py 2
-except asf/scorecard/loop.py 4
-except asf/stale_ref.py 1
-except asf/tick/dry_run.py 1
-except asf/tick/network.py 1
-except asf/tick/step_daily.py 1
-except asf/tick/step_harvest.py 3
-except asf/tick/step_health.py 6
-except asf/tick/step_wave.py 8
-except asf/tick/summary.py 1
-except asf/tick/tick.py 2
-except asf/tick/widen_footprint.py 1
-except asf/trunk_red.py 5
-except asf/trunk_watch.py 1
-except asf/upgrade.py 1
-except asf/views/status.py 3
-except asf/workers/headroom.py 2
-except asf/workers/health.py 2
-except asf/workers/landing.py 2
-except asf/workers/lifecycle.py 2
-except asf/workers/pool.py 1
-except asf/workers/relaunch.py 1
-except asf/workers/runtime.py 1
-except asf/workers/spawn.py 2
-except asf/workers/stopgate.py 1
-except asf/workers/trunkclose.py 1
-except asf/workers/wave.py 3
