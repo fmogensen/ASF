@@ -2319,6 +2319,69 @@ class FeaturesInBuildCap(unittest.TestCase):
             {'feeder': {'features_per_session': 'two'}})], ['feeder.features_per_session'])
 
 
+class PlanAhead(unittest.TestCase):
+    """W2-PR5: specs and plans just in time. ``flags.plan_ahead: N`` lets a spec or plan row
+    launch only while the Features moving + spec/plan work in flight + rows admitted stay under
+    the build cap + N; unset, every decided card is specified now (today)."""
+
+    def product(self, ahead, **feeder):
+        conv = {'feeder': dict({'max_features_in_build': 4, 'max_specs_in_flight': 10}, **feeder)}
+        if ahead is not None:
+            conv['flags'] = {'plan_ahead': ahead}
+        return product(conventions=conv)
+
+    def docs(self, out):
+        return [r for r in out if r.kind in rows.SPEC_PLAN_KINDS]
+
+    def test_cap_4_plan_ahead_2_three_building_emits_three_spec_rows(self):
+        out = rows.plan_rows(build_index(started=3, unstarted=0, cards=5), self.product(2), [],
+                             20)
+        docs = self.docs(out)
+        self.assertEqual([r.item_id for r in docs if r.launches],
+                         ['F-0001', 'F-0002', 'F-0003'])
+        held = [r for r in docs if not r.launches]
+        self.assertEqual([r.item_id for r in held], ['F-0004', 'F-0005'])
+        for r in held:
+            self.assertEqual(r.waits_on, 'build slot')
+            self.assertTrue(r.action.startswith('WAITS ON build slot (plan_ahead 2): 3 moving + '
+                                                '0 spec/plan in flight + 3 this wave, build cap 4'),
+                            r.action)
+        # the Tasks of the Features in build are never held
+        self.assertTrue(all(r.launches for r in out if r.kind == rows.PLAN_CODE))
+
+    def test_unset_or_malformed_is_today(self):
+        idx = build_index(started=3, unstarted=0, cards=5)
+        for ahead in (None, -1, 'many', True, 1.5):
+            out = rows.plan_rows(idx, self.product(ahead), [], 20)
+            self.assertEqual(len([r for r in self.docs(out) if r.launches]), 5, ahead)
+            self.assertIsNone(rows.plan_ahead(self.product(ahead)))
+        self.assertEqual(rows.plan_ahead(self.product('2')), 2)
+        self.assertEqual(rows.plan_ahead(self.product(0)), 0)
+
+    def test_spec_and_plan_sessions_in_flight_count(self):
+        idx = build_index(started=3, unstarted=0, cards=5)
+        inflight = [{'item': 'F-0009', 'kind': 'spec'}, {'item': 'F-0008', 'kind': 'plan'}]
+        out = rows.plan_rows(idx, self.product(2), inflight, 20)
+        self.assertEqual([r.item_id for r in self.docs(out) if r.launches], ['F-0001'])
+
+    def test_nothing_moving_still_specifies_up_to_cap_plus_ahead(self):
+        out = rows.plan_rows(build_index(started=0, unstarted=0, cards=8), self.product(1), [],
+                             20)
+        self.assertEqual(len([r for r in self.docs(out) if r.launches]), 5)
+
+    def test_a_lane_experiment_and_a_refused_documents_correction_are_never_held(self):
+        idx = build_index(started=3, unstarted=0, cards=3)
+        idx['items']['F-0001']['stage'] = 'spec-draft'
+        idx['items']['F-0002']['ab_pair'] = 'p1'
+        occupancy = {'corrections': {'F-0001': {'kind': rows.LANDING_GATE, 'text': 'gate red',
+                                                'rounds': 1, 'branch': 'spec/F-0001'}}}
+        out = rows.plan_rows(idx, self.product(0), [], 20, occupancy=occupancy)
+        by = {r.item_id: r for r in out}
+        self.assertTrue(by['F-0001'].launches)
+        self.assertTrue(by['F-0002'].launches)
+        self.assertEqual(by['F-0003'].waits_on, 'build slot')
+
+
 class IncidentsTest(unittest.TestCase):
     """F-0071 acceptance 5, 6: the S1 clock."""
 
