@@ -1282,6 +1282,9 @@ def run(product_name):
     net = check_network(cfg)
     if net is not None:
         rows.append(('network', False, net[0], net[1]))
+    host = check_host_clock(cfg)
+    if host is not None:
+        rows.append(('network clock', False, host[0], host[1]))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
     ok, detail = check_rule_checks(product)
@@ -1339,6 +1342,24 @@ def run(product_name):
     if branches:
         rows.append(('branches', False, branches[0], branches[1]))
     return rows
+
+
+def check_host_clock(cfg):
+    """``(ok, detail)`` for the host clock ``asf.host.net-probe`` while ``network.probe`` is on
+    (installed, loaded or paused); None while it is off."""
+    from asf import scheduler
+    from asf.tick import network
+    if not network.enabled(cfg):
+        return None
+    label = scheduler.host_label(cfg)
+    if not os.path.exists(scheduler.plist_path(label)):
+        return False, (f'{label} is not installed — `asf scheduler install --host` writes it')
+    record = scheduler.pause_record(label, cfg)
+    if record is not None:
+        return False, f'{label} {scheduler.pause_text(record)} — `asf scheduler resume --host`'
+    if not scheduler.status(label).get('loaded'):
+        return False, f'{label} is installed but not loaded — `asf scheduler install --host`'
+    return True, f'{label} installed and loaded'
 
 
 def check_network(cfg, now=None):
