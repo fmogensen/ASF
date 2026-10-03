@@ -1902,9 +1902,15 @@ class TestOneCount(Base):
     def test_a_ceiling_hold_in_the_row_names_the_rows_own_count(self):
         """The queue held a batch at 4/4; the row's count is now 5: the row names 5, never 4."""
         from unittest import mock
+        from asf import capacity
         from asf.views import status
         p = product(cap={'ci': 4})
-        self.t0 = ci_queue._now()   # the row reads the file as of now
+        # one fixed instant for the queue and the row: a wall clock that crosses a minute
+        # between the admit and the row would otherwise read "waits 1 min"
+        for clock in (mock.patch.object(ci_queue, '_now', return_value=self.t0),
+                      mock.patch.object(capacity, '_now', return_value=self.t0)):
+            clock.start()
+            self.addCleanup(clock.stop)
         self.assertFalse(self.admit(self.queue(p, NoRunnersGh(inflight=4)), 'batch', 'batch',
                                     kind='batch').admitted)
         self.assertIn('(4 runs in flight;', self.lines[-1])
