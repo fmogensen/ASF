@@ -83,6 +83,11 @@ QUEUE_CLOCK = 'ci-queue'
 QUEUE_COMMAND = 'ci-queue'
 QUEUE_EVERY_S = 60
 
+#: the host-level probe clock (W1-PR3a): one per host, outside the ``asf.<product>.*`` glob, so
+#: no product's install, retire or reload touches it; written only when ``network.probe`` is on
+HOST_CLOCK = 'net-probe'
+HOST_PRODUCT = 'host'
+
 
 class SchedulerError(Exception):
     pass
@@ -568,6 +573,36 @@ def render(product, clock, cfg=None, venv=_PIN):
         f"NEEDS OPERATOR: scheduler kind {job_kind!r} has no adapter — install a job running "
         f"`{' '.join(argv)}` {_clock_when(clock)} and log it to {log}"
     )
+    return job
+
+
+def render_host(cfg=None):
+    """The job definition of the host's network probe clock — ``asf.host.net-probe``, ``asf
+    net-probe`` every 60 s — in :func:`render`'s shape, or None while ``config.yaml
+    network.probe`` is not on. Log only: the job probes and writes ``state/network.json``."""
+    from asf.tick import network
+    cfg = env.load_config() if cfg is None else cfg
+    if not network.enabled(cfg):
+        return None
+    label = label_for(HOST_PRODUCT, HOST_CLOCK, cfg)
+    log = os.path.join(env.ASF_HOME, 'logs', f'{HOST_CLOCK}.log')
+    argv = [sys.executable, '-m', 'asf.cli', 'net-probe']
+    job = {'kind': kind(cfg), 'label': label, 'log': log, 'argv': argv, 'product': HOST_PRODUCT,
+           'clock': HOST_CLOCK, 'steps': [], 'every_s': network.PROBE_EVERY_S}
+    if job['kind'] == 'launchd':
+        job['plist'] = {
+            'Label': label, 'ProgramArguments': argv, 'WorkingDirectory': repo_root(),
+            'EnvironmentVariables': {'PATH': _absolute_path_entries(),
+                                     'HOME': os.path.expanduser('~'),
+                                     'PYTHONPATH': repo_root(), 'ASF_HOME': env.ASF_HOME},
+            'StandardOutPath': log, 'StandardErrorPath': log,
+            'RunAtLoad': True, 'StartInterval': network.PROBE_EVERY_S,
+        }
+        job['path'] = plist_path(label)
+    else:
+        job['needs_operator'] = (f"NEEDS OPERATOR: scheduler kind {job['kind']!r} has no adapter — "
+                                 f"run `{' '.join(argv)}` every {network.PROBE_EVERY_S} s and log "
+                                 f"it to {log}")
     return job
 
 

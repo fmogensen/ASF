@@ -1279,6 +1279,9 @@ def run(product_name):
         rows.append(('agent homes asf', required, ok, detail))
     for ok, detail in check_product_warnings(product):
         rows.append(('product', False, ok, detail))
+    net = check_network(cfg)
+    if net is not None:
+        rows.append(('network', False, net[0], net[1]))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
     ok, detail = check_rule_checks(product)
@@ -1336,6 +1339,13 @@ def run(product_name):
     if branches:
         rows.append(('branches', False, branches[0], branches[1]))
     return rows
+
+
+def check_network(cfg, now=None):
+    """``(ok, detail)`` from the host probe's last record (:func:`asf.tick.network.doctor_row`),
+    or None while ``network.probe`` is off and nothing was ever recorded."""
+    from asf.tick import network
+    return network.doctor_row(env.ASF_HOME, cfg, now=now)
 
 
 def check_cux_lock():
