@@ -73,6 +73,7 @@ COMMANDS = {
     'shadow-diff':          ("compare a product's shadow turn against a reference run", None, None),
     'plugin':               ('build or check the editor plugin generated from this surface', REPO, 'build'),
     'ci':                   ('run the CI pool: reconcile this host with what is declared, and read the queue', HOST, '--apply'),
+    'net-probe':            ('probe how this host reaches the forge and log which layer fails', HOST, None),
     'cloud':                ("install or check the cloud lane's CI workflow", REPO, 'install'),
     'deploy':               ('record the sha a deploy target now runs', RECORD, None),
 }
