@@ -636,14 +636,36 @@ def _target_problems(targets):
     return out
 
 
+#: The problem an unknown key carries: a *warning*, never a refusal (:func:`product_problems`).
+UNKNOWN_KEY = 'is not a field of the product file'
+
+
 def validate_product_text(text):
     """The product file checked against the declared field list: a sorted list of
     ``(line, key, problem)``, empty when the file is well-formed. ``key`` is dotted for a
-    nested one (``ci.runner_labels``); ``line`` is 1-based in ``text``."""
+    nested one (``ci.runner_labels``); ``line`` is 1-based in ``text``.
+
+    Every finding, errors and warnings alike — the same contract every earlier release's reader
+    keeps, so ``asf product check`` and a pinned venv's loader compare like with like.
+    :func:`product_problems` splits them; :func:`load_product` refuses only the errors."""
+    errors, warnings = product_problems(text)
+    return sorted(errors + warnings)
+
+
+def product_problems(text):
+    """``(errors, warnings)``, each a sorted list of ``(line, key, problem)``.
+
+    A *warning* is an unknown key — at the top level, or inside a section whose own keys are
+    checked (:data:`NESTED_FIELDS`): a file written for a newer ``asf`` (or with a typo) still
+    loads, and ``asf doctor``'s ``product`` row names the key in yellow. An *error* is
+    everything else — a value of the wrong shape, an unreadable file, a refused ``deploy_sha``,
+    ``cloud``, ``ci.pool``, ``ci.queue``, ``credentials`` or ``conventions`` value — and
+    refuses the load. Forward tolerance means the *next* pinned reader never strands a product
+    file the current one writes."""
     try:
         data = loads(text)
     except ConfigError as e:
-        return [(0, '', str(e))]
+        return [(0, '', str(e))], []
     lines = {}
     section = None
     for n, raw in enumerate(text.splitlines(), 1):
@@ -657,12 +679,13 @@ def validate_product_text(text):
         elif section in NESTED_FIELDS or section == 'conventions':
             lines.setdefault(section + '.' + m[0], n)
     problems = []
+    warnings = []
 
     def check(fields, mapping, prefix):
         for key, value in mapping.items():
             dotted = prefix + key
             if key not in fields:
-                problems.append((lines.get(dotted, 0), dotted, 'is not a field of the product file'))
+                warnings.append((lines.get(dotted, 0), dotted, UNKNOWN_KEY))
             elif not _shape_ok(value, fields[key]):
                 problems.append((lines.get(dotted, 0), dotted, f'must be {fields[key]}, not {value!r}'))
 
@@ -688,7 +711,7 @@ def validate_product_text(text):
     for key, why in conventions_mod.validate_mapping(data.get('conventions')):
         dotted = 'conventions.' + key
         problems.append((lines.get('conventions.' + key.split('.')[0], 0), dotted, why))
-    return sorted(problems)
+    return sorted(problems), sorted(warnings)
 
 
 def key_line(path, dotted):
@@ -730,10 +753,13 @@ class Product:
     None, in which case it calls :func:`load_product` itself).
     """
 
-    def __init__(self, name, data):
+    def __init__(self, name, data, warnings=()):
         self.name = name
         self._data = data or {}
         self._conventions = None
+        #: ``(line, key, problem)`` for every unknown key the file carried (:func:`product_problems`):
+        #: loaded anyway, named in yellow on ``asf doctor``'s ``product`` row.
+        self.warnings = tuple(warnings)
 
     def _get(self, key, default=None):
         return self._data.get(key, default)
@@ -863,6 +889,12 @@ class Product:
         (:mod:`asf.credentials`). ``[]`` when the product names none."""
         return self._get('credentials') or []
 
+    def flag(self, name, default=None):
+        """``conventions.flags.<name>``, else ``default`` (:meth:`Conventions.flag`). Every
+        behaviour switch lives in that one map, which every earlier reader keeps verbatim — a
+        new flag never takes a pinned product down."""
+        return self.conventions.flag(name, default)
+
     def branch_prefix(self, kind):
         """The prefix *without* its separator (``worker``), for the callers that compose
         ``<prefix>/<job>`` themselves. :meth:`Conventions.branch` builds the whole name."""
@@ -876,10 +908,10 @@ def load_product(name=None):
     if not data:
         raise ConfigError(f'no product config at {path}')
     with open(path, encoding='utf-8') as f:
-        problems = validate_product_text(f.read())
-    if problems:
-        raise ConfigError(f'{path}: {format_problems(problems)}')
-    return Product(name, data)
+        errors, warnings = product_problems(f.read())
+    if errors:
+        raise ConfigError(f'{path}: {format_problems(errors)}')
+    return Product(name, data, warnings)
 
 
 def state_dir(product=None):

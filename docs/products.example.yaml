@@ -208,6 +208,13 @@ conventions:
     step_duration_ratio: 1.5 # today's median step duration over the window's
     spend_ratio: 1.5         # a kind's median dollars per landed change over all kinds'
     failure_class_count: 3   # one gate signature, in the window
+  # flags: every behaviour switch, in one map. Never validated and kept verbatim by every earlier
+  # reader, so a product pinned to an older asf still loads a file that sets a new one. An
+  # unset flag is its documented default; a name this release does not read is listed by
+  # `asf doctor`'s `product` row (asf.conventions.KNOWN_FLAGS).
+  # flags:
+  #   mechanical: true
+  #   plan_ahead: 2
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

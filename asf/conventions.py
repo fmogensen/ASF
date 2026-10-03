@@ -359,6 +359,14 @@ DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: for the rest). Any other value — ``'{docs: wait}'`` quoted into a string — is never a silent
 #: default: it is a red doctor finding.
 WORD_OR_MAP_CONVENTIONS = {'landing_checks_missing': ('wait', 'local-gate')}
+#: ``flags:`` — the one map every behaviour switch lives in (:meth:`Conventions.flag`). It is not
+#: a field and :func:`validate_mapping` never checks it, so every earlier reader keeps it
+#: verbatim: a product file that sets a flag still loads under a venv pinned to an older sha.
+#: A new switch is a name here, never a new top-level or checked key. A name the file sets that
+#: is not here is listed by :meth:`Conventions.unknown_flags` (the doctor's ``product`` row).
+KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16', 'facts',
+               'refguard', 'console_wait', 'groom_rules', 'relaunch_cap', 'loop_cap',
+               'head_capped', 'unknown_holds', 'models.cheap_kinds')
 
 
 
@@ -1167,6 +1175,39 @@ class Conventions:
     def doc_dir(self, key):
         """``spec`` → ``specs_dir``, ``plan`` → ``plans_dir``, ``review`` → ``reviews_dir``."""
         return self.get(f'{key}s_dir') or self.get(key + '_dir') or key + 's'
+
+    # ---- flags ---------------------------------------------------------------
+
+    @property
+    def flags(self):
+        """``flags:`` as the yaml wrote it (a passthrough, never validated); ``{}`` when unset
+        or not a map."""
+        value = self.extra.get('flags')
+        return value if isinstance(value, dict) else {}
+
+    def flag(self, name, default=None):
+        """``flags.<name>``, else ``default``. A dotted name (``models.cheap_kinds``) is read as
+        written first, then as a path into nested maps — both spellings are one flag. A value of
+        None (``name:`` left empty) is unset."""
+        flags = self.flags
+        value = flags.get(name)
+        if value is None and '.' in name:
+            node = flags
+            for part in name.split('.'):
+                node = node.get(part) if isinstance(node, dict) else None
+            value = node
+        return default if value is None else value
+
+    def unknown_flags(self):
+        """The names under ``flags:`` this release does not read (:data:`KNOWN_FLAGS`), sorted.
+        A nested map counts by its dotted leaf names (``models: {cheap_kinds}``)."""
+        names = []
+        for key, value in self.flags.items():
+            if key not in KNOWN_FLAGS and isinstance(value, dict):
+                names += [f'{key}.{sub}' for sub in value]
+            else:
+                names.append(str(key))
+        return sorted(n for n in names if n not in KNOWN_FLAGS)
 
     # ---- the mapping face ----------------------------------------------------
 

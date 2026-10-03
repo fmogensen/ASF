@@ -1,0 +1,4 @@
+# The oldest asf sha whose loader still reads a live product file (a pinned product venv), one
+# full 40-character sha per line (a shallow clone fetches it by name; a short one cannot be).
+# tests/pinned.py loads product files under each one; drop a line only when no product runs it.
+8d5e25a62d954a5ac46b46ec496330c01de2759b
