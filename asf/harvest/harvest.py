@@ -31,7 +31,7 @@ import tempfile
 import time
 
 
-from asf import approvals, env, gh_limit, gitpush, hermetic, mutation_guard, redact, refguard
+from asf import approvals, env, github, gitpush, hermetic, redact, refguard
 from asf.conventions import Conventions
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -899,39 +899,17 @@ def product_gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
 
 def _gh(args):
     """Run ``gh`` with ``args``; ``(rc, stdout, stderr)``. Never in the product checkout (a
-    ``--delete-branch`` there would switch its branch) — every call names ``-R <slug>``. A dry
-    run in progress (:mod:`asf.mutation_guard`) refuses a mutating call (``pr merge``, ``run
-    cancel``, an ``api -X POST/PATCH/DELETE`` …) instead of running it — the backstop for a
-    caller that never threaded its own ``dry_run`` flag this far; a read (``pr view``, ``pr
-    checks``, a plain ``api`` GET) is never touched."""
-    gh_limit.guard(args)
-    if mutation_guard.is_active() and mutation_guard.is_mutating_gh(args):
-        line = mutation_guard.would_line('gh', args)
-        print(line)
-        return 1, '', line
-    p = subprocess.run(['gh', *args], capture_output=True, text=True, env=clean_env())
-    gh_limit.inspect_proc(args, p)  # a rate limit is never a result
-    if escapes_refused(args, p.returncode, getattr(p, 'stderr', '')):
-        args = with_escapes(args)
-        p = subprocess.run(['gh', *args], capture_output=True, text=True, env=clean_env())
-        gh_limit.inspect_proc(args, p)
-    return p.returncode, p.stdout, p.stderr
+    ``--delete-branch`` there would switch its branch) — every call names ``-R <slug>``. A shim
+    over :func:`asf.github.call` (no timeout, as ever): the rate-limit latch, the dry-run
+    refusal of a mutating call (:mod:`asf.mutation_guard`), the escape-sequence retry and the
+    hermetic env all live there now. New readers call :func:`asf.github.gh` and get a
+    :class:`asf.github.Result` whose failure is Unknown, not an rc to remember to check."""
+    return github.call(args, timeout=None).triple()
 
 
-#: ``gh api`` (2.101 on) refuses to print a response holding terminal escape sequences — a CI
-#: job's log, coloured by its tools — unless asked to; an older ``gh`` has no such flag. So the
-#: flag is added only on that refusal: a job log read never comes back empty for its colours.
-GH_ESCAPES = '--allow-escape-sequences'
-
-
-def escapes_refused(args, rc, err):
-    """True when ``gh api`` refused a response for its escape sequences (:data:`GH_ESCAPES`)."""
-    return rc != 0 and list(args[:1]) == ['api'] and GH_ESCAPES in (err or '') \
-        and GH_ESCAPES not in args
-
-
-def with_escapes(args):
-    return ['api', GH_ESCAPES, *args[1:]]
+GH_ESCAPES = github.GH_ESCAPES
+escapes_refused = github.escapes_refused
+with_escapes = github.with_escapes
 
 
 def gh_json(args, default):
