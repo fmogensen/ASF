@@ -3192,9 +3192,9 @@ class TestOwnCadence(ReliefBase):
         self.relieve(p, run)                            # 101, 102, 201 cancelled for main
         held = tick.acquire_lock(p)                     # a tick of p is mid-health
         self.assertIsNotNone(held)
-        upgrade.write_pending('a' * 40, 'other')
+        upgrade.write_pending('a' * 40, 'other', 'p')
         try:
-            self.assertTrue(upgrade.read_pending())
+            self.assertTrue(upgrade.read_pending('p'))
             gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
             self.lines.clear()
             self.assertEqual(ci_queue.apply(p, source=ci_queue.GitHubSource(p, run=run),

@@ -419,13 +419,14 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         # would load the new one half-way through the tick, so the steps wait for the next tick
         print('tick: the install was upgraded under this tick; its steps run on the next tick')
         return 0
-    if upgraded and upgraded[-1] == drift.DEFERRED and upgrade.read_pending():
+    if upgraded and upgraded[-1] == drift.DEFERRED and upgrade.read_pending(product.name):
         # the owner already drained for upgrade.drain_wait_s and the floor is still busy. It
         # keeps working (skipping its steps starved its own product for as long as the slowest
         # other tick ran, 2026-09-25: 40 min), but it drains too: while the marker is pending
         # no tick spawns a background harvest (step_harvest.run), the other products' ticks do
         # not start, and what runs ends — the owner's next start finds the gap.
-        print(f'tick: upgrade to {upgrade.read_pending()["sha"][:7]} pending — this tick runs'
+        marker = upgrade.read_pending(product.name)
+        print(f'tick: upgrade to {marker["sha"][:7]} pending — this tick runs'
               ' without a new background harvest; the install goes at the next start')
     if not any(s == 'daily' for s, _, _ in rows):
         # this tick's own clock doesn't carry daily (it isn't the daily clock) — catch it up

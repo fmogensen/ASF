@@ -751,7 +751,7 @@ class UpgradeToTests(HomeCase):
                                 argparse.Namespace(skip_pipx=False, ref=self.TAG, owner='factory'),
                                 run=run)
         self.assertEqual(rc, upgrade.DEFERRED)
-        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+        self.assertEqual(upgrade.read_pending('factory')['sha'], self.SHA)
 
     def test_the_clock_reload_still_runs_after_a_tag_install(self):
         self.write(env.config_path(), '')
@@ -772,6 +772,11 @@ class PendingUpgradeTest(HomeCase):
     """A deferred upgrade marks itself pending, so the other ticks stop starting and a gap comes."""
     SHA = 'b' * 40
 
+    def setUp(self):
+        super().setUp()
+        for name in ('factory', 'other'):  # two unpinned products: both run the shared install
+            self.write(env.product_path(name), 'backlog_dir: /nonexistent\n')
+
     def run_upgrade(self, run, owner='factory'):
         return _quiet(upgrade.cmd_upgrade,
                       argparse.Namespace(skip_pipx=False, ref=self.SHA, owner=owner), run=run)
@@ -779,7 +784,7 @@ class PendingUpgradeTest(HomeCase):
     def test_a_deferral_writes_the_marker(self):
         rc, out, _err = self.run_upgrade(FakeRun(ticks='4242\n'))
         self.assertEqual(rc, upgrade.DEFERRED)
-        data = upgrade.read_pending()
+        data = upgrade.read_pending('other')
         self.assertEqual((data['sha'], data['owner']), (self.SHA, 'factory'))
         self.assertLess(abs(data['at'] - time.time()), 60)
         self.assertIn(f'upgrade: pending {self.SHA[:7]}', out)
@@ -790,12 +795,12 @@ class PendingUpgradeTest(HomeCase):
         ticks until the marker expired. 0 sessions ran, 8 were ready. A marker is written only
         for a target the upgrade will actually install, and one the moved head has made
         uninstallable goes at once."""
-        upgrade.write_pending('c' * 40, 'factory')
+        upgrade.write_pending('c' * 40, 'factory', 'other')
         run = FakeRun(ticks='4242\n', ci=json.dumps([{'conclusion': 'failure'}]))
         rc, out, _err = self.run_upgrade(run)
         self.assertEqual(rc, upgrade.DEFERRED)
-        self.assertIsNone(upgrade.read_pending())
-        self.assertFalse(os.path.exists(upgrade.pending_path()))
+        self.assertIsNone(upgrade.read_pending('other'))
+        self.assertFalse(os.path.exists(upgrade.pending_path('other')))
         self.assertIn(f'remote CI is red at {self.SHA[:7]}', out)
         self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed='d' * 40))
 
@@ -803,27 +808,27 @@ class PendingUpgradeTest(HomeCase):
         rc, _out, _err = self.run_upgrade(FakeRun(ticks='4242\n',
                                                   ci=json.dumps([{'conclusion': 'success'}])))
         self.assertEqual(rc, upgrade.DEFERRED)
-        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+        self.assertEqual(upgrade.read_pending('other')['sha'], self.SHA)
 
     def test_a_manual_deferral_writes_none(self):
         self.run_upgrade(FakeRun(ticks='4242\n'), owner=None)
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('other'))
 
     def test_a_later_deferral_keeps_the_first_timestamp(self):
-        upgrade.write_pending('c' * 40, 'factory', now=1000.0)
-        upgrade.write_pending(self.SHA, 'factory', now=5000.0)
-        self.assertEqual(upgrade.read_pending()['at'], 1000.0)
-        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+        upgrade.write_pending('c' * 40, 'factory', 'other', now=1000.0)
+        upgrade.write_pending(self.SHA, 'factory', 'other', now=5000.0)
+        self.assertEqual(upgrade.read_pending('other')['at'], 1000.0)
+        self.assertEqual(upgrade.read_pending('other')['sha'], self.SHA)
 
     def test_other_products_ticks_wait_and_the_owners_go_on(self):
-        upgrade.write_pending(self.SHA, 'factory')
+        upgrade.write_pending(self.SHA, 'factory', 'other')
         lines = []
         self.assertTrue(upgrade.waiting('other', out=lines.append, installed='c' * 40))
         self.assertEqual(lines, [f'tick: waiting — upgrade to {self.SHA[:7]} pending'])
         self.assertFalse(upgrade.waiting('factory', out=lines.append, installed='c' * 40))
 
     def test_a_waiting_tick_starts_no_step(self):
-        upgrade.write_pending(self.SHA, 'factory')
+        upgrade.write_pending(self.SHA, 'factory', 'other')
         product = env.Product('other', {'repo_dir': self.tmp, 'main': 'main', 'ci': {'provider': 'none'}})
         from asf.tick import tick
         with mock.patch('asf.env.load_product', return_value=product), \
@@ -839,29 +844,30 @@ class PendingUpgradeTest(HomeCase):
         ran.assert_not_called()
 
     def test_the_upgrade_clears_the_marker(self):
-        upgrade.write_pending(self.SHA, 'factory')
+        upgrade.write_pending(self.SHA, 'factory', 'other')
         rc, _out, _err = self.run_upgrade(FakeRun(installed=self.SHA))
         self.assertEqual(rc, 0)
-        self.assertIsNone(upgrade.read_pending())
-        self.assertFalse(os.path.exists(upgrade.pending_path()))
+        self.assertIsNone(upgrade.read_pending('other'))
+        self.assertFalse(os.path.exists(upgrade.pending_path('other')))
 
     def test_the_upgrading_tick_does_not_count_itself(self):
-        upgrade.write_pending(self.SHA, 'factory')
+        upgrade.write_pending(self.SHA, 'factory', 'other')
         rc, _out, _err = self.run_upgrade(FakeRun(ticks=f'{os.getpid()}\n{os.getppid()}\n',
                                                   installed=self.SHA))
         self.assertEqual(rc, 0)
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('other'))
 
     def test_a_stale_marker_is_ignored_and_removed(self):
-        upgrade.write_pending(self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 1)
+        upgrade.write_pending(self.SHA, 'factory', 'other',
+                              now=time.time() - upgrade.PENDING_TTL_S - 1)
         self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
-        self.assertFalse(os.path.exists(upgrade.pending_path()))
+        self.assertFalse(os.path.exists(upgrade.pending_path('other')))
 
     def test_a_marker_whose_sha_is_installed_is_ignored_and_removed(self):
-        upgrade.write_pending(self.SHA, 'factory')
+        upgrade.write_pending(self.SHA, 'factory', 'other')
         self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed=self.SHA))
-        self.assertFalse(os.path.exists(upgrade.pending_path()))
-        self.assertIsNone(upgrade.cooling())  # an installed marker is no expiry
+        self.assertFalse(os.path.exists(upgrade.pending_path('other')))
+        self.assertIsNone(upgrade.cooling('other'))  # an installed marker is no expiry
 
     def test_the_pending_ttl_is_ten_minutes(self):
         """B-0141: a marker nothing clears held the whole factory for half an hour."""
@@ -871,33 +877,35 @@ class PendingUpgradeTest(HomeCase):
         """B-0141 review round 1, C1 and C2: `held` is what the doctor and the status Cron row
         read, so it answers the same question `waiting` does — for the owner, whose ticks go on,
         and for the markers no tick honours, the answer is no wait at all."""
-        upgrade.write_pending(self.SHA, 'factory')
+        upgrade.write_pending(self.SHA, 'factory', 'factory')
+        upgrade.write_pending(self.SHA, 'factory', 'other')
         self.assertIsNone(upgrade.held('factory'))  # the owner drains and installs; it ticks
         self.assertEqual(upgrade.held('other')['sha'], self.SHA)
-        self.assertEqual(upgrade.held()['sha'], self.SHA)  # no product named: the marker itself
 
         # each of the three below is a marker still on disk that no tick honours: `held` reads it
         # and reports no wait, rather than leaving the doctor to announce one nobody is serving
-        upgrade.clear_pending()  # an operator's wait whose process was killed
-        upgrade.write_pending(self.SHA, None)
-        data = upgrade.read_pending()
+        upgrade.clear_pending('other')  # an operator's wait whose process was killed
+        upgrade.write_pending(self.SHA, None, 'other')
+        data = upgrade.read_pending('other')
         data['pid'] = 999999
-        upgrade._write_json(upgrade.pending_path(), data)
+        upgrade._write_json(upgrade.pending_path('other'), data)
         self.assertIsNone(upgrade.held('other'))
         self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
 
-        upgrade.clear_pending()  # a clock step dated the marker in the future
-        upgrade.clear_expired()  # the drop above left no cool-down, but the one below would
-        self.assertIsNotNone(upgrade.write_pending(self.SHA, 'factory', now=time.time() + 3600))
+        upgrade.clear_pending('other')  # a clock step dated the marker in the future
+        upgrade.clear_expired('other')  # the drop above left no cool-down, but the one below would
+        self.assertIsNotNone(upgrade.write_pending(self.SHA, 'factory', 'other',
+                                                   now=time.time() + 3600))
         self.assertIsNone(upgrade.held('other'))
 
-        upgrade.clear_pending()  # past the TTL, every tick resumes
+        upgrade.clear_pending('other')  # past the TTL, every tick resumes
         self.assertIsNotNone(upgrade.write_pending(
-            self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 1))
+            self.SHA, 'factory', 'other', now=time.time() - upgrade.PENDING_TTL_S - 1))
         self.assertIsNone(upgrade.held('other'))
 
     def test_a_timed_out_marker_resumes_the_parked_ticks_loudly_and_does_not_repark_them(self):
-        upgrade.write_pending(self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 60)
+        upgrade.write_pending(self.SHA, 'factory', 'other',
+                              now=time.time() - upgrade.PENDING_TTL_S - 60)
         lines = []
         self.assertFalse(upgrade.waiting('other', out=lines.append, installed='c' * 40))
         self.assertEqual(len(lines), 1, lines)
@@ -907,12 +915,44 @@ class PendingUpgradeTest(HomeCase):
         # the owner's next deferral does not park them again straight away
         rc, out, _err = self.run_upgrade(FakeRun(ticks='4242\n'))
         self.assertEqual(rc, upgrade.DEFERRED)
-        self.assertIsNone(upgrade.read_pending())
-        self.assertIn('no pending mark until', out)
+        self.assertIsNone(upgrade.read_pending('other'))
         self.assertFalse(upgrade.waiting('other', out=lines.append, installed='c' * 40))
         # once the cool-down has passed, a deferral parks them again
-        self.assertIsNotNone(upgrade.write_pending(self.SHA, 'factory',
+        self.assertIsNotNone(upgrade.write_pending(self.SHA, 'factory', 'other',
                                                    now=time.time() + upgrade.PENDING_TTL_S + 1))
+
+    def test_a_cooling_down_floor_says_no_mark_was_written(self):
+        for name in ('factory', 'other'):
+            upgrade._write_json(upgrade.expired_path(name), {'sha': self.SHA, 'at': time.time()})
+        rc, out, _err = self.run_upgrade(FakeRun(ticks='4242\n'))
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertIn('no pending mark until', out)
+        self.assertIsNone(upgrade.read_pending('other'))
+
+    def test_asf_upgrade_marker_does_not_park_a_pinned_product(self):
+        """S-M1: a pinned product runs its own venv; an upgrade of the shared install marks
+        only the products that run it, and a per-product marker parks no other product."""
+        from asf import installs
+        self.write(env.product_path('pinned'), 'backlog_dir: /nonexistent\n')
+        installs.write('pinned', 'e' * 40, os.path.join(self.tmp, 'venv-pinned'))
+        self.assertEqual(upgrade.marked_products('factory'), ['factory', 'other'])
+        self.assertEqual(upgrade.marked_products(None), ['factory', 'other'])
+        upgrade.write_pending(self.SHA, None, 'factory')  # e.g. a move of the factory product
+        self.assertFalse(upgrade.waiting('pinned', out=lambda _l: None, installed='c' * 40))
+        self.assertIsNone(upgrade.held('pinned'))
+        self.assertTrue(upgrade.waiting('factory', out=lambda _l: None, installed='c' * 40))
+        # no global marker is written: an older reader of state/upgrade-pending.json sees none
+        self.assertFalse(os.path.exists(os.path.join(env.ASF_HOME, 'state',
+                                                     'upgrade-pending.json')))
+
+    def test_the_shared_reinstall_refuses_while_a_product_is_pinned(self):
+        from asf import installs
+        installs.write('other', 'e' * 40, os.path.join(self.tmp, 'venv-other'))
+        run = FakeRun()
+        rc, out, _err = self.run_upgrade(run)
+        self.assertEqual(rc, 2)
+        self.assertIn('pinned product(s) other', out)
+        self.assertEqual(run.installs(), [])
 
 
 class AncestorPendingTest(HomeCase):
@@ -950,58 +990,58 @@ class AncestorPendingTest(HomeCase):
         self.addCleanup(patch.stop)
 
     def test_a_newer_install_containing_the_pending_sha_clears_the_marker(self):
-        upgrade.write_pending(self.pending_sha, 'factory')
+        upgrade.write_pending(self.pending_sha, 'factory', 'other')
         lines = []
         self.assertFalse(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
         self.assertEqual(lines, [])  # no park, no NEEDS OPERATOR
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('other'))
 
     def test_an_already_expired_marker_thats_actually_installed_clears_silently(self):
         # a leftover expired.json (a prior, unrelated cool-down) must not survive either
         old_at = time.time() - upgrade.PENDING_TTL_S - 60
-        upgrade._write_json(upgrade.pending_path(),
+        upgrade._write_json(upgrade.pending_path('other'),
                             {'sha': self.pending_sha, 'owner': 'factory', 'at': old_at})
-        upgrade._write_json(upgrade.expired_path(),
+        upgrade._write_json(upgrade.expired_path('other'),
                             {'sha': 'deadbeef' * 5, 'owner': 'factory', 'at': time.time() - 5})
         lines = []
         self.assertFalse(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
         self.assertEqual(lines, [])  # never NEEDS OPERATOR
-        self.assertIsNone(upgrade.read_pending())
-        self.assertFalse(os.path.exists(upgrade.expired_path()))
+        self.assertIsNone(upgrade.read_pending('other'))
+        self.assertFalse(os.path.exists(upgrade.expired_path('other')))
 
     def test_an_unrelated_install_leaves_the_marker_pending(self):
-        upgrade.write_pending(self.pending_sha, 'factory')
+        upgrade.write_pending(self.pending_sha, 'factory', 'other')
         lines = []
         self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.unrelated_sha))
         self.assertEqual(lines, [f'tick: waiting — upgrade to {self.pending_sha[:7]} pending'])
-        self.assertIsNotNone(upgrade.read_pending())
+        self.assertIsNotNone(upgrade.read_pending('other'))
 
     def test_an_older_install_leaves_the_marker_pending(self):
-        upgrade.write_pending(self.installed_sha, 'factory')  # pending is ahead of the install
+        upgrade.write_pending(self.installed_sha, 'factory', 'other')  # pending is ahead of the install
         lines = []
         self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.pending_sha))
-        self.assertIsNotNone(upgrade.read_pending())
+        self.assertIsNotNone(upgrade.read_pending('other'))
 
     def test_a_git_error_falls_back_to_the_prefix_check(self):
-        upgrade.write_pending(self.pending_sha, 'factory')
+        upgrade.write_pending(self.pending_sha, 'factory', 'other')
         with mock.patch('asf.drift.factory_root', return_value=os.path.join(self.tmp, 'no-such-repo')):
             lines = []
             self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
-        self.assertIsNotNone(upgrade.read_pending())  # the ancestor check errored — prefix says no
+        self.assertIsNotNone(upgrade.read_pending('other'))  # the ancestor check errored — prefix says no
 
     def test_no_factory_repo_falls_back_to_the_prefix_check(self):
-        upgrade.write_pending(self.pending_sha, 'factory')
+        upgrade.write_pending(self.pending_sha, 'factory', 'other')
         with mock.patch('asf.drift.factory_root', return_value=None):
             lines = []
             self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
-        self.assertIsNotNone(upgrade.read_pending())
+        self.assertIsNotNone(upgrade.read_pending('other'))
 
     def test_exact_match_still_works_without_touching_git(self):
-        upgrade.write_pending(self.pending_sha, 'factory')
+        upgrade.write_pending(self.pending_sha, 'factory', 'other')
         with mock.patch('asf.drift.factory_root', side_effect=AssertionError('should not be called')):
             self.assertFalse(upgrade.waiting('other', out=lambda _l: None,
                                              installed=self.pending_sha))
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('other'))
 
 
 class SequencedRun(FakeRun):
@@ -1027,6 +1067,10 @@ class DrainTest(HomeCase):
     """The owner's tick drains the floor for up to ``upgrade.drain_wait_s``, then installs."""
     SHA = 'b' * 40
 
+    def setUp(self):
+        super().setUp()
+        self.write(env.product_path('other'), 'backlog_dir: /nonexistent\n')
+
     def upgrade(self, run, owner='factory', wait=None, ref=SHA):
         slept = []
         rc, out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(
@@ -1044,13 +1088,13 @@ class DrainTest(HomeCase):
         self.assertIn('upgrade: waiting up to 180s for 1 asf process(es) to end:', out)
         self.assertIn('54171 (10:09) -m asf.tick.step_harvest --product asf', out)
         self.assertIn(f'upgrade: installed {self.SHA[:7]}', out)
-        self.assertIsNone(upgrade.read_pending())  # the install clears the mark
+        self.assertIsNone(upgrade.read_pending('factory'))  # the install clears the mark
 
     def test_the_owner_marks_pending_before_it_waits(self):
         seen = []
 
         def sleep(_s):
-            seen.append(upgrade.read_pending())
+            seen.append(upgrade.read_pending('factory'))
         run = SequencedRun(['4242\n', ''], installed=self.SHA)
         _quiet(upgrade.cmd_upgrade, argparse.Namespace(
             skip_pipx=False, ref=self.SHA, owner='factory', wait=60, sleep=sleep), run=run)
@@ -1062,7 +1106,7 @@ class DrainTest(HomeCase):
         self.assertEqual(rc, upgrade.DEFERRED)
         self.assertEqual(run.installs(), [])
         self.assertEqual(sum(slept), 30)
-        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+        self.assertEqual(upgrade.read_pending('factory')['sha'], self.SHA)
         self.assertIn('upgrade: deferred to the next tick', out)
 
     def test_the_drain_wait_reads_the_operator_config(self):
@@ -1078,7 +1122,7 @@ class DrainTest(HomeCase):
         self.assertEqual(run.installs()[0][-1], f'git+https://github.com/o/r.git@{FakeRun.HEAD}')
         self.assertIn('54171 (10:09) -m asf.tick.step_harvest', out)
         self.assertEqual(len(slept), 1)
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('other'))
 
     def test_a_manual_wait_parks_every_product_while_it_waits(self):
         seen = []
@@ -1097,7 +1141,7 @@ class DrainTest(HomeCase):
         self.assertEqual(run.installs(), [])
         self.assertEqual(sum(slept), 20)
         self.assertIn('upgrade: NOT installed', out)
-        self.assertIsNone(upgrade.read_pending())  # never leaves the factory parked
+        self.assertIsNone(upgrade.read_pending('other'))  # never leaves the factory parked
 
     def test_the_cli_takes_wait_with_and_without_seconds(self):
         p = argparse.ArgumentParser()
@@ -1132,6 +1176,10 @@ class DrainIgnoresTestsTest(HomeCase):
     """A test suite's ``asf.cli tick --product sample`` under a temp ASF home is no factory
     process of this install: the drain never waits on it (the 2026-09-26 17:10 freeze)."""
     SHA = 'b' * 40
+
+    def setUp(self):
+        super().setUp()
+        self.write(env.product_path('other'), 'backlog_dir: /nonexistent\n')
 
     def envs(self):
         test_home = os.path.join(self.tmp, 'asf_sample_x')
@@ -1172,7 +1220,7 @@ class DrainIgnoresTestsTest(HomeCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(slept, [])
         self.assertEqual(len(run.installs()), 1)
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('other'))
 
     def test_an_interrupted_manual_wait_lifts_its_mark(self):
         run = SequencedRun(['54171\n'], installed=FakeRun.HEAD)
@@ -1182,7 +1230,7 @@ class DrainIgnoresTestsTest(HomeCase):
         with self.assertRaises(KeyboardInterrupt):
             _quiet(upgrade.cmd_upgrade, argparse.Namespace(
                 skip_pipx=False, ref=None, owner=None, wait=540, sleep=sleep), run=run)
-        self.assertIsNone(upgrade.read_pending())  # never leaves the factory parked
+        self.assertIsNone(upgrade.read_pending('other'))  # never leaves the factory parked
 
 
 class DeadWaiterTest(HomeCase):
@@ -1191,23 +1239,23 @@ class DeadWaiterTest(HomeCase):
     SHA = 'b' * 40
 
     def test_an_operator_mark_records_its_pid(self):
-        self.assertEqual(upgrade.write_pending(self.SHA, None)['pid'], os.getpid())
-        self.assertNotIn('pid', upgrade.write_pending(self.SHA, 'factory'))
+        self.assertEqual(upgrade.write_pending(self.SHA, None, 'other')['pid'], os.getpid())
+        self.assertNotIn('pid', upgrade.write_pending(self.SHA, 'factory', 'other'))
 
     def test_a_dead_waiters_mark_no_longer_parks_the_ticks(self):
         dead = subprocess.Popen([sys.executable, '-c', 'pass'])
         dead.wait()
-        upgrade.write_pending(self.SHA, None)
-        data = upgrade.read_pending()
+        upgrade.write_pending(self.SHA, None, 'other')
+        data = upgrade.read_pending('other')
         data['pid'] = dead.pid
-        upgrade._write_json(upgrade.pending_path(), data)
+        upgrade._write_json(upgrade.pending_path('other'), data)
         lines = []
         self.assertFalse(upgrade.waiting('other', out=lines.append, installed='c' * 40))
-        self.assertIsNone(upgrade.read_pending())
+        self.assertIsNone(upgrade.read_pending('other'))
         self.assertIn('is gone', lines[0])
 
     def test_a_live_waiters_mark_still_parks_them(self):
-        upgrade.write_pending(self.SHA, None)
+        upgrade.write_pending(self.SHA, None, 'other')
         self.assertTrue(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
 
 
