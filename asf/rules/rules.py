@@ -77,7 +77,7 @@ def resolve_script(root, script):
 
 def load_rules(root):
     """Return the live rule entries from index.json, ordered by id — a card carrying
-    ``removed:`` or ``moved_to:`` is retired and skipped."""
+    ``removed:``, ``moved_to:`` or ``superseded_by:`` is retired and skipped."""
     index_path = os.path.join(root, 'index.json')
     if not os.path.isfile(index_path):
         raise RulesError('index.json is missing (run `backlog.py index`)')
@@ -93,6 +93,8 @@ def load_rules(root):
             continue
         if entry.get('removed') or entry.get('moved_to'):
             continue  # a retired card: its check no longer binds this record
+        if entry.get('superseded_by'):
+            continue  # replaced by another rule: its successor binds the record in its place
         rule = dict(entry)
         rule.setdefault('id', iid)
         rules.append(rule)
