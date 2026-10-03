@@ -69,6 +69,7 @@ git asf/workers/lifecycle.py 1
 git asf/workers/retention.py 6
 git asf/workers/runtime.py 1
 git asf/workers/spawn.py 27
+git asf/workers/stopgate.py 1
 git asf/workers/trash.py 1
 git asf/workers/trunkclose.py 2
 git asf/workers/trunkmerge.py 1
