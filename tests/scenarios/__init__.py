@@ -21,7 +21,8 @@ product checkout, the record, the operator home and the fake ``gh`` first on ``P
 
 With the host answering, PR #1 is open work: no path may close the Task. A **host behaviour**
 (:data:`BEHAVIOURS`) then changes what the host says — ``rate-limit`` (every call refused for
-rate, the fake's ``e2e rate-limit on``), ``close-unmerged`` (PR #1 closed without a merge, the
+rate, the fake's ``e2e rate-limit on`` with the recorded refusal of ``tests/fixtures/gh/
+rate-limit``), ``close-unmerged`` (PR #1 closed without a merge, the
 fake's ``e2e close-unmerged 1``), and ``merged`` (PR #1 squash-merged: the positive control,
 which proves a row can see a close at all).
 
@@ -44,8 +45,10 @@ import tempfile
 import types
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.scenarios…` does not
+    import contracts
     from e2e.factory import Factory, NAME, SLUG, _git
 except ImportError:  # pragma: no cover - import shape only
+    from tests import contracts
     from tests.e2e.factory import Factory, NAME, SLUG, _git
 
 ITEM = 'T-0001'
@@ -187,7 +190,10 @@ def _open(f):
 
 
 def _rate_limit(f):
-    gh(f, 'e2e', 'rate-limit', 'on')
+    """Every call answered with GitHub's own recorded refusal (W3-PR3's
+    ``tests/fixtures/gh/rate-limit``)."""
+    rc, _out, err = contracts.load('rate-limit', 'run-list')
+    gh(f, 'e2e', 'rate-limit', 'on', str(rc), err)
 
 
 def _close_unmerged(f):

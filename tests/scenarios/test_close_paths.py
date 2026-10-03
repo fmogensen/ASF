@@ -15,6 +15,7 @@ still there, so the PR that fixes it turns the row red here and drops the marker
 change — the row is that PR's acceptance. A new path or behaviour is one entry in the harness
 and rows here; one test method is generated per row.
 """
+import json
 import re
 import subprocess
 import unittest
@@ -150,11 +151,19 @@ class TheWorld(unittest.TestCase):
         self.assertFalse(_on_trunk(f, S.WORLD.hand))
         self.assertTrue(_on_trunk(f, S.WORLD.decoy))
 
+    def test_the_closed_pr_reads_as_the_recorded_host_shows_one(self):
+        f = S.WORLD.fork()
+        S.BEHAVIOURS['close-unmerged'](f)
+        _rc, out, _err = S.contracts.load('pr-closed-unmerged', 'pr-view')
+        p = f.gh('pr', 'view', '1', '-R', S.SLUG, '--json', 'state,mergedAt,mergeCommit')
+        self.assertEqual((p.returncode, json.loads(p.stdout)), (0, json.loads(out)))
+
     def test_a_rate_limited_host_refuses_every_call_but_its_own_switch(self):
         f = S.WORLD.fork()
         S.BEHAVIOURS['rate-limit'](f)
+        rc, _out, err = S.contracts.load('rate-limit', 'run-list')
         p = f.gh('pr', 'list', '-R', S.SLUG, '--state', 'all', '--json', 'number')
-        self.assertEqual(p.returncode, 1)
+        self.assertEqual((p.returncode, p.stderr), (rc, err))
         self.assertIn('API rate limit exceeded', p.stderr)
         self.assertEqual(f.gh('e2e', 'rate-limit', 'off').returncode, 0)
         p = f.gh('pr', 'list', '-R', S.SLUG, '--state', 'all', '--json', 'number')
