@@ -57,7 +57,7 @@ def instruction(why, branch, number=None, base=None, shas=()):
     return text
 
 
-def cmd_correct(args, fetch=None):
+def cmd_correct(args, fetch=None, alive=None):
     product = env.load_product(getattr(args, 'product', None))
     why = str(getattr(args, 'why', '') or '').strip()
     item = (args.item or '').strip().upper()
@@ -75,9 +75,20 @@ def cmd_correct(args, fetch=None):
     if lifecycle.item_park(path, item):
         print(f'asf correct: {item} is parked by hand — `asf unpark {item}` first')
         return 1
-    if any(lifecycle.is_live(r) for r in lifecycle.item_runs(path, item)):
-        print(f'asf correct: {item} has a session running — correct it when it ends')
-        return 1
+    open_runs = [r for r in lifecycle.item_runs(path, item) if lifecycle.is_live(r)]
+    if open_runs:
+        if alive is None:
+            from asf.workers import health
+            alive = health.alive_for(product, list(lifecycle.latest(path).values()))
+        running = [r for r in open_runs if lifecycle.occupies(r, alive)]
+        if running:
+            print(f'asf correct: {item} has a session running — correct it when it ends')
+            return 1
+        # the ledger has no `ended` line, but no session answers at the pid (or the cloud run
+        # is over): health has not reaped it yet, and a stale entry never blocks a correction
+        print(f'asf correct: {item}: ignoring stale run(s) '
+              f'{", ".join(str(r.get("job")) for r in open_runs)} — no live session behind '
+              f'them (health will end them)')
     rounds = lifecycle.rounds_of(path, item)
     run = max(runs, key=lambda r: r.get('started') or '')
     if rounds >= lifecycle.ROUND_CAP:

@@ -43,11 +43,11 @@ class CorrectTests(unittest.TestCase):
         with open(self.path) as f:
             return f.read()
 
-    def run_cmd(self, why='widen the budgets', pr=None, item='T-0017', fetch=None):
+    def run_cmd(self, why='widen the budgets', pr=None, item='T-0017', fetch=None, alive=None):
         args = argparse.Namespace(item=item, why=why, from_pr=pr, product='sample')
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            rc = correct.cmd_correct(args, fetch=fetch)
+            rc = correct.cmd_correct(args, fetch=fetch, alive=alive or (lambda pid: True))
         return rc, out.getvalue()
 
     def rows(self):
@@ -159,6 +159,37 @@ class CorrectTests(unittest.TestCase):
         rc, out = self.run_cmd()
         self.assertEqual(rc, 1, out)
         self.assertIn('running', out)
+
+    def _open_run(self, pid):
+        live = dict(self.RUN, job='correct-t-0017', pid=pid, started='2026-09-02T09:00:00Z')
+        live.pop('ended'), live.pop('end_reason')
+        self.ledger(self.RUN, live)
+
+    def test_a_dead_pid_entry_is_stale_and_does_not_block(self):
+        self._open_run(999999)
+        rc, out = self.run_cmd(alive=lambda pid: False)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('stale', out)
+
+    def test_a_live_run_refuses(self):
+        self._open_run(4242)
+        rc, out = self.run_cmd(alive=lambda pid: pid == 4242)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('running', out)
+
+    def test_a_cloud_run_still_working_refuses_and_an_ended_one_proceeds(self):
+        from unittest import mock
+        from asf.workers import cloudpid
+        tok = cloudpid.PREFIXES[0] + 'x1' if isinstance(cloudpid.PREFIXES, tuple) else 'x'
+        self._open_run(tok)
+        with mock.patch.object(cloudpid, 'status', return_value=cloudpid.WORKING):
+            rc, out = self.run_cmd(alive=lifecycle.pid_alive)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('running', out)
+        with mock.patch.object(cloudpid, 'status', return_value='ended'):
+            rc, out = self.run_cmd(alive=lifecycle.pid_alive)
+        self.assertEqual(rc, 0, out)
+        self.assertIn('stale', out)
 
     def test_it_supersedes_a_factory_park_on_the_item(self):
         parked = {'job': 'review-t-0017', 'correction': {
