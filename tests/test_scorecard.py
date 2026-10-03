@@ -940,5 +940,192 @@ class WiringTests(unittest.TestCase):
         self.assertEqual((args.command, args.weeks), ('scorecard', 6))
 
 
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'scorecard')
+
+
+def _prun(job, started, *, kind='coder', model='light-model', item='T-0001', head='aaaaaaa',
+          ended=None, reason='finished', harvested=None, usd=1.0, causes=()):
+    from asf.scorecard.facts import to_dt  # noqa: F401
+    r = {'_job': job, 'started': started, 'kind': kind, 'model': model, 'item': item,
+         '_head': head, 'ended': ended or started, 'end_reason': reason, '_usd': usd,
+         '_causes': sorted(causes)}
+    if harvested:
+        r['harvested'] = harvested
+    return r
+
+
+class ProgramTests(unittest.TestCase):
+    """asf.scorecard.program — the improvement program's row and ``--check``."""
+
+    def setUp(self):
+        from asf.scorecard import program
+        self.P = program
+        self.start = facts.to_dt('2026-10-01T00:00:00Z')
+        self.end = facts.to_dt('2026-10-02T00:00:00Z')
+
+    def test_a_three_hour_launch_gap_is_three_idle_hours_and_a_short_one_is_none(self):
+        runs = [_prun('a-t-0001', '2026-10-01T01:00:00Z'), _prun('b-t-0002', '2026-10-01T02:00:00Z'),
+                _prun('c-t-0003', '2026-10-01T05:00:00Z')]   # gaps 1 h (not idle), 3 h (idle)
+        self.assertEqual(self.P.row(runs, self.start, self.end)['idle_hours'], 3.0)
+
+    def test_another_products_launch_splits_a_gap_under_all(self):
+        runs = [_prun('a-t-0001', '2026-10-01T01:00:00Z'), _prun('c-t-0003', '2026-10-01T05:00:00Z')]
+        row = self.P.row(runs, self.start, self.end, extra_starts=['2026-10-01T03:00:00Z'])
+        self.assertEqual(row['idle_hours'], 0.0)   # 2 h + 2 h: neither over 2 h
+
+    def test_four_offline_lines_are_four_offline_ticks(self):
+        text = '\n'.join(['DONE since 2026-10-01T03:00:00Z — none'] + [
+            'tick: record failed (fatal: Could not resolve host)',
+            'tick: record failed — offline; nothing else ran'] * 4 + ['tick: record ok'])
+        lines = self.P.offline_lines([text])
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(self.P.row([], self.start, self.end, offline=lines)['offline_ticks'], 4)
+
+    def test_an_offline_line_dated_before_the_window_is_not_counted(self):
+        text = ('DONE since 2026-09-20T03:00:00Z\ntick: record failed — offline; nothing else ran\n')
+        row = self.P.row([], self.start, self.end, offline=self.P.offline_lines([text]))
+        self.assertEqual(row['offline_ticks'], 0)
+        self.assertIsNone(self.P.row([], self.start, self.end)['offline_ticks'])  # not read
+
+    def test_each_run_is_one_waste_class_in_order(self):
+        runs = [_prun('a-t-0001', '2026-10-01T01:00:00Z', reason='failed: not pushed'),
+                _prun('b-t-0002', '2026-10-01T01:10:00Z', reason='failed: empty branch: nothing to land'),
+                _prun('c-t-0003', '2026-10-01T01:20:00Z', reason='superseded by T-0009')]
+        runs += [_prun('d-t-0004', f'2026-10-01T02:0{i}:00Z', head='bbbbbbb') for i in range(5)]
+        w = self.P.row(runs, self.start, self.end)['waste_by_class']
+        # the 4th and 5th run of d on one head are a loop; an empty branch is nothing, not failed
+        self.assertEqual({k: v['runs'] for k, v in w.items()},
+                         {'failed': 1, 'loop': 2, 'superseded': 1, 'nothing': 1})
+
+    def test_a_correct_run_is_mechanical_only_when_every_cause_is(self):
+        runs = [_prun('correct-t-0001', '2026-10-01T01:00:00Z', kind='correct', causes=['footprint']),
+                _prun('correct-t-0002', '2026-10-01T01:00:00Z', kind='correct',
+                      causes=['footprint', 'review'], usd=5.0)]
+        m = self.P.row(runs, self.start, self.end)['mechanical_only_corrects']
+        self.assertEqual((m['runs'], m['usd']), (1, 1.0))
+
+    def test_heavy_share_and_cardless_heavy_reviews(self):
+        runs = [_prun('review-pr-0001', '2026-10-01T01:00:00Z', kind='review', item='PR-0001',
+                      model='heavy-model', usd=3.0),
+                _prun('coder-t-0002', '2026-10-01T01:00:00Z', usd=1.0)]
+        row = self.P.row(runs, self.start, self.end, heavy={'heavy-model'})
+        self.assertEqual((row['heavy_share'], row['cardless_heavy_reviews']), (0.75, 1))
+
+    def test_roots_follow_each_wait_to_the_item_it_ends_on(self):
+        board = [{'item_id': 'T-0002', 'waits_on': 'T-0001', 'action': 'WAITS ON T-0001', 'brief_kind': ''},
+                 {'item_id': 'T-0003', 'waits_on': 'delivery', 'brief_kind': 'review',
+                  'action': 'WAITS ON delivery T-0002: …'},
+                 {'item_id': 'T-0001', 'waits_on': 'operator', 'action': 'PARKED', 'brief_kind': ''}]
+        row = self.P.row([], self.start, self.end, board=board)
+        self.assertEqual(row['rows_waiting_on_item'], 2)
+        self.assertEqual(row['top_roots'], [('T-0001', 2)])
+        self.assertEqual(row['reviews_held_after'], 1)
+
+    def test_pending_keys_read_null_until_their_producer_registers(self):
+        row = self.P.row([], self.start, self.end)
+        for key in self.P.PENDING:
+            self.assertIn(key, row)
+            self.assertIsNone(row[key])
+        with mock.patch.dict(self.P._PRODUCERS, {'refguard_warns': lambda ctx: 7}):
+            self.assertEqual(self.P.row([], self.start, self.end)['refguard_warns'], 7)
+
+    def test_the_fixture_ledger_reproduces_the_rebaseline_since_10_01(self):
+        runs = self.P.ledger_runs(os.path.join(FIXTURES, 'ledger-sample.jsonl'))
+        row = self.P.row(runs, facts.to_dt('2026-10-01T12:00:00Z'),
+                         facts.to_dt('2026-10-03T16:00:00Z'), heavy={'heavy-model'})
+        # the re-baseline's since-10-01 column: ~$292, max 2 runs of a job on a head (0 over 3),
+        # 4 mechanical-only corrects for $5.74, 1 cardless review on heavy, 2 reshape runs
+        self.assertEqual((row['runs'], row['usd']), (101, 292.1))
+        self.assertEqual(row['max_runs_job_head']['runs'], 2)
+        self.assertEqual(row['job_heads_over_3'], 0)
+        m = row['mechanical_only_corrects']
+        self.assertEqual((m['runs'], m['usd']), (4, 5.74))
+        self.assertEqual(row['cardless_heavy_reviews'], 1)
+        self.assertEqual(row['reshape']['runs'], 2)
+        self.assertEqual(row['waste_by_class']['loop']['runs'], 0)
+        self.assertEqual(row['infra_ended']['runs'], 0)
+
+    def test_window_specs(self):
+        now = facts.to_dt('2026-10-03T00:00:00Z')
+        s, e = self.P.window('7d', now)
+        self.assertEqual(facts.iso(s), '2026-09-26T00:00:01Z')
+        s, _e = self.P.window('since=2026-10-01T12:00Z', now)
+        self.assertEqual(facts.iso(s), '2026-10-01T12:00:00Z')
+        with self.assertRaises(ValueError):
+            self.P.window('a week', now)
+
+
+class TargetsTests(unittest.TestCase):
+    """asf.scorecard.targets and ``asf scorecard --check``."""
+
+    ROW = {'cardless_heavy_reviews': 0, 'heavy_share': 0.4, 'rows_waiting_on_item': None,
+           'waste_by_class': {'loop': {'runs': 0, 'usd': 0.0}}}
+
+    def setUp(self):
+        from asf.scorecard import targets
+        self.T = targets
+
+    def test_each_op_and_a_dotted_key(self):
+        tg = self.T.parse({'targets': [
+            {'key': 'cardless_heavy_reviews', 'op': '==', 'value': 0},
+            {'key': 'heavy_share', 'op': '<', 'value': 0.30},
+            {'key': 'waste_by_class.loop.usd', 'op': '<=', 'value': 0},
+            {'key': 'rows_waiting_on_item', 'op': 'measured'},
+            {'key': 'no_such_key', 'op': 'measured'},
+            {'key': 'rows_waiting_on_item', 'op': '<=', 'value': 10}]})
+        oks = [ok for _t, _v, ok in self.T.check(self.ROW, tg)]
+        # heavy 0.4 misses < 0.30; an absent key is not measured; an unread number misses
+        self.assertEqual(oks, [True, False, True, True, False, False])
+
+    def test_a_malformed_file_is_refused(self):
+        for bad in ({}, {'targets': [{'op': '=='}]}, {'targets': [{'key': 'x', 'op': '~'}]},
+                    {'targets': [{'key': 'x', 'op': '<'}]}):
+            with self.assertRaises(self.T.TargetsError):
+                self.T.parse(bad)
+
+    def _check(self, text, row=None):
+        from asf.views import scorecard as view
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'targets.yaml')
+            with open(path, 'w') as f:
+                f.write(text)
+            args = mock.Mock(check=path, window='7d', all=False)
+            product = mock.Mock()
+            product.name = 'p'
+            row = dict(row or self.ROW, start='s', end='e')
+            out = io.StringIO()
+            with mock.patch('asf.scorecard.program.load', return_value=row), \
+                    mock.patch('sys.stdout', out):
+                rc = view.cmd_check(args, product)
+        return rc, out.getvalue()
+
+    def test_check_exits_0_when_every_target_is_met(self):
+        rc, out = self._check('targets:\n  - {key: cardless_heavy_reviews, op: "==", value: 0}\n')
+        self.assertEqual(rc, 0)
+        self.assertIn('1/1 targets met', out)
+
+    def test_check_exits_1_listing_each_missed_target(self):
+        rc, out = self._check('targets:\n  - {key: heavy_share, op: "<", value: 0.3}\n'
+                              '  - {key: cardless_heavy_reviews, op: measured}\n')
+        self.assertEqual(rc, 1)
+        self.assertIn('MISS heavy_share = 0.4 (want < 0.3)', out)
+        self.assertIn('1/2 targets met', out)
+
+    def test_check_exits_2_on_a_malformed_file(self):
+        rc, out = self._check('wave: A\n')
+        self.assertEqual(rc, 2)
+
+    def test_the_repo_targets_file_parses_and_its_wave_a_targets_are_measured(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'docs', 'program', 'targets.yaml')
+        tg = self.T.parse(env.load_file(path))
+        self.assertTrue(tg)
+        from asf.scorecard import program
+        row = program.row([], facts.to_dt('2026-10-01T00:00:00Z'), facts.to_dt('2026-10-02T00:00:00Z'),
+                          board=[])
+        self.assertTrue(all(ok for _t, _v, ok in self.T.check(row, tg)))
+
+
 if __name__ == '__main__':
     unittest.main()

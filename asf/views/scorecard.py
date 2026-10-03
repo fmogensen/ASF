@@ -217,9 +217,61 @@ def cmd_scorecard(args, root):
         else:
             print(render_lanes(d), end='')
         return 0
+    if isinstance(getattr(args, 'check', None), str):
+        return cmd_check(args, product)
     d = compute(root, product, weeks=max(1, int(getattr(args, 'weeks', 4) or 4)))
     if getattr(args, 'json', False):
+        d['program'] = program_row(args, product)
         print(json.dumps(d, indent=1, default=str))
     else:
         print(render(d), end='')
     return 0
+
+
+def _others(product, every):
+    """Every other configured product, for ``--all``'s ``idle_hours`` (unreadable ones skipped)."""
+    import os
+    if not every:
+        return []
+    out = []
+    pdir = os.path.join(env.ASF_HOME, 'products')
+    for name in sorted(f[:-5] for f in os.listdir(pdir) if f.endswith('.yaml')) \
+            if os.path.isdir(pdir) else []:
+        if name == product.name:
+            continue
+        try:
+            out.append(env.load_product(name))
+        except Exception:  # noqa: BLE001 — a product that does not load adds no launches
+            continue
+    return out
+
+
+def _window(args):
+    w = getattr(args, 'window', None)
+    return w if isinstance(w, str) and w else '7d'
+
+
+def _every(args):
+    return getattr(args, 'all', False) is True
+
+
+def program_row(args, product):
+    """The program row (:mod:`asf.scorecard.program`) over ``--window`` (default ``7d``)."""
+    from asf.scorecard import program
+    start, end = program.window(_window(args))
+    return program.load(product, start, end, others=_others(product, _every(args)))
+
+
+def cmd_check(args, product):
+    """``asf scorecard --check <targets.yaml> [--window …]``: exit 1 listing each missed target."""
+    from asf.scorecard import program, targets
+    try:
+        tg = targets.parse(env.load_file(args.check))
+        start, end = program.window(_window(args))
+    except (OSError, ValueError) as e:
+        print(f'scorecard --check: {e}')
+        return 2
+    row = program.load(product, start, end, others=_others(product, _every(args)))
+    results = targets.check(row, tg)
+    print(targets.render(results, product.name, row['start'], row['end']), end='')
+    return 0 if all(ok for _t, _v, ok in results) else 1

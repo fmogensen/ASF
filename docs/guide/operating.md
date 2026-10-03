@@ -416,6 +416,18 @@ A Feature's route is a typed field:
   the delta; the daily scorecard line carries the 7-day lane split. `asf doctor` (row `ab pairs`)
   and `asf status` (row `A/B pairs`) warn when a pair's two Features touch the same files.
 
+## Program metrics and targets
+
+`asf scorecard --json [--window 7d|36h|since=<iso>] [--all]` adds a `program` row: `idle_hours`
+(launch gaps over 2 h; `--all` counts every product's launches), `offline_ticks`,
+`waste_by_class` (each run classed once: failed, loop, superseded, nothing),
+`mechanical_only_corrects`, `max_runs_job_head`, `heavy_share`, `cardless_heavy_reviews`,
+`reshape`, `infra_ended`, and over the board `rows_waiting_on_item`, `top_roots` and
+`reviews_held_after`. Keys whose producers land later read `null`.
+`asf scorecard --check docs/program/targets.yaml [--window …]` reads each target (`key`, `op`
+of `==`/`<=`/`<`/`>=`/`>` or `measured`, `value`) against that row and exits 1 listing every
+missed one; a key the row could not read misses any numeric target.
+
 ## Clearing a card that does not belong
 
 A card that is not this product's work — a Bug filed against the wrong product, a Feature nobody
