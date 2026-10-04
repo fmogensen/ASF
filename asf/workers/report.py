@@ -75,6 +75,17 @@ def unpushed(report):
     return bool(value) and bool(NO_RE.match(value))
 
 
+#: A ``pushed:`` value declaring a rebase the factory publishes: ``rebased <sha> — …``.
+REBASED_RE = re.compile(r'^\s*rebased\s+`?(?P<sha>[0-9a-f]{7,40})\b', re.I)
+
+
+def rebased(text):
+    """The sha a result's own report declared ``pushed: rebased <sha>`` — the brief's answer to
+    a push refused as non-fast-forward, which the factory publishes — or ''."""
+    m = REBASED_RE.match((parse(text).get('pushed') or '').split('\n', 1)[0])
+    return m.group('sha').lower() if m else ''
+
+
 def ruling(text):
     """The ``ruling:`` paragraph of an adjudicate session's REPORT, or '' (B-0064): the one
     place a ruling lives — the factory files it on the item's card, the session commits none."""

@@ -104,7 +104,10 @@ on the trunk: never merge `origin/spec/F-0001` or `origin/main` into it, never f
 recut it or open another branch. Push with `git push origin spec/F-0001`. If that is refused as
 non-fast-forward, the rebase is why: stop there — do not merge, do not force — and write
 `pushed: rebased <sha> — the factory publishes` in the report; the factory publishes a rebased
-lane branch itself (B-0056). Never invent an id: a card id comes from `asf new` or the
+lane branch itself (B-0056). Publishing and landing are the factory's, never yours: commit, and
+the lane publishes and lands the branch — never run `asf land` or any other `asf` command to
+publish, and a refused push is never a `NEEDS OPERATOR`.
+Never invent an id: a card id comes from `asf new` or the
 `BACKLOG_ID_RANGE` this session was given, and a ruling is never a commit in this repo.
 
 Anything a human must decide, answer or run is never guessed and never buried in a comment:
