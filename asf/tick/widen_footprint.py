@@ -50,6 +50,7 @@ from asf import approvals
 from asf.feeder import footprint
 from asf.feeder import rows as feeder_rows
 from asf.feeder import widen
+from asf.record import writer as card_writer
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import report as report_mod
@@ -354,8 +355,7 @@ def write_card(root, item_id, updates, stamp, note, product=None):
         return err
     with open(rec['path'], encoding='utf-8') as f:
         meta, body = frontmatter.parse(f.read(), path=rec['relpath'])
-    with open(rec['path'], 'w', encoding='utf-8') as f:
-        f.write(frontmatter.render(meta, append_history_lines(body, [history])))
+    card_writer.write_card(rec['path'], frontmatter.render(meta, append_history_lines(body, [history])))
     if _git(root, ['rev-parse', '--git-dir']) is not None:
         _git(root, ['add', '--', rec['relpath']])
         _git(root, ['commit', '-q', '-s', '-m', f'{item_id}: {note}', '--only',

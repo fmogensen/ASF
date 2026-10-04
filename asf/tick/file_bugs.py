@@ -25,6 +25,7 @@ import sys
 from asf.conventions import Conventions
 from asf.feeder import footprint
 from asf.record import frontmatter
+from asf.record import writer
 from asf.record.core import canonicalize, load_items, today
 from asf.record.index import do_index
 from asf.record.ids import mint_id, write_new_item
@@ -353,8 +354,7 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
         hist = f"- {date} file-bugs: count {old_count} → {new_count} ({latest})"
         new_body = append_history_lines(body2, [hist])
         if new_body != body2:
-            with open(rec['path'], 'w', encoding='utf-8') as f:
-                f.write(frontmatter.render(meta2, new_body))
+            writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         return 'bumped'
 
     typed = {
@@ -436,8 +436,7 @@ def _note_new_places(rec, info, date):
     new_body = append_history_lines(body, hist)
     if new_body == body:
         return False
-    with open(rec['path'], 'w', encoding='utf-8') as f:
-        f.write(frontmatter.render(meta, new_body))
+    writer.write_card(rec['path'], frontmatter.render(meta, new_body))
     return True
 
 
