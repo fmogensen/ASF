@@ -9,7 +9,7 @@ from collections import Counter
 from asf import invariants
 from asf.conventions import DEFAULT_SPECS_DIR
 from asf.feeder import footprint
-from asf.groom import shape
+from asf.groom import conflicts, shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter, tree
 from asf.record.core import (
@@ -396,6 +396,9 @@ def record_findings(root, scrub=None, layout=True, shared=()):
     for a, b, g1, g2 in invariants.unordered_overlaps(tasks, shared):
         rec = canonical[a]
         add(rec, find_line(rec, 'writes'), f"writes: {g1!r} intersects Active task {b}'s {g2!r}")
+
+    # supersession: dangling, half-written and cyclic pairs — messages and sort are conflicts'
+    findings.extend(conflicts.supersession_findings(canonical, find_line))
 
     # index.json staleness
     index_wrong = set()  # (id, expected entry, entry on disk) for every entry out of date
