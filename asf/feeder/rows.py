@@ -405,6 +405,34 @@ def roots_on(product):
     return v is True or str(v).strip().lower() in ('on', 'true', 'yes')
 
 
+#: ``flags.console_wait``: ``hold`` (default) — an item waiting on the console orders its
+#: dependants as any unlanded item does; ``aside`` — it orders nothing (:func:`console_only`)
+CONSOLE_WAIT_HOLD, CONSOLE_WAIT_ASIDE = 'hold', 'aside'
+
+
+def console_wait(product):
+    """``flags.console_wait`` — :data:`CONSOLE_WAIT_ASIDE` when set so, else
+    :data:`CONSOLE_WAIT_HOLD` (unset, ``hold`` or anything else: today's ordering)."""
+    v = _conventions(product).flag('console_wait') if product is not None else None
+    return CONSOLE_WAIT_ASIDE if str(v or '').strip().lower() == CONSOLE_WAIT_ASIDE \
+        else CONSOLE_WAIT_HOLD
+
+
+def console_only(rows):
+    """The item ids whose every row is a CONSOLE → AMEND: work only the console can move, put
+    aside (W8-PR1). Under ``console_wait: aside`` such an item no longer orders another row
+    (:func:`after_of` drops it, :func:`candidates` sets it on the map as ``console_aside``); an
+    item with any other row — a landing, a review — keeps its ``after:`` edges. The groom rows speak for a day's questions, not for the
+    item they name, so they never count. I3's overlap check is not touched: a dependant whose
+    ``writes:`` overlaps a staged item is still refused at launch."""
+    by = {}
+    for r in rows:
+        if r.kind in (GROOM_ADJUDICATE, GROOM_CLERK):
+            continue
+        by[r.item_id] = by.get(r.item_id, True) and r.kind == CONSOLE_AMEND
+    return {i for i, only in by.items() if only}
+
+
 def _whole_flag(product, name, default):
     v = _conventions(product).flag(name) if product is not None else None
     if isinstance(v, str) and v.strip().isdigit():
@@ -527,16 +555,21 @@ def absorbers(items):
     return out
 
 
-def after_of(items, item, absorbed=None):
+def after_of(items, item, absorbed=None, keep_aside=False):
     """``item``'s ``after:`` with each merged-away id read as the card that absorbed it (a chain
     followed to its end); an absorber the item itself is dropped — it does not wait on its own
     work. A dependency on a card groom removed outright — not done, merged into nothing — is a
     dead edge and dropped (:func:`dead_after`): its work is not coming, so nothing may wait on
     it. A chain that ends on a removed card that never landed is kept: the scope folded into it
-    is still the Feature's work, and :func:`orphaned_after` names it for a decision."""
+    is still the Feature's work, and :func:`orphaned_after` names it for a decision.
+
+    An item the map sets aside as ``console_aside`` (``flags.console_wait: aside``,
+    :func:`console_only` — its only row waits on the console) is dropped too: it orders nothing
+    (W8-PR1). ``keep_aside``: keep it — the edge as the record has it."""
     absorbed = absorbers(items) if absorbed is None else absorbed
     out = []
     gone = getattr(items, 'retired_open', {})
+    aside = () if keep_aside else getattr(items, 'console_aside', ())
     for a in item.get('after') or ():
         seen, hops = {a}, 0
         while a in absorbed and absorbed[a] not in seen:
@@ -545,7 +578,7 @@ def after_of(items, item, absorbed=None):
             hops += 1
         if a in gone and not hops:
             continue  # removed outright: a dead edge (dead_after says so)
-        if a != item.get('id') and a not in out:
+        if a != item.get('id') and a not in out and a not in aside:
             out.append(a)
     return out
 
@@ -1732,8 +1765,13 @@ def hold_unlanded(rows, items, landed_shas=None, product=None, on_trunk=None):
 
     ``on_trunk`` (``flags.roots``, :func:`landed_ids`): an ``after:`` on an unverified landing
     the trunk carries no longer holds; a row it released says so in its reason, so a dependant
-    built on a landing later reset names the root it trusted."""
+    built on a landing later reset names the root it trusted.
+
+    ``console_aside`` on the map (``flags.console_wait: aside``, :func:`console_only`): the items
+    whose only row waits on the console — :func:`after_of` drops them, so an ``after:`` on one
+    no longer holds; a launching row it released says so."""
     on_trunk = set(getattr(items, 'trunk_unverified', ()) if on_trunk is None else on_trunk)
+    aside = getattr(items, 'console_aside', ())
     landed = landed_ids(items, landed_shas, on_trunk)
     absorbed = absorbers(items)
     out, said = [], set()
@@ -1761,6 +1799,11 @@ def hold_unlanded(rows, items, landed_shas=None, product=None, on_trunk=None):
             if trusted and not pending and r.launches:
                 r = dataclasses.replace(r, reason=f"{r.reason} (after: {', '.join(trusted)} on "
                                                   f"the trunk, its landing unverified)")
+            put = [a for a in after_of(items, items.get(r.item_id) or {}, absorbed, True)
+                   if a in aside] if aside else []
+            if put and not pending and r.launches:
+                r = dataclasses.replace(r, reason=f"{r.reason} (after: {', '.join(put)} waits on "
+                                                  f"the console — put aside, it orders nothing)")
         # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
         # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print.
         # A review of a pushed branch reads a diff and changes nothing the predecessor writes:
@@ -2104,10 +2147,37 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     silent no-row, never a coder relaunched over a landing the lane recorded.
     ``unverified_on_trunk``: those of them whose landing the trunk carries — under
     ``flags.roots`` an ``after:`` on one is answered (:func:`hold_unlanded`), and a stale park
-    with rows behind it surfaces (:func:`surface_stale_parks`, ``now`` its clock)."""
+    with rows behind it surfaces (:func:`surface_stale_parks`, ``now`` its clock).
+
+    ``flags.console_wait: aside`` (W8-PR1): an item whose only row is CONSOLE → AMEND
+    (:func:`console_only`) is set on the map as ``console_aside`` and the rows are drawn again —
+    it orders nothing (:func:`after_of`), its own row ranks behind the live rows of its tier. A
+    Task released that way may itself be console work: the passes run to a fixed point."""
     items = items_of(index)
     roots = roots_on(product)
     items.trunk_unverified = set(unverified_on_trunk or ()) if roots else set()
+    items.console_aside = set()
+    args = (index, items, product, inflight, attempts, occupancy, groom_state, landed_shas,
+            decision_limit, adjudicated, unverified_landed, now, roots)
+    ordered = _candidates(*args)
+    if console_wait(product) == CONSOLE_WAIT_ASIDE:
+        for _ in range(CONSOLE_PASSES):
+            more = console_only(ordered) - items.console_aside
+            if not more:
+                break
+            items.console_aside |= more
+            ordered = _candidates(*args)
+    return ordered
+
+
+#: the most times :func:`candidates` draws the rows again for ``console_wait: aside`` — each
+#: pass can only add console items it released; a chain of them deeper than this stays held
+CONSOLE_PASSES = 4
+
+
+def _candidates(index, items, product, inflight, attempts, occupancy, groom_state, landed_shas,
+                decision_limit, adjudicated, unverified_landed, now, roots):
+    """:func:`candidates`' one pass over a prepared map."""
     occ = occupancy or {}
     corrections = occ.get('corrections') or {}
     live = inflight_ids(inflight) | set(occ.get('busy') or ())
@@ -2154,6 +2224,8 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     rows = hold_classes(rows, product)
     rows = over_budget_epics(rows, items)          # F-0052
     rows, aside = hold_shelved(rows, items, occ.get('parks'))
+    # ... and its own row ranks behind the live rows of its tier, as put-aside work does
+    aside |= {id(r) for r in rows if r.item_id in items.console_aside and r.kind == CONSOLE_AMEND}
     cap, attempts = attempt_limit(product), attempts or {}
     rows = [_capped(r, attempts, cap, product, adjudicated)
             if r.launches and r.kind in CAPPED_KINDS else r for r in rows]
