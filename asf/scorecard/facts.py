@@ -184,15 +184,19 @@ UNTRACEABLE = 'landed without a traceable commit'
 def landing_shas(meta):
     """The commits the record says landed this card: a typed ``landed: <sha>``, and the ingest's
     evidence (``merge <sha> of <branch> lands <id>``, ``commit <sha> names <id>``,
-    ``PR #<n> merged (<sha>)``, ``fix merged (<sha>)``)."""
+    ``PR #<n> merged (<sha>)``, ``fix merged (<sha>)``) — the ``landing:`` stamp's sha first."""
     ev = meta.get('evidence')
     out = []
+    stamp = meta.get('landing')
+    stamped = str(stamp.get('sha') or '').strip() if isinstance(stamp, dict) else ''
+    if _SHA_RE.match(stamped):
+        out.append(stamped)
     typed = str(meta.get('landed') or '').strip()
-    if _SHA_RE.match(typed):
+    if _SHA_RE.match(typed) and typed not in out:
         out.append(typed)
     for line in ev if isinstance(ev, list) else []:
         m = _LANDING_RE.match(str(line)) or _MERGED_RE.match(str(line))
-        if m and m.group(1) not in out:
+        if m and not any(o.startswith(m.group(1)) or m.group(1).startswith(o) for o in out):
             out.append(m.group(1))
     return out
 

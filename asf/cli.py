@@ -292,6 +292,8 @@ def build_parser():
     from asf.workers.correct import register as register_correct, register_reset
     register_correct(sub)
     register_reset(sub)
+    from asf.tick.migrate_landing import register as register_migrate_landing
+    register_migrate_landing(sub)
     from asf.workers.trunkmerge import register as register_trunk_check
     register_trunk_check(sub)
     from asf.briefs import register as register_briefs
@@ -514,6 +516,12 @@ def _main(argv=None):
     if args.command == 'migrate':
         from asf.tick.migrate import cmd_migrate
         return cmd_migrate(args, resolve_record(args))
+    if args.command == 'migrate-landing':
+        from asf.tick.migrate_landing import cmd_migrate_landing
+        if not (args.apply or args.revert):   # the dry run writes nothing: nothing to publish
+            return cmd_migrate_landing(args, resolve_record(args))
+        return _published(cmd_migrate_landing, args, resolve_record(args),
+                          'record: migrate-landing ' + ('--revert' if args.revert else '--apply'))
     if args.command == 'groom':
         from asf.groom.groom import cmd_groom
         return _published(cmd_groom, args, resolve_record(args),

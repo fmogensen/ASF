@@ -13,7 +13,8 @@ rule; never edit the state field directly).
 
 A ``reopened:`` machine line — one entry per reopen, timestamped and reasoned — is the marker
 that survives every later ``asf ingest`` untouched (ingest never drops a key it does not itself
-derive, I1), and a ``## History`` line says what changed and why. The write goes through the same
+derive, I1), and a ``## History`` line says what changed and why. The card's ``landing:`` stamp
+is cleared: the close it recorded was the false one. The write goes through the same
 staged/published path ``asf set`` uses: :func:`asf.record.stage.guarded`, then the console's
 ``_published`` commits and pushes it, hooks on.
 """
@@ -24,7 +25,8 @@ from asf import env
 from asf.evidence import closing, evidence
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, now_iso, today
-from asf.record.ingest import EVIDENCE_TYPES, MACHINE_KEY_ORDER, RULE_PREFIX, append_history_lines
+from asf.record.ingest import EVIDENCE_TYPES, LANDING_KEY, MACHINE_KEY_ORDER, RULE_PREFIX
+from asf.record.ingest import append_history_lines
 from asf.record.ingest import derive, is_retired, write_fields
 
 
@@ -98,6 +100,9 @@ def cmd_reopen(args, root):
         fields.pop('blocked', None)
         fields.pop('blocked_by_open', None)
     fields['stage_since'] = now
+    # the landing the false close stood on is no landing: the next close stamps afresh, and I14
+    # reads `landing.as_of` against this reopen
+    fields.pop(LANDING_KEY, None)
     marker = f"{now}: {args.reason} — {old_state} → {c.state}"
     fields['reopened'] = list(machine.get('reopened') or []) + [marker]
     fields['updated'] = now

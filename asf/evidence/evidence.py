@@ -903,6 +903,7 @@ def discover(product=None, checked_file=None):
         "lane_docs": lane_docs(product, prs, commits=commits, merges=merges),
         "proves": landed_proves(product, prs),
         "ci": ci_provider(product),
+        "reverts": trunk_reverts(product),
     }
 
 
@@ -1164,6 +1165,53 @@ def merge_facts(product, path=None):
                      "files": list(lane.get("files") or ())})
             else:
                 out["code"][item] = {"sha": sha, "branch": branch, "pr": lane.get("pr")}
+                if run.get("trunk_closed"):
+                    # who closed it, for the card's `landing:` stamp (asf.record.ingest)
+                    out["code"][item].update(trunk_closed=str(run["trunk_closed"]),
+                                             trunk_arm=str(run.get("trunk_arm") or ""))
+    return out
+
+
+#: A revert's own message: ``git revert`` writes ``This reverts commit <sha>.`` into the body.
+REVERTS_RE = re.compile(r"This reverts commit ([0-9a-f]{40})")
+
+
+def trunk_reverts(product):
+    """``{reverted sha: reverting sha}`` — every trunk commit a later trunk commit reverts
+    (``This reverts commit <sha>`` in its message), one ``git log --grep`` for all. A revert that
+    is itself reverted puts its target back: such a target is left out. ``{}`` when git says
+    nothing (no product, no trunk)."""
+    if product is None:
+        return {}
+    text = sh(f"git log --format=%H%x1e%B --grep='This reverts commit' origin/{product.main} --",
+              product=product)
+    rev = {}
+    for sha, body in reversed(_parse_proves_log(text)):  # oldest first: a newer revert wins
+        for target in REVERTS_RE.findall(body or ""):
+            rev[target] = sha
+
+    def reverted(sha, seen=()):
+        r = rev.get(sha)
+        return bool(r) and r not in seen and not reverted(r, seen + (sha,))
+
+    return {t: r for t, r in rev.items() if reverted(t)}
+
+
+def full_shas(product, shas):
+    """``{sha: full 40-hex sha}`` for each of ``shas`` git knows as a commit in the product repo
+    (one ``git cat-file --batch-check`` for all); an unknown or ambiguous one is left out."""
+    shas = sorted({str(s) for s in shas or () if s and re.fullmatch(r"[0-9a-f]{4,40}", str(s))})
+    if product is None or not shas:
+        return {}
+    # each line is `<sha> <sha>`: the name to look up, and itself again as %(rest) to key by
+    text = sh("printf '%s %s\\n' " + " ".join(f"{s} {s}" for s in shas)
+              + " | git cat-file --batch-check='%(objectname) %(objecttype) %(rest)'",
+              product=product)
+    out = {}
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "commit" and FULL_SHA_RE.fullmatch(parts[0]):
+            out[parts[2] if len(parts) > 2 else parts[0]] = parts[0]
     return out
 
 
@@ -1261,6 +1309,8 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
         r = rec(iid)
         r["commit"], r["merge"] = fact["sha"], fact.get("branch") or ""
         r["pr"] = fact.get("pr")
+        if fact.get("trunk_closed"):
+            r["trunk_closed"], r["trunk_arm"] = fact["trunk_closed"], fact.get("trunk_arm") or ""
     prefixes = branch_prefixes(product)
     known = {}
     # A Feature is never landed by its spec or plan: a commit whose diff is only documents under
