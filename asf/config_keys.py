@@ -5,7 +5,7 @@ A key the operator sets that no code reads does nothing and says nothing (``work
 local_max_inflight`` sat in a live config for days while ``capacity.total.sessions`` was the real
 limit). :func:`unknown_keys` names each one so doctor can warn. Entries are dotted paths: ``a.b``
 is a key, ``a.*`` is a free-form map (any key below it is fine), ``a[]`` is a list of maps whose
-keys follow as ``a[].k``. ``tests/test_config_keys.py`` fails when code reads a top-level key
+keys follow as ``a[].k``. The cutover script's keys are listed too. ``tests/test_config_keys.py`` fails when code reads a key (chained reads, any depth)
 missing here, and when a registered key no code mentions.
 """
 
@@ -26,6 +26,9 @@ KNOWN_CONFIG_KEYS = frozenset({
     'worker_pool.accounts[].caps', 'worker_pool.accounts[].home',
     'worker_pool.accounts[].config_dir', 'worker_pool.accounts[].home_seed',
     'worker_pool.accounts[].isolate_home', 'worker_pool.accounts[].auth_env',
+    'worker_pool.accounts[].note',   # annotation for the operator; nothing reads it
+    'operator.tick_file', 'operator.plugin_dir', 'cutover.job_timeout_s', 'legacy_steps',
+    'quota_guards.seven_d_cooldown',   # old name of quota_guards.cooldown.seven_d; still honoured
     'quota_guards.five_h', 'quota_guards.seven_d', 'quota_guards.seven_d_model',
     'quota_guards.stale_after_min', 'quota_guards.stop.*', 'quota_guards.cooldown.*',
     'quota_guards.running_allowance', 'quota_guards.five_h_usd',

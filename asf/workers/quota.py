@@ -25,6 +25,7 @@ import datetime
 import json
 import shlex
 import subprocess
+import sys
 
 DEFAULT_STOP = {'five_h': 95, 'seven_d': 95, 'seven_d_model': 95}
 BAND = 5                       # how far below the stop the cooldown opens, when unnamed
@@ -35,6 +36,15 @@ STALE_AFTER_MIN = 30          # minutes after ``polled_at`` a reading stops bein
 #: names no ``<window>_resets_at``.
 WINDOW_LENGTH = {'five_h': datetime.timedelta(hours=5), 'seven_d': datetime.timedelta(days=7),
                  'seven_d_model': datetime.timedelta(days=7)}
+
+
+_WARNED = set()
+
+
+def _warn_once(msg):
+    if msg not in _WARNED:
+        _WARNED.add(msg)
+        print(f'asf: warn: {msg}', file=sys.stderr)
 
 
 def guards_from_config(cfg):
@@ -61,6 +71,10 @@ def guards_from_config(cfg):
             stale_after = float(g['stale_after_min'])
         named_stop = g.get('stop') or {}
         named_cooldown = g.get('cooldown') or {}
+        if g.get('seven_d_cooldown') is not None:    # the old flat name; the nested key wins
+            _warn_once('quota_guards.seven_d_cooldown is deprecated: '
+                       'use quota_guards.cooldown.seven_d')
+            cooldown['seven_d'] = float(g['seven_d_cooldown'])
         for w in WINDOW_KEYS:
             if named_stop.get(w) is not None:
                 stop[w] = float(named_stop[w])
