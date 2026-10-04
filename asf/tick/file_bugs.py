@@ -210,6 +210,13 @@ def error_class(message):
     return ' '.join(_ITEM_ID_RE.sub('…', _QUOTED_RE.sub('…', message)).split())
 
 
+def collapse_id_lists(text):
+    """A list of ``…`` slots (ids already taken out) is one slot: ``…, …`` -> ``…``, so a finding
+    naming two Tasks and one naming one are the same cause. The one definition
+    :func:`cause_key` and the groom dedupe key (asf.groom.policy) share."""
+    return re.sub(r'…(?:\s*,\s*…)+', '…', text)
+
+
 def record_error_signatures(root, findings=None, canonical=None, shared=()):
     """One signature per error CLASS `asf check` reports over the record, every card carrying it
     an evidence line (B-0132). The record pre-commit judges only what a commit stages, so an
@@ -392,7 +399,7 @@ def cause_key(finding):
     for spec in sorted({str(x) for x in (finding.subject, *(finding.paths or ())) if x},
                        key=len, reverse=True):
         message = message.replace(spec, '…')
-    return error_class(message)
+    return collapse_id_lists(error_class(message))
 
 
 def invariant_signatures(findings):

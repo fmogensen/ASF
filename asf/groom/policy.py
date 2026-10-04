@@ -790,14 +790,14 @@ def _finding_cause(cause, body):
     """The cause half of a finding key. A signature whose cause is only a card path was written
     by the filer before one-Bug-per-cause: its cause is read off the first evidence line's message
     instead, so it keys like the Bug the current filer would write."""
-    from asf.tick.file_bugs import error_class
+    from asf.tick.file_bugs import collapse_id_lists, error_class
     if _CARD_PATH_RE.fullmatch(cause.strip()):
         m = _EVIDENCE_RE.search(body or '')
         if m is None:
             return '…'
         cause = m.group('message').replace(m.group('subject').strip(), '…')
     # a list of ids is one slot: "T-0183, T-0187" and "T-0547" are the same cause
-    return re.sub(r'…(?:\s*,\s*…)+', '…', error_class(_CARD_PATH_RE.sub('…', cause)))
+    return collapse_id_lists(error_class(_CARD_PATH_RE.sub('…', cause)))
 
 
 def dedupe_key(rec, rules):
