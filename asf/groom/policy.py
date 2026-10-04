@@ -149,6 +149,9 @@ class Ctx:
     ci_red_days: int = CI_RED_DAYS
     ci_runs: tuple = ()
     approvals: dict = dataclasses.field(default_factory=dict)
+    #: ``flags.groom_rules`` resolved (:func:`groom_rules`): the dedupe keys
+    #: ``close_exact_duplicate`` may match on besides the title overlap
+    groom_rules: frozenset = frozenset()
 
 
 def _named_in_blockedby(item_id, canonical):
@@ -185,7 +188,9 @@ def close_exact_duplicate(item_id, rec, canonical, derived, ctx):
     """Overlap ≥ ``ctx.duplicate_overlap``, same ``type``, same ``parent``, and the younger card
     (``item_id`` itself — the id a near-duplicate line always names, §2.9's ``dupes`` section) is
     ``state: New``, ``decided != true``, childless, named in no blockedBy, and has no branch in
-    ``links``."""
+    ``links``. Under ``flags.groom_rules`` an older open card with the same dedupe key
+    (:func:`keyed_duplicate_of` — one finding's cause, one scorecard class) is a duplicate
+    whatever the titles' overlap."""
     from asf.record import frontmatter
     from asf.record.core import is_open, jaccard, tokenize
     typed, machine = frontmatter.split_machine(rec['meta'])
@@ -199,6 +204,10 @@ def close_exact_duplicate(item_id, rec, canonical, derived, ctx):
         return None
     if (typed.get('links') or {}).get('branches'):
         return None
+    keyed = keyed_duplicate_of(item_id, rec, canonical, ctx.groom_rules)
+    if keyed is not None:
+        oid, label = keyed
+        return Answer('no', 'removed', f'groom {ctx.date}', f'duplicate of {oid} ({label})')
     my_type = typed.get('type')
     my_parent = typed.get('parent')
     my_tokens = tokenize(typed.get('title', ''))
@@ -740,3 +749,282 @@ def stale_park_section(product, root, canonical):
     rows = feeder_rows.candidates(index, product, step_wave.inflight(product),
                                   **{k: inputs.get(k) for k in keep})
     return stale_park_lines(rows, canonical)
+
+
+# ---- groom rules (``flags.groom_rules``, W8-PR4a) -------------------------------------------
+
+#: The rules ``flags.groom_rules`` may name: the younger of two open findings of one cause closes
+#: as a duplicate of the oldest; the younger of two open scorecard cards of one class folds into
+#: the oldest; a Feature whose open Tasks' ``writes:`` the trunk already covers gets one *verify*
+#: Task — a report, never a close (a covering diff is a hint, not the Task's landing).
+GROOM_RULES = ('dedupe-findings', 'dedupe-scorecard', 'report-covered')
+
+#: An invariant finding's Bug signature (:data:`asf.tick.file_bugs.INVARIANT_SIG`).
+_FINDING_SIG_RE = re.compile(r'^invariant (?P<invariant>\S+): (?P<cause>.*)$')
+#: A record card's path (``features/F-0093.md``) — the cause an older filer keyed a finding on.
+_CARD_PATH_RE = re.compile(r'\b[\w.-]+(?:/[\w.-]+)*/[A-Z]-\d{4}\.md\b')
+#: A finding Bug's first evidence line: ``- [<path> — ]<subject>: <message>``.
+_EVIDENCE_RE = re.compile(r'^- (?:\S+ — )?(?P<subject>[^:\n]+): (?P<message>.+)$', re.M)
+#: The scorecard loop's marker line on a card it filed (:data:`asf.scorecard.loop.MARKER`).
+_SCORECARD_RE = re.compile(r'^scorecard-cause: (?P<key>.+?) #\d+\s*$', re.M)
+#: An item id in a commit subject: a commit naming an item is that item's landing, read by the
+#: landing rules — never a covers-only hint for another Task.
+_ITEM_ID_RE = re.compile(r'\b[A-Z]-\d{4}\b')
+#: The marker a verify Task carries, so one Feature gets one, ever.
+COVERED_MARK = 'groom-covered:'
+
+
+def groom_rules(product):
+    """``flags.groom_rules`` as a frozenset of :data:`GROOM_RULES` names: a list, or one string
+    of names split on commas/spaces. Unset (the default), or names this release does not know:
+    nothing runs."""
+    v = getattr(product, 'flag', None) and product.flag('groom_rules')
+    if isinstance(v, str):
+        v = re.split(r'[\s,]+', v)
+    if not isinstance(v, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(str(n).strip() for n in v if str(n).strip() in GROOM_RULES)
+
+
+def _finding_cause(cause, body):
+    """The cause half of a finding key. A signature whose cause is only a card path was written
+    by the filer before one-Bug-per-cause: its cause is read off the first evidence line's message
+    instead, so it keys like the Bug the current filer would write."""
+    from asf.tick.file_bugs import error_class
+    if _CARD_PATH_RE.fullmatch(cause.strip()):
+        m = _EVIDENCE_RE.search(body or '')
+        if m is None:
+            return '…'
+        cause = m.group('message').replace(m.group('subject').strip(), '…')
+    # a list of ids is one slot: "T-0183, T-0187" and "T-0547" are the same cause
+    return re.sub(r'…(?:\s*,\s*…)+', '…', error_class(_CARD_PATH_RE.sub('…', cause)))
+
+
+def dedupe_key(rec, rules):
+    """``(key, label)`` the dedupe rules group ``rec`` by, or ``None``: an invariant finding's Bug
+    by ``(invariant, cause)`` under ``dedupe-findings``; a card the scorecard loop filed by its
+    cause's class (``failure`` of ``failure:failed: not pushed``) under ``dedupe-scorecard``."""
+    from asf.record import frontmatter
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    if 'dedupe-findings' in rules and typed.get('type') == 'bug':
+        m = _FINDING_SIG_RE.match(str(typed.get('signature') or ''))
+        if m:
+            cause = _finding_cause(m.group('cause'), rec.get('body'))
+            return ('finding', m.group('invariant'), cause), f"invariant {m.group('invariant')}: {cause}"
+    if 'dedupe-scorecard' in rules:
+        m = _SCORECARD_RE.search(rec.get('body') or '')
+        if m:
+            cls = m.group('key').split(':', 1)[0].strip()
+            return ('scorecard', typed.get('type'), cls), f'scorecard class {cls}'
+    return None
+
+
+def keyed_duplicate_of(item_id, rec, canonical, rules):
+    """``(oldest id, label)`` when an older open card shares ``item_id``'s :func:`dedupe_key`,
+    else ``None``. The oldest is the lowest id: it stays, every younger one is its duplicate."""
+    from asf.record.core import is_open
+    if not rules:
+        return None
+    mine = dedupe_key(rec, rules)
+    if mine is None:
+        return None
+    for oid in sorted(canonical):
+        if oid >= item_id:
+            break
+        orec = canonical[oid]
+        if is_open(orec) and (dedupe_key(orec, rules) or (None,))[0] == mine[0]:
+            return oid, mine[1]
+    return None
+
+
+def _not_started(item_id, rec, canonical, derived):
+    """Why a younger duplicate must stay (``''`` when it may close): it has left ``New``, has
+    children, is named in an open blockedBy or has a branch — its work, or work on it, began."""
+    from asf.record import frontmatter
+    typed, machine = frontmatter.split_machine(rec['meta'])
+    if machine.get('state', 'New') != 'New':
+        return f"started ({machine.get('state')})"
+    if derived.get(item_id, {}).get('children'):
+        return 'has children'
+    if _named_in_blockedby(item_id, canonical):
+        return 'named in a blockedBy'
+    if (typed.get('links') or {}).get('branches'):
+        return 'has a branch'
+    return ''
+
+
+def dedupe_closes(canonical, derived, rules):
+    """``([(item, oldest, why)], [(item, oldest, why kept)])`` — the open cards the dedupe rules
+    close as duplicates of the oldest card of their key, and the ones they leave because work on
+    them began (:func:`_not_started`)."""
+    from asf.record.core import is_open
+    closes, kept, oldest = [], [], {}
+    for iid in sorted(canonical):
+        rec = canonical[iid]
+        key = dedupe_key(rec, rules) if is_open(rec) else None
+        if key is None:
+            continue
+        if key[0] not in oldest:
+            oldest[key[0]] = iid
+            continue
+        oid, label = oldest[key[0]], key[1]
+        stay = _not_started(iid, rec, canonical, derived)
+        (kept if stay else closes).append((iid, oid, stay or f'duplicate of {oid} ({label})'))
+    return closes, kept
+
+
+def _created(rec):
+    """The day a card was created, off its History ``- <date>: created`` line, else ``None``."""
+    m = re.search(r'^- (\d{4}-\d{2}-\d{2}): created\b', rec.get('body') or '', re.M)
+    return m.group(1) if m else None
+
+
+def _covers(paths, writes):
+    """True when every ``writes:`` entry (a path or a glob) matches one of ``paths`` — the match
+    :func:`asf.workers.landing.covers` makes against one commit's diff."""
+    import fnmatch
+    return bool(writes) and all(
+        any(p == w or fnmatch.fnmatch(p, w) or p.startswith(w.rstrip('/') + '/') for p in paths)
+        for w in writes)
+
+
+def trunk_commits(repo, main, since):
+    """``[(sha, day, subject, paths)]`` of ``origin/<main>``'s first-parent commits since ``since``
+    (a day), newest first, each with the paths it changed against its first parent; ``None``
+    when git could not answer — the report waits, never guesses."""
+    from asf import gitops
+    if not repo or not since:
+        return None
+    r = gitops.git(['log', '--first-parent', '-m', '--name-only', f'--since={since}T00:00:00Z',
+                    '--format=%x1e%H%x1f%cs%x1f%s', f'origin/{main}'], repo)
+    if not r.ok:
+        return None
+    out = []
+    for chunk in (r.data or '').split('\x1e'):
+        head, _, rest = chunk.strip('\n').partition('\n')
+        parts = head.split('\x1f')
+        if len(parts) != 3:
+            continue
+        out.append((parts[0], parts[1], parts[2], [p for p in rest.splitlines() if p.strip()]))
+    return out
+
+
+#: A Feature's stages the covered report reads: its plan is approved, its Tasks not all landed.
+_COVERED_STAGES = ('plan-approved',)
+
+
+def covered_reports(canonical, commits_for):
+    """``[(feature, {task: (sha, subject)}, writes)]`` — each open Feature at ``plan-approved``
+    or ``building…`` that has no verify Task yet, whose every open Task has a ``writes:`` that
+    one trunk commit since the Task's creation covers, a commit whose subject names no item (one
+    that names an item is that item's landing — the landing rules read it, :data:`_ITEM_ID_RE`).
+    ``commits_for(day)`` gives the trunk's commits since ``day`` (:func:`trunk_commits`), ``None``
+    when unknown — no report then. Never closes anything: a covering diff is a hint the work may
+    be on the trunk, not its landing (S-B6)."""
+    from asf.record import frontmatter
+    from asf.record.core import is_open
+    tasks_of, verified = {}, set()
+    for tid, trec in canonical.items():
+        ttyped, _m = frontmatter.split_machine(trec['meta'])
+        if ttyped.get('type') != 'task' or not ttyped.get('parent'):
+            continue
+        if COVERED_MARK in (trec.get('body') or ''):
+            verified.add(ttyped['parent'])
+        elif is_open(trec):
+            tasks_of.setdefault(ttyped['parent'], []).append((tid, ttyped))
+    out = []
+    for fid in sorted(canonical):
+        rec = canonical[fid]
+        typed, machine = frontmatter.split_machine(rec['meta'])
+        stage = str(machine.get('stage') or '')
+        if typed.get('type') != 'feature' or not is_open(rec) or fid in verified:
+            continue
+        if stage not in _COVERED_STAGES and not stage.startswith('building'):
+            continue
+        tasks = sorted(tasks_of.get(fid) or ())
+        if not tasks or any(not t.get('writes') for _tid, t in tasks):
+            continue
+        hits, writes = {}, set()
+        for tid, t in tasks:
+            w = [str(x) for x in t['writes']]
+            writes.update(w)
+            since = _created(canonical[tid]) or _created(rec)
+            commits = commits_for(since) if since else None
+            hit = next(((sha, subj) for sha, day, subj, paths in commits or ()
+                        if day >= since and not _ITEM_ID_RE.search(subj) and _covers(paths, w)),
+                       None)
+            if hit is None:
+                break
+            hits[tid] = hit
+        else:
+            out.append((fid, hits, sorted(writes)))
+    return out
+
+
+def _file_verify_task(root, canonical, fid, hits, writes, date):
+    """Write the one verify Task under ``fid`` (:func:`covered_reports`); returns its id."""
+    from asf.record.ids import mint_id, write_new_item
+    lines = [f"{tid}'s writes: are covered by {sha[:9]} ({subj})" for tid, (sha, subj) in
+             sorted(hits.items())]
+    body = (f"The trunk already carries commits covering the writes: of every open Task of {fid}. "
+            f"A covering diff is not the Task's landing: confirm each one and close it with the "
+            f"sha that lands it, or name what the covering commit missed.\n\nCovered:\n"
+            + '\n'.join(f'- {l}' for l in lines) + f'\n\n{COVERED_MARK} {fid}')
+    typed = {'title': f'Verify {fid}: the trunk already covers its open Tasks',
+             'parent': fid, 'writes': list(writes)}
+    acceptance = [f'each open Task of {fid} is closed on the sha that lands it, or says what the '
+                  f'covering commit missed']
+    new_id = mint_id(root, canonical, 'task')
+    return write_new_item(root, canonical, 'task', new_id, typed, body, date,
+                          'groom report-covered', acceptance=acceptance)
+
+
+def apply_groom_rules(product, root, now=None, out=print, dry_run=False, commits_for=None):
+    """``flags.groom_rules``, once per tick (the groom step), over the record at ``root``:
+    ``dedupe-findings``/``dedupe-scorecard`` close each younger open card of one key as a
+    duplicate of the oldest (``removed:`` + a History line; a started one is left — the dry run
+    names it), ``report-covered`` files one verify Task per covered Feature. Flag unset: nothing.
+    ``dry_run`` prints ``would …`` lines and writes nothing. Returns ``[(item, word)]``."""
+    import os
+    rules = groom_rules(product)
+    if not rules or not root or not os.path.isdir(root):
+        return []
+    from asf.groom.groom import _write_card
+    from asf.record.core import canonicalize, compute_derived, load_items, today
+    canonical, _dupes = canonicalize(load_items(root)[0])
+    derived = compute_derived(canonical)
+    date = today()
+    done = []
+    if rules & {'dedupe-findings', 'dedupe-scorecard'}:
+        closes, kept = dedupe_closes(canonical, derived, rules)
+        for iid, _oid, why in closes:
+            if dry_run:
+                out(f'groom rules: would close {iid} — {why}')
+            else:
+                _write_card(canonical[iid], {'removed': f'{why} (groom {date})'},
+                            f'- {date} groom: removed → {why} (controller, groom_rules)')
+                out(f'groom rules: closed {iid} — {why}')
+            done.append((iid, 'close'))
+        if dry_run:
+            for iid, oid, why in kept:
+                out(f'groom rules: keeps {iid} — same key as {oid}, but {why}')
+    if 'report-covered' in rules:
+        if commits_for is None:
+            repo, main, cache = getattr(product, 'repo_dir', None), getattr(product, 'main', 'main'), {}
+
+            def commits_for(day):
+                if day not in cache:
+                    cache[day] = trunk_commits(repo, main, day)
+                return cache[day]
+        for fid, hits, writes in covered_reports(canonical, commits_for):
+            shas = ', '.join(f'{tid} by {sha[:9]}' for tid, (sha, _s) in sorted(hits.items()))
+            if dry_run:
+                out(f'groom rules: would file a verify Task under {fid} — {shas}')
+            else:
+                tid = _file_verify_task(root, canonical, fid, hits, writes, date)
+                out(f'groom rules: filed {tid} to verify {fid} — {shas}')
+            done.append((fid, 'report'))
+    if done and not dry_run:
+        from asf.record.index import do_index
+        do_index(root)
+    return done

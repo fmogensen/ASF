@@ -26,4 +26,5 @@ def run(ctx, out=print):
         raise StepFailed(f'groom exited {rc}')
     from asf.groom import policy
     policy.apply_unverified_landings(product, root, out=out)   # flags.roots: off is a no-op
+    policy.apply_groom_rules(product, root, out=out)           # flags.groom_rules: unset is a no-op
     return 0

@@ -1233,7 +1233,8 @@ def cmd_groom(args, root):
                          ci_red_days=policy.ci_red_days(product),
                          ci_runs=trunk_ci_runs(root, product),
                          approvals=dict((product.approvals if product is not None else None)
-                                        or {}))
+                                        or {}),
+                         groom_rules=policy.groom_rules(product))
         sections, barred_count = run_policy_pass(sections, canonical, derived, product, ctx)
 
     text = render_groom_file(date, sections)
