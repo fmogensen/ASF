@@ -76,6 +76,7 @@ and cut to capacity.
 """
 import copy
 import dataclasses
+import datetime as dt
 import math
 import re
 
@@ -387,6 +388,38 @@ def plan_ahead(product):
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 
 
+#: ``flags.roots`` (W8-PR1g): dependency roots decided by code — off unless set ``on``/``true``
+ROOTS_UNVERIFIED_HOURS = 24   #: ``flags.roots_unverified_hours``: an unverified landing decides
+ROOTS_PARK_STALE_DAYS = 3     #: ``flags.roots_park_stale_days``: a park this old surfaces
+ROOTS_MIN_DEPENDANTS = 5      #: ``flags.roots_min_dependants``: rows behind a park that surface it
+
+
+def roots_on(product):
+    """``flags.roots`` is ``on`` (or true): the three dependency-root rules run — an ``after:`` on
+    an unverified landing the trunk carries is satisfied (:func:`hold_unlanded`), an unverified
+    landing decides itself (:func:`asf.groom.policy.decide_unverified_landing`), a stale park
+    with rows behind it surfaces (:func:`surface_stale_parks`). Unset or anything else: off."""
+    if product is None:
+        return False
+    v = _conventions(product).flag('roots')
+    return v is True or str(v).strip().lower() in ('on', 'true', 'yes')
+
+
+def _whole_flag(product, name, default):
+    v = _conventions(product).flag(name) if product is not None else None
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else default
+
+
+def roots_settings(product):
+    """``(unverified_hours, park_stale_days, min_dependants)`` of ``flags.roots_*``, each a whole
+    number >= 0, else its default."""
+    return (_whole_flag(product, 'roots_unverified_hours', ROOTS_UNVERIFIED_HOURS),
+            _whole_flag(product, 'roots_park_stale_days', ROOTS_PARK_STALE_DAYS),
+            _whole_flag(product, 'roots_min_dependants', ROOTS_MIN_DEPENDANTS))
+
+
 def features_per_session(product):
     """``conventions.feeder.features_per_session`` (default 2): ``auto``'s Features in build per
     session slot — a number > 0."""
@@ -437,7 +470,7 @@ def decision_rows(product):
 
 # ---- per-item predicates ----------------------------------------------------
 
-def landed_ids(items, landed_shas=None):
+def landed_ids(items, landed_shas=None, on_trunk=()):
     """Ids that count as landed: the record's Resolved/Closed, plus every id the trunk names.
 
     The two disagree when a Task's work reached the trunk under a sibling's commit, or when the
@@ -450,9 +483,16 @@ def landed_ids(items, landed_shas=None):
     set alone, exactly as before. A removed card that is done counts too
     (:attr:`Items.retired_done`): groom retires a card that landed, and its successors must not
     wait on it for ever (a product's T-0360).
+
+    ``on_trunk`` (``flags.roots``; :func:`candidates` sets it on the map as ``trunk_unverified``):
+    the open items whose recorded landing is on ``origin/<main>`` though not verified as theirs
+    (:func:`asf.tick.step_wave.unverified_on_trunk`) — the work is on the trunk by the host's
+    word, so an ``after:`` on one is answered; the item's own NEEDS DECISION row stays for the
+    person (a product's T-0091 held 19 rows while its landing was disputed).
     """
     done = {i for i, v in items.items() if v.get('state') in DONE_STATES}
-    return done | set(getattr(items, 'retired_done', ())) | set(landed_shas or {})
+    return (done | set(getattr(items, 'retired_done', ())) | set(landed_shas or {})
+            | set(on_trunk or ()) | set(getattr(items, 'trunk_unverified', ())))
 
 
 #: a removal line that names the card carrying the removed card's work on: a groom merge's
@@ -1675,7 +1715,7 @@ def groom_rows(index, product, busy, groom_state, inflight):
     return out
 
 
-def hold_unlanded(rows, items, landed_shas=None, product=None):
+def hold_unlanded(rows, items, landed_shas=None, product=None, on_trunk=None):
     """B-0080: ``after:`` holds every row kind, not only PLAN → CODE. An item whose predecessor
     has not landed is not in dispute, it is waiting: a launching row for it (code, correct,
     adjudicate, rebase, close) becomes ``WAITS ON <id>`` — no session, no round. The groom row
@@ -1688,8 +1728,13 @@ def hold_unlanded(rows, items, landed_shas=None, product=None):
     not a hold: it is the order the one session commits in (``delivery: feature``). A member
     the delivery leaves out (:func:`left_out`, given ``product``: the console's, or one a cycle
     defers) is not built on the branch, so its ``after:`` holds its own row, never the
-    delivery's."""
-    landed = landed_ids(items, landed_shas)
+    delivery's.
+
+    ``on_trunk`` (``flags.roots``, :func:`landed_ids`): an ``after:`` on an unverified landing
+    the trunk carries no longer holds; a row it released says so in its reason, so a dependant
+    built on a landing later reset names the root it trusted."""
+    on_trunk = set(getattr(items, 'trunk_unverified', ()) if on_trunk is None else on_trunk)
+    landed = landed_ids(items, landed_shas, on_trunk)
     absorbed = absorbers(items)
     out, said = [], set()
     for r in rows:
@@ -1710,8 +1755,12 @@ def hold_unlanded(rows, items, landed_shas=None, product=None):
                         seen.add(a)
                         pending.append(a)
         else:
-            pending = [a for a in after_of(items, items.get(r.item_id) or {}, absorbed)
-                       if a not in landed]
+            after = after_of(items, items.get(r.item_id) or {}, absorbed)
+            pending = [a for a in after if a not in landed]
+            trusted = [a for a in after if a in on_trunk]
+            if trusted and not pending and r.launches:
+                r = dataclasses.replace(r, reason=f"{r.reason} (after: {', '.join(trusted)} on "
+                                                  f"the trunk, its landing unverified)")
         # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
         # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print.
         # A review of a pushed branch reads a diff and changes nothing the predecessor writes:
@@ -1914,6 +1963,103 @@ def _capped(row, attempts, limit, product, adjudicated=None):
                f"another attempt")
 
 
+#: the action of a stale park :func:`surface_stale_parks` puts in front of its tier
+STALE_PARK_RE = re.compile(r'^NEEDS DECISION: (\d+) rows wait on this park')
+#: an item id a row can wait on through ``after:``
+AFTER_ID_RE = re.compile(r'^[A-Z]-\d{4,}$')
+
+
+def park_since(occupancy, adjudicated=None):
+    """``{item: iso}``: when each parked item was parked — an operator park's ``at``
+    (:func:`asf.workers.lifecycle.parks`), a correction park's ``at``, or the newest adjudicate
+    session that left the card unchanged (:func:`_capped`). An item none of them dates is
+    absent: a park of unknown age never surfaces."""
+    occ = occupancy or {}
+    out = {}
+    for iid, adj in (adjudicated or {}).items():
+        if (adj or {}).get('same_card') and adj.get('at'):
+            out[iid] = str(adj['at'])
+    for iid, c in (occ.get('corrections') or {}).items():
+        if (c or {}).get('parked') and c.get('at'):
+            out[iid] = max(out.get(iid, ''), str(c['at']))
+    for p in occ.get('parks') or ():
+        if p.get('item') and p.get('at'):
+            out[p['item']] = max(out.get(p['item'], ''), str(p['at']))
+    return out
+
+
+def waiting_roots(rows):
+    """``{root: [dependant item, …]}``: every item a row waits on through ``after:``
+    (:func:`hold_unlanded`'s ``WAITS ON <id>``), followed to the item that waits on no other —
+    the root — and the distinct items whose rows end there, in row order."""
+    on = {}
+    for r in rows:
+        if (r.waits_on and AFTER_ID_RE.match(str(r.waits_on))
+                and r.action == f'WAITS ON {r.waits_on}'):
+            on.setdefault(r.item_id, r.waits_on)
+
+    def root(iid):
+        seen = {iid}
+        while on.get(iid) and on[iid] not in seen:
+            iid = on[iid]
+            seen.add(iid)
+        return iid
+    out = {}
+    for iid in on:
+        out.setdefault(root(on[iid]), []).append(iid)
+    return out
+
+
+def _parse_at(text):
+    try:
+        t = dt.datetime.fromisoformat(str(text).strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+
+
+def surface_stale_parks(rows, items, product, since, now=None):
+    """Rule 3 of ``flags.roots``: a PARKED root (:func:`waiting_roots`) parked at least
+    ``flags.roots_park_stale_days`` (``since``: :func:`park_since`) with at least
+    ``flags.roots_min_dependants`` rows behind it becomes ``NEEDS DECISION: <n> rows wait on this
+    park (<d> d) — asf unpark / asf close / asf replan``, first in its tier — one line per root,
+    never per dependant. Nothing is unparked: the person decides (a product, 2026-10-03: 144 of
+    183 rows waited on an item, four parked roots held 55 of them for days, no view said so)."""
+    _hours, days, least = roots_settings(product)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    behind = waiting_roots(rows)
+    surfaced = {}
+    for r in rows:
+        if r.item_id in surfaced or not r.action.startswith(PARKED):
+            continue
+        n = len(behind.get(r.item_id) or ())
+        at = _parse_at(since.get(r.item_id)) if since.get(r.item_id) else None
+        if n < max(least, 1) or at is None:
+            continue
+        age = (now - at).total_seconds() / 86400
+        if age < days:
+            continue
+        iid = r.item_id
+        surfaced[iid] = dataclasses.replace(
+            r, action=(f'{NEEDS_DECISION}: {n} rows wait on this park ({int(age)} d) — '
+                       f'asf unpark {iid} / asf close {iid} / asf replan {iid}'),
+            reason=f"{r.reason} — {n} rows wait on it: {', '.join(behind[iid][:5])}"
+                   + (f' +{n - 5}' if n > 5 else ''))
+    if not surfaced:
+        return rows
+    out, placed = [], set()
+    for r in rows:
+        if r.item_id in surfaced and r.action.startswith(PARKED):
+            continue
+        for iid, s in surfaced.items():
+            if iid not in placed and s.tier <= r.tier:
+                out.append(s)
+                placed.add(iid)
+        out.append(r)
+    out += [s for iid, s in surfaced.items() if iid not in placed]
+    return out
+
+
 def unverified_rows(items, product, unverified, spoken):
     """A NEEDS DECISION row per open Task/Bug the lifecycle records as landed although the
     landing is not its own (``unverified``: ``{item: why}``) and no other row speaks for: the
@@ -1937,7 +2083,8 @@ def unverified_rows(items, product, unverified, spoken):
 
 
 def candidates(index, product, inflight, attempts=None, occupancy=None, groom_state=None,
-               landed_shas=None, decision_limit=None, adjudicated=None, unverified_landed=None):
+               landed_shas=None, decision_limit=None, adjudicated=None, unverified_landed=None,
+               unverified_on_trunk=None, now=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's order (:func:`feature_order`: Epic rank, Feature rank, id), then within a Feature
     the stalemate, branch housekeeping, new work.
@@ -1954,8 +2101,13 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     adjudicate session already ended on, per card state. ``unverified_landed``: ``{item: why}``,
     the open items the lifecycle records as landed whose landing does not hold up as theirs
     (:func:`asf.workers.landing.verify_landings`): each gets a NEEDS DECISION row — never a
-    silent no-row, never a coder relaunched over a landing the lane recorded."""
+    silent no-row, never a coder relaunched over a landing the lane recorded.
+    ``unverified_on_trunk``: those of them whose landing the trunk carries — under
+    ``flags.roots`` an ``after:`` on one is answered (:func:`hold_unlanded`), and a stale park
+    with rows behind it surfaces (:func:`surface_stale_parks`, ``now`` its clock)."""
     items = items_of(index)
+    roots = roots_on(product)
+    items.trunk_unverified = set(unverified_on_trunk or ()) if roots else set()
     occ = occupancy or {}
     corrections = occ.get('corrections') or {}
     live = inflight_ids(inflight) | set(occ.get('busy') or ())
@@ -2042,7 +2194,10 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
                 KIND_ORDER.get(r.kind, 5), seq)
     ordered = [r for _seq, r in sorted(enumerate(rows), key=key)]
     # work the product put aside (:func:`hold_shelved`) ranks behind every live row of its tier
-    return sorted(ordered, key=lambda r: (r.tier, r.tier >= 2 and id(r) in aside))
+    ordered = sorted(ordered, key=lambda r: (r.tier, r.tier >= 2 and id(r) in aside))
+    if roots:
+        ordered = surface_stale_parks(ordered, items, product, park_since(occ, adjudicated), now)
+    return ordered
 
 
 def finish_phase(items, row):
@@ -2147,7 +2302,7 @@ def live_ids(inflight, occupancy):
 
 def build_state(items, product, capacity, inflight=(), occupancy=None, landed_shas=None,
                 bandwidth=None, rows=None, attempts=None, groom_state=None, held=None, gate=None,
-                adjudicated=None, unverified_landed=None):
+                adjudicated=None, unverified_landed=None, unverified_on_trunk=None):
     """``(X, N, why, binds)``: the Features in build that are moving (:func:`features_moving`),
     the cap (:func:`features_cap`), the inputs that set it, and whether the cap holds anything
     now — what ``asf next`` and ``asf status`` show. ``binds``: :func:`build_cap` turns at least
@@ -2161,7 +2316,8 @@ def build_state(items, product, capacity, inflight=(), occupancy=None, landed_sh
     if rows is None:
         rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
                           groom_state=groom_state, landed_shas=landed_shas,
-                          adjudicated=adjudicated, unverified_landed=unverified_landed)
+                          adjudicated=adjudicated, unverified_landed=unverified_landed,
+                          unverified_on_trunk=unverified_on_trunk)
         if gate is not None:
             rows = gate(rows, items)
     landed = landed_ids(items, landed_shas)
@@ -2175,11 +2331,11 @@ def build_state(items, product, capacity, inflight=(), occupancy=None, landed_sh
 
 def build_load(items, product, capacity, inflight=(), occupancy=None, landed_shas=None,
                bandwidth=None, rows=None, attempts=None, groom_state=None, held=None, gate=None,
-               adjudicated=None, unverified_landed=None):
+               adjudicated=None, unverified_landed=None, unverified_on_trunk=None):
     """``(X, N, why)`` of :func:`build_state`."""
     return build_state(items, product, capacity, inflight, occupancy, landed_shas, bandwidth,
                        rows, attempts, groom_state, held, gate, adjudicated,
-                       unverified_landed)[:3]
+                       unverified_landed, unverified_on_trunk)[:3]
 
 
 def build_load_line(x, cap, why, binds=None):
@@ -2336,7 +2492,7 @@ def failing_to_spawn(rows, failing):
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
               groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
               s1_first=True, gate=None, bandwidth=None, adjudicated=None,
-              unverified_landed=None, failing=None):
+              unverified_landed=None, failing=None, unverified_on_trunk=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
     ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
@@ -2351,7 +2507,8 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
                       groom_state=groom_state, landed_shas=landed_shas,
                       decision_limit=decision_limit, adjudicated=adjudicated,
-                      unverified_landed=unverified_landed)
+                      unverified_landed=unverified_landed,
+                      unverified_on_trunk=unverified_on_trunk)
     if exclude:
         from asf.invariants import row_key
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]

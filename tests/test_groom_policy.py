@@ -1291,3 +1291,74 @@ class PredatesSectionTests(GroomAutoTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DependencyRootRules(unittest.TestCase):
+    """W8-PR1g rule 2 (an unverified landing decides itself) and rule 3's groom question."""
+
+    def test_decide_unverified_landing(self):
+        self.assertIsNone(policy.decide_unverified_landing('T-0001', 'abc', 23.9, True, 'done', 24))
+        self.assertIsNone(policy.decide_unverified_landing('T-0001', 'abc', None, True, 'done', 24))
+        a = policy.decide_unverified_landing('T-0001', 'abc1234567', 30, True, 'done', 24)
+        self.assertEqual((a.word, a.field), ('accept', 'trunk_closed'))
+        self.assertTrue(a.why.startswith(policy.COVERS_ACCEPT), a.why)
+        for covers, report in ((False, 'done'), (True, 'partial'), (True, '')):
+            a = policy.decide_unverified_landing('T-0001', 'abc', 30, covers, report, 24)
+            self.assertEqual(a.word, 'reset')
+            self.assertIn('unverified for 30 h', a.why)
+
+    def _apply(self, facts, flags=None, reset_rc=0):
+        from unittest import mock
+        from asf.tick import step_wave
+        from asf.workers import trunkclose
+        p = Product('sample', {'conventions': {'flags': {'roots': 'on'} if flags is None
+                                               else flags}})
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root)
+        with open(os.path.join(root, 'index.json'), 'w', encoding='utf-8') as f:
+            json.dump({'items': {}}, f)
+        closes, resets, said = [], [], []
+        with mock.patch.object(step_wave, 'occupancy', return_value={}), \
+                mock.patch.object(step_wave, 'landings', return_value=({}, {'T-0001': 'x'})), \
+                mock.patch.object(policy, 'unverified_landing_facts', return_value=facts), \
+                mock.patch.object(trunkclose, 'close',
+                                  side_effect=lambda *a: closes.append(a)), \
+                mock.patch.object(policy, '_reset',
+                                  side_effect=lambda pr, i, why: resets.append(i) or reset_rc):
+            done = policy.apply_unverified_landings(p, root, out=said.append)
+        return done, closes, resets, said
+
+    def test_covers_and_done_is_accepted_by_closing_the_run(self):
+        run = {'job': 'coder-t-0001'}
+        done, closes, resets, said = self._apply([('T-0001', run, 'abc', 30, True, 'done')])
+        self.assertEqual(done, [('T-0001', 'accept')])
+        self.assertEqual(closes[0][1:3], ('coder-t-0001', 'abc'))
+        self.assertTrue(closes[0][3].startswith(policy.COVERS_ACCEPT))
+        self.assertEqual(resets, [])
+
+    def test_else_reset_is_called_once(self):
+        done, closes, resets, said = self._apply([('T-0001', {'job': 'j'}, 'abc', 30, False,
+                                                   'done')])
+        self.assertEqual((done, closes, resets), ([('T-0001', 'reset')], [], ['T-0001']))
+        # too young: nothing
+        done, closes, resets, said = self._apply([('T-0001', {'job': 'j'}, 'abc', 2, False, '')])
+        self.assertEqual((done, closes, resets), ([], [], []))
+
+    def test_flag_off_does_nothing(self):
+        done, closes, resets, said = self._apply([('T-0001', {'job': 'j'}, 'abc', 30, False, '')],
+                                                 flags={})
+        self.assertEqual((done, closes, resets, said), ([], [], [], []))
+
+    def test_one_groom_question_per_stale_park(self):
+        from asf.feeder import rows as feeder_rows
+        r = feeder_rows.Row(tier=2, kind=feeder_rows.STALEMATE, item_id='T-0108', feature_id='F-1',
+                            action='NEEDS DECISION: 31 rows wait on this park (4 d) — asf unpark '
+                                   'T-0108 / asf close T-0108 / asf replan T-0108',
+                            brief_kind='adjudicate', branch='', reason='parked')
+        other = feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id='T-0109',
+                                feature_id='F-1', action='WAITS ON T-0108', brief_kind='task', branch='',
+                                reason='after', waits_on='T-0108')
+        lines = policy.stale_park_lines([r, other, r], {})
+        self.assertEqual(len(lines), 1)
+        self.assertIn('31 rows wait on this park (4 d)', lines[0])
+        self.assertEqual(policy.open_questions('\n'.join(lines))[0][0], 'T-0108')

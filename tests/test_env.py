@@ -666,6 +666,7 @@ _PLANNED_FLAG_VALUES = {
     'i14': 'report', 'i16': 'report', 'facts': 'shadow', 'refguard': 'warn',
     'console_wait': 'false', 'groom_rules': 'true', 'relaunch_cap': '3', 'loop_cap': '4',
     'head_capped': 'true', 'unknown_holds': 'true', 'models.cheap_kinds': '[review, groom]',
+    'roots_unverified_hours': '24', 'roots_park_stale_days': '3', 'roots_min_dependants': '5',
 }
 PLANNED_PRODUCT = _dedent("""
     product: sample

@@ -2382,6 +2382,107 @@ class PlanAhead(unittest.TestCase):
         self.assertEqual(by['F-0003'].waits_on, 'build slot')
 
 
+def roots(on=True, **flags):
+    return product(conventions={'flags': dict({'roots': 'on'} if on else {}, **flags)})
+
+
+class DependencyRoots(unittest.TestCase):
+    """W8-PR1g: a parked or disputed root does not hold its dependants for ever (a product,
+    2026-10-03: 144 of 183 rows waited on an item; four roots held 97 of them)."""
+
+    def index(self, chain=6, first='New'):
+        kids = ['T-0010'] + [f'T-{11 + n:04d}' for n in range(chain)]
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 0/2',
+                            'decided': True, 'state': 'Active', 'children': kids},
+                 'T-0010': {'id': 'T-0010', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                            'decided': True, 'state': first, 'writes': ['root.py']}}
+        for n in range(chain):
+            tid = f'T-{11 + n:04d}'
+            # half of them chain behind each other: the root holds them transitively
+            after = ['T-0010'] if n % 2 == 0 or n == 0 else [f'T-{10 + n:04d}']
+            items[tid] = {'id': tid, 'type': 'task', 'parent': 'F-0001', 'rank': 2 + n,
+                          'decided': True, 'state': 'New', 'writes': [f'{tid}.py'], 'after': after}
+        return {'items': items}
+
+    def unverified(self, p):
+        return rows.candidates(self.index(chain=1), p, [],
+                               occupancy={'landed': {'T-0010': 'abc1234'}},
+                               unverified_landed={'T-0010': 'not its commit'},
+                               unverified_on_trunk={'T-0010'})
+
+    def test_an_after_on_an_unverified_landing_on_the_trunk_launches_the_dependant(self):
+        by = {r.item_id: r for r in self.unverified(roots())}
+        self.assertTrue(by['T-0011'].launches, by['T-0011'])
+        self.assertIn('after: T-0010 on the trunk, its landing unverified', by['T-0011'].reason)
+
+    def test_flag_off_the_dependant_waits_as_today(self):
+        by = {r.item_id: r for r in self.unverified(roots(on=False))}
+        self.assertEqual(by['T-0011'].action, 'WAITS ON T-0010')
+        self.assertFalse(rows.roots_on(roots(on=False)))
+        self.assertFalse(rows.roots_on(roots(on=False, roots='off')))
+
+    def parked(self, p, at='2020-01-01T00:00:00Z', chain=6, now=None):
+        return rows.candidates(self.index(chain=chain), p, [], attempts={'T-0010': 5},
+                               adjudicated={'T-0010': {'runs': 1, 'at': at, 'same_card': True}},
+                               now=now)
+
+    def test_a_stale_park_with_six_rows_behind_it_is_the_first_decision_line(self):
+        out = self.parked(roots())
+        self.assertEqual(out[0].item_id, 'T-0010', kinds(out))
+        self.assertTrue(out[0].action.startswith(
+            'NEEDS DECISION: 6 rows wait on this park ('), out[0].action)
+        self.assertIn('asf unpark T-0010 / asf close T-0010 / asf replan T-0010', out[0].action)
+        self.assertEqual([r.item_id for r in out].count('T-0010'), 1)
+        self.assertFalse(out[0].launches)
+
+    def test_a_young_park_or_few_dependants_or_flag_off_stays_parked(self):
+        now = dt.datetime(2026, 10, 3, tzinfo=dt.timezone.utc)
+        for out in (self.parked(roots(), at='2026-10-02T00:00:00Z', now=now),
+                    self.parked(roots(), chain=4),
+                    self.parked(roots(on=False))):
+            root = [r for r in out if r.item_id == 'T-0010'][0]
+            self.assertTrue(root.action.startswith('PARKED'), root.action)
+        # the thresholds are flags
+        out = self.parked(roots(roots_min_dependants=3), chain=4)
+        self.assertTrue(out[0].action.startswith('NEEDS DECISION: 4 rows'), out[0].action)
+        out = self.parked(roots(roots_park_stale_days=0), at='2026-10-02T23:00:00Z', now=now)
+        self.assertTrue(out[0].action.startswith('NEEDS DECISION'), out[0].action)
+
+    def test_waiting_roots_follows_the_chain_to_the_root(self):
+        out = self.parked(roots(on=False))
+        got = rows.waiting_roots(out)
+        self.assertEqual(sorted(got), ['T-0010'])
+        self.assertEqual(len(got['T-0010']), 6)
+
+    def test_the_wave_reads_which_unverified_landings_the_trunk_carries(self):
+        from unittest import mock
+        from asf.workers import landing
+        occ = {'landed': {'T-0001': 'aaa', 'T-0002': 'bbb'}}
+        unverified = {'T-0001': 'x', 'T-0002': 'y'}
+        on = Product('sample', {'repo_dir': '/nonexistent',
+                                'conventions': {'flags': {'roots': 'on'}}})
+        with mock.patch.object(landing, 'on_trunk', side_effect=lambda r, m, sha: sha == 'aaa'):
+            self.assertEqual(step_wave.unverified_on_trunk(on, occ, unverified), {'T-0001'})
+            self.assertEqual(step_wave.unverified_on_trunk(roots(on=False), occ, unverified),
+                             set())
+
+    def test_park_since_reads_every_park_kind(self):
+        occ = {'parks': [{'item': 'T-0001', 'at': '2026-01-02T00:00:00Z'}],
+               'corrections': {'T-0002': {'parked': True, 'at': '2026-01-03T00:00:00Z'},
+                               'T-0004': {'at': '2026-01-03T00:00:00Z'}}}
+        adj = {'T-0003': {'at': '2026-01-04T00:00:00Z', 'same_card': True},
+               'T-0005': {'at': '2026-01-04T00:00:00Z', 'same_card': False}}
+        self.assertEqual(rows.park_since(occ, adj), {'T-0001': '2026-01-02T00:00:00Z',
+                                                     'T-0002': '2026-01-03T00:00:00Z',
+                                                     'T-0003': '2026-01-04T00:00:00Z'})
+
+    def test_settings_default_and_read_the_flags(self):
+        self.assertEqual(rows.roots_settings(roots()), (24, 3, 5))
+        self.assertEqual(rows.roots_settings(roots(roots_unverified_hours='12',
+                                                   roots_park_stale_days=1,
+                                                   roots_min_dependants=-1)), (12, 1, 5))
+
+
 class IncidentsTest(unittest.TestCase):
     """F-0071 acceptance 5, 6: the S1 clock."""
 

@@ -298,6 +298,7 @@ def plan_inputs(product, root, index=None):
             'gate': invariant_gate(product),
             'bandwidth': capacity_mod.bandwidth(product),
             'landed_shas': landed_shas, 'unverified_landed': unverified,
+            'unverified_on_trunk': unverified_on_trunk(product, occ, unverified),
             'adjudicated': adjudications(product, index, tries),
             'failing': failing(product),
             **triage}
@@ -325,6 +326,23 @@ def landings(product, occ, index):
         return landing.verify_landings(product, occ, items, path=pool_mod.sessions_path(product))
     except Exception:  # noqa: BLE001 — a verification that cannot run claims nothing
         return {}, {}
+
+
+def unverified_on_trunk(product, occ, unverified):
+    """The unverified landings (:func:`landings`) whose recorded sha ``origin/<main>`` carries —
+    under ``flags.roots`` an ``after:`` on one is answered
+    (:func:`asf.feeder.rows.hold_unlanded`). Flag off, or a git that cannot answer: none."""
+    from asf.feeder import rows as feeder_rows
+    from asf.workers import landing
+    if not unverified or not feeder_rows.roots_on(product):
+        return set()
+    try:
+        landed = (occ or {}).get('landed') or {}
+        main = getattr(getattr(product, 'conventions', None), 'main', None) or 'main'
+        return {i for i in unverified
+                if landing.on_trunk(product.repo_dir, main, landed.get(i) or '')}
+    except Exception:  # noqa: BLE001 — a fact that cannot be read answers nothing
+        return set()
 
 
 def adjudications(product, index, tries):

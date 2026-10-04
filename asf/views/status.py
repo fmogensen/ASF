@@ -315,7 +315,8 @@ def build_cell(root, product):
         landed_shas=inputs.get('landed_shas'), bandwidth=inputs.get('bandwidth'),
         attempts=inputs.get('attempts'), groom_state=inputs.get('groom_state'),
         held=inputs.get('held'), gate=inputs.get('gate'), adjudicated=inputs.get('adjudicated'),
-        unverified_landed=inputs.get('unverified_landed'))
+        unverified_landed=inputs.get('unverified_landed'),
+        unverified_on_trunk=inputs.get('unverified_on_trunk'))
     return f"{x} / {n} ({why})" + feeder_rows.build_binds_note(x, n, binds)
 
 

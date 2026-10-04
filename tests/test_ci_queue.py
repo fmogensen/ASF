@@ -148,6 +148,11 @@ ITEMS = {
 
 class Base(unittest.TestCase):
     def setUp(self):
+        # the gh read memo keys on id(subprocess.run): an earlier test's mock freed at the same
+        # address answers for this one (a runner reading the test never made: "heavy 0 free")
+        from asf import gh_limit
+        gh_limit.reset()
+        self.addCleanup(gh_limit.reset)
         self.tmp = tempfile.mkdtemp()
         self._home = env.ASF_HOME
         env.ASF_HOME = self.tmp

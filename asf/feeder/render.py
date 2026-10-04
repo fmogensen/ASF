@@ -132,7 +132,8 @@ def cmd_next(args, root=None):
                              bandwidth=inputs.get('bandwidth'), attempts=inputs.get('attempts'),
                              groom_state=inputs.get('groom_state'), held=inputs.get('held'),
                              gate=inputs.get('gate'), adjudicated=inputs.get('adjudicated'),
-                             unverified_landed=inputs.get('unverified_landed'))
+                             unverified_landed=inputs.get('unverified_landed'),
+                             unverified_on_trunk=inputs.get('unverified_on_trunk'))
         print(table(rows, hidden=hidden, load=load), end='')
     return 0
 

@@ -55,6 +55,13 @@ conventions:
 launches only while the Features moving + the spec/plan sessions in flight + the rows admitted
 this wave stay under the build cap + N; the rest say `WAITS ON build slot (plan_ahead N): …`.
 
+`roots: on` (default off) decides dependency roots by code: an `after:` on an item whose
+recorded landing is on the trunk but unverified as its own is answered (its NEEDS DECISION row
+stays); an unverified landing older than `roots_unverified_hours` (24) is accepted when its sha
+covers the item's `writes:` and its report says `done`, else reset; a park older than
+`roots_park_stale_days` (3) with at least `roots_min_dependants` (5) rows behind it becomes the
+first NEEDS DECISION line of `asf next` and one groom question. Nothing is unparked by code.
+
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.
