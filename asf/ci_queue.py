@@ -4070,6 +4070,8 @@ def apply(product, source=None, out=print, now=None):
     reinstall under it costs one pass, the next minute's runs. 0 always."""
     if mode(product) == 'off':
         return 0
+    from asf.facts import cache as facts_cache
+    facts_cache.clear()  # the queue's pass reads its facts afresh (asf.facts.cache)
     got = queue_pass(product, items=_saved_items(product), source=source, out=out, now=now)
     if got is None:
         out(f'ci queue: a pass of {product.name} runs already — skipped')

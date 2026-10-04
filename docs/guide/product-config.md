@@ -62,6 +62,13 @@ covers the item's `writes:` and its report says `done`, else reset; a park older
 `roots_park_stale_days` (3) with at least `roots_min_dependants` (5) rows behind it becomes the
 first NEEDS DECISION line of `asf next` and one groom question. Nothing is unparked by code.
 
+`facts: old | shadow | new` (default `old`) moves a decider onto its fact (`asf/facts/`): every
+fact says when it was read (`as_of`) and is `Unknown` when it could not be, never an empty
+answer. `shadow` runs both the decider and the fact, returns the decider's answer and logs each
+disagreement to `state/<product>/facts-disagree.jsonl` — counted as `facts_disagree` in the
+scorecard and on a `Facts` status row; whatever the fact raises is logged, never raised. In
+shadow a host fact is read once per pass and never re-read. `new` returns the fact's answer.
+
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.

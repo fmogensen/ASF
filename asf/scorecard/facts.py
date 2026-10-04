@@ -45,6 +45,7 @@ class Facts:
     clutter: dict               # {'stale_prs': int|None, 'open_prs': int|None, 'branches': int|None}
     as_of: str = ''             # the reading's clock, ISO
     diagnostics: list = dataclasses.field(default_factory=list)  # gaps in the reading, one line each
+    disagree: list = dataclasses.field(default_factory=list)  # asf.facts.disagree records
 
 
 # ----------------------------------------------------------------- time --
@@ -448,9 +449,14 @@ def load(root, product=None, *, registry=True, forge=True, as_of=None):
         sha, at = prod_deployment(product)
         attribute_prod(items, sha, at, _git_ancestor(product), naming=_trunk_naming(product),
                        untraced=untraced)
+    disagree = []
+    if product is not None:
+        from asf.facts import disagree as facts_disagree
+        disagree = facts_disagree.records(product)
     return Facts(items=items, sessions=_stream(root, 'sessions'), ci=_stream(root, 'ci'),
                  gates=_stream(root, 'gates'), runs=runs, clutter=clutter,
-                 as_of=as_of or now_iso(), diagnostics=diagnostics(items, untraced))
+                 as_of=as_of or now_iso(), diagnostics=diagnostics(items, untraced),
+                 disagree=disagree)
 
 
 def state_file(product, name):

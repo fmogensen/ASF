@@ -1048,6 +1048,8 @@ def main(argv=None):
     if lock is None:
         print(f'harvest: another harvest of {product.name} is running — skipped')
         return 0
+    from asf.facts import cache as facts_cache
+    facts_cache.clear()  # the detached harvest is a pass of its own (asf.facts.cache)
     try:
         run_product_harvest(product, state_dir, args.dry_run)
     finally:

@@ -528,6 +528,14 @@ def land_red_cell(product):
     return 'RED ' + '; '.join(f'#{n} {why}' for n, why in got)
 
 
+def facts_cell(product):
+    """``N disagreement(s) in 24h (facts shadow): landed/trunkclose 3, …`` while the facts shadow
+    (``flags.facts: shadow``) disagrees with an old decider (:func:`asf.facts.disagree.
+    status_cell`), else None (no row)."""
+    from asf.facts import disagree
+    return disagree.status_cell(product)
+
+
 def merge_cell(product):
     """``auto``, ``queue`` or ``manual`` — ``conventions.merge``: whether the lane merges a green,
     reviewed PR itself (directly, or through its merge queue) or the operator clicks merge."""
@@ -595,7 +603,8 @@ def render(root, product, cfg=None):
                        ('Queue bypass', lambda: bypass_cell(product)),
                        ('Land requests', lambda: land_red_cell(product)),
                        ('Trunk stall', lambda: trunk_stall_cell(product)),
-                       ('Trunk red', lambda: trunk_red_cell(product))):
+                       ('Trunk red', lambda: trunk_red_cell(product)),
+                       ('Facts', lambda: facts_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table
