@@ -2767,6 +2767,67 @@ class PathFilteredRequiredCheck(unittest.TestCase):
             self.assertIn('m8-e2e', host.recheck(f, 7))
 
 
+class AConflictingBranchNeverWaitsForCI(LaneFixture):
+    """A product's #1037, #1023 and #1017: PRs opened on branches that already conflicted with
+    the trunk. GitHub runs no ``pull_request`` workflow on a conflicting PR, so none of them ever
+    got a CI run — while the lane asked review rounds of them, pass after pass. A branch the
+    trunk conflicts with goes BACK to be rebased before a PR is opened, and an open PR found
+    conflicting goes back before any review or CI wait: every PR the factory opens gets its run."""
+
+    CONFLICT = ['a.txt']
+
+    def test_pushed_goes_back_instead_of_opening_a_pr(self):
+        f = facts(mode='pr', conflict=self.CONFLICT)
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), f), (lane.BACK, 'kind=conflict'))
+        f = facts(mode='pr', conflict=self.CONFLICT, pr={'number': 7, 'state': 'OPEN',
+                                                         'head': HEAD})
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), f), (lane.BACK, 'kind=conflict'))
+        # a clean branch opens as before
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), facts(mode='pr', conflict=[])),
+                         (lane.PR_OPEN, 'open a PR'))
+
+    def test_an_open_pr_goes_back_before_any_review(self):
+        f = facts(mode='pr', conflict=self.CONFLICT, review_required=True,
+                  pr={'number': 7, 'state': 'OPEN', 'head': HEAD})
+        for s in (lane.PR_OPEN, lane.REVIEW):
+            self.assertEqual(lane.next_state(rec(s, pr=7), f), (lane.BACK, 'kind=conflict'))
+
+    def test_the_branch_facts_read_the_conflict(self):
+        self.push_main({'a.txt': 'trunk\n'}, 'chore: a on main')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', 'worker/T-0001', 'origin/main~1'], cwd=self.worker)
+        self.write(self.worker, 'a.txt', 'branch\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'feat(T-0001): a'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', 'worker/T-0001'], cwd=self.worker)
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat(T-0002): b')
+        items = {t: {'id': t, 'type': 'task', 'state': 'Active'} for t in ('T-0001', 'T-0002')}
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=items)
+        ln.mode, ln.slug = 'pr', 'o/p'
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        heads = ln.remote_heads()
+        ln.trunk_sha = heads['main']
+        f = ln.branch_facts('worker/T-0001', None, heads['worker/T-0001'], None, True, False)
+        self.assertEqual(f['conflict'], ['a.txt'])
+        f = ln.branch_facts('worker/T-0002', None, heads['worker/T-0002'], None, True, False)
+        self.assertFalse(f.get('conflict'))
+
+    def test_back_sends_it_to_be_rebased(self):
+        runner = lane.Lane.__new__(lane.Lane)
+        lines = []
+        runner.out, runner.dry_run, runner.results, runner.trunk = lines.append, False, {}, 'main'
+        f = {'branch': 'cloud/spec-x', 'item': 'F-0001', 'head': HEAD, 'prev': rec(lane.REVIEW),
+             'pr': {'number': 1023, 'state': 'OPEN'}, 'conflict': ['docs/a.md'], 'run': {}}
+        with mock.patch.object(lane, 'send_back') as sb:
+            runner.enter_back(f, 'kind=conflict')
+        sb.assert_called_once()
+        _ln, _f, kind, text, files = sb.call_args[0]
+        self.assertEqual(kind, 'conflict')
+        self.assertIn('#1023', text)
+        self.assertIn('no pull_request workflow', text)
+        self.assertEqual(list(files), ['docs/a.md'])
+
+
 class AMergeConflictGoesBack(unittest.TestCase):
     """2026-09-27: a product's two spec-lane PRs and one code PR passed GATE, and the host
     refused each merge for conflicts with a trunk that moved under them. The lane recorded

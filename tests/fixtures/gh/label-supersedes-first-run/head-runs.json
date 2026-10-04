@@ -1,0 +1,55 @@
+{
+ "argv": [
+  "api",
+  "repos/example/repo/actions/runs?head_sha=ca48329a83c1938f6ce39bd20890024dc015703a&event=pull_request&per_page=100"
+ ],
+ "rc": 0,
+ "stderr": "",
+ "stdout": {
+  "total_count": 3,
+  "workflow_runs": [
+   {
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:21:17Z",
+    "event": "pull_request",
+    "head_branch": "worker/T-0001",
+    "head_sha": "ca48329a83c1938f6ce39bd20890024dc015703a",
+    "html_url": "https://github.com/example/repo/actions/runs/10001",
+    "id": 10001,
+    "name": "ci",
+    "run_attempt": 1,
+    "status": "completed",
+    "updated_at": "2026-10-03T11:35:55Z",
+    "url": "https://api.github.com/repos/example/repo/actions/runs/10001"
+   },
+   {
+    "conclusion": "success",
+    "created_at": "2026-10-03T11:11:14Z",
+    "event": "pull_request",
+    "head_branch": "worker/T-0001",
+    "head_sha": "ca48329a83c1938f6ce39bd20890024dc015703a",
+    "html_url": "https://github.com/example/repo/actions/runs/10002",
+    "id": 10002,
+    "name": "dco",
+    "run_attempt": 1,
+    "status": "completed",
+    "updated_at": "2026-10-03T11:11:33Z",
+    "url": "https://api.github.com/repos/example/repo/actions/runs/10002"
+   },
+   {
+    "conclusion": "cancelled",
+    "created_at": "2026-10-03T11:11:14Z",
+    "event": "pull_request",
+    "head_branch": "worker/T-0001",
+    "head_sha": "ca48329a83c1938f6ce39bd20890024dc015703a",
+    "html_url": "https://github.com/example/repo/actions/runs/10003",
+    "id": 10003,
+    "name": "ci",
+    "run_attempt": 1,
+    "status": "completed",
+    "updated_at": "2026-10-03T11:21:37Z",
+    "url": "https://api.github.com/repos/example/repo/actions/runs/10003"
+   }
+  ]
+ }
+}

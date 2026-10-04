@@ -3616,6 +3616,35 @@ def _busy_runs(q, wf, listed_runs):
     return list(out.values())
 
 
+def first_pr_run(run, runs):
+    """True when ``run`` (a ``pull_request`` run, as listed) is its PR's first run on a head
+    its branch has not moved past: its first attempt (the listing says so — an unknown attempt
+    is not known to be first), no earlier run of the same branch at the same sha in ``runs``,
+    and no later run of the branch at another sha. Relief never cancels such a run: the queue
+    holds a PR's start until it fits (the PR is opened only then), and a cut first run is a red
+    mark on the PR for no defect of its code. A re-run, or a superseded head's run, may go."""
+    try:
+        if int(run.get('attempt')) != 1:
+            return False
+    except (TypeError, ValueError):
+        return False
+    branch, sha = run.get('headBranch'), run.get('headSha')
+    rid, at = run.get('databaseId'), _parse(run.get('createdAt'))
+    if not branch or not sha or at is None:
+        return False
+    for o in runs or ():
+        if o.get('databaseId') == rid or o.get('headBranch') != branch:
+            continue
+        oat = _parse(o.get('createdAt'))
+        if oat is None:
+            continue
+        if o.get('headSha') == sha and oat < at:
+            return False                        # a run of this head came before it
+        if o.get('headSha') != sha and oat > at:
+            return False                        # the branch moved on: a superseded head
+    return True
+
+
 def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owner, possessive,
                  wait_s, escalate_s, run_level, for_id=None):
     """Relief for one protected run (the trunk run, or an S1 PR run): the runs in its way,
@@ -3717,6 +3746,10 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
             prio, label = priority(item, items, branch, product=product)
             if prio == S1:
                 continue                        # an S1 or hotfix run is never cancelled
+            if kind == 'pr' and first_pr_run(r, listed(wf)):
+                out(f"relief: exempt {branch} — its PR's first run on "
+                    f"{str(r.get('headSha') or '?')[:9]}: held before its start, never cut")
+                continue
             if kind == 'batch':
                 why = urgent_batch(product, branch)
                 if why:                         # a priority batch's run is never cancelled
@@ -3845,7 +3878,9 @@ PASS_LOCK = 'ci-queue.lock'
 def _open_pr(product, branch, item, items):
     """Open ``branch``'s PR as the lane does (:meth:`asf.harvest.lane.GitHubHost.open`: its
     title and body, or adopt the open one naming it): ``(number, '')`` or ``(None, why)``. The
-    lane's next pass finds the PR open and moves the branch to PR_OPEN."""
+    lane's next pass finds the PR open and moves the branch to PR_OPEN. Never on a branch that
+    conflicts with the trunk: GitHub runs no ``pull_request`` workflow on a conflicting PR, so
+    "its run starts" would be false — the lane sends the branch back to be rebased instead."""
     from asf.harvest import lane as lane_mod
     from asf.tick import shadow
     root = shadow.record_dir(product)
@@ -3853,6 +3888,10 @@ def _open_pr(product, branch, item, items):
                        root if root and os.path.isdir(root) else None)
     if ln.mode != 'pr' or not ln.slug:
         return None, 'the product lands without a PR host'
+    files = lane_mod.conflict_files(ln.repo, ln.trunk, branch)
+    if files:
+        return None, (f'{branch} conflicts with origin/{ln.trunk} in {", ".join(files)} — '
+                      f'no run would start on its PR; the lane sends it back to be rebased')
     return ln.host.open(branch, item)
 
 

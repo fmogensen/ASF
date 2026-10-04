@@ -31,12 +31,16 @@ Transitions (plan §2 plus the §9 overrides):
 - T1  (run) → PUSHED          the run ended and ``origin/<branch>`` is ahead of the trunk; a
                                branch or PR no run holds is adopted the same way (T2 adoption)
 - T2  PUSHED → PR_OPEN         a PR was opened or one already exists; FF: at once, pr=None
+- T2c PUSHED → BACK            PR mode: the branch conflicts with the trunk — GitHub would run
+                               no ``pull_request`` workflow on its PR; rebased first
 - T3  PR_OPEN → REVIEW         ``conventions.lane.review`` requires a review for the landing
                                class (a state, no round is spent)
 - T4  REVIEW → GATE            the review of the current head reads approved (or policy none)
 - T5  REVIEW → BACK            the review of the current head reads changes (rounds+1)
 - T5c PR_OPEN/REVIEW → BACK    a required check failed on the PR's exact head (any event's run):
                                a correct round against the named failures, before any review
+- T5e PR_OPEN/REVIEW → BACK    the open PR conflicts with the trunk: no run will come, no
+                               review round is spent; back to be rebased (the lane's own first)
 - T5d BACK → BACK              a pending review round on a head whose required checks failed:
                                superseded by the T5c gate correction (the failures go first)
 - T5a REVIEW → GATE            ... unless an adjudicate ruling already answered it on the code
@@ -1344,6 +1348,8 @@ def next_state(prev, facts):
             return PR_OPEN, 'fast-forward: the branch is its own PR'
         if not f.get('host'):
             return PR_OPEN, 'no PR host: the product lands it'
+        if f.get('conflict'):  # T2c: GitHub runs no pull_request workflow on a conflicting PR
+            return BACK, 'kind=conflict'
         if pr.get('state') == 'OPEN':
             return PR_OPEN, f'PR #{n}'
         return PR_OPEN, 'open a PR'
@@ -1351,6 +1357,8 @@ def next_state(prev, facts):
         return keep
     if s in (PR_OPEN, REVIEW) and f.get('checks_red'):  # T5c: its exact head failed CI
         return BACK, 'kind=gate'
+    if s in (PR_OPEN, REVIEW) and f.get('mode') == 'pr' and f.get('conflict'):
+        return BACK, 'kind=conflict'  # T5e: no run will come, no review round is spent on it
     if s in (PR_OPEN, REVIEW):  # T3/T4/T5: a review of the head already there counts at once
         rv = f.get('review') or {}
         if not f.get('review_required'):
@@ -1588,6 +1596,11 @@ class Lane:
             if f['review_required'] and docs_only_task(self.product, self.items, item, files):
                 f['review_waived'] = 'docs-only writes: flags.docs_review skips the review'
                 f['review_required'] = False
+        if self.mode == 'pr' and self.slug and not f['foreign'] \
+                and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
+            # T2c/T5e: GitHub runs no pull_request workflow on a PR that conflicts with the
+            # trunk — no PR is opened on it, and an open one goes back before any review
+            f['conflict'] = conflict_files(repo, trunk, b, fetch=False)
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
             members = delivery_members(self.items, item)
             f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members)
@@ -2853,6 +2866,15 @@ class Lane:
                                                            red['names']), ())
             f['correction'] = {'kind': 'gate', 'text': text}
             return f.get('prev')
+        if kind == 'conflict' and f.get('conflict'):
+            text = conflict_text((f.get('pr') or {}).get('number'), self.trunk, f['conflict'])
+            if self.dry_run:
+                self.out(f'DRY: would send {b} back: {text}')
+                self.results[b] = 'dry'
+                return None
+            if send_back(self, f, 'conflict', text, list(f['conflict'])) == 'held':
+                f['correction'] = {'kind': 'conflict', 'text': text}
+            return f.get('prev')
         if kind == 'review':
             rv = f.get('review') or {}
             text = f"{rv.get('path')} reads {rv.get('text')}: answer its C list on {b}"
@@ -3643,17 +3665,29 @@ def auto_merge_line(f, number, sha):
 MERGE_CONFLICT_RE = re.compile(r'merge conflict|not mergeable|conflicting', re.I)
 
 
-def conflict_files(repo, trunk, branch):
+def conflict_files(repo, trunk, branch, fetch=True):
     """The files ``origin/<branch>`` conflicts in against a freshly fetched ``origin/<trunk>``
-    (the pass may have just merged onto it), or ``[]`` when unknown."""
+    (the pass may have just merged onto it), or ``[]`` when unknown. ``fetch=False``: the refs
+    as the pass's own fetch left them."""
     if not repo:
         return []
-    H.sh(['git', 'fetch', '-q', 'origin', trunk, branch], cwd=repo)
+    if fetch:
+        H.sh(['git', 'fetch', '-q', 'origin', trunk, branch], cwd=repo)
     got = H.sh(['git', 'merge-tree', '--write-tree', '--name-only', '--no-messages',
                 f'origin/{trunk}', f'origin/{branch}'], cwd=repo)
     if got.returncode != 1:
         return []
     return [l for l in (got.stdout or '').splitlines()[1:] if l.strip()]
+
+
+def conflict_text(number, trunk, files):
+    """The correction for a branch that conflicts with ``trunk`` in ``files``, PR ``number``
+    (None: no PR yet)."""
+    what = f'PR #{number}' if number else 'the branch'
+    return (f'{what} conflicts with origin/{trunk} in {", ".join(files)} — GitHub runs no '
+            f'pull_request workflow on a conflicting PR, so its required checks never start; '
+            f'rebase the branch onto origin/{trunk} (git rebase origin/{trunk}), never merge; '
+            f'the factory publishes the rebased branch')
 
 
 def redaction_recheck(lane, f):
@@ -4275,18 +4309,48 @@ class GitHubHost(Host):
                           + ('' if rc == 0 else f' — label not removed: {H.tail(err)}'))
         return rc == 0
 
+    def run_in_flight(self, head):
+        """``(id, status)`` of a ``pull_request`` run of the product's ``ci.workflow`` (any
+        workflow when unset, or when the listing carries no ``path``) on ``head`` that is not
+        completed yet, or None — none, or unreadable (the label goes on as before)."""
+        data = H.gh_json(['api', f'repos/{self.slug}/actions/runs?head_sha={head}'
+                                 f'&event=pull_request&per_page=100'], None)
+        runs = data.get('workflow_runs') if isinstance(data, dict) else None
+        ci = self.product.ci if isinstance(getattr(self.product, 'ci', None), dict) else {}
+        workflow = os.path.basename(str(ci.get('workflow') or ''))
+        for r in runs if isinstance(runs, list) else ():
+            if not isinstance(r, dict) or r.get('event', 'pull_request') != 'pull_request':
+                continue
+            if r.get('head_sha', head) != head or r.get('status') in (None, 'completed'):
+                continue
+            if workflow and r.get('path') and os.path.basename(str(r['path'])) != workflow:
+                continue
+            return r.get('id') or r.get('databaseId') or '?', r.get('status')
+        return None
+
     def heavy_gate(self, f, number):
         """``ci.heavy_after_review``: None when PR ``number``'s head is approved for heavy CI
         already (its lane record's ``heavy`` is the head) or the product does not ask for it;
         else the head is approved now — :meth:`mark_heavy`, the record's ``heavy``/``heavy_at``
         written — and the PR waits: its heavy jobs start on the label, and no check of the head
-        is judged before they could have."""
+        is judged before they could have. Never while a ``pull_request`` run of the head is
+        still queued or in progress (:meth:`run_in_flight`): the labelled run is that run's twin
+        in the head's concurrency group, and the host cancels the one in flight — a PR's first
+        run cut short by the factory itself. The PR waits for it to end; the label goes on then."""
         lane, b, rec = self.lane, f['branch'], f.get('prev') or {}
         head = f.get('head')
         if not self.product.conventions.heavy_after_review() or not head:
             return None
         if rec.get('heavy') == head:
             return None
+        flying = self.run_in_flight(head)
+        if flying:
+            rid, status = flying
+            lane.out(f'waiting {b}: PR #{number} approved at {head[:9]} — heavy CI held until '
+                     f'run {rid} on the head ends ({status}): the label would cancel it')
+            wait(lane, f, f'heavy CI held: run {rid} on {head[:9]} is {status}',
+                 state=WAITING_CI)
+            return 'waiting'
         if lane.dry_run:
             lane.out(f'DRY: would approve {b} PR #{number} at {head[:9]} for heavy CI')
             lane.results[b] = 'dry'
@@ -4315,11 +4379,7 @@ class GitHubHost(Host):
                 lane.out(f'DRY: would send {b} back: PR #{number} conflicts in {", ".join(files)}')
                 lane.results[b] = 'dry'
                 return 'back'
-            send_back(lane, f, 'conflict', f'PR #{number} conflicts with origin/{lane.trunk} in '
-                      f'{", ".join(files)} — GitHub runs no pull_request workflow on a '
-                      f'conflicting PR, so its required checks never start; rebase the branch '
-                      f'onto origin/{lane.trunk} (git rebase origin/{lane.trunk}), never merge; '
-                      f'the factory publishes the rebased branch', files)
+            send_back(lane, f, 'conflict', conflict_text(number, lane.trunk, files), files)
             return 'back'
         return self.heavy_kick(f, number)
 

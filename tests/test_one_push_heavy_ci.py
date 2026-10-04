@@ -246,6 +246,36 @@ class HeavyAfterReview(unittest.TestCase):
         self.assertEqual(written['heavy'], HEAD)
         self.assertTrue(written['heavy_at'])
 
+    def test_the_label_waits_for_the_heads_run_in_flight(self):
+        # a product's #1057/#1050/#1040/#1033/#1014/#1005: the label went on while the PR's
+        # first run was still in progress; the labelled run shares its concurrency group (one
+        # run per head) and the host cancelled the first one — a cancelled first run on every
+        # such PR. The heavy run is started only once no run of the head is in flight.
+        host = self._host()
+        prev = {'state': lane.GATE, 'head': HEAD, 'pr': 7}
+        running = {'id': 11, 'event': 'pull_request', 'status': 'in_progress',
+                   'path': '.github/workflows/ci.yml', 'created_at': '2027-01-15T08:00:00Z'}
+        how, written = self._gate(host, prev, [running])
+        self.assertIsNone(how)
+        self.assertFalse(any(c[:2] == ['pr', 'edit'] for c in self.calls))
+        self.assertEqual(written['state'], lane.WAITING_CI)
+        self.assertNotIn('heavy', written)
+        self.assertIn('run 11', written['reason'])
+        # another workflow's run (dco) or a dispatched run is no twin of the labelled one
+        other = dict(running, id=12, path='.github/workflows/dco.yml')
+        dispatched = dict(running, id=13, event='workflow_dispatch')
+        how, written = self._gate(host, prev, [other, dispatched])
+        self.assertIn(['pr', 'edit', '7', '-R', 'o/p', '--add-label',
+                       conventions.DEFAULT_HEAVY_CI_LABEL], self.calls)
+        self.assertEqual(written['heavy'], HEAD)
+        # the first run done: the label goes on
+        how, written = self._gate(host, prev, [dict(running, status='completed',
+                                                    conclusion='success')])
+        self.assertIsNone(how)
+        self.assertIn(['pr', 'edit', '7', '-R', 'o/p', '--add-label',
+                       conventions.DEFAULT_HEAVY_CI_LABEL], self.calls)
+        self.assertEqual(written['heavy'], HEAD)
+
     def test_off_never_labels(self):
         host = self._host(heavy=False)
         run = {'id': 1, 'status': 'completed', 'created_at': '2027-01-15T08:00:00Z'}
