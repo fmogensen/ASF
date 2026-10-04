@@ -431,10 +431,34 @@ def voided_landing(world, f):
                          now='2026-01-03T09:00:00Z', alive=lambda *_a, **_k: False)
 
 
-EDITS = {'voided-landing': voided_landing}
+def doc_lane_landing(world, f):
+    """A reshape of the Task ran on the plan lane and its plan merged: a run line on a plan-lane
+    branch stamped ``harvested:`` at the trunk head. W8-PR3: a document's merge is never the
+    Task's landing — not a code merge fact, not a close, and
+    :func:`asf.workers.landing.verify_landings` calls it neither verified nor unverified (no
+    NEEDS DECISION row: the Task stays at its build stage)."""
+    from asf import env
+    from asf.evidence import evidence
+    from asf.workers import landing, lifecycle
+    product = env.load_product(NAME)
+    branch = evidence.branch_prefixes(product)['plan'] + ITEM.lower()
+    merged = _git(['rev-parse', 'main'], cwd=f.repo_origin)
+    append_runs(f, {'job': f'reshape-{ITEM.lower()}', 'item': ITEM, 'kind': 'reshape',
+                    'branch': branch, 'pid': 4343, 'started': STARTED},
+                {'job': f'reshape-{ITEM.lower()}', 'ended': ENDED, 'end_reason': 'finished',
+                 'harvested': merged})
+    path = os.path.join(f.state_dir, 'sessions.jsonl')
+    occ = lifecycle.occupancy(path, alive=lambda *_a, **_k: False)
+    assert occ['landed_on'].get(ITEM) == branch, occ['landed_on']
+    got = landing.verify_landings(product, occ, {ITEM: {'type': 'task', 'state': 'New'}},
+                                  path=path)
+    assert got == ({}, {}), f'a plan-lane merge is neither verified nor unverified: {got}'
+
+
+EDITS = {'voided-landing': voided_landing, 'doc-lane-landing': doc_lane_landing}
 #: The edits that write a landing stamp themselves: the row's premise, not the path's close —
 #: such a row is read by its path's verdict alone.
-STAMPING_EDITS = ('voided-landing',)
+STAMPING_EDITS = ('voided-landing', 'doc-lane-landing')
 
 
 def run(path, behaviour, edit=None, world=WORLD):

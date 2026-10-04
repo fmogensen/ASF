@@ -2125,6 +2125,22 @@ def unverified_rows(items, product, unverified, spoken):
     return out
 
 
+def doc_lane_landed(product, occupancy):
+    """The items whose recorded landing (``landed_on``) is a spec/plan lane's merge
+    (:func:`asf.evidence.evidence.lane_kind`): a document merged, not the item's work (W8-PR3) —
+    such a landing holds no idle-branch row, so a Task left Active on its merged plan branch
+    still gets its coder. Never a failure: prefixes that cannot be read name none."""
+    on = (occupancy or {}).get('landed_on') or {}
+    if not on:
+        return set()
+    try:
+        from asf.evidence import evidence as ev
+        prefixes = ev.branch_prefixes(product)
+        return {i for i, b in on.items() if ev.lane_kind(b, prefixes)}
+    except Exception:  # noqa: BLE001 — unreadable conventions: every landing holds as before
+        return set()
+
+
 def candidates(index, product, inflight, attempts=None, occupancy=None, groom_state=None,
                landed_shas=None, decision_limit=None, adjudicated=None, unverified_landed=None,
                unverified_on_trunk=None, now=None):
@@ -2197,7 +2213,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     # names it under review/landing alone) or a landing the record has not ingested yet
     held = (spoken | set(occ.get('review') or ()) | set(occ.get('landing') or ())
             | {v.get('item') for v in (occ.get('lanes') or {}).values() if v.get('item')}
-            | set(occ.get('landed') or ()))
+            | (set(occ.get('landed') or ()) - doc_lane_landed(product, occ)))
     rows += [r for r in branch_rows(items, product, busy, held, landed_shas)
              if r.feature_id not in stalled]
     rows += groom_rows(index, product, busy, groom_state, inflight)

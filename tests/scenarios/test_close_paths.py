@@ -79,6 +79,10 @@ ROWS = (
     # the voided landing: a reset names the landing's (pr, head) — no merge fact from it, even
     # while the host says the PR merged
     (MF, 'merged', 'none', None, 'voided-landing'),
+    # the doc lane (W8-PR3): a reshape's plan merged on the plan lane is the document's merge —
+    # no code merge fact, no close, and no NEEDS DECISION (the edit checks verify_landings)
+    (IN, 'open', 'none', None, 'doc-lane-landing'),
+    (MF, 'open', 'none', None, 'doc-lane-landing'),
 )
 
 
