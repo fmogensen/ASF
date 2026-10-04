@@ -120,10 +120,10 @@ class PinnedPathTest(ts.SchedulerTestCase):
 class SmokeTest(ts.SchedulerTestCase):
     """:func:`asf.scheduler.smoke` replays each written plist: its interpreter, its env, its cwd."""
 
-    def write_plist(self, label, python, path_dirs):
+    def write_plist(self, label, python, path_dirs, args=('tick',)):
         agents = os.path.join(self.home, 'Library', 'LaunchAgents')
         os.makedirs(agents, exist_ok=True)
-        plist = {'Label': label, 'ProgramArguments': [python, '-m', 'asf.cli', 'tick'],
+        plist = {'Label': label, 'ProgramArguments': [python, '-m', 'asf.cli', *args],
                  'WorkingDirectory': self.tmp,
                  'EnvironmentVariables': {'PATH': os.pathsep.join(path_dirs), 'HOME': self.home,
                                           'ASF_HOME': self.asf_home}}
@@ -137,7 +137,8 @@ class SmokeTest(ts.SchedulerTestCase):
         for name in ('git', 'gh', 'claude'):
             stub(self.tools, name, f'echo "{name} $* PATH=$PATH" >> {self.log}')
         self.python = stub(os.path.join(self.tmp, 'venv', 'bin'), 'python',
-                           f'echo "python $3" >> {self.log}')
+                           f'echo "python $3" >> {self.log}; '
+                           f'[ "$1" = -m ] && echo "clock $*" >> {self.log}; exit 0')
 
     def test_every_command_runs_under_the_plists_own_env(self):
         self.write_plist('asf.sample.tick', self.python, [self.tools])
@@ -149,7 +150,44 @@ class SmokeTest(ts.SchedulerTestCase):
         self.assertIn('gh auth status --active', calls)
         self.assertIn('git --version', calls)
         self.assertIn(f'PATH={self.tools}', calls)      # the plist's PATH, not this process's
-        self.assertEqual(len(ok), 4)
+        self.assertEqual(len(ok), 5)
+
+    def test_the_tick_clocks_own_command_runs_not_only_the_daily(self):
+        """2026-10-04 canary: the daily and the tick plist share interpreter, env and cwd, so
+        the smoke replayed the daily alone — a tick broken by its own argv would have resumed.
+        Each clock's exact command runs in its no-op form: ``tick … --manifest``, ``ci queue``
+        without ``--apply``."""
+        self.write_plist('asf.sample.daily', self.python, [self.tools],
+                         ('tick', '--product', 'sample', '--steps', 'daily'))
+        self.write_plist('asf.sample.tick', self.python, [self.tools],
+                         ('tick', '--product', 'sample', '--steps', 'record,wave'))
+        self.write_plist('asf.sample.shadow', self.python, [self.tools],
+                         ('tick', '--product', 'sample', '--shadow'))
+        self.write_plist('asf.sample.ci-queue', self.python, [self.tools],
+                         ('ci', 'queue', '--apply', '--product', 'sample'))
+        ok, failures = scheduler.smoke('sample')
+        self.assertEqual(failures, [])
+        with open(self.log) as f:
+            calls = [ln for ln in f.read().splitlines() if ln.startswith('clock ')]
+        self.assertEqual(sorted(calls), sorted([
+            'clock -m asf.cli tick --product sample --steps daily --manifest',
+            'clock -m asf.cli tick --product sample --steps record,wave --manifest',
+            'clock -m asf.cli tick --product sample --manifest',
+            'clock -m asf.cli ci queue --product sample --help']))
+        self.assertTrue(any(line.startswith('asf.sample.tick:') and '--manifest' in line
+                            for line in ok), ok)
+
+    def test_a_tick_whose_own_command_fails_is_a_failure(self):
+        stub(os.path.join(self.tmp, 'venv', 'bin'), 'python',
+             'case "$*" in *record,wave*) echo "bad step" >&2; exit 2;; esac; exit 0')
+        self.write_plist('asf.sample.daily', self.python, [self.tools],
+                         ('tick', '--product', 'sample', '--steps', 'daily'))
+        self.write_plist('asf.sample.tick', self.python, [self.tools],
+                         ('tick', '--product', 'sample', '--steps', 'record,wave'))
+        _ok, failures = scheduler.smoke('sample')
+        self.assertEqual(len(failures), 1, failures)
+        self.assertIn('asf.sample.tick:', failures[0])
+        self.assertIn('--manifest exit 2 bad step', failures[0])
 
     def test_a_tool_missing_from_the_plist_path_or_failing_is_a_failure(self):
         stub(self.tools, 'gh', 'echo "not logged in" >&2; exit 1')
