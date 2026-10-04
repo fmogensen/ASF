@@ -100,10 +100,11 @@ def _git_hook_body(name, asf_path, product_name):
     container gets the same file with no ``asf`` installed (review-t-0356: every commit aborted
     on a missing ``asf``). So: the install's own ``asf``, else ``$HOME/.local/bin/asf`` (an agent
     home's link), else ``asf`` on ``PATH``; without any, the repository's own
-    ``tools/checks/redact.sh``; without that, REDACTION UNCHECKED — loudly, the commit flagged
-    for the ``Redaction: unchecked`` trailer (:data:`asf.redact.UNCHECKED_TRAILER`) the landing
-    re-scans before it merges. Never a silent pass."""
-    from asf import redact
+    ``tools/checks/redact.sh``; without that, the commit or push is REFUSED, loudly (exit 1):
+    a pushed branch is public before any landing re-scan reads it, so nothing unscanned leaves.
+    The landing still re-scans a commit marked ``Redaction: unchecked``
+    (:data:`asf.redact.UNCHECKED_TRAILER`) — a second layer for a mark made elsewhere. Never a
+    silent pass."""
     p = product_name
     lines = [
         '#!/bin/sh',
@@ -112,19 +113,17 @@ def _git_hook_body(name, asf_path, product_name):
         f'if [ -x "$HOME/.local/bin/asf" ]; then exec "$HOME/.local/bin/asf" redact --{name} '
         f'--product {p}; fi',
         f'if command -v asf >/dev/null 2>&1; then exec asf redact --{name} --product {p}; fi',
-        '# no asf here (a cloud container): the repository\'s own check, else REDACTION UNCHECKED',
+        '# no asf here (a cloud container): the repository\'s own check, else refused',
         'top=$(git rev-parse --show-toplevel 2>/dev/null)',
         f'if [ -n "$top" ] && [ -x "$top/{CHECKS_DIR}/redact.sh" ]; then '
         f'exec "$top/{CHECKS_DIR}/redact.sh" --{name}; fi',
     ]
-    if name == 'pre-commit':
-        lines.append(f'flag=$(git rev-parse --git-path {redact.UNCHECKED_FLAG} 2>/dev/null) '
-                     '&& date -u +%Y-%m-%dT%H:%M:%SZ >> "$flag"')
+    what = 'commit' if name == 'pre-commit' else 'push'
     lines += [
-        f'echo "asf: REDACTION UNCHECKED ({name}) — no asf and no {CHECKS_DIR}/redact.sh here: '
-        'nothing was scanned for names or secrets. The commit is marked '
-        f'\'{redact.UNCHECKED_TRAILER}\' and the landing re-scans it before it merges." >&2',
-        'exit 0',
+        f'echo "asf: REDACTION REFUSED ({name}) — no asf and no {CHECKS_DIR}/redact.sh here: '
+        f'nothing can scan this {what} for names or secrets, so it is refused (a pushed branch '
+        f'is public before any landing re-scan). Install asf, or add {CHECKS_DIR}/redact.sh." >&2',
+        'exit 1',
     ]
     return '\n'.join(lines) + '\n'
 

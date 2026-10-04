@@ -38,17 +38,17 @@ MF = 'evidence.merge_facts'
 ROWS = (
     # the wave's trunk check before a launch: the open PR is the Task's own unmerged work
     (CB, 'open', 'none', None, None),
-    (CB, 'rate-limit', 'none', 'W4-PR2', None),
+    (CB, 'rate-limit', 'none', None, None),
     (CB, 'close-unmerged', 'decoy', None, None),
     (CB, 'merged', 'decoy', None, None),
     # a park carrying the verified evidence
     (CP, 'open', 'none', None, None),
-    (CP, 'rate-limit', 'none', 'W4-PR2', None),
+    (CP, 'rate-limit', 'none', None, None),
     (CP, 'close-unmerged', 'decoy', None, None),
     (CP, 'merged', 'decoy', None, None),
     # the relaunch cap: park, or close on evidence that re-verifies with the host
     (RC, 'open', 'none', None, None),
-    (RC, 'rate-limit', 'none', 'W4-PR2', None),
+    (RC, 'rate-limit', 'none', None, None),
     (RC, 'close-unmerged', 'decoy', None, None),
     (RC, 'merged', 'decoy', None, None),
     # the record's ingest: a PR closed unmerged is no landing, a refused host no answer

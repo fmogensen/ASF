@@ -40,8 +40,10 @@ class _Repo(unittest.TestCase):
         self.product = mock.Mock(repo_dir=self.repo, main='main')
         self.product.name = 'p'
         self.writes = []
+        # gh is a fake everywhere here: no open PR names the item, unless a test says otherwise
         patches = [mock.patch.object(pool_mod, 'sessions_path', lambda _p: self.path),
-                   mock.patch.object(pool_mod, 'update_session', self.update)]
+                   mock.patch.object(pool_mod, 'update_session', self.update),
+                   mock.patch.object(landing, 'open_prs', lambda _r, _i: [])]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -349,6 +351,95 @@ class AttributionTests(_Repo):
         self.assertFalse(landing.names(self.repo, 'main', rep, self.ITEM))
         self.commit('task(T-0042): the inspector, landed')
         self.assertTrue(landing.names(self.repo, 'main', self.git('rev-parse', 'HEAD'), self.ITEM))
+
+
+
+class UnknownTests(_Repo):
+    """Unknown never closes: when ``gh`` cannot list the open PRs, the evidence is
+    :class:`trunkclose.Unknown` — no close, no launch, the row waits."""
+
+    def setUp(self):
+        super().setUp()
+        from asf import gh_limit
+        gh_limit.reset()
+        self.addCleanup(gh_limit.reset)
+        self.bin = os.path.join(self.d, 'bin')
+        os.makedirs(self.bin)
+        p = mock.patch.dict(os.environ, {'PATH': self.bin + os.pathsep + os.environ['PATH']})
+        p.start()
+        self.addCleanup(p.stop)
+        # the real open_prs, over the fake gh on PATH
+        p = mock.patch.object(landing, 'open_prs', _REAL_OPEN_PRS)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def gh(self, rc=0, stdout='', stderr=''):
+        path = os.path.join(self.bin, 'gh')
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\n'
+                    f"cat <<'EOF'\n{stdout}\nEOF\n"
+                    f"echo {json.dumps(stderr)} >&2\n"
+                    f'exit {rc}\n')
+        os.chmod(path, 0o755)
+
+    def done(self):
+        self.run_once(report('done', f'the whole scope is on origin/main under {self.sha[:9]}'))
+
+    def test_open_prs_reads_heads_and_is_unknown_on_failure_or_a_full_page(self):
+        self.gh(stdout=json.dumps([{'number': 1, 'title': 'task(T-0332): x',
+                                    'headRefName': 'cloud/T-0332-b'}]))
+        self.assertEqual(landing.open_prs(self.repo, self.ITEM), ['cloud/T-0332-b'])
+        self.gh(rc=1, stderr='could not resolve host')
+        self.assertIsNone(landing.open_prs(self.repo, self.ITEM))
+        self.gh(stdout='not json')
+        self.assertIsNone(landing.open_prs(self.repo, self.ITEM))
+        full = [{'number': n, 'title': 'x', 'headRefName': f'b{n}'} for n in range(300)]
+        self.gh(stdout=json.dumps(full))
+        self.assertIsNone(landing.open_prs(self.repo, self.ITEM))  # len == limit: maybe cut
+
+    def test_a_failed_gh_makes_a_perfect_report_unknown_not_evidence(self):
+        self.done()
+        self.gh(rc=1, stderr='could not resolve host')
+        hit = trunkclose.evidence(self.path, self.ITEM, self.repo)
+        self.assertIsInstance(hit, trunkclose.Unknown)
+        self.assertFalse(hit)
+        self.assertIsNone(landing.open_work(self.repo, 'main', self.path, self.ITEM))
+        self.gh(stdout='[]')
+        self.assertEqual(trunkclose.evidence(self.path, self.ITEM, self.repo)[0], self.sha)
+
+    def test_the_row_waits_on_gh_unknown_neither_launched_nor_closed(self):
+        self.done()
+        self.gh(rc=1, stderr='could not resolve host')
+        lines = []
+        self.assertTrue(trunkclose.closes_before_launch(self.product, 'coder', self.ITEM,
+                                                        lines.append))
+        self.assertEqual(self.writes, [])
+        self.assertIn(trunkclose.WAITS_UNKNOWN, lines[0])
+        self.assertTrue(lines[0].startswith('waits'), lines)
+
+    def test_close_parked_closes_nothing_on_unknown(self):
+        self.done()
+        reason = (f'reshape launched 1 time(s) — the work it names is on origin/main at '
+                  f'{self.sha[:9]} (verified): close T-0332 on that evidence. Not relaunched')
+        self.write(dict(relaunch.park_fields(reason, CARD, '2026-09-30T06:00:00Z'), job=self.JOB))
+        self.gh(rc=1, stderr='could not resolve host')
+        self.assertEqual(trunkclose.close_parked(self.product, lambda _l: None), [])
+        self.assertEqual(self.writes, [])
+        self.assertIn(self.ITEM, lifecycle.corrections(self.path))
+
+    def test_a_rate_limit_answer_raises_through_close_parked(self):
+        from asf import gh_limit
+        self.done()
+        reason = (f'reshape launched 1 time(s) — the work it names is on origin/main at '
+                  f'{self.sha[:9]} (verified): close T-0332 on that evidence. Not relaunched')
+        self.write(dict(relaunch.park_fields(reason, CARD, '2026-09-30T06:00:00Z'), job=self.JOB))
+        self.gh(rc=1, stderr='API rate limit exceeded for user ID 1.')
+        with mock.patch('sys.stderr'), self.assertRaises(gh_limit.RateLimited):
+            trunkclose.close_parked(self.product, lambda _l: None)
+        self.assertEqual(self.writes, [])
+
+
+_REAL_OPEN_PRS = landing.open_prs
 
 
 if __name__ == '__main__':
