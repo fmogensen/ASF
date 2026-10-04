@@ -30,7 +30,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-from asf import env, gh_limit, gitpush, mutation_guard
+from asf import env, gh_limit, github, gitpush, mutation_guard, refguard
 from asf import tokens
 from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
                              Conventions)
@@ -1111,7 +1111,9 @@ def cut_tag(repo, name, sha, message):
     if subprocess.run(['git', '-C', repo, 'tag', '-a', '--cleanup=whitespace', name, sha, '-m', message],
                       capture_output=True, text=True, env=dated).returncode != 0:
         return False
-    if gitpush.push(['-q', 'origin', f'refs/tags/{name}'], repo, refs_only=True).returncode:
+    # a tag is never a protected branch: the guard with the defaults, refusing
+    if gitpush.push(['-q', 'origin', f'refs/tags/{name}'], repo, refs_only=True,
+                    guard=refguard.Guard()).returncode:
         _git(repo, 'tag', '-d', name)
         return False
     return True
@@ -1364,13 +1366,49 @@ def sync_changelog(root, product):
     if text == current:
         return None
     added = [t for t in entries if not re.search(rf'(?m)^## {re.escape(t)}\b', current)]
-    sha = _commit_file(repo, base, path, text, CHANGELOG_SUBJECT.format(tags=', '.join(added), path=path))
+    subject = CHANGELOG_SUBJECT.format(tags=', '.join(added), path=path)
+    sha = _commit_file(repo, base, path, text, subject)
+    conv = product.conventions
+    auto = bool(getattr(conv, 'merge_auto', lambda: False)())
+    # under merge: auto the lane lands what it reviewed itself: the changelog commit is a landing
+    # path, a door; otherwise the trunk push is what flags.refguard warns about or refuses
+    guard = refguard.guard_from(product.main, conv, door=auto)
+    if sha and guard.mode == refguard.REFUSE and not auto:
+        return _changelog_pr(product, sha, path, subject, guard)
     if not sha or gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{product.main}'],
-                               repo).returncode:
+                               repo, guard=guard).returncode:
         print(f"release: could not push {path} to {product.main}; retrying next rollup", file=sys.stderr)
         return None
     print(f"release: {', '.join(added)} in {path}")
     return sha
+
+
+#: The branch a changelog commit goes up on when the trunk takes no factory push
+#: (``flags.refguard: refuse`` and a ``merge`` other than ``auto``/``queue``): one PR, updated in
+#: place by every rollup until someone merges it.
+CHANGELOG_BRANCH = 'asf/changelog'
+
+
+def _changelog_pr(product, sha, path, subject, guard):
+    """Put the changelog commit ``sha`` up as a PR instead of pushing it to the trunk: force
+    :data:`CHANGELOG_BRANCH` to it and open the PR (an open one is simply updated by the push).
+    None — the trunk did not move."""
+    branch = CHANGELOG_BRANCH
+    if gitpush.push(['-q', 'origin', f'+{sha}:refs/heads/{branch}'], product.repo_dir,
+                    guard=guard).returncode:
+        print(f"release: could not push {path} to {branch}; retrying next rollup", file=sys.stderr)
+        return None
+    slug = product.repo_slug
+    if slug:
+        r = github.gh(['pr', 'create', '-R', slug, '--base', product.main, '--head', branch,
+                       '--title', subject, '--body',
+                       f'The release notes in `{path}`, put up as a PR: the trunk takes no '
+                       f'factory push (`flags.refguard: refuse`).'])
+        if not r.ok and 'already exists' not in (r.stderr or ''):
+            print(f"release: {path} pushed to {branch}, PR not opened: "
+                  f"{(r.stderr or r.stdout or '').strip()[:200]}", file=sys.stderr)
+    print(f"release: {path} up for review on {branch}")
+    return None
 
 
 def write_trunk_release(root, day, items, product):

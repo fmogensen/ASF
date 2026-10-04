@@ -1845,7 +1845,7 @@ class Lane:
             args = ['-q'] + ([f'--force-with-lease={lease}'] if lease else [])
             started = time.monotonic()
             r = gitpush.push(args + ['origin', refspec], wt, refs_only=True,
-                             timeout=gitpush.push_timeout(self.conv), log=self.out)
+                             timeout=gitpush.push_timeout(self.conv), log=self.out, guard=refguard.guard_from(self.trunk, self.conv))
             kind, _, branch = what.partition(' ')
             self.out(f'lane: push {branch or kind} {time.monotonic() - started:.1f}s ({kind})')
             ok, why = r.returncode == 0, push_why(r.stderr or r.stdout)
@@ -2281,7 +2281,7 @@ class Lane:
                 return DEFERRED
             r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
                               f'{new}:refs/heads/{b}'], wt, refs_only=True,
-                             timeout=gitpush.push_timeout(self.conv), log=self.out)
+                             timeout=gitpush.push_timeout(self.conv), log=self.out, guard=refguard.guard_from(self.trunk, self.conv))
             if r.returncode == 0:
                 break
             cause, text = push_cause(r)
@@ -2465,7 +2465,7 @@ class Lane:
             return False
         r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
                           f'{new}:refs/heads/{b}'], wt, refs_only=True,
-                         timeout=gitpush.push_timeout(self.conv), log=self.out)
+                         timeout=gitpush.push_timeout(self.conv), log=self.out, guard=refguard.guard_from(self.trunk, self.conv))
         if r.returncode != 0:
             self.out(f'normalise {b}: deferred — push refused '
                      f'({push_why(r.stderr or r.stdout)})')
@@ -2510,7 +2510,7 @@ class Lane:
             return ''
         r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
                           f'{new}:refs/heads/{b}'], wt,
-                         timeout=gitpush.push_timeout(self.conv), log=self.out)
+                         timeout=gitpush.push_timeout(self.conv), log=self.out, guard=refguard.guard_from(self.trunk, self.conv))
         if r.returncode != 0:
             self.out(f'{what} {b} push refused: {push_why(r.stderr or r.stdout)} — kept')
             return ''
@@ -2767,7 +2767,7 @@ class Lane:
             return None
         r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
                           f'{new}:refs/heads/{b}'], wt,
-                         timeout=gitpush.push_timeout(self.conv), log=self.out)
+                         timeout=gitpush.push_timeout(self.conv), log=self.out, guard=refguard.guard_from(self.trunk, self.conv))
         if r.returncode != 0:
             self.out(f'sign-off {b} ({check}) push refused: {push_why(r.stderr or r.stdout)}')
             return None

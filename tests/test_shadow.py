@@ -103,6 +103,32 @@ class EnsureShadowCloneTests(unittest.TestCase):
         _git(['remote', 'set-url', 'origin', os.path.join(self.tmp, 'missing')], path)
         self.assertFalse(shadow.push(path))
 
+    def test_record_push_is_not_refused(self):
+        """The record's ``HEAD:main`` push is its publish: the push door's record guard
+        protects nothing, so ``flags.refguard: refuse`` never stops the record."""
+        from unittest import mock
+        from asf import gitpush, refguard
+        _git(['config', 'receive.denyCurrentBranch', 'updateInstead'], self.origin)
+        path = shadow.ensure_clone(self.product, os.path.join(self.tmp, 'c'))
+        with open(os.path.join(path, 'new.txt'), 'w') as f:
+            f.write('x')
+        self.assertTrue(shadow.commit_local(path, 'add'))
+        seen, real = [], gitpush.push
+
+        def push(args, cwd, **kw):
+            seen.append(kw['guard'])
+            return real(args, cwd, **kw)
+        with mock.patch.object(gitpush, 'push', side_effect=push):
+            self.assertTrue(shadow.push(path))
+        self.assertEqual(seen, [refguard.RECORD])
+        self.assertEqual(refguard.RECORD.refusal('HEAD:main'), '')
+        refusing = refguard.Guard(main=None, protected=(), mode=refguard.REFUSE)
+        self.assertEqual(refusing.refusal('HEAD:main'), '')       # protects nothing, any mode
+        self.assertEqual(_rev_parse(path), _rev_parse(self.origin, 'HEAD'))
+        # keyed on the repository: the record clone of a product guarding `main` is the record
+        self.assertIs(refguard.guard_for(self.product, shadow.shadow_dir(self.product)),
+                      refguard.RECORD)
+
 
 if __name__ == '__main__':
     unittest.main()

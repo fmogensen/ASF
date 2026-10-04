@@ -319,7 +319,8 @@ def delete(repo, branch, sha, slug=None, main=None, protected=None, push_timeout
         rc, out, err = H._gh(['api', '-X', 'DELETE', ref])
         return rc == 0, '' if rc == 0 else (H.tail(err or out) or f'gh exit {rc}')
     r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{branch}:{sha}', 'origin',
-                      '--delete', branch], repo, refs_only=True, timeout=push_timeout_s)
+                      '--delete', branch], repo, refs_only=True, timeout=push_timeout_s,
+                      guard=refguard.Guard(main, protected))
     return r.returncode == 0, H.tail(r.stderr or r.stdout) if r.returncode else ''
 
 

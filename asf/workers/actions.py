@@ -27,7 +27,7 @@ import re
 import subprocess
 import time
 
-from asf import env, gh_limit, gitpush
+from asf import env, gh_limit, gitpush, refguard
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
@@ -302,7 +302,9 @@ def push_brief(worktree, job_name, brief_text, job_env, setup=None):
     if p.returncode != 0:
         return False, f'brief: git mktree failed ({p.stderr.strip()})'
     ref = brief_ref(job_name)
-    p = gitpush.push(['-q', 'origin', f'+{p.stdout.strip()}:{ref}'], worktree, refs_only=True)
+    # refs/asf/briefs/… is never a branch: the guard with the defaults, refusing
+    p = gitpush.push(['-q', 'origin', f'+{p.stdout.strip()}:{ref}'], worktree, refs_only=True,
+                     guard=refguard.Guard())
     if p.returncode != 0:
         lines = (p.stderr or '').strip().splitlines()
         return False, f"brief: push to {ref} refused ({lines[-1] if lines else 'failed'})"
@@ -313,7 +315,8 @@ def delete_brief(worktree, ref):
     """Delete a finished run's brief ref on origin: nothing of a run outlives it there."""
     if not worktree or not os.path.isdir(worktree) or not str(ref).startswith(BRIEF_REF_PREFIX):
         return False
-    return gitpush.push(['-q', 'origin', f':{ref}'], worktree, refs_only=True).returncode == 0
+    return gitpush.push(['-q', 'origin', f':{ref}'], worktree, refs_only=True,
+                        guard=refguard.Guard()).returncode == 0
 
 
 # ---- the runtime ------------------------------------------------------------------------------

@@ -1909,13 +1909,13 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
         return False, f'publish {branch} refused: ' + '; '.join(redact.correction(findings))
     if archive:
         a = gitpush.push(['-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt,
-                         refs_only=True, timeout=limit)
+                         refs_only=True, timeout=limit, guard=refguard.Guard(main, protected))
         if a.returncode != 0:
             return False, f'publish {branch} refused: the old tip could not be archived'
     args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
-    p = gitpush.push(args, wt, timeout=limit)
+    p = gitpush.push(args, wt, timeout=limit, guard=refguard.Guard(main, protected))
     if p.returncode != 0:
         hook_findings = redact.parse_finding_lines(f'{p.stderr or ""}\n{p.stdout or ""}')
         if hook_findings:

@@ -315,7 +315,10 @@ EXPECTED_LADDER = ['card', 'card', 'card', 'spec-draft', 'spec-approved',
 class FailurePathsBase(unittest.TestCase):
     """A fresh copy of ``sample/`` per class; the test plays the session between ticks (the fake
     runtime returns at once and touches no git), rewriting ``fake_script.json`` before each tick
-    so every launch in that tick gets the scripted result. Every tick's printed lines are kept."""
+    so every launch in that tick gets the scripted result. Every tick's printed lines are kept.
+    ``REFGUARD``: a ``conventions.flags.refguard`` mode the class's product runs under."""
+
+    REFGUARD = None
 
     @classmethod
     def setUpClass(cls):
@@ -331,6 +334,13 @@ class FailurePathsBase(unittest.TestCase):
         os.makedirs(os.path.join(cls.home, 'products'))
         _fill(os.path.join(cls.sample, 'product.yaml'),
               os.path.join(cls.home, 'products', 'sample.yaml'), REPO=cls.repo, BACKLOG=cls.backlog)
+        if cls.REFGUARD:
+            yml = os.path.join(cls.home, 'products', 'sample.yaml')
+            with open(yml, encoding='utf-8') as f:
+                text = f.read()
+            with open(yml, 'w', encoding='utf-8') as f:
+                f.write(text.replace('\nconventions:\n', '\nconventions:\n  flags:\n'
+                                     f'    refguard: {cls.REFGUARD}\n', 1))
         _fill(os.path.join(cls.sample, 'config.yaml'), os.path.join(cls.home, 'config.yaml'),
               SAMPLE=cls.sample)
         base = dict(os.environ, ASF_HOME=cls.home, PYTHONPATH=ROOT,
@@ -340,6 +350,7 @@ class FailurePathsBase(unittest.TestCase):
                         os.path.join(cls.tmp, 'bin')))
         cls.env = hermetic.build(base, home=cls.tmp)
         cls.ticks = []
+        cls.errs = []
         init = cls.asf('init', '--product', 'sample')
         assert init.returncode == 0, init.stdout + init.stderr
 
@@ -364,6 +375,7 @@ class FailurePathsBase(unittest.TestCase):
         lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
         lines += cls.background_harvest(lines)
         cls.ticks.append(lines)
+        cls.errs.append(p.stderr)
         return lines
 
     @classmethod
@@ -493,6 +505,19 @@ class HeldThenCorrectedThenLanded(FailurePathsBase):
     def test_every_tick_committed_and_pushed_the_record(self):
         for i, lines in enumerate(self.ticks):
             self.assertTrue(self.find(lines, 'tick: state committed and pushed'), (i, lines))
+
+
+class HeldThenCorrectedThenLandedUnderRefguard(HeldThenCorrectedThenLanded):
+    """The same five ticks with ``flags.refguard: refuse``: the landing goes through the push
+    door, every record publish (``HEAD:main`` of the record) is allowed, and nothing the factory
+    pushes is aimed at the trunk outside a door."""
+
+    REFGUARD = 'refuse'
+
+    def test_no_push_was_refused_or_warned(self):
+        for i, (lines, err) in enumerate(zip(self.ticks, self.errs)):
+            self.assertFalse([ln for ln in lines + err.splitlines() if 'REF GUARD' in ln],
+                             (i, lines, err))
 
 
 class FinishedWithoutPushIsCorrected(FailurePathsBase):

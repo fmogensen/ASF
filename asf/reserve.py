@@ -15,7 +15,7 @@ Renumbering a landed collision against main at publish time is a separate step, 
 """
 import re
 
-from asf import env, gitpush
+from asf import env, gitpush, refguard
 from asf.evidence import evidence
 from asf.harvest import harvest as H
 
@@ -115,7 +115,7 @@ def claim(product, sequence, n):
     if not commit:
         raise SystemExit(f'reserve: could not build a claim commit in {product.repo_dir!r}')
     result = gitpush.push(['origin', f'{commit}:{_reservation_ref(sequence, n)}'],
-                          product.repo_dir, refs_only=True)
+                          product.repo_dir, refs_only=True, guard=refguard.guard_for(product))
     return result.returncode == 0
 
 
