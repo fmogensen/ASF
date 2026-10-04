@@ -660,6 +660,80 @@ class ConsoleAmendRowsTest(unittest.TestCase):
                          (rows.CONSOLE_AMEND, False, 'console'))
 
 
+class ConsoleWaitAside(unittest.TestCase):
+    """W8-PR1: an item whose only row waits on the console orders nothing (``flags.console_wait:
+    aside``) — a product's Task whose ``writes:`` reached the amendable set held 211 rows behind
+    it while nothing but the console could move it. Its own row stays; the ``after:`` it
+    answered no longer holds a dependant. Default ``hold``: today's rows."""
+
+    def idx(self):
+        tasks = {'T-0056': {'id': 'T-0056', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                            'state': 'New', 'writes': ['rules/README.md']},
+                 'T-0057': {'id': 'T-0057', 'type': 'task', 'parent': 'F-0001', 'rank': 2,
+                            'state': 'New', 'writes': ['b.py'], 'after': ['T-0056']},
+                 'T-0058': {'id': 'T-0058', 'type': 'task', 'parent': 'F-0001', 'rank': 3,
+                            'state': 'New', 'writes': ['c.py'], 'after': ['T-0057']}}
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                            'rank': 1, 'stage': 'building 0/3', 'children': list(tasks)}}
+        items.update(tasks)
+        return {'items': items}
+
+    def by(self, p):
+        return {r.item_id: r for r in rows.candidates(self.idx(), p, [])}
+
+    def test_default_hold_keeps_the_wait(self):
+        for p in (product(), product(conventions={'flags': {'console_wait': 'hold'}})):
+            self.assertEqual(rows.console_wait(p), 'hold')
+            by = self.by(p)
+            self.assertEqual((by['T-0057'].action, by['T-0057'].waits_on),
+                             ('WAITS ON T-0056', 'T-0056'))
+
+    def test_aside_releases_the_dependant_and_keeps_the_console_row(self):
+        p = product(conventions={'flags': {'console_wait': 'aside'}})
+        self.assertEqual(rows.console_wait(p), 'aside')
+        by = self.by(p)
+        self.assertEqual((by['T-0056'].kind, by['T-0056'].waits_on, by['T-0056'].launches),
+                         (rows.CONSOLE_AMEND, 'console', False))
+        self.assertEqual((by['T-0057'].kind, by['T-0057'].action),
+                         (rows.PLAN_CODE, rows.LAUNCH))
+        self.assertIn('T-0056 waits on the console', by['T-0057'].reason)
+        # ordering only: a dependant of a live row still waits on it
+        self.assertEqual(by['T-0058'].waits_on, 'T-0057')
+
+    def test_an_item_with_another_row_still_orders(self):
+        # the console row is not its only row: a landing of the item keeps the after: edge
+        console = rows.console_amend_row(product(), 'T-0056', 'F-0001', ['rules/README.md'],
+                                         'worker/T-0056')
+        land = rows.Row(tier=2, kind=rows.PUSHED_LAND, item_id='T-0056', feature_id='F-0001',
+                        action=rows.LAUNCH, brief_kind='land', branch='worker/T-0056',
+                        reason='pushed')
+        dep = rows.Row(tier=2, kind=rows.PLAN_CODE, item_id='T-0057', feature_id='F-0001',
+                       action=rows.LAUNCH, brief_kind='task', branch='task/T-0057', reason='r')
+        self.assertEqual(rows.console_only([console, land, dep]), set())
+        self.assertEqual(rows.console_only([console, dep]), {'T-0056'})
+        items = rows.items_of(self.idx())
+        self.assertEqual(rows.hold_unlanded([console, dep], items)[-1].waits_on, 'T-0056')
+        items.console_aside = {'T-0056'}
+        out = rows.hold_unlanded([console, dep], items)[-1]
+        self.assertTrue(out.launches)
+        self.assertIn('T-0056 waits on the console', out.reason)
+        self.assertEqual(rows.after_of(items, items['T-0057']), [])
+        self.assertEqual(rows.after_of(items, items['T-0057'], keep_aside=True), ['T-0056'])
+
+    def test_a_console_task_released_by_a_console_task_is_aside_too(self):
+        idx = self.idx()
+        idx['items']['T-0057']['writes'] = ['rules/R-0001.md']
+        by = {r.item_id: r for r in rows.candidates(
+            idx, product(conventions={'flags': {'console_wait': 'aside'}}), [])}
+        self.assertEqual((by['T-0057'].kind, by['T-0058'].action),
+                         (rows.CONSOLE_AMEND, rows.LAUNCH))
+
+    def test_the_console_row_ranks_behind_live_rows(self):
+        p = product(conventions={'flags': {'console_wait': 'aside'}})
+        out = [r.item_id for r in rows.candidates(self.idx(), p, []) if r.tier == 2]
+        self.assertEqual(out[-1], 'T-0056', out)
+
+
 class DeliveryRowsTest(unittest.TestCase):
     """T-0174 / S-17452: delivery_rows speaks for a delivery's members — one plan row, one code
     row, the union footprint, and a WAITS ON delivery row for every other open member."""

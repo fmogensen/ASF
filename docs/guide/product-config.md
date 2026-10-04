@@ -69,6 +69,12 @@ disagreement to `state/<product>/facts-disagree.jsonl` — counted as `facts_dis
 scorecard and on a `Facts` status row; whatever the fact raises is logged, never raised. In
 shadow a host fact is read once per pass and never re-read. `new` returns the fact's answer.
 
+`console_wait: aside` (default `hold`) stops work only the console can move from ordering
+anything: an item whose only row is CONSOLE → AMEND (its `writes:` reach the amendable set)
+keeps that row, ranked behind the live rows of its tier, but an `after:` naming it no longer
+holds a dependant — the released row says `waits on the console — put aside`. The launch-time
+overlap check is unchanged: a dependant whose `writes:` overlaps staged work still waits.
+
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.

@@ -215,6 +215,7 @@ conventions:
   # flags:
   #   mechanical: on     # conflict → the lane rebases it; footprint → the widening verdict in the hold; not pushed → published from the worktree, review/notes rounds archived (default off)
   #   plan_ahead: 2
+  #   console_wait: aside  # hold (default) | aside: an item whose only row waits on the console orders nothing
   #   verdict_block: warn   # off (default) | warn | on: a review's ```verdict block is read
   #                         # first (the table is the fallback); at `on` the Stop gate refuses
   #                         # a review that ends without one bound to its head
