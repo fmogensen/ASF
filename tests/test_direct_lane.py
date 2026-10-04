@@ -187,6 +187,47 @@ class ReviewWaiver(unittest.TestCase):
         self.assertEqual(lane.review_waived(off, 'code', self.items, 'T-0001', 1), '')
 
 
+class DocsOnlyNoReview(unittest.TestCase):
+    """W2-PR7: a Task whose ``writes:`` are docs-only gets no review row (``flags.docs_review``)."""
+    items = {'F-0001': feature(stage='plan-approved', state='Active'),
+             'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                        'writes': ['docs/guide/a.md']},
+             'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                        'writes': ['src/a.py']},
+             'T-0003': {'id': 'T-0003', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                        'writes': ['docs/guide/a.md src/b.py']}}
+    held = {'T-0001': {'branch': 'worker/T-0001', 'round': 1, 'pr': 5, 'why': 'no verdict'},
+            'T-0002': {'branch': 'worker/T-0002', 'round': 1, 'pr': 6, 'why': 'no verdict'}}
+
+    def rows_(self, **conv):
+        return [(r.kind, r.item_id) for r in
+                rows.lane_rows(self.items, product(**conv), {}, {'review': self.held})]
+
+    def test_off_by_default_both_tasks_are_reviewed(self):
+        self.assertEqual(self.rows_(doc_paths=['docs/']),
+                         [(rows.PUSHED_REVIEW, 'T-0001'), (rows.PUSHED_REVIEW, 'T-0002')])
+
+    def test_the_flag_drops_only_the_docs_only_task(self):
+        got = self.rows_(doc_paths=['docs/'], flags={'docs_review': 'skip'})
+        self.assertEqual(got, [(rows.PUSHED_LAND, 'T-0001'), (rows.PUSHED_REVIEW, 'T-0002')])
+
+    def test_a_packed_writes_entry_is_read_as_its_paths(self):
+        p = product(doc_paths=['docs/'], flags={'docs_review': 'skip'})
+        self.assertFalse(lane.docs_only_task(p, self.items, 'T-0003'))
+
+    def test_a_required_docs_review_keeps_the_row(self):
+        got = self.rows_(doc_paths=['docs/'], flags={'docs_review': 'skip'},
+                         lane={'review': {'docs': 'required'}})
+        self.assertEqual(got[0], (rows.PUSHED_REVIEW, 'T-0001'))
+
+    def test_the_lane_waiver_needs_the_diff_inside_the_writes(self):
+        p = product(doc_paths=['docs/'], flags={'docs_review': 'skip'})
+        self.assertTrue(lane.docs_only_task(p, self.items, 'T-0001', ['docs/guide/a.md']))
+        self.assertFalse(lane.docs_only_task(p, self.items, 'T-0001', ['docs/guide/a.md', 'x.py']))
+        self.assertFalse(lane.docs_only_task(p, self.items, 'T-0002', ['src/a.py']))
+        self.assertFalse(lane.docs_only_task(product(doc_paths=['docs/']), self.items, 'T-0001'))
+
+
 def lane_facts():
     """F-0010 direct (pair p1): carded 09-01, landed 09-02 — 1 session $5, 10 CI min.
     F-0011 full (pair p1): carded 09-01, landed 09-04, Task T-0011 — spec $4, coder $6, review $1
