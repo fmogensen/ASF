@@ -294,6 +294,42 @@ def parse(text, path=None):
     return meta, body
 
 
+def _copy_container(value):
+    """A fresh copy of ``value``'s list/dict containers, at every level of nesting; a scalar is
+    returned as-is, being immutable."""
+    if isinstance(value, list):
+        return [_copy_container(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _copy_container(v) for k, v in value.items()}
+    return value
+
+
+def clone(meta):
+    """A deep-enough copy of a parsed ``meta``, safe for a caller to mutate in place without
+    affecting the cache entry it came from.
+
+    Every container value (list, dict) is copied into the new :class:`FrontmatterDict`; a scalar
+    is shared, being immutable. ``entries`` is rebuilt as a new list of new :class:`_Entry`
+    objects whose ``value`` **is** the copied container this clone put in the dict — not the
+    cache's own entry, and not the cache's own container. ``parse`` makes ``e.value`` and
+    ``meta[key]`` the same object for every list and dict value, and ``render`` replays a key's
+    original raw line when ``meta[key] == e.value``; sharing the cached entries here would break
+    that identity for a caller that mutates a nested container in place, and ``render`` would
+    then render canonically where a fresh parse would replay the original line. ``machine_keys``
+    is copied as a new ``set``, ``comments`` as a new ``dict``.
+    """
+    new = FrontmatterDict()
+    for key, value in meta.items():
+        new[key] = _copy_container(value)
+    new.entries = [
+        _Entry(e.kind, e.key, new[e.key] if e.key in new else e.value, e.raw)
+        for e in meta.entries
+    ]
+    new.machine_keys = set(meta.machine_keys)
+    new.comments = dict(meta.comments)
+    return new
+
+
 def _entry_style(entry):
     return 'block' if entry.kind == 'list' and '\n' in entry.raw else 'inline'
 
