@@ -2534,6 +2534,39 @@ class ABlockedRunIsParkedUntilTheCardChanges(Home):
         held = [d for j, w, d in found if w == 'held']
         self.assertTrue(held, found)
 
+    def test_a_run_with_local_commits_and_a_question_is_held_never_parked_nothing_to_land(self):
+        """A product's T-0349: a transplant committed locally, its push refused (not a
+        fast-forward), the factory's publish refused too, and the report asked a person to
+        publish it. Commits in the worktree are something to land: the run is held with its
+        work as the correction's input, never parked "nothing to land"."""
+        items = self.card()
+        rec = self.spawn('transplant', {'ok': True, 'pid': 79,
+                                        'result': 'NEEDS OPERATOR: run `asf land` — the sandbox '
+                                                  'denies asf'})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'a')
+        git('push', '-q', 'origin', branch, cwd=wt)
+        other = tempfile.mkdtemp(prefix='person_')
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        git('clone', '-q', '-b', branch, git('remote', 'get-url', 'origin', cwd=wt), other, cwd=wt)
+        with open(os.path.join(other, 'b'), 'w') as f:
+            f.write('theirs')
+        self.commit(other, 'b')   # origin gains a commit the worktree's head will not carry
+        git('push', '-q', 'origin', branch, cwd=other)
+        with open(os.path.join(wt, 'b'), 'w') as f:
+            f.write('ours')
+        git('add', 'b', cwd=wt)
+        git('commit', '-qm', 'ours', cwd=wt)
+        git('fetch', '-q', 'origin', cwd=wt)   # the session saw origin's tip, as T-0349's did
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
+        self.assertTrue([d for j, w, d in found if j == 'transplant' and w == 'held'], found)
+        corr = pool_mod.load_sessions(self.product)['transplant']['correction']
+        self.assertNotEqual(corr['kind'], lifecycle.BLOCKED)
+        self.assertFalse(corr.get('parked'))
+        self.assertNotIn('nothing to land', corr.get('reason') or '')
+
     def test_a_closed_items_park_is_released_not_kept(self):
         items = self.card()
         rec = self.spawn('parked', {'ok': True, 'pid': 77,

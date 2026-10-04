@@ -1787,7 +1787,7 @@ def _rewrite_account_names(wt, remote_sha, findings):
 
 
 def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None,
-            droppable=None):
+            droppable=None, transplant=False):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -1834,7 +1834,16 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     where either refusal above would stand, origin's commits the head lacks that change ONLY
     files it says yes to — review and notes rounds, filed in the factory's own store — are
     dropped instead: the old tip archived, the head pushed over it under the lease. A commit
-    that touches anything else still refuses. ``(ok, line)``."""
+    that touches anything else still refuses.
+
+    ``transplant`` (``flags.mechanical`` only — :func:`asf.harvest.mechanical.publish_worktree`
+    decides it): the run's own report declared this head a rebase the factory publishes, and
+    origin's tip is the one its worktree held — a branch cut fresh and the approved content
+    carried over. Every commit origin holds that the head lacks is then dropped the same way:
+    the old tip archived, the head pushed over it under the lease. ``(ok, line)``."""
+    if transplant:
+        droppable = _any_path
+    what = TRANSPLANT_DROPS if transplant else 'review/notes round(s)'
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
     from asf import gitpush, redact, refguard
@@ -1860,7 +1869,8 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
             # factory carries it onto the head — never the head back onto the stale remote —
             # and one it cannot carry is named, with the trunk as the instruction
             subjects = _subjects(wt, left)
-            carried = carry_onto_head(wt, left)
+            # a transplant replaced those commits on purpose: never carried back onto it
+            carried = False if transplant else carry_onto_head(wt, left)
             if not carried and not only_touching(wt, left, droppable):
                 why = loss_refusal(branch, left, main, subjects)
                 return False, f'publish {branch} refused: {why}'
@@ -1870,11 +1880,13 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
             named = ', '.join(f'{s} {subjects[s]}' if subjects.get(s) else s for s in left)
             rebased = (f'carried {len(left)} commit(s) the rebase dropped ({named}) '
                        f'(old tip kept as {archive})' if carried else
-                       f'{DROPPED_ROUNDS} {len(left)} review/notes round(s) origin held ({named}) '
+                       f'{DROPPED_ROUNDS} {len(left)} {what} origin held ({named}) '
                        f'(old tip kept as {archive})')
             lost = []
         if lost is None or lost:
-            ok, fetched, rebased = rebase_onto_remote(wt, branch)
+            # a transplant is never rebased back onto the tip it replaces
+            ok, fetched, rebased = (False, '', '') if transplant else \
+                rebase_onto_remote(wt, branch)
             if not ok and only_touching(wt, lost, droppable):
                 # origin's extra commits are review/notes rounds only: kept on an archive ref,
                 # the head published over them under the lease on the tip the evidence read
@@ -1883,7 +1895,7 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
                     return False, f'publish {branch} refused: {archive} is a protected ref'
                 subjects = _subjects(wt, lost)
                 named = ', '.join(f'{s} {subjects[s]}' if subjects.get(s) else s for s in lost)
-                rebased = (f'{DROPPED_ROUNDS} {len(lost)} review/notes round(s) origin held '
+                rebased = (f'{DROPPED_ROUNDS} {len(lost)} {what} origin held '
                            f'({named}) (old tip kept as {archive})')
             elif not ok:
                 return False, f'publish {branch} refused: {rebased or loss_refusal(branch, lost)}'
@@ -1917,6 +1929,12 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
 
 #: The words a publish line opens with when it dropped origin's review/notes rounds (``droppable``).
 DROPPED_ROUNDS = 'dropped'
+#: What a ``transplant`` publish says it dropped: the commits the session's declared rebase left.
+TRANSPLANT_DROPS = 'commit(s) the declared transplant replaces,'
+
+
+def _any_path(_path):
+    return True
 
 
 def only_touching(wt, shas, droppable):

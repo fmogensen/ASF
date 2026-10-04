@@ -425,6 +425,67 @@ class ReplayOwn(_Rounds):
         self.assertFalse(out.resolved)
 
 
+class DeclaredTransplant(_Rounds):
+    """A correct/transplant run cuts its branch fresh from the trunk and carries the approved
+    content over (a product's T-0349): origin/<branch> holds code commits the new head does not,
+    so its push is not a fast-forward, the session may not force, and the brief tells it to write
+    ``pushed: rebased <sha> — the factory publishes``. Under the flag the factory does publish it
+    — the old tip archived, the head pushed under the lease — when the report declares that exact
+    head and origin's tip is the one the worktree itself held. Anything else still refuses."""
+
+    def setUp(self):
+        super().setUp()
+        self.commit('a', 'own a\n', 'task(T-0001): own a')
+        self.push_branch()
+        self.push_from_elsewhere('f', 'fix f\n', 'fix(T-0001): a reviewer fix')
+        self.sh(['fetch', '-q', 'origin'], self.repo)   # the session saw origin's tip
+        self.land_on_trunk(('t', 'trunk\n', 'chore: the trunk moves'))
+        self.sh(['checkout', '-q', '-B', self.branch, 'origin/main'], self.repo)
+        with open(os.path.join(self.repo, 'a'), 'w') as fh:
+            fh.write('own a, carried\n')
+        self.head_sha = self.commit('f', 'fix f, carried\n',
+                                    'task(T-0001): transplanted fresh from main')
+        self.tip = self.remote()
+
+    def product(self, flags=ON):
+        return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                      'conventions': {'flags': flags, 'reviews_dir': 'reviews'}})
+
+    def test_undeclared_it_refuses_as_today(self):
+        ok, line, out = mechanical.publish_worktree(self.product(), self.repo, self.branch,
+                                                    self.tip, main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('would lose', line)
+        self.assertEqual(self.remote(), self.tip)
+        self.assertFalse(out.resolved)
+
+    def test_a_declared_transplant_is_published_and_the_old_tip_archived(self):
+        ok, line, out = mechanical.publish_worktree(self.product(), self.repo, self.branch,
+                                                    self.tip, main='main',
+                                                    declared=self.head_sha[:9])
+        self.assertTrue(ok, line)
+        self.assertIn('transplant', line)
+        self.assertEqual(self.remote(), self.head_sha)
+        self.assertEqual(self.on_origin(lifecycle.copies_archive(self.branch, self.tip)),
+                         self.tip)
+        self.assertTrue(out.resolved)
+
+    def test_a_declared_sha_that_is_not_the_head_refuses(self):
+        ok, line, _out = mechanical.publish_worktree(self.product(), self.repo, self.branch,
+                                                     self.tip, main='main', declared='0badc0de1')
+        self.assertFalse(ok, line)
+        self.assertEqual(self.remote(), self.tip)
+
+    def test_a_commit_pushed_after_the_session_looked_still_refuses(self):
+        newer = self.push_from_elsewhere('p', 'a person\'s newer commit\n', 'fix: newer')
+        ok, line, _out = mechanical.publish_worktree(self.product(), self.repo, self.branch,
+                                                     newer, main='main',
+                                                     declared=self.head_sha[:9])
+        self.assertFalse(ok, line)
+        self.assertEqual(self.remote(), newer)
+        self.assertEqual(self.on_origin(lifecycle.copies_archive(self.branch, newer)), '')
+
+
 class UnpushedEntry(unittest.TestCase):
 
     def test_the_table_holds_unpushed(self):
@@ -512,6 +573,70 @@ class UnpushedHealth(TW.Home):
         ev = run['mechanical']
         self.assertEqual((ev['event'], ev['kind'], ev['resolved']),
                          ('mechanical', lifecycle.UNPUSHED, True))
+
+
+
+class DeclaredTransplantHealth(UnpushedHealth):
+    """The T-0349 shape through the health step: the run cut its branch fresh from the trunk,
+    origin/<branch> holds a code commit the head replaces, and the report says ``pushed: rebased
+    <sha> — the factory publishes``. Flag on: published, the old tip archived, the run finished.
+    Flag off: held, as today — never parked."""
+
+    def shape(self):
+        rec = self.spawn('adj', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'own')
+        TW.git('push', '-q', 'origin', branch, cwd=wt)
+        other = tempfile.mkdtemp(prefix='reviewer_')
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        TW.git('clone', '-q', '-b', branch, TW.git('remote', 'get-url', 'origin', cwd=wt), other,
+               cwd=wt)
+        self.commit(other, 'fix')
+        TW.git('push', '-q', 'origin', branch, cwd=other)
+        tip = TW.git('rev-parse', 'HEAD', cwd=other)
+        TW.git('fetch', '-q', 'origin', cwd=wt)
+        main = TW.git('rev-parse', 'origin/main', cwd=wt)
+        TW.git('reset', '-q', '--hard', main, cwd=wt)          # cut fresh from the trunk
+        for name in ('own', 'fix'):
+            with open(os.path.join(wt, name), 'w') as f:
+                f.write(name + ', carried')
+        TW.git('add', '-A', cwd=wt)
+        TW.git('commit', '-qm', 'task: transplanted', cwd=wt)
+        head = TW.git('rev-parse', 'HEAD', cwd=wt)
+        run = pool_mod.load_sessions(self.product)['adj']
+        with open(run['log'], 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': f'REPORT\nitem: x\nkind: correct\nstatus: done\n'
+                                          f'pushed: rebased {head[:9]} — the factory publishes\n'
+                                          f'NEEDS OPERATOR: run asf land for it\n'}) + '\n')
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(self.product, 'adj', ended='2026-10-03T07:00:45Z',
+                                end_reason=reason, rc=1)
+        return wt, branch, tip
+
+    def test_flag_off_the_run_is_held(self):
+        self.flagged(False)
+        wt, branch, tip = self.shape()
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None, items={})
+        run = pool_mod.load_sessions(self.product)['adj']
+        self.assertNotEqual(run['end_reason'], 'finished')
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
+        self.assertEqual(TW.git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0], tip)
+
+    def test_flag_on_the_declared_transplant_is_published_and_the_old_tip_archived(self):
+        self.flagged(True)
+        wt, branch, tip = self.shape()
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None, items={})
+        run = pool_mod.load_sessions(self.product)['adj']
+        self.assertTrue(any(j == 'adj' and w == 'published' for j, w, _d in found), found)
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertEqual(TW.git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
+                         TW.git('rev-parse', 'HEAD', cwd=wt))
+        archive = lifecycle.copies_archive(branch, tip)
+        self.assertEqual(TW.git('ls-remote', '--heads', 'origin', archive, cwd=wt).split()[0], tip)
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
 
 
 if __name__ == '__main__':

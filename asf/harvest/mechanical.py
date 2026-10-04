@@ -20,8 +20,11 @@ those causes, applied by the lane (:mod:`asf.harvest.lane`) *before* it writes a
   :func:`round_file`) are archived and the head published over them under the lease; a rebase
   onto ``origin/<branch>`` that conflicts because origin was rewritten under the worktree (a
   lane rebuild, a transplant) is replayed from the fork point — only the session's own commits
-  onto the rewritten tip (:func:`replay_own`) — and published. Anything else origin holds that
-  the push would lose still refuses, as today; no commits is the ``empty branch`` path.
+  onto the rewritten tip (:func:`replay_own`) — and published. A run whose report declared
+  ``pushed: rebased <its head>`` over the very tip its worktree held (a correct/transplant run
+  that cut the branch fresh: :func:`declared_transplant`) is published over that tip, archived.
+  Anything else origin holds that the push would lose still refuses, as today; no commits is
+  the ``empty branch`` path.
 
 Every entry is a function ``(lane, f, cause) -> Outcome`` over what the lane already does, never
 a new git path. :func:`apply` runs one, only under ``conventions.flags.mechanical: on`` (default
@@ -35,7 +38,7 @@ import os
 from asf import gitpush, refguard
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
-from asf.workers import lifecycle
+from asf.workers import lifecycle, report
 from asf.workers.pool import now_iso
 
 #: ``conventions.flags.<FLAG>`` turns the table on; anything but an "on" word is off.
@@ -175,13 +178,31 @@ def replay_own(wt, branch):
                   f'origin/{branch} ({tip[:9]})')
 
 
+def declared_transplant(wt, branch, remote_sha, declared, seen):
+    """True when the factory may publish ``wt``'s HEAD over ``remote_sha`` as a transplant: the
+    run's report declared ``pushed: rebased <sha>`` (``declared``, :func:`asf.workers.report.
+    rebased`) and that sha is this HEAD, and origin's tip is ``seen`` — the tip the worktree's
+    own ``origin/<branch>`` held before the publish, so the session replaced what it saw and
+    nothing pushed after it looked is dropped (the lease then guards origin moving since)."""
+    declared = (declared or '').strip().lower()
+    if len(declared) < 7 or not remote_sha or seen != remote_sha:
+        return False
+    head = _git(wt, 'rev-parse', 'HEAD').stdout.strip().lower()
+    return bool(head) and head.startswith(declared)
+
+
 def publish_worktree(product, wt, branch, remote_sha, main='main', protected=None,
-                     push_timeout_s=None):
+                     push_timeout_s=None, declared=''):
     """``(ok, line, outcome)``: :func:`asf.workers.lifecycle.publish` of ``wt``'s HEAD with the
-    table's two answers to its refusals — review/notes rounds dropped (``droppable``), a
+    table's three answers to its refusals — review/notes rounds dropped (``droppable``), a
     rewritten origin replayed onto (:func:`replay_own`, then published again; a refusal there
-    leaves the worktree as it was). ``outcome``: the :class:`Outcome` (kind ``unpushed``)."""
+    leaves the worktree as it was), and a declared transplant published over the tip it replaces
+    (:func:`declared_transplant`: ``declared`` is the sha the run's report said it rebased to —
+    the brief's ``pushed: rebased <sha> — the factory publishes``; the old tip is archived).
+    ``outcome``: the :class:`Outcome` (kind ``unpushed``)."""
     droppable = round_file(getattr(product, 'conventions', None))
+    seen = _git(wt, 'rev-parse', '-q', '--verify',
+                f'refs/remotes/origin/{branch}^{{commit}}').stdout.strip()
     ok, line = lifecycle.publish(wt, branch, remote_sha, main=main, protected=protected,
                                  push_timeout_s=push_timeout_s, droppable=droppable)
     if not ok and lifecycle.rebase_conflict(line):
@@ -198,6 +219,14 @@ def publish_worktree(product, wt, branch, remote_sha, main='main', protected=Non
                 line = f'{line} (the factory {how}, and that refused too: {line2})'
         elif how:
             line = f'{line} ({how})'
+    if not ok and (lifecycle.stale_head(line) or lifecycle.rebase_conflict(line)) \
+            and declared_transplant(wt, branch, remote_sha, declared, seen):
+        ok2, line2 = lifecycle.publish(wt, branch, remote_sha, main=main, protected=protected,
+                                       push_timeout_s=push_timeout_s, transplant=True)
+        if ok2:
+            ok, line = True, f'the run declared a transplant: {line2}'
+        else:
+            line = f'{line} (published as the declared transplant, that refused too: {line2})'
     new = _git(wt, 'rev-parse', 'HEAD').stdout.strip()
     return ok, line, Outcome(UNPUSHED, bool(ok), new, line)
 
@@ -216,7 +245,8 @@ def unpushed(lane, f, cause):
         product, wt, b, lifecycle.RemoteHeads().sha(wt, b) or '',
         main=getattr(lane, 'trunk', None) or 'main',
         protected=refguard.listed(conv) if conv is not None else None,
-        push_timeout_s=gitpush.push_timeout(conv))
+        push_timeout_s=gitpush.push_timeout(conv),
+        declared=report.rebased(str((lifecycle.result_of(run) or {}).get('result') or '')))
     return out
 
 

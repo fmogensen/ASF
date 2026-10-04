@@ -414,8 +414,9 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     if mechanical.enabled(product):
         # flags.mechanical (W2-PR3b): review/notes rounds origin holds are dropped, a rewritten
         # origin is replayed onto — the event on the run, as the lane's table writes it
+        declared = report_mod.rebased(str((ev.result or {}).get('result') or ''))
         ok, line, out = mechanical.publish_worktree(product, wt, branch, ev.remote_sha,
-                                                    **publish_args)
+                                                    declared=declared, **publish_args)
         was = run.get('mechanical') or {}
         if run.get('job') and (was.get('kind'), was.get('head'), was.get('resolved')) \
                 != (out.kind, out.head, out.resolved):  # once per outcome, not every pass
@@ -770,10 +771,14 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             pool_mod.update_session(product, job, harvested=landed_sha)
             s.update(harvested=landed_sha)
             found.append((job, 'landed', f'its branch landed at {landed_sha[:9]}: nothing to push'))
-        elif question and items is not None and (reason.startswith(UNPUSHED_REASON_PREFIXES)
-                                                  or reason == f'failed: {lifecycle.EMPTY_BRANCH}'):
+        elif question and items is not None and not (ev.unpushed or ev.uncommitted) and (
+                reason.startswith(UNPUSHED_REASON_PREFIXES)
+                or reason == f'failed: {lifecycle.EMPTY_BRANCH}'):
             # nothing to land, and the run's own report declared a question for a person:
-            # relaunching it buys the same report again, so the item is parked (F-0126)
+            # relaunching it buys the same report again, so the item is parked (F-0126). A run
+            # with commits or files in its worktree has something to land — never this park (a
+            # product's T-0349: an approved transplant parked "nothing to land" because its
+            # report asked a person to publish it); it is held below with its work as the input
             fields, line = lifecycle.blocked_park(
                 question, s.get('item'), lifecycle.card_fingerprint(product, s.get('item'), items), now)
             pool_mod.update_session(product, job, **fields)
