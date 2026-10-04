@@ -22,6 +22,13 @@ main: main
 # and pushes to origin, so `git pull` here before reading the tables.
 backlog_dir: ~/Code/acme/sample-backlog
 
+# ids: how a new S-/T-/B- id is taken. `claim: push` (the default) takes it by creating a ref
+# refs/asf/ids/<P>-<nnnn> on the record's origin — create-only, so two writers never get the same
+# number; a launch claims its session's whole BACKLOG_ID_RANGE block with one push, and a cloud
+# session reads that block from its brief. `claim: off` keeps the host-local reservation only.
+ids:
+  claim: push
+
 # conventions: every path/naming choice the record and tick tools need, so no tool hardcodes a
 # directory name or branch prefix.
 conventions:

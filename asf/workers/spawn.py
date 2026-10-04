@@ -109,14 +109,50 @@ def _reserve_id_range(product, job, prefixes, start, size):
     for _j, rng in rows:
         for m in re.finditer(r'([A-Z]):(\d+)-(\d+)', rng):
             top[m.group(1)] = max(top.get(m.group(1), -1), int(m.group(3)))
-    parts = []
-    for p in prefixes:
-        lo = max(start, top.get(p, start - 1) + 1)
-        parts.append(f'{p}:{lo:04d}-{lo + size - 1:04d}')
-    rng = ','.join(parts)
+    claimed = claim_id_blocks(product, job, prefixes, start, size, top)
+    if claimed:
+        rng = claimed
+    else:
+        parts = []
+        for p in prefixes:
+            lo = max(start, top.get(p, start - 1) + 1)
+            parts.append(f'{p}:{lo:04d}-{lo + size - 1:04d}')
+        rng = ','.join(parts)
     with open(path, 'a', encoding='utf-8') as f:
         f.write(f'{job}\t{rng}\t{pool_mod.now_iso()}\n')
     return rng
+
+
+def claim_repo(product):
+    """The record repo whose origin holds the id claims: the tick's record clone when it
+    exists, else the product's backlog checkout. None when neither has an ``origin``."""
+    from asf.record import idclaim
+    from asf.tick import shadow
+    for d in (shadow.record_dir(product), getattr(product, 'backlog_dir', None)):
+        if d and idclaim.has_origin(d):
+            return d
+    return None
+
+
+def claim_id_blocks(product, job, prefixes, start, size, local_top=None):
+    """Claim the job's blocks on the record repo's origin (:mod:`asf.record.idclaim`), above
+    every local reservation (``local_top``) and every id the record holds. Returns the
+    ``BACKLOG_ID_RANGE`` text, or None when claims are off or there is no origin — the caller
+    keeps the local-only block. A claim that fails after its bounded attempts is a SpawnError:
+    a launch never goes out with a block nobody holds."""
+    from asf.record import idclaim
+    from asf.record.ids import record_top
+    if not idclaim.enabled(product):
+        return None
+    repo = claim_repo(product)
+    if not repo:
+        return None
+    floors = {p: max((local_top or {}).get(p, 0), record_top(repo, p)) for p in prefixes}
+    try:
+        blocks = idclaim.claim(repo, {p: size for p in prefixes}, job, floors=floors, start=start)
+    except idclaim.ClaimError as e:
+        raise SpawnError(f'id claim for {job}: {e}') from None
+    return idclaim.range_text(blocks, order=list(prefixes))
 
 
 def release_id_range(product, job):

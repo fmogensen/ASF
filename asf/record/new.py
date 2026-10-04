@@ -128,7 +128,17 @@ def cmd_new(args, root):
             print(f"{iid}: {title2} (overlap {score:.2f})", file=sys.stderr)
         return 3
 
-    new_id = mint_id(root, canonical, type_)
+    if type_ == 'task' and not args.force:
+        from asf.record.idcheck import duplicate_task
+        stories = [s.strip() for k, sub, v in sets if k == 'stories' and not sub
+                   for s in (v if isinstance(v, list) else str(v).split(',')) if str(s).strip()]
+        dup = duplicate_task(canonical, args.parent, stories, writes)
+        if dup:
+            print(f"{dup}: an open Task with the same parent, stories and writes "
+                  f"(--force to add it anyway)", file=sys.stderr)
+            return 3
+
+    new_id = mint_id(root, canonical, type_, claim=True)
 
     meta = frontmatter.FrontmatterDict()
     meta['id'] = new_id

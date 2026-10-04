@@ -2,6 +2,13 @@
 
 A per-job id range (``BACKLOG_ID_RANGE=S:0300-0349,T:0900-0949``) lets a parallel writer reserve
 a block so two worktrees never mint the same id.
+
+Ids are claimed by push (:mod:`asf.record.idclaim`): a job's block is a create-only ref
+``refs/asf/ids/<P>-<lo>`` on the record repo's origin, claimed before the launch (so a cloud
+session, which has neither the env var's host nor the asf CLI, is safe too — its brief carries
+the range); ``asf new`` outside a block claims its single id the same way. A record repo
+without ``origin``, or a product with ``ids: {claim: off}``, keeps the local behaviour.
+At land, :mod:`asf.record.idcheck` refuses a plan whose new ids no claim covers.
 """
 import os
 import re
@@ -22,6 +29,21 @@ def _id_range(prefix):
     return None
 
 
+def record_top(root, prefix):
+    """The highest number the record at ``root`` holds for ``prefix`` (its card file names)."""
+    top = 0
+    for folder, p in set(TYPES.values()):
+        if p != prefix:
+            continue
+        d = os.path.join(root, folder)
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                m = re.match(rf'^{prefix}-(\d+)\.md$', name)
+                if m:
+                    top = max(top, int(m.group(1)))
+    return top
+
+
 def _in_worktree(root):
     """A linked worktree has a .git FILE (pointing at the main repo); the canonical clone has a
     .git directory and a plain fixture directory has none — only the worktree case is the
@@ -29,12 +51,27 @@ def _in_worktree(root):
     return os.path.isfile(os.path.join(root, '.git'))
 
 
-def mint_id(root, canonical, type_):
+def _claims_enabled(root):
+    """``ids.claim`` of the product whose checkout holds ``root`` (default on)."""
+    from asf import env
+    from asf.record import idclaim
+    try:
+        name = env.product_of_dir(root)
+        product = env.load_product(name) if name else None
+    except Exception:  # noqa: BLE001 — an unresolvable product keeps the default
+        product = None
+    return idclaim.enabled(product)
+
+
+def mint_id(root, canonical, type_, claim=False, claimant=None):
+    """The next id for ``type_``. Inside ``BACKLOG_ID_RANGE``: the next free number of the
+    job's claimed block. Otherwise, with ``claim`` (``asf new``) or in a worktree, and the
+    record repo has an ``origin``: a single id claimed by push (:mod:`asf.record.idclaim`) —
+    the same allocator a job's block comes from. Otherwise the record's top + 1, stepping over
+    every block the local claim mirror shows taken."""
+    from asf.record import idclaim
     folder, prefix = TYPES[type_]
     rng = _id_range(prefix)
-    if rng is None and _in_worktree(root) and not os.environ.get('BACKLOG_ALLOW_MINT'):
-        raise SystemExit(f"new: minting {prefix}-ids in a worktree needs BACKLOG_ID_RANGE (e.g. {prefix}:0300-0349) — "
-                         f"parallel writers collide otherwise")
     max_n = 0
     for iid, rec in canonical.items():
         if rec['meta'].get('type') == type_:
@@ -53,7 +90,23 @@ def mint_id(root, canonical, type_):
         if n > hi:
             raise SystemExit(f"new: id range {prefix}:{lo:04d}-{hi:04d} exhausted")
         return f"{prefix}-{n:04d}"
-    return f"{prefix}-{max_n + 1:04d}"
+    worktree = _in_worktree(root)
+    if (claim or worktree) and idclaim.has_origin(root) and _claims_enabled(root):
+        who = claimant or os.environ.get('ASF_SESSION') or os.environ.get('ASF_JOB') or 'asf new'
+        try:
+            return idclaim.claim_one(root, prefix, who, floor=max_n)
+        except idclaim.ClaimError as e:
+            raise SystemExit(f"new: {prefix}-id claim on origin failed: {e}") from None
+    if worktree and not os.environ.get('BACKLOG_ALLOW_MINT'):
+        raise SystemExit(f"new: minting {prefix}-ids in a worktree needs BACKLOG_ID_RANGE (e.g. {prefix}:0300-0349) "
+                         f"or an origin to claim on — parallel writers collide otherwise")
+    n = max_n + 1
+    taken = idclaim.claims(root) if os.path.isdir(os.path.join(root, '.git')) or worktree else []
+    c = idclaim.covers(taken, f"{prefix}-{n}")
+    while c is not None:  # a number inside a block a job holds is that job's, never ours
+        n = c.hi + 1
+        c = idclaim.covers(taken, f"{prefix}-{n}")
+    return f"{prefix}-{n:04d}"
 
 
 def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why,
