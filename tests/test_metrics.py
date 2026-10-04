@@ -21,6 +21,7 @@ from asf.record.index import do_index
 from asf.conventions import Conventions
 from asf.metrics import import_sessions
 from asf.metrics import metrics
+from asf.scorecard import score
 
 DAY = '2026-09-21'
 
@@ -130,6 +131,10 @@ class Base(unittest.TestCase):
 
     def read(self, rel):
         with open(os.path.join(self.root, rel), encoding='utf-8') as f:
+            return f.read()
+
+    def read_bytes(self, rel):
+        with open(os.path.join(self.root, rel), 'rb') as f:
             return f.read()
 
     def put(self, stream, ev):
@@ -270,6 +275,112 @@ class Append(Base):
         self.assertEqual(rc, 2)
         self.assertIn('line 2:', err)
         self.assertEqual(len(self.read('metrics/ci/2026-09-21.jsonl').splitlines()), 2)
+
+
+class SessionUpdateTests(Base):
+    """A corrected `sessions` verdict reaches the stream (§2.5): `append_event`'s third status."""
+
+    def session(self, **kw):
+        return dict({'task': 'fix-free-plan-t3-r1', 'account': 'accta', 'ts': f'{DAY}T09:00:00Z',
+                     'result': 'failed: not pushed: 3 uncommitted file(s), 0 unpushed commit(s)',
+                     'reason': 'original reason', 'usd': 1.5, 'minutes': 12.0,
+                     'tokens_input': 100, 'tokens_output': 50, 'tokens_cache_read': 10,
+                     'tokens_cache_write': 5}, **kw)
+
+    def test_a_first_event_is_appended(self):
+        self.assertEqual(self.put('sessions', self.session())[0], 'appended')
+
+    def test_an_unchanged_result_is_exists_and_writes_no_byte(self):
+        self.put('sessions', self.session())
+        rel = 'metrics/sessions/2026-09-21.jsonl'
+        before = self.read_bytes(rel)
+        self.assertEqual(self.put('sessions', self.session())[0], 'exists')
+        self.assertEqual(self.read_bytes(rel), before)
+
+    def test_a_changed_result_is_updated_and_leaves_the_owned_fields_alone(self):
+        self.put('sessions', self.session())
+        status, path = self.put('sessions', self.session(
+            result='finished', reason=None, usd=None, minutes=None,
+            tokens_input=None, tokens_output=None, tokens_cache_read=None, tokens_cache_write=None))
+        self.assertEqual(status, 'updated')
+        lines = [json.loads(l) for l in self.read('metrics/sessions/2026-09-21.jsonl').splitlines()]
+        self.assertEqual(len(lines), 1)
+        line = lines[0]
+        self.assertEqual(line['result'], 'finished')
+        self.assertEqual((line['reason'], line['usd'], line['minutes']), ('original reason', 1.5, 12.0))
+        self.assertEqual((line['tokens_input'], line['tokens_output'], line['tokens_cache_read'],
+                          line['tokens_cache_write']), (100, 50, 10, 5))
+
+    def test_every_other_stream_stays_exists_only(self):
+        cases = (
+            ('ci', ci_event(1)),
+            ('ticks', {'tick': 1, 'ts': f'{DAY}T08:00:00Z', 'launches': 3, 'merges': 1, 'stalls': 0,
+                      'refusals': 1, 'relaunches': 1}),
+            ('landings', {'ts': f'{DAY}T05:00:00Z', 'job': 'code-t-0001', 'sha': 'a' * 40,
+                         'branch': 'worker/T-0001', 'kind': 'code'}),
+            ('gates', {'ts': f'{DAY}T06:41:12Z', 'seconds': 412.7, 'branches': ['spec/F-0100'],
+                      'conclusion': 'failure'}),
+        )
+        for stream, ev in cases:
+            self.put(stream, ev)
+            rel = f'metrics/{stream}/2026-09-21.jsonl'
+            before = self.read_bytes(rel)
+            self.assertEqual(self.put(stream, ev)[0], 'exists')
+            self.assertEqual(self.read_bytes(rel), before, stream)
+
+    def test_a_rewrite_keeps_the_other_lines_order_and_bytes(self):
+        self.put('sessions', self.session(task='a', ts=f'{DAY}T08:00:00Z'))
+        self.put('sessions', self.session(task='b', ts=f'{DAY}T09:00:00Z'))
+        self.put('sessions', self.session(task='c', ts=f'{DAY}T10:00:00Z'))
+        before = self.read('metrics/sessions/2026-09-21.jsonl').splitlines()
+        self.put('sessions', self.session(task='b', ts=f'{DAY}T09:00:00Z', result='finished'))
+        after = self.read('metrics/sessions/2026-09-21.jsonl').splitlines()
+        self.assertEqual(len(after), 3)
+        self.assertEqual(after[0], before[0])
+        self.assertEqual(after[2], before[2])
+        self.assertNotEqual(after[1], before[1])
+        self.assertEqual(json.loads(after[1])['task'], 'b')
+        self.assertEqual(json.loads(after[1])['result'], 'finished')
+
+    def test_cmd_append_reports_updated(self):
+        run_cli(self.root, 'append', 'sessions', json.dumps(self.session()))
+        rc, out, _err = run_cli(self.root, 'append', 'sessions', json.dumps(self.session(result='finished')))
+        self.assertEqual(rc, 0)
+        self.assertIn('updated metrics/sessions/2026-09-21.jsonl', out)
+
+    def test_a_rejudged_run_is_no_longer_counted_against_its_own_class(self):
+        """The end-to-end case: a run backfilled `failed: not pushed`, then re-judged `finished`,
+        leaves a stream the scorecard counts as zero runs in that class (F-0094)."""
+        home = tempfile.mkdtemp(prefix='session_update_home_')
+        self.addCleanup(shutil.rmtree, home, True)
+        state = os.path.join(home, 'state', 'sample')
+        os.makedirs(state)
+        state_path = os.path.join(state, 'sessions.jsonl')
+        product = env.Product('sample', {})
+
+        def write_registry(end_reason):
+            with open(state_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'job': 'fix-free-plan-t3-r1', 'item': 'T-0001', 'kind': 'fix',
+                                    'account': 'accta', 'started': f'{DAY}T09:00:00Z'}) + '\n')
+                f.write(json.dumps({'job': 'fix-free-plan-t3-r1', 'ended': f'{DAY}T09:20:00Z',
+                                    'end_reason': end_reason}) + '\n')
+
+        write_registry('failed: not pushed: 0 uncommitted file(s), 0 unpushed commit(s)')
+        with mock.patch.object(env, 'ASF_HOME', home):
+            evs = metrics.sessions_from_registry(product, since_day='2026-09-20', items=self.items,
+                                                 state_path=state_path)
+        self.assertEqual(self.put('sessions', evs[0])[0], 'appended')
+
+        write_registry('finished')
+        with mock.patch.object(env, 'ASF_HOME', home):
+            evs = metrics.sessions_from_registry(product, since_day='2026-09-20', items=self.items,
+                                                 state_path=state_path)
+        status, _path = self.put('sessions', evs[0])
+        self.assertEqual(status, 'updated')
+
+        lines = metrics.read_stream(self.root, 'sessions', days=['2026-09-21'])
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(score.failure_class(lines[0]['result']), 'finished')
 
 
 def fixture_streams(test):
