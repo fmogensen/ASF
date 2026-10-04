@@ -10,15 +10,16 @@ import types
 import unittest
 from unittest import mock
 
-from asf import attestation, gh_limit, merge_queue, stale_ref, trunk_red
+from asf import attestation, env, gh_limit, merge_queue, stale_ref, trunk_red
 from asf.harvest import deploy
+from asf.harvest import lane
 from asf.harvest import harvest as H
 from tests import contracts
 from tests.contracts import SLUG, FixtureGh
 
 BEHAVIOURS = ('stale-merge-ref', 'skipped-required-job/attested',
               'skipped-required-job/not-attested', 'run-success-hiding-job', 'rate-limit',
-              'pr-closed-unmerged', 'path-filtered-check')
+              'pr-closed-unmerged', 'path-filtered-check', 'label-supersedes-first-run')
 PRODUCT = types.SimpleNamespace(repo_slug=SLUG, conventions={})
 
 
@@ -223,6 +224,46 @@ class PrClosedUnmerged(Base):
         number = contracts.fixture(self.B, 'merged-sha')['argv'][2]
         with mock.patch.object(H, '_gh', side_effect=FixtureGh(self.B)):
             self.assertEqual(H.merged_sha(SLUG, number), '')
+
+
+class LabelSupersedesFirstRun(Base):
+    """A product's #1057: the heavy-CI label went on at 11:21:14 while the PR's first ``ci`` run
+    (created 11:11:14) was in progress; the labelled run (11:21:17) shared its concurrency group
+    and the host cancelled the first one at 11:21:37. The lane reads the head's runs before the
+    label (:meth:`asf.harvest.lane.GitHubHost.run_in_flight`) and holds it while one runs."""
+    B = 'label-supersedes-first-run'
+
+    def host(self):
+        product = env.Product('p', {'repo_slug': SLUG, 'conventions': {},
+                                    'ci': {'workflow': 'ci.yml'}})
+        return lane.GitHubHost(product, None)
+
+    def head(self):
+        return contracts.fixture(self.B, 'head-runs')['argv'][1].split('head_sha=')[1] \
+            .split('&')[0]
+
+    def test_the_first_run_was_cancelled_by_the_labelled_twin(self):
+        runs = out(self.B, 'head-runs')['workflow_runs']
+        ci = sorted((r for r in runs if r['name'] == 'ci'), key=lambda r: r['created_at'])
+        self.assertEqual([r['conclusion'] for r in ci], ['cancelled', 'success'])
+        self.assertEqual({r['head_sha'] for r in ci}, {self.head()})
+
+    def test_at_the_labels_moment_the_first_run_is_in_flight(self):
+        fx = FixtureGh(self.B)
+        argv = tuple(contracts.fixture(self.B, 'head-runs')['argv'])
+        body = out(self.B, 'head-runs')
+        first = min((r for r in body['workflow_runs'] if r['name'] == 'ci'),
+                    key=lambda r: r['created_at'])
+        # rewound to 11:21:14: the labelled run not created yet, the first one in progress
+        body['workflow_runs'] = [dict(r, status='in_progress', conclusion=None)
+                                 if r is first else r for r in body['workflow_runs']
+                                 if r['created_at'] <= '2026-10-03T11:21:14Z']
+        fx.answers[argv] = (0, json.dumps(body), '')
+        with mock.patch.object(H, '_gh', side_effect=fx):
+            self.assertEqual(self.host().run_in_flight(self.head()), (first['id'], 'in_progress'))
+        # as recorded (every run completed): nothing in flight, the label may go on
+        with mock.patch.object(H, '_gh', side_effect=FixtureGh(self.B)):
+            self.assertIsNone(self.host().run_in_flight(self.head()))
 
 
 if __name__ == '__main__':

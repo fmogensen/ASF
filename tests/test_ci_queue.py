@@ -1012,6 +1012,38 @@ class TestTrunkRelief(ReliefBase):
                            for k, v in self.runs().items()})
         self.assertEqual(self.relieve(p, run, minutes=1), (0, 0))
 
+    def test_a_prs_first_run_is_never_cancelled(self):
+        # the queue holds a PR's first run (it opens the PR only once the run fits); once
+        # started it is never cut — a cancelled first run is a red mark on every PR it hits.
+        # A re-run (attempt 2) or a run of a head the branch has moved past still goes.
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        for r in runs['pr.yml']:
+            r['attempt'] = 1
+        runs['pr.yml'][1]['attempt'] = 2                      # 102: a re-run
+        gh, run = self.gh(runs)
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        self.assertEqual(self.cancels(gh), ['102', '201'])
+        self.assertIn("relief: exempt worker/plan-measure — its PR's first run on aaaaaaaaa: "
+                      "held before its start, never cut", self.lines)
+        # the branch moved on: 101's head is superseded, its run is fair game
+        data = ci_queue.load('p')
+        data['relief'] = []
+        ci_queue.save('p', data)
+        runs = self.runs()
+        for r in runs['pr.yml']:
+            r['attempt'] = 1
+        t = self.at(self.t0 - datetime.timedelta(minutes=2))
+        runs['pr.yml'].append({'databaseId': 107, 'status': 'queued', 'event': 'pull_request',
+                               'headBranch': 'worker/plan-measure', 'headSha': 'c' * 40,
+                               'createdAt': t, 'attempt': 1})
+        gh, run = self.gh(runs)
+        self.relieve(p, run)
+        self.assertIn('101', self.cancels(gh))
+        self.assertNotIn('102', self.cancels(gh))
+
     def test_a_run_whose_pr_changes_ci_config_is_never_cancelled(self):
         p = self.product()
         os.makedirs(env.state_dir('p'), exist_ok=True)
@@ -3051,6 +3083,35 @@ class TestHeldPrOpens(ReliefBase):
             ci_queue.apply(p, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append,
                            now=self.t0 + datetime.timedelta(minutes=5))
         self.assertIn('pr:task/T-0341', ci_queue.load('p')['entries'])
+
+
+class TestNoPrOnAConflict(unittest.TestCase):
+    """A product's #1037/#1023/#1017: opened on branches that conflicted with the trunk —
+    "its run starts", and none ever did (GitHub runs no ``pull_request`` workflow on a
+    conflicting PR). The queue's opener refuses such a branch: the lane sends it back to be
+    rebased instead."""
+
+    def _open(self, conflict):
+        fake = mock.Mock(mode='pr', slug='o/p', repo='/r', trunk='main')
+        fake.host.open.return_value = (42, '')
+        from asf.harvest import lane as lane_mod
+        with mock.patch.object(lane_mod, 'Lane', return_value=fake), \
+                mock.patch.object(lane_mod, 'conflict_files', return_value=conflict) as cf:
+            got = ci_queue._open_pr(env.Product('p', {'repo_slug': 'o/p'}), 'task/T-0500',
+                                    'T-0500', {})
+        return got, fake, cf
+
+    def test_a_conflicting_branch_is_not_opened(self):
+        (number, why), fake, cf = self._open(['a.ts'])
+        self.assertIsNone(number)
+        self.assertIn('conflicts with origin/main in a.ts', why)
+        fake.host.open.assert_not_called()
+        cf.assert_called_once_with('/r', 'main', 'task/T-0500')
+
+    def test_a_clean_branch_is_opened(self):
+        got, fake, _cf = self._open([])
+        self.assertEqual(got, (42, ''))
+        fake.host.open.assert_called_once_with('task/T-0500', 'T-0500')
 
 
 class TestAdmittedStarts(ReliefBase):
