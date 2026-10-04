@@ -111,6 +111,17 @@ class BuildInvariants(unittest.TestCase):
         self.assertEqual((env['ASF_PRODUCT'], env['ASF_JOB'], env['HOME']), ('p', 'j', '/homes/a'))
         self.assertNotIn('BACKLOG_ID_RANGE', env)
 
+    def test_a_child_given_a_home_never_keeps_the_callers_runtime_config_dir(self):
+        # the install e2e ran a real runtime CLI in a temp HOME, but under a worker session's
+        # CLAUDE_CONFIG_DIR: its `plugin marketplace add` landed in that account's live settings
+        base = {'PATH': '/bin', 'HOME': '/me', hermetic.RUNTIME_CONFIG_DIR: '/me/.cfg/acct-a'}
+        for mode in hermetic.MODES:
+            env = hermetic.build(base, home='/tmp/t/home', mode=mode,
+                                 passthrough=(hermetic.RUNTIME_CONFIG_DIR,))
+            self.assertNotIn(hermetic.RUNTIME_CONFIG_DIR, env, mode)
+        # no home of its own: the caller's runtime is the child's, as before
+        self.assertEqual(hermetic.build(base)[hermetic.RUNTIME_CONFIG_DIR], '/me/.cfg/acct-a')
+
     def test_git_init_under_the_built_env_ignores_the_hosts_default_branch(self):
         # B-0038 as a live check: a global gitconfig says master; a child git says the trunk
         tmp = tempfile.mkdtemp()
@@ -245,7 +256,9 @@ class OneBuilderTests(unittest.TestCase):
                  'print(json.dumps({'
                  '"git": [k.lower() for k, _ in hermetic.git_config_pairs(os.environ)],'
                  '"identity": [v for v in hermetic.CALLER_IDENTITY if v in os.environ],'
-                 '"home": env.ASF_HOME}))')
+                 '"home": env.ASF_HOME,'
+                 '"runtime": os.environ.get(hermetic.RUNTIME_CONFIG_DIR, "")}))')
+        base[hermetic.RUNTIME_CONFIG_DIR] = os.path.join(tempfile.gettempdir(), 'callers-runtime')
         for entry in ('import tests', 'import tests.test_00_home'):
             out = subprocess.run([sys.executable, '-c', f'{entry}; {probe}'], cwd=root, env=base,
                                  capture_output=True, text=True)
@@ -255,6 +268,7 @@ class OneBuilderTests(unittest.TestCase):
             self.assertEqual(got['identity'], [], entry)
             self.assertNotEqual(os.path.realpath(got['home']),
                                 os.path.realpath(os.path.expanduser('~/.ASF')), entry)
+            self.assertTrue(got['runtime'].startswith(got['home']), entry)
         # Both entries above import tests/__init__.py first — Python cannot reach
         # tests.test_00_home without it — so the package guard masks its twin's, and this loop
         # alone stays green with tests/test_00_home.py's own strip deleted. `discover -s tests`
@@ -264,6 +278,66 @@ class OneBuilderTests(unittest.TestCase):
         out = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests',
                               '-p', 'test_00_home.py'], cwd=root, env=base,
                              capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+
+class OperatorFilesGuardTests(unittest.TestCase):
+    """Both of the suite's entry points snapshot the operator's own files and exit
+    :data:`asf.hermetic.LEAK_EXIT` when a process wrote a path of its own into one — here against
+    a fake operator home (:data:`asf.hermetic.OPERATOR_HOME_VAR`), never the real one."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def setUp(self):
+        self.op = tempfile.mkdtemp(prefix='asf-operator-')
+        self.addCleanup(shutil.rmtree, self.op, True)
+        os.makedirs(os.path.join(self.op, '.ASF', 'products'))
+        with open(os.path.join(self.op, '.ASF', 'config.yaml'), 'w', encoding='utf-8') as f:
+            f.write('worker_pool:\n  accounts:\n    - name: a\n      config_dir: ~/workers/a\n')
+        self.settings = os.path.join(self.op, 'workers', 'a', 'settings.json')
+        os.makedirs(os.path.dirname(self.settings))
+        with open(self.settings, 'w', encoding='utf-8') as f:
+            f.write('{"theme": "dark"}\n')
+        self.base = dict(os.environ, PYTHONPATH=self.ROOT, **{hermetic.OPERATOR_HOME_VAR: self.op})
+        self.base.pop('ASF_TESTS_HOME', None)
+        self.base.pop('ASF_HOME', None)
+
+    def run_child(self, entry, write):
+        code = (f'{entry}\nimport json, os, tempfile\n'
+                f'path = {self.settings!r}\n{write}\n')
+        return subprocess.run([sys.executable, '-c', code], cwd=self.ROOT, env=self.base,
+                              capture_output=True, text=True)
+
+    LEAK = ('json.dump({"extraKnownMarketplaces": {"asf": {"path": os.path.join('
+            'tempfile.gettempdir(), "asf_install_e2e_x", "home", ".ASF", "plugin")}}}, '
+            'open(path, "w"))')
+
+    ENTRIES = ('import tests',
+               'import sys; sys.path.insert(0, "tests"); import test_00_home')
+
+    def test_the_operator_config_names_the_files_watched(self):
+        files = hermetic.operator_files(self.op)
+        self.assertIn(self.settings, files)
+        self.assertIn(os.path.join(self.op, '.ASF', 'config.yaml'), files)
+
+    def test_a_process_that_writes_a_suite_path_into_an_operator_file_fails(self):
+        for entry in self.ENTRIES:
+            with open(self.settings, 'w', encoding='utf-8') as f:
+                f.write('{"theme": "dark"}\n')
+            out = self.run_child(entry, self.LEAK)
+            self.assertEqual(out.returncode, hermetic.LEAK_EXIT, entry + out.stderr)
+            self.assertIn(self.settings, out.stderr, entry)
+
+    def test_a_live_change_without_a_suite_path_and_no_change_both_pass(self):
+        for entry in self.ENTRIES:
+            for write in ('pass', 'open(path, "w").write(\'{"theme": "light"}\')'):
+                out = self.run_child(entry, write)
+                self.assertEqual(out.returncode, 0, entry + write + out.stderr)
+
+    def test_an_earlier_leak_already_in_the_file_is_not_this_runs(self):
+        leaked = self.run_child(self.ENTRIES[0], self.LEAK)
+        self.assertEqual(leaked.returncode, hermetic.LEAK_EXIT, leaked.stderr)
+        out = self.run_child(self.ENTRIES[0], 'open(path, "a").write("\\n")')
         self.assertEqual(out.returncode, 0, out.stderr)
 
 

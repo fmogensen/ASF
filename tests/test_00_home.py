@@ -10,6 +10,11 @@ import shutil
 import tempfile
 import unittest
 
+# Twin of tests/__init__.py's guard: the operator's own files, snapshotted now, checked at exit.
+from asf import hermetic as _hermetic  # imports nothing of asf.env: ASF_HOME is set below
+
+_hermetic.guard_operator_files()
+
 
 def hermetic_home():
     chosen = os.environ.get('ASF_TESTS_HOME')
@@ -31,6 +36,9 @@ def hermetic_home():
     # git applies it to every repo — so a fixture repo the suite just created reports the
     # operator's real hook dir and `asf hooks install` calls those hooks foreign.
     hermetic.strip_git_config(os.environ)
+    # the runtime's config dir is the caller's (a worker session's is its account's): the suite's
+    # is its own, so a runtime CLI a test reaches never writes an operator's settings
+    os.environ[hermetic.RUNTIME_CONFIG_DIR] = os.path.join(chosen, 'runtime-config')
     # the host-pressure guard reads a quiet host: a loaded machine must not hold the suite's launches
     os.environ['ASF_HOST_READING'] = '0 1 0'
     return chosen
@@ -59,6 +67,10 @@ class HomeIsHermetic(unittest.TestCase):
                                    capture_output=True, text=True, check=True).stdout.strip()
             hooks = hooks if os.path.isabs(hooks) else os.path.join(repo, hooks)
             self.assertTrue(os.path.realpath(hooks).startswith(os.path.realpath(repo)), hooks)
+
+    def test_the_suite_never_inherits_the_callers_runtime_config_dir(self):
+        from asf import env, hermetic
+        self.assertTrue(os.environ[hermetic.RUNTIME_CONFIG_DIR].startswith(env.ASF_HOME))
 
     def test_the_suite_never_inherits_the_callers_identity(self):
         # B-0055: CI's hermetic step exports ASF_PRODUCT the way the tick does; a test that runs a

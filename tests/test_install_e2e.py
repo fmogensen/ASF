@@ -113,6 +113,12 @@ class InstallFromZeroTests(unittest.TestCase):
 
     # ---- the first run: zero to green -----------------------------------------------
 
+    def test_the_runtime_writes_under_the_temp_home_never_the_callers_config_dir(self):
+        # a worker session's CLAUDE_CONFIG_DIR, inherited here, sent the runtime CLI's
+        # `plugin marketplace add` into that account's live settings file
+        self.assertEqual(self.env['HOME'], self.home)
+        self.assertNotIn(hermetic.RUNTIME_CONFIG_DIR, self.env)
+
     def test_first_run_exits_0(self):
         self.assertEqual(self.first.returncode, 0, self.first.stdout + self.first.stderr)
 

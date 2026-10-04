@@ -16,7 +16,11 @@ keys a child never inherits (:data:`GIT_CONFIG_NOT_INHERITED` — the caller ses
 asks for: ``worktree`` first on ``PYTHONPATH``
 (then the package that is running, then whatever the base had), ``identity`` for a worker (its
 own ``ASF_PRODUCT``/``ASF_JOB``/``ASF_SESSION``/``BACKLOG_ID_RANGE`` — set, not inherited),
-``home`` to point ``HOME`` somewhere else (a test's temp home; a worker account's own).
+``home`` to point ``HOME`` somewhere else (a test's temp home; a worker account's own) — and
+with it the caller's runtime config dir (:data:`RUNTIME_CONFIG_DIR`) is dropped: it lives under
+the caller's home, and a child given a home of its own that kept it wrote its runtime settings
+into the caller's (the install e2e's ``plugin marketplace add`` landed in every worker
+account's live settings file).
 
 Two modes. ``gate`` (the default — the harvest gate, the suite) starts from the whole base
 environment and removes what is listed above: a product's tests may need the machine's tools.
@@ -25,8 +29,13 @@ environment and removes what is listed above: a product's tests may need the mac
 operator's token, cloud credential or agent socket in the tick's environment never reaches a
 session unless the operator names it.
 """
+import atexit
+import glob
 import os
+import pwd
 import re
+import sys
+import tempfile
 
 #: The variables that name the caller — the tick's product, a session's job, its session id and
 #: mint range. None may reach a child that is not that caller: the gate is the branch's result, a
@@ -66,6 +75,13 @@ WORKER_ALLOW = ('PATH', 'LANG', 'TERM', 'TMPDIR', 'USER', 'SHELL')
 WORKER_ALLOW_PREFIX = 'LC_'
 
 MODES = ('gate', 'worker')
+
+#: The variable that moves the agent runtime's user config dir off ``HOME``. It is the caller's
+#: own — a worker session's is its account's — so a child :func:`build` gives a ``home`` of its
+#: own never keeps it: the child's runtime then writes under that home. A caller that means a
+#: child to use an account's config dir sets it after :func:`build`
+#: (:func:`asf.workers.runtime.build_env`).
+RUNTIME_CONFIG_DIR = 'CLAUDE_CONFIG_DIR'
 
 
 def package_parent():
@@ -171,10 +187,141 @@ def build(base=None, worktree=None, identity=None, home=None, trunk=DEFAULT_TRUN
         env['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(parts))
     if home:
         env['HOME'] = os.path.expanduser(home)
+        env.pop(RUNTIME_CONFIG_DIR, None)  # the caller's home's, never the child's
     for key, value in (identity or {}).items():
         if value is not None:
             env[key] = str(value)
     return env
+
+
+# ---- the suite's guard over the operator's own files -------------------------------
+
+#: Names the operator's real home for :func:`guard_operator_files` — set only by a test of the
+#: guard itself; otherwise the home is the user's passwd entry, never ``HOME`` (a test moves it).
+OPERATOR_HOME_VAR = 'ASF_SUITE_OPERATOR_HOME'
+
+#: The exit status a suite process ends with when it wrote into an operator file.
+LEAK_EXIT = 3
+
+_guard = {}
+
+
+def operator_home():
+    return os.environ.get(OPERATOR_HOME_VAR) or pwd.getpwuid(os.getuid()).pw_dir
+
+
+def _under(home, path):
+    path = str(path)
+    if path == '~' or path.startswith('~/'):
+        path = home + path[1:]
+    return os.path.join(home, path) if not os.path.isabs(path) else path
+
+
+#: A ``config_dir:`` or ``home:`` line of the operator config, at any depth. Read by a pattern, not
+#: :mod:`asf.env`: the guard runs before the suite has moved ``ASF_HOME``, and importing
+#: :mod:`asf.env` then would bind it to the operator's. A line that is not an account's only
+#: widens what is watched, which is harmless: a file is flagged only when the suite wrote into it.
+ACCOUNT_DIR_RE = re.compile(r'^\s*(?:-\s*)?(config_dir|home):\s*([\'"]?)([^\s#\'"]+)\2\s*(?:#.*)?$',
+                            re.M)
+
+
+def _account_dirs(config):
+    try:
+        with open(config, encoding='utf-8') as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [(m.group(1), m.group(3)) for m in ACCOUNT_DIR_RE.finditer(text)]
+
+
+def operator_files(home=None):
+    """The operator's own files a suite must never write: the operator config and every product
+    file under ``<home>/.ASF``, the runtime's user settings under ``<home>``, and the settings
+    file in every worker account's ``config_dir`` (and ``home``) that config names — paths read
+    from the config itself, so nothing here knows where an operator keeps their accounts."""
+    home = home or operator_home()
+    asf_home = os.path.join(home, '.ASF')
+    config = os.path.join(asf_home, 'config.yaml')
+    out = {config, os.path.join(home, '.claude', 'settings.json')}
+    out.update(glob.glob(os.path.join(asf_home, 'products', '*.yaml')))
+    for key, value in _account_dirs(config):
+        if key == 'config_dir':
+            out.add(os.path.join(_under(home, value), 'settings.json'))
+        else:
+            out.add(os.path.join(_under(home, value), '.claude', 'settings.json'))
+    return sorted(out)
+
+
+def _read(path):
+    try:
+        with open(path, 'rb') as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def suite_markers():
+    """What a path the suite made starts with: this process's temp dir (both spellings) and the
+    suite's own ``ASF_HOME``."""
+    tmp = tempfile.gettempdir()
+    marks = {tmp, os.path.realpath(tmp)}
+    if os.environ.get('ASF_HOME'):
+        marks.add(os.environ['ASF_HOME'])
+    return sorted(m for m in marks if m and m != os.sep)
+
+
+def _suite_paths(data, marks):
+    """Every path in ``data`` (bytes) that starts with one of ``marks``."""
+    if not data:
+        return set()
+    out = set()
+    for mark in marks:
+        out.update(re.findall(re.escape(mark.encode()) + rb'[^\s"\',;)]*', data))
+    return out
+
+
+def snapshot_operator_files(home=None):
+    """``{path: (content, suite paths it names)}`` for every :func:`operator_files` path."""
+    marks = suite_markers()
+    return {p: (data, _suite_paths(data, marks))
+            for p in operator_files(home) for data in [_read(p)]}
+
+
+def leaked_files(before, home=None):
+    """The operator files (:func:`operator_files`) whose content changed since ``before`` (a
+    :func:`snapshot_operator_files`) *and* gained a path under a :func:`suite_markers` root: the
+    suite wrote it. One the live factory changed meanwhile gains none, and one that already
+    named such a path (an earlier leak) is not blamed on this run."""
+    marks = suite_markers()
+    out = []
+    for path in sorted(set(before) | set(operator_files(home))):
+        old, old_paths = before.get(path, (None, set()))
+        data = _read(path)
+        if data is not None and data != old and _suite_paths(data, marks) - old_paths:
+            out.append(path)
+    return out
+
+
+def _check_guard():
+    leaks = leaked_files(_guard['before'], _guard['home'])
+    if leaks:
+        sys.stderr.write('hermetic: the suite wrote into the operator\'s own files: '
+                         + ', '.join(leaks) + '\n')
+        sys.stderr.flush()
+        os._exit(LEAK_EXIT)
+
+
+def guard_operator_files():
+    """Snapshot :func:`operator_files` now and check them as the process exits: a suite process
+    that wrote a path of its own into one ends with :data:`LEAK_EXIT`, whatever its tests said.
+    Called first by both of the suite's entry points (``tests/__init__.py``,
+    ``tests/test_00_home.py``); a second call in one process is a no-op. Registered before the
+    temp home's own cleanup, so it runs after it."""
+    if _guard:
+        return
+    home = operator_home()
+    _guard.update(home=home, before=snapshot_operator_files(home))
+    atexit.register(_check_guard)
 
 
 #: The words that make a variable name look like a credential (``worker_pool.env_passthrough``
