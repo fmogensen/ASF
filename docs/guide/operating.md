@@ -210,6 +210,18 @@ The `queue bypass` row counts only trunk commits from after that ruleset was cre
 `merge_queue.watch_since`, an ISO date), so the merges that made the ruleset necessary do not
 keep it red.
 
+**Landing through `merge-pr.sh`: `asf ruleset`.** A product whose green PRs land through
+`tools/merge-pr.sh` (no merge queue) gets the same server-side door from `asf ruleset install`:
+ruleset `asf trunk` on the trunk, no bypass actors, `deletion` and `non_fast_forward` refused,
+`conventions.landing_checks` required on the merged head (`strict_required_status_checks_policy:
+true`) and a `pull_request` rule with 0 approvals, so the token's `gh pr merge` is the only way on
+and a hand push is refused. It creates or updates the ruleset by name, so a second run changes
+nothing. `asf ruleset install --dry-run` prints the exact API call and payload and the diff
+against what the host has, and writes nothing; `asf ruleset status` reads it. `asf ruleset
+break-glass --off` deletes the ruleset with a loud line and a `break-glass.log` entry in the
+product's state directory; `--on` installs it again. Applying it to a repository is an operator
+move, never a tick's.
+
 **Trunk stall.** When the trunk has not moved for more than `conventions.ci.trunk_stall_hours`
 (default 4) while landings wait — a batch in the merge queue, or an `asf land` request — every
 tick logs one `trunk watch: STALL` line and `asf status` / `asf doctor` show a red `Trunk stall`
