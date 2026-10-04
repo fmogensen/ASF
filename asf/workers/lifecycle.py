@@ -135,7 +135,10 @@ NETWORK_RE = re.compile(r'could not resolve host|connection (?:reset|refused|tim
                         r'remote end hung up|ssl_error|gnutls', re.I)
 #: The end_reason of a run a spent window cut short (asf.workers.headroom).
 QUOTA_EXHAUSTED_REASON = f'failed: {headroom.QUOTA_EXHAUSTED}'
-HOOK_RE = re.compile(r'\bhook\b|pre-push|refused|declined', re.I)
+#: What a refusal BY THE REPO'S HOOK says. A bare ``refused`` is not in it: the factory's own
+#: publish refusals ("would lose N commit(s)", "rebase conflicts in", "protected ref") say
+#: ``refused`` too and are not the hook's.
+HOOK_RE = re.compile(r'\bhook\b|pre-push|declined', re.I)
 #: The factory's own pre-push redaction scan (:func:`_redaction_findings`) refusing a publish: the
 #: same refusal the hook would make, so its precise correction reaches the session (F-0003).
 REDACT_REFUSAL_RE = re.compile(r'(?:^|; )redact: \S+:\d+ ')
@@ -1915,16 +1918,25 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
             else:
                 remote_sha = fetched
     findings = _redaction_findings(wt, remote_sha)
+    before_rewrite = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
     if findings and _rewrite_account_names(wt, remote_sha, findings):
         rebased = ', '.join(x for x in (rebased, 'worker-account names rewritten to lane-N') if x)
         findings = _redaction_findings(wt, remote_sha)
+    rewritten = _git(['rev-parse', 'HEAD'], wt).stdout.strip() != before_rewrite
+
+    def refused(why):
+        # a refused publish leaves the worktree exactly as it was (#340): the rewrite moved HEAD
+        if rewritten:
+            _git(['reset', '-q', '--hard', before_rewrite], wt)
+        return False, f'publish {branch} refused: {why}'
+
     if findings:
-        return False, f'publish {branch} refused: ' + '; '.join(redact.correction(findings))
+        return refused('; '.join(redact.correction(findings)))
     if archive:
         a = gitpush.push(['-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt,
                          refs_only=True, timeout=limit, guard=refguard.Guard(main, protected))
         if a.returncode != 0:
-            return False, f'publish {branch} refused: the old tip could not be archived'
+            return refused('the old tip could not be archived')
     args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
@@ -1932,8 +1944,8 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     if p.returncode != 0:
         hook_findings = redact.parse_finding_lines(f'{p.stderr or ""}\n{p.stdout or ""}')
         if hook_findings:
-            return False, f'publish {branch} refused: ' + '; '.join(redact.correction(hook_findings))
-        return False, f'publish {branch} refused: {git_error((p.stderr or "") + chr(10) + (p.stdout or ""))}'
+            return refused('; '.join(redact.correction(hook_findings)))
+        return refused(git_error((p.stderr or "") + chr(10) + (p.stdout or "")))
     head = _git(['rev-parse', '--short', 'HEAD'], wt).stdout.strip()
     if rebased:
         return True, f'{rebased} and pushed: published {branch} at {head}'
@@ -2181,13 +2193,14 @@ def outcome_class(result):
 
 def push_failure(text):
     """The retry class of a push's failure text — :data:`NETWORK_ERROR` for a transport error,
-    :data:`HOOK_REFUSED` for a refusal by the repo's hook — or None for anything else."""
+    :data:`HOOK_REFUSED` for a refusal by the repo's hook (or the redaction scan it runs) — or None
+    for anything else, the factory's own publish refusals included."""
     text = text or ''
     if stale_head(text) or rebase_conflict(text):  # the factory's own refusal: never a retry
         return None
     if NETWORK_RE.search(text):
         return NETWORK_ERROR
-    if HOOK_RE.search(text) or REDACT_REFUSAL_RE.search(text):
+    if HOOK_RE.search(text) or REDACT_REFUSAL_RE.search(text) or HOOK_REDACTION_RE.search(text):
         return HOOK_REFUSED
     return None
 

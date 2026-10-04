@@ -1550,6 +1550,17 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
                 'worker account — replace with lane-N')
         self.assertEqual(lc.push_failure(line.split('refused: ', 1)[1]), lc.HOOK_REFUSED)
 
+    def test_the_factorys_own_refusals_are_not_hook_refusals(self):
+        for line in ('would lose 2 commit(s) on origin/fix/B-9999 (abc, def) — rebase onto '
+                     'origin/fix/B-9999, then push',
+                     'rebase conflicts in: a.py',
+                     'fix/B-9999 is not a lane branch; publish refused',
+                     'archive/x is a protected ref, refused',
+                     'the old tip could not be archived (refused)'):
+            self.assertIsNone(lc.push_failure(line), line)
+        self.assertEqual(lc.push_failure("remote rejected (pre-push hook declined)"),
+                         lc.HOOK_REFUSED)
+
     def test_a_stale_head_refusal_is_not_a_hook_refusal(self):
         # never retried as a push: the branch is held for a rebase onto the remote head
         line = ('publish fix/B-9999 refused: would lose 1 commit(s) on origin/fix/B-9999 '
@@ -2571,6 +2582,24 @@ class PublishRedactionTests(unittest.TestCase):
         self.assertNotIn('operator-' + 'private', line)  # never the matched text (D8)
         # nothing was pushed: the branch does not exist on origin at all
         self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9997'], self.repo), '')
+
+    def test_a_publish_refused_after_the_name_rewrite_leaves_the_worktree_as_it_was(self):
+        # #340 moved HEAD to the rewritten chain even when another finding then refused the push
+        with open(os.path.join(self.home, 'redact-names.txt'), 'w', encoding='utf-8') as f:
+            f.write('operator-' + 'private\n')
+        redact._DEFAULT_CACHE.clear()
+        self.write_commit('plan.md', f'a plan naming {self.account}\n', 'a plan')
+        self.write_commit('other.md', 'operator-' + 'private\n', 'another file')
+        head = self.sh(['rev-parse', 'HEAD'], self.repo)
+
+        ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main')
+
+        self.assertFalse(ok, line)
+        self.assertIn('redact: other.md:1', line)
+        self.assertEqual(self.sh(['rev-parse', 'HEAD'], self.repo), head)
+        self.assertEqual(self.sh(['status', '--porcelain'], self.repo), '')
+        with open(os.path.join(self.repo, 'plan.md'), encoding='utf-8') as f:
+            self.assertIn(self.account, f.read())
 
     def test_a_worker_account_name_fixed_in_a_later_commit_is_rewritten_and_published(self):
         # the loop: the session was told "replace with lane-N", fixed the file in a new commit,
