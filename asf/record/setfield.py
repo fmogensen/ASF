@@ -14,6 +14,7 @@ import sys
 import tempfile
 
 from asf.record import frontmatter
+from asf.record import writer as card_writer
 from asf.record.core import canonicalize, load_items, record_root
 from asf.record.new import _parse_sets
 
@@ -179,9 +180,9 @@ def set_typed(rec, updates, writer='set', product=None):
     unchanged."""
     # write to a scratch copy first: the card is replaced only if it parses back to the ask
     fd, scratch = tempfile.mkstemp(suffix='.md')
+    os.close(fd)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(rec['text'])
+        card_writer.write_text(scratch, rec['text'])
         frontmatter.write_typed(scratch, updates)
         with open(scratch, encoding='utf-8') as f:
             new_text = f.read()
@@ -214,5 +215,4 @@ def set_typed(rec, updates, writer='set', product=None):
 
 
 def _write(_root, path, text):
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
+    card_writer.write_card(path, text)

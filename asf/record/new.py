@@ -2,7 +2,7 @@
 import os
 import sys
 
-from asf.record import frontmatter
+from asf.record import frontmatter, writer
 from asf.record.core import (
     NO_PARENT_TYPES, PARENT_TYPES, TYPES, canonicalize, is_open, jaccard, load_items, now_iso,
     today, tokenize,
@@ -181,8 +181,7 @@ def cmd_new(args, root):
     d = os.path.join(root, folder)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, f"{new_id}.md")
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
+    writer.write_card(path, text)
     print(new_id)
     publish(root, path, f"record: new {type_} {new_id}")
     return 0

@@ -11,7 +11,7 @@ from asf.conventions import DEFAULT_SPECS_DIR
 from asf.feeder import footprint
 from asf.groom import conflicts, shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
-from asf.record import frontmatter, tree
+from asf.record import frontmatter, tree, writer
 from asf.record.core import (
     BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, ITEM_FOLDERS as CARD_FOLDERS, NO_PARENT_TYPES,
     PARENT_TYPES, as_list, build_index_data, canonicalize, compute_derived, expected_body,
@@ -518,8 +518,8 @@ def stage_derived(repo, prefix, staged_root, scrub=None):
         except OSError:
             on_disk = None
         if on_disk == before.get(rel_in_root):
-            with open(staged_path, 'rb') as src, open(work, 'wb') as dst:
-                dst.write(src.read())
+            with open(staged_path, 'rb') as src:
+                writer.write_bytes(work, src.read())
         print(f'{rel}: regenerated from the staged cards and staged')
     return staged
 

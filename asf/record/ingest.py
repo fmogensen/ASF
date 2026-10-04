@@ -19,7 +19,7 @@ import sys
 
 from asf import env, proves, reviews
 from asf.evidence import closing, evidence
-from asf.record import frontmatter
+from asf.record import frontmatter, writer
 from asf.record.core import is_retired as core_is_retired
 from asf.record.core import canonicalize, load_items, now_iso, parse_sections, render_sections, section_content, today
 from asf.record.index import do_index
@@ -1283,8 +1283,7 @@ def tick_proven(canonical, ev, stamp, task_ev=None):
         if not history:
             continue
         body = append_history_lines(body, history)
-        with open(rec['path'], 'w', encoding='utf-8') as f:
-            f.write(frontmatter.render(meta, body))
+        writer.write_card(rec['path'], frontmatter.render(meta, body))
 
 
 def ingest_into(root, ev, product=None):
@@ -1343,8 +1342,7 @@ def ingest_into(root, ev, product=None):
             meta2, body2 = frontmatter.parse(text, path=rec['relpath'])
             new_body = append_history_lines(body2, history)
             if new_body != body2:
-                with open(rec['path'], 'w', encoding='utf-8') as f:
-                    f.write(frontmatter.render(meta2, new_body))
+                writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         if type_ == 'feature' and stage_val.get(iid) == 'on-prod' and old != 'on-prod':
             write_on_prod_event(root, iid, old, now)
 
@@ -1404,5 +1402,4 @@ def note_dead_after(canonical, now):
             continue
         body2 = append_history_lines(body, new)
         if body2 != body:
-            with open(rec['path'], 'w', encoding='utf-8') as f:
-                f.write(frontmatter.render(meta, body2))
+            writer.write_card(rec['path'], frontmatter.render(meta, body2))
