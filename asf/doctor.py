@@ -717,6 +717,36 @@ def check_product_warnings(product):
     return rows or [(True, 'no unknown keys, no unknown flags')]
 
 
+def check_plan_headings(product):
+    """[(ok, detail)] — the ``plans`` row: a plan in ``plans_dir`` with Task-like headings that
+    parse to 0 Tasks mints no Task cards (a format drift). ``'warn'`` per plan, one ok row when
+    every plan parses or has no Task headings. Reads the checkout read-only."""
+    from asf.tick import migrate
+    d = product.repo_dir
+    conv = getattr(product, 'conventions', None)
+    rel = conv.doc_dir('plan') if hasattr(conv, 'doc_dir') else 'plans'
+    root = os.path.join(d, rel) if d else ''
+    if not root or not os.path.isdir(root):
+        return [(True, 'no plans directory')]
+    rows, n = [], 0
+    for dirpath, _dirs, files in sorted(os.walk(root)):
+        for name in sorted(files):
+            if not name.endswith('.md'):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                with open(path, encoding='utf-8') as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            n += 1
+            like = migrate.task_like_headings(text)
+            if like:
+                rows.append(('warn', f'{os.path.relpath(path, d)}: {len(like)} Task-like heading(s) '
+                                     f'parse to 0 Tasks (e.g. {like[0]!r}) — no Task cards will mint'))
+    return rows or [(True, f'{n} plan(s): every Task-like heading parses')]
+
+
 def check_config_keys(cfg):
     """[('warn', detail)] — the ``config keys`` row: the keys of ``config.yaml`` no code reads
     (:func:`asf.config_keys.unknown_keys`), one row naming them all; none when there are none.
@@ -1305,6 +1335,8 @@ def run(product_name):
         rows.append(('agent homes asf', required, ok, detail))
     for ok, detail in check_product_warnings(product):
         rows.append(('product', False, ok, detail))
+    for ok, detail in check_plan_headings(product):
+        rows.append(('plans', False, ok, detail))
     for level, detail in check_config_keys(cfg):
         rows.append(('config keys', False, level, detail))
     net = check_network(cfg)

@@ -88,6 +88,43 @@ class ParseGoalsTests(unittest.TestCase):
         self.assertEqual(goals[1]['blockedBy'], [])
 
 
+class PlanHeadingShapesTests(unittest.TestCase):
+    """The plan-Task heading shapes plans really use — a real plan's `### Task T1:` minted
+    nothing because the reader only knew `### Task 1:` and `### T1`."""
+    SHAPES = [
+        ('### Task 1: Alpha', 'T1', 'Alpha'),
+        ('### Task T1: Alpha', 'T1', 'Alpha'),
+        ('### T1: Alpha', 'T1', 'Alpha'),
+        ('### T1 \u2014 Alpha', 'T1', 'Alpha'),
+        ('### T1 - Alpha', 'T1', 'Alpha'),
+        ('## Task T1 - Alpha', 'T1', 'Alpha'),
+        ('## Task 1', 'T1', ''),
+        ('#### task t1: Alpha', 'T1', 'Alpha'),
+        ('### **Task T1:** Alpha', 'T1', 'Alpha'),
+        ('### **Task 1: Alpha**', 'T1', 'Alpha'),
+        ('### **T1** \u2014 Alpha', 'T1', 'Alpha'),
+        ('### TASK T1 \u2013 Alpha', 'T1', 'Alpha'),
+        ('### Task T1a: Alpha', 'T1a', 'Alpha'),
+    ]
+
+    def test_every_shape_parses_one_task(self):
+        for head, tid, title in self.SHAPES:
+            with self.subTest(head=head):
+                records = migrate.plan_task_records(f'# Plan\n\n{head}\nbody\n')
+                self.assertEqual([(r['tid'], r['title']) for r in records], [(tid, title)])
+
+    def test_prose_headings_are_not_tasks(self):
+        for head in ('### Tasks overview', '### Test plan', '### Task list', '### Today 1'):
+            with self.subTest(head=head):
+                self.assertEqual(migrate.plan_task_records(f'{head}\nbody\n'), [])
+
+    def test_task_like_headings_counted_when_none_parse(self):
+        self.assertEqual(migrate.task_like_headings('### Task #1 - x\n### Task-2: y\n'),
+                         ['### Task #1 - x', '### Task-2: y'])
+        self.assertEqual(migrate.task_like_headings('### Task T1: a\n'), [])
+        self.assertEqual(migrate.task_like_headings('# Plan\nprose\n'), [])
+
+
 class PlanTaskRecordsTests(unittest.TestCase):
     def test_three_tasks_in_order_with_titles(self):
         records = migrate.plan_task_records(PLAN_FIXTURE)
