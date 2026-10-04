@@ -172,6 +172,13 @@ def _atomic_write_bytes(target, payload, mode):
         raise
 
 
+def atomic_write_bytes(target, payload, *, mode=0o644):
+    """``payload`` at ``target`` in one ``os.replace`` (``mkstemp`` beside it, ``fsync``, ``mode``):
+    a reader sees the old file or the new one; a failure leaves the old one and no temp file. No
+    lock — :mod:`asf.record.writer` writes cards through this."""
+    _atomic_write_bytes(target, payload, mode)
+
+
 def _dumps(data, indent):
     return (json.dumps(data, indent=indent) + '\n').encode('utf-8')
 

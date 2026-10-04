@@ -3,7 +3,7 @@ import json
 import os
 import sys
 
-from asf.record import frontmatter
+from asf.record import frontmatter, writer
 from asf.record.core import (build_index_data, canonicalize, compute_derived, expected_body, load_items,
                              render_index_json, title_scrub)
 from asf.schema import SCHEMA_VERSION
@@ -37,8 +37,7 @@ def refresh(root, scrub=None, only=None, index=True, create_index=False):
         new_body = expected_body(rec, canonical, derived, scrub)
         if new_body != rec['body']:
             new_text = frontmatter.render(rec['meta'], new_body)
-            with open(rec['path'], 'w', encoding='utf-8') as f:
-                f.write(new_text)
+            writer.write_card(rec['path'], new_text)
             written.append(rec['relpath'])
     if index and (create_index or os.path.isfile(os.path.join(root, 'index.json'))):
         broken = {f for f, _line, _why in parse_errors}
@@ -73,8 +72,7 @@ def write_index_json(root, canonical, derived, keep=()):
                 if iid not in data['items'] and entry_relpath(iid, entry) in keep:
                     data['items'][iid] = entry
     if old_items != data['items']:
-        with open(index_path, 'w', encoding='utf-8') as f:
-            f.write(render_index_json(data))
+        writer.write_text(index_path, render_index_json(data))
         return True
     return False
 

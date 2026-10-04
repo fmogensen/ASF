@@ -23,6 +23,8 @@ write, the rest commits, and every finding is kept in :data:`REFUSED` until the 
 import os
 from dataclasses import dataclass, field, replace
 
+from asf.record import writer as card_writer
+
 #: The record writers in the order the tick runs them. A writer not listed here still runs,
 #: staged under its own name.
 WRITERS = ('backfill', 'ingest', 'plan-tasks', 'plan-order', 'file-bugs', 'rollup', 'index',
@@ -140,8 +142,7 @@ def refuse(root, staged, findings):
                 os.remove(full)
             continue
         os.makedirs(os.path.dirname(full) or '.', exist_ok=True)
-        with open(full, 'wb') as f:
-            f.write(text.encode('utf-8', 'surrogateescape'))
+        card_writer.write_bytes(full, text.encode('utf-8', 'surrogateescape'))
     return tuple(named)
 
 

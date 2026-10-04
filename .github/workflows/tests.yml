@@ -30,6 +30,8 @@ jobs:
         run: bash tools/check_conventions.sh
       - name: check generic
         run: bash tools/check_generic.sh
+      - name: one record writer (no card written in place)
+        run: bash tools/check_record_writers.sh
       # HEAD^1 is the trunk this change lands on (a pull request's merge commit, or main before
       # a push): a site another change landed meanwhile never turns this one red.
       - name: no new raw gh/git call site (the client ratchet)

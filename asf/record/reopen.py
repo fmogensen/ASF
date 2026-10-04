@@ -23,7 +23,7 @@ import sys
 
 from asf import env
 from asf.evidence import closing, evidence
-from asf.record import frontmatter
+from asf.record import frontmatter, writer
 from asf.record.core import canonicalize, load_items, now_iso, today
 from asf.record.ingest import EVIDENCE_TYPES, LANDING_KEY, MACHINE_KEY_ORDER, RULE_PREFIX
 from asf.record.ingest import append_history_lines
@@ -121,8 +121,7 @@ def cmd_reopen(args, root):
         meta2, body2 = frontmatter.parse(text, path=relpath)
         new_body = append_history_lines(body2, [history_line])
         if new_body != body2:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(frontmatter.render(meta2, new_body))
+            writer.write_card(path, frontmatter.render(meta2, new_body))
 
     from asf.record import stage as stage_mod
     _r, _staged, findings = stage_mod.guarded(

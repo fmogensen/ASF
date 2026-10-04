@@ -11,6 +11,8 @@ PyYAML or any third-party module — python3 stdlib only.
 """
 import re
 
+from asf.record import writer
+
 MARKER = "# ---- machine ----"
 
 _KEY_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):(.*)$')
@@ -391,8 +393,7 @@ def write_machine(path, machine):
         machine_lines.append(_format_entry(k, v, style))
     body = '\n'.join(lines[end + 1:])
     new_text = '---\n' + '\n'.join(head + machine_lines) + '\n---\n' + body
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(new_text)
+    writer.write_card(path, new_text)
 
 
 #: The machine keys a writer may drop: each is re-derived by every ingest (invariant I1) —
@@ -478,8 +479,7 @@ def merge_machine(path, updates, drop=(), order=()):
     new_text = '\n'.join(['---'] + head + machine_lines + lines[end:])
     if new_text == text:
         return False
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(new_text)
+    writer.write_card(path, new_text)
     return True
 
 
@@ -544,5 +544,4 @@ def write_typed(path, updates):
 
     body = '\n'.join(lines[end + 1:])
     new_text = '---\n' + '\n'.join(new_head + tail) + '\n---\n' + body
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(new_text)
+    writer.write_card(path, new_text)

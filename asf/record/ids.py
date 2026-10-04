@@ -6,7 +6,7 @@ a block so two worktrees never mint the same id.
 import os
 import re
 
-from asf.record import frontmatter
+from asf.record import frontmatter, writer
 from asf.record.core import TYPES, now_iso
 from asf.schema import SCHEMA_VERSION
 
@@ -98,8 +98,7 @@ def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why
     text = frontmatter.render(meta, full_body)
     path = os.path.join(root, folder, f"{new_id}.md")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
+    writer.write_card(path, text)
     canonical[new_id] = {
         'meta': meta, 'body': full_body, 'path': path,
         'relpath': os.path.relpath(path, root), 'folder': folder,
