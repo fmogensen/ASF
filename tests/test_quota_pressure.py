@@ -84,5 +84,16 @@ class SeatsTests(unittest.TestCase):
                              (a_state, b_state, c_state))
 
 
+
+class OldCooldownName(unittest.TestCase):
+    def test_flat_seven_d_cooldown_is_an_alias_of_the_nested_key(self):
+        from asf.workers import quota
+        g = quota.guards_from_config({'quota_guards': {'seven_d': 95, 'seven_d_cooldown': 80}})
+        self.assertEqual(g['cooldown']['seven_d'], 80)
+        g = quota.guards_from_config({'quota_guards': {'seven_d': 95, 'seven_d_cooldown': 80,
+                                                       'cooldown': {'seven_d': 70}}})
+        self.assertEqual(g['cooldown']['seven_d'], 70)
+
+
 if __name__ == '__main__':
     unittest.main()
