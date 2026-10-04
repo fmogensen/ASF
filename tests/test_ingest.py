@@ -1101,7 +1101,7 @@ class ReconciledTests(unittest.TestCase):
         git('config', 'commit.gpgsign', 'false')
         git('commit', '-q', '--allow-empty', '-m', 'feat: the work, naming no id')
         self.on_trunk = git('rev-parse', 'HEAD')
-        self.product = types.SimpleNamespace(repo_dir=repo, main='main', conventions={})
+        self.product = types.SimpleNamespace(repo_dir=repo, main='main', conventions={}, ci=None)
 
     def run_ingest(self, ev):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1128,6 +1128,16 @@ class ReconciledTests(unittest.TestCase):
         self.assertNotIn('landed', machine)
         self.assertEqual(set(machine) - {'landing'}, {'schema_version', 'state', 'evidence',
                                                        'stage_since', 'updated'})
+
+    def test_a_typed_landed_sha_closes_a_bug_by_reconciled_too(self):
+        """§2.5's last paragraph names no type: a Bug with no fixer link closes the same way a
+        Task does, off the same merged map (F-0080, 28551 C2)."""
+        write(self.root, 'B-0001', 'bug', 'Reconciled by hand', 'bugs',
+              typed_lines=[f'landed: {self.on_trunk}'])
+        self.assertEqual(self.run_ingest(dict(EMPTY_EV, main_sha=self.on_trunk, ids={})), 0)
+        meta = read_meta(self.root, 'bugs', 'B-0001')[0]
+        self.assertEqual(meta['state'], 'Closed')
+        self.assertEqual(meta['evidence'][-1], 'rule: reconciled')
 
 
 class IngestDerivesNothing(unittest.TestCase):
