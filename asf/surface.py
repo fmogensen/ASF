@@ -28,6 +28,8 @@ COMMANDS = {
     'inbox':               ('file an untyped note for the next groom to type', RECORD, None),
     'set':                  ('set typed fields on a card', RECORD, None),
     'reopen':               ('reopen an item closed in error and re-derive its state from the evidence', RECORD, None),
+    'untick':               ("clear a Story's acceptance tick so the line must be proved again", RECORD, None),
+    'audit-proofs':         ('list every done Story with an acceptance line no test proved', RECORD, '--apply'),
     'check':                ('check the record for errors and print each one with its item', None, None),
     'index':                ("rebuild every item's children and backlinks, and the record's index", RECORD, None),
     'ingest':               ("derive each item's state from the product's commits, branches and pull requests", RECORD, None),

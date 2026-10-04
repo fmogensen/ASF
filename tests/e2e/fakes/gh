@@ -352,6 +352,11 @@ def do_merge(state, pr, method, delete_branch):
                           f"cannot be cleanly created")
         parents = ['-p', base] + (['-p', head] if method == 'merge' else [])
         body = pr.get('body') or ''
+        if method == 'squash':
+            # GitHub's default squash message carries the squashed commits' messages — their
+            # trailers (a `Proves:` claim among them) reach the trunk with it
+            logs = git(state, 'log', '--reverse', '--format=%B', f'{base}..{head}').stdout.strip()
+            body = '\n\n'.join(p for p in (body.strip(), logs) if p)
         msg = subject + ('\n\n' + body if method == 'squash' and body else '')
         if method == 'merge':
             msg = f"Merge pull request #{pr['number']} from {head_ref}\n\n{pr['title']}"

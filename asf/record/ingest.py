@@ -19,7 +19,7 @@ import sys
 
 from asf import env, proves, reviews
 from asf.evidence import closing, evidence
-from asf.record import frontmatter, writer
+from asf.record import decisions, frontmatter, writer
 from asf.record.core import is_retired as core_is_retired
 from asf.record.core import canonicalize, load_items, now_iso, parse_sections, render_sections, section_content, today
 from asf.record.index import do_index
@@ -761,7 +761,7 @@ class _Derived:
     own: bool = False         #: it carries a branch, a PR or a commit of its own
 
 
-def descend(canonical, new_state, closings, derived, keep=()):
+def descend(canonical, new_state, closings, derived, keep=(), evs=None):
     """A Feature that closed closes the children beneath it that have no evidence of their own.
 
     A child is evidence-free when its rule was `no-rule`, or its state is New with no branch, no
@@ -771,7 +771,9 @@ def descend(canonical, new_state, closings, derived, keep=()):
     item descent closed passes it on. A Bug is never descended onto — its own `quiet` rule is what
     says the defect is gone. Nor is a Task in `keep` (:func:`orphaned_tasks`): its scope was
     folded into a survivor that never landed, so its parent's close proves nothing for it.
-    Rewrites `new_state` and `closings` in place."""
+    Rewrites `new_state` and `closings` in place. ``evs`` (the Ev each item was settled from):
+    a Story whose Ev names an unproved acceptance line is never descended onto."""
+    evs = evs or {}
     reached = {iid for iid, c in closings.items()
                if c.state == closing.CLOSED and canonical[iid]['meta'].get('type') == 'feature'}
     sha = {iid: derived[iid].sha for iid in reached}
@@ -790,6 +792,9 @@ def descend(canonical, new_state, closings, derived, keep=()):
             # a matrix row that says todo is the item's own evidence that it was never built:
             # the parent's close is no proof, so the item keeps the state its own rule gave it
             if any(str(l).startswith('matrix status todo') for l in closings[iid].lines):
+                continue
+            # a Story with an unproved acceptance line is not done because its parent is
+            if evs.get(iid) is not None and getattr(evs[iid], 'unproved', ()):
                 continue
             hit = closing.state_of(type_, closing.Ev(parent_closed=True))
             named = f"{parent} Closed" + (f" (commit {sha[parent][:7]})" if sha.get(parent) else '')
@@ -986,6 +991,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
     story_tasks = _story_tasks(canonical)
     review_claims = review_proven(canonical, task_ev)
+    register = decisions.register(canonical, product)
 
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'story':
@@ -1011,6 +1017,13 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         if claims:
             m = len(proves.bullets(rec['body']))
             lines.append(f"acceptance {len(claims)}/{m} proven ({_newest_review_path(claims, task_ev)})")
+        # "no test, no done": Task closure is necessary, never sufficient — every acceptance
+        # line needs its proved-line entry (or a registered deferral) before a done rule fires
+        open_lines = unproved_of(iid, rec, register, ev, claims)
+        if open_lines and closing.state_of('story', ev_obj, new_state[iid]).state in closing._DONE:
+            # only where it decides something: the lines a done rule would have closed over
+            lines.extend(unproved_line(*u) for u in open_lines)
+        ev_obj.unproved = tuple(n for n, _t, _w in open_lines)
         settle(iid, 'story', ev_obj, lines)
 
     # ---- Bugs: independent of other items
@@ -1100,6 +1113,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             kid_ids = [cid for cid, crec in canonical.items()
                        if crec['meta'].get('parent') == iid
                        and crec['meta'].get('type') in LANDING_CHILD_TYPES]
+            kid_ids += [t for t in _story_descendants(canonical, iid, story_tasks)
+                        if t not in kid_ids]
             kids = [new_state[cid] for cid in kid_ids]
             kids_closed = bool(kids) and all(s == closing.CLOSED for s in kids)
             # …and it is Closed, not merely Resolved, when the product deploys nothing (B-0078):
@@ -1130,7 +1145,21 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         child_ids = [cid for cid, crec in canonical.items()
                      if crec['meta'].get('type') == 'task' and crec['meta'].get('parent') == iid
                      and (not crec['meta'].get('removed') or cid in orphans)]
+        # its Stories' Tasks are its Tasks too: a Task filed under a Story (or naming it) is
+        # work of this Feature, and a New one keeps the Feature building (F-0106/F-0108)
+        direct_n = len(child_ids)
+        child_ids += [t for t in _story_descendants(canonical, iid, story_tasks)
+                      if t not in child_ids]
         child_states = [new_state[cid] for cid in child_ids]
+        # the ladder of a Feature already held Closed reads its own Tasks only, as before: the
+        # descent below may still close an evidence-free grandchild, and the stage must not
+        # move again on the next pass because of it
+        stage_states = child_states[:direct_n] if new_state[iid] == closing.CLOSED else child_states
+        # …and its Stories are children of the Feature's rule: an open Story keeps it open
+        story_ids = [cid for cid, crec in canonical.items()
+                     if crec['meta'].get('type') == 'story' and crec['meta'].get('parent') == iid
+                     and not crec['meta'].get('removed')]
+        story_states = [new_state[cid] for cid in story_ids]
         all_closed = bool(child_ids) and all(s == closing.CLOSED for s in child_states)
         merged_in_prod = in_prod = False
         if all_closed:
@@ -1151,8 +1180,11 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         spec_approved = bool(spec_review and spec_review[1] == 'APPROVED') or spec_on_main
         plan_on_main, plan_branch = _plan_home(rec['meta'], fev, ev, product)
         plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or plan_on_main
-        ev_obj = closing.Ev(children=tuple(child_states), commit=commit, green=green, in_prod=in_prod,
-                            spec_on_main=spec_on_main, plan_approved=plan_approved,
+        if story_states and not child_ids:
+            # Stories only, all Closed: a Closed Story is already in prod by its own rule
+            in_prod = all(s == closing.CLOSED for s in story_states)
+        ev_obj = closing.Ev(children=tuple(child_states + story_states), commit=commit, green=green,
+                            in_prod=in_prod, spec_on_main=spec_on_main, plan_approved=plan_approved,
                             landed=iev.get('landed') or '')
         if not child_ids and commit:
             # no Tasks to judge by, and a code commit on main names it: landed, as for a Feature
@@ -1165,7 +1197,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
                          'review': spec_review[:2] if spec_review else None}
             plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
                          'review': plan_review[:2] if plan_review else None}
-            stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, on_prod_for_stage)
+            stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, stage_states, on_prod_for_stage)
             from asf.feeder.rows import plan_on_trunk, trunk_of
             lines = []
             if spec_on_main:
@@ -1178,13 +1210,19 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             elif plan_branch:
                 r = f" (review r{plan_review[0]} {plan_review[1]})" if plan_review else ''
                 lines.append(f"plan on {plan_branch}{r}")
+            if new_state[iid] == closing.CLOSED:
+                # held Closed: its lines read its own Tasks, as before (see stage_states)
+                child_ids, child_states = child_ids[:direct_n], child_states[:direct_n]
             if child_ids:
                 lines.append(f"{sum(1 for s in child_states if s == 'Closed')}/{len(child_ids)} tasks Closed")
+            open_s = [cid for cid, st in zip(story_ids, story_states) if st not in closing._DONE]
+            if open_s and new_state[iid] != closing.CLOSED:
+                lines.append(f"{len(open_s)}/{len(story_ids)} stories open: {', '.join(open_s)}")
             lines = lines or [f"no evidence found ({date})"]
         settle(iid, 'feature', ev_obj, lines, sha=commit or _landing_sha(child_ids, task_ev, ev))
 
     # ---- Descent: a Feature that closed closes the children beneath it that nothing else names
-    descend(canonical, new_state, closings, derived, keep=orphans)
+    descend(canonical, new_state, closings, derived, keep=orphans, evs=evs)
 
     # ---- Epics: purely a function of their children's derived state; no product-repo evidence
     for iid, rec in canonical.items():
@@ -1209,6 +1247,24 @@ def _story_tasks(canonical):
         for sid in rec['meta'].get('stories') or []:
             out[sid].append(iid)
     return out
+
+
+def unproved_of(sid, rec, register, ev=None, review=None):
+    """``[(line, text, why), …]``: Story ``sid``'s acceptance lines that no ``proved line`` entry,
+    no claim this pass records (``ev['proves']``, ``review``) and no registered deferral covers
+    (:func:`asf.proves.unproved`)."""
+    body = rec['body']
+    m = len(proves.bullets(body))
+    claims = list(((ev or {}).get('proves') or {}).get(sid) or []) + list(review or [])
+    pending = {int(c.get('line') or 0) for c in claims}
+    pending = {n for n in pending if 1 <= n <= m}
+    return proves.unproved(body, register, also_proved=pending)
+
+
+def unproved_line(n, text, why):
+    """The evidence line naming one unproved acceptance line."""
+    text = text if len(text) <= 80 else text[:77] + '...'
+    return f"unproved line {n} — {text} ({why})"
 
 
 def review_proven(canonical, task_ev):
@@ -1256,6 +1312,25 @@ def _newest_review_path(claims, task_ev):
     return best['path']
 
 
+def _story_descendants(canonical, fid, story_tasks):
+    """The Tasks of ``fid``'s Stories, in canonical order, deduplicated: the ones whose
+    ``stories:`` name a Story of it (:func:`_story_tasks`) and the ones filed under one
+    (``parent:`` the Story, :func:`asf.proves.stories_of_task`). A removed Task is none."""
+    stories = [sid for sid, srec in canonical.items()
+               if srec['meta'].get('type') == 'story' and srec['meta'].get('parent') == fid]
+    out = []
+    for sid in stories:
+        for tid in story_tasks.get(sid, []):
+            if tid not in out:
+                out.append(tid)
+    for tid, trec in canonical.items():
+        meta = trec['meta']
+        if (meta.get('type') == 'task' and not meta.get('removed') and meta.get('parent') in stories
+                and tid not in out):
+            out.append(tid)
+    return out
+
+
 def tick_proven(canonical, ev, stamp, task_ev=None):
     """The pass that turns a landed or review-proven claim into a fact on the card (§2.5, §2.7):
     over the Story cards only, the ``## Acceptance`` line each of ``ev['proves']``'s claims and
@@ -1279,10 +1354,14 @@ def tick_proven(canonical, ev, stamp, task_ev=None):
             text = f.read()
         meta, body = frontmatter.parse(text, path=rec['relpath'])
         history = []
+        credited = proves.proved_lines(body)
         for claim in claims:
             body, changed = proves.tick(body, claim['line'], None)
-            if not changed:
+            # re-credit: a line already ticked (by hand, or before the entry existed) still gets
+            # its one proved-line entry — else it could never count as proved
+            if not changed and (claim['line'] in credited or not proves.is_ticked(body, claim['line'])):
                 continue
+            credited.add(claim['line'])
             pr_clause = f", PR #{claim['pr']}" if claim.get('pr') else ''
             history.append(f"- {stamp} ingest: proved line {claim['line']} — "
                            f"{claim['task']}{pr_clause} ({claim['test']})")
@@ -1290,6 +1369,10 @@ def tick_proven(canonical, ev, stamp, task_ev=None):
         for claim in rclaims:
             body, changed = proves.tick(body, claim['line'], None, suffix=claim['path'])
             review_ticked = review_ticked or changed
+            if claim['line'] not in credited and proves.is_ticked(body, claim['line']):
+                credited.add(claim['line'])
+                history.append(f"- {stamp} ingest: proved line {claim['line']} — "
+                               f"{claim['task']} ({claim['path']})")
         if review_ticked:
             m = len(proves.bullets(body))
             path = _newest_review_path(rclaims, task_ev or {})

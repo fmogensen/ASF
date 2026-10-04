@@ -8,15 +8,20 @@ Pure: no git, no clock, no import from `asf`. Durations arrive as seconds on `Ev
 
 The rules, first match per type after the two `any` rows:
 
-  any      reconciled         a typed landed sha and green CI                    -> Closed
+  any      reconciled         a typed landed sha and green CI (and, for a Story,
+                                  every acceptance line proved)                  -> Closed
   any      parent-closed      the parent is Closed and the item has no evidence  -> Closed
                                   (a matrix status todo is evidence: unbuilt stays open)
   task     landed-green       a trunk commit or merged PR, and green CI          -> Closed
   task     landed             a trunk commit or merged PR                        -> Resolved
   task     in-flight          a branch or a PR                                   -> Active
   task     planned            otherwise                                          -> New
-  story    tasks-closed       its Tasks all Closed, and in prod                  -> Closed
-  story    tasks-resolved     its Tasks all Resolved or Closed                   -> Resolved
+  story    tasks-closed       its Tasks all Closed, in prod, every line proved   -> Closed
+  story    tasks-resolved     its Tasks all done, every acceptance line proved   -> Resolved
+  story    unproved           Tasks done (or matrix done/doing), a line unproved -> Active
+                                  ("no test, no done": a line is proved by an ingest
+                                  "proved line N" entry, or deferred by a decision
+                                  the register holds — Task closure is not enough)
   story    matrix-done        the plan's matrix says done                        -> Closed
   story    matrix-doing       the plan's matrix says doing                       -> Resolved
   story    task-active        a Task Active, or a child with evidence            -> Active
@@ -28,6 +33,8 @@ The rules, first match per type after the two `any` rows:
   bug      filed              otherwise                                          -> New
   feature  children-closed    its children all Closed, and in prod               -> Closed
   feature  children-resolved  its children all Resolved or Closed                -> Resolved
+                                  (children: its Tasks, its Stories AND those
+                                  Stories' Tasks — an open Story keeps it open)
   feature  landed-green       no children, a naming commit, green, in prod       -> Closed
   feature  landed             no children, a naming commit                       -> Resolved
   feature  documented         a spec on main or an approved plan                 -> Active
@@ -75,6 +82,7 @@ class Ev:
     landed: str = ''          #: the typed reconciliation sha (§2.5)
     parent_closed: bool = False
     typed_closed: bool = False     #: an Epic's typed `closed: true`, read only as an early close
+    unproved: tuple = ()      #: a Story's acceptance line numbers with no proof and no deferral
 
 
 def _landed(ev):
@@ -86,7 +94,7 @@ def _own_evidence(ev):
     evidence. ``matrix_status == 'todo'`` is evidence too, of the opposite: the plan says the
     work is unbuilt, so a parent's close is no proof it was done (parent-closed never fires)."""
     return bool(ev.matrix_status == 'todo' or ev.commit or ev.merged_sha or ev.branch or ev.pr_state or ev.open_prs
-                or ev.child_evidence)
+                or ev.child_evidence or ev.unproved)
 
 
 def _all(ev, states):
@@ -99,7 +107,7 @@ def _quiet(ev):
 
 #: (type, name, predicate, state, prose) — first match per type decides; `any` rows lead.
 RULES = (
-    ('any', 'reconciled', lambda ev: bool(ev.landed and ev.green), CLOSED,
+    ('any', 'reconciled', lambda ev: bool(ev.landed and ev.green and not ev.unproved), CLOSED,
      'a typed landed sha and green CI'),
     ('any', 'parent-closed', lambda ev: bool(ev.parent_closed and not _own_evidence(ev)), CLOSED,
      'the parent is Closed and the item has no evidence of its own'),
@@ -108,10 +116,14 @@ RULES = (
     ('task', 'landed', _landed, RESOLVED, 'a trunk commit or merged PR'),
     ('task', 'in-flight', lambda ev: bool(ev.branch or ev.pr_state), ACTIVE, 'a branch or a PR'),
     ('task', 'planned', lambda ev: True, NEW, 'in a plan, nothing yet'),
-    ('story', 'tasks-closed', lambda ev: _all(ev, (CLOSED,)) and ev.in_prod, CLOSED,
-     'every Task Closed, and in prod'),
-    ('story', 'tasks-resolved', lambda ev: _all(ev, _DONE), RESOLVED,
-     'every Task Resolved or Closed'),
+    ('story', 'tasks-closed',
+     lambda ev: _all(ev, (CLOSED,)) and ev.in_prod and not ev.unproved, CLOSED,
+     'every Task Closed, in prod, and every acceptance line proved'),
+    ('story', 'tasks-resolved', lambda ev: _all(ev, _DONE) and not ev.unproved, RESOLVED,
+     'every Task Resolved or Closed, and every acceptance line proved'),
+    ('story', 'unproved',
+     lambda ev: bool(ev.unproved) and (_all(ev, _DONE) or ev.matrix_status in ('done', 'doing')),
+     ACTIVE, 'its Tasks are done but an acceptance line is unproved'),
     ('story', 'matrix-done', lambda ev: ev.matrix_status == 'done', CLOSED,
      "the plan's matrix says done"),
     ('story', 'matrix-doing', lambda ev: ev.matrix_status == 'doing', RESOLVED,

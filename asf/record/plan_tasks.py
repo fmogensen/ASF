@@ -12,13 +12,15 @@ path, the section's text as the description, ``decided: true`` (the plan is appr
 and ``after`` from the order the plan states (:mod:`asf.record.plan_order`) — without it every
 Task of a plan launched at once and each successor's coder found nothing to build on.
 Ids are minted by :func:`asf.record.ids.mint_id` — never by a session. A Feature that already
-has a Task child is left alone: the plan was read once, a re-run is a no-op.
+has a Task child is left alone: the plan was read once, a re-run is a no-op. A plan whose Tasks
+cite a decision id (``D-nnnn``, outside a code span) the decision register lacks
+(:mod:`asf.record.decisions`) mints nothing: its line names the missing ids.
 """
 import re
 
 from asf.evidence import evidence
 from asf.record.core import canonicalize, load_items, today
-from asf.record import plan_order
+from asf.record import decisions, plan_order
 from asf.record.ids import mint_id, write_new_item
 from asf.record.ingest import is_retired, match_feature
 
@@ -77,6 +79,7 @@ def _mint(root, product, ev, out=print, read_ref=None):
     canonical, _dupes = canonicalize(by_id)
     features = (ev or {}).get('features') or {}
     made = []
+    known = None   # the decision register, read once and only when a plan is about to mint
     for fid in sorted(canonical):
         rec = canonical[fid]
         if rec['meta'].get('type') != 'feature':
@@ -108,6 +111,16 @@ def _mint(root, product, ev, out=print, read_ref=None):
             continue
         if not records:
             out(f'plan-tasks: {fid}: {plan_path} has no `### Task N:` heading — nothing to mint')
+            continue
+        # a Task that cites a decision the register lacks (S6) is a decision that was never made:
+        # the plan is refused whole, before any card exists, and the line names each one
+        if known is None:
+            known = decisions.register(canonical, product)
+        missing = list(dict.fromkeys(
+            d for t in records for d in decisions.unknown(f"{t['title'] or ''}\n{t['body']}", known)))
+        if missing:
+            out(f"plan-tasks: {fid}: {plan_path} cites decision(s) not in the register: "
+                f"{', '.join(missing)} — nothing minted (record the decision, or drop the id)")
             continue
         ids = []
         for t in records:
