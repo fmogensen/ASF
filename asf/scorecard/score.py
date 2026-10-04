@@ -237,6 +237,9 @@ def window_row(facts, start, end, rows=None):
         'bugs': sum(r['bugs'] for r in shipped), 's1': sum(r['s1'] for r in shipped),
         'dead_sessions': len(dead),
         'dead_usd': round(sum(r.usd or 0.0 for r in dead), 2),
+        # the facts shadow's disagreements (asf.facts.disagree) — the cutover's evidence
+        'facts_disagree': sum(1 for d in getattr(facts, 'disagree', None) or ()
+                              if in_window(d.get('ts'), start, end)),
     }
 
 
