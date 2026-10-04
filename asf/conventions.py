@@ -367,7 +367,7 @@ WORD_OR_MAP_CONVENTIONS = {'landing_checks_missing': ('wait', 'local-gate')}
 KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16', 'facts',
                'refguard', 'console_wait', 'groom_rules', 'relaunch_cap', 'loop_cap',
                'head_capped', 'unknown_holds', 'models.cheap_kinds', 'roots_unverified_hours',
-               'roots_park_stale_days', 'roots_min_dependants')
+               'roots_park_stale_days', 'roots_min_dependants', 'queue_store')
 
 
 

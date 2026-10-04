@@ -4,8 +4,8 @@ Every state file under ``<ASF_HOME>/state/`` was its own module's business: a fi
 name (two writers share it), no lock around a read-modify-write (a second process's land
 request or rebuild request vanished between the read and the write), no version (a format
 change reset the file silently), and a parse error read as "empty" — the next write then
-destroyed whatever the file held. This module is the shared answer; nothing calls it yet (the
-callers move one owner at a time).
+destroyed whatever the file held. This module is the shared answer; the callers move one owner
+at a time (the merge queue's requests and rebuilds first, behind ``flags.queue_store``).
 
 * :func:`atomic_write_json` — ``mkstemp`` in the file's own directory, ``fsync``, ``os.replace``:
   a reader sees the old file or the new one, never half of either, and a crash leaves the old;
@@ -17,6 +17,9 @@ callers move one owner at a time).
 * :func:`update` — under the ``flock``: read, ``fn(data)``, atomic write. A corrupt file is
   copied to ``<name>.corrupt-<ts>`` and :class:`StoreCorrupt` raised — it is never overwritten
   with ``fn(default)``. A lock not free inside ``timeout_s`` raises :class:`StoreBusy`;
+* :func:`write_at` / :func:`update_at` — the same two for a caller that holds a state file's path
+  (a module handed a state directory) rather than its product; the file name is still the
+  registered name;
 * :func:`append` — one jsonl record, ``O_APPEND`` under the same ``flock``;
 * :func:`reap` — the files :mod:`asf.state.registry` does not name, or names with a TTL they
   outlived, moved to ``.trash/<date>/`` (purged after 14 days); a dry run unless ``apply``.
@@ -355,9 +358,33 @@ def write(product, name, data, *, expect=None, timeout_s=TIMEOUT_S, mode=0o644):
     """Replace ``name`` with ``data`` under its lock; the new version. ``expect`` (a version from
     :func:`read`, 0 for "absent") that is not the one on disk raises :class:`StoreConflict`. A
     corrupt file being replaced is copied aside first."""
-    spec = _json_spec(name, 'write')
+    return write_at(path(product, name), data, expect=expect, timeout_s=timeout_s, mode=mode)
+
+
+def update(product, name, fn, *, default=None, timeout_s=TIMEOUT_S, mode=0o644):
+    """Read-modify-write under the lock; returns what was written. ``fn(data)`` returns the new
+    data — or ``None``, and then ``data`` (mutated in place) is written. An absent file starts
+    from a copy of ``default``; a corrupt one raises :class:`StoreCorrupt` after a copy, and is
+    left as it is."""
+    return update_at(path(product, name), fn, default=default, timeout_s=timeout_s, mode=mode)
+
+
+def _registered_target(target, verb):
+    """``(target, name, spec)`` for an explicit path whose file name is a registered json name.
+    A shared name is refused as :func:`_mutable` refuses it."""
+    target = os.path.abspath(target)
+    name = os.path.basename(target)
+    spec = _json_spec(name, verb)
     _mutable(name, spec)
-    target = path(product, name)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    return target, name, spec
+
+
+def write_at(target, data, *, expect=None, timeout_s=TIMEOUT_S, mode=0o644):
+    """:func:`write` for a caller that holds the file's path rather than its product (a module
+    handed a state directory): the file name must be a registered name, and everything else —
+    the lock, ``expect``, the corrupt copy, the version — is :func:`write`'s."""
+    target, name, spec = _registered_target(target, 'write')
     with _locked(target, timeout_s):
         previous = _version(target)
         if expect is not None and expect != previous:
@@ -370,14 +397,11 @@ def write(product, name, data, *, expect=None, timeout_s=TIMEOUT_S, mode=0o644):
     return version
 
 
-def update(product, name, fn, *, default=None, timeout_s=TIMEOUT_S, mode=0o644):
-    """Read-modify-write under the lock; returns what was written. ``fn(data)`` returns the new
-    data — or ``None``, and then ``data`` (mutated in place) is written. An absent file starts
-    from a copy of ``default``; a corrupt one raises :class:`StoreCorrupt` after a copy, and is
-    left as it is."""
-    spec = _json_spec(name, 'update')
-    _mutable(name, spec)
-    target = path(product, name)
+def update_at(target, fn, *, default=None, timeout_s=TIMEOUT_S, mode=0o644):
+    """:func:`update` for a caller that holds the file's path rather than its product: the file
+    name must be a registered name; the lock, the corrupt refusal and the version are
+    :func:`update`'s."""
+    target, name, spec = _registered_target(target, 'update')
     with _locked(target, timeout_s):
         got, why = _read_at(target, spec.kind, default)
         if got.state == CORRUPT:

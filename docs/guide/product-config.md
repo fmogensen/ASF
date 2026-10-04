@@ -75,6 +75,12 @@ keeps that row, ranked behind the live rows of its tier, but an `after:` naming 
 holds a dependant — the released row says `waits on the console — put aside`. The launch-time
 overlap check is unchanged: a dependant whose `writes:` overlaps staged work still waits.
 
+`queue_store: on` (default off) writes the merge queue's state files (`land-requests.json`,
+`merge-queue.json`, `merge-queue-rebuild.json`) through the state store: one locked
+read-modify-write per change, on the file as it is then, so an `asf land` or a rebuild request
+written while a queue pass runs is never lost, and a corrupt file is copied aside and left
+alone rather than overwritten. The files keep their shape; an older venv still reads them.
+
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.

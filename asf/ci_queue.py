@@ -3091,7 +3091,7 @@ def _rebuild_batch(q, product, rec, why, dry_run, out, keep):
         keep.append(rec)
         return
     q.data['entries'].pop(_rerun_key(rec), None)
-    if merge_queue.request_rebuild(env.state_dir(product.name), ref, why):
+    if merge_queue.request_rebuild(env.state_dir(product.name), ref, why, product=product):
         out(f'ci queue: batch {ref} (cancelled run {rid}) dropped — {why}; the merge queue '
             f'rebuilds it on {trunk} next pass, a fresh run on the new batch sha')
     else:

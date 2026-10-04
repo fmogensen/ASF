@@ -206,6 +206,43 @@ class Writes(StoreHome):
             self.assertEqual(store.schema(P, REQ), 2)
 
 
+class ByPath(StoreHome):
+    """``write_at``/``update_at``: a caller handed a state directory, not its product."""
+
+    def test_any_directory_registered_name(self):
+        target = os.path.join(self.tmp, 'elsewhere', REQ)
+        store.update_at(target, lambda d: d.setdefault('q', []).append(1) and None, default={})
+        v = store.write_at(target, {'q': [1, 2]})
+        self.assertEqual(store._version(target), v)
+        out = store.update_at(target, lambda d: dict(d, n=1))
+        self.assertEqual(out, {'q': [1, 2], 'n': 1})
+        with open(target) as f:
+            self.assertEqual(json.load(f), {'q': [1, 2], 'n': 1})
+        with self.assertRaises(store.StoreConflict):
+            store.write_at(target, {}, expect=v)
+
+    def test_unregistered_shared_and_corrupt_are_refused(self):
+        d = os.path.join(self.tmp, 'elsewhere')
+        with self.assertRaises(store.StoreUnregistered):
+            store.update_at(os.path.join(d, 'nobody.json'), lambda x: x, default={})
+        with self.assertRaises(store.StoreRefused):
+            store.write_at(os.path.join(d, 'seats.json'), [])
+        self.assertFalse(os.path.exists(d))  # a refusal makes nothing
+        os.makedirs(d)
+        with open(os.path.join(d, REQ), 'w') as f:
+            f.write('{torn')
+        with self.assertRaises(store.StoreCorrupt):
+            store.update_at(os.path.join(d, REQ), lambda x: {}, default={})
+        with open(os.path.join(d, REQ)) as f:
+            self.assertEqual(f.read(), '{torn')
+
+    def test_by_product_and_by_path_share_one_lock(self):
+        with store._locked(store.path(P, REQ)):
+            with self.assertRaises(store.StoreBusy):
+                store.update_at(os.path.join(self.sdir(), REQ), lambda d: d, default={},
+                                timeout_s=0.2)
+
+
 class Shared(StoreHome):
     def test_mutating_a_shared_file_is_refused_until_every_product_is_on(self):
         self.assertEqual(store.shared_ready(), (False, []))
