@@ -34,7 +34,7 @@ KNOWN_CONFIG_KEYS = frozenset({
     'capacity.total.sessions', 'capacity.total.ci', 'capacity.per_product.sessions',
     'capacity.per_product.ci', 'capacity.reserve_for_s1.*',
     'feeder.capacity',          # moved to capacity.*; doctor's capacity row says so
-    'tick.step_timeout_s',
+    'tick.step_timeout_s', 'tick.budget_s',
     'network.probe', 'network.recover', 'network.watchdog', 'network.hosts',
     'cloud.*', 'upgrade.min_interval_min', 'upgrade.drain_wait_s', 'credentials.*',
 })

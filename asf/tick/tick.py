@@ -39,7 +39,7 @@ import time
 
 from asf import capacity, ci_queue, env
 from asf.record.index import do_index
-from asf.tick import network, steps, summary
+from asf.tick import network, steps, summary, watchdog
 
 
 def _ns(**kw):
@@ -386,10 +386,23 @@ def cmd_tick(args, root=None):
     if lock is None:
         print(f"tick: another tick of {product.name} is running — skipped")
         return 0
+    # a tick that never ends held this lock forever and no later tick started (2026-10-04):
+    # past its wall-clock budget it names its step and exits, which releases the lock
+    timer = watchdog.arm(tick_budget_s(product, [r[0] for r in rows]))
     try:
         return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=True))
     finally:
+        if timer is not None:
+            timer.cancel()
         lock.close()
+
+
+def tick_budget_s(product, step_names):
+    """This tick's wall-clock budget (:mod:`asf.tick.watchdog`): config ``tick.budget_s``, else
+    a multiple of the interval of the clock running ``step_names``."""
+    configured = watchdog.configured()
+    interval = None if configured is not None else watchdog.clock_interval(product, step_names)
+    return watchdog.seconds_for(product, step_names, budget_s=configured, interval_s=interval)
 
 
 def _run_locked(args, product, fresh, rows, chosen, locks=None):
@@ -465,6 +478,7 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
             print("tick: step daily already ran today")
             continue
         t0 = time.monotonic()
+        watchdog.enter(step)
         if owner == 'asf':
             step_rc = run_asf_step(step, ctx)
             if step == 'harvest':
@@ -510,6 +524,7 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
             # act on a stale board with full confidence, so none of them runs
             print(f"tick: record failed — {ctx.stale_reason or 'see above'}; nothing else ran")
             break
+    watchdog.enter('commit')
     if ran and ctx.has_record:
         with locks.record('state commit') as ok:
             if ok:
