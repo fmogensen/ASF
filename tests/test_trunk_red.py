@@ -20,7 +20,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import doctor, env, flake, merge_queue, trunk_red, trunk_watch
+from asf import doctor, env, flake, merge_queue, stale_ref, trunk_red, trunk_watch
 from asf.harvest import harvest, lane
 from asf.views import status
 
@@ -59,6 +59,8 @@ class FakeSource:
 
 class Fixture(unittest.TestCase):
     def setUp(self):
+        stale_ref._RUNS.clear()     # read once a process: no run id leaks in from another module
+        self.addCleanup(stale_ref._RUNS.clear)
         self.base = tempfile.mkdtemp(prefix='trunkred_')
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
         self.origin = os.path.join(self.base, 'origin.git')
@@ -233,6 +235,8 @@ class FactoryHead(unittest.TestCase):
     """A factory PR's head red after triage, on a check trunk red holds: no correct round."""
 
     def setUp(self):
+        stale_ref._RUNS.clear()
+        self.addCleanup(stale_ref._RUNS.clear)
         self.base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.base, True)
         self.state_dir = self.base
