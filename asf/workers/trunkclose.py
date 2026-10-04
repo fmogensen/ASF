@@ -24,8 +24,8 @@ trunk — no work of its own is left unlanded. With it:
   pending correction on it cleared. The record is never written here.
 """
 import re
-import subprocess
 
+from asf import gitops
 from asf.workers import landing
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -60,8 +60,9 @@ LEAD_SHA_RE = re.compile(r'\s*([0-9a-f]{7,40})\b')
 
 
 def _git(repo, args):
-    p = subprocess.run(['git', *args], cwd=repo, capture_output=True, text=True)
-    return p.stdout.strip() if p.returncode == 0 else None
+    """``git <args>``'s stdout, stripped, or ``None`` when it failed or could not answer."""
+    r = gitops.git(args, repo)
+    return r.data if r.ok else None
 
 
 def full_sha(repo, sha):
@@ -99,9 +100,11 @@ def own_shas(text):
 
 
 def _is_ancestor(repo, sha, ref):
-    return bool(sha and ref) and subprocess.run(
-        ['git', 'merge-base', '--is-ancestor', sha, ref], cwd=repo,
-        capture_output=True).returncode == 0
+    """True/False, or ``None`` when git could not tell (:func:`asf.gitops.is_ancestor`) — every
+    caller below reads ``None`` the way that closes nothing."""
+    if not (sha and ref):
+        return False
+    return gitops.is_ancestor(repo, sha, ref)
 
 
 def trunk_sha(repo, main, run, text, item='', writes=(), prs=()):
@@ -123,8 +126,11 @@ def trunk_sha(repo, main, run, text, item='', writes=(), prs=()):
             continue
         if pushed and _is_ancestor(repo, sha, pushed) and not _is_ancestor(repo, sha, launch):
             continue  # a commit the run itself made
-        if branch and branch in (_git(repo, ['log', '-1', '--format=%B', sha]) or ''):
-            continue  # the trunk's merge of the run's own branch (a merge queue's commit)
+        if branch:
+            body = gitops.log1(repo, sha, '%B')
+            if body is None or branch in body:
+                continue  # the trunk's merge of the run's own branch (a merge queue's commit),
+                # or a message git could not read: unknown is never evidence
         if not landing.attributable(repo, main, sha, item or run.get('item') or '', writes, prs):
             continue  # merely an ancestor of the trunk: another item's commit, the head merged in
         return sha

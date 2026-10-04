@@ -1,0 +1,75 @@
+"""asf.gitops — the one client for read-only ``git``: every call returns a :class:`Result`.
+
+A raw ``subprocess.run(['git', …])`` that fails returns a code, and most call sites read any
+non-zero code as "no": not an ancestor, no such branch, nothing changed. A git that hung, a
+repository that is not there, or an object not fetched yet then reads exactly like a definite
+answer — and a landing check that reads "no" where it meant "could not tell" files a NEEDS
+DECISION row, or reads "no branch left" and closes a card. Here the two are kept apart:
+
+* :func:`git` runs one command with a timeout and the hermetic environment
+  (:func:`asf.hermetic.git_env` — a hook's ``GIT_DIR`` never leaks in) and returns the
+  :class:`asf.github.Result` shape: ``ok`` with ``data`` (stdout, stripped), or not ``ok`` with
+  ``rc`` (``-1``: git never answered — a timeout, a missing directory) and ``reason``;
+* the helpers answer the questions the landing checks ask, and each returns ``None`` —
+  **Unknown** — when git could not answer, never ``False``/``''``/``0``.
+
+Pushing stays in :mod:`asf.gitpush`. The repository's ``check_clients`` script counts the raw
+``git`` argv sites left outside these modules; each migration lowers its baseline.
+"""
+import subprocess
+
+from asf import hermetic
+from asf.github import Result, now_iso
+
+#: Seconds one git read may take before its answer is Unknown.
+TIMEOUT_S = 120
+
+
+def git(args, cwd, *, timeout=TIMEOUT_S, env=None):
+    """Run ``git <args>`` in ``cwd``. ``ok`` with ``data`` = stdout stripped when git exits 0;
+    otherwise not ``ok`` — ``rc`` is git's code (a definite answer some helpers read), or ``-1``
+    when git never answered (``reason`` ``'timeout'`` or the error)."""
+    try:
+        p = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True,
+                           timeout=timeout, env=hermetic.git_env(env))
+    except subprocess.TimeoutExpired:
+        return Result(False, as_of=now_iso(), reason='timeout')
+    except (OSError, ValueError) as e:
+        return Result(False, as_of=now_iso(), reason=f'error: {e}')
+    out, err = p.stdout or '', p.stderr or ''
+    if p.returncode != 0:
+        first = (err.strip().splitlines() or [''])[0]
+        return Result(False, rc=p.returncode, stdout=out, stderr=err, as_of=now_iso(),
+                      reason=f'rc {p.returncode}: {first}' if first else f'rc {p.returncode}')
+    return Result(True, data=out.strip(), rc=0, stdout=out, stderr=err, as_of=now_iso())
+
+
+def rev_parse(cwd, ref):
+    """``ref`` resolved to its sha; ``''`` when git says there is no such ref (rc 1); ``None``
+    when git could not answer (no repository, a timeout)."""
+    r = git(['rev-parse', '--verify', '-q', ref], cwd)
+    if r.ok:
+        return r.data
+    return '' if r.rc == 1 else None
+
+
+def is_ancestor(cwd, sha, ref):
+    """True when ``sha`` is an ancestor of ``ref``, False when it is not, ``None`` when git
+    could not tell — an object it does not have (not fetched), no repository, a timeout."""
+    r = git(['merge-base', '--is-ancestor', sha, ref], cwd)
+    if r.ok:
+        return True
+    return False if r.rc == 1 else None
+
+
+def log1(cwd, sha, fmt):
+    """``git log -1 --format=<fmt> <sha>``, stripped, or ``None`` when git could not answer."""
+    r = git(['log', '-1', f'--format={fmt}', sha], cwd)
+    return r.data if r.ok else None
+
+
+def rev_list_count(cwd, a, b):
+    """How many commits ``b`` carries that ``a`` does not (``a..b``), or ``None`` when git could
+    not answer (a ref missing, a timeout)."""
+    r = git(['rev-list', '--count', f'{a}..{b}'], cwd)
+    return int(r.data) if r.ok and r.data.isdigit() else None
