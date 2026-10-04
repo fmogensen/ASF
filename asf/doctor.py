@@ -1353,6 +1353,7 @@ def run(product_name):
         rows.append(('ci classes', required, ok, detail))
     for required, ok, detail in check_cloud(cfg, product):
         rows.append(('cloud lane', required, ok, detail))
+    rows.append(('lane split', False, True, check_lane_split(cfg, product)))
     slow = check_gate_speed(product)
     if slow:
         rows.append(('gate', False, False, slow))
@@ -1564,6 +1565,16 @@ def check_cloud(cfg, product):
     GitHub origin. No rows while ``cloud.enabled`` is not set."""
     from asf.workers import cloud
     return cloud.doctor_rows(cfg, product)
+
+
+def check_lane_split(cfg, product):
+    """The ``lane split`` row: how this product's work splits between the host and the cloud
+    lane now, and why (:func:`asf.workers.cloud.lane_split`) — informational, never red."""
+    from asf.workers import cloud
+    try:
+        return cloud.lane_split(cfg, product)
+    except Exception as e:  # noqa: BLE001 — an unreadable split is one row, not a crash
+        return f'cannot read the lane split — {type(e).__name__}: {e}'
 
 
 def check_gate_speed(product):

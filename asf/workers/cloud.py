@@ -28,12 +28,26 @@ dead run's worktree is brought up to ``origin/<branch>``, its brief ref is delet
 lands in the status file every liveness check reads — from then on health judges it like any run:
 pushed or not, empty or not.
 
-**Placement** (:func:`asf.workers.wave.wave`). With ``cloud.default: true`` the cloud is the
+**Placement** (:func:`asf.workers.wave.wave`) follows ``cloud.mode`` (:data:`MODES`), re-read
+every tick — the tick is a fresh process that loads both files, so a one-line change applies on
+the next tick with no restart. ``overflow`` (the default; ``local`` is its alias: local first)
+and ``primary`` are below; ``off`` launches no new cloud session whatever else is configured —
+the live ones drain as usual (:func:`sync` reads them on every health pass) — and keeps the
+``role: cloud`` accounts off the local lane. ``cloud.default: true`` is the older spelling of
+``mode: primary``; a written ``mode`` wins.
+
+With ``cloud.mode: primary`` the cloud is the
 DEFAULT executor: every row goes there first except one whose kind is in :data:`LOCAL_KINDS` —
 the closed exception list of three kinds the lane structurally cannot collect — or in
 ``cloud.local_only``, or whose item carries ``local_only: true``; the local lane takes such a row,
-and takes any other one too once the cloud lane is full or unready. With ``cloud.default: false``
-the cloud is OVERFLOW: a row goes there only when the local lane cannot take it — no local seat,
+and takes any other one too once the cloud lane cannot: it is full (``max_inflight``) or unready
+(the doctor's critical checks), no lane account has quota headroom, the tick's
+``max_creates_per_tick`` is spent, or its launches are erroring — ``cloud.fallback_failures``
+(default 3) failed creates within ``cloud.fallback_window_min`` (default 30) trip a
+``cloud.fallback_cooldown_min`` (default 30) cool-down in which every row goes local
+(:class:`Breaker`). Each such launch says why on its tick-log line (``… — cloud fallback:
+<why>``) and the status row's cloud clause carries the last one (:func:`capacity_clause`).
+With ``cloud.mode: overflow`` the cloud is OVERFLOW: a row goes there only when the local lane cannot take it — no local seat,
 or host pressure — ``cloud.enabled`` is true, the row is eligible (``cloud.rows: any``, or a
 ``cloud-ok`` row) and the lane is under ``cloud.max_inflight`` (else
 ``worker_pool.caps.cloud_max_inflight``); the exception list holds in this mode too — the
@@ -63,7 +77,7 @@ Config (``~/.ASF/config.yaml``; a product file's ``cloud:`` overrides key by key
       token_secret: CLAUDE_CODE_OAUTH_TOKEN
       max_inflight: 4
       rows: any                  # or cloud-ok (default)
-      default: true              # cloud first (default false: overflow only)
+      mode: primary              # overflow (default; alias local) | primary | off
       local_only: [groom]        # kinds that never leave the host
       accounts: [acct-a]         # optional: default = the role: cloud accounts
       timeout_min: 240
@@ -125,6 +139,21 @@ WORKING, FINISHED, DEAD = cloudpid.WORKING, cloudpid.FINISHED, cloudpid.DEAD
 #: ``cloud.max_creates_per_tick``'s default for ``claude-remote``: each create is a helper call
 DEFAULT_REMOTE_CREATES_PER_TICK = 2
 
+MODE_OVERFLOW, MODE_PRIMARY, MODE_OFF = 'overflow', 'primary', 'off'
+#: ``cloud.mode``'s values: overflow (local first, the cloud takes what local cannot), primary
+#: (cloud first, local is the exception and the fallback), off (no new cloud launch)
+MODES = (MODE_OVERFLOW, MODE_PRIMARY, MODE_OFF)
+#: the other spellings ``cloud.mode`` accepts, and the mode each one is
+MODE_ALIASES = {'local': MODE_OVERFLOW}
+#: primary mode's launch-error fallback (:class:`Breaker`): this many failed cloud creates …
+DEFAULT_FALLBACK_FAILURES = 3
+#: … within this many minutes send every row local for …
+DEFAULT_FALLBACK_WINDOW_MIN = 30
+#: … this many minutes
+DEFAULT_FALLBACK_COOLDOWN_MIN = 30
+#: how long ``asf status`` keeps naming the last fallback
+FALLBACK_SHOWN_S = 3600
+
 
 # ---- config -----------------------------------------------------------------------------------
 
@@ -140,8 +169,12 @@ class Settings:
     runs_on: tuple = DEFAULT_RUNS_ON
     token_secret: str = DEFAULT_TOKEN_SECRET
     workflow: str = DEFAULT_WORKFLOW
-    default: bool = False
+    default: bool = False        # mode == primary (the field ``cloud.default`` used to set)
     local_only: tuple = ()
+    mode: str = MODE_OVERFLOW
+    fallback_failures: int = DEFAULT_FALLBACK_FAILURES
+    fallback_window_min: float = DEFAULT_FALLBACK_WINDOW_MIN
+    fallback_cooldown_min: float = DEFAULT_FALLBACK_COOLDOWN_MIN
     # claude-remote (asf.workers.remote)
     environment_id: str = ''     # one environment for every lane account …
     environments: tuple = ()     # … or ((account, environment), …): environments are per account
@@ -154,8 +187,10 @@ class Settings:
 
     @property
     def on(self):
-        """The lane can take a launch: enabled, a runtime it runs, and a seat to give."""
-        return self.enabled and self.runtime in RUNTIMES and self.max_inflight > 0
+        """The lane can take a launch: enabled, not ``mode: off``, a runtime it runs, and a seat
+        to give."""
+        return (self.enabled and self.mode != MODE_OFF and self.runtime in RUNTIMES
+                and self.max_inflight > 0)
 
 
 def config_problems(block):
@@ -181,7 +216,33 @@ def config_problems(block):
     secret = block.get('token_secret')
     if secret is not None and not SECRET_RE.match(str(secret)):
         out.append(('cloud.token_secret', f'must be a repo secret name, not {secret!r}'))
+    mode = block.get('mode')
+    if mode is not None and parse_mode(mode) is None:
+        out.append(('cloud.mode', f'must be one of {", ".join(MODES + tuple(MODE_ALIASES))}, '
+                                  f'not {mode!r}'))
+    for key in ('fallback_failures', 'fallback_window_min', 'fallback_cooldown_min'):
+        v = block.get(key)
+        if v is not None and (isinstance(v, bool) or _float(v, -1) <= 0):
+            out.append((f'cloud.{key}', f'must be a number above 0, not {v!r}'))
     return out
+
+
+def parse_mode(v):
+    """``cloud.mode`` as one of :data:`MODES` (an alias resolved), or None for a value it is
+    not. A YAML ``off`` read as false is ``off``."""
+    if v is False:
+        return MODE_OFF
+    m = str(v).strip().lower() if isinstance(v, str) else None
+    m = MODE_ALIASES.get(m, m)
+    return m if m in MODES else None
+
+
+def _mode(c):
+    """The block's mode: ``mode`` when written (an unreadable one is the default — the config
+    check refuses it), else ``default: true`` → primary, else overflow."""
+    if c.get('mode') is not None:
+        return parse_mode(c.get('mode')) or MODE_OVERFLOW
+    return MODE_PRIMARY if truthy(c.get('default')) else MODE_OVERFLOW
 
 
 def _int(v, default):
@@ -250,8 +311,15 @@ def settings(cfg, product=None):
                     runs_on=_labels(c.get('runs_on')),
                     token_secret=str(c.get('token_secret') or DEFAULT_TOKEN_SECRET),
                     workflow=str(c.get('workflow') or DEFAULT_WORKFLOW),
-                    default=truthy(c.get('default')),
+                    default=_mode(c) == MODE_PRIMARY,
                     local_only=_kinds(c.get('local_only')),
+                    mode=_mode(c),
+                    fallback_failures=max(1, _int(c.get('fallback_failures'),
+                                                  DEFAULT_FALLBACK_FAILURES)),
+                    fallback_window_min=_float(c.get('fallback_window_min'),
+                                               DEFAULT_FALLBACK_WINDOW_MIN),
+                    fallback_cooldown_min=_float(c.get('fallback_cooldown_min'),
+                                                 DEFAULT_FALLBACK_COOLDOWN_MIN),
                     environment_id='' if isinstance(c.get('environment_id'), dict)
                     else str(c.get('environment_id') or ''),
                     environments=tuple(sorted((str(k), str(v)) for k, v in
@@ -301,8 +369,8 @@ def eligible(row, s):
 
 
 def first(row, s):
-    """``cloud.default: true``: the row goes to the cloud lane before the local one. Every kind
-    but a local-only one — there is no allow-list."""
+    """``cloud.mode: primary``: the row goes to the cloud lane before the local one. Every kind
+    but a local-only one — there is no allow-list (``cloud.rows`` bounds the overflow path)."""
     return bool(s.default) and not local_only(row, s)
 
 
@@ -540,6 +608,125 @@ def settle_ended(run):
     return status
 
 
+# ---- primary mode's fallback -------------------------------------------------------------------
+
+def _state_file(product, name):
+    from asf import env  # local: env imports this module
+    try:
+        return os.path.join(env.state_dir(product), name)
+    except (OSError, AttributeError, TypeError):
+        return None
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            got = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
+def _write_json(path, data):
+    if not path:
+        return
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, sort_keys=True, indent=1)
+    except OSError:
+        pass
+
+
+def _clock(ts):
+    return time.strftime('%H:%M', time.localtime(ts))
+
+
+class Breaker:
+    """Primary mode's launch-error fallback, in ``<state>/cloud-breaker.json``: a cloud create
+    that fails is noted; ``cloud.fallback_failures`` of them within ``cloud.fallback_window_min``
+    trip a ``cloud.fallback_cooldown_min`` cool-down in which the wave sends every row to the
+    local lane. A create that succeeds clears the count (they must be consecutive). The same
+    signal ``asf cloud doctor`` cannot give: the lane passes every check and still fails to
+    create — a helper refusing, a runtime erroring, a quota the reader does not see. A state
+    dir that cannot be read or written only loses the memory."""
+
+    FILE = 'cloud-breaker.json'
+
+    def __init__(self, product, s, clock=None):
+        self.s = s
+        self.clock = clock or time.time
+        self.path = _state_file(product, self.FILE)
+        self.data = _read_json(self.path) if self.path else {}
+
+    def tripped(self):
+        """``''``, or why every row goes local now."""
+        until = float(self.data.get('until') or 0)
+        if until <= self.clock():
+            return ''
+        return (f'cloud launches erroring — {self.data.get("count")} failed creates in '
+                f'{self.s.fallback_window_min:g} min (last: {self.data.get("why")}); local lane '
+                f'until {_clock(until)}')
+
+    def fail(self, why):
+        """Note one failed create. The trip line when this one trips the breaker, else None."""
+        now = self.clock()
+        horizon = now - self.s.fallback_window_min * 60
+        fails = [t for t in self.data.get('fails') or () if isinstance(t, (int, float))
+                 and t >= horizon] + [now]
+        why = ' '.join(str(why).split())[:200]
+        if len(fails) >= self.s.fallback_failures:
+            until = now + self.s.fallback_cooldown_min * 60
+            self.data = {'fails': [], 'until': until, 'count': len(fails), 'why': why}
+            _write_json(self.path, self.data)
+            return self.tripped()
+        self.data = dict(self.data, fails=fails, why=why)
+        _write_json(self.path, self.data)
+        return None
+
+    def ok(self):
+        """A create succeeded: the failures were not consecutive."""
+        if self.data.get('fails'):
+            self.data = dict(self.data, fails=[])
+            _write_json(self.path, self.data)
+
+
+FALLBACK_FILE = 'cloud-fallback.json'
+
+
+def note_fallback(product, job, why, now=None):
+    """Record that the local lane took ``job``, a row primary mode sends to the cloud, and why —
+    the status row names the last one (:func:`last_fallback`)."""
+    _write_json(_state_file(product, FALLBACK_FILE),
+                {'at': time.time() if now is None else now, 'job': job, 'why': str(why)})
+
+
+def last_fallback(product, now=None):
+    """``{at, job, why}`` of the last fallback within :data:`FALLBACK_SHOWN_S`, or None."""
+    path = _state_file(product, FALLBACK_FILE)
+    got = _read_json(path) if path else {}
+    now = time.time() if now is None else now
+    try:
+        at = float(got.get('at'))
+    except (TypeError, ValueError):
+        return None
+    return got if now - at <= FALLBACK_SHOWN_S else None
+
+
+def fallback_state(product, s, now=None):
+    """One phrase: why the local lane takes primary mode's rows now, or the last time it did —
+    ``''`` when neither (or the mode is not primary)."""
+    if s.mode != MODE_PRIMARY or not s.on:
+        return ''
+    tripped = Breaker(product, s, clock=(lambda: now) if now is not None else None).tripped()
+    if tripped:
+        return f'fallback: {tripped}'
+    last = last_fallback(product, now)
+    if not last:
+        return ''
+    ago = max(0, int(((time.time() if now is None else now) - float(last['at'])) // 60))
+    return f'last fallback {ago}m ago: {last.get("job")} local — {last.get("why")}'
+
+
 # ---- placement's counts, status and doctor --------------------------------------------------
 
 def inflight(product_name):
@@ -550,19 +737,27 @@ def inflight(product_name):
                if is_cloud(r) and lifecycle.occupies(r))
 
 
+#: ``asf cloud doctor``'s mode row, per mode
+MODE_DETAIL = {
+    MODE_PRIMARY: f'cloud.mode: primary — the cloud lane is the default executor '
+                  f'(local: {", ".join(LOCAL_KINDS)}, cloud.local_only, cards marked local_only, '
+                  f'and the fallback)',
+    MODE_OVERFLOW: 'cloud.mode: overflow — the cloud lane is overflow only',
+    MODE_OFF: 'cloud.mode: off — no new cloud launch; live cloud runs drain',
+}
+
+
 def checks(cfg, product, run_cmd=None):
     """``[(name, required, ok, detail)]`` — every readiness check of the lane, one per line of
     ``asf cloud doctor``: on/default, runtime, seats, accounts, then the runtime's own
     (:func:`asf.workers.actions.checks`: workflow, secret, runner). ``required`` marks a
     critical check: one failing makes the lane unready (:func:`readiness`)."""
     s = settings(cfg, product)
-    rows = [('enabled', True, s.enabled,
-             'cloud.enabled: true' if s.enabled else 'cloud.enabled: false — the lane takes no '
-                                                     'launch')]
-    rows.append(('default', False, s.default,
-                 f'cloud.default: true — the cloud lane is the default executor '
-                 f'(local: {", ".join(LOCAL_KINDS)})' if s.default
-                 else 'cloud.default: false — the cloud lane is overflow only'))
+    rows = [('enabled', True, s.enabled and s.mode != MODE_OFF,
+             'cloud.enabled: true' if s.enabled and s.mode != MODE_OFF
+             else 'cloud.mode: off — the lane takes no launch' if s.enabled
+             else 'cloud.enabled: false — the lane takes no launch')]
+    rows.append(('default', False, s.default, MODE_DETAIL[s.mode]))
     if s.runtime in REFUSED:
         rows.append(('runtime', True, False,
                      f'cloud.runtime {s.runtime} is refused: {REFUSED[s.runtime]}'))
@@ -605,7 +800,7 @@ def readiness(cfg, product, run_cmd=None):
     reads it once per tick — each call costs a few ``gh`` calls."""
     s = settings(cfg, product)
     if not s.on:
-        return False, 'cloud lane off (cloud.enabled, runtime, max_inflight)'
+        return False, 'cloud lane off (cloud.enabled, cloud.mode, runtime, max_inflight)'
     return _verdict(checks(cfg, product, run_cmd=run_cmd))
 
 
@@ -635,6 +830,8 @@ def doctor_rows(cfg, product, run_cmd=None):
     s = settings(cfg, product)
     if not s.enabled:
         return []
+    if s.mode == MODE_OFF:
+        return [(False, True, MODE_DETAIL[MODE_OFF])]
     rows = [(req, ok, d) for name, req, ok, d in checks(cfg, product, run_cmd=run_cmd)
             if not ok and name not in ('enabled', 'default')]
     if not rows:
@@ -643,7 +840,7 @@ def doctor_rows(cfg, product, run_cmd=None):
         rows.insert(0, (False, True, f'cloud lane on: {s.max_inflight} seat(s), runtime '
                                      f'{s.runtime} on [{", ".join(s.runs_on)}], accounts '
                                      f'{", ".join(a.name for a in accts)}, rows {s.rows}'
-                                     f'{", default" if s.default else ""}'))
+                                     f', mode {s.mode}'))
     return rows
 
 
@@ -652,4 +849,35 @@ def capacity_clause(cfg, product):
     s = settings(cfg, product)
     if not s.enabled:
         return ''
-    return f'cloud {inflight(product.name)}/{s.max_inflight}'
+    base = f'cloud {inflight(product.name)}/{s.max_inflight}'
+    if s.mode == MODE_OFF:
+        return f'{base} off (no new launch; live runs drain)'
+    if s.mode != MODE_PRIMARY:
+        return base
+    why = fallback_state(product, s)
+    return f'{base} primary' + (f' ({why})' if why else '')
+
+
+def lane_split(cfg, product):
+    """``asf doctor``'s ``lane split`` row: the effective split of this product's work between
+    the hosts — the mode, the local session ceiling and where it comes from (written, or
+    ``capacity.sessions: auto`` sized off the host), the cloud lane's seats, what never leaves
+    the host, and the fallback now."""
+    from asf import capacity as capacity_mod  # local: capacity reads the pool, which reads this
+    s = settings(cfg, product)
+    try:
+        local, source = capacity_mod.product_sessions(product, cfg)
+        local_txt = f'local sessions {local} ({source})'
+    except Exception as e:  # noqa: BLE001 — an unreadable ceiling is one phrase, not a crash
+        local_txt = f'local sessions unreadable ({type(e).__name__}: {e})'
+    lane = ('cloud lane off' if not s.enabled else 'no new cloud launch' if s.mode == MODE_OFF
+            else f'cloud max_inflight {s.max_inflight}' if s.on
+            else 'cloud lane not ready to launch (asf cloud doctor)')
+    keep = ', '.join(LOCAL_KINDS + tuple(k for k in s.local_only if k not in LOCAL_KINDS))
+    why = {MODE_PRIMARY: 'cloud first; local takes local-only rows and the fallback',
+           MODE_OVERFLOW: 'local first; the cloud takes what local cannot',
+           MODE_OFF: 'local only'}[s.mode]
+    state = fallback_state(product, s) or ('no fallback in the last hour'
+                                           if s.mode == MODE_PRIMARY and s.on else '')
+    return (f'mode {s.mode} ({why}) — {local_txt}, {lane}, local only: {keep} and cards marked '
+            f'local_only' + (f'; {state}' if state else ''))

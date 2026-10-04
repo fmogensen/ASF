@@ -17,6 +17,12 @@ shape::
       weight: 3          # this product's share of the pool against the others' (default 1)
       batch: {per_run: 8, parallel: 2, runners: 4}
 
+``sessions: auto`` (in the product file, or ``per_product``) sizes the ceiling off the host it
+runs on, read every tick (:func:`auto_sessions`): ``max(1, min(sessions_ceiling, cores // 2,
+RAM_GB // 4))``, ``sessions_ceiling`` (``config.yaml``'s ``capacity:``, default
+:data:`AUTO_CEILING`) the cap a bigger host never passes; a figure the host does not give is left out of the min. The host guards
+(``host_guards``: load and swap) still hold the local lane on top of it.
+
 This is the one module that reads those keys — no caller reads them raw.
 
 **The session law.** :func:`resolve` hands back a *ceiling*, not a free count:
@@ -62,6 +68,12 @@ import subprocess
 from asf import env, github
 
 DEFAULT_SESSIONS = 4
+#: ``capacity.sessions: auto``'s ceiling when ``sessions_ceiling`` is not written
+AUTO_CEILING = 8
+#: ``auto``: one session per this many cores …
+AUTO_CORES_PER_SESSION = 2
+#: … and per this many GB of RAM
+AUTO_GB_PER_SESSION = 4
 DEMAND_FRESH_S = 30 * 60   # a partner's demand record older than this lends nothing
 DEMAND_FILE = 'demand.json'
 DEFAULT_RESERVE = {'local': 1, 'cloud': 1}
@@ -103,15 +115,69 @@ def _operator_capacity(cfg):
     return cap if isinstance(cap, dict) else {}
 
 
+def is_auto(v):
+    return isinstance(v, str) and v.strip().lower() == 'auto'
+
+
+def host_size():
+    """``(cores, ram_gb)`` of this host; either None when unreadable. Never raises."""
+    cores = os.cpu_count()
+    ram = None
+    try:
+        p = subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True,
+                           timeout=5)
+        if p.returncode == 0 and p.stdout.strip().isdigit():
+            ram = int(p.stdout.strip()) / 2 ** 30
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if ram is None:
+        try:
+            with open('/proc/meminfo', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('MemTotal:'):
+                        ram = int(line.split()[1]) / 2 ** 20
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+    return cores, ram
+
+
+def auto_sessions(cfg, size=None):
+    """``(int, source)`` for ``sessions: auto``: ``max(1, min(sessions_ceiling, cores // 2,
+    RAM_GB // 4))``, ``sessions_ceiling`` the operator's (``config.yaml`` ``capacity:``), a
+    figure the host does not give left out; ``size`` is ``(cores, ram_gb)`` (default
+    :func:`host_size`)."""
+    ceiling = _operator_capacity(cfg).get('sessions_ceiling')
+    if not (isinstance(ceiling, int) and not isinstance(ceiling, bool) and ceiling > 0):
+        ceiling = AUTO_CEILING
+    cores, ram = size if size is not None else host_size()
+    terms = [ceiling]
+    parts = [f'ceiling {ceiling}']
+    if cores:
+        terms.append(int(cores) // AUTO_CORES_PER_SESSION)
+        parts.append(f'{int(cores)} cores/{AUTO_CORES_PER_SESSION}')
+    if ram:
+        terms.append(int(ram // AUTO_GB_PER_SESSION))
+        parts.append(f'{ram:.0f} GB/{AUTO_GB_PER_SESSION}')
+    return max(1, min(terms)), f'auto: min({", ".join(parts)})'
+
+
 def product_sessions(product, cfg):
     """A product's session ceiling: its own file, else the operator default, else the deprecated
-    ``feeder.capacity``, else :data:`DEFAULT_SESSIONS`. ``(int, source)``."""
-    v = _product_capacity(product).get('sessions')
+    ``feeder.capacity``, else :data:`DEFAULT_SESSIONS`. ``(int, source)``. ``auto`` in either
+    block sizes it off the host (:func:`auto_sessions`)."""
+    own = _product_capacity(product)
+    v = own.get('sessions')
     if isinstance(v, int) and v >= 0:
         return v, 'product'
-    v = (_operator_capacity(cfg).get('per_product') or {}).get('sessions')
+    if is_auto(v):
+        return auto_sessions(cfg)
+    per = _operator_capacity(cfg).get('per_product') or {}
+    v = per.get('sessions') if isinstance(per, dict) else None
     if isinstance(v, int) and v >= 0:
         return v, 'operator default'
+    if is_auto(v):
+        return auto_sessions(cfg)
     v = ((cfg or {}).get('feeder') or {}).get('capacity')
     if isinstance(v, int) and v >= 0:
         return v, 'feeder.capacity'

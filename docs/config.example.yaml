@@ -142,6 +142,15 @@ cloud:
   rows: cloud-ok               # or `any`: which rows may go to the lane
   # accounts: [acct-a]         # whose quota they spend; unset = the role: cloud accounts
   timeout_min: 240             # a run still working after this is cancelled, and ends dead
+  # mode: overflow (default; alias local) — local first; primary — the cloud first (below);
+  # off — no new cloud launch, live runs drain. `default: true` is the older spelling of primary.
+  # In primary a row goes local only when it must (local_only) or as the fallback: the lane full,
+  # unready, out of quota, or erroring (fallback_failures creates failed in fallback_window_min
+  # → fallback_cooldown_min local); each fallback is a `— cloud fallback: <why>` launch line.
+  mode: overflow
+  # fallback_failures: 3
+  # fallback_window_min: 30
+  # fallback_cooldown_min: 30
   # default: the cloud as the DEFAULT executor instead of overflow. true: a row of kind coder,
   # correct, review, adjudicate, fix-bug, spec, plan, direct or groom (every kind with
   # `rows: any`; a cloud-ok row too) goes to the cloud FIRST, up to max_inflight; the local lane
@@ -151,7 +160,6 @@ cloud:
   # The lane is unready — the wave says `cloud lane unready: <why> — local lane only` — while a
   # critical check of `asf cloud doctor --product <p>` fails (the token secret's name in the repo,
   # the workflow on the trunk, an online runner carrying runs_on, a cloud account).
-  default: false
   # local_only: [groom]        # kinds that never leave the host; a card's own `local_only: true`
                                # keeps that item's rows local too (both modes)
 
