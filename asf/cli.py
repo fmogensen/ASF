@@ -294,6 +294,8 @@ def build_parser():
     register_reset(sub)
     from asf.tick.migrate_landing import register as register_migrate_landing
     register_migrate_landing(sub)
+    from asf.trunk_ruleset import register as register_ruleset
+    register_ruleset(sub)
     from asf.workers.trunkmerge import register as register_trunk_check
     register_trunk_check(sub)
     from asf.briefs import register as register_briefs
