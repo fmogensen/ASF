@@ -458,21 +458,23 @@ def voided_sha(path, item, sha):
     return next((v for v in voids(path, item) if _sha_match(v.get('head'), sha)), None)
 
 
-def voided_run(path, run, sha=None):
+def voided_run(path, run, sha=None, folded=None):
     """The standing reset that names ``run``'s landing claim, or None: a void of its item whose
     head is ``sha`` (the run's merge sha, else its ``harvested``), or any standing reset of its
     item naming the run's lane PR — with the lane's head when both carry one — on a run that
-    started before it. A reset ``(pr, head)`` is never a merge fact, whatever the host says."""
+    started before it. A reset ``(pr, head)`` is never a merge fact, whatever the host says.
+    ``folded``: the ledger already folded (:func:`_folded` reads the file each call)."""
     run = run or {}
     item = run.get('item')
     if not item or not isinstance(item, (str, int, float)):
         return None
+    folded = folded or _folded(path)
     lane = run.get('lane') if isinstance(run.get('lane'), dict) else {}
     sha = sha or run.get('harvested')
-    for v in voids(path, item):
+    for v in folded.voids.get(item, ()):
         if sha and _sha_match(v.get('head'), sha):
-            return v
-    for v in _folded(path).standing.get(item, ()):
+            return dict(v)
+    for v in folded.standing.get(item, ()):
         if not v.get('pr') or lane.get('pr') != v.get('pr'):
             continue
         if (run.get('started') or '') >= (v.get('at') or ''):
@@ -878,7 +880,13 @@ def delivered(run):
 
 
 def landed(run):
-    return bool(run) and bool(run.get('harvested'))
+    """The run carries a landing mark (``harvested:``). Under ``flags.facts: shadow`` the landing
+    fact (:func:`asf.facts.landing.shadow_run`) is compared beside it; the answer is this one."""
+    old = bool(run) and bool(run.get('harvested'))
+    if not old:
+        return old
+    from asf.facts import landing as facts_landing
+    return facts_landing.shadow_run(run, old)
 
 
 def eligible(run):
@@ -895,6 +903,11 @@ def landed_earlier(path, run):
     the trunk (a squash-merged lane PR included: the native landing marks the run at merge) — or
     None. A later session on that branch that writes nothing has nothing to land, and is not sent
     back to push work the trunk already holds."""
+    from asf.facts import landing as facts_landing
+    return facts_landing.shadow_earlier(path, run, _landed_earlier(path, run))
+
+
+def _landed_earlier(path, run):
     branch, started = (run or {}).get('branch'), (run or {}).get('started') or ''
     if not path or not branch:
         return None

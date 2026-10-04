@@ -81,6 +81,13 @@ answer. `shadow` runs both the decider and the fact, returns the decider's answe
 disagreement to `state/<product>/facts-disagree.jsonl` — counted as `facts_disagree` in the
 scorecard and on a `Facts` status row; whatever the fact raises is logged, never raised. In
 shadow a host fact is read once per pass and never re-read. `new` returns the fact's answer.
+The first fact in shadow is the landing (`asf/facts/landing.py`): did an item's work land on
+the trunk, by rule — a voided landing never, the lane's PR merge, a commit naming the item,
+the trunk-close evidence with its arm; a commit that only covers the item's `writes:` is a
+hint, a reverted landing is not landed. The workers' deciders (the trunk close, the relaunch
+cap, the landing verification, the ledger's `landed`) keep their own answer under `shadow` and
+`new` until each is cut over; each distinct disagreement is logged once a day. `asf facts
+replay --product P [--since ISO]` runs the same comparison offline over the ledger.
 
 `console_wait: aside` (default `hold`) stops work only the console can move from ordering
 anything: an item whose only row is CONSOLE → AMEND (its `writes:` reach the amendable set)

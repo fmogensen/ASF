@@ -296,6 +296,8 @@ def build_parser():
     register_migrate_landing(sub)
     from asf.trunk_ruleset import register as register_ruleset
     register_ruleset(sub)
+    from asf.facts.landing import register as register_facts
+    register_facts(sub)
     from asf.workers.trunkmerge import register as register_trunk_check
     register_trunk_check(sub)
     from asf.briefs import register as register_briefs

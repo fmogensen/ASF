@@ -169,18 +169,20 @@ def landed_in(reason):
 
 
 def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP,
-            writes=()):
+            writes=(), product=None):
     """``None`` when the launch may go ahead, else the park's reason: :data:`CAP` launches of
     ``job`` on one state, or one whose report ended terminal on it (:func:`terminal`) while the
     branch still sits on the head it was handed."""
-    return assess(path, job, item, head, card, cause, repo, main, cap, writes)[0]
+    return assess(path, job, item, head, card, cause, repo, main, cap, writes, product)[0]
 
 
 def assess(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP,
-           writes=()):
+           writes=(), product=None):
     """``(reason, landed)``: :func:`verdict`'s reason (or None), and the sha of the commit the
     last report names that git verified on ``origin/<main>`` ('' when none) — the evidence a
-    park closes its card on instead of waiting for a person (:mod:`asf.workers.trunkclose`)."""
+    park closes its card on instead of waiting for a person (:mod:`asf.workers.trunkclose`).
+    Under ``product``'s ``flags.facts: shadow`` the ``landed`` half is compared with the landing
+    fact (:func:`asf.facts.landing.landed`); the answer is always this one."""
     runs = streak(path, job, item, head, card, cause)
     on_head = head_streak(path, job, item, head, card)
     if len(on_head) >= cap and len(on_head) > len(runs):
@@ -210,6 +212,14 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
     if landed and lifecycle.voided_sha(path, item, landed):
         why += f' — claims voided landing {landed[:7]}'
         landed = ''  # the operator voided it (`asf reset`): parked, never closed on it
+    if claim and product is not None and repo and item:
+        from asf.facts import landing as facts_landing
+        landed = facts_landing.shadow(
+            product, facts_landing.RELAUNCH, item, landed,
+            lambda: facts_landing.landed(product, item, repo=repo, main=main, path=path,
+                                         writes=list(writes or ()),
+                                         branches=[r.get('branch') for r in runs]),
+            agree=facts_landing.agree_closes)
     if landed:
         why += (f' — the work it names is on origin/{main} at {landed[:9]} (verified): close '
                 f'{item} on that evidence')

@@ -139,7 +139,26 @@ def trunk_sha(repo, main, run, text, item='', writes=(), prs=()):
     return '', ''
 
 
-def evidence(path, item, repo, main='main', writes=(), ask_gh=True):
+def evidence(path, item, repo, main='main', writes=(), ask_gh=True, product=None):
+    """:func:`_evidence` — under ``product``'s ``flags.facts: shadow`` with the landing fact
+    (:func:`asf.facts.landing.landed`) compared beside it; the answer is always this one. A run
+    already closed here is not asked (its "no new evidence" is not a "not landed")."""
+    got = _evidence(path, item, repo, main, writes, ask_gh)
+    if product is None or not repo or not item:
+        return got
+    run = newest_ended(path, item)
+    if run is not None and run.get('trunk_closed'):
+        return got
+    from asf.facts import landing as facts_landing
+    branches = [run.get('branch')] if run else []
+    return facts_landing.shadow(
+        product, facts_landing.TRUNKCLOSE, item, got,
+        lambda: facts_landing.landed(product, item, repo=repo, main=main, path=path,
+                                     writes=list(writes or ()), branches=branches),
+        view=facts_landing.view_evidence)
+
+
+def _evidence(path, item, repo, main='main', writes=(), ask_gh=True):
     """``(sha, run, claim)`` when ``item``'s work is verified on the trunk, else None: its newest
     ended run's REPORT ends ``status: done`` (:func:`asf.workers.relaunch.terminal`) and names a
     commit on ``origin/<main>`` that is not the run's own work (:func:`trunk_sha`), and the run's
@@ -190,7 +209,7 @@ def closes_before_launch(product, row_kind, item, out=print, dry_run=False):
     path = pool_mod.sessions_path(product)
     try:
         hit = evidence(path, item, product.repo_dir, product.main,
-                       landing.item_writes(product, item))
+                       landing.item_writes(product, item), product=product)
     except Exception as e:  # noqa: BLE001 — the check never blocks a wave by failing
         out(f'trunk: evidence check failed for {item} — {e}')
         return False
@@ -240,7 +259,8 @@ def close_parked(product, out=print, dry_run=False):
     for item, job, corr in parked(path):
         if not relaunch.landed_in(corr.get('reason') or corr.get('text')):
             continue
-        hit = evidence(path, item, repo, product.main, landing.item_writes(product, item))
+        hit = evidence(path, item, repo, product.main, landing.item_writes(product, item),
+                       product=product)
         if not hit:
             continue
         sha, run, _claim = hit
