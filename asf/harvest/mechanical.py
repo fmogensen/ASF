@@ -437,7 +437,7 @@ def note(lane, f, out):
     if not job:
         return
     ev = event(out, trunk=trunk_of(lane))
-    H.mark_session(lane.state_dir, job, mechanical=ev)
+    H.mark_session(lane.state_dir, job, mechanical=ev, branch=f.get('branch'))
     if f.get('run') is not None:
         f['run'][EVENT] = ev
 
@@ -503,7 +503,7 @@ def apply(lane, f, cause):
         if corr.get('kind') in CLEARS:
             fields['correction'] = None
             f['correction'] = None
-        H.mark_session(lane.state_dir, run.get('job') or b, **fields)
+        H.mark_session(lane.state_dir, run.get('job') or b, **fields, branch=b)
         if f.get('run') is not None:
             f['run'][EVENT] = fields[EVENT]
         lane.results[b] = 'mechanical'
@@ -512,7 +512,7 @@ def apply(lane, f, cause):
     else:
         if run.get('job') or b:
             ev = event(out, trunk=trunk_of(lane))
-            H.mark_session(lane.state_dir, run.get('job') or b, mechanical=ev)
+            H.mark_session(lane.state_dir, run.get('job') or b, mechanical=ev, branch=b)
             if f.get('run') is not None:
                 f['run'][EVENT] = ev
         lane.out(f'{EVENT}:{kind} {b}: residue — '

@@ -414,6 +414,7 @@ generated: 2026-09-21 — from metrics/ci (3), metrics/sessions (4), metrics/tic
 | Metric | Value | Note |
 |---|---|---|
 | landing | — | no product resolved — the session registry is machine-local |
+| relaunch | — | no product resolved — the session registry is machine-local |
 | ci runs | 3 — 1 green, 1 red, 1 reruns | red rate 33 % |
 | runner-minutes | 40 (0 h) — useful 70 % | cancelled: batch 12 (30 %) — 30 % of the minutes |
 | red job: e2e | 1/2 (50 %) | |
@@ -526,6 +527,62 @@ class LandingRowTests(Base):
                 mock.patch('asf.improve.measure.ended_runs', side_effect=AssertionError('should not be called')):
             md = metrics.render_daily(self.root, DAY, self.items, product='sample')
         self.assertIn('| landing | — | no product resolved — the session registry is machine-local |', md)
+
+
+class ScorecardRelaunchRowTests(Base):
+    RELAUNCHES = {'sessions': 7, 'share': 0.226, 'usd_per_session': 2.1, 'hours_per_session': 1.5,
+                  'first_usd_per_session': 3.4, 'first_hours_per_session': 2.0}
+
+    def test_relaunch_row_follows_landing_and_carries_both_numbers(self):
+        rows = metrics.scorecard_rows([], [], [], landing=(0.35, 3.6, 86), relaunches=self.RELAUNCHES)
+        self.assertEqual(rows[1], ('relaunch', '7 sessions were relaunches (23 %)',
+                                    '$2.10 per relaunch vs $3.40 per first launch (7 days)'))
+
+    def test_a_side_with_no_sessions_reads_dash_not_zero(self):
+        relaunches = dict(self.RELAUNCHES, usd_per_session=None, hours_per_session=None)
+        rows = metrics.scorecard_rows([], [], [], relaunches=relaunches)
+        self.assertEqual(rows[1], ('relaunch', '7 sessions were relaunches (23 %)',
+                                    '— per relaunch vs $3.40 per first launch (7 days)'))
+
+    def test_none_reads_dash_with_its_note(self):
+        rows = metrics.scorecard_rows([], [], [])
+        self.assertEqual(rows[1], ('relaunch', '—', 'no product resolved — the session registry is machine-local'))
+
+    def test_render_daily_with_no_product_never_touches_measure(self):
+        with mock.patch('asf.improve.measure.ended_runs', side_effect=AssertionError('should not be called')):
+            md = metrics.render_daily(self.root, DAY, self.items)
+        self.assertIn('| relaunch | — | no product resolved — the session registry is machine-local |', md)
+
+    def test_render_daily_computes_the_row_over_two_windows(self):
+        # "two windows of that row" (§2.6's third acceptance) — two render_daily calls, each
+        # reading a different `measure.table` result, land two different relaunch rows. The
+        # direction between them is not asserted; a test cannot make a week pass.
+        home = tempfile.mkdtemp(prefix='metrics_test_home_')
+        self.addCleanup(shutil.rmtree, home, True)
+        state = os.path.join(home, 'state', 'sample')
+        os.makedirs(state)
+        open(os.path.join(state, 'sessions.jsonl'), 'w').close()
+        windows = [
+            {'non_landing_share': 0.35, 'usd_per_landed_item': 3.6, 'landed_items': 86, 'relaunches': self.RELAUNCHES},
+            {'non_landing_share': 0.40, 'usd_per_landed_item': 4.0, 'landed_items': 90,
+             'relaunches': {'sessions': 9, 'share': 0.28, 'usd_per_session': 2.5, 'hours_per_session': 1.6,
+                            'first_usd_per_session': 3.1, 'first_hours_per_session': 1.9}},
+        ]
+        with mock.patch.object(env, 'ASF_HOME', home), \
+                mock.patch('asf.improve.measure.ended_runs', return_value=['a run']), \
+                mock.patch('asf.improve.measure.table', side_effect=windows):
+            first = metrics.render_daily(self.root, DAY, self.items, product='sample')
+            second = metrics.render_daily(self.root, DAY, self.items, product='sample')
+        self.assertIn('| relaunch | 7 sessions were relaunches (23 %) | $2.10 per relaunch vs $3.40 per first launch (7 days) |', first)
+        self.assertIn('| relaunch | 9 sessions were relaunches (28 %) | $2.50 per relaunch vs $3.10 per first launch (7 days) |', second)
+
+    def test_a_missing_registry_renders_the_dash_form_not_an_error(self):
+        home = tempfile.mkdtemp(prefix='metrics_test_home_')
+        self.addCleanup(shutil.rmtree, home, True)
+        with mock.patch.object(env, 'ASF_HOME', home), \
+                mock.patch('asf.improve.measure.ended_runs', side_effect=AssertionError('should not be called')):
+            md = metrics.render_daily(self.root, DAY, self.items, product='sample')
+        self.assertIn('| relaunch | — | no product resolved — the session registry is machine-local |', md)
 
 
 class Rollup(Base):

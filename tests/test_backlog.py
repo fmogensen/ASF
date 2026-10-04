@@ -247,6 +247,44 @@ class SetCommandTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertEqual(self.read(), before)
 
+    def test_set_local_only_round_trips_and_cloud_routing_reads_it(self):
+        from asf.workers import cloud
+        from asf.workers import pool as pool_mod
+        cfg = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'default': True}})
+        for word, want in (('true', True), ('false', False)):
+            r = run(['set', 'B-0001', f'local_only={word}'], self.root)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            meta, _ = frontmatter.parse(self.read())
+            self.assertIs(meta['local_only'], want)
+            row = pool_mod.Row('j', 'B-0001', kind='coder',
+                               local_only=cloud.truthy(meta.get('local_only')))
+            self.assertEqual(cloud.first(row, cfg), not want)
+
+    def test_set_local_only_refuses_a_non_boolean_and_check_flags_one(self):
+        before = self.read()
+        r = run(['set', 'B-0001', 'local_only=maybe'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('true, false', r.stderr)
+        self.assertEqual(self.read(), before)
+        with open(self.bug, 'w', encoding='utf-8') as f:
+            f.write(before.replace('severity: S2', 'severity: S2\nlocal_only: maybe'))
+        r = run(['check'], self.root)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('local_only must be true or false', r.stdout + r.stderr)
+
+    def test_set_takes_many_ids_in_one_call(self):
+        other = write_item(self.root, 'B-0002', 'bug', 'Also', parent='E-0001',
+                           typed_lines=('severity: S2',))
+        r = run(['set', 'B-0001', 'B-0002', 'local_only=true'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for path in (self.bug, other):
+            with open(path, encoding='utf-8') as f:
+                self.assertIs(frontmatter.parse(f.read())[0]['local_only'], True)
+        before = self.read()
+        r = run(['set', 'B-0001', 'B-9999', 'rank=7'], self.root)  # an unknown id writes nothing
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.read(), before)
+
 
 class SetListFieldTests(unittest.TestCase):
     """A Task's writes: and after: are list fields of `asf set`: =, += and -= forms, through the

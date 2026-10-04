@@ -39,6 +39,7 @@ class Run:
     usd: float | None
     publish_refused: str = ''  #: the registry's `publish_refused` key; read by diagnose's sub-causes and nothing else
     worktree: str = ''  #: the registry's `worktree` key; read by diagnose's sub-causes and nothing else
+    attempt: int = 1        # 1-based, among this job's ended runs in ledger order
 
 
 class Cell(collections.namedtuple('Cell', 'sessions hours usd')):
@@ -117,14 +118,15 @@ def ended_runs(product, *, ledger=None, logs_dir=None, since=None, as_of=None):
         minutes = [_minutes(r.get('started'), r['ended']) for r in ended]
         spend = job_spend(job, logs_dir)
         total = sum(minutes)
-        for r, m in zip(ended, minutes):
+        for attempt, (r, m) in enumerate(zip(ended, minutes), 1):
             share = (m / total) if total else 1 / len(ended)
             out.append(Run(
                 job=job, kind=r.get('kind') or '', model=r.get('model') or '',
                 item=r.get('item') or None, started=r.get('started') or '', ended=r['ended'],
                 minutes=m, landed=bool(r.get('harvested')), end_reason=r.get('end_reason') or '',
                 usd=None if spend is None else spend * share,
-                publish_refused=r.get('publish_refused') or '', worktree=r.get('worktree') or ''))
+                publish_refused=r.get('publish_refused') or '', worktree=r.get('worktree') or '',
+                attempt=attempt))
     if since:
         out = [r for r in out if r.ended[:10] >= since]
     if as_of:
@@ -141,6 +143,14 @@ def _cells(runs, key):
     return {k: Cell(s, round(m / 60, 1), round(u, 2)) for k, (s, m, u) in sorted(acc.items())}
 
 
+def _per_session(runs):
+    """``(usd, hours)`` averaged over ``runs``, each ``None`` when ``runs`` is empty."""
+    if not runs:
+        return None, None
+    return (round(sum(r.usd or 0.0 for r in runs) / len(runs), 2),
+            round(sum(r.minutes for r in runs) / len(runs) / 60, 1))
+
+
 def table(runs, record_usd=None):
     """The numbers over ``runs``, one flat dict (§2.1). ``record_usd`` is the same window's spend
     as the record's ``cost:`` blocks hold it, carried beside ``usd`` and ``None`` when not given."""
@@ -153,6 +163,10 @@ def table(runs, record_usd=None):
     repeat = sorted(i for i, n in per_item.items() if n >= 3)
     on_repeat = [r for r in runs if r.item in repeat]
     n_items = len(landed_items)
+    relaunches = [r for r in runs if r.attempt >= 2]
+    first_launches = [r for r in runs if r.attempt == 1]
+    usd_per_session, hours_per_session = _per_session(relaunches)
+    first_usd_per_session, first_hours_per_session = _per_session(first_launches)
 
     def share(part, whole):
         return round(part / whole, 3) if whole else 0.0
@@ -174,4 +188,9 @@ def table(runs, record_usd=None):
             'hours_share': share(sum(r.minutes for r in on_repeat), minutes)},
         'minutes_per_landed_item': round(minutes / n_items, 1) if n_items else None,
         'usd_per_landed_item': round(usd / n_items, 2) if n_items else None,
+        'relaunches': {
+            'sessions': len(relaunches), 'share': share(len(relaunches), len(runs)),
+            'usd_per_session': usd_per_session, 'hours_per_session': hours_per_session,
+            'first_usd_per_session': first_usd_per_session, 'first_hours_per_session': first_hours_per_session,
+        },
     }

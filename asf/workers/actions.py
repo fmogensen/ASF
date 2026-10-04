@@ -27,7 +27,7 @@ import re
 import subprocess
 import time
 
-from asf import env, gh_limit, gitpush, refguard
+from asf import env, github, gitpush, refguard
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
@@ -194,23 +194,21 @@ class Gh:
     def __init__(self, product, run=None):
         self.product = product
         self.slug = getattr(product, 'repo_slug', None)
-        self._run = run or subprocess.run
+        self._run = run  # None: asf.github's own subprocess.run
         self._env = None
 
     def call(self, args):
-        """``(ok, stdout, last error line)``."""
+        """``(ok, stdout, last error line)`` through :func:`asf.github.gh` — ``ok`` false is
+        Unknown (a failure, a timeout, a dry run's refusal), never an empty answer; a rate limit
+        raises :class:`asf.gh_limit.RateLimited`."""
         if self._env is None:
             from asf import ci_pool
             self._env = ci_pool._gh_env(self.product)
-        gh_limit.guard(args)
-        try:
-            p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
-                          env=self._env)
-        except (OSError, subprocess.SubprocessError) as e:
-            return False, '', f'gh {args[0]}: {type(e).__name__}'
-        gh_limit.inspect_proc(args, p)
-        lines = (p.stderr or p.stdout or '').strip().splitlines()
-        return p.returncode == 0, p.stdout or '', (lines[-1] if lines else f'exit {p.returncode}')
+        r = github.gh(list(args), timeout=GH_TIMEOUT_S, run=self._run, env=self._env)
+        if r.ok:
+            return True, r.stdout or '', ''
+        lines = (r.stderr or r.stdout or '').strip().splitlines()
+        return False, '', f'gh {args[0]}: {lines[-1] if lines else r.reason}'
 
     def dispatch(self, workflow, ref, fields):
         args = ['workflow', 'run', workflow, '-R', self.slug, '--ref', ref]

@@ -526,6 +526,25 @@ class TestNoPrHost(unittest.TestCase):
         self.assertFalse(doctor.has_pr_host(env.Product('p', {'ci': 'none'})))
 
 
+class GhAuth(unittest.TestCase):
+    """`doctor._gh_auth` — the `cli:gh` row through asf.github: an Unknown is never ok."""
+
+    def test_an_answer_is_ok_with_its_first_line(self):
+        done = subprocess.CompletedProcess(['gh'], 0, '', 'github.com\n  Logged in\n')
+        with mock.patch('subprocess.run', return_value=done):
+            self.assertEqual(doctor._gh_auth(), (True, 'github.com'))
+
+    def test_unknown_reads_are_never_ok(self):
+        for effect in (OSError('no gh'), subprocess.TimeoutExpired('gh', 10)):
+            with mock.patch('subprocess.run', side_effect=effect):
+                ok, detail = doctor._gh_auth()
+            self.assertFalse(ok)
+            self.assertTrue(detail)
+        failed = subprocess.CompletedProcess(['gh'], 1, '', 'You are not logged in\n')
+        with mock.patch('subprocess.run', return_value=failed):
+            self.assertEqual(doctor._gh_auth(), (False, 'You are not logged in'))
+
+
 class Capacity(unittest.TestCase):
     """`doctor.check_capacity` — spec f-0079 §2.5, the doctor's `capacity` row."""
 

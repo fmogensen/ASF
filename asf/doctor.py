@@ -747,6 +747,18 @@ def check_plan_headings(product):
     return rows or [(True, f'{n} plan(s): every Task-like heading parses')]
 
 
+def check_config_keys(cfg):
+    """[('warn', detail)] — the ``config keys`` row: the keys of ``config.yaml`` no code reads
+    (:func:`asf.config_keys.unknown_keys`), one row naming them all; none when there are none.
+    A key nothing reads does nothing, so a ``warn`` and never red."""
+    from asf import config_keys
+    unknown = config_keys.unknown_keys(cfg)
+    if not unknown:
+        return []
+    return [('warn', f'config.yaml: {", ".join(unknown)} — not read by this release (a setting '
+                     f'that silently does nothing: remove it, or see asf.config_keys)')]
+
+
 def check_cli_dispatcher(product, path=None, timeout=60):
     """[(required, ok, detail)] — the CLI every hook and session calls (``~/.local/bin/asf``,
     :mod:`asf.dispatch`) resolves this product into its pin. The dispatcher is run with
@@ -813,13 +825,27 @@ def check_agent_homes(cfg=None):
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
 _CLI_TOOLS = [
     ('git', True, ['git', '--version']),
-    ('gh', True, ['gh', 'auth', 'status']),
+    ('gh', True, None),  # :func:`_gh_auth` — through asf.github, never a raw argv
     ('gcloud', False, ['gcloud', 'auth', 'list']),
     ('az', False, ['az', 'account', 'show']),
     ('aws', False, ['aws', 'sts', 'get-caller-identity']),
     ('flyctl', False, ['flyctl', 'auth', 'whoami']),
     ('vercel', False, ['vercel', 'whoami']),
 ]
+
+
+def _gh_auth(timeout=10):
+    """``(ok, detail)`` of ``gh auth status`` read through :func:`asf.github.gh`: ok only on a
+    real answer; an Unknown (not runnable, a timeout, a rate limit) is never ok."""
+    from asf import gh_limit, github
+    try:
+        r = github.gh(['auth', 'status'], timeout=timeout)
+    except gh_limit.RateLimited:
+        return False, 'rate limited'
+    detail = (r.stdout or r.stderr or '').strip().splitlines()
+    if r.ok:
+        return True, detail[0] if detail else ''
+    return False, detail[0] if detail else r.reason
 
 
 def check_cli_sessions(product=None):
@@ -829,10 +855,10 @@ def check_cli_sessions(product=None):
     for name, required, argv in _CLI_TOOLS:
         if name == 'gh' and product is not None and not has_pr_host(product):
             required = False
-        if not required and shutil.which(argv[0]) is None:
+        if not required and shutil.which(argv[0] if argv else name) is None:
             rows.append((name, required, None, 'not installed'))
             continue
-        ok, detail = _run(argv)
+        ok, detail = _run(argv) if argv else _gh_auth()
         rows.append((name, required, ok, detail))
     return rows
 
@@ -1311,6 +1337,8 @@ def run(product_name):
         rows.append(('product', False, ok, detail))
     for ok, detail in check_plan_headings(product):
         rows.append(('plans', False, ok, detail))
+    for level, detail in check_config_keys(cfg):
+        rows.append(('config keys', False, level, detail))
     net = check_network(cfg)
     if net is not None:
         rows.append(('network', False, net[0], net[1]))
@@ -1357,6 +1385,7 @@ def run(product_name):
         rows.append(('ci classes', required, ok, detail))
     for required, ok, detail in check_cloud(cfg, product):
         rows.append(('cloud lane', required, ok, detail))
+    rows.append(('lane split', False, True, check_lane_split(cfg, product)))
     slow = check_gate_speed(product)
     if slow:
         rows.append(('gate', False, False, slow))
@@ -1568,6 +1597,16 @@ def check_cloud(cfg, product):
     GitHub origin. No rows while ``cloud.enabled`` is not set."""
     from asf.workers import cloud
     return cloud.doctor_rows(cfg, product)
+
+
+def check_lane_split(cfg, product):
+    """The ``lane split`` row: how this product's work splits between the host and the cloud
+    lane now, and why (:func:`asf.workers.cloud.lane_split`) — informational, never red."""
+    from asf.workers import cloud
+    try:
+        return cloud.lane_split(cfg, product)
+    except Exception as e:  # noqa: BLE001 — an unreadable split is one row, not a crash
+        return f'cannot read the lane split — {type(e).__name__}: {e}'
 
 
 def check_gate_speed(product):

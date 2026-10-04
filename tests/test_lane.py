@@ -789,6 +789,46 @@ class LaneRepo(LaneFixture):
         self.assertEqual(results, {'worker/T-0001': 'landed'})
 
 
+class OneJobTwoBranches(LaneFixture):
+    """A product's F-0011: its spec and plan PRs (#1023, #1037) were each corrected under the one
+    job name ``correct-f-0011`` — the spec run first, the plan run later. Every lane write went
+    to the job's latest run, so the spec branch's record landed on the plan run: each tick the
+    plan read the spec's head as its own ("head moved a1cfbfc → 21807f8"), the spec never saw
+    its own record move ("head moved 3024d40 → a1cfbfc"), and both re-entered PUSHED → PR_OPEN
+    → REVIEW/GATE for good — a fresh review round asked for on every pass."""
+
+    def launch(self, job, branch, kind, started):
+        p = subprocess.Popen(['true'])
+        p.wait()
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': job, 'item': 'F-0011', 'feature': 'F-0011',
+                                'branch': branch, 'kind': kind, 'pid': p.pid,
+                                'started': started}) + '\n')
+            f.write(json.dumps({'job': job, 'ended': started.replace('00Z', '05Z'),
+                                'end_reason': 'finished', 'rc': 0}) + '\n')
+
+    def test_a_spec_and_plan_pair_under_one_job_name_converge_in_one_pass_and_stay(self):
+        self.push_lane('spec/F-0011', {'specs/f-0011.md': 'the spec\n'}, 'spec(F-0011): spec')
+        self.push_lane('plan/F-0011', {'plans/f-0011.md': 'the plan\n'}, 'plan(F-0011): plan')
+        self.launch('correct-f-0011', 'spec/F-0011', 'correct', '2026-09-27T05:39:00Z')
+        self.launch('correct-f-0011', 'plan/F-0011', 'correct', '2026-09-27T08:42:00Z')
+        heads = {b: sh(['git', 'rev-parse', b], cwd=self.origin).stdout.strip()
+                 for b in ('spec/F-0011', 'plan/F-0011')}
+        product = self.product()
+        lane.lane_pass(product, self.state_dir, out=lambda *_: None)
+        for b, sha in heads.items():
+            self.assertEqual(self.lane_of(b).get('head'), sha, f'{b} holds its own head')
+        before = {b: self.lane_of(b) for b in heads}
+        for _ in range(2):
+            lines = []
+            lane.lane_pass(product, self.state_dir, out=lines.append)
+            self.assertEqual([ln for ln in lines if 'head moved' in ln or ' → ' in ln], [],
+                             'a pass on unmoved heads moves neither branch')
+            for b, sha in heads.items():
+                self.assertEqual(self.lane_of(b).get('head'), sha)
+                self.assertEqual(self.lane_of(b).get('state'), before[b].get('state'))
+
+
 class DeliveryLaneTest(LaneFixture):
     """A delivery's branch (F-0102): a lead whose ``delivers:`` names its members, one commit per
     member — accepted; a member no commit names is reported on the landing line, not refused."""
@@ -2765,6 +2805,67 @@ class PathFilteredRequiredCheck(unittest.TestCase):
         with mock.patch.object(harvest, '_gh', side_effect=self._gh(
                 self._checks(), self.DONE, self.JOBS)):
             self.assertIn('m8-e2e', host.recheck(f, 7))
+
+
+class AConflictingBranchNeverWaitsForCI(LaneFixture):
+    """A product's #1037, #1023 and #1017: PRs opened on branches that already conflicted with
+    the trunk. GitHub runs no ``pull_request`` workflow on a conflicting PR, so none of them ever
+    got a CI run — while the lane asked review rounds of them, pass after pass. A branch the
+    trunk conflicts with goes BACK to be rebased before a PR is opened, and an open PR found
+    conflicting goes back before any review or CI wait: every PR the factory opens gets its run."""
+
+    CONFLICT = ['a.txt']
+
+    def test_pushed_goes_back_instead_of_opening_a_pr(self):
+        f = facts(mode='pr', conflict=self.CONFLICT)
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), f), (lane.BACK, 'kind=conflict'))
+        f = facts(mode='pr', conflict=self.CONFLICT, pr={'number': 7, 'state': 'OPEN',
+                                                         'head': HEAD})
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), f), (lane.BACK, 'kind=conflict'))
+        # a clean branch opens as before
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), facts(mode='pr', conflict=[])),
+                         (lane.PR_OPEN, 'open a PR'))
+
+    def test_an_open_pr_goes_back_before_any_review(self):
+        f = facts(mode='pr', conflict=self.CONFLICT, review_required=True,
+                  pr={'number': 7, 'state': 'OPEN', 'head': HEAD})
+        for s in (lane.PR_OPEN, lane.REVIEW):
+            self.assertEqual(lane.next_state(rec(s, pr=7), f), (lane.BACK, 'kind=conflict'))
+
+    def test_the_branch_facts_read_the_conflict(self):
+        self.push_main({'a.txt': 'trunk\n'}, 'chore: a on main')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', 'worker/T-0001', 'origin/main~1'], cwd=self.worker)
+        self.write(self.worker, 'a.txt', 'branch\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'feat(T-0001): a'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', 'worker/T-0001'], cwd=self.worker)
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat(T-0002): b')
+        items = {t: {'id': t, 'type': 'task', 'state': 'Active'} for t in ('T-0001', 'T-0002')}
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=items)
+        ln.mode, ln.slug = 'pr', 'o/p'
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        heads = ln.remote_heads()
+        ln.trunk_sha = heads['main']
+        f = ln.branch_facts('worker/T-0001', None, heads['worker/T-0001'], None, True, False)
+        self.assertEqual(f['conflict'], ['a.txt'])
+        f = ln.branch_facts('worker/T-0002', None, heads['worker/T-0002'], None, True, False)
+        self.assertFalse(f.get('conflict'))
+
+    def test_back_sends_it_to_be_rebased(self):
+        runner = lane.Lane.__new__(lane.Lane)
+        lines = []
+        runner.out, runner.dry_run, runner.results, runner.trunk = lines.append, False, {}, 'main'
+        f = {'branch': 'cloud/spec-x', 'item': 'F-0001', 'head': HEAD, 'prev': rec(lane.REVIEW),
+             'pr': {'number': 1023, 'state': 'OPEN'}, 'conflict': ['docs/a.md'], 'run': {}}
+        with mock.patch.object(lane, 'send_back') as sb:
+            runner.enter_back(f, 'kind=conflict')
+        sb.assert_called_once()
+        _ln, _f, kind, text, files = sb.call_args[0]
+        self.assertEqual(kind, 'conflict')
+        self.assertIn('#1023', text)
+        self.assertIn('no pull_request workflow', text)
+        self.assertEqual(list(files), ['docs/a.md'])
 
 
 class AMergeConflictGoesBack(unittest.TestCase):

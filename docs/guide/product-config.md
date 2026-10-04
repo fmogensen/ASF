@@ -720,6 +720,66 @@ S1 reserve: while an S1 Bug is open, each lane keeps `reserve_for_s1` slots for 
 `asf capacity --product <p>` (or `--all`, `/asf:capacity`) prints the resolved numbers and which
 term bounds each.
 
+### `capacity.sessions: auto` — sized off the host
+
+```yaml
+capacity:
+  sessions: auto          # instead of a count
+```
+
+and, in `config.yaml`, `capacity: {sessions_ceiling: 8}` — auto's cap (default 8; kept out of
+the product file so a product pinned to an older reader still loads).
+
+`auto` sizes the local session ceiling off the host the tick runs on, read every tick:
+`max(1, min(sessions_ceiling, cores ÷ 2, RAM_GB ÷ 4))` (integer division; a figure the host does
+not report is left out of the min). A 10-core, 32 GB host gets 5; a 64-core, 256 GB one stops at
+the ceiling. It is a ceiling like any other — `total.sessions`, the fair share and the host guards
+(`host_guards`: load and swap) still apply on top. `per_product.sessions` in `config.yaml` may be
+`auto` too. A written count always wins over `auto`. The doctor's
+`lane split` row and `asf capacity` show the figure and the terms it came from.
+
+### The cloud lane: `cloud.mode`
+
+The product file's `cloud:` block overrides `config.yaml`'s key by key (see
+`docs/config.example.yaml` for the lane's runtime, runners and accounts). `cloud.mode` decides how
+work splits between this host and the cloud lane:
+
+```yaml
+cloud:
+  mode: primary              # overflow (default) | local | primary | off
+  max_inflight: 4            # cloud sessions at once
+  local_only: [review]       # kinds that never leave the host (groom, groom-clerk, close always)
+  fallback_failures: 3       # primary only: this many failed cloud creates …
+  fallback_window_min: 30    # … within this many minutes …
+  fallback_cooldown_min: 30  # … send every row local for this long
+```
+
+| mode | what it does |
+| --- | --- |
+| `overflow` (default) | Local first. A row goes to the cloud only when the local lane cannot take it (no local seat, every local account capped or out of quota, a host hold) and the row is eligible: `cloud.rows: any`, or a `cloud-ok` row. |
+| `local` | The same as `overflow` — an alias, for "local first". |
+| `primary` | Cloud first. Every row goes to the cloud lane, up to `max_inflight` and the lane accounts' quota headroom, except what must run here: the kinds `groom`, `groom-clerk` and `close`, the kinds in `cloud.local_only`, and an item whose card says `local_only: true`. `cloud.rows` does not narrow this mode — it is the overflow path's dial. |
+| `off` | No new cloud launch at all, whatever accounts are configured. Cloud runs already live drain as usual (each health pass syncs them); the `role: cloud` accounts stay off the local lane. |
+
+In `primary` the local lane is also the **fallback**: a cloud-first row runs here when the cloud lane
+is full (`max_inflight`), unready (a critical `asf cloud doctor` check fails), no lane account has
+quota headroom, the tick's `max_creates_per_tick` is spent, or its launches are erroring —
+`fallback_failures` failed creates within `fallback_window_min` (a success in between resets the
+count) trip a `fallback_cooldown_min` cool-down in which every row goes local. A fallback is never
+silent: its tick-log line ends `— cloud fallback: <why>` (a trip prints `cloud lane: cloud launches
+erroring — …; local lane until HH:MM`), and the `asf status` capacity row's cloud clause reads
+`cloud 2/4 primary (last fallback 3m ago: <job> local — <why>)` for an hour after, or `(fallback:
+…)` while a cool-down holds.
+
+`cloud.default: true` is the older spelling of `mode: primary`; a written `mode` wins. An unknown
+mode, or a fallback number that is not above 0, refuses the file at `asf product check`.
+
+**Switching is one line, picked up on the next tick.** Every tick is a fresh process that reads
+the product file again; nothing is cached across ticks, so `mode: primary` → `mode: local` (or
+`sessions: 4` → `sessions: auto`) needs no restart and no `asf upgrade`. `asf doctor`'s `lane split`
+row prints the effective split per product and why: the mode, the local session ceiling (written
+or auto-sized), the cloud lane's `max_inflight`, what stays local, and the fallback state.
+
 ### Holding a class of new work
 
 ```yaml

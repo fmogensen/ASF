@@ -176,10 +176,12 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     widens it as it widens ``n``.
 
     ``local_hold`` (host pressure's reason) keeps every row off the local lane — never off the
-    cloud lane. With ``cloud.default: true`` a row :func:`asf.workers.cloud.first` names goes to
-    the cloud lane first and to the local lane when the cloud is full; otherwise a row the local
-    lane cannot take goes to the cloud lane when it is on and the row is eligible
-    (:mod:`asf.workers.cloud`). Cloud launches go through ``cloud_runtime`` (default: the
+    cloud lane. With ``cloud.mode: primary`` a row :func:`asf.workers.cloud.first` names goes to
+    the cloud lane first and to the local lane when the cloud cannot take it — full, unready, no
+    account with quota headroom, the tick's creates spent, or its launches erroring
+    (:class:`asf.workers.cloud.Breaker`); that launch's line ends ``— cloud fallback: <why>``.
+    Otherwise a row the local lane cannot take goes to the cloud lane when it is on and the row is
+    eligible (:mod:`asf.workers.cloud`); ``cloud.mode: off`` takes no row. Cloud launches go through ``cloud_runtime`` (default: the
     configured one); the line reads ``launched … → <acct> (<model>) cloud <session url>``.
 
     ``cloud_ready`` is the lane's ``(ready, why)`` (:func:`asf.workers.cloud.readiness`), read
@@ -203,6 +205,9 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         ready = False
     cloud_open = cloud.on and ready
     cloud_cap, cloud_tries = cloud.max_creates_per_tick, 0
+    # primary mode: the launch-error fallback, and why the local lane took each cloud-first row
+    breaker = cloud_mod.Breaker(product, cloud) if cloud.on and cloud.default else None
+    fallback = {}
     sample = pool is None  # a tick's own pool: its readings are history (asf.workers.headroom)
     pool = pool or pool_mod.Pool.from_config(cfg, product)
     spawn_fn = spawn_fn or spawn_mod.spawn
@@ -257,11 +262,21 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         lane, acct, creason, reason = 'local', None, '', ''
         capped = cloud_open and bool(cloud_cap) and cloud_tries >= cloud_cap
         cloud_now = cloud_open and not capped
+        tripped = breaker.tripped() if breaker is not None and cloud_now else ''
+        if tripped:                         # primary's launches erroring: every row local
+            cloud_now = False
         first = cloud_now and cloud_mod.first(row, cloud)
-        if first:                           # cloud.default: the cloud lane before the local
+        miss = ''                           # why a cloud-first row did not go to the cloud
+        if breaker is not None and not first and cloud_mod.first(row, cloud):
+            miss = (tripped or (f'cloud lane unready: {why}' if not ready else
+                                f'cloud lane: {cloud_tries} launches this tick '
+                                f'(cloud.max_creates_per_tick)'))
+        if first:                           # cloud.mode: primary — the cloud lane before local
             acct, creason = pool.pick_cloud(row.kind, row.model, cloud)
             if acct is not None:
                 lane = 'cloud'
+            else:
+                miss = creason
         if acct is None:
             if local_hold:
                 acct, reason = None, f'held: {local_hold}'
@@ -271,7 +286,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             else:
                 acct, reason = pool.pick_account(
                     row.kind, row.model, is_fix=row.is_fix, s1_is_open=s1,
-                    lane=row.lane or ('local' if cloud.on else None))
+                    lane=row.lane or ('local' if cloud.on or (
+                        cloud.enabled and cloud.mode == cloud_mod.MODE_OFF) else None))
             if acct is None and first:
                 reason = f'{creason}; {reason}'
         if acct is None and capped and cloud_mod.eligible(row, cloud):
@@ -285,6 +301,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                 reason = f'{reason}; {creason}'
         if acct is None:
             return None, None, None, reason
+        if lane != 'cloud' and miss:
+            fallback[row.job] = miss
         rt = runtime
         if lane == 'cloud':
             rt = cloud_runtime or cloud_mod.lane_runtime(cloud, product)
@@ -306,8 +324,14 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             where = f'cloud {url}' if lane == 'cloud' else f"pid {rec.get('pid')}"
             bypass = ' (S1: passes host load hold)' if getattr(row, 'host_load_bypass',
                                                                False) else ''
+            if lane == 'cloud' and breaker is not None:
+                breaker.ok()
+            fell = ''
+            if lane != 'cloud' and row.job in fallback:
+                fell = f' — cloud fallback: {fallback[row.job]}'
+                cloud_mod.note_fallback(product, row.job, fallback[row.job])
             outcome[id(entry)] = (None, f"launched {row.job:<24} {row.item:<10} → "
-                                        f"{acct.name} ({rec.get('model')}) {where}{bypass}")
+                                        f"{acct.name} ({rec.get('model')}) {where}{bypass}{fell}")
             timings[id(entry)] = f'launch {row.job}: setup {secs:.1f}s'
             return False
         pool.untake(acct, **seat)
@@ -323,6 +347,10 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         elif isinstance(err, spawn_mod.WorktreeExternal):
             outcome[id(entry)] = (str(err), None)  # someone else's checkout — a wait, not ours
         else:
+            if lane == 'cloud' and breaker is not None:
+                trip = breaker.fail(err)
+                if trip:
+                    out(f'cloud lane: {trip}')
             reason = str(err) if str(err).startswith('NEEDS OPERATOR') else f'spawn failed: {err}'
             reason = failures.note(row.job, reason, getattr(err, 'clear', ''))
             failed_now.append(row.job)

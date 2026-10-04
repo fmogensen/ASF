@@ -52,6 +52,8 @@ KEEP = frozenset({
     'jobs', 'databaseId', 'startedAt', 'completedAt', 'url', 'headSha', 'mergedAt',
     'mergeCommit', 'oid', 'headRefOid', 'baseRefOid', 'mergeStateStatus', 'headRefName',
     'closedAt', 'number', 'workflowName', 'attempt', 'createdAt', 'headBranch',
+    # gh api …/actions/runs?head_sha=…
+    'workflow_runs',
 })
 
 _SHA_RE = re.compile(r'\b[0-9a-f]{40}\b')

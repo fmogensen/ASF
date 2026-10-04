@@ -14,8 +14,7 @@ wanted; each call site has already decided that. This module answers only *now, 
 A session's own push is never asked about: it carries the work, and :func:`asf.workers.lifecycle.
 publish` is its route. The guard sits at the rewrite sites, never in the funnel they share.
 """
-import json
-import subprocess
+from asf import gh_limit, github
 
 #: the PR does not merge cleanly into the trunk — its run is against a head that cannot land
 CONFLICT = 'conflicting'
@@ -29,14 +28,18 @@ URGENT_EXCEPTIONS = (CONFLICT,)
 CI_FLIGHT_TIMEOUT_S = 30
 #: the one line a deferred rewrite writes, whatever the site (F-0203 C11)
 DEFER_FMT = '{what} deferred: {branch} CI in flight (run {run})'
+#: the line when the host could not say whether a run is in flight: Unknown is never "nothing
+#: in flight", so the rewrite waits — whatever exception it claims
+UNKNOWN_FMT = '{what} deferred: {branch} CI in flight unknown ({why})'
 
 
 def run_in_flight(product, branch, run=None, timeout=CI_FLIGHT_TIMEOUT_S):
     """The newest run of the product's ``ci.workflow`` on ``branch`` the host has not completed:
-    ``{'id': <int>, 'status': <str>}``, else None — nothing in flight, no ``ci.workflow`` or
-    ``repo_slug`` configured, or a failed, timed-out or unparsable ``gh``. Read with the
-    product's own login (:func:`asf.ci_pool._gh_env`), the seam and the discipline of
-    :func:`asf.capacity.ci_runs_in_flight` (P5). Never raises."""
+    ``{'id': <int>, 'status': <str>}``; None when nothing is in flight or no ``ci.workflow`` /
+    ``repo_slug`` is configured (no CI to wait for); an Unknown :class:`asf.github.Result` when
+    ``gh`` failed, timed out, was rate limited or printed something unparsable — never read as
+    "nothing in flight". Read with the product's own login (:func:`asf.ci_pool._gh_env`) through
+    :func:`asf.github.gh`. Never raises."""
     ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
     workflow = ci.get('workflow')
     repo_slug = getattr(product, 'repo_slug', None)
@@ -44,26 +47,27 @@ def run_in_flight(product, branch, run=None, timeout=CI_FLIGHT_TIMEOUT_S):
         return None
     from asf import ci_pool
     try:
-        p = (run or subprocess.run)(
-            ['gh', 'run', 'list', '-R', repo_slug, '--workflow', workflow, '--branch', branch,
-             '--limit', '20', '--json', 'databaseId,status,createdAt'],
-            capture_output=True, text=True, timeout=timeout, env=ci_pool._gh_env(product))
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if p.returncode != 0:
-        return None
-    try:
-        rows = json.loads(p.stdout or '')
-    except (ValueError, TypeError):
-        return None
+        r = github.gh(['run', 'list', '-R', repo_slug, '--workflow', workflow, '--branch', branch,
+                       '--limit', '20', '--json', 'databaseId,status,createdAt'],
+                      json=True, timeout=timeout, run=run, env=ci_pool._gh_env(product))
+    except gh_limit.RateLimited:
+        return github.unknown('rate limited')
+    if not r.ok:
+        return r
+    rows = r.data
     if not isinstance(rows, list):
-        return None
+        return github.unknown('bad json')
     live = [r for r in rows if isinstance(r, dict) and r.get('status') != 'completed'
             and r.get('databaseId')]
     if not live:
         return None
     newest = max(live, key=lambda r: (str(r.get('createdAt') or ''), int(r.get('databaseId') or 0)))
     return {'id': newest['databaseId'], 'status': newest.get('status') or ''}
+
+
+def is_unknown(run):
+    """True when :func:`run_in_flight`'s answer is Unknown (the host could not say)."""
+    return isinstance(run, github.Result) and run.unknown
 
 
 def urgent(branch, severity=None, item=None, items=None):
@@ -93,9 +97,14 @@ def verdict(product, branch, what, needed=None, severity=None, item=None, items=
     | yes | no  | CONFLICT/RED/STRICT  | push |
     | yes | yes | CONFLICT             | push |
     | yes | yes | RED/STRICT           | **defer** |
+    | unknown | — | —                  | **defer** |
+
+    An Unknown read is never "nothing in flight": the rewrite waits for a pass that can see.
     """
     flight = flight or Flight()
     run = flight.read(product, branch)
+    if is_unknown(run):
+        return UNKNOWN_FMT.format(what=what, branch=branch, why=run.reason or 'unknown')
     if not run:
         return ''
     allowed = URGENT_EXCEPTIONS if urgent(branch, severity, item, items) else (CONFLICT, RED,

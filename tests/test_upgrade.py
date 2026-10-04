@@ -43,7 +43,7 @@ class FakeRun:
 
     def __call__(self, cmd, **_kw):
         self.calls.append(list(cmd))
-        ok = lambda out='': mock.Mock(returncode=0, stdout=out)  # noqa: E731
+        ok = lambda out='': mock.Mock(stderr='', returncode=0, stdout=out)  # noqa: E731
         if cmd[:2] == ['pipx', 'list']:
             return ok(json.dumps({'venvs': {'asf-factory': {'metadata': {'main_package': {
                 'package_or_url': f'git+{URL}@1234567'}}}}}))
@@ -53,19 +53,19 @@ class FakeRun:
                 sha = cmd[-1].rsplit('@', 1)[1]
                 make_venv(os.path.join(self.venvs, f'asf-factory{suffix}'),
                           self.installs_sha or sha)
-            return mock.Mock(returncode=self.pipx_rc, stdout='')
+            return mock.Mock(stderr='', returncode=self.pipx_rc, stdout='')
         if cmd[:2] == ['gh', 'api']:
             if self.ci is False:
-                return mock.Mock(returncode=1, stdout='')
+                return mock.Mock(stderr='', returncode=1, stdout='')
             return ok(self.ci if 'check-runs' in cmd[2] else json.dumps({'statuses': []}))
         if cmd[:2] == ['pgrep', '-f']:
             answer = self.procs.pop(0) if len(self.procs) > 1 else self.procs[0]
-            return mock.Mock(returncode=0 if answer else 1, stdout=answer)
+            return mock.Mock(stderr='', returncode=0 if answer else 1, stdout=answer)
         if cmd[:1] == ['ps']:
             asked = cmd[cmd.index('-p') + 1].split(',')
             return ok('\n'.join(f'{pid} 00:10 /v/bin/python -m asf.cli {what}'
                                 for pid, what in self.listing() if str(pid) in asked))
-        return mock.Mock(returncode=1, stdout='')
+        return mock.Mock(stderr='', returncode=1, stdout='')
 
     def listing(self):
         return [(71, 'ci queue --apply --product alpha'), (72, 'tick --product beta --steps x')]

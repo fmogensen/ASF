@@ -532,8 +532,9 @@ class FakeRun:
     """``subprocess.run`` for the upgrade: answers by the command's first words."""
     HEAD = 'a' * 40
 
-    def __init__(self, ticks='', ci='[]', installed=None, pipx_rc=0):
+    def __init__(self, ticks='', ci='[]', installed=None, pipx_rc=0, gh_rc=0):
         self.calls = []
+        self.gh_rc = gh_rc
         self.answers = {
             ('pipx', 'list'): json.dumps({'venvs': {'asf-factory': {'metadata': {'main_package': {
                 'package_or_url': 'git+https://github.com/o/r.git@1234567'}}}}}),
@@ -550,7 +551,9 @@ class FakeRun:
         self.calls.append(cmd)
         if cmd[:2] == ['pipx', 'install']:
             return mock.Mock(returncode=self.pipx_rc, stdout='')
-        return mock.Mock(returncode=0, stdout=self.answers.get(tuple(cmd[:2]), ''))
+        if cmd[:1] == ['gh'] and self.gh_rc:
+            return mock.Mock(returncode=self.gh_rc, stdout='', stderr='HTTP 502: Bad Gateway')
+        return mock.Mock(returncode=0, stdout=self.answers.get(tuple(cmd[:2]), ''), stderr='')
 
     def installs(self):
         return [c for c in self.calls if c[:2] == ['pipx', 'install']]
@@ -621,6 +624,15 @@ class UpgradeTest(HomeCase):
         self.assertEqual(rc, upgrade.DEFERRED)
         self.assertEqual(run.installs(), [])
         self.assertIn('remote CI is red', out)
+
+    def test_an_unreadable_ci_is_not_installed(self):
+        """Unknown is never green: a gh that fails or prints garbage defers the plain path too,
+        the way a red head does — no pipx call."""
+        for run in (FakeRun(gh_rc=1), FakeRun(ci='not json')):
+            rc, out, _err = self.run_upgrade(run)
+            self.assertEqual(rc, upgrade.DEFERRED)
+            self.assertEqual(run.installs(), [])
+            self.assertIn('remote CI is unknown', out)
 
     def test_an_install_that_did_not_move_fails(self):
         run = FakeRun(installed='c' * 40)
@@ -803,6 +815,13 @@ class PendingUpgradeTest(HomeCase):
         self.assertFalse(os.path.exists(upgrade.pending_path('other')))
         self.assertIn(f'remote CI is red at {self.SHA[:7]}', out)
         self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed='d' * 40))
+
+    def test_an_unreadable_ci_writes_no_marker_and_clears_the_one_it_holds(self):
+        upgrade.write_pending('c' * 40, 'factory', 'other')
+        rc, out, _err = self.run_upgrade(FakeRun(ticks='4242\n', gh_rc=1))
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertIsNone(upgrade.read_pending('other'))
+        self.assertIn(f'remote CI is unknown at {self.SHA[:7]}', out)
 
     def test_a_green_head_still_writes_the_marker(self):
         rc, _out, _err = self.run_upgrade(FakeRun(ticks='4242\n',

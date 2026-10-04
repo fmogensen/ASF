@@ -124,13 +124,27 @@ class ResolveCi(Home):
             self.assertIsNone(capacity.CiRuns().read(p))
         with mock.patch('subprocess.run', side_effect=subprocess.TimeoutExpired('gh', 1)):
             self.assertIsNone(capacity.CiRuns().read(p))
-        with mock.patch('subprocess.run', return_value=mock.Mock(returncode=1, stdout='')):
+        with mock.patch('subprocess.run', return_value=mock.Mock(returncode=1, stdout='', stderr='')):
             self.assertIsNone(capacity.CiRuns().read(p))
         cfg = {'capacity': {'total': {'ci': 2}}}
         with mock.patch('subprocess.run', side_effect=OSError('boom')):
             r = capacity.resolve(p, cfg=cfg, ci_source=capacity.CiRuns())
         self.assertIsNone(r.ci_inflight)
         self.assertEqual(r.ci, 2)  # unknown never lowers ci (D8)
+
+    def test_a_rate_limited_read_is_none_and_never_raises(self):
+        from asf import gh_limit
+        self.write_product('asf')
+        p = product('asf', {'repo_slug': 'acme/x', 'ci': {'workflow': 'ci.yml'},
+                            'capacity': {'ci': 5}})
+        gh_limit.reset()
+        limited = mock.Mock(returncode=1, stdout='', stderr='API rate limit exceeded')
+        try:
+            with mock.patch('subprocess.run', return_value=limited):
+                self.assertIsNone(capacity.CiRuns().read(p))
+            self.assertTrue(gh_limit.latched())
+        finally:
+            gh_limit.reset()
 
     def test_ci_none_product_never_calls_gh(self):
         self.write_product('asf')
@@ -662,3 +676,43 @@ class BatchMeasured(Home):
                                side_effect=AssertionError('backend_for must not be called')), \
              mock.patch('subprocess.run', side_effect=AssertionError('gh must not be called')):
             self.assertEqual(capacity.batch_shape(p, None), {'runners': 6, 'parallel': 1})
+
+
+class AutoSessions(Home):
+    """``capacity.sessions: auto``: ``max(1, min(sessions_ceiling, cores // 2, RAM_GB // 4))``
+    off a stubbed host reading — a bigger host raises it up to the ceiling, never past it."""
+
+    def sessions(self, block, size, cfg=None):
+        with mock.patch.object(capacity, 'host_size', return_value=size):
+            return capacity.product_sessions(product(data={'capacity': block}), cfg or {})
+
+    def test_the_formula(self):
+        self.assertEqual(self.sessions({'sessions': 'auto'}, (10, 32)),
+                         (5, 'auto: min(ceiling 8, 10 cores/2, 32 GB/4)'))
+        self.assertEqual(self.sessions({'sessions': 'auto'}, (16, 16))[0], 4)      # RAM bound
+        self.assertEqual(self.sessions({'sessions': 'auto'}, (64, 256))[0], 8)     # the ceiling
+        self.assertEqual(self.sessions({'sessions': 'auto'}, (64, 256),
+                                       {'capacity': {'sessions_ceiling': 12}})[0], 12)
+        self.assertEqual(self.sessions({'sessions': 'auto'}, (1, 2))[0], 1)        # at least 1
+
+    def test_an_unreadable_figure_is_left_out(self):
+        self.assertEqual(self.sessions({'sessions': 'auto'}, (12, None)),
+                         (6, 'auto: min(ceiling 8, 12 cores/2)'))
+        self.assertEqual(self.sessions({'sessions': 'auto'}, (None, None))[0], 8)
+
+    def test_the_operator_default_may_be_auto_and_a_written_count_wins(self):
+        cfg = {'capacity': {'per_product': {'sessions': 'auto'}, 'sessions_ceiling': 3}}
+        self.assertEqual(self.sessions({}, (32, 128), cfg)[0], 3)
+        self.assertEqual(self.sessions({'sessions': 2}, (32, 128), cfg), (2, 'product'))
+
+    def test_the_product_check_takes_auto_and_refuses_the_rest(self):
+        ok = 'capacity:\n  sessions: auto\n'
+        self.assertEqual(env.product_problems(ok), ([], []))
+        bad = 'capacity:\n  sessions: lots\n'
+        keys = sorted(k for _l, k, _w in env.product_problems(bad)[0])
+        self.assertEqual(keys, ['capacity.sessions'])
+
+    def test_the_host_reading_never_raises(self):
+        cores, ram = capacity.host_size()
+        self.assertTrue(cores is None or cores > 0)
+        self.assertTrue(ram is None or ram > 0)

@@ -133,6 +133,42 @@ class Refused(unittest.TestCase):
         self.assertIn('cloud.runtime claude-cloud is refused', detail)
 
 
+class GhUnknown(unittest.TestCase):
+    """:class:`actions.Gh` through asf.github: an unread answer is ``ok`` false, never data."""
+
+    def gh(self, effect):
+        product = env.Product('p', {'repo_slug': 'o/r'})
+        return actions.Gh(product, run=effect)
+
+    def test_a_failure_or_a_timeout_reads_nothing(self):
+        def failed(argv, **_kw):
+            return subprocess.CompletedProcess(argv, 1, '[{"databaseId": 1}]', 'HTTP 502\n')
+
+        def timed_out(argv, **_kw):
+            raise subprocess.TimeoutExpired('gh', actions.GH_TIMEOUT_S)
+        with mock.patch('asf.ci_pool._gh_env', return_value={}):
+            self.assertEqual(self.gh(failed).call(['run', 'list']), (False, '', 'gh run: HTTP 502'))
+            ok, out, err = self.gh(timed_out).call(['run', 'list'])
+            self.assertEqual((ok, out), (False, ''))
+            self.assertIn('timeout', err)
+            self.assertIsNone(self.gh(failed).view(7))
+            self.assertIsNone(self.gh(failed).secret_names())
+
+    def test_a_dry_run_refuses_a_dispatch_without_spawning(self):
+        from asf import mutation_guard
+        spawned = []
+
+        def run(argv, **_kw):
+            spawned.append(argv)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with mock.patch('asf.ci_pool._gh_env', return_value={}), \
+                mock.patch.object(mutation_guard, 'is_active', return_value=True), \
+                mock.patch('builtins.print'):
+            ok, _err = self.gh(run).dispatch('asf-worker.yml', 'main', {'job': 'j'})
+        self.assertFalse(ok)
+        self.assertEqual(spawned, [])
+
+
 class Settings(unittest.TestCase):
     def test_defaults_and_the_product_override(self):
         s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1}})
@@ -651,7 +687,7 @@ class DoctorCommand(unittest.TestCase):
         body = [l for l in lines if l.startswith(('ok ', 'gap '))]
         self.assertTrue(body and all(l.startswith('ok ') for l in body), lines)
         text = '\n'.join(lines)
-        for want in ('cloud.enabled', 'cloud.default', 'repo secret CLAUDE_CODE_OAUTH_TOKEN',
+        for want in ('cloud.enabled', 'cloud.mode: primary', 'repo secret CLAUDE_CODE_OAUTH_TOKEN',
                      '.github/workflows/asf-worker.yml on main of o/r', 'online runner r1',
                      'acct-c', 'ready: yes'):
             self.assertIn(want, text)
@@ -665,7 +701,7 @@ class DoctorCommand(unittest.TestCase):
         rc, lines = self.run_doctor(self.cfg(runs_on=['self-hosted'], default=False), fake)
         self.assertEqual(rc, 1)
         text = '\n'.join(l for l in lines if l.startswith('gap '))
-        for want in ('cloud.default', 'repo secret CLAUDE_CODE_OAUTH_TOKEN is missing',
+        for want in ('cloud.mode: overflow', 'repo secret CLAUDE_CODE_OAUTH_TOKEN is missing',
                      'asf-worker.yml is not on main of o/r', 'no online runner carries'):
             self.assertIn(want, text)
         self.assertTrue(lines[-1].startswith('ready: no'), lines)
@@ -827,9 +863,210 @@ class Doctor(unittest.TestCase):
         # ON writes no `default` at this Task's sha, so pass it explicitly (F-0216 Task 1)
         rows = cloud.checks(self.cfg(default=True), self.product(), FakeGh())
         _name, _req, _ok, detail = next(r for r in rows if r[0] == 'default')
-        self.assertEqual(detail, 'cloud.default: true — the cloud lane is the default executor '
-                                 '(local: groom, groom-clerk, close)')
+        self.assertEqual(detail, 'cloud.mode: primary — the cloud lane is the default executor '
+                                 '(local: groom, groom-clerk, close, cloud.local_only, cards '
+                                 'marked local_only, and the fallback)')
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ModeKeys(unittest.TestCase):
+    """``cloud.mode``: overflow (default; ``local`` its alias), primary, off — ``default: true``
+    the older spelling of primary, a written mode winning; the config check refuses the rest."""
+
+    def mode(self, **block):
+        return cloud.settings({'cloud': dict(ON, **block)}).mode
+
+    def test_the_values(self):
+        self.assertEqual(self.mode(), 'overflow')
+        self.assertEqual(self.mode(mode='local'), 'overflow')
+        self.assertEqual(self.mode(mode='primary'), 'primary')
+        self.assertEqual(self.mode(mode='Primary '), 'primary')
+        self.assertEqual(self.mode(mode='off'), 'off')
+        self.assertEqual(self.mode(mode=False), 'off')         # a YAML off read as false
+        self.assertEqual(self.mode(default=True), 'primary')
+        self.assertEqual(self.mode(default=True, mode='overflow'), 'overflow')
+        s = cloud.settings({'cloud': dict(ON, mode='primary')})
+        self.assertTrue(s.default and s.on)
+        self.assertFalse(cloud.settings({'cloud': dict(ON, mode='off')}).on)
+
+    def test_the_check_refuses_a_mode_it_does_not_know_and_a_bad_fallback(self):
+        self.assertEqual(cloud.config_problems({'mode': 'primary', 'fallback_failures': 2,
+                                                'fallback_window_min': 10,
+                                                'fallback_cooldown_min': 15}), [])
+        got = dict(cloud.config_problems({'mode': 'cloud-first', 'fallback_failures': 0,
+                                          'fallback_cooldown_min': 'soon'}))
+        self.assertEqual(sorted(got), ['cloud.fallback_cooldown_min', 'cloud.fallback_failures',
+                                       'cloud.mode'])
+        self.assertIn('overflow, primary, off, local', got['cloud.mode'])
+
+    def test_a_product_file_with_a_bad_mode_is_refused(self):
+        errors, _warnings = env.product_problems('cloud:\n  mode: sometimes\n')
+        self.assertEqual([k for _l, k, _w in errors], ['cloud.mode'])
+
+
+class PrimaryMode(Lanes):
+    """``cloud.mode: primary``: every eligible row to the cloud first — up to ``max_inflight``
+    and the lane accounts' quota — local only for what must run here and as the fallback, each
+    fallback said on its launch line and in the status row."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg = dict(self.cfg, cloud=dict(ON, mode='primary', rows='cloud-ok'))
+
+    def lanes(self, launched):
+        return [(r.job, rec.get('runtime_lane') or 'local') for r, rec in launched]
+
+    def run_wave(self, rows, quota=None, **kw):
+        if quota is None:
+            return super().run_wave(rows, **kw)
+        fake = quota_mod.FakeQuotaSource
+        with mock.patch.object(quota_mod, 'FakeQuotaSource', lambda _d: fake(quota)):
+            return super().run_wave(rows, **kw)
+
+    def test_an_eligible_row_goes_to_the_cloud_with_a_free_local_seat(self):
+        launched, waits, lines = self.run_wave([feature_row('spec-1')])
+        self.assertEqual((self.lanes(launched), waits), ([('spec-1', 'cloud')], []))
+        self.assertNotIn('cloud fallback', lines[0])
+
+    def test_what_must_run_here_stays_local(self):
+        groom = pool_mod.Row('groom-f-0001', 'F-0001', model='Opus', kind='groom')
+        card = feature_row('spec-2', item='F-0002')
+        card.local_only = True
+        launched, _waits, lines = self.run_wave([groom, card])
+        self.assertEqual(self.lanes(launched), [('groom-f-0001', 'local')])
+        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], local_only=['spec']))
+        launched, _waits, lines = self.run_wave([feature_row('spec-3', item='F-0003')], cfg=cfg)
+        self.assertEqual(self.lanes(launched), [('spec-3', 'local')])
+        self.assertFalse([l for l in lines if 'cloud fallback' in l])  # not a fallback
+
+    def test_a_full_cloud_lane_falls_back_and_says_so(self):
+        live = [{'job': 'c1', 'account': 'acct-c', 'runtime_lane': 'cloud'},
+                {'job': 'c2', 'account': 'acct-c', 'runtime_lane': 'cloud'}]
+        launched, _waits, lines = self.run_wave([feature_row('spec-1')], live=live)
+        self.assertEqual(self.lanes(launched), [('spec-1', 'local')])
+        self.assertTrue(lines[0].endswith('— cloud fallback: cloud full — 2/2 in flight'),
+                        lines[0])
+        self.assertEqual(cloud.last_fallback(self.product)['job'], 'spec-1')
+        with mock.patch.object(cloud, 'inflight', return_value=2):
+            clause = cloud.capacity_clause(self.cfg, self.product)
+        self.assertRegex(clause, r'^cloud 2/2 primary \(last fallback 0m ago: spec-1 local — '
+                                 r'cloud full — 2/2 in flight\)$')
+
+    def test_no_cloud_quota_falls_back(self):
+        quota = {'acct-c': {'five_h_pct': 99, 'seven_d_pct': 10}}
+        launched, _waits, lines = self.run_wave([feature_row('spec-1')], quota=quota)
+        self.assertEqual(self.lanes(launched), [('spec-1', 'local')])
+        self.assertIn('— cloud fallback: cloud: accounts stopped: acct-c', lines[0])
+
+    def test_an_unready_lane_falls_back_and_says_so(self):
+        launched, _waits, lines = self.run_wave([feature_row('spec-1')],
+                                                ready=(False, 'no runner'))
+        self.assertEqual(self.lanes(launched), [('spec-1', 'local')])
+        launch = [l for l in lines if l.startswith('launched')]
+        self.assertTrue(launch[0].endswith('— cloud fallback: cloud lane unready: no runner'),
+                        launch)
+
+    def failing_spawn(self):
+        def spawn(product, row, acct, brief, runtime=None, cfg=None):
+            if runtime is self.crt:
+                raise spawn_mod.SpawnError('remote create refused (HTTP 500)')
+            return spawn_mod.spawn(product, row, acct, brief, runtime=runtime, cfg=cfg)
+        return spawn
+
+    def test_erroring_creates_trip_the_fallback_for_a_cool_down(self):
+        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], fallback_failures=2,
+                                        fallback_cooldown_min=30))
+        rows = [feature_row('spec-1'), feature_row('spec-2', item='F-0002')]
+        launched, waits, lines = self.run_wave(rows, cfg=cfg, spawn_fn=self.failing_spawn())
+        self.assertEqual(launched, [])
+        trip = [l for l in lines if l.startswith('cloud lane: cloud launches erroring')]
+        self.assertEqual(len(trip), 1, lines)
+        self.assertIn('2 failed creates in 30 min (last: remote create refused (HTTP 500))',
+                      trip[0])
+        # the next tick: a free cloud seat, and the row still goes local, saying why
+        launched, _waits, lines = self.run_wave([feature_row('spec-3', item='F-0003')], cfg=cfg)
+        self.assertEqual(self.lanes(launched), [('spec-3', 'local')])
+        self.assertIn('— cloud fallback: cloud launches erroring', lines[0])
+        clause = cloud.capacity_clause(cfg, self.product)
+        self.assertIn('primary (fallback: cloud launches erroring', clause)
+        self.assertIn('cloud launches erroring', cloud.lane_split(cfg, self.product))
+
+    def test_the_breaker_counts_consecutive_failures_in_its_window_and_cools_down(self):
+        s = cloud.settings({'cloud': dict(ON, mode='primary', fallback_failures=2,
+                                          fallback_window_min=10, fallback_cooldown_min=30)})
+        now = [1_000_000.0]
+        b = cloud.Breaker(self.product, s, clock=lambda: now[0])
+        self.assertIsNone(b.fail('x'))
+        b.ok()                                   # a success between: not consecutive
+        self.assertIsNone(b.fail('x'))
+        now[0] += 11 * 60                        # out of the window
+        self.assertIsNone(b.fail('x'))
+        now[0] += 60
+        self.assertTrue(b.fail('y'))             # two within ten minutes: tripped
+        self.assertTrue(cloud.Breaker(self.product, s, clock=lambda: now[0]).tripped())
+        now[0] += 31 * 60                        # the cool-down is over
+        self.assertEqual(cloud.Breaker(self.product, s, clock=lambda: now[0]).tripped(), '')
+
+    def test_overflow_is_unchanged_and_keeps_no_breaker(self):
+        cfg = dict(self.cfg, cloud=dict(ON, mode='overflow', fallback_failures=1))
+        launched, _waits, lines = self.run_wave([feature_row('spec-1')], cfg=cfg)
+        self.assertEqual(self.lanes(launched), [('spec-1', 'local')])
+        live = [{'job': 'x', 'account': 'acct-a'}]
+        launched, waits, lines = self.run_wave([feature_row('spec-2', item='F-0002')], cfg=cfg,
+                                               live=live, spawn_fn=self.failing_spawn())
+        self.assertEqual(launched, [])
+        self.assertFalse([l for l in lines if 'erroring' in l or 'fallback' in l])
+        self.assertFalse(os.path.exists(os.path.join(env.state_dir(self.product),
+                                                     cloud.Breaker.FILE)))
+        self.assertEqual(cloud.capacity_clause(cfg, self.product), 'cloud 0/2')
+
+    def test_off_launches_no_cloud_session_and_drains(self):
+        cfg = dict(self.cfg, cloud=dict(ON, mode='off'))
+        live = [{'job': 'x', 'account': 'acct-a'}]
+        launched, waits, _ = self.run_wave([feature_row('spec-1')], cfg=cfg, live=live,
+                                           ready=None)
+        self.assertEqual(launched, [])
+        self.assertEqual(waits[0][1], 'pool full — accounts at cap: acct-a 1/1')  # acct-c kept off
+        self.assertEqual(cloud.capacity_clause(cfg, self.product),
+                         'cloud 0/2 off (no new launch; live runs drain)')
+        self.assertEqual(cloud.doctor_rows(cfg, self.product),
+                         [(False, True, 'cloud.mode: off — no new cloud launch; live cloud runs '
+                                        'drain')])
+
+    def test_the_mode_flips_on_the_next_tick(self):
+        """One line in the product file, re-read by the next tick's ``load_product`` — nothing
+        cached across ticks."""
+        path = env.product_path('sample')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        base = (f'repo_dir: {self.repo}\nmain: main\nrepo_slug: o/r\njob_grants:\n'
+                f'  - {self.grant}\ncloud:\n  enabled: true\n  max_inflight: 2\n'
+                f'  rows: any\n  accounts: [acct-c]\n  launch_wait_s: 0\n')
+        cfg = dict(self.cfg, cloud={})
+        got = []
+        for n, mode in enumerate(('primary', 'overflow', 'off', 'local', 'primary'), 1):
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(base + f'  mode: {mode}\n')
+            self.product = env.load_product('sample')
+            launched, _w, _l = self.run_wave([feature_row(f'spec-{n}', item=f'F-000{n}')],
+                                             cfg=cfg)
+            got.append(self.lanes(launched)[0][1])
+        self.assertEqual(got, ['cloud', 'local', 'local', 'local', 'cloud'])
+
+    def test_doctor_names_the_split(self):
+        with mock.patch('asf.capacity.host_size', return_value=(10, 32)):
+            p = env.Product('sample', dict(self.product._data, capacity={'sessions': 'auto'}))
+            line = cloud.lane_split(self.cfg, p)
+        self.assertTrue(line.startswith(
+            'mode primary (cloud first; local takes local-only rows and the fallback) — local '
+            'sessions 5 (auto: min(ceiling 8, 10 cores/2, 32 GB/4)), cloud max_inflight 2, '
+            'local only: groom, groom-clerk, close and cards marked local_only'), line)
+        off = cloud.lane_split({}, self.product)
+        self.assertIn('mode overflow (local first; the cloud takes what local cannot)', off)
+        self.assertIn('cloud lane off', off)
+        from asf import doctor
+        self.assertEqual(doctor.check_lane_split(self.cfg, self.product),
+                         cloud.lane_split(self.cfg, self.product))
+

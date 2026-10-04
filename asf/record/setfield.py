@@ -16,7 +16,7 @@ import tempfile
 from asf.record import frontmatter
 from asf.record import writer as card_writer
 from asf.record.core import canonicalize, load_items, record_root
-from asf.record.new import _parse_sets
+from asf.record.new import _parse_sets  # noqa: F401
 
 #: The list-valued fields ``asf set`` writes with ``=`` / ``+=`` / ``-=``, per type.
 LIST_FIELDS = {'task': ('writes', 'after')}
@@ -92,18 +92,42 @@ def _why_not_removed(field, item_id, base, value):
     return '; '.join(dict.fromkeys(out))
 
 
+def split_targets(args):
+    """``(ids, assignments)`` off ``asf set ID [ID…] FIELD=VALUE…``: every word with no ``=`` is
+    an id, so one call (one record commit) sets a field on many cards."""
+    ids, assignments = [args.id], []
+    for a in args.assignments:
+        (assignments if '=' in a else ids).append(a)
+    return list(dict.fromkeys(ids)), assignments
+
+
 def cmd_set(args, root):
+    ids, assignments = split_targets(args)
+    if not assignments:
+        print("error: asf set wants FIELD=VALUE after the id(s)", file=sys.stderr)
+        return 2
     by_id, _errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
-    rec = canonical.get(args.id)
-    if rec is None:
-        print(f"error: no item {args.id!r}", file=sys.stderr)
-        return 2
-    try:
-        sets = parse_assignments(rec['meta'].get('type'), args.assignments)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
+    # every id is resolved and every assignment parsed before any card is written
+    for item_id in ids:
+        rec = canonical.get(item_id)
+        if rec is None:
+            print(f"error: no item {item_id!r}", file=sys.stderr)
+            return 2
+        try:
+            parse_assignments(rec['meta'].get('type'), assignments)
+        except ValueError as e:
+            print(f"error: {e}" + (f" ({item_id})" if len(ids) > 1 else ''), file=sys.stderr)
+            return 2
+    for item_id in ids:
+        rc = _set_one(args, root, canonical[item_id], item_id, assignments)
+        if rc:
+            return rc
+    return 0
+
+
+def _set_one(args, root, rec, item_id, assignments):
+    sets = parse_assignments(rec['meta'].get('type'), assignments)
     updates = {}
     idempotent = []
     all_noop = True  # PD4: the `set` line is suppressed only when every op was a list-field no-op
@@ -115,12 +139,12 @@ def cmd_set(args, root):
                 all_noop = False
             if op == '-' and not changed:
                 print(f"error: {top}-={' '.join(value)} removes nothing — "
-                      + _why_not_removed(top, args.id, base, value), file=sys.stderr)
+                      + _why_not_removed(top, item_id, base, value), file=sys.stderr)
                 return 2
             if op == '+' and not changed:
                 idempotent.append((top, value))
             if top == 'writes' and not updates[top]:
-                print(f"error: a Task keeps a writes: footprint — {args.id} would have none",
+                print(f"error: a Task keeps a writes: footprint — {item_id} would have none",
                       file=sys.stderr)
                 return 2
         elif sub:
@@ -140,13 +164,13 @@ def cmd_set(args, root):
     if idempotent:
         from asf.feeder import widen  # function-local like the other two (D4)
         for top, value in idempotent:
-            print(f"{args.id}: {top}: already covers {' '.join(widen.norm_writes(value))} — "
+            print(f"{item_id}: {top}: already covers {' '.join(widen.norm_writes(value))} — "
                   "footprint unchanged")
     if 'writes' in updates:
-        _warn_standing_overlaps(root, args.id, product_of(args))
+        _warn_standing_overlaps(root, item_id, product_of(args))
     lists = LIST_FIELDS.get(rec['meta'].get('type'), ())
     if not all_noop:
-        print(f"{args.id}: set " + ', '.join(
+        print(f"{item_id}: set " + ', '.join(
             f"{k}={' '.join(v)}" if k in lists else k for k, v in updates.items()))
     return 0
 
