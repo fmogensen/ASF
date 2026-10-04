@@ -1375,6 +1375,8 @@ def run(product_name):
         rows.append(('ci runners', required, ok, detail))
     for required, ok, detail in check_queue_bypass(product):
         rows.append(('queue bypass', required, ok, detail))
+    for required, ok, detail in check_queue_cancels(product):
+        rows.append(('queue cancels', required, ok, detail))
     for required, ok, detail in check_trunk_ruleset(product):
         rows.append(('trunk ruleset', required, ok, detail))
     for required, ok, detail in check_trunk_stall(product):
@@ -1544,6 +1546,17 @@ def check_queue_bypass(product):
         return trunk_watch.doctor_rows(product)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(True, None, f'cannot read the trunk watch — {e}')]
+
+
+def check_queue_cancels(product):
+    """[(required, ok, detail)] — one red row per merge-queue batch cut again because a required
+    check judged no code (cancelled, timed out, stale, never started) twice on one sha
+    (:func:`asf.merge_queue.doctor_rows`, off ``ci-cancels.json``). No rows otherwise."""
+    from asf import merge_queue
+    try:
+        return merge_queue.doctor_rows(product)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(True, None, f'cannot read the merge queue cancels — {e}')]
 
 
 def check_trunk_stall(product):

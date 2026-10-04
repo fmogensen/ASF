@@ -44,6 +44,17 @@ neither re-run nor replace — its run made on a workflow the trunk has changed 
 (:func:`request_rebuild`), and the next pass drops the batch and cuts its members again on the
 trunk's tip, a new sha whose push starts a fresh run.
 
+**No verdict.** A required check that concluded ``cancelled``, ``timed_out``, ``stale`` or
+``startup_failure`` (:data:`NONVERDICT`: an operator cancelling a hung run, a timeout, a
+superseding workflow) judged no code: never red against the members, never green. With nothing
+queued or in progress on the batch sha to replace it, its run is re-run once per (batch sha,
+job), the claim kept in ``ci-cancels.json`` (cause :data:`MQ_RERUN`); a second non-verdict on that
+sha drops the batch and cuts its members again, with an ``ALARM`` line and a ``queue cancels``
+doctor row. A batch pending past ``merge_queue.stuck_min`` (default 90) with a required check
+never started and no run queued or in progress on its sha is handled the same (2026-10-04: a
+batch whose ``gate`` was cancelled sat "pending" 3 h, the green batch behind it held by a full
+chain). A cancel the CI start queue made itself (its ``relief`` record) is its own to re-run.
+
 **Stacking.** Up to ``merge_queue.inflight`` batches form a chain: each is cut on the sha of the
 one before it, not the trunk, so two batches overlap in CI instead of queueing. The chain's
 order is the landing order; a dropped batch drops every batch stacked on it (they contain its
@@ -122,7 +133,19 @@ QUEUE_FILE = 'merge-queue.json'
 #: wait for its checks before it is dropped and cut again (a saturated runner pool is slow, not
 #: red: the default is generous).
 DEFAULTS = {'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 2, 'timeout_min': 360,
-            'start_kind': 'trunk'}
+            'stuck_min': 90, 'start_kind': 'trunk'}
+#: the conclusions of a required check that judged no code (:func:`_nonverdict`): a cancel (an
+#: operator, a superseding workflow, a timeout the host turned into one), a check the host gave
+#: up on (``timed_out``/``stale``), a workflow that never started its jobs. Never red, never green.
+NONVERDICT = ('cancelled', 'timed_out', 'stale', 'startup_failure')
+#: the claims (:func:`asf.ci_queue.claim_cancel`, ``ci-cancels.json``) of a batch's non-verdict:
+#: the one re-run per (batch sha, job), a re-run the host refused, and the re-cut that follows a
+#: second one — the ALARM the doctor's ``queue cancels`` row reads
+MQ_RERUN, MQ_REFUSED, MQ_ALARM = 'mq-cancel-rerun', 'mq-cancel-refused', 'mq-cancel-alarm'
+#: how long a re-run asked of the host may show nothing new before its claim counts as spent
+RERUN_GRACE_S = 600
+#: how long an ALARM stays a red doctor row
+ALARM_WINDOW_S = 6 * 3600
 #: ``merge_queue.start_kind``: how the CI start queue (:mod:`asf.ci_queue`) admits the batch
 #: push — ``trunk`` (the default: the batch is the trunk's next sha, so it starts as a trunk run
 #: does — trunk priority, sized over every runner, never held at the ``capacity.ci`` ceiling or
@@ -166,7 +189,7 @@ def settings(conv):
     string prefix; anything else keeps its default (a scalar block is the doctor's finding)."""
     raw = conv.map_of('merge_queue') if hasattr(conv, 'map_of') else {}
     out = dict(DEFAULTS)
-    for key in ('batch_size', 'inflight', 'timeout_min'):
+    for key in ('batch_size', 'inflight', 'timeout_min', 'stuck_min'):
         v = raw.get(key)
         if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
             out[key] = v
@@ -301,11 +324,12 @@ def check_runs(slug, sha):
     return [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else None
 
 
-def verdict(runs, required):
+def verdict(runs, required, nonverdict=('cancelled',)):
     """``('green'|'pending'|'red', why)`` for check ``runs`` against the ``required`` names. A
     required check is green only when a run of it (its job name up to the first space: a matrix
     leg answers for its job) concluded ``success``; one still running or not created is
-    pending; one ``cancelled`` is pending (it judged no code); one that concluded anything else —
+    pending; one ``cancelled`` (any conclusion in ``nonverdict``; the batch judge passes
+    :data:`NONVERDICT`) is pending (it judged no code); one that concluded anything else —
     ``skipped`` included — is red. A red check the
     product does not require is never a verdict. No required names: pending, and the line says
     so — a queue with nothing to gate on lands nothing."""
@@ -321,8 +345,8 @@ def verdict(runs, required):
         for r in mine:
             if r.get('status') != 'completed':
                 pending.append(f"{name} ({r.get('status') or 'pending'})")
-            elif r.get('conclusion') == 'cancelled':   # a cut-short run judged no code
-                pending.append(f'{name} (cancelled)')
+            elif r.get('conclusion') in nonverdict:   # a cut-short run judged no code
+                pending.append(f"{name} ({r.get('conclusion')})")
             elif r.get('conclusion') != 'success':
                 red.append(f"{name} ({r.get('conclusion') or 'no conclusion'})")
     if red:
@@ -485,7 +509,9 @@ def run(lane, ready):
             settled |= gone
             loose.extend(f for f in members if f['branch'] not in gone)
             dropped.add(ref)
-        elif state == 'stale':
+        elif state in ('stale', 'recut'):
+            # recut: a non-verdict its one re-run did not clear (_nonverdict) — no member is
+            # blamed, nothing is ledgered red: the members are cut again as a stale batch's are
             _drop(lane, batch, why)
             loose.extend(members)
             dropped.add(ref)
@@ -693,7 +719,7 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     runs = check_runs(lane.slug, sha)
     if runs is None:
         return 'pending', 'check runs unreadable', None
-    state, why = verdict(runs, required)
+    state, why = verdict(runs, required, NONVERDICT)
     checks = flake.batch_checks(runs)
     flake.settle(lane.product, lane.state_dir, lane.slug, sha, checks, out=lane.out)
     if state == 'green':
@@ -713,6 +739,12 @@ def judge(lane, batch, members, heads, trunk_sha, st):
             state, why = 'pending', f"re-running {', '.join(held)} (flake triage)"
         else:
             return 'red', why, (checks, red)
+    if state == 'pending':
+        # a required check that judged no code, nothing running to replace it: re-run once,
+        # then re-cut — an absent verdict is never waited out
+        got = _nonverdict(lane, batch, runs, required, st)
+        if got:
+            return got
     if state == 'pending' and _age_s(batch) > st['timeout_min'] * 60:
         return 'timeout', f"timed out after {st['timeout_min']} min — {why}", None
     if state == 'green':
@@ -736,6 +768,150 @@ _PATH_LINE_RE = re.compile(r'(?<![\w@./-])((?:[\w@.+-]+/)*[\w@.+-]+\.[A-Za-z0-9]
 FINDING_LINES = 400
 #: how many finding lines a culprit's correct brief names
 BRIEF_FINDINGS = 30
+
+
+def _run_id(r):
+    """The workflow run id behind check run ``r`` (its details or html link), or None."""
+    for link in (r.get('details_url'), r.get('html_url')):
+        m = _RUN_LINK_RE.search(str(link or ''))
+        if m:
+            return m.group(1)
+    return None
+
+
+_RUN_LINK_RE = re.compile(r'/actions/runs/(\d+)')
+
+
+def _workflow_runs(slug, sha):
+    """The workflow runs on ``sha`` (``[{id, status, conclusion}]``), or None when unreadable."""
+    data = H.gh_json(['api', f'repos/{slug}/actions/runs?head_sha={sha}&per_page=100'], None)
+    runs = data.get('workflow_runs') if isinstance(data, dict) else None
+    return [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else None
+
+
+def _ci_queue_holds(lane, ref):
+    """True while the CI start queue holds a re-run of a run on ``ref`` (its ``relief`` record:
+    it cancelled the run itself and re-runs it when its turn comes) — that cancel is its own."""
+    try:
+        relief = ci_queue.load(lane.product.name).get('relief') or ()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return any(isinstance(r, dict) and r.get('branch') == ref for r in relief)
+
+
+def _nonverdict(lane, batch, runs, required, st):
+    """A pending batch whose required checks judged no code, with nothing queued or running on
+    its sha to replace them — a cancelled (or ``timed_out``/``stale``/``startup_failure``,
+    :data:`NONVERDICT`) required check, or a batch pending past ``merge_queue.stuck_min`` with
+    no run at all — is never waited out. Its runs are re-run ONCE per (batch sha, job), the claim
+    written to ``ci-cancels.json`` (:func:`asf.ci_queue.claim_cancel`, cause :data:`MQ_RERUN`)
+    before the host is asked; a second non-verdict on that sha (the re-run cancelled again, or
+    showing nothing new past :data:`RERUN_GRACE_S`) is ``('recut', why, None)``: the batch is
+    dropped and its members cut again, an ALARM line and a :data:`MQ_ALARM` claim (the doctor's
+    ``queue cancels`` row). Never red (no member blamed, nothing sent back) and never green.
+    None: leave the batch pending (something runs, the CI start queue owns the cancel, the host
+    is unreadable, a re-run was just asked)."""
+    from asf.harvest import deploy
+    ref, sha = batch['ref'], batch['sha']
+    gone, missing = {}, []
+    for name in required:
+        mine = [r for r in runs or () if deploy.job_key(r.get('name')) == name]
+        if not mine:
+            missing.append(name)
+        elif any(r.get('status') != 'completed' for r in mine):
+            return None                      # a run of this job still queued or in progress
+        else:
+            off = [r for r in mine if r.get('conclusion') in NONVERDICT]
+            if off:
+                gone[name] = off
+    age = _age_s(batch)
+    stuck = not gone and missing and age > st['stuck_min'] * 60
+    if not gone and not stuck:
+        return None
+    if _ci_queue_holds(lane, ref):
+        return None                          # the CI start queue cancelled it: its re-run
+    wf = _workflow_runs(lane.slug, sha)
+    if wf is None:
+        return None                          # unreadable: asked again next pass
+    if any(r.get('status') != 'completed' for r in wf):
+        return None                          # a newer run is queued or in progress on the sha
+    jobs = sorted(gone) or sorted(missing)
+    what = (', '.join(f"{n} {'/'.join(sorted({r.get('conclusion') for r in gone[n]}))}"
+                      for n in sorted(gone)) if gone
+            else f"{', '.join(missing)} never started — pending {int(age // 60)} min "
+                 f"(merge_queue.stuck_min {st['stuck_min']}), no run queued or in progress")
+    state_dir, now = lane.state_dir, ci_queue._now()
+    claims = ci_queue.load_claims(state_dir)
+    mine = [c for c in claims.values() if isinstance(c, dict)
+            and c.get('cause') in (MQ_RERUN, MQ_REFUSED, MQ_ALARM) and c.get('sha') == sha
+            and set(c.get('jobs') or ()) & set(jobs)]
+    if mine:
+        asked = max((ci_queue._parse(c.get('at')) for c in mine
+                     if ci_queue._parse(c.get('at'))), default=None)
+        ended = [ci_queue._parse(r.get('completed_at')) for n in gone for r in gone[n]]
+        again = asked is not None and any(t and t > asked for t in ended)
+        waited = asked is None or (now - asked).total_seconds() > RERUN_GRACE_S
+        if not again and not waited:
+            return None                      # the re-run was just asked: the host catches up
+        members = ', '.join(f"#{m.get('pr')}" for m in batch['members'])
+        why = (f'{what} again after its one re-run — no verdict on {sha[:9]}; cut again '
+               f'({members}), no member blamed')
+        lane.out(f'merge queue: ALARM {ref} {why}')
+        ci_queue.claim_cancel(state_dir, f'mq:{sha}', MQ_ALARM, now, sha=sha, ref=ref, jobs=jobs,
+                              prs=[m.get('pr') for m in batch['members']], why=what)
+        return 'recut', f'no verdict — {what}, cancelled again after its one re-run', None
+    gone_ids = {_run_id(r) for n in gone for r in gone[n]} - {None}
+    if gone:
+        ids = sorted(gone_ids) or sorted(str(r.get('id')) for r in wf
+                                         if r.get('conclusion') in NONVERDICT and r.get('id'))
+    else:
+        ids = sorted(str(r.get('id')) for r in wf if r.get('id'))
+    if not ids:
+        # nothing on the host to re-run (no run was ever made on the sha): a fresh cut pushes a
+        # new sha, and that push starts the run
+        lane.out(f'merge queue: ALARM {ref} {what} — no run on {sha[:9]} to re-run; cut again')
+        ci_queue.claim_cancel(state_dir, f'mq:{sha}', MQ_ALARM, now, sha=sha, ref=ref, jobs=jobs,
+                              prs=[m.get('pr') for m in batch['members']], why=what)
+        return 'recut', f'no verdict — {what}, no run on its sha', None
+    # the claim first: a re-run nothing remembers would be asked again every pass
+    for rid in ids:
+        ci_queue.claim_cancel(state_dir, rid, MQ_RERUN, now, sha=sha, ref=ref, jobs=jobs)
+    held = ci_queue.load_claims(state_dir)
+    if not all((held.get(rid) or {}).get('cause') == MQ_RERUN for rid in ids):
+        lane.out(f'merge queue: {ref} {what} — ci-cancels.json not written, no re-run asked')
+        return None
+    refused = []
+    for rid in ids:
+        args = ['run', 'rerun', rid, '-R', lane.slug] + (['--failed'] if gone else [])
+        if H._gh(args)[0] != 0:
+            refused.append(rid)
+    for rid in refused:
+        ci_queue.claim_cancel(state_dir, rid, MQ_REFUSED, now, sha=sha, ref=ref, jobs=jobs)
+    lane.out(f"merge queue: {ref} {', '.join(jobs)} "
+             f"{'cancelled' if gone else 'stuck pending'} — rerun once ({what}; run(s) "
+             f"{', '.join(ids)}" + (f", refused: {', '.join(refused)}" if refused else '') + ')')
+    return None
+
+
+def doctor_rows(product, now=None):
+    """[(required, ok, detail)] — one red row per merge-queue ALARM in the last
+    :data:`ALARM_WINDOW_S` (a batch whose required check judged no code twice on one sha and was
+    cut again, :func:`_nonverdict`), off ``ci-cancels.json``; no ``gh`` call. No rows for a
+    product not on ``merge: queue``, or with no alarm."""
+    conv = getattr(product, 'conventions', None)
+    if conv is None or not conv.merge_queue():
+        return []
+    from asf import env
+    now = now or ci_queue._now()
+    rows = []
+    for _k, c in sorted(ci_queue.load_claims(env.state_dir(product.name)).items()):
+        if isinstance(c, dict) and c.get('cause') == MQ_ALARM \
+                and ci_queue._age(c.get('at'), now) <= ALARM_WINDOW_S:
+            prs = ', '.join(f'#{p}' for p in c.get('prs') or ())
+            rows.append((True, False, f"merge queue ALARM {c.get('ref')} @ "
+                                      f"{str(c.get('sha'))[:9]}: {c.get('why')} — no verdict "
+                                      f"after one re-run, cut again ({prs})"))
+    return rows
 
 
 def _skipped(why):

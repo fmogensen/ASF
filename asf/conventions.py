@@ -234,8 +234,8 @@ MERGE_MANUAL = 'manual'
 MERGE_QUEUE = 'queue'
 MERGE_MODES = (MERGE_AUTO, MERGE_MANUAL, MERGE_QUEUE)
 DEFAULT_MERGE = MERGE_MANUAL
-#: ``conventions.merge_queue: {ref_prefix, batch_size, inflight, timeout_min}`` — the queue's
-#: shape under ``merge: queue`` (:data:`asf.merge_queue.DEFAULTS`); ``ref_prefix`` is what the
+#: ``conventions.merge_queue: {ref_prefix, batch_size, inflight, timeout_min, stuck_min}`` —
+#: the queue's shape under ``merge: queue`` (:data:`asf.merge_queue.DEFAULTS`); ``ref_prefix`` is what the
 #: product's CI triggers its full matrix on.
 
 #: ``customer_content: {paths, forbidden_markers}`` — the pages a customer reads (a site's
