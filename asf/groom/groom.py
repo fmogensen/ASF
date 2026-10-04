@@ -6,6 +6,7 @@ import re
 from asf import budget
 from asf import env
 from asf.record import frontmatter
+from asf.record import writer
 from asf.record.core import (as_list, canonicalize, compute_derived, is_open, is_retired,
                              jaccard, load_items, parse_sections, tokenize)
 from asf.record.index import do_index
@@ -173,8 +174,7 @@ def _write_card(rec, fields, hist):
     meta2, body2 = frontmatter.parse(text, path=rec['relpath'])
     new_body = append_history_lines(body2, [hist])
     if new_body != body2:
-        with open(rec['path'], 'w', encoding='utf-8') as f:
-            f.write(frontmatter.render(meta2, new_body))
+        writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
     rec['meta'].update(fields)
 
 
@@ -304,8 +304,7 @@ def _merge_source_and_history(loser_rec, survivor_rec):
     body = append_section_lines(body, '## History', new_hist)
 
     if body != orig_body:
-        with open(survivor_rec['path'], 'w', encoding='utf-8') as f:
-            f.write(frontmatter.render(meta, body))
+        writer.write_card(survivor_rec['path'], frontmatter.render(meta, body))
 
 
 def apply_conflict(canonical, a, b, answer, date, who, emit=None):
@@ -507,8 +506,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
             hist = f"- {date} groom: blockedBy → {hist_value} {who}"
             new_body = append_history_lines(body2, [hist])
             if new_body != body2:
-                with open(rec['path'], 'w', encoding='utf-8') as f:
-                    f.write(frontmatter.render(meta2, new_body))
+                writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
             if remainder:
                 rec['meta']['blockedBy'] = remainder
             else:
@@ -552,8 +550,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
         hist = f"- {date} groom: {field} → {_fmt_history_value(value)} {who}"
         new_body = append_history_lines(body2, [hist])
         if new_body != body2:
-            with open(rec['path'], 'w', encoding='utf-8') as f:
-                f.write(frontmatter.render(meta2, new_body))
+            writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         rec['meta'][field] = value
         applied += 1
         if event:

@@ -489,6 +489,20 @@ class OneBugPerCauseTests(unittest.TestCase):
         got = file_bugs.file_invariant_bugs(self.root, [self.i10('F-0003', 'T-0009')], out=out.append)
         self.assertEqual(list(got.values()), ['skipped'])
 
+    def test_findings_naming_a_different_number_of_tasks_are_one_bug_and_a_history_line(self):
+        out = []
+        got = file_bugs.file_invariant_bugs(self.root, [self.i10('F-0001', 'T-0001, T-0002')],
+                                            out=out.append)
+        self.assertEqual(list(got.values()), ['filed'])
+        self.assertEqual(self.bugs()[0][0]['signature'],
+                         'invariant I10: Resolved with open Task(s) …')
+        got = file_bugs.file_invariant_bugs(self.root, [self.i10('F-0002', 'T-0007')],
+                                            out=out.append)
+        self.assertEqual(list(got.values()), ['bumped'])
+        bugs = self.bugs()
+        self.assertEqual(len(bugs), 1)
+        self.assertIn('also features/F-0002.md', bugs[0][1].split('## History', 1)[1])
+
 
 class DeterministicBugIdTests(unittest.TestCase):
     """The legacy tool merges ci_signatures, then refusal_signatures, then
