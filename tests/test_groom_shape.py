@@ -197,6 +197,49 @@ class SplitProposalTest(ShapeRepo):
         self.assertIn('asf/harvest is held by T-0021', lines[0])
 
 
+class SharedPathProposalTests(ShapeRepo):
+    """F-0187, D6: a glob the product declares `conventions.shared_paths` is no one's
+    footprint in the groomer either — merge and split proposals stop treating it as an
+    overlap, and threading the set through `build_groom_sections` is proved beside the pure
+    functions it calls."""
+
+    def sections(self, shared=()):
+        canonical, _d = canonicalize(load_items(self.root)[0])
+        derived = compute_derived(canonical)
+        return groom.build_groom_sections(canonical, derived, TODAY, shared=shared)
+
+    def test_shared_path_stops_the_merge_proposal(self):
+        self.task('T-0001', ['src/a.py', 'uv.lock'])
+        self.task('T-0002', ['src/b.py', 'uv.lock'])
+        self.assertEqual(self.sections(shared=['uv.lock'])['merge'], [])
+        lines = self.sections()['merge']
+        self.assertEqual(len(lines), 1)
+        self.assertIn('uv.lock ↔ uv.lock', lines[0])
+
+    def test_a_real_overlap_still_merges_with_a_shared_set_declared(self):
+        self.task('T-0001', ['src/a.py'])
+        self.task('T-0002', ['src/a.py'])
+        lines = self.sections(shared=['uv.lock'])['merge']
+        self.assertEqual(len(lines), 1)
+        self.assertIn('merge T-0001+T-0002 —', lines[0])
+
+    def test_area_held_only_by_a_shared_path_is_free_no_split(self):
+        self.task('T-0050', ['uv.lock', 'asf/harvest/**'])
+        self.task('T-0020', ['uv.lock'], state='Active')
+        self.assertEqual(self.sections(shared=['uv.lock'])['split'], [])
+        lines = self.sections()['split']
+        self.assertEqual(len(lines), 1)
+
+    def test_a_genuine_overlap_still_splits_with_a_shared_set_declared(self):
+        self.task('T-0050', ['uv.lock', 'asf/harvest/**'])
+        self.task('T-0020', ['uv.lock'], state='Active')
+        self.task('T-0021', ['asf/harvest/x.py'], state='Active')
+        lines = self.sections(shared=['uv.lock'])['split']
+        self.assertEqual(len(lines), 1)
+        self.assertIn('asf/harvest is held by T-0021', lines[0])
+        self.assertNotIn('T-0020', lines[0])
+
+
 class ApplyTest(ShapeRepo):
     MERGE = '- [ ] T-0001 merge T-0001+T-0002 — F-0001: writes overlap → answer: '
     SPLIT = '- [ ] T-0050 split asf/feeder | asf/harvest — held → answer: '

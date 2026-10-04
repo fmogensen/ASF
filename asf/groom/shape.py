@@ -235,9 +235,11 @@ def _by_feature(ready):
     return out
 
 
-def merge_proposals(ready, declined=None):
+def merge_proposals(ready, declined=None, shared=()):
     """D2: one Proposal per connected component (size >= 2) of the overlap graph over one
-    Feature's ready Tasks. `ids` is ordered (rank, id), so `ids[0]` survives (D7)."""
+    Feature's ready Tasks. `ids` is ordered (rank, id), so `ids[0]` survives (D7). `shared`:
+    the product's `conventions.shared_paths` — a glob it covers is no one's footprint here
+    either, so two Tasks whose only common path is a lockfile are not proposed for merging."""
     out = []
     for fid, group in sorted(_by_feature(ready).items()):
         group = sorted(group, key=lambda r: (r.rank, r.id))
@@ -251,7 +253,8 @@ def merge_proposals(ready, declined=None):
                 cur = stack.pop()
                 comp.append(cur)
                 for other in group:
-                    if other.id not in seen and footprint.overlaps(cur.writes, other.writes):
+                    if (other.id not in seen
+                            and footprint.overlaps(cur.writes, other.writes, shared)):
                         seen.add(other.id)
                         stack.append(other)
             if len(comp) < 2:
@@ -259,7 +262,7 @@ def merge_proposals(ready, declined=None):
             comp = sorted(comp, key=lambda r: (r.rank, r.id))
             ids = tuple(r.id for r in comp)
             hit = next(h for i, a in enumerate(comp) for b in comp[i + 1:]
-                       for h in [footprint.overlaps(a.writes, b.writes)] if h)
+                       for h in [footprint.overlaps(a.writes, b.writes, shared)] if h)
             why = ('%s: writes overlap (%s ↔ %s); they run one after the other anyway, '
                    'one session and one gate saved' % (fid, hit[0], hit[1]))
             if not _is_declined(proposal_key('merge', ids), ids, declined):
@@ -291,10 +294,11 @@ def batch_proposals(ready, merges, capacity, max_globs, declined=None):
     return out
 
 
-def split_proposals(ready, active, depth, declined=None):
+def split_proposals(ready, active, depth, declined=None, shared=()):
     """D4: a ready Task with globs in two or more areas, where an area overlaps a holder (an
     `Active` Task or a ready Task of another Feature) and another overlaps none. `active` is
-    `[(id, writes)]`."""
+    `[(id, writes)]`. `shared`: the product's `conventions.shared_paths` — an area whose only
+    overlap with a holder is a shared glob counts as free."""
     out = []
     for r in ready:
         by_area = areas(r.writes, depth)
@@ -304,7 +308,8 @@ def split_proposals(ready, active, depth, declined=None):
         holders += [(o.id, o.writes, 'ready, ' + o.feature) for o in ready if o.feature != r.feature]
         held, free = [], []
         for area, globs in by_area.items():
-            hit = next(((tid, kind) for tid, w, kind in holders if footprint.overlaps(globs, w)), None)
+            hit = next(((tid, kind) for tid, w, kind in holders
+                        if footprint.overlaps(globs, w, shared)), None)
             (held if hit else free).append((area, hit))
         if not held or not free:
             continue

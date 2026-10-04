@@ -5,6 +5,7 @@ import re
 
 from asf import budget
 from asf import env
+from asf.feeder import footprint
 from asf.record import frontmatter
 from asf.record import writer
 from asf.record.core import (as_list, canonicalize, compute_derived, is_open, is_retired,
@@ -857,15 +858,18 @@ def _proposal_line(p):
     return f"- [ ] {p.ids[0]} {p.verb} {rest} — {p.why} → answer: ____"
 
 
-def groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_globs):
-    """The four F-0086 sections: merges, batches, splits, and split parts awaiting a `yes`."""
+def groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_globs, shared=()):
+    """The four F-0086 sections: merges, batches, splits, and split parts awaiting a `yes`.
+    `shared`: the product's `conventions.shared_paths`, kept out of the merge and split
+    overlap tests (F-0187, D6)."""
     # a Task the duplicate rule closes is no merge partner: it is going, not merging
     ready = [t for t in shape.ready_tasks(canonical, derived)
              if policy.task_duplicate_of(t.id, canonical[t.id], canonical) is None]
     declined = shape.declined_keys(canonical)
-    merges = shape.merge_proposals(ready, declined)
+    merges = shape.merge_proposals(ready, declined, shared)
     batches = shape.batch_proposals(ready, merges, capacity, batch_max_globs, declined)
-    splits = shape.split_proposals(ready, shape.active_tasks(canonical), area_depth, declined)
+    splits = shape.split_proposals(ready, shape.active_tasks(canonical), area_depth, declined,
+                                   shared)
     parts = []
     for tid, rec in sorted(canonical.items()):
         meta = rec['meta']
@@ -881,11 +885,11 @@ def groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_glo
 
 def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
                          area_depth=DEFAULT_AREA_DEPTH, batch_max_globs=DEFAULT_BATCH_MAX_GLOBS,
-                         since=None):
+                         since=None, shared=()):
     now = datetime.datetime.now(datetime.timezone.utc)
     origin_ids = inbox_origin_ids(canonical)
     sections = {
-        **groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_globs),
+        **groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_globs, shared),
         'inbox': groom_inbox_section(canonical, origin_ids),
         'undecided3': groom_undecided_section(canonical, now, 3, exclude=origin_ids),
         'no_stories': groom_features_without_stories(canonical, derived),
@@ -1204,7 +1208,8 @@ def cmd_groom(args, root):
         canonical, derived, date, capacity=lane_slots,
         area_depth=conv.area_depth if conv else DEFAULT_AREA_DEPTH,
         batch_max_globs=conv.batch_max_globs if conv else DEFAULT_BATCH_MAX_GLOBS,
-        since=conv.get('id_in_subject_since') if conv else None)
+        since=conv.get('id_in_subject_since') if conv else None,
+        shared=footprint.shared_globs(product))
     sections[INBOX_QUESTIONS[1]] = inbox_mod.question_lines(root, intake_dir)
     sections[REFUSED_QUESTIONS[1]] = groom_refused_section(canonical, product)
     sections[OVER_BUDGET_QUESTIONS[1]] = groom_over_budget_section(canonical, derived, product)
