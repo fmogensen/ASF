@@ -11,7 +11,10 @@ The rules, first match per type after the two `any` rows:
   any      reconciled         a typed landed sha and green CI (and, for a Story,
                                   every acceptance line proved)                  -> Closed
   any      parent-closed      the parent is Closed and the item has no evidence  -> Closed
-                                  (a matrix status todo is evidence: unbuilt stays open)
+                                  (a matrix status todo is evidence: unbuilt stays open;
+                                  the close is borrowed — never held by `sticky`, never a
+                                  Closed child for children-closed, so the two never prove
+                                  each other — and it names the parent's own landing only)
   task     landed-green       a trunk commit or merged PR, and green CI          -> Closed
   task     landed             a trunk commit or merged PR                        -> Resolved
   task     in-flight          a branch or a PR                                   -> Active

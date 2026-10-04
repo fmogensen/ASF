@@ -86,11 +86,13 @@ def landing_of(iid, rule, canonical, ev, task_ev, derived, story_tasks=None):
     if rule == 'reconciled':
         return str(frontmatter.split_machine(meta)[0].get('landed') or ''), 'console'
     if rule == 'parent-closed':
+        # the parent's OWN landing, never a sha it borrowed from a child: a Feature closed on its
+        # Tasks carries the newest Task's merge, and that merge lands that Task, not this one
         parent, seen = meta.get('parent'), set()
         while parent and parent in canonical and parent not in seen:
             seen.add(parent)
-            if derived.get(parent) is not None and derived[parent].sha:
-                return derived[parent].sha, 'descent'
+            if derived.get(parent) is not None and derived[parent].own_sha:
+                return derived[parent].own_sha, 'descent'
             parent = canonical[parent]['meta'].get('parent')
         return '', 'descent'
     if type_ == 'story':
@@ -759,6 +761,23 @@ class _Derived:
     raw: closing.Closing      #: `state_of`'s answer, before `sticky`
     sha: str = ''             #: the commit that landed it, for the line that names it
     own: bool = False         #: it carries a branch, a PR or a commit of its own
+    own_sha: str = ''         #: a landing that names it (typed, commit, merged PR) — never a
+    #:                          child's: the only sha descent may hand down
+
+
+def borrowed(meta):
+    """The card's Closed is descent's (``rule: parent-closed`` on disk, or a landing stamped
+    ``by: descent``): its parent's close, not evidence of its own. Such a close is never held by
+    the terminal hold and never counts toward the parent's ``children-closed`` — the two rules
+    would otherwise prove each other (a parent Closed because its children are, each child Closed
+    because the parent is). While the parent stays Closed, descent gives it back every pass."""
+    machine = frontmatter.split_machine(meta)[1]
+    if machine.get('state') != closing.CLOSED:
+        return False
+    stamp = machine.get(LANDING_KEY)
+    if isinstance(stamp, dict) and stamp.get('by') == 'descent':
+        return True
+    return RULE_PREFIX + 'parent-closed' in (machine.get('evidence') or [])
 
 
 def descend(canonical, new_state, closings, derived, keep=(), evs=None):
@@ -776,7 +795,8 @@ def descend(canonical, new_state, closings, derived, keep=(), evs=None):
     evs = evs or {}
     reached = {iid for iid, c in closings.items()
                if c.state == closing.CLOSED and canonical[iid]['meta'].get('type') == 'feature'}
-    sha = {iid: derived[iid].sha for iid in reached}
+    # the parent's own landing only (see `landing_of`): a sibling Task's merge is no child's
+    sha = {iid: derived[iid].own_sha for iid in reached}
     grew = True
     while grew:
         grew = False
@@ -889,6 +909,9 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     new_state = {}
     for iid, rec in canonical.items():
         new_state[iid] = frontmatter.split_machine(rec['meta'])[1].get('state', 'New')
+    # descent's closes from the last pass: re-derived from scratch, never held (`borrowed`)
+    lent = {iid for iid, rec in canonical.items()
+            if rec['meta'].get('type') in ('story', 'task') and borrowed(rec['meta'])}
 
     closings = {}     # iid -> the Closing that gets written: state, rule, evidence lines
     derived = {}      # iid -> _Derived, what descent reads
@@ -926,13 +949,17 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         """The one place a state is chosen: `closing.state_of`, held by `closing.sticky` — unless
         `iid` is in `bypass_sticky`, the terminal hold `asf reopen` lifts for this one item."""
         old = new_state[iid]
-        raw = closing.state_of(type_, ev_obj, old)
+        # a borrowed close is no state to carry or hold: the item's own rule speaks from New, and
+        # descent (below) closes it again only if its parent is still Closed
+        raw = closing.state_of(type_, ev_obj, closing.NEW if iid in lent else old)
         c = dataclasses.replace(raw, lines=tuple(lines))
-        final = c if iid in bypass_sticky else closing.sticky(old, c)
+        final = c if iid in bypass_sticky or iid in lent else closing.sticky(old, c)
         closings[iid] = final
         evs[iid] = ev_obj
         new_state[iid] = final.state
-        derived[iid] = _Derived(raw, sha or ev_obj.commit or ev_obj.merged_sha, _own_evidence(ev_obj))
+        own_sha = ev_obj.landed or ev_obj.commit or ev_obj.merged_sha
+        derived[iid] = _Derived(raw, sha or ev_obj.commit or ev_obj.merged_sha, _own_evidence(ev_obj),
+                                own_sha)
         return final
 
     # ---- Tasks: no dependency on any other item's derived state
