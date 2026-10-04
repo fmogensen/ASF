@@ -18,6 +18,7 @@ import sys
 from asf import env
 from asf.evidence import evidence
 from asf.record import frontmatter
+from asf.record import writer
 from asf.record.core import TYPE_ORDER, TYPES, BARE_DECISION_RE, canonicalize, load_items, now_iso, today
 from asf.record.ingest import _path_only, cmd_ingest
 from asf.schema import SCHEMA_VERSION
@@ -444,8 +445,7 @@ def cmd_migrate(args, root):
         if changed:
             new_text = frontmatter.render(rec['meta'], rec['body'])
             if not dry_run:
-                with open(rec['path'], 'w', encoding='utf-8') as f:
-                    f.write(new_text)
+                writer.write_card(rec['path'], new_text)
             rec['text'] = new_text
             report[type_]['matched'] += 1
         else:

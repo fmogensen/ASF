@@ -25,6 +25,7 @@ import sys
 from asf.conventions import Conventions
 from asf.feeder import footprint
 from asf.record import frontmatter
+from asf.record import writer
 from asf.record.core import canonicalize, load_items, today
 from asf.record.index import do_index
 from asf.record.ids import mint_id, write_new_item
@@ -209,6 +210,13 @@ def error_class(message):
     return ' '.join(_ITEM_ID_RE.sub('…', _QUOTED_RE.sub('…', message)).split())
 
 
+def collapse_id_lists(text):
+    """A list of ``…`` slots (ids already taken out) is one slot: ``…, …`` -> ``…``, so a finding
+    naming two Tasks and one naming one are the same cause. The one definition
+    :func:`cause_key` and the groom dedupe key (asf.groom.policy) share."""
+    return re.sub(r'…(?:\s*,\s*…)+', '…', text)
+
+
 def record_error_signatures(root, findings=None, canonical=None, shared=()):
     """One signature per error CLASS `asf check` reports over the record, every card carrying it
     an evidence line (B-0132). The record pre-commit judges only what a commit stages, so an
@@ -353,8 +361,7 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
         hist = f"- {date} file-bugs: count {old_count} → {new_count} ({latest})"
         new_body = append_history_lines(body2, [hist])
         if new_body != body2:
-            with open(rec['path'], 'w', encoding='utf-8') as f:
-                f.write(frontmatter.render(meta2, new_body))
+            writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         return 'bumped'
 
     typed = {
@@ -392,7 +399,7 @@ def cause_key(finding):
     for spec in sorted({str(x) for x in (finding.subject, *(finding.paths or ())) if x},
                        key=len, reverse=True):
         message = message.replace(spec, '…')
-    return error_class(message)
+    return collapse_id_lists(error_class(message))
 
 
 def invariant_signatures(findings):
@@ -436,8 +443,7 @@ def _note_new_places(rec, info, date):
     new_body = append_history_lines(body, hist)
     if new_body == body:
         return False
-    with open(rec['path'], 'w', encoding='utf-8') as f:
-        f.write(frontmatter.render(meta, new_body))
+    writer.write_card(rec['path'], frontmatter.render(meta, new_body))
     return True
 
 
