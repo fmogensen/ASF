@@ -141,7 +141,7 @@ class StoryNeedsEveryLineProved(RecordCase):
         m = self.read(s)[0]
         self.assertEqual(m['state'], 'Active')
         self.assertEqual(m['evidence'][-1], 'rule: unproved')
-        self.assertIn('unproved line 3 — team service_principal (no proved-line entry)',
+        self.assertIn('unproved line 3 — team service_principal (no proof)',
                       m['evidence'])
         self.assertEqual(self.state('tasks/T-0351.md'), 'Closed')   # the Task is done; the Story is not
 
@@ -403,7 +403,7 @@ class AuditProofs(RecordCase):
         self.fixture()
         rc, text, before = self.run_audit()
         self.assertEqual(rc, 0)
-        self.assertIn('| S-0001 | Closed | F-0001 | 2: hand ticked |', text)
+        self.assertIn('| S-0001 | Closed | F-0001 | 2: hand ticked (no proof) |', text)
         self.assertIn('| S-0004 | Resolved | F-0001 | 1: later — deferred by D-0099 '
                       '(deferred by D-0099, not in the decision register) |', text)
         for sid in ('S-0002', 'S-0003', 'S-0005'):
@@ -420,6 +420,125 @@ class AuditProofs(RecordCase):
         self.assertEqual(self.state('stories/S-0002.md'), 'Resolved')
         self.assertNotIn(self.state('features/F-0001.md'), ('Resolved', 'Closed'))
         self.assertIn('S-0001: reopened — state Closed → Active', text)
+
+
+class InlineProvenBy(unittest.TestCase):
+    """A ticked bullet that says ``— proven by <path>`` is proved when the path is a file in the
+    product checkout (and a quoted test name, when given, is in it); an absence never is."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix='s6_repo_')
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.put('packages/x/src/foo.test.ts', "it('refuses a stranger', () => {})\n")
+        self.put('apps/web/e2e/bar.spec.ts', "test('signs in', async () => {})\n")
+        self.put('scripts/check.sh', '#!/bin/sh\n')
+
+    def put(self, rel, text):
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def why(self, text, ticked=True, history=(), register=()):
+        out = proves.unproved(story_body([(ticked, text)], history), register, repo_dir=self.repo)
+        return out[0][2] if out else None
+
+    def test_an_existing_file_proves_the_line(self):
+        self.assertIsNone(self.why('refuses — proven by packages/x/src/foo.test.ts'))
+        self.assertIsNone(self.why('runs — proven by scripts/check.sh'))
+        self.assertIsNone(self.why('signs in — proven by `apps/web/e2e/bar.spec.ts:210`'))
+        self.assertIsNone(self.why('signs in proven by apps/web/e2e/bar.spec.ts:210.'))
+
+    def test_a_missing_path_does_not(self):
+        self.assertEqual(self.why('x — proven by packages/x/src/gone.test.ts'),
+                         'path missing: packages/x/src/gone.test.ts')
+
+    def test_a_path_outside_the_checkout_does_not(self):
+        self.assertTrue(self.why('x — proven by ../../etc/hosts').startswith('path missing'))
+
+    def test_a_quoted_name_must_be_in_the_file(self):
+        self.assertIsNone(self.why('x — proven by packages/x/src/foo.test.ts ("refuses a stranger")'))
+        self.assertIsNone(self.why('x — proven by packages/x/src/foo.test.ts "refuses a stranger"'))
+        self.assertEqual(self.why('x — proven by packages/x/src/foo.test.ts ("admits a stranger")'),
+                         'test name not found: "admits a stranger" in packages/x/src/foo.test.ts')
+
+    def test_several_paths_count_when_one_exists(self):
+        for sep in (', ', ' and ', '; '):
+            self.assertIsNone(self.why(f'x — proven by packages/x/gone.test.ts{sep}'
+                                       'packages/x/src/foo.test.ts'), sep)
+        self.assertEqual(self.why('x — proven by a/gone.test.ts, b/gone.test.ts'),
+                         'path missing: a/gone.test.ts, b/gone.test.ts')
+
+    def test_an_absence_is_never_a_proof(self):
+        self.assertEqual(self.why('no secret logged — proven by the absence of `secret` in '
+                                  'packages/x/src/foo.test.ts'), 'no proof')
+
+    def test_an_unticked_bullet_is_not_proved_by_its_citation(self):
+        self.assertEqual(self.why('x — proven by packages/x/src/foo.test.ts', ticked=False),
+                         'no proof')
+
+    def test_no_checkout_proves_nothing_inline(self):
+        out = proves.unproved(story_body([(True, 'x — proven by packages/x/src/foo.test.ts')]))
+        self.assertTrue(out[0][2].startswith('path missing'))
+
+    def test_proved_line_and_deferral_still_count(self):
+        self.assertIsNone(self.why('plain claim', history=(proved(1),)))
+        self.assertIsNone(self.why('later — deferred by D-0007', ticked=False, register={'D-0007'}))
+        self.assertEqual(self.why('plain claim'), 'no proof')
+
+    def test_the_parser_reads_paths_names_and_stops_at_prose(self):
+        self.assertEqual(
+            proves.inline_proofs('x — proven by a/b.test.ts ("one"), c/d.spec.ts:12 and '
+                                 '.github/workflows/ci.yml (the `drill` step)'),
+            [('a/b.test.ts', 'one'), ('c/d.spec.ts', None), ('.github/workflows/ci.yml', None)])
+        self.assertEqual(proves.inline_proofs('x — proven by the absence of it'), [])
+        self.assertEqual(proves.inline_proofs('x — no test found'), [])
+
+
+class InlineProofCloses(StoryNeedsEveryLineProved):
+    """The ingest and the audit read the same inline proof: a done Story whose open line cites an
+    existing test closes; one citing a missing file stays Active and says why."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.root, 'checkout')
+        os.makedirs(os.path.join(self.repo, 'tests'))
+        with open(os.path.join(self.repo, 'tests', 'team.test.ts'), 'w', encoding='utf-8') as f:
+            f.write("it('team service_principal', () => {})\n")
+        patcher = mock.patch.object(decisions, 'repo_dir', return_value=self.repo)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_an_inline_proof_closes_the_story(self):
+        s = self.s1158(history=(proved(1), proved(2)))
+        self.write('S-1158', 'story', parent='F-0106', body=story_body(
+            [(True, 'org members'), (True, 'team members'),
+             (True, 'team service_principal — proven by tests/team.test.ts')],
+            (proved(1), proved(2))))
+        self.ingest(self.ev())
+        self.assertEqual(self.state(s), 'Closed')
+
+    def test_a_missing_inline_path_keeps_it_active_and_says_so(self):
+        s = self.s1158()
+        self.write('S-1158', 'story', parent='F-0106', body=story_body(
+            [(True, 'org members'), (True, 'team members'),
+             (True, 'svc — proven by tests/gone.test.ts')], (proved(1), proved(2))))
+        self.ingest(self.ev())
+        m = self.read(s)[0]
+        self.assertEqual(m['state'], 'Active')
+        self.assertIn('unproved line 3 — svc — proven by tests/gone.test.ts '
+                      '(path missing: tests/gone.test.ts)', m['evidence'])
+
+    def test_the_audit_reads_the_same_proof(self):
+        self.write('E-0001', 'epic')
+        self.write('F-0001', 'feature', parent='E-0001', state='Closed')
+        self.write('S-0001', 'story', parent='F-0001', state='Closed', body=story_body(
+            [(True, 'a — proven by tests/team.test.ts ("team service_principal")')]))
+        self.write('S-0002', 'story', parent='F-0001', state='Closed', body=story_body(
+            [(True, 'b — proven by tests/team.test.ts ("someone else")')]))
+        found = reopen_mod.audit(reopen_mod._canonical(self.root), set(), self.repo)
+        self.assertEqual([(sid, [w for _n, _t, w in lines]) for sid, _s, _f, lines in found],
+                         [('S-0002', ['test name not found: "someone else" in tests/team.test.ts'])])
 
 
 if __name__ == '__main__':
