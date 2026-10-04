@@ -11,9 +11,8 @@ to a commit applied here to someone else's API.
 import datetime
 import json
 import os
-import subprocess
 
-from asf import env
+from asf import env, gh_limit, github
 from asf.security import gh_env
 
 #: How long ``gh api`` gets before the call counts as failed.
@@ -54,7 +53,7 @@ class GitHubHost(Host):
     def __init__(self, product, run=None):
         self.product = product
         self.slug = product.repo_slug
-        self._run = run or subprocess.run
+        self._run = run  # None: asf.github's own subprocess.run
         self._env = None
 
     def _api(self, path, jq):
@@ -62,16 +61,16 @@ class GitHubHost(Host):
             raise HostError('the product has no repo_slug')
         if self._env is None:
             self._env = gh_env(self.product)
-        args = ['gh', 'api', f'repos/{self.slug}/{path}', '--jq', jq]
         try:
-            p = self._run(args, capture_output=True, text=True, timeout=TIMEOUT_S, env=self._env)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            raise HostError(f'gh api {path}: {e}') from e
-        if p.returncode != 0:
-            lines = (p.stderr or p.stdout or '').strip().splitlines()
-            raise HostError(f"gh api {path}: {lines[-1] if lines else 'failed'}")
+            r = github.gh(['api', f'repos/{self.slug}/{path}', '--jq', jq], timeout=TIMEOUT_S,
+                          run=self._run, env=self._env)
+        except gh_limit.RateLimited as e:
+            raise HostError(f'gh api {path}: rate limited') from e
+        if not r.ok:
+            lines = (r.stderr or r.stdout or '').strip().splitlines()
+            raise HostError(f"gh api {path}: {lines[-1] if lines else r.reason}")
         try:
-            return [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
+            return [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
         except json.JSONDecodeError as e:
             raise HostError(f'gh api {path}: bad output ({e})') from e
 

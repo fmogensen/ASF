@@ -500,29 +500,58 @@ def drain(others, wait_s, run=subprocess.run, out=print, sleep=time.sleep):
     return others
 
 
-def ci_red(url, ref, run=subprocess.run):
-    """True when a finished remote CI run on ``ref`` failed; False when green, pending, or not
-    knowable (no ``gh``, not a GitHub url) — the check is skipped, never guessed."""
+def _gh(run, args, timeout=60, json=True):
+    """``gh <args>`` through :func:`asf.github.gh` — a rate limit is an Unknown answer here, not
+    an exception: the upgrade decides nothing on it, and the latch already keeps the next call
+    from spending."""
+    from asf import gh_limit, github
+    try:
+        return github.gh(args, json=json, timeout=timeout, run=run)
+    except gh_limit.RateLimited:
+        return github.unknown('rate limited')
+
+
+def ci_state(url, ref, run=subprocess.run):
+    """``('red' | 'clear' | 'unknown', detail)`` for the finished remote CI runs on ``ref``:
+    ``red`` when one failed, ``clear`` when none did (green, pending, or no run yet), ``unknown``
+    when ``gh`` could not answer (a failure, a timeout, a rate limit, unparsable output) — never
+    read as clear. A url that is not a GitHub repository has no CI host to ask: ``clear``, the
+    check skipped by configuration."""
     m = re.search(r'github\.com[/:]([^/]+/[^/]+?)(\.git)?/?$', url)
     if not m:
-        return False
-    text = _out(run, ['gh', 'run', 'list', '--repo', m.group(1), '--commit', ref,
-                      '--limit', '20', '--json', 'conclusion'], timeout=30)
-    try:
-        runs = json.loads(text) if text else []
-    except ValueError:
-        return False
-    return any((r or {}).get('conclusion') in ('failure', 'timed_out') for r in runs)
+        return 'clear', f'{url} is not a GitHub repository'
+    r = _gh(run, ['run', 'list', '--repo', m.group(1), '--commit', ref,
+                  '--limit', '20', '--json', 'conclusion'], timeout=30)
+    if not r.ok:
+        return 'unknown', r.reason or 'unknown'
+    runs = r.data if r.data is not None else []
+    if not isinstance(runs, list):
+        return 'unknown', 'bad json'
+    if any(isinstance(x, dict) and x.get('conclusion') in ('failure', 'timed_out') for x in runs):
+        return 'red', 'a run failed'
+    return 'clear', ''
+
+
+def ci_red(url, ref, run=subprocess.run):
+    """True when a finished remote CI run on ``ref`` failed; False when green, pending or no CI
+    host to ask; None when ``gh`` could not answer — Unknown, which the upgrade defers on, never
+    reads as green (:func:`ci_state`)."""
+    state, _detail = ci_state(url, ref, run)
+    return None if state == 'unknown' else state == 'red'
 
 
 def refuses(url, ref, run=subprocess.run):
     """Why :func:`_install` would refuse ``ref`` — one phrase — else ``None``. The pending marker
     parks every other product's ticks, so it is written only for a target the upgrade will
-    actually install (B-0141: a red head parked the whole factory for the marker's whole life)."""
+    actually install (B-0141: a red head parked the whole factory for the marker's whole life)
+    — not for one whose CI could not be read either."""
     if not ref:
         return f"main's head is unreadable from {url}"
-    if ci_red(url, ref, run):
+    state, detail = ci_state(url, ref, run)
+    if state == 'red':
         return f'remote CI is red at {ref[:7]}'
+    if state == 'unknown':
+        return f'remote CI is unknown at {ref[:7]} ({detail})'
     return None
 
 
@@ -671,8 +700,13 @@ def _install(ref, run, out, pin=None):
     if not ref:
         out(f'NEEDS OPERATOR: cannot read main\'s head from {url}')
         return 2
-    if ci_red(url, ref, run):
+    state, detail = ci_state(url, ref, run)
+    if state == 'red':
         out(f'upgrade: skipped — remote CI is red at {ref[:7]}; the next green head installs')
+        return DEFERRED
+    if state == 'unknown':
+        out(f'upgrade: deferred — remote CI is unknown at {ref[:7]} ({detail}); '
+            'the next pass reads it again')
         return DEFERRED
     cmd = upgrade_command(url, pin or ref)
     out('upgrade: ' + ' '.join(cmd))
@@ -786,12 +820,8 @@ def ci_verdict(url, sha, run=subprocess.run, checks=None):
     names = list(checks) if checks is not None else landing_checks_for(slug)
     if not names:
         return 'unknown', f'no product names landing_checks for {slug}'
-    text = _out(run, ['gh', 'api', f'repos/{slug}/commits/{sha}/check-runs?per_page=100'],
-                timeout=60)
-    try:
-        runs = json.loads(text)['check_runs'] if text else None
-    except (ValueError, KeyError, TypeError):
-        runs = None
+    r = _gh(run, ['api', f'repos/{slug}/commits/{sha}/check-runs?per_page=100'])
+    runs = r.data.get('check_runs') if r.ok and isinstance(r.data, dict) else None
     if not isinstance(runs, list):
         return 'unknown', 'gh could not read the check runs'
     latest = {}
@@ -801,11 +831,11 @@ def ci_verdict(url, sha, run=subprocess.run, checks=None):
                 latest[r['name']] = r
     statuses = {}
     if any(n not in latest for n in names):
-        stext = _out(run, ['gh', 'api', f'repos/{slug}/commits/{sha}/status'], timeout=60)
-        try:
+        sr = _gh(run, ['api', f'repos/{slug}/commits/{sha}/status'])
+        try:  # unread statuses leave the missing checks Unknown below — never green
             statuses = {s.get('context'): s.get('state')
-                        for s in json.loads(stext).get('statuses') or ()} if stext else {}
-        except (ValueError, AttributeError, TypeError):
+                        for s in sr.data.get('statuses') or ()} if sr.ok and sr.data else {}
+        except (AttributeError, TypeError):
             statuses = {}
     red, unknown = [], []
     for name in names:

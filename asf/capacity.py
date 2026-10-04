@@ -59,7 +59,7 @@ import math
 import os
 import subprocess
 
-from asf import env
+from asf import env, github
 
 DEFAULT_SESSIONS = 4
 DEMAND_FRESH_S = 30 * 60   # a partner's demand record older than this lends nothing
@@ -544,15 +544,15 @@ def ci_runs_in_flight(product, run=None, timeout=CI_TIMEOUT_S):
     out = gh_limit.memo_get(key) if key else None
     if out is None:
         try:
-            p = (run or subprocess.run)(
-                ['gh', 'run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
-                 '--json', 'status', '--jq', '[.[] | select(.status != "completed")] | length'],
-                capture_output=True, text=True, timeout=timeout, env=ci_pool._gh_env(product))
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if p.returncode != 0:
-            return None
-        out = (p.stdout or '').strip()
+            r = github.gh(['run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
+                           '--json', 'status', '--jq',
+                           '[.[] | select(.status != "completed")] | length'],
+                          timeout=timeout, run=run, env=ci_pool._gh_env(product))
+        except gh_limit.RateLimited:
+            return None  # rate limited: unknown (the latch keeps the next call from spending)
+        if not r.ok:
+            return None  # Unknown: never a count of 0
+        out = (r.stdout or '').strip()
         if key and out.isdigit():
             gh_limit.memo_put(key, out)
     return int(out) if out.isdigit() else None

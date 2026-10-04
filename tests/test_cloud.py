@@ -133,6 +133,42 @@ class Refused(unittest.TestCase):
         self.assertIn('cloud.runtime claude-cloud is refused', detail)
 
 
+class GhUnknown(unittest.TestCase):
+    """:class:`actions.Gh` through asf.github: an unread answer is ``ok`` false, never data."""
+
+    def gh(self, effect):
+        product = env.Product('p', {'repo_slug': 'o/r'})
+        return actions.Gh(product, run=effect)
+
+    def test_a_failure_or_a_timeout_reads_nothing(self):
+        def failed(argv, **_kw):
+            return subprocess.CompletedProcess(argv, 1, '[{"databaseId": 1}]', 'HTTP 502\n')
+
+        def timed_out(argv, **_kw):
+            raise subprocess.TimeoutExpired('gh', actions.GH_TIMEOUT_S)
+        with mock.patch('asf.ci_pool._gh_env', return_value={}):
+            self.assertEqual(self.gh(failed).call(['run', 'list']), (False, '', 'gh run: HTTP 502'))
+            ok, out, err = self.gh(timed_out).call(['run', 'list'])
+            self.assertEqual((ok, out), (False, ''))
+            self.assertIn('timeout', err)
+            self.assertIsNone(self.gh(failed).view(7))
+            self.assertIsNone(self.gh(failed).secret_names())
+
+    def test_a_dry_run_refuses_a_dispatch_without_spawning(self):
+        from asf import mutation_guard
+        spawned = []
+
+        def run(argv, **_kw):
+            spawned.append(argv)
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        with mock.patch('asf.ci_pool._gh_env', return_value={}), \
+                mock.patch.object(mutation_guard, 'is_active', return_value=True), \
+                mock.patch('builtins.print'):
+            ok, _err = self.gh(run).dispatch('asf-worker.yml', 'main', {'job': 'j'})
+        self.assertFalse(ok)
+        self.assertEqual(spawned, [])
+
+
 class Settings(unittest.TestCase):
     def test_defaults_and_the_product_override(self):
         s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1}})

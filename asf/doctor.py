@@ -795,13 +795,27 @@ def check_agent_homes(cfg=None):
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
 _CLI_TOOLS = [
     ('git', True, ['git', '--version']),
-    ('gh', True, ['gh', 'auth', 'status']),
+    ('gh', True, None),  # :func:`_gh_auth` — through asf.github, never a raw argv
     ('gcloud', False, ['gcloud', 'auth', 'list']),
     ('az', False, ['az', 'account', 'show']),
     ('aws', False, ['aws', 'sts', 'get-caller-identity']),
     ('flyctl', False, ['flyctl', 'auth', 'whoami']),
     ('vercel', False, ['vercel', 'whoami']),
 ]
+
+
+def _gh_auth(timeout=10):
+    """``(ok, detail)`` of ``gh auth status`` read through :func:`asf.github.gh`: ok only on a
+    real answer; an Unknown (not runnable, a timeout, a rate limit) is never ok."""
+    from asf import gh_limit, github
+    try:
+        r = github.gh(['auth', 'status'], timeout=timeout)
+    except gh_limit.RateLimited:
+        return False, 'rate limited'
+    detail = (r.stdout or r.stderr or '').strip().splitlines()
+    if r.ok:
+        return True, detail[0] if detail else ''
+    return False, detail[0] if detail else r.reason
 
 
 def check_cli_sessions(product=None):
@@ -811,10 +825,10 @@ def check_cli_sessions(product=None):
     for name, required, argv in _CLI_TOOLS:
         if name == 'gh' and product is not None and not has_pr_host(product):
             required = False
-        if not required and shutil.which(argv[0]) is None:
+        if not required and shutil.which(argv[0] if argv else name) is None:
             rows.append((name, required, None, 'not installed'))
             continue
-        ok, detail = _run(argv)
+        ok, detail = _run(argv) if argv else _gh_auth()
         rows.append((name, required, ok, detail))
     return rows
 
