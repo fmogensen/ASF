@@ -592,10 +592,13 @@ def decide_unverified_landing(item_id, sha, age_hours, covers, report, hours):
     """Rule 2 of ``flags.roots``: a landing recorded for ``item_id`` but not verified as its
     work decides itself once it is ``hours`` old — *accept* when the harvested ``sha`` covers
     the item's ``writes:`` (``covers``) and the run's REPORT says ``done`` (``report``), else
-    *reset*: the claim is voided and the item starts over. Younger, or no age known: no answer,
+    *reset*: the claim is voided and the item starts over. ``covers`` of ``None`` (git could not
+    answer) is no answer either way. Younger, or no age known: no answer,
     the NEEDS DECISION row stands. Pure — the caller reads the facts
     (:func:`unverified_landing_facts`) and applies the answer (:func:`apply_unverified_landings`)."""
     if age_hours is None or age_hours < hours:
+        return None
+    if covers is None:      # git could not answer: an unknown never acts, neither way
         return None
     short = str(sha or '')[:9] or 'no sha'
     if covers and report == 'done':
@@ -674,6 +677,9 @@ def apply_unverified_landings(product, root, now=None, out=print, dry_run=False)
                                                                        items, now):
         answer = decide_unverified_landing(iid, sha, age, covers, report, hours)
         if answer is None:
+            if covers is None and age is not None and age >= hours:
+                out(f"roots: {iid} {'would wait' if dry_run else 'waits'} on git "
+                    f'(cannot tell whether {str(sha or "")[:9] or "no sha"} covers its writes:)')
             continue
         if dry_run:
             out(f'roots: would {answer.word} {iid} — {answer.why}')
