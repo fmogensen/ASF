@@ -27,6 +27,8 @@ venv_b=$(ab_venv "$product" "$b") || exit 2
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/asf-ab-dry-run.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 snap="$work/state"
 
 orchestrate() {  # <venv> <out>
