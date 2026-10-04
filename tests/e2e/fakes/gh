@@ -44,6 +44,8 @@ and the harness's own verbs, which move the forge the way a person or CI would:
   ``if:`` false, a ``needs:`` upstream that skipped it); with ``attested`` the head also carries
   the merge queue's ``asf/attested`` = ``success`` commit status (the recorded pair
   ``tests/fixtures/gh/skipped-required-job/{attested,not-attested}``)
+* ``e2e status-unreadable <sha>`` — every ``commits/<sha>/status`` read fails the way a GitHub
+  outage answers (exit 1, ``HTTP 502``): the attestation of ``sha`` is Unknown, not absent
 * ``e2e hide-job-failure <n> [<name>]`` — PR ``n``'s workflow run concludes ``success`` while
   its job ``name`` (``e2e-nightly``) failed under ``continue-on-error``
   (``tests/fixtures/gh/run-success-hiding-job``)
@@ -528,6 +530,8 @@ def api(state, argv):
         return
     m = re.fullmatch(r'repos/[^/]+/[^/]+/commits/([0-9a-f]{40})/status(?:\?.*)?', path)
     if m:
+        if m.group(1) in (state.get('status_unreadable') or []):
+            raise Refusal('gh: Server Error (HTTP 502)')
         got = list((state.get('statuses') or {}).get(m.group(1)) or [])
         overall = 'success' if got and all(s['state'] == 'success' for s in got) else 'pending'
         emit({'sha': m.group(1), 'state': overall, 'statuses': got, 'total_count': len(got),
@@ -635,6 +639,9 @@ def e2e(state, argv):
         state.setdefault('statuses', {}).setdefault(argv[1], []).insert(0, {
             'context': argv[2], 'state': argv[3], 'created_at': now(), 'updated_at': now(),
             'id': len(state['statuses'][argv[1]]) + 1})
+        return
+    if verb == 'status-unreadable':
+        state.setdefault('status_unreadable', []).append(argv[1])
         return
     if verb == 'hide-job-failure':
         pr = find(state, argv[1])

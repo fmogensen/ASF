@@ -14,11 +14,13 @@ import time
 import unittest
 from unittest import mock
 
-from asf import conventions, env, merge_queue, stale_ref
+from asf import conventions, env, github, merge_queue
+from asf.facts import cache as facts_cache
 from asf.harvest import harvest, lane
 from asf.views import status
 from asf.workers import lifecycle
 
+from tests import contracts
 from tests.test_lane import HEAD, LaneFixture, facts, rec, sh
 
 SLUG = 'o/p'
@@ -78,11 +80,13 @@ class QueueRepo(LaneFixture):
 
     def setUp(self):
         super().setUp()
-        # stale_ref reads a run once a process: a run id one test saw must not answer the next's
-        stale_ref._RUNS.clear()
-        self.addCleanup(stale_ref._RUNS.clear)
+        # stale_ref reads a run once a pass (asf.facts.cache): a run id one test saw must not
+        # answer the next's
+        facts_cache.clear()
+        self.addCleanup(facts_cache.clear)
         self.gh = FakeGH()
-        patch = mock.patch.object(harvest, '_gh', side_effect=self.gh)
+        # every gh reader answers from the fake — asf.github's own and the harvest._gh shim
+        patch = mock.patch.object(github, 'call', side_effect=contracts.as_call(self.gh))
         patch.start()
         self.addCleanup(patch.stop)
         st = mock.patch.object(env, 'state_dir', lambda *_a, **_k: self.state_dir)

@@ -65,9 +65,10 @@ class ParseTests(unittest.TestCase):
 
 
 class _Proc:
-    def __init__(self, stdout, returncode=0):
+    def __init__(self, stdout, returncode=0, stderr=''):
         self.stdout = stdout
         self.returncode = returncode
+        self.stderr = stderr
 
 
 class _CapturingRun:
@@ -83,7 +84,7 @@ class _CapturingRun:
         joined = ' '.join(argv)
         for needle, stdout in self.replies:
             if needle in joined:
-                return _Proc(stdout)
+                return _Proc(stdout) if stdout is not None else _Proc('', 1, 'HTTP 502')
         return _Proc('')
 
     def count(self, needle):
@@ -140,6 +141,42 @@ class WorkflowSelector(unittest.TestCase):
         self.assertIn('CI', buf.getvalue())
         self.assertIn('Deploy', buf.getvalue())
         self.assertEqual([r['id'] for r in rows], [5])   # today's filter: name == workflow
+
+
+class UnknownReads(unittest.TestCase):
+    """A ``gh`` read that does not answer (:mod:`asf.github`: Unknown) is never an empty answer:
+    no listing reads as "no runs", no log as "no flaky test"."""
+
+    def _instance(self, replies):
+        run = _CapturingRun(replies)
+        return flaky.GitHubRuns(argparse.Namespace(repo_slug='o/r'), run=run), run
+
+    def test_an_unread_workflow_listing_is_unknown_and_asked_again(self):
+        g, run = self._instance([('actions/workflows?', None)])
+        self.assertIsNone(g.runs('CI', '2026-09-01T00:00:00Z'))
+        self.assertIsNone(g.runs('CI', '2026-09-01T00:00:00Z'))
+        self.assertEqual(run.count('actions/workflows?'), 2)    # never cached as "matches none"
+        self.assertEqual(run.count('/runs'), 0)
+
+    def test_an_unread_run_listing_is_unknown(self):
+        g, _run = self._instance([('actions/workflows?', WORKFLOWS),
+                                  ('actions/workflows/111/runs', None)])
+        self.assertIsNone(g.runs('CI', '2026-09-01T00:00:00Z'))
+
+    def test_an_unread_log_is_unknown(self):
+        g, _run = self._instance([('/logs', None)])
+        self.assertIsNone(g.log(5))
+        g, _run = self._instance([('/logs', 'a log\n')])
+        self.assertEqual(g.log(5), 'a log\n')
+
+    def test_the_reads_go_through_the_github_client(self):
+        from unittest import mock
+        from asf import github
+        g, run = self._instance([])
+        with mock.patch.object(github, 'gh', return_value=github.Result(True, 'x')) as gh:
+            self.assertEqual(g.log(5), 'x')
+        self.assertEqual(gh.call_args.kwargs['run'], run)
+        self.assertEqual(gh.call_args.kwargs['timeout'], flaky.GH_TIMEOUT_S)
 
 
 class PassWindow(unittest.TestCase):
@@ -268,6 +305,26 @@ class WindowIntegration(unittest.TestCase):
         src.job_fail_ids = set()
         touched = flaky.collect(state, src, 'ci', self.conv, self.now, out=lambda *_: None)
         self.assertIn('1', state['seen'])
+
+    def test_an_unread_listing_keeps_the_window_where_it_was(self):
+        src = SinceFilteredRuns()
+        src.runs = lambda workflow, since: None     # Unknown: never "no runs since"
+        state = flaky.read_state(os.path.join(tempfile.mkdtemp(prefix='flaky_state_'), 'x.json'))
+        state['window_from'] = before = self.ts(30)
+        lines = []
+        self.assertEqual(flaky.collect(state, src, 'ci', self.conv, self.now, out=lines.append),
+                         set())
+        self.assertEqual(state['window_from'], before)
+        self.assertTrue(any('unreadable' in l for l in lines), lines)
+
+    def test_a_run_whose_log_is_unread_is_read_again(self):
+        src = SinceFilteredRuns()
+        src.add(1, 'main', self.ts(5))
+        src.log = lambda job_id: None
+        state = flaky.read_state(os.path.join(tempfile.mkdtemp(prefix='flaky_state_'), 'x.json'))
+        flaky.collect(state, src, 'ci', self.conv, self.now, out=lambda *_: None)
+        self.assertNotIn('1', state['seen'])
+        self.assertLessEqual(state['window_from'], src.runs_[0]['created'])
 
     def test_truncated_listing_prints_and_still_reads_its_batch(self):
         src = SinceFilteredRuns()

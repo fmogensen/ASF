@@ -10,8 +10,9 @@ import types
 import unittest
 from unittest import mock
 
-from asf import (attestation, capacity, ci_flight, env, gh_limit, merge_queue, stale_ref,
-                 trunk_red, upgrade)
+from asf import (attestation, capacity, ci_flight, env, gh_limit, github, merge_queue,
+                 stale_ref, trunk_red, upgrade)
+from asf.facts import cache as facts_cache
 from asf.harvest import deploy
 from asf.harvest import lane
 from asf.harvest import harvest as H
@@ -41,10 +42,10 @@ class Base(unittest.TestCase):
     def setUp(self):
         gh_limit.reset()
         attestation._SEEN.clear()
-        stale_ref._RUNS.clear()
+        facts_cache.clear()
         self.addCleanup(gh_limit.reset)
         self.addCleanup(attestation._SEEN.clear)
-        self.addCleanup(stale_ref._RUNS.clear)
+        self.addCleanup(facts_cache.clear)
 
     def through_subprocess(self, *behaviours):
         fx = FixtureGh(*behaviours)
@@ -105,6 +106,22 @@ class SkippedRequiredJob(Base):
                                         self.REQUIRED, deploy._sh)
         self.assertFalse(ok)
         self.assertEqual(rule, 'required job tests not green (skipped)')
+
+
+    def test_an_unreadable_attestation_is_unknown_and_holds_the_deploy_pick(self):
+        # S-M23: the status call does not answer — Unknown, never "not attested"
+        b = 'skipped-required-job/attested'
+        fx = FixtureGh(b)
+        status = tuple(contracts.fixture(b, 'status')['argv'])
+        del fx.answers[status]
+        with mock.patch.object(subprocess, 'run', side_effect=fx.run):
+            self.assertIsNone(attestation.attested(SLUG, sha_of(b)))
+            ok, rule = deploy._jobs_verdict(
+                PRODUCT, {'databaseId': run_id(b), 'headSha': sha_of(b)}, self.REQUIRED,
+                deploy._sh)
+        self.assertIsNone(ok)
+        self.assertIn('unreadable', rule)
+        self.assertIn(list(status), fx.calls)
 
 
 class PathFilteredCheck(Base):
@@ -189,7 +206,7 @@ class StaleMergeRef(Base):
                if c['conclusion'] == 'failure']
         self.assertTrue(red)
         fx = FixtureGh(self.B)
-        with mock.patch.object(H, '_gh', side_effect=fx), \
+        with mock.patch.object(github, 'call', side_effect=contracts.as_call(fx)), \
                 mock.patch.object(stale_ref, 'arrival', return_value=arrived):
             got = stale_ref.stale(PRODUCT, SLUG, red, tip['sha'], None)
         self.assertEqual(got, [c['name'] for c in red])
@@ -199,7 +216,7 @@ class StaleMergeRef(Base):
     def test_a_run_created_after_the_tip_arrived_is_not_stale(self):
         red = [c for c in out(self.B, 'check-runs')['check_runs']
                if c['conclusion'] == 'failure']
-        with mock.patch.object(H, '_gh', side_effect=FixtureGh(self.B)), \
+        with mock.patch.object(github, 'call', side_effect=contracts.as_call(FixtureGh(self.B))), \
                 mock.patch.object(stale_ref, 'arrival', return_value=1):
             self.assertEqual(stale_ref.stale(PRODUCT, SLUG, red, 'x', None), [])
 

@@ -12,8 +12,15 @@ the rules job) is red as before, and one still queued or running is still pendin
 covers the heavy jobs the trunk run skipped, never a real verdict of that run.
 
 Only a ``success`` status counts: ``pending``, ``failure``, ``error`` or no status at all is not
-an attestation. Unreadable reads as not attested — the reader judges the sha as before.
+an attestation. Unreadable is **Unknown** — :func:`attested` returns ``None``, never ``False``
+(S-M23): ``False`` would read as "skipped, and nobody attested it", and a reader would then judge
+an attested sha by its skipped heavy jobs — or walk past it to an older red. Each reader maps
+``None`` to "hold, read again": the deploy picks nothing this tick, the lane's ``trunk_red`` gives
+the check no verdict on that sha, the CI queue's trunk relief cancels nothing, ``pr_checks``
+neither passes nor reds the skipped check. ``None`` is falsy, so a caller that only asks "is it
+attested?" still never counts an unreadable sha as attested.
 """
+from asf import github
 
 #: the commit status context a landed batch sha carries (``conventions.ci.attest_status``'s
 #: default); :data:`asf.merge_queue.ATTEST_CONTEXT` is this one
@@ -47,24 +54,28 @@ def state_of(combined, context_name=CONTEXT):
     return None
 
 
-def _gh_read(path):
-    from asf.harvest import harvest as H
-    return H.gh_json(['api', path], None)
+def _read(path):
+    """The parsed JSON of ``gh api <path>`` through :mod:`asf.github`, or None when Unknown."""
+    r = github.api(path)
+    return r.data if r.ok else None
 
 
 def attested(slug, sha, context_name=CONTEXT, read=None):
-    """True when ``sha`` carries ``context_name`` = ``success``. ``read(path)`` returns the
-    parsed JSON of a ``gh api`` path (None when unreadable); the default reads through ``gh``.
-    Never raises."""
+    """True when ``sha`` carries ``context_name`` = ``success``, False when it does not (another
+    state, or no such status), ``None`` when the status could not be read — Unknown, never
+    False. ``read(path)`` returns the parsed JSON of a ``gh api`` path (None when unreadable);
+    the default reads through :func:`asf.github.api`. Never raises."""
     if not slug or not sha or not context_name:
         return False
     key = (slug, sha, context_name)
     if key in _SEEN:
         return True
     try:
-        got = (read or _gh_read)(f'repos/{slug}/commits/{sha}/status?per_page=100')
-    except Exception:  # noqa: BLE001 — unreadable: not attested, judged as before
-        return False
+        got = (read or _read)(f'repos/{slug}/commits/{sha}/status?per_page=100')
+    except Exception:  # noqa: BLE001 — a read that raised (a rate limit included): Unknown
+        return None
+    if not isinstance(got, dict):
+        return None     # unreadable, or not a combined status: Unknown
     ok = state_of(got, context_name) == 'success'
     if ok:
         _SEEN.add(key)
@@ -72,5 +83,6 @@ def attested(slug, sha, context_name=CONTEXT, read=None):
 
 
 def product_attested(product, sha, read=None):
-    """:func:`attested` for ``product`` (its ``repo_slug`` and :func:`context`)."""
+    """:func:`attested` for ``product`` (its ``repo_slug`` and :func:`context`): True, False or
+    ``None`` (Unknown)."""
     return attested(getattr(product, 'repo_slug', None), sha, context(product), read)

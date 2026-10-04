@@ -108,6 +108,8 @@ class FakeSh:
             return json.dumps({'jobs': self.jobs.get(int(cmd[3]), [])})
         if cmd[:3] == ['gh', 'workflow', 'run']:
             return '' if self.dispatch_ok else None
+        if cmd[:2] == ['gh', 'api'] and '/status?' in cmd[2]:
+            return json.dumps({'state': 'pending', 'statuses': []})   # no attestation (S-M23)
         if 'rev-parse' in cmd:
             return MAIN
         if cmd[:2] == ['vercel', 'ls']:

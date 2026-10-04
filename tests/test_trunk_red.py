@@ -20,8 +20,11 @@ import time
 import unittest
 from unittest import mock
 
-from asf import doctor, env, flake, merge_queue, stale_ref, trunk_red, trunk_watch
+from asf import doctor, env, flake, github, merge_queue, stale_ref, trunk_red, trunk_watch
+from asf.facts import cache as facts_cache
 from asf.harvest import harvest, lane
+
+from tests import contracts
 from asf.views import status
 
 from tests.test_lane import sh
@@ -36,22 +39,32 @@ def iso(epoch):
         '%Y-%m-%dT%H:%M:%SZ')
 
 
+def _ok(data):
+    return github.Result(True, data, 0, '', '', 'now', '')
+
+
 class FakeSource:
-    """The start queue's ``gh`` door as :mod:`asf.trunk_red` calls it."""
+    """The trunk watch's ``gh`` door as :mod:`asf.trunk_red` calls it: ``gh(args, json=)`` →
+    an :class:`asf.github.Result`. ``unknown``: the verbs (``'run list'``, ``'run view'``) whose
+    read does not answer (Unknown)."""
 
     def __init__(self):
         self.calls, self.runs, self.view, self.refuse = [], [], None, None
+        self.unknown = set()
 
-    def gh_try(self, args):
+    def gh(self, args, json=False):
         self.calls.append(list(args))
+        if ' '.join(args[:2]) in self.unknown:
+            return github.unknown('rc 1: HTTP 502')
         if args[:2] == ['workflow', 'run']:
-            return (None, self.refuse) if self.refuse else ('', '')
+            return github.unknown(f'rc 1: {self.refuse}', 1, '', self.refuse) if self.refuse \
+                else _ok('')
         if args[:2] == ['run', 'list']:
             ev = args[args.index('-e') + 1] if '-e' in args else None
-            return json.dumps([r for r in self.runs if not ev or r.get('event') == ev]), ''
+            return _ok([r for r in self.runs if not ev or r.get('event') == ev])
         if args[:2] == ['run', 'view']:
-            return json.dumps(self.view), ''
-        return None, 'unexpected'
+            return _ok(self.view)
+        return github.unknown('unexpected')
 
     def dispatches(self):
         return [c for c in self.calls if c[:2] == ['workflow', 'run']]
@@ -59,8 +72,8 @@ class FakeSource:
 
 class Fixture(unittest.TestCase):
     def setUp(self):
-        stale_ref._RUNS.clear()     # read once a process: no run id leaks in from another module
-        self.addCleanup(stale_ref._RUNS.clear)
+        facts_cache.clear()     # a run read is kept a pass: no run id leaks in from another module
+        self.addCleanup(facts_cache.clear)
         self.base = tempfile.mkdtemp(prefix='trunkred_')
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
         self.origin = os.path.join(self.base, 'origin.git')
@@ -235,8 +248,8 @@ class FactoryHead(unittest.TestCase):
     """A factory PR's head red after triage, on a check trunk red holds: no correct round."""
 
     def setUp(self):
-        stale_ref._RUNS.clear()
-        self.addCleanup(stale_ref._RUNS.clear)
+        facts_cache.clear()
+        self.addCleanup(facts_cache.clear)
         self.base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.base, True)
         self.state_dir = self.base
@@ -409,6 +422,15 @@ class FullRun(Fixture):
         self.look(now=NOW + 2 * trunk_red.READ_EVERY_S + 3, product=product)
         self.assertEqual(len(self.src.dispatches()), 1)
 
+    def test_an_unknown_run_listing_never_loses_the_dispatched_run(self):
+        self.stall()
+        product = self.make(trunk_full_every_hours=0)
+        self.look(now=NOW, product=product)
+        self.src.unknown = {'run list'}
+        self.look(now=NOW + trunk_red.FIND_S + 60, product=product)
+        self.assertEqual(trunk_red.load(self.state_dir)['full']['state'], 'dispatched')
+        self.assertFalse(any('lost' in l for l in self.lines), self.lines)
+
     def test_a_flaky_red_is_re_run_before_any_verdict(self):
         self.stall()
         product = self.make(trunk_full_every_hours=0)
@@ -443,6 +465,27 @@ class SafetyNet(Fixture):
         self.assertEqual(self.src.dispatches(), [])
         self.look(now=NOW, product=self.make(trunk_full_every_hours=3))
         self.assertEqual(len(self.src.dispatches()), 1)
+
+    def test_an_unknown_run_listing_holds_the_safety_net(self):
+        # the listing of past full runs does not read: Unknown, never "no full run on record" —
+        # no dispatch on it; the next listing decides
+        self.src.unknown = {'run list'}
+        self.look(now=NOW)
+        self.assertEqual(self.src.dispatches(), [])
+        self.assertTrue(any('unreadable' in l for l in self.lines), self.lines)
+        self.src.unknown = set()
+        self.look(now=NOW + trunk_red.LIST_EVERY_S + 1)
+        self.assertEqual(len(self.src.dispatches()), 1)
+
+    def test_the_default_door_is_the_github_client_with_the_products_auth(self):
+        door = trunk_red._source(self.product, None)
+        with mock.patch.object(github, 'gh', return_value=_ok([])) as gh, \
+                mock.patch.object(trunk_red, '_auth_env', return_value={'GH_TOKEN': 't'}):
+            self.assertTrue(door.gh(['run', 'list'], json=True).ok)
+        self.assertEqual(gh.call_args.kwargs['env'], {'GH_TOKEN': 't'})
+        self.assertTrue(gh.call_args.kwargs['json'])
+        import inspect
+        self.assertNotIn('_gh_try', inspect.getsource(trunk_red))
 
     def test_no_workflow_named_is_no_dispatch(self):
         product = env.Product('sample', {'repo_dir': self.repo, 'repo_slug': 'o/p', 'main': 'main',
@@ -488,11 +531,10 @@ class StaleMergeRef(QueueRepo):
 
     def setUp(self):
         super().setUp()
-        from asf import stale_ref
-        stale_ref._RUNS.clear()
-        self.addCleanup(stale_ref._RUNS.clear)
+        facts_cache.clear()
+        self.addCleanup(facts_cache.clear)
         self.gh = RunsGH()
-        patch = mock.patch.object(harvest, '_gh', side_effect=self.gh)
+        patch = mock.patch.object(github, 'call', side_effect=contracts.as_call(self.gh))
         patch.start()
         self.addCleanup(patch.stop)
         self.push_lane('hotfix/clock', {'x.txt': 'x\n'}, 'hotfix: clock')
@@ -567,14 +609,55 @@ class StaleMergeRef(QueueRepo):
         self.assertIn('red', merge_queue.load_requests(self.state_dir)['1034'])
 
 
+class RunMemo(unittest.TestCase):
+    """A run's ``(event, created)`` is read once a pass (:mod:`asf.facts.cache`): the tick, the
+    harvest and the ci-queue pass each start one, so nothing a run read leaks past it — an
+    Unknown read included, which reads again next pass."""
+
+    LINK = 'https://github.com/o/p/actions/runs/77/job/770'
+
+    def setUp(self):
+        facts_cache.clear()
+        self.addCleanup(facts_cache.clear)
+        self.answers = []
+        self.calls = []
+
+        def api(path, **_kw):
+            self.calls.append(path)
+            return self.answers.pop(0)
+        p = mock.patch.object(github, 'api', side_effect=api)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_run_is_read_once_a_pass_and_again_the_next(self):
+        run = {'event': 'pull_request', 'created_at': '2026-10-02T09:00:00Z'}
+        self.answers = [github.Result(True, run), github.Result(True, dict(run, event='push'))]
+        self.assertEqual(stale_ref.run_of('o/p', self.LINK)[0], 'pull_request')
+        self.assertEqual(stale_ref.run_of('o/p', self.LINK)[0], 'pull_request')
+        self.assertEqual(self.calls, ['repos/o/p/actions/runs/77'])
+        facts_cache.clear()     # the next pass (asf.tick.tick.Context, the harvest, ci queue)
+        self.assertEqual(stale_ref.run_of('o/p', self.LINK)[0], 'push')
+        self.assertEqual(len(self.calls), 2)
+
+    def test_an_unknown_read_is_not_kept_past_its_pass(self):
+        run = {'event': 'pull_request', 'created_at': '2026-10-02T09:00:00Z'}
+        self.answers = [github.unknown('rc 1: HTTP 502'), github.Result(True, run)]
+        self.assertIsNone(stale_ref.run_of('o/p', self.LINK))
+        self.assertIsNone(stale_ref.run_of('o/p', self.LINK))     # not asked twice a pass
+        facts_cache.clear()
+        self.assertEqual(stale_ref.run_of('o/p', self.LINK)[0], 'pull_request')
+
+    def test_no_module_memo_outlives_a_pass(self):
+        self.assertFalse(hasattr(stale_ref, '_RUNS'))
+
+
 class StaleFactoryHead(unittest.TestCase):
     """A factory PR red on an old merge ref: reopened for a fresh run — no flake re-run (it would
     replay the old ref), no correct round."""
 
     def setUp(self):
-        from asf import stale_ref
-        stale_ref._RUNS.clear()
-        self.addCleanup(stale_ref._RUNS.clear)
+        facts_cache.clear()
+        self.addCleanup(facts_cache.clear)
         self.base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.base, True)
         self.state_dir = os.path.join(self.base, 'state')
@@ -608,7 +691,7 @@ class StaleFactoryHead(unittest.TestCase):
         checks = [{'name': 'gate', 'bucket': 'pass', 'link': 'https://x/actions/runs/7/job/11'},
                   {'name': 'gate-tests', 'bucket': 'fail',
                    'link': 'https://x/actions/runs/7/job/12'}]
-        with mock.patch.object(harvest, '_gh', side_effect=self.gh), \
+        with mock.patch.object(github, 'call', side_effect=contracts.as_call(self.gh)), \
                 mock.patch.object(lane, 'pr_checks', return_value=('red', '', checks)), \
                 mock.patch.object(host, 'merge_required', return_value=(('gate', 'gate-tests'), None)), \
                 mock.patch.object(host, 'trunk_red', return_value={}), \

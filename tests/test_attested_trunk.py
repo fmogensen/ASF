@@ -107,6 +107,22 @@ class Deploy(Base):
                                       status='success')
         self.assertIsNone(sha)
 
+    def test_an_unknown_attestation_holds_the_pick_never_an_older_sha(self):
+        older = {'databaseId': 6, 'headSha': OLDER, 'status': 'completed', 'conclusion': 'success'}
+        newest = {'databaseId': 7, 'headSha': SHA, 'status': 'completed', 'conclusion': 'success'}
+
+        def sh(cmd, *a, **k):
+            if cmd[:3] == ['gh', 'run', 'view']:
+                return json.dumps({'jobs': self.HEAVY_SKIPPED if cmd[3] == '7'
+                                   else [job(n, 'success') for n in REQUIRED]})
+            return None     # the status read fails: Unknown
+        sha, rule = deploy._pick(self.product(), 'prod', [newest, older], sh)
+        self.assertIsNone(sha)
+        self.assertIn('attestation', rule)
+        self.assertIn('unreadable', rule)
+        green, why = deploy._jobs_verdict(self.product(), newest, REQUIRED, sh)
+        self.assertIsNone(green)
+
     def test_all_green_reads_no_status(self):
         jobs = [job(n, 'success') for n in REQUIRED]
         (sha, _rule), sh = self.pick(jobs, status=None)
@@ -133,10 +149,25 @@ class Context(Base):
         self.assertEqual(attestation.context(types.SimpleNamespace(conventions=conv)), 'x/att')
         self.assertEqual(attestation.context(None), 'asf/attested')
 
-    def test_unreadable_is_not_attested(self):
-        self.assertFalse(attestation.attested('o/r', SHA, read=lambda p: None))
-        self.assertFalse(attestation.attested('o/r', SHA, read=lambda p: 1 / 0))
-        self.assertTrue(attestation.attested('o/r', SHA, read=lambda p: combined('success')))
+    def test_unreadable_is_unknown_never_not_attested(self):
+        # S-M23: an attestation that did not read is Unknown (None) — never False, which a
+        # reader would judge as "skipped and nobody attested it"
+        self.assertIsNone(attestation.attested('o/r', SHA, read=lambda p: None))
+        self.assertIsNone(attestation.attested('o/r', SHA, read=lambda p: 1 / 0))
+        self.assertIsNone(attestation.attested('o/r', SHA, read=lambda p: ['not', 'a', 'dict']))
+        self.assertIs(attestation.attested('o/r', SHA, read=lambda p: combined(None)), False)
+        self.assertIs(attestation.attested('o/r', SHA, read=lambda p: combined('pending')), False)
+        self.assertIs(attestation.attested('o/r', SHA, read=lambda p: combined('success')), True)
+
+    def test_the_default_read_goes_through_the_github_client(self):
+        from asf import github
+        answers = {'ok': github.Result(True, combined('success')),
+                   'unknown': github.unknown('rc 1: HTTP 502')}
+        for got, want in (('ok', True), ('unknown', None)):
+            attestation._SEEN.clear()
+            with mock.patch.object(github, 'api', return_value=answers[got]) as api:
+                self.assertIs(attestation.attested('o/r', SHA), want, got)
+            api.assert_called_once_with(f'repos/o/r/commits/{SHA}/status?per_page=100')
 
 
 class TrunkRed(Base):
@@ -157,6 +188,8 @@ class TrunkRed(Base):
             return 0, json.dumps(combined(status.get(sha))), ''
         log = subprocess.CompletedProcess([], 0, f'{SHA}\n{OLDER}\n', '')
         for p in (mock.patch.object(H, '_gh', side_effect=gh),
+                  mock.patch.object(attestation, '_read',
+                                    side_effect=lambda path: json.loads(gh(['api', path])[1])),
                   mock.patch.object(H, 'sh', return_value=log)):
             p.start()
             self.addCleanup(p.stop)
@@ -177,10 +210,26 @@ class TrunkRed(Base):
             self.assertEqual(self.host(self.RUNS, {SHA: state}).trunk_red(['gate']),
                              {'gate': OLDER}, state)
 
+    def test_an_unknown_attestation_is_no_verdict_never_the_older_red(self):
+        h = self.host(self.RUNS, {SHA: 'success'})
+        with mock.patch.object(attestation, '_read', return_value=None):
+            self.assertEqual(h.trunk_red(['gate', 'rules']), {})
+
     def test_attested_but_gate_red_is_red_for_trunk_red(self):
         runs = {SHA: [job('rules', 'failure'), job('gate', 'failure')]}
         self.assertEqual(self.host(runs, {SHA: 'success'}).trunk_red(['gate', 'rules']),
                          {'gate': SHA, 'rules': SHA})
+
+
+class PrChecksUnknown(Base):
+    def test_an_unknown_attestation_never_passes_and_never_reds_a_skipped_check(self):
+        rollup = [{'name': 'rules', 'bucket': 'pass', 'workflow': 'ci', 'startedAt': '1'},
+                  {'name': 'gate', 'bucket': 'skipping', 'workflow': 'ci', 'startedAt': '1'}]
+        with mock.patch.object(lane.pr_graph, 'checks_for', return_value=rollup), \
+                mock.patch.object(attestation, '_read', return_value=None):
+            state, _detail, checks = lane.pr_checks('o/r', 5, ('gate', 'rules'), head=SHA)
+        self.assertNotEqual(state, 'red')
+        self.assertNotIn('gate', lane.passed_names(checks, ('gate', 'rules')))
 
 
 class PrChecks(Base):
@@ -193,7 +242,9 @@ class PrChecks(Base):
             reads.append(args)
             return 0, json.dumps(combined(status)), ''
         with mock.patch.object(lane.pr_graph, 'checks_for', return_value=rollup), \
-                mock.patch.object(H, '_gh', side_effect=gh):
+                mock.patch.object(H, '_gh', side_effect=gh), \
+                mock.patch.object(attestation, '_read',
+                                  side_effect=lambda path: json.loads(gh(['api', path])[1])):
             got = lane.pr_checks('o/r', 5, ('gate', 'rules'), head=SHA)
         return got, reads
 
@@ -266,6 +317,35 @@ class CiQueue(Base):
         self.assertEqual(n, 0)
         q.needs.assert_not_called()
         self.assertIn('is attested (asf/attested)', lines[-1])
+
+    def test_an_unknown_attestation_holds_the_relief_never_sizes_it(self):
+        import datetime
+        now = datetime.datetime(2026, 10, 2, 12, tzinfo=datetime.timezone.utc)
+        target = {'databaseId': 9, 'headSha': SHA,
+                  'createdAt': (now - datetime.timedelta(hours=1)).isoformat()}
+        src = mock.Mock()
+        src.live_jobs.return_value = []
+        src.attested.return_value = None
+        q = mock.Mock()
+        lines = []
+        product = types.SimpleNamespace(repo_slug='o/r', name='p', main='main',
+                                        conventions=Conventions.from_mapping({}))
+        with mock.patch.object(ci_queue, 'workflow_for', return_value='ci.yml'), \
+                mock.patch.object(ci_queue, '_broken_reserve', return_value={}):
+            n = ci_queue._relieve_for(product, q, src, {}, lambda wf: [], now, target,
+                                      lines.append, False, owner='main run 9', possessive='main',
+                                      wait_s=60, escalate_s=120, run_level=True)
+        self.assertEqual(n, 0)
+        q.needs.assert_not_called()
+        self.assertIn('attestation unreadable', lines[-1])
+
+    def test_the_source_reads_an_unreadable_attestation_as_unknown(self):
+        product = types.SimpleNamespace(repo_slug='o/r', name='p',
+                                        conventions=Conventions.from_mapping({}))
+        src = ci_queue.GitHubSource.__new__(ci_queue.GitHubSource)
+        src.product, src.slug = product, 'o/r'
+        with mock.patch.object(src, '_gh', return_value=None):
+            self.assertIsNone(src.attested(SHA))
 
 
 if __name__ == '__main__':

@@ -7,7 +7,6 @@ gh asf/evidence/sources.py 1
 gh asf/gh_limit.py 1
 gh asf/harvest/deploy.py 6
 gh asf/metrics/metrics.py 1
-gh asf/tick/flaky.py 2
 gh asf/views/pr_annotate.py 1
 gh asf/views/status.py 1
 gh asf/workers/landing.py 1
@@ -42,7 +41,6 @@ git asf/reserve.py 2
 git asf/scorecard/facts.py 2
 git asf/scorecard/pairs.py 1
 git asf/snapshot.py 1
-git asf/stale_ref.py 1
 git asf/tick/dry_run.py 1
 git asf/tick/land_spec.py 1
 git asf/tick/shadow.py 25

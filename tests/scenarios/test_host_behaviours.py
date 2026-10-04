@@ -96,6 +96,13 @@ class TheFakeHost(unittest.TestCase):
                 self.assertEqual(attestation.state_of(rec), want)
                 self.assertEqual(attestation.state_of(got), want)
 
+    def test_an_unreadable_status_is_refused_not_empty(self):
+        f = self.fork('skip-job-unknown')
+        p = f.gh('api', f'repos/{S.SLUG}/commits/{S.WORLD.hand}/status?per_page=100')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('HTTP 502', p.stderr)
+        self.assertEqual([r['conclusion'] for r in _check_run(f, S.CHECK)], ['skipped'])
+
     def test_a_hidden_job_failure_reads_as_the_recorded_run(self):
         f = self.fork('hide-job-failure')
         rec = _fixture('run-success-hiding-job', 'run-view')
@@ -173,6 +180,12 @@ class Readers(unittest.TestCase):
         self.assertEqual([c.get('attested') for c in checks if c['name'] == S.CHECK],
                          ['asf/attested'])
 
+    def test_a_skipped_required_check_whose_attestation_is_unknown_is_neither_passed_nor_red(self):
+        state, _bare, passed, checks, _ignored, _stale = self.read('skip-job-unknown')
+        self.assertEqual(passed, set())
+        self.assertNotEqual(state, 'red')
+        self.assertEqual([c.get('attested') for c in checks if c['name'] == S.CHECK], [None])
+
     def test_a_path_filtered_required_check_is_missing(self):
         _state, _bare, passed, checks, _ignored, _stale = self.read('path-filter')
         self.assertEqual(passed, set())
@@ -188,6 +201,65 @@ class Readers(unittest.TestCase):
     def test_a_red_on_a_stale_merge_ref_is_no_verdict(self):
         state, _bare, passed, _checks, _ignored, stale = self.read('stale-merge-ref')
         self.assertEqual((state, passed, stale), ('red', set(), [S.CHECK]))
+
+
+#: S-M23 — each reader of the attestation on PR #1's head under the three skipped behaviours:
+#: ``(reader, behaviour, expected)``. Unknown (``skip-job-unknown``) is ``None`` — a hold, read
+#: again — never the ``False`` an unattested head reads as, and never red.
+ATTESTATION_ROWS = (
+    ('attestation', 'skip-job', False),
+    ('attestation', 'skip-job-attested', True),
+    ('attestation', 'skip-job-unknown', None),
+    ('deploy', 'skip-job', False),
+    ('deploy', 'skip-job-attested', True),
+    ('deploy', 'skip-job-unknown', None),
+    ('ci_queue relief', 'skip-job', False),
+    ('ci_queue relief', 'skip-job-attested', True),
+    ('ci_queue relief', 'skip-job-unknown', None),
+    ('trunk_red', 'skip-job-attested', {}),
+    ('trunk_red', 'skip-job-unknown', {}),
+)
+
+
+def _read_attestation(reader, product, f):
+    from asf import attestation, ci_queue
+    from asf.harvest import deploy, lane
+    if reader == 'attestation':
+        return attestation.product_attested(product, S.WORLD.hand)
+    if reader == 'deploy':
+        runs = _json(f, 'api', f'repos/{S.SLUG}/actions/runs?head_sha={S.WORLD.hand}')
+        run = {'databaseId': runs['workflow_runs'][0]['id'], 'headSha': S.WORLD.hand}
+        return deploy._jobs_verdict(product, run, [S.CHECK], deploy._sh)[0]
+    if reader == 'ci_queue relief':
+        return ci_queue.GitHubSource(product).attested(S.WORLD.hand)
+    # the lane's trunk_red, the head's branch standing in for the trunk it would be on
+    host = lane.GitHubHost.__new__(lane.GitHubHost)
+    host.lane, host.slug, host.trunk, host.product = (
+        type('L', (), {'repo': f.repo})(), S.SLUG, S.PR_HEAD, product)
+    host._trunk_runs, host._attested = {}, {}
+    S._git(['fetch', '-q', 'origin'], cwd=f.repo)
+    return host.trunk_red([S.CHECK])
+
+
+class AttestationReaders(unittest.TestCase):
+    """One generated test per row of :data:`ATTESTATION_ROWS`."""
+
+    def check(self, reader, behaviour, expected):
+        f = S.WORLD.fork()
+        S.BEHAVIOURS[behaviour](f)
+        with S.deciding(f) as product:
+            got = _read_attestation(reader, product, f)
+        self.assertEqual(got, expected, f'{reader} × {behaviour}')
+        if expected is None:
+            self.assertIsNone(got)      # Unknown is None, never a falsy False
+
+
+for _row in ATTESTATION_ROWS:
+    _name = 'test_' + '__'.join(re.sub(r'[^a-z0-9]+', '_', t.lower()).strip('_')
+                                for t in _row[:2])
+    assert not hasattr(AttestationReaders, _name), _name
+    setattr(AttestationReaders, _name,
+            (lambda row: lambda self: self.check(*row))(_row))
 
 
 if __name__ == '__main__':

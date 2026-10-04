@@ -7,9 +7,9 @@ read-only against a product repo and then redacted (:class:`Redactor`)::
      "rc": 0, "stdout": <the parsed JSON, or the raw text>, "stderr": ""}
 
 :func:`load` returns one call's ``(rc, stdout, stderr)``; :class:`FixtureGh` answers every call
-of one or more behaviours in the shape of :func:`asf.harvest.harvest._gh` (``fx(args)``) and of
-``subprocess.run`` (``fx.run(['gh', *args], ...)``), so a reader is driven through its own
-``gh`` seam. A call no fixture names answers ``rc 1`` with a ``no fixture`` stderr — never a
+of one or more behaviours in the shape of :func:`asf.harvest.harvest._gh` (``fx(args)``), of
+:func:`asf.github.call` (:func:`as_call`) and of ``subprocess.run`` (``fx.run(['gh', *args],
+...)``), so a reader is driven through its own ``gh`` seam. A call no fixture names answers ``rc 1`` with a ``no fixture`` stderr — never a
 silent empty success.
 
 The redactor is deterministic: the product's slug becomes ``example/repo``, its branches
@@ -186,6 +186,24 @@ class FixtureGh:
         """``subprocess.run`` for a ``['gh', *args]`` argv."""
         rc, out, err = self(list(cmd)[1:])
         return subprocess.CompletedProcess(list(cmd), rc, out, err)
+
+
+def as_call(fake):
+    """``fake`` — a ``gh`` that answers ``(rc, stdout, stderr)`` (a :class:`FixtureGh`, a test's
+    own) — in the shape of :func:`asf.github.call`. Patch ``asf.github.call`` with it and every
+    reader answers from ``fake``: :mod:`asf.github`'s own and the :func:`asf.harvest.harvest._gh`
+    shim over it alike."""
+    from asf import github
+
+    def call(args, *, timeout=None, run=None, env=None):
+        rc, out, err = fake(list(args))
+        out, err = out or '', err or ''
+        if rc != 0:
+            first = next((ln.strip() for ln in err.splitlines() if ln.strip()), '')
+            return github.Result(False, None, rc, out, err, github.now_iso(),
+                                 f'rc {rc}: {first}' if first else f'rc {rc}')
+        return github.Result(True, out, rc, out, err, github.now_iso(), '')
+    return call
 
 
 def record(recipe, run=subprocess.run, root=ROOT):

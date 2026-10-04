@@ -4580,7 +4580,8 @@ class GitHubHost(Host):
         not red — the PR's own checks and the gate still judge it, as before. A check that
         only ``skipped`` judges by the attestation (:mod:`asf.attestation`): on a sha the merge
         queue attested it is green there (the batch run judged that exact sha), on any other it
-        is no verdict and the commit before judges."""
+        is no verdict and the commit before judges; where the attestation does not read
+        (Unknown) the check has no verdict at all — never the older commit's red."""
         want = [n for n in dict.fromkeys(names or ()) if n]
         repo = getattr(self.lane, 'repo', None)
         if not want or not repo:
@@ -4604,9 +4605,13 @@ class GitHubHost(Host):
                         and r.get('conclusion') != 'cancelled']
                 if not done:
                     continue
-                if all(r.get('conclusion') in attestation.ATTESTED_CONCLUSIONS for r in done) \
-                        and not self.attested(sha):
-                    continue  # skipped on a sha nobody attested: no verdict, the one before judges
+                if all(r.get('conclusion') in attestation.ATTESTED_CONCLUSIONS for r in done):
+                    att = self.attested(sha)
+                    if att is None:
+                        left.discard(name)  # attestation Unknown: no verdict, never an older red
+                        continue
+                    if not att:
+                        continue  # skipped on a sha nobody attested: the one before judges
                 left.discard(name)
                 if any(r.get('conclusion') in TRUNK_RED_CONCLUSIONS for r in done):
                     red[name] = sha

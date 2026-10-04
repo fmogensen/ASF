@@ -32,6 +32,10 @@ Fail-open: a state directory that cannot be written, a refused re-run or an unre
 list is no triage — the red goes to its correct round exactly as before. A re-run refused because
 the run is still in progress waits for the next pass (the rest of the matrix is still judging).
 
+``gh`` goes through :mod:`asf.github` (a test's own ``gh`` — ``(rc, stdout, stderr)`` or an
+:class:`asf.github.Result` — stands in for it); a read that does not answer is Unknown, and
+Unknown is today's fail-open: no infra red, no step or test named.
+
 State: ``state/<product>/flake-triage.json`` — ``{reruns: {"<sha>|<check>": {...}},
 quarantine: [{job, step, test, sha, ...}]}``; expired entries and day-old re-run records are
 pruned on every read.
@@ -40,6 +44,8 @@ import datetime
 import json
 import os
 import re
+
+from asf import github
 
 FILE = 'flake-triage.json'
 #: ``ci.quarantine_days`` default: how long a flaked job stays in quarantine
@@ -166,9 +172,22 @@ def _ids(link):
     return (r.group(1) if r else None), (j.group(1) if j else None)
 
 
-def _gh():
-    from asf.harvest import harvest as H
-    return H._gh
+def _call(gh, args):
+    """``gh <args>`` as an :class:`asf.github.Result`: through :func:`asf.github.gh`, or through
+    ``gh`` when one is passed (``(rc, stdout, stderr)`` or a ``Result``). A ``gh`` that cannot
+    run is Unknown."""
+    if gh is None:
+        return github.gh(args)
+    try:
+        got = gh(args)
+    except OSError as e:
+        return github.unknown(f'gh not runnable: {e}')
+    if isinstance(got, github.Result):
+        return got
+    rc, out, err = got
+    if rc != 0:
+        return github.Result(False, None, rc, out or '', err or '', github.now_iso(), f'rc {rc}')
+    return github.Result(True, out, rc, out or '', err or '', github.now_iso(), '')
 
 
 def is_infra(messages):
@@ -180,16 +199,16 @@ def is_infra(messages):
     return bool(msgs) and all(any(sig in m for sig in INFRA_SIGNATURES) for m in msgs)
 
 
-def infra_red(slug, job_id, gh):
+def infra_red(slug, job_id, gh=None):
     """The runner-loss annotation of failed job ``job_id`` (one ``gh api`` call: its check run's
     annotations — a job id is its check run id), or None when it is no infra red or unreadable
-    (an unreadable job is judged as before)."""
+    (an unreadable job is judged as before). ``gh``: see :func:`_call`."""
     if not job_id or not slug:
         return None
+    r = _call(gh, ['api', f'repos/{slug}/check-runs/{job_id}/annotations'])
     try:
-        rc, o, _e = gh(['api', f'repos/{slug}/check-runs/{job_id}/annotations'])
-        got = json.loads(o) if rc == 0 and o else None
-    except (OSError, ValueError, TypeError):
+        got = json.loads(r.data) if r.ok and r.data else None
+    except (ValueError, TypeError):
         return None
     if not isinstance(got, list):
         return None
@@ -207,7 +226,6 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
     cfg = settings(product)
     if not names or not sha or not cfg['on'] or not state_dir or not os.path.isdir(state_dir):
         return names, []
-    gh = gh or _gh()
     now = now or _now()
     data = load(state_dir, now)
     defects, held, started = [], [], []
@@ -244,12 +262,9 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
         elif rec and int(rec.get('attempts') or 0) >= limit:
             defects.append(name)    # red again on its re-run: a real defect
             continue
-        try:
-            rc, o, err = gh(['run', 'rerun', '--job', job_id, '-R', slug])
-        except OSError as e:
-            rc, o, err = 1, '', str(e)
-        if rc != 0:
-            text = f'{o}\n{err}'.lower()
+        r = _call(gh, ['run', 'rerun', '--job', job_id, '-R', slug])
+        if not r.ok:
+            text = f'{r.stdout}\n{r.stderr}\n{r.reason}'.lower()
             if any(w in text for w in _RUNNING) or lost:
                 held.append(name)   # still judging the rest, or infra: the next pass asks again
                 continue
@@ -287,16 +302,16 @@ def _failed_detail(slug, job_id, gh):
     if not job_id:
         return step, test
     try:
-        rc, o, _e = gh(['api', f'repos/{slug}/actions/jobs/{job_id}'])
-        if rc == 0:
-            job = json.loads(o)
+        r = _call(gh, ['api', f'repos/{slug}/actions/jobs/{job_id}'])
+        if r.ok:
+            job = json.loads(r.data)
             for s in job.get('steps') or ():
                 if s.get('conclusion') == 'failure':
                     step = s.get('name')
                     break
-        rc, log, _e = gh(['api', f'repos/{slug}/actions/jobs/{job_id}/logs'])
-        if rc == 0:
-            for line in (log or '').splitlines():
+        r = _call(gh, ['api', f'repos/{slug}/actions/jobs/{job_id}/logs'])
+        if r.ok:
+            for line in (r.data or '').splitlines():
                 line = re.sub(r'^﻿?\d{4}-\d{2}-\d{2}T[\d:.]+Z ?', '', line)
                 line = re.sub(r'\x1b\[[0-9;?]*[ -/]*[@-~]', '', line)
                 for rx in _TEST_RES:
@@ -345,7 +360,6 @@ def settle(product, state_dir, slug, sha, checks, out=print, now=None, gh=None, 
     mine = {k: r for k, r in data['reruns'].items() if r.get('sha') == sha}
     if not mine:
         return []
-    gh = gh or _gh()
     cfg = settings(product)
     by_name = {}
     for c in checks or ():
