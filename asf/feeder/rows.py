@@ -193,6 +193,11 @@ CAPPED_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, CONF
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 PR_RE = re.compile(r'\bPR #\d+\b')
+#: ingest's line for a PR the host reports open on the item's branch
+OPEN_PR_RE = re.compile(r'\bPR #(\d+) OPEN\b')
+#: the occupancy keys that say an item's work is pushed: a lane state, a wait on the lane, a
+#: correction (:func:`pushed_ids`)
+PUSHED_KEYS = ('review', 'landing', 'waiting_landing', 'corrections')
 #: ingest's line for a spec that sits on a branch, not the trunk (``spec on <branch>[ (review …)]``)
 SPEC_ON_BRANCH_RE = re.compile(r'^spec on (?!origin/)(\S+)')
 #: ingest's line for a plan that sits on a branch, not the trunk (``plan on <branch>[ (review …)]``)
@@ -2241,6 +2246,8 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     spoken_for = {r.item_id for r in rows}
     rows += [r for r in bug_waits if r.item_id not in spoken_for]
     rows += unverified_rows(items, product, unverified_landed, busy | {r.item_id for r in rows})
+    pushed = pushed_ids(items, occ)
+    rows += pushed_rows(items, product, pushed, occ, live | {r.item_id for r in rows})
     rows = hold_parks(rows, items, occ.get('parks'))
     rows = hold_unlanded(rows, items, landed_shas, product)
     rows = hold_replanning(rows, items)
@@ -2282,10 +2289,14 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
             # one session decides the whole day's questions for every Feature: it goes before
             # the Feature work, not at the rank of whichever card happens to be the oldest (an
             # unranked inbox card put it behind every launch, and the cut never reached it)
-            return (r.tier, -1, (-1, -1), -1, '', 0, seq)
+            return (r.tier, -1, -1, (-1, -1), -1, '', 0, seq)
         order = feature_order(items, f) if f else (ix.BIG, ix.BIG, r.feature_id or '~')
         phase = finish_phase(items, r)
-        return (r.tier, phase, near(r, f) if phase == 0 and f else (0, 0), *order,
+        # finish before you start, across Features too: a row on pushed work (its review, its
+        # landing, its correction) goes before any new coder — 22 PRs waited up to 8 days while
+        # the seats went to new Tasks of nearer Features (asf 2026-10-04)
+        return (r.tier, phase, 0 if r.item_id in pushed else 1,
+                near(r, f) if phase == 0 and f else (0, 0), *order,
                 KIND_ORDER.get(r.kind, 5), seq)
     ordered = [r for _seq, r in sorted(enumerate(rows), key=key)]
     # work the product put aside (:func:`hold_shelved`) ranks behind every live row of its tier
@@ -2293,6 +2304,63 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     if roots:
         ordered = surface_stale_parks(ordered, items, product, park_since(occ, adjudicated), now)
     return ordered
+
+
+def open_pr_of(item):
+    """The number of the open PR the item's evidence names (``PR #N OPEN``), else ``''``."""
+    for e in (item or {}).get('evidence') or ():
+        m = OPEN_PR_RE.search(str(e))
+        if m:
+            return m.group(1)
+    return ''
+
+
+def pushed_ids(items, occupancy):
+    """The open Tasks and Bugs whose work is pushed: the lifecycle holds them in a lane state, a
+    wait on the lane or a correction (:data:`PUSHED_KEYS`), or the record names an open PR on
+    them. Each one is owed a row in every plan (:func:`pushed_rows`, :func:`orphaned_pushed`)."""
+    occ = occupancy or {}
+    named = set()
+    for key in PUSHED_KEYS:
+        named |= set(occ.get(key) or ())
+    return {iid for iid, v in (items or {}).items()
+            if isinstance(v, dict) and v.get('type') in ('task', 'bug') and is_open(v)
+            and (iid in named or open_pr_of(v))}
+
+
+def pushed_rows(items, product, pushed, occupancy, spoken):
+    """A non-launching PUSHED → LAND row for each pushed item (:func:`pushed_ids`) no other row
+    and no live session speaks for (``spoken``) — never a silent PR: a blocked one waits on its
+    blocker, one finished and awaiting harvest says so, and an open PR no run holds waits on the
+    lane, which takes run-less branches up (:meth:`asf.harvest.lane.Lane.orphan_claims`)."""
+    occ = occupancy or {}
+    waiting = occ.get('waiting_landing') or {}
+    out = []
+    for iid in sorted(set(pushed) - set(spoken)):
+        item = items.get(iid) or {}
+        kind = 'task' if item.get('type') == 'task' else 'fix'
+        f = _task_feature(items, item) if kind == 'task' else feature_of(items, item)
+        number = open_pr_of(item)
+        what = f'PR #{number}' if number else 'its branch'
+        if iid in waiting:
+            action = f'{WAITS_LANDING}: {what} {waiting[iid]}'
+        else:
+            action = f'{WAITS_LANDING}: {what} open, no run holds it — the lane takes it up'
+        row = Row(tier=review_tier(item), kind=PUSHED_LAND, item_id=iid,
+                  feature_id=f['id'] if f else '', action=action, brief_kind='review',
+                  branch=_branch_of(item, product, kind), reason='pushed work, no other row')
+        out.append(blocked_row(row, item) if item.get('blocked') else row)
+    return out
+
+
+def orphaned_pushed(index, rows, occupancy, inflight):
+    """The pushed items (:func:`pushed_ids`) with no row in ``rows`` and no live session — the
+    invariant ``asf doctor`` counts (``pushed work``); ``[]`` whenever the feeder holds it."""
+    items = items_of(index)
+    occ = occupancy or {}
+    live = inflight_ids(inflight) | set(occ.get('busy') or ())
+    rowed = {r.item_id for r in rows or ()}
+    return sorted(pushed_ids(items, occ) - rowed - live)
 
 
 def finish_phase(items, row):
@@ -2614,5 +2682,7 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     rows = plan_ahead_cap(rows, items_of(index), product, inflight, capacity, held,
                           occupancy=occupancy, landed_shas=landed_shas, bandwidth=bandwidth)
     rows = finish_first(rows, items_of(index), product, inflight, held)
-    return failing_to_spawn(tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first),
+    keep = pushed_ids(items_of(index), occupancy)
+    return failing_to_spawn(tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first,
+                                         keep=keep),
                             failing)

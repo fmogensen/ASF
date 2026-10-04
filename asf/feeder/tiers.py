@@ -44,12 +44,14 @@ def free_slots(inflight, capacity):
     return max(int(capacity) - len(inflight or []), 0)
 
 
-def select(candidates, inflight, capacity, held=(), s1_first=True):
+def select(candidates, inflight, capacity, held=(), s1_first=True, keep=()):
     """The emitted rows, in order. ``candidates`` is :func:`asf.feeder.rows.candidates`' list;
     ``held`` the item ids a hold parks (their launching rows take no slot). ``s1_first=False``
     drops the S1 lane's cut of the tier-2 rows: the product's *demand*
-    (:func:`asf.tick.step_wave.demand`), not this tick's launch order."""
-    held = set(held or ())
+    (:func:`asf.tick.step_wave.demand`), not this tick's launch order. ``keep``: the item ids
+    whose rows are always emitted (:func:`asf.feeder.rows.pushed_ids` — pushed work is never
+    silent): a launching one past the seats as ``WAITS ON a free slot``, a WAITS one as it is."""
+    held, keep = set(held or ()), set(keep or ())
     ordered = sorted(candidates, key=tier_of)  # stable: keeps the Feature order within a tier
     free = free_slots(inflight, capacity)
     s1_rows = sum(1 for r in ordered if r.tier == TIER_S1 and r.launches and r.item_id not in held)
@@ -57,22 +59,28 @@ def select(candidates, inflight, capacity, held=(), s1_first=True):
     out = []
     for r in ordered:
         if r.tier == TIER_REST and s1_waiting:
-            break
+            if r.item_id in keep:
+                out.append(r if not r.launches or r.item_id in held else _no_slot(r))
+            continue
         if r.launches and r.item_id in held:
             out.append(r)
             continue
         if not r.launches:
             # an S1/S2 row is named even with no slot free: a WAITS row for a held or busy Bug
             # is the one place NEXT says why it gets no session
-            if free > 0 or r.tier < TIER_REST:
+            if free > 0 or r.tier < TIER_REST or r.item_id in keep:
                 out.append(r)
             continue
         if free > 0:
             free -= 1
             out.append(r)
-        elif r.tier == TIER_S1:
-            out.append(R.Row(**{**r.__dict__, 'action': NO_SLOT}))
+        elif r.tier == TIER_S1 or r.item_id in keep:
+            out.append(_no_slot(r))
     return out
+
+
+def _no_slot(row):
+    return R.Row(**{**row.__dict__, 'action': NO_SLOT})
 
 
 def gate(cut, uncut, held=()):
@@ -87,7 +95,7 @@ def gate(cut, uncut, held=()):
                                   if r.tier == TIER_S1 and r.action == NO_SLOT
                                   and r.item_id not in held))
     behind_rows = [r for r in uncut if r.tier == TIER_REST and r.launches and r.item_id not in held]
-    cut_keys = {(r.item_id, r.kind) for r in cut}
+    cut_keys = {(r.item_id, r.kind) for r in cut if r.action != NO_SLOT}
     dropped = [r for r in behind_rows if (r.item_id, r.kind) not in cut_keys]
     order, counts = [], {}
     for r in dropped:

@@ -1336,6 +1336,9 @@ def run(product_name):
     lock = check_cux_lock()
     if lock is not None:
         rows.append(('quota lock', False, lock[0], lock[1]))
+    pushed = check_pushed_work(product)
+    if pushed is not None:
+        rows.append(('pushed work', False, pushed[0], pushed[1]))
     ok, detail = check_worktrees(product)
     rows.append(('worktrees', False, ok, detail))
     branches = check_branches(product)
@@ -1383,6 +1386,39 @@ def check_cux_lock():
         return False, (f'{w.label} — quota readings go stale; quota_guards.reclaim_cux_lock: '
                        f'true lets the tick reclaim it')
     return True, w.label
+
+
+def pushed_work_line(orphans):
+    """``(ok, detail)`` for the pushed-work invariant: red while an open Task/Bug with an open PR
+    has no NEXT row and no session (:func:`asf.feeder.rows.orphaned_pushed`)."""
+    orphans = list(orphans or ())
+    if not orphans:
+        return True, 'pushed work: every open Task/Bug with an open PR has a NEXT row'
+    shown = ', '.join(orphans[:8]) + (f' +{len(orphans) - 8}' if len(orphans) > 8 else '')
+    return False, (f'pushed work: {len(orphans)} open Task/Bug with an open PR and no NEXT row '
+                   f'— nothing reviews, lands or reaps them: {shown}')
+
+
+def check_pushed_work(product):
+    """``(ok, detail)`` — :func:`pushed_work_line` over the plan ``asf next`` prints, or None when
+    the plan cannot be drawn (no record yet)."""
+    root = getattr(product, 'backlog_dir', None)
+    if not root or not os.path.isfile(os.path.join(root, 'index.json')):
+        return None
+    try:
+        from asf import capacity as capacity_mod
+        from asf.feeder import rows as feeder_rows
+        from asf.tick import step_wave
+        from asf.views import index_reader
+        index, _ = index_reader.load(root)
+        inflight = step_wave.inflight(product)
+        inputs = step_wave.plan_inputs(product, root)
+        plan = feeder_rows.plan_rows(index, product, inflight,
+                                     capacity_mod.resolve(product).sessions, **inputs)
+        return pushed_work_line(feeder_rows.orphaned_pushed(index, plan, inputs.get('occupancy'),
+                                                            inflight))
+    except Exception as e:  # noqa: BLE001 — an unreadable plan is one unknown row
+        return None, f'pushed work: cannot draw the plan — {e}'
 
 
 def check_worktrees(product):
