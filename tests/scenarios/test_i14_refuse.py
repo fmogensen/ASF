@@ -43,7 +43,7 @@ REFUSE_ROWS = (
     # it is put back
     (IN, 'merged', 'closes', None, None),
     (IN, 'open', 'closes', None, 'attested-sha'),
-    (IN, 'merged', 'none', 'W4-PR3b', 'voided-landing'),
+    (IN, 'merged', 'none', None, 'voided-landing'),  # W4-PR5: the ingest never closes it
     (IN, 'open', 'none', 'W4-PR3b', 'revert'),
     # nothing to refuse: open work, and a host that answers nothing
     (IN, 'open', 'none', None, None),

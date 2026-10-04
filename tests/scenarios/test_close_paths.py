@@ -90,7 +90,7 @@ ROWS = (
     (MF, 'open', 'none', None, 'doc-lane-landing'),
     # ... and the record's ingest reads the host's merged PR past the void: the Task `asf reset`
     # started over is closed again on the very claim the reset voided
-    (IN, 'merged', 'none', 'W4-PR5', 'voided-landing'),
+    (IN, 'merged', 'none', None, 'voided-landing'),
 )
 
 

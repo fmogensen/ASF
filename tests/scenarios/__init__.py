@@ -699,7 +699,6 @@ STAMPING_EDITS = ('voided-landing', 'doc-lane-landing', 'doc-lane', 'cloud-sessi
 #: The plan items a gap row names (``gap``): the item whose change turns that row green.
 GAPS = {
     'W4-PR3b': 'I14 under flags.i14: refuse puts back a close without a sound landing',
-    'W4-PR5': "an `asf reset` void holds against the ingest's own read of the host",
     'W6-PR6c': 'the record\'s readers cut over to facts/landing (the revert rule)',
 }
 
