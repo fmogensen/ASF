@@ -1,9 +1,9 @@
 """tests.test_seat_claims — F-0189: the claim ledger, the compare-and-set, the row that
 re-decides, and the two-process proof. Four classes, one per Task of the plan:
-``SeatLedger`` (T-0573), ``PoolClaims``, ``WaveRefusedSeat``, ``TwoWavesOneAccount``.
+``SeatLedger`` (T-0573), ``PoolClaims`` (T-0574), ``WaveRefusedSeat``, ``TwoWavesOneAccount``.
 
-This module only carries ``SeatLedger`` so far — the other three land with the Tasks that make
-them meaningful."""
+This module carries ``SeatLedger`` and ``PoolClaims`` so far — the other two land with the Tasks
+that make them meaningful."""
 import json
 import os
 import shutil
@@ -11,11 +11,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 from test_workers import Home, feature_row  # noqa: E402,F401
 
 from asf import env  # noqa: E402
+from asf.workers import observe as observe_mod  # noqa: E402
+from asf.workers import pool as pool_mod  # noqa: E402
 from asf.workers import seats as seats_mod  # noqa: E402
 
 
@@ -37,6 +40,22 @@ def registered_run(product, job, pid, started='2026-09-29T00:00:00Z'):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps({'job': job, 'pid': pid, 'started': started, 'product': product}) + '\n')
+
+
+def registered_seat(product, job, pid, account='acct-a', started='2026-09-29T00:00:00Z'):
+    """A registered run that also holds an account's seat — :func:`registered_run` plus the
+    ``account`` key :meth:`asf.workers.pool.Pool.load` reads."""
+    pool_mod.append_session(product, {'job': job, 'pid': pid, 'account': account,
+                                      'started': started})
+
+
+def pool_cfg(cap=4, caps=None, name='acct-a'):
+    """One-account config for a :meth:`asf.workers.pool.Pool.from_config` pool — PD12: the two
+    products a fixture spans here are ``a`` and ``b``, never a real product name."""
+    acct = {'name': name, 'role': 'local', 'cap': cap}
+    if caps:
+        acct['caps'] = caps
+    return {'worker_pool': {'accounts': [acct], 'sessions': 'fake'}}
 
 
 class SeatLedger(Home):
@@ -114,3 +133,107 @@ class SeatLedger(Home):
         finally:
             env.ASF_HOME = old
             shutil.rmtree(other, ignore_errors=True)
+
+
+class PoolClaims(Home):
+    """:meth:`asf.workers.pool.Pool.take` as a compare-and-set across products — the opening
+    reproduction (docs/specs/f-0189.md) inverted: after it, 4 on an account at ``cap: 4`` answers
+    4, not 8."""
+
+    def test_a_pools_takes_are_seen_by_a_freshly_built_pool_of_another_product(self):
+        cfg = pool_cfg()
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        for i in range(4):
+            self.assertTrue(a.take(a.accounts[0], 'opus', job=f'job-{i}', product='a',
+                                   kind='task'))
+        b = pool_mod.Pool.from_config(cfg, 'b')
+        self.assertEqual(b.load(b.accounts[0]), 4)
+        self.assertFalse(b.under_caps(b.accounts[0], 'opus'))
+        self.assertEqual(b.pick_account('code', 'opus'),
+                         (None, 'pool full — accounts at cap: acct-a 4/4'))
+
+    def test_a_5th_take_by_either_product_is_refused_and_writes_no_claim(self):
+        cfg = pool_cfg()
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        for i in range(4):
+            self.assertTrue(a.take(a.accounts[0], 'opus', job=f'job-{i}', product='a',
+                                   kind='task'))
+        claims, _why = seats_mod.read()
+        self.assertEqual(len(claims), 4)
+        b = pool_mod.Pool.from_config(cfg, 'b')
+        self.assertFalse(b.take(b.accounts[0], 'opus', job='job-b', product='b', kind='task'))
+        claims, _why = seats_mod.read()
+        self.assertEqual(len(claims), 4)
+
+    def test_a_per_model_caps_ceiling_refuses_the_same_way(self):
+        cfg = pool_cfg(cap=4, caps={'opus': 1})
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        self.assertTrue(a.take(a.accounts[0], 'opus', job='job-0', product='a', kind='task'))
+        b = pool_mod.Pool.from_config(cfg, 'b')
+        self.assertFalse(b.under_caps(b.accounts[0], 'opus'))
+        self.assertFalse(b.take(b.accounts[0], 'opus', job='job-1', product='b', kind='task'))
+
+    def test_untake_returns_the_seat_and_the_claim_in_one_step(self):
+        cfg = pool_cfg()
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        acct = a.accounts[0]
+        self.assertTrue(a.take(acct, 'opus', job='job-0', product='a', kind='task'))
+        self.assertTrue(a.untake(acct, 'opus', job='job-0', product='a', kind='task'))
+        self.assertEqual(seats_mod.read()[0], [])
+        b = pool_mod.Pool.from_config(cfg, 'b')
+        self.assertEqual(b.load(b.accounts[0]), 0)
+
+    def test_untake_still_finds_its_seat_after_a_refresh(self):
+        cfg = pool_cfg()
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        acct = a.accounts[0]
+        self.assertTrue(a.take(acct, 'opus', job='job-0', product='a', kind='task'))
+        self.assertTrue(a.take(acct, 'opus', job='job-1', product='a', kind='task'))  # a _refresh
+        self.assertTrue(a.untake(acct, 'opus', job='job-0', product='a', kind='task'))
+        self.assertEqual(a.load(acct), 1)
+
+    def test_retake_swaps_the_model_on_the_claim_and_the_live_row_never_refused(self):
+        cfg = pool_cfg(cap=1)
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        acct = a.accounts[0]
+        seat = {'model': 'opus', 'job': 'job-0', 'product': 'a', 'kind': 'task', 'lane': None}
+        self.assertTrue(a.take(acct, **seat))
+        new_seat = a.retake(acct, seat, 'sonnet')
+        self.assertEqual(new_seat['model'], 'sonnet')
+        self.assertEqual(a.load(acct, 'sonnet'), 1)
+        self.assertEqual(a.load(acct, 'opus'), 0)
+        claims, _why = seats_mod.read()
+        self.assertEqual(claims[0]['model'], 'sonnet')
+
+    def test_a_busy_lock_makes_take_return_false(self):
+        cfg = pool_cfg()
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        with mock.patch.object(pool_mod.seats_mod, 'held', side_effect=seats_mod.Busy('busy')):
+            self.assertFalse(a.take(a.accounts[0], 'opus', job='job-0', product='a', kind='task'))
+        self.assertEqual(a.load(a.accounts[0]), 0)
+
+    def test_an_unusable_ledger_makes_take_return_true_and_sets_seats_degraded(self):
+        cfg = pool_cfg()
+        a = pool_mod.Pool.from_config(cfg, 'a')
+        self.assertEqual(a.seats_degraded, '')
+        with mock.patch.object(pool_mod.seats_mod, 'held',
+                              side_effect=seats_mod.Unusable('state dir is a file')):
+            self.assertTrue(a.take(a.accounts[0], 'opus', job='job-0', product='a', kind='task'))
+        self.assertEqual(a.seats_degraded, 'state dir is a file')
+        self.assertEqual(a.load(a.accounts[0]), 1)
+
+    def test_a_hand_built_pools_live_survives_a_take(self):
+        acct = pool_mod.Account('acct-a', cap=4)
+        p = pool_mod.Pool([acct], live=[{'job': 'x', 'account': 'acct-a'}])
+        self.assertTrue(p.take(acct, 'opus', job='job-0', product='a', kind='task'))
+        self.assertEqual(p.load(acct), 2)
+
+    def test_a_dead_pid_but_ps_visible_run_still_holds_its_seat_after_a_take(self):
+        dead = dead_pid()
+        registered_seat('a', 'legacy-job', dead)
+        src = observe_mod.FakeSource([{'pid': dead, 'ppid': 1, 'env': {}}])
+        cfg = pool_cfg()
+        a = pool_mod.Pool.from_config(cfg, 'a', session_source=src)
+        self.assertEqual(a.load(a.accounts[0]), 1)
+        self.assertTrue(a.take(a.accounts[0], 'opus', job='job-0', product='a', kind='task'))
+        self.assertEqual(a.load(a.accounts[0]), 2)
