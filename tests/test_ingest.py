@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import types
 import unittest
@@ -1076,6 +1077,67 @@ class DeliveryStageTests(IngestTestCase):
         self.assertEqual(self.meta('features', 'F-0097')['state'], 'Closed')
         self.assertEqual(self.meta('bugs', 'B-0034')['state'], 'Closed')
         self.assertEqual(self.meta('stories', 'S-0055')['state'], 'New')
+
+
+class ReconciledTests(unittest.TestCase):
+    """§2.5's last paragraph, the consuming half: a typed ``landed:`` sha the trunk carries
+    closes a Task by the ordinary ``reconciled`` rule — the same evidence lines a commit-subject
+    close would carry, and the file is left with no typed state anywhere (F-0080, 28551)."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        repo = tempfile.mkdtemp(prefix='reconciled_test_')
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        git_env = dict(os.environ, GIT_AUTHOR_DATE='2026-01-01T00:00:00Z',
+                       GIT_COMMITTER_DATE='2026-01-01T00:00:00Z')
+
+        def git(*a):
+            return subprocess.run(['git', *a], cwd=repo, capture_output=True, text=True,
+                                  check=True, env=git_env).stdout.strip()
+        git('init', '-q', '-b', 'main')
+        git('config', 'user.email', 't@example.com')
+        git('config', 'user.name', 't')
+        git('config', 'commit.gpgsign', 'false')
+        git('commit', '-q', '--allow-empty', '-m', 'feat: the work, naming no id')
+        self.on_trunk = git('rev-parse', 'HEAD')
+        self.product = types.SimpleNamespace(repo_dir=repo, main='main', conventions={}, ci=None)
+
+    def run_ingest(self, ev):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return ingest.ingest_into(self.root, ev, self.product)
+
+    def test_a_typed_landed_sha_closes_the_task_by_reconciled(self):
+        write(self.root, 'T-0001', 'task', 'Reconciled by hand', 'tasks',
+              typed_lines=[f'landed: {self.on_trunk}'])
+        self.assertEqual(self.run_ingest(dict(EMPTY_EV, main_sha=self.on_trunk, ids={})), 0)
+        meta = read_meta(self.root, 'tasks', 'T-0001')[0]
+        self.assertEqual(meta['state'], 'Closed')
+        self.assertEqual(meta['evidence'][-1], 'rule: reconciled')
+        self.assertEqual((meta['landing']['sha'], meta['landing']['by']),
+                         (self.on_trunk, 'console'))
+
+    def test_the_file_carries_no_typed_state_the_machine_block_is_the_ordinary_one(self):
+        """A reconciled close writes exactly the keys any other close writes — `landed:` stays
+        on the typed side of the file as plain input, never echoed into the machine block."""
+        write(self.root, 'T-0001', 'task', 'Reconciled by hand', 'tasks',
+              typed_lines=[f'landed: {self.on_trunk}'])
+        self.run_ingest(dict(EMPTY_EV, main_sha=self.on_trunk, ids={}))
+        typed, machine = frontmatter.split_machine(read_meta(self.root, 'tasks', 'T-0001')[0])
+        self.assertEqual(typed.get('landed'), self.on_trunk)
+        self.assertNotIn('landed', machine)
+        self.assertEqual(set(machine) - {'landing'}, {'schema_version', 'state', 'evidence',
+                                                       'stage_since', 'updated'})
+
+    def test_a_typed_landed_sha_closes_a_bug_by_reconciled_too(self):
+        """§2.5's last paragraph names no type: a Bug with no fixer link closes the same way a
+        Task does, off the same merged map (F-0080, 28551 C2)."""
+        write(self.root, 'B-0001', 'bug', 'Reconciled by hand', 'bugs',
+              typed_lines=[f'landed: {self.on_trunk}'])
+        self.assertEqual(self.run_ingest(dict(EMPTY_EV, main_sha=self.on_trunk, ids={})), 0)
+        meta = read_meta(self.root, 'bugs', 'B-0001')[0]
+        self.assertEqual(meta['state'], 'Closed')
+        self.assertEqual(meta['evidence'][-1], 'rule: reconciled')
 
 
 class IngestDerivesNothing(unittest.TestCase):

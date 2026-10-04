@@ -898,6 +898,24 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     reach = _prod_reach(ev, product)  # one rev-list of the deploy for every in-prod question
     on_trunk = _trunk_reach(ev, product)  # and one of the trunk, for a typed `landed:` sha
     green_after = None
+    # a typed `landed:` (§2.5's last paragraph) hands `reconciled` its sha through the same
+    # `{id: evidence}` map a commit subject would have produced — one sha the trunk does not
+    # carry is a claim, never a close, so only an on-trunk one is folded in; everything past
+    # this point reads `commit`/`green`/`landed` off that one merged map, for every type
+    reconciled = {iid: sha for iid, rec in canonical.items()
+                  for sha in (_typed_landed(rec['meta']),) if sha and on_trunk(sha)}
+    if reconciled:
+        # `ev['ci']` is `discover()`'s own `ci_provider(product)` read at evidence-gather time
+        # (W4-PR3a); handing it to `merge_landed` as `green` answers "is there CI" without
+        # `merge_landed` re-asking a `product` that, off a bare ingest call, may carry no `ci`
+        # field at all
+        green = evidence.ci_green_runs(product) if ev.get('ci') else None
+        ev = dict(ev, ids=evidence.merge_landed(ev.get('ids') or {}, reconciled, product,
+                                                green=green))
+    # a typed `landed:` the trunk does not carry is a claim, never a close (see above) — but it
+    # is still named in the item's evidence, the way the old Task-only block used to
+    off_trunk = {iid: sha for iid, rec in canonical.items()
+                 for sha in (_typed_landed(rec['meta']),) if sha and not on_trunk(sha)}
 
     def settle(iid, type_, ev_obj, lines, sha=''):
         """The one place a state is chosen: `closing.state_of`, held by `closing.sticky` — unless
@@ -928,6 +946,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         _st, id_lines = match_ids(iid, ev)
         if iid in void_hit:
             id_lines = id_lines + [f"landing {void_hit[iid][:9]} voided (asf reset)"]
+        if iid in off_trunk:
+            id_lines = id_lines + [f"typed landed {off_trunk[iid][:9]} is not on the trunk"]
         if tev is not None:
             branch, pr_state = tev.get('branch') or '', tev.get('pr_state') or ''
         else:  # nothing matched it by document: the id tokens naming it are what is left
@@ -959,20 +979,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         # a merged PR is its own green: a plan's Task never waited on CI to close
         green = bool(iev.get('green')) if commit else bool(merged)
         ev_obj = closing.Ev(commit=commit, green=green, merged_sha=merged, branch=branch,
-                            pr_state=pr_state, open_prs=tuple(iev.get('open_prs') or ()))
-        # a typed `landed:` (§2.5, F-0106 C6/C7) hands `reconciled` its sha — Tasks only, and
-        # only a sha the trunk carries: one it does not is a claim, never a close
-        landed = _typed_landed(rec['meta'])
-        if landed and on_trunk(landed):
-            if green_after is None:
-                green_after = _green_after(ev, product)
-            if green_after(landed):
-                ev_obj.landed, ev_obj.green = landed, True
-                lines = lines + [f"typed landed {landed[:9]} on the trunk"]
-            else:
-                lines = lines + [f"typed landed {landed[:9]} on the trunk, no green CI at or after it"]
-        elif landed:
-            lines = lines + [f"typed landed {landed[:9]} is not on the trunk"]
+                            pr_state=pr_state, open_prs=tuple(iev.get('open_prs') or ()),
+                            landed=iev.get('landed') or '')
         settle(iid, 'task', ev_obj, lines, sha=ev_obj.landed or '')
 
     # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
@@ -986,10 +994,12 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         task_ids = story_tasks.get(iid, [])
         states = [new_state[cid] for cid in task_ids]
         all_closed = bool(states) and all(s == closing.CLOSED for s in states)
+        iev = _ids_of(iid, ev)
         ev_obj = closing.Ev(children=tuple(states), matrix_status=(sev or {}).get('status') or '',
                             child_evidence=any(derived[cid].own for cid in task_ids)
                             or (sev is None and _own_ids(iid, ev)),
-                            in_prod=all_closed and _in_prod(task_ids, task_ev, ev, reach=reach))
+                            in_prod=all_closed and _in_prod(task_ids, task_ev, ev, reach=reach),
+                            landed=iev.get('landed') or '', green=bool(iev.get('green')))
         if sev is None:
             _st, id_lines = match_ids(iid, ev)
             lines = id_lines or [f"no evidence found ({date})"]
@@ -1016,13 +1026,15 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             if merged_sha and green_after is None:
                 green_after = _green_after(ev, product)
             ev_obj = closing.Ev(merged_sha=merged_sha, green=bool(merged_sha) and green_after(merged_sha),
-                                branch=(bev['branches'] or [''])[0], open_prs=tuple(bev['open_prs']))
+                                branch=(bev['branches'] or [''])[0], open_prs=tuple(bev['open_prs']),
+                                landed=iev.get('landed') or '')
         else:
             # no link, or links that show nothing: the item's own id is the evidence left
             commit = iev.get('commit') or ''
             ev_obj = closing.Ev(commit=commit, green=bool(commit and iev.get('green')),
                                 branch=(iev.get('branches') or [''])[0],
-                                open_prs=tuple(iev.get('open_prs') or ()))
+                                open_prs=tuple(iev.get('open_prs') or ()),
+                                landed=iev.get('landed') or '')
             _st, id_lines = match_ids(iid, ev)
             lines = id_lines or [f"no evidence found ({date})"]
         ev_obj.signature = typed.get('signature') or ''
@@ -1102,7 +1114,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
                 in_prod = (kids_closed or (not kids and bool(commit))) and _in_prod(
                     landing, task_ev, ev, own_sha=commit, reach=reach)
             c = settle(iid, 'feature', closing.Ev(children=tuple(kids), commit=commit, green=green,
-                                                  in_prod=in_prod), [], sha=commit)
+                                                  in_prod=in_prod, landed=iev.get('landed') or ''),
+                      [], sha=commit)
             if c.state in (closing.RESOLVED, closing.CLOSED):
                 stage_val[iid] = 'landed'
                 lines = (id_lines if commit else []) + (
@@ -1139,7 +1152,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         plan_on_main, plan_branch = _plan_home(rec['meta'], fev, ev, product)
         plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or plan_on_main
         ev_obj = closing.Ev(children=tuple(child_states), commit=commit, green=green, in_prod=in_prod,
-                            spec_on_main=spec_on_main, plan_approved=plan_approved)
+                            spec_on_main=spec_on_main, plan_approved=plan_approved,
+                            landed=iev.get('landed') or '')
         if not child_ids and commit:
             # no Tasks to judge by, and a code commit on main names it: landed, as for a Feature
             # the documents never matched (a document-lane commit never counts, B-0059)
