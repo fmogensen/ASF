@@ -500,6 +500,33 @@ def _prod_reach(ev, product=None):
     return check
 
 
+def _trunk_reach(ev, product=None):
+    """``sha -> bool``: is ``sha`` on the trunk — an ancestor of (or equal to) ``main_sha``, the
+    ``origin/<main>`` the evidence was read at. One ``rev-list`` with a product, read the first
+    time one is asked; without one, :func:`evidence.ancestor_of`'s answer. No ``main_sha``, or a
+    sha git cannot place, is not on the trunk: nothing closes on a sha the trunk does not carry."""
+    base = ev.get('main_sha')
+    if product is None:
+        return lambda sha: bool(sha and base) and evidence.ancestor_of(sha, base)
+    reach = []
+
+    def check(sha):
+        if not sha or not base:
+            return False
+        if not reach:
+            reach.append(evidence.ancestry(product, [base]))
+        return reach[0](sha)
+    return check
+
+
+def _typed_landed(meta):
+    """The card's typed ``landed:`` sha (§2.5) when it is shaped like one (``asf check``'s
+    :data:`asf.record.check.LANDED_SHA_RE`), lower-cased; ``''`` otherwise."""
+    from asf.record import check
+    value = str(frontmatter.split_machine(meta)[0].get('landed') or '').strip()
+    return value.lower() if value and check.LANDED_SHA_RE.fullmatch(value) else ''
+
+
 def _merged_in_prod(child_ids, task_ev, ev, reach=None):
     """Every child Task's landing sha is an ancestor of the deploy. False for a child nothing
     says landed: nothing says where its merge is. `reach` is a :func:`_prod_reach` to ask."""
@@ -804,6 +831,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     evs = {}          # iid -> the Ev its closing was chosen from, what `predates` reads
     since = product.conventions.get('id_in_subject_since') if product is not None else None
     reach = _prod_reach(ev, product)  # one rev-list of the deploy for every in-prod question
+    on_trunk = _trunk_reach(ev, product)  # and one of the trunk, for a typed `landed:` sha
+    green_after = None
 
     def settle(iid, type_, ev_obj, lines, sha=''):
         """The one place a state is chosen: `closing.state_of`, held by `closing.sticky` — unless
@@ -858,9 +887,22 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines = [ln for ln in lines if not ln.startswith('no evidence found')] + [reset_line(reset)]
         # a merged PR is its own green: a plan's Task never waited on CI to close
         green = bool(iev.get('green')) if commit else bool(merged)
-        settle(iid, 'task', closing.Ev(commit=commit, green=green, merged_sha=merged,
-                                       branch=branch, pr_state=pr_state,
-                                       open_prs=tuple(iev.get('open_prs') or ())), lines)
+        ev_obj = closing.Ev(commit=commit, green=green, merged_sha=merged, branch=branch,
+                            pr_state=pr_state, open_prs=tuple(iev.get('open_prs') or ()))
+        # a typed `landed:` (§2.5, F-0106 C6/C7) hands `reconciled` its sha — Tasks only, and
+        # only a sha the trunk carries: one it does not is a claim, never a close
+        landed = _typed_landed(rec['meta'])
+        if landed and on_trunk(landed):
+            if green_after is None:
+                green_after = _green_after(ev, product)
+            if green_after(landed):
+                ev_obj.landed, ev_obj.green = landed, True
+                lines = lines + [f"typed landed {landed[:9]} on the trunk"]
+            else:
+                lines = lines + [f"typed landed {landed[:9]} on the trunk, no green CI at or after it"]
+        elif landed:
+            lines = lines + [f"typed landed {landed[:9]} is not on the trunk"]
+        settle(iid, 'task', ev_obj, lines, sha=ev_obj.landed or '')
 
     # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
     story_tasks = _story_tasks(canonical)
@@ -891,7 +933,6 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         settle(iid, 'story', ev_obj, lines)
 
     # ---- Bugs: independent of other items
-    green_after = None
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'bug':
             continue

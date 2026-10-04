@@ -243,6 +243,67 @@ class RevertedLanding(_Record):
                          {shas[0][:9]: shas[0]})
 
 
+class TypedLandedReconciles(_Record):
+    """A typed ``landed:`` sha (§2.5) the trunk carries closes the Task by ``reconciled`` and is
+    stamped ``console`` (F-0080, F-0106 C6/C7); one the trunk does not carry closes nothing."""
+
+    def setUp(self):
+        super().setUp()
+        repo = tempfile.mkdtemp(prefix='landing_typed_')
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        # fixed dates: the same shas every run, so a sha's spelling never varies the outcome
+        env = dict(os.environ, GIT_AUTHOR_DATE='2026-01-01T00:00:00Z',
+                   GIT_COMMITTER_DATE='2026-01-01T00:00:00Z')
+
+        def git(*a):
+            return subprocess.run(['git', *a], cwd=repo, capture_output=True, text=True,
+                                  check=True, env=env).stdout.strip()
+        git('init', '-q', '-b', 'main')
+        git('config', 'user.email', 't@example.com')
+        git('config', 'user.name', 't')
+        git('config', 'commit.gpgsign', 'false')
+        git('commit', '-q', '--allow-empty', '-m', 'feat: the work, naming no id')
+        self.on_trunk = git('rev-parse', 'HEAD')
+        git('checkout', '-q', '-b', 'side')
+        git('commit', '-q', '--allow-empty', '-m', 'wip: never merged')
+        self.off_trunk = git('rev-parse', 'HEAD')
+        git('checkout', '-q', 'main')
+        self.product = types.SimpleNamespace(repo_dir=repo, main='main', conventions={})
+
+    def run_ingest(self, ev):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return ingest.ingest_into(self.root, ev, self.product)
+
+    def test_a_typed_landed_sha_on_the_trunk_closes_reconciled_stamped_console(self):
+        short = self.on_trunk[:9]
+        rel = write(self.root, 'T-0001', 'task', typed=(f'landed: {short}',))
+        self.assertTrue(check.LANDED_SHA_RE.fullmatch(short))
+        self.assertEqual(self.run_ingest(dict(EMPTY_EV, main_sha=self.on_trunk)), 0)
+        m = self.machine(rel)
+        self.assertEqual(m['state'], 'Closed')
+        self.assertIn('rule: reconciled', m['evidence'])
+        self.assertEqual((m['landing']['sha'], m['landing']['by']), (self.on_trunk, 'console'))
+
+    def test_a_typed_landed_sha_not_on_the_trunk_closes_nothing(self):
+        rel = write(self.root, 'T-0001', 'task', typed=(f'landed: {self.off_trunk}',))
+        self.assertEqual(self.run_ingest(dict(EMPTY_EV, main_sha=self.on_trunk)), 0)
+        m = self.machine(rel)
+        self.assertEqual(m['state'], 'New')
+        self.assertNotIn('landing', m)
+        self.assertIn(f'typed landed {self.off_trunk[:9]} is not on the trunk', m['evidence'])
+
+    def test_a_typed_landed_sha_with_no_green_ci_after_it_closes_nothing(self):
+        rel = write(self.root, 'T-0001', 'task', typed=(f'landed: {self.on_trunk}',))
+        with mock.patch.object(ingest.evidence, 'ci_green_runs', return_value=[]):
+            self.run_ingest(dict(EMPTY_EV, main_sha=self.on_trunk, ci=True))
+        self.assertEqual(self.machine(rel)['state'], 'New')
+
+    def test_with_no_trunk_read_a_typed_landed_sha_closes_nothing(self):
+        rel = write(self.root, 'T-0001', 'task', typed=(f'landed: {self.on_trunk}',))
+        self.run_ingest(dict(EMPTY_EV))
+        self.assertEqual(self.machine(rel)['state'], 'New')
+
+
 class ReopenClears(_Record):
     def test_reopen_clears_the_landing(self):
         rel = write(self.root, 'T-0001', 'task', machine=(
