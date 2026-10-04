@@ -10,7 +10,9 @@ the same run lines); none writes it.
 **Where the state lives.** On the run line in ``state/<product>/sessions.jsonl``, never a ledger
 of its own: a transition is ``mark_session(job, lane={state, head, pr, at, reason, …})`` on the
 run that owns the branch (:func:`asf.workers.lifecycle.by_branch`: the last run naming a branch
-owns it). Adopting a branch or PR no run made writes a synthetic run. A v0.1.2 binary reading
+owns it). The line names that branch too: one job name can hold runs on two branches (a
+Feature's spec and plan both corrected as ``correct-f-…``), and the fold puts the line on the
+job's run on that branch. Adopting a branch or PR no run made writes a synthetic run. A v0.1.2 binary reading
 the same file ignores the ``lane`` field. Transitions that finish a run still write
 ``harvested:`` / ``correction:`` on it (:func:`asf.workers.lifecycle.hold`).
 
@@ -1216,12 +1218,12 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
             dict(record, branch=branch, job=job), needs, fact,
             f'{text}\nfootprint: the red is outside writes: — needs {" ".join(needs)}',
             now_iso(), tests=tests)
-        H.mark_session(state_dir, job, **fields)
+        H.mark_session(state_dir, job, **fields, branch=branch)
         out(line)
         return 'held'
     fields, line = lifecycle.hold(H.sessions_path(state_dir), dict(record, branch=branch, job=job),
                                   kind, text, now_iso(), head=head, finding=finding, main=main)
-    H.mark_session(state_dir, job, **fields)
+    H.mark_session(state_dir, job, **fields, branch=branch)
     out(line)
     return 'held'
 
@@ -2023,7 +2025,8 @@ class Lane:
                 fh.write(json.dumps(dict(run, lane=rec, **fields), sort_keys=True) + '\n')
             f['run'] = run
             return
-        H.mark_session(self.state_dir, run.get('job') or f['branch'], lane=rec, **fields)
+        H.mark_session(self.state_dir, run.get('job') or f['branch'], lane=rec,
+                       **dict(fields, branch=f['branch']))
 
     def set(self, f, state, reason, result=None, **extra):
         """Record one transition of ``f``'s branch; ``result`` goes in :attr:`results`."""
@@ -2363,7 +2366,8 @@ class Lane:
                                                            f['review'], new,
                                                            trunk=f'origin/{self.trunk}')
         if f.get('correction') and (f['correction'].get('kind') == lifecycle.NAMING):
-            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
+            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None,
+                           branch=b)
             f['correction'] = None
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
@@ -2470,7 +2474,8 @@ class Lane:
                  + f' from {b}: {old[:9]} → {new[:9]}, {len(res["own"])} own commit(s) on '
                  f'origin/{self.trunk} ({self.trunk_sha_now()[:9]}); old tip kept as {archive}')
         if corr.get('kind') in (lifecycle.NAMING, COPIES, 'merge'):
-            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
+            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None,
+                           branch=b)
             f['correction'] = None
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
@@ -2768,7 +2773,7 @@ class Lane:
             if f.get('run') is None:
                 self.write(f, self.record(f, PUSHED, 'adopted'))
             if f.get('correction'):  # the mechanical hold gives way to the check's
-                H.mark_session(self.state_dir, f['run'].get('job') or b, correction=None)
+                H.mark_session(self.state_dir, f['run'].get('job') or b, correction=None, branch=b)
             rec = self.set(f, BACK, 'kind=gate')
             self.results[b] = hold_with_correction(self.state_dir, b, f['run'], 'gate', text,
                                                    self.out, head=old, main=self.trunk)
@@ -2778,7 +2783,8 @@ class Lane:
         if not archive:
             return None
         if f.get('correction'):
-            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
+            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None,
+                           branch=b)
             f['correction'] = None
         f['checks_red'] = None
         tp = {'from': src, 'head': new, 'review': appr['path'], 'round': appr['round'],
@@ -3331,7 +3337,7 @@ def send_back(lane, f, kind, text, files, rebase=True):
             lane.set(f, PUSHED, f'rebased onto {lane.trunk} by the lane (no session)')
             corr = f.get('correction') or {}
             if corr.get('kind') in ('conflict', lifecycle.NAMING, COPIES, 'merge'):
-                H.mark_session(lane.state_dir, run.get('job') or b, correction=None)
+                H.mark_session(lane.state_dir, run.get('job') or b, correction=None, branch=b)
                 f['correction'] = None
             lane.results[b] = 'rebased'
             return 'rebased'
@@ -3353,7 +3359,7 @@ def send_back(lane, f, kind, text, files, rebase=True):
         job = run.get('job') or b
         fields, line = lifecycle.hold(lane.path, dict(run, branch=b, job=job), LANDING_GATE, note,
                                       now_iso(), head=f.get('head'), main=lane.trunk)
-        H.mark_session(lane.state_dir, job, **fields)
+        H.mark_session(lane.state_dir, job, **fields, branch=b)
         lane.out(line)
         lane.results[b] = 'held'
         return 'held'

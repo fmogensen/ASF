@@ -299,8 +299,23 @@ def fold(lines):
         if is_launch(rec) or job not in runs:
             runs.setdefault(job, []).append(dict(rec))
         else:
-            runs[job][-1].update(rec)
+            _run_of(runs[job], rec.get('branch')).update(rec)
     return {job: [_clean(r) for r in rs] for job, rs in runs.items()}
+
+
+def _run_of(rs, branch):
+    """The run of one job an update line lands on: the latest one, unless the line names a
+    branch the latest run is not on and an earlier run of the job is — then that run. One job
+    name launched on two branches (a Feature's spec and plan corrected as ``correct-f-…``) left
+    the earlier branch's lane record on the later branch's run, and the two swapped every tick
+    (a product's F-0011)."""
+    latest = rs[-1]
+    if not branch or not isinstance(branch, str) or latest.get('branch') == branch:
+        return latest
+    for r in reversed(rs):
+        if r.get('branch') == branch:
+            return r
+    return latest
 
 
 #: ``{(path, ASF_HOME): _Folded}`` — the registry folded once per *content*: every question the

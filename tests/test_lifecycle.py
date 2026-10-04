@@ -110,6 +110,22 @@ class RegistryFoldInvariants(unittest.TestCase):
         lines = [{'job': 'j', 'harvested': 'sha', 'correction': None}]
         self.assertEqual(lc.fold(lines), {'j': [{'job': 'j', 'harvested': 'sha'}]})
 
+    def test_an_update_naming_its_branch_lands_on_that_branchs_run_of_the_job(self):
+        """A product's F-0011: one job name launched on the spec branch, then on the plan
+        branch. An update line naming the spec branch is the spec run's, not the job's latest
+        (the plan run): read as the latest, the two branches' lane records swapped every tick."""
+        lines = [{'job': 'j', 'pid': 1, 'started': 't1', 'branch': 'spec/F'},
+                 {'job': 'j', 'pid': 2, 'started': 't2', 'branch': 'plan/F'},
+                 {'job': 'j', 'branch': 'spec/F', 'lane': {'state': 'REVIEW', 'head': 's'}},
+                 {'job': 'j', 'branch': 'plan/F', 'lane': {'state': 'GATE', 'head': 'p'}},
+                 {'job': 'j', 'harvested': 'x'},             # no branch: the latest, as before
+                 {'job': 'j', 'branch': 'gone/F', 'note': 'n'}]  # no run on it: the latest
+        spec, plan = lc.fold(lines)['j']
+        self.assertEqual(spec['lane'], {'state': 'REVIEW', 'head': 's'})
+        self.assertEqual(plan['lane'], {'state': 'GATE', 'head': 'p'})
+        self.assertEqual((spec.get('harvested'), plan.get('harvested')), (None, 'x'))
+        self.assertEqual((spec['branch'], plan['branch']), ('spec/F', 'gone/F'))
+
     def test_by_branch_is_the_last_launch_naming_the_branch(self):
         lines = [{'job': 'fix-b-0001', 'pid': 1, 'started': 't1', 'branch': 'fix/B-0001', 'item': 'B-0001'},
                  {'job': 'fix-b-0001', 'ended': 't2', 'end_reason': 'finished'},
