@@ -445,10 +445,14 @@ class IdleBranchTests(unittest.TestCase):
 
     def test_not_idle_when_something_holds_it(self):
         self.assertNotIn('T-0362', self.rows_for(inflight=[{'item': 'T-0362'}]))   # a live session
+        # pushed, or a PR open: no coder again — the one row is a WAITS ON landing (pushed
+        # work is never silent, tests/test_pushed_work.py)
         occ = {'waiting_landing': {'T-0362': 'pushed, waiting to land'}}
-        self.assertNotIn('T-0362', self.rows_for(occupancy=occ))                    # pushed
+        r = self.rows_for(occupancy=occ)['T-0362']                                  # pushed
+        self.assertEqual((r.kind, r.launches), (rows.PUSHED_LAND, False))
         pr = self.index(**{'T-0362': {'evidence': ['branch cloud/T-0362, PR #7 OPEN']}})
-        self.assertNotIn('T-0362', self.rows_for(pr))                               # a PR
+        r = self.rows_for(pr)['T-0362']                                             # a PR
+        self.assertEqual((r.kind, r.launches), (rows.PUSHED_LAND, False))
         corr = {'corrections': {'T-0362': {'kind': 'gate', 'rounds': 1, 'same': 1, 'text': 'red',
                                            'branch': 'cloud/T-0362', 'at': '2026-01-01T00:00:00Z'}}}
         by = self.rows_for(occupancy=corr)
