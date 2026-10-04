@@ -21,7 +21,7 @@ import os
 import re
 import subprocess
 
-from asf import env
+from asf import env, reservations
 from asf.briefs import preamble
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
@@ -348,9 +348,10 @@ def predecessor(product, item_id, branch, kind):
 
 
 def repo_facts(product, row, index, inflight=None):
-    """The nine keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all nine."""
+    """The ten keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all ten."""
     facts = {'head': '', 'branch_exists': False, 'files': {}, 'tests': [], 'last_report': '',
-             'outlines': {}, 'commits': {'total': 0, 'lines': []}, 'progress': '', 'relaunch': {}}
+             'outlines': {}, 'commits': {'total': 0, 'lines': []}, 'progress': '', 'relaunch': {},
+             'reservations': reservations.load(env.state_dir(product))}
     plain = preamble.collect(product, row, index, inflight)
     item_id = getattr(row, 'item_id', '') or ''
     main = getattr(product, 'main', 'main')

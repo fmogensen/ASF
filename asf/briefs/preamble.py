@@ -26,6 +26,7 @@ import os
 import re
 
 from asf import proves as proves_mod
+from asf import reservations
 from asf.conventions import Conventions
 from asf.feeder import rows as feeder_rows
 from asf.record import frontmatter
@@ -232,7 +233,7 @@ STORY_KINDS = ('spec', 'spec-amend', 'plan', 'review', 'adjudicate', 'spec-plan'
 #: equal — the drift between what a caller fills and what the preamble reads is the defect that
 #: left every brief printing ``(not known here)``.
 REPO_FACT_KEYS = ('head', 'branch_exists', 'files', 'tests', 'last_report', 'outlines',
-                  'commits', 'progress', 'relaunch')
+                  'commits', 'progress', 'relaunch', 'reservations')
 
 
 def _strip_rev(value):
@@ -462,6 +463,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'commits': dict((repo_facts or {}).get('commits') or {}),
         'progress': (repo_facts or {}).get('progress') or '',
         'relaunch': dict((repo_facts or {}).get('relaunch') or {}),
+        'reservations': dict((repo_facts or {}).get('reservations') or {}),
         'inflight': list(inflight or []),
     }
 
@@ -570,6 +572,14 @@ def state_lines(product, facts):
     out += [f"Writes (the footprint this job may touch): "
             f"{', '.join(facts['writes']) if facts['writes'] else '(none declared)'}",
             f"Tests named by the card: {tests}"]
+    if conventions(product).map_of('sequences'):
+        snap = facts.get('reservations') or {}
+        if not snap:
+            out.append(f"Reserved in flight: {UNKNOWN}")
+        else:
+            lines = reservations.brief_lines(snap)
+            out.append('Reserved in flight: '
+                       + ('; '.join(lines) + ' — book past these' if lines else NONE))
     if facts.get('merged'):
         out.append(f"Also delivers: {', '.join(facts['merged'])} — their sections of "
                    f"{facts['plan_path']}, acceptance byte-identical")
