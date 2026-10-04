@@ -717,6 +717,18 @@ def check_product_warnings(product):
     return rows or [(True, 'no unknown keys, no unknown flags')]
 
 
+def check_config_keys(cfg):
+    """[('warn', detail)] — the ``config keys`` row: the keys of ``config.yaml`` no code reads
+    (:func:`asf.config_keys.unknown_keys`), one row naming them all; none when there are none.
+    A key nothing reads does nothing, so a ``warn`` and never red."""
+    from asf import config_keys
+    unknown = config_keys.unknown_keys(cfg)
+    if not unknown:
+        return []
+    return [('warn', f'config.yaml: {", ".join(unknown)} — not read by this release (a setting '
+                     f'that silently does nothing: remove it, or see asf.config_keys)')]
+
+
 def check_cli_dispatcher(product, path=None, timeout=60):
     """[(required, ok, detail)] — the CLI every hook and session calls (``~/.local/bin/asf``,
     :mod:`asf.dispatch`) resolves this product into its pin. The dispatcher is run with
@@ -1279,6 +1291,8 @@ def run(product_name):
         rows.append(('agent homes asf', required, ok, detail))
     for ok, detail in check_product_warnings(product):
         rows.append(('product', False, ok, detail))
+    for level, detail in check_config_keys(cfg):
+        rows.append(('config keys', False, level, detail))
     net = check_network(cfg)
     if net is not None:
         rows.append(('network', False, net[0], net[1]))
