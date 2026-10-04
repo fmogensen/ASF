@@ -698,6 +698,8 @@ def product_problems(text):
     from asf.workers import cloud  # `cloud:`: a refused runtime refuses the file (asf.workers.cloud)
     for dotted, why in cloud.config_problems(data.get('cloud')):
         problems.append((lines.get('cloud', 0), dotted, why))
+    for dotted, why in _capacity_problems(data.get('capacity')):
+        problems.append((lines.get(dotted, lines.get('capacity', 0)), dotted, why))
     for dotted, why in _deploy_problems(data.get('deploy_sha')):
         problems.append((lines.get('deploy_sha', 0), dotted, why))
     from asf import ci_pool  # `ci.pool`: every runner's fields, its role a capability (asf.ci_pool)
@@ -714,6 +716,20 @@ def product_problems(text):
         dotted = 'conventions.' + key
         problems.append((lines.get('conventions.' + key.split('.')[0], 0), dotted, why))
     return sorted(problems), sorted(warnings)
+
+
+def _capacity_problems(block):
+    """``capacity.sessions`` is a count or ``auto`` (sized off the host, :mod:`asf.capacity`;
+    its cap is the operator's ``capacity.sessions_ceiling`` — no new product-file key, so a
+    product pinned to an older reader still loads)."""
+    if not isinstance(block, dict):
+        return []
+    out = []
+    v = block.get('sessions')
+    if v is not None and not ((isinstance(v, int) and not isinstance(v, bool) and v >= 0)
+                              or (isinstance(v, str) and v.strip().lower() == 'auto')):
+        out.append(('capacity.sessions', f'must be a count or auto, not {v!r}'))
+    return out
 
 
 def key_line(path, dotted):
