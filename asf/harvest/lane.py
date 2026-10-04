@@ -1894,8 +1894,10 @@ class Lane:
 
     def ref_gone(self, branch):
         """True when ``origin`` holds no ``branch`` — a delete already done counts as done."""
-        r = H.sh(['git', 'ls-remote', '--heads', 'origin', branch], cwd=self.repo)
-        return r.returncode == 0 and not r.stdout.strip()
+        from asf import gitops  # the exact ref: ``archive/<branch>`` is not ``<branch>``
+        r = H.sh(['git', 'ls-remote', '--heads', 'origin', gitops.head_ref(branch)],
+                 cwd=self.repo)
+        return r.returncode == 0 and not gitops.head_sha(r.stdout, branch)
 
     def guarded(self, target, what):
         """The :mod:`asf.refguard` line refusing a factory write of ``what`` to ``target`` (the

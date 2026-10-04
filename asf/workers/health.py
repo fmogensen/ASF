@@ -297,8 +297,7 @@ def pushed(worktree, branch):
         return False, 'not a git worktree'
     if st.stdout.strip():
         return False, 'uncommitted changes'
-    ls = _git(['ls-remote', '--heads', 'origin', branch], worktree)
-    remote = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    remote = lifecycle.remote_head(worktree, branch)
     if not remote:
         return False, 'branch not pushed'
     if _git(['merge-base', '--is-ancestor', 'HEAD', remote], worktree).returncode != 0:
