@@ -194,8 +194,9 @@ def build_parser():
     p_inbox.add_argument('--product')
 
     p_set = sub.add_parser('set', help='write typed fields of a card through the parser')
-    p_set.add_argument('id')
-    p_set.add_argument('assignments', nargs='+', metavar='FIELD=VALUE')
+    p_set.add_argument('id', help='the card; more ids may follow, then FIELD=VALUE…: '
+                                  'one commit sets the fields on all of them')
+    p_set.add_argument('assignments', nargs='+', metavar='[ID…] FIELD=VALUE')
     p_set.add_argument('--product')
 
     p_reopen = sub.add_parser(
@@ -499,9 +500,11 @@ def _main(argv=None):
         from asf.groom.inbox import cmd_inbox
         return cmd_inbox(args, resolve_record(args, announce=_announce_stderr))
     if args.command == 'set':
-        from asf.record.setfield import cmd_set
+        from asf.record.setfield import cmd_set, split_targets
+        ids = split_targets(args)[0]
+        label = args.id if len(ids) == 1 else f"{ids[0]} +{len(ids) - 1} more"
         return _published(cmd_set, args, resolve_record(args, announce=_announce_stderr),
-                          f"record: set {args.id}")
+                          f"record: set {label}")
     if args.command == 'reopen':
         from asf.record.reopen import cmd_reopen
         return _published(cmd_reopen, args, resolve_record(args, announce=_announce_stderr),

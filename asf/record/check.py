@@ -18,6 +18,7 @@ from asf.record.core import (
     is_open, load_items, parse_sections, title_scrub, today,
 )
 from asf.record.index import entry_relpath
+from asf.record.new import BOOL_FIELDS
 from asf.redact import _run_git
 
 ACCEPTANCE_ITEM_RE = re.compile(r'(?m)^- \[[ x]\]\s+\S')
@@ -280,6 +281,11 @@ def record_findings(root, scrub=None, layout=True, shared=()):
         for b in as_list(meta.get('blockedBy')):
             if isinstance(b, str) and ID_RE.match(b) and b not in canonical:
                 add(rec, find_line(rec, 'blockedBy'), f"blockedBy references missing item {b}")
+        # local_only is a boolean: the cloud lane's routing reads it as one
+        for flag in BOOL_FIELDS:
+            if flag in meta and not isinstance(meta[flag], bool):
+                add(rec, find_line(rec, flag),
+                    f"{flag} must be true or false, got {meta[flag]!r}")
         # stories: (Task)
         for s in meta.get('stories') or []:
             if isinstance(s, str) and s not in canonical:
