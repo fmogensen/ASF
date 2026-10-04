@@ -72,7 +72,7 @@ class WithVenvTests(Fixture):
         self.assertEqual(seen['snap'], snap)
         self.assertEqual(seen['other'], os.path.join(self.home, 'state', 'other'))
         self.assertEqual(seen['config'], os.path.join(self.home, 'config.yaml'))
-        self.assertEqual(seen['files'], ['record', 'worktrees'])
+        self.assertEqual(seen['files'], ['record', 'trunk-merge', 'turbo-cache', 'worktrees'])
         self.assertEqual(os.listdir(os.path.join(snap, 'worktrees')), [])  # never copied
         self.assertTrue(os.path.isdir(snap), 'the caller owns --state-copy')
 
@@ -107,6 +107,51 @@ class WithVenvTests(Fixture):
         self.addCleanup(shutil.rmtree, tmp, True)
         self.assertTrue(os.path.exists(os.path.join(copy, 'marker')))
         self.assertFalse(os.path.exists(os.path.join(self.home, 'state', 'sample', 'marker')))
+
+    def test_heavy_caches_are_not_copied_and_a_failed_copy_leaves_no_temp_dir(self):
+        real = os.path.join(self.home, 'state', 'sample')
+        os.makedirs(os.path.join(real, 'trunk-merge'))
+        with open(os.path.join(real, 'trunk-merge', 'big'), 'wb') as f:
+            f.truncate(40 * 1024 ** 3)  # sparse: no real disk
+        os.makedirs(os.path.join(real, 'turbo-cache'))
+        with open(os.path.join(real, 'turbo-cache', 'big'), 'wb') as f:
+            f.truncate(1024 ** 3)
+        tmp, copy = dry_run._copy_state(self.product)
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.assertTrue(os.path.exists(os.path.join(copy, 'record', 'index.json')))
+        self.assertEqual(os.listdir(os.path.join(copy, 'trunk-merge')), [])
+        self.assertEqual(os.listdir(os.path.join(copy, 'turbo-cache')), [])
+        self.assertLess(dry_run._tree_size(real), 1024 ** 2)
+        # a copy that would leave too little free is refused, and its temp dir is removed
+        made = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def mk(*a, **k):
+            made.append(real_mkdtemp(*a, **k))
+            return made[-1]
+
+        with mock.patch.object(dry_run, 'MIN_FREE_BYTES', 1 << 62), \
+                mock.patch.object(tempfile, 'mkdtemp', mk):
+            with self.assertRaises(dry_run.CopyRefused) as cm:
+                dry_run._copy_state(self.product)
+        self.assertIn('state copy refused', str(cm.exception))
+        self.assertTrue(made)
+        self.assertFalse(any(os.path.exists(m) for m in made))
+
+    def test_a_failing_copy_removes_its_temp_dir(self):
+        made = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def mk(*a, **k):
+            made.append(real_mkdtemp(*a, **k))
+            return made[-1]
+
+        with mock.patch.object(dry_run.shutil, 'copytree', side_effect=OSError('No space left')), \
+                mock.patch.object(tempfile, 'mkdtemp', mk):
+            with self.assertRaises(OSError):
+                dry_run._copy_state(self.product)
+        self.assertTrue(made)
+        self.assertFalse(any(os.path.exists(m) for m in made))
 
     def test_cmd_tick_routes_with_venv_and_refuses_it_without_dry_run(self):
         args = tick.register(__import__('argparse').ArgumentParser().add_subparsers()) \

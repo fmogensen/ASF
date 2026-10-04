@@ -63,6 +63,7 @@ state as its pair (the ``ab-dry-run.sh`` tool: the pinned venv and a candidate, 
 """
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -72,11 +73,73 @@ from asf import env
 
 #: Left out of the copy: the worker worktrees are full product checkouts (tens of GB, with
 #: symlinked dependency trees) that no dry-run step reads; the copy gets an empty dir in their
-#: place, so nothing it runs can reach a live session's checkout either.
-_NOT_COPIED = ('worktrees',)
+#: place, so nothing it runs can reach a live session's checkout either. ``trunk-merge`` (a
+#: 30 GB merge-queue checkout) and ``turbo-cache`` are the same: heavy caches, never read.
+_NOT_COPIED = ('worktrees', 'trunk-merge', 'turbo-cache')
+
+#: A copy never leaves less than this free on the target filesystem.
+MIN_FREE_BYTES = 10 * 1024 ** 3
+
+
+class CopyRefused(RuntimeError):
+    """The copy would not fit with :data:`MIN_FREE_BYTES` to spare."""
+
+
+def _tree_size(path, skip=_NOT_COPIED):
+    """Bytes the copy of ``path`` would occupy: allocated blocks, symlinks counted not followed,
+    the top-level ``skip`` names left out."""
+    total = 0
+    stack = [(path, True)]
+    while stack:
+        d, top = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            if top and e.name in skip:
+                continue
+            try:
+                st = e.stat(follow_symlinks=False)
+                total += getattr(st, 'st_blocks', 0) * 512 or st.st_size
+                if e.is_dir(follow_symlinks=False):
+                    stack.append((e.path, False))
+            except OSError:
+                continue
+    return total
+
+
+def _check_space(src, dest_parent, min_free=None):
+    need = _tree_size(src)
+    free = shutil.disk_usage(dest_parent).free
+    floor = MIN_FREE_BYTES if min_free is None else min_free
+    if free - need < floor:
+        gb = 1024 ** 3
+        raise CopyRefused(
+            f'state copy refused: {src} needs {need / gb:.1f} GB, {dest_parent} has '
+            f'{free / gb:.1f} GB free; the copy would leave under {floor / gb:.0f} GB free')
+    return need
+
+
+class _TermAsExit:
+    """SIGTERM raises SystemExit for the life of this object (main thread only), so the
+    ``finally`` that removes a temp dir runs on a kill as it does on Ctrl-C."""
+
+    def __enter__(self):
+        self._old = None
+        try:
+            self._old = signal.signal(signal.SIGTERM, lambda _n, _f: sys.exit(143))
+        except ValueError:  # not the main thread
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        if self._old is not None:
+            signal.signal(signal.SIGTERM, self._old)
 
 
 def _copy_tree(src, dest):
+    _check_space(src, os.path.dirname(os.path.abspath(dest)))
     shutil.copytree(src, dest, symlinks=True, ignore=shutil.ignore_patterns(*_NOT_COPIED))
     for name in _NOT_COPIED:
         os.makedirs(os.path.join(dest, name), exist_ok=True)
@@ -91,7 +154,8 @@ def _copy_state(product, source=None):
     tmp = tempfile.mkdtemp(prefix='asf-dry-run-')
     copy_path = os.path.join(tmp, 'state')
     try:
-        _copy_tree(real, copy_path)
+        with _TermAsExit():
+            _copy_tree(real, copy_path)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -141,7 +205,8 @@ def run_with_venv(product, venv, fresh=False, state_copy=None, run=subprocess.ru
         return 2
     base = tempfile.mkdtemp(prefix='asf-dry-run-venv-')
     try:
-        snap = snapshot(product, state_copy or os.path.join(base, 'snapshot'))
+        with _TermAsExit():
+            snap = snapshot(product, state_copy or os.path.join(base, 'snapshot'))
         home = shadow_home(product.name, snap, base)
         child = {k: v for k, v in os.environ.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
         child['ASF_HOME'] = home

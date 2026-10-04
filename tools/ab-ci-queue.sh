@@ -19,6 +19,8 @@ venv_b=$(ab_venv "$product" "$b") || exit 2
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/asf-ab-ci-queue.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 view() {  # <venv> <out>
   (cd / && env -u PYTHONPATH -u PYTHONHOME "$1/bin/python" -m asf.cli ci queue \
