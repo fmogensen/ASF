@@ -86,6 +86,17 @@ alone rather than overwritten. The files keep their shape; an older venv still r
 store only once every product under `products/` sets it, and the store refuses the write,
 naming the products that have not, until then.
 
+`i14: off | report | refuse` (default `off`) is invariant I14, a close needs a landing fact: a
+Task, Bug or Story a record writer moves to Resolved/Closed must carry a `landing:` stamp whose
+`sha` is a full sha on `origin/<main>` (the trunk is fetched first; a sha git still lacks defers
+the close, it is never judged), stamped after the card's last reopen, not voided by `asf reset`;
+a `trunkclose/covers` stamp also needs its run's REPORT `done`, no open work with gh known, and
+the covering commit newer than the card. `report` prints `INVARIANT I14 (report): …`, appends
+one record to `state/<product>/invariants-report.jsonl` and lets the write stand (the count is
+the `I14` row of `asf status` and `i14_report_lines` in `asf scorecard`); `refuse` puts the
+card back together with the parents the same writer resolved on it. `asf check --invariants`
+lists the findings in either mode.
+
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.

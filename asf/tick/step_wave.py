@@ -599,7 +599,7 @@ def relaunch_capped(product, row, wrow, out=print):
     if hit:
         # the park would only ask a person to close what git already proves landed
         sha, run, _claim = hit
-        trunkclose.close(product, run['job'], sha, reason)
+        trunkclose.close(product, run['job'], sha, reason, run.get('trunk_arm', ''))
         out(f'closed   {wrow.job:<24} {wrow.item:<10} — landed: {sha[:9]} (verified on '
             f'origin/{product.main}); not relaunched, not parked')
         return True

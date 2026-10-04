@@ -65,6 +65,18 @@ def register(key, producer):
     _PRODUCERS[key] = producer
 
 
+def _i14_report_lines(ctx):
+    """``i14_report_lines`` — invariant I14's report records in the window
+    (:func:`asf.invariants.i14_report_lines`); ``None`` without a product."""
+    if ctx.get('product') is None:
+        return None
+    from asf import invariants
+    return invariants.i14_report_lines(ctx['product'], ctx['start'], ctx['end'])
+
+
+register('i14_report_lines', _i14_report_lines)
+
+
 # ------------------------------------------------------------ classes --
 
 def end_class(reason):
@@ -194,12 +206,13 @@ def idle_hours(starts, start, end, gap_h=IDLE_GAP_H):
     return round(total, 2)
 
 
-def row(runs, start, end, *, heavy=(), offline=None, board=None, extra_starts=()):
+def row(runs, start, end, *, heavy=(), offline=None, board=None, extra_starts=(), product=None):
     """The program row over ``[start, end)``.
 
     ``runs`` — :func:`ledger_runs`; ``heavy`` — the heavy model ids; ``offline`` —
     :func:`offline_lines` (``None``: not read); ``board`` — plan rows as dicts (``None``: not
-    read); ``extra_starts`` — other products' launch stamps for ``idle_hours`` (``--all``)."""
+    read); ``extra_starts`` — other products' launch stamps for ``idle_hours`` (``--all``);
+    ``product`` — for the keys read from its state files (``None``: not read)."""
     heavy = set(heavy)
     win = [r for r in runs if (d := to_dt(r.get('started'))) is not None and start <= d < end]
     usd = sum(r['_usd'] or 0.0 for r in win)
@@ -251,7 +264,8 @@ def row(runs, start, end, *, heavy=(), offline=None, board=None, extra_starts=()
         out['top_roots'] = top_roots[:8]
         out['reviews_held_after'] = sum(1 for r in board if r.get('item_id') in dep
                                         and str(r.get('brief_kind') or '') == 'review')
-    ctx = {'runs': runs, 'window': win, 'start': start, 'end': end, 'board': board}
+    ctx = {'runs': runs, 'window': win, 'start': start, 'end': end, 'board': board,
+           'product': product}
     for key in PENDING:
         out[key] = None
     for key, producer in _PRODUCERS.items():
@@ -342,7 +356,7 @@ def load(product, start, end, *, board=True, others=()):
     for p in others:
         extra += [r['started'] for r in ledger_runs(pool.sessions_path(p))]
     return row(runs, start, end, heavy=heavy_models(), offline=offline_lines(_tick_logs(product)),
-               board=_board(product) if board else None, extra_starts=extra)
+               board=_board(product) if board else None, extra_starts=extra, product=product)
 
 
 def dumps(d):

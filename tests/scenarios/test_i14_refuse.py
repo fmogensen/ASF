@@ -12,8 +12,7 @@ write, and reads the card **on disk**.
 I14 (W4-PR3b) accepts a close whose landing is sound and puts back the rest: a ``covers``
 attribution on a commit older than the card (S-M16), a landing an ``asf reset`` voided (W4-PR5),
 a landing the trunk reverted (S-M15). :data:`REFUSE_ROWS` is ``(path, behaviour, expected, gap,
-edit)``, read as in ``test_close_paths.py``: until W4-PR3b lands every row it must refuse still
-closes, and says so.
+edit)``, read as in ``test_close_paths.py``; W4-PR3b closed every gap this table named.
 """
 import re
 import unittest
@@ -36,15 +35,15 @@ REFUSE_ROWS = (
     (CP, 'close-unmerged', 'decoy', None, None),
     (RC, 'close-unmerged', 'decoy', None, None),
     # ... and is put back when the card is newer than the commit said to cover it
-    (CB, 'close-unmerged', 'none', 'W4-PR3b', 'card-after-cover'),
-    (CP, 'close-unmerged', 'none', 'W4-PR3b', 'card-after-cover'),
-    (RC, 'close-unmerged', 'none', 'W4-PR3b', 'card-after-cover'),
+    (CB, 'close-unmerged', 'none', None, 'card-after-cover'),
+    (CP, 'close-unmerged', 'none', None, 'card-after-cover'),
+    (RC, 'close-unmerged', 'none', None, 'card-after-cover'),
     # the record's own close on the host's merged PR stands; on a voided or a reverted landing
     # it is put back
     (IN, 'merged', 'closes', None, None),
     (IN, 'open', 'closes', None, 'attested-sha'),
     (IN, 'merged', 'none', None, 'voided-landing'),  # W4-PR5: the ingest never closes it
-    (IN, 'open', 'none', 'W4-PR3b', 'revert'),
+    (IN, 'open', 'none', None, 'revert'),
     # nothing to refuse: open work, and a host that answers nothing
     (IN, 'open', 'none', None, None),
     (IN, 'rate-limit', 'none', None, None),

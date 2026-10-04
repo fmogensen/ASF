@@ -156,6 +156,7 @@ class BeforeLaunchTests(_Repo):
         self.assertIn('(verified)', fields['trunk_closed'])
         self.assertIsNone(fields['correction'])
         self.assertTrue(lines[0].startswith('closed   coder-t-0332'), lines)
+        self.assertEqual(fields['trunk_arm'], 'names')  # the stamp's `by: trunkclose/names`
         # closed once: the landed run is no new evidence
         self.assertFalse(trunkclose.closes_before_launch(self.product, 'coder', self.ITEM,
                                                          lines.append))
@@ -326,8 +327,11 @@ class AttributionTests(_Repo):
         self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
         self.run_once(report('done', f'on origin/main at {sweep[:9]}'), head=self.head)
         self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False))
-        self.assertEqual(trunkclose.evidence(self.path, self.ITEM, self.repo,
-                                             writes=['apps/panel.tsx'], ask_gh=False)[0], sweep)
+        sha, run, _claim = trunkclose.evidence(self.path, self.ITEM, self.repo,
+                                               writes=['apps/panel.tsx'], ask_gh=False)
+        self.assertEqual((sha, run['trunk_arm']), (sweep, 'covers'))
+        self.assertEqual(landing.attribution(self.repo, 'main', sweep, self.ITEM,
+                                             ['apps/panel.tsx']), 'covers')
         self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False,
                                               writes=['apps/panel.tsx', 'apps/other.tsx']))
 
@@ -341,9 +345,13 @@ class AttributionTests(_Repo):
                    {'job': 'coder-t-0042', 'ended': '2026-09-30T04:30:00Z',
                     'end_reason': 'finished'})
         self.run_once(report('done', f'on origin/main at {merged[:9]}'), head=self.head)
-        self.assertEqual(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False)[0],
-                         merged)
+        sha, run, _claim = trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False)
+        self.assertEqual((sha, run['trunk_arm']), (merged, 'pr'))
         self.assertFalse(landing.names(self.repo, 'main', merged, self.ITEM, prs=['903']))
+        text = report('done', f'on origin/main at {merged[:9]}')
+        self.assertEqual(trunkclose.trunk_sha(self.repo, 'main', {}, text, self.ITEM,
+                                              prs=['902']), (merged[:9], 'pr'))
+        self.assertEqual(trunkclose.trunk_sha(self.repo, 'main', {}, text, self.ITEM), ('', ''))
 
     def test_a_report_commit_on_the_trunk_does_not_name_its_item(self):
         self.commit('asf(T-0042): report correct-t-0042\n\nREPORT\nitem: T-0042\n\n'
