@@ -792,6 +792,28 @@ class TrunkReleases(Base):
         self.assertTrue(self.changelog().startswith('# Changelog'))
         self.assertIn(f'## v0.1.0 — {DAY}\n\n{notes}', self.changelog() + '\n')
 
+    def test_under_refguard_refuse_the_changelog_goes_up_as_a_pr(self):
+        """``flags.refguard: refuse`` with a person merging (``merge: manual``): the changelog
+        commit never goes to the trunk — it is pushed to its own branch and put up as a PR."""
+        self.product.conventions.extra['flags'] = {'refguard': 'refuse'}
+        gh = mock.Mock(return_value=mock.Mock(ok=True, stderr='', stdout=''))
+        with mock.patch.object(metrics.github, 'gh', gh):
+            self.release()
+        self.assertNotIn('CHANGELOG.md', _git(self.origin, 'ls-tree', '--name-only', 'main'))
+        log = _git(self.origin, 'show', f'{metrics.CHANGELOG_BRANCH}:CHANGELOG.md')
+        self.assertIn('## v0.1.0', log)
+        (call,) = [c for c in gh.call_args_list if c.args[0][:2] == ['pr', 'create']]
+        args = call.args[0]
+        self.assertEqual(args[args.index('--head') + 1], metrics.CHANGELOG_BRANCH)
+        self.assertEqual(args[args.index('--base') + 1], 'main')
+        self.assertEqual(args[args.index('-R') + 1], 'x/y')
+
+    def test_under_merge_auto_the_changelog_push_is_a_door(self):
+        self.product.conventions.extra['flags'] = {'refguard': 'refuse'}
+        self.product.conventions.merge = 'auto'
+        self.release()
+        self.assertIn('## v0.1.0', self.changelog())
+
     def test_the_changelog_is_newest_first_and_idempotent(self):
         self.release()
         self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')

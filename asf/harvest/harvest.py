@@ -484,7 +484,9 @@ def push_ff(repo, sha, trunk='main'):
     anc = sh(['git', 'merge-base', '--is-ancestor', origin_sha, sha], cwd=repo)
     if anc.returncode != 0:
         return False, True
-    push = gitpush.push(['origin', f'{sha}:refs/heads/{trunk}'], repo)
+    # the landing path built to advance the trunk: a door
+    push = gitpush.push(['origin', f'{sha}:refs/heads/{trunk}'], repo,
+                        guard=refguard.Guard(trunk, door=True))
     return push.returncode == 0, False
 
 
@@ -512,7 +514,8 @@ def push_branch(repo, sha, branch, expected, main='main', protected=None):
         if lost is None or lost:
             return False, lifecycle.loss_refusal(branch, lost)
     push = gitpush.push([f'--force-with-lease=refs/heads/{branch}:{expected}', 'origin',
-                         f'{sha}:refs/heads/{branch}'], repo)
+                         f'{sha}:refs/heads/{branch}'], repo,
+                        guard=refguard.Guard(main, protected))
     if push.returncode != 0:
         return False, f'push branch failed: {tail(push.stderr or push.stdout)}'
     return True, None

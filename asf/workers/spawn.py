@@ -325,7 +325,7 @@ def _archive_tip(product, repo, branch, tip, timeout):
     if refguard.refusal(ref, f'archive {branch}', product.main, None):
         raise SpawnError(f'retire {branch} refused: {ref} is a protected ref')
     r = gitpush.push(['-q', 'origin', f'{tip}:refs/heads/{ref}'], repo, refs_only=True,
-                     timeout=timeout)
+                     timeout=timeout, guard=refguard.guard_for(product, repo))
     have = _git(['ls-remote', '--heads', 'origin', f'refs/heads/{ref}'], repo).split()
     if r.returncode != 0 or tip not in have:
         raise SpawnError(f'retire {branch} refused: {tip[:9]} could not be archived to {ref}: '
@@ -358,7 +358,8 @@ def _archive_unpushed(product, repo, holder, branch):
         if refguard.refusal(ref, f'archive {branch}', product.main, None):
             raise SpawnError(f'reclaim of {holder} refused: {ref} is a protected ref')
         r = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{ref}'], repo, refs_only=True,
-                         timeout=gitpush.push_timeout(getattr(product, 'conventions', None)))
+                         timeout=gitpush.push_timeout(getattr(product, 'conventions', None)),
+                         guard=refguard.guard_for(product, repo))
         if r.returncode != 0:
             raise SpawnError(f'reclaim of {holder} refused: {sha[:9]} could not be archived '
                              f'to {ref}: {(r.stderr or "").strip()}')
@@ -477,7 +478,7 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
         have = _git(['ls-remote', '--tags', 'origin', f'refs/tags/{tag}'], repo).split()
     if dead not in have:
         r = gitpush.push(['-q', 'origin', f'{dead}:refs/tags/{tag}'], repo, refs_only=True,
-                         timeout=limit)
+                         timeout=limit, guard=refguard.guard_for(product, repo))
         if r.returncode != 0:
             raise SpawnError(f'retire {branch} refused: {dead[:9]} could not be kept as {tag}: '
                              f'{(r.stderr or "").strip()}')
@@ -503,7 +504,8 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
                   f'rebased copy); archived as {ref}', file=sys.stderr)
         _git(['branch', '-D', branch], repo)
     r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{branch}:{dead}', 'origin',
-                      f':refs/heads/{branch}'], repo, refs_only=True, timeout=limit)
+                      f':refs/heads/{branch}'], repo, refs_only=True, timeout=limit,
+                     guard=refguard.guard_for(product, repo))
     if r.returncode != 0:
         raise SpawnError(f'retire {branch} refused: {(r.stderr or "").strip() or "push failed"}')
     print(f'retired {branch}: PR #{reset.get("pr")} closed unmerged, its head {dead[:9]} kept '

@@ -95,7 +95,7 @@ class ClaimTests(unittest.TestCase):
             cwd='/repo')
         push.assert_called_once_with(
             ['origin', 'deadbeef:refs/heads/reservations/migrations/293'], '/repo',
-            refs_only=True)
+            refs_only=True, guard=mock.ANY)
 
     def test_a_refused_push_is_not_a_claim(self):
         with mock.patch.object(reserve.H, 'sh',

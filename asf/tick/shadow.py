@@ -106,8 +106,10 @@ def commit_local(path, message):
 
 
 def _push_once(path, branch):
-    from asf import gitpush
-    return gitpush.push(['-q', 'origin', f'HEAD:{branch}'], path).returncode == 0
+    from asf import gitpush, refguard
+    # the record's trunk is its publish target: the record guard protects nothing
+    return gitpush.push(['-q', 'origin', f'HEAD:{branch}'], path,
+                        guard=refguard.RECORD).returncode == 0
 
 
 #: How many times origin may move under one push before the tick gives up on this tick's

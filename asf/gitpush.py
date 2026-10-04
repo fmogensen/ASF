@@ -15,14 +15,24 @@ Either way the push is killed — its whole process group, the hook's children t
 ``git.push_timeout_s`` seconds (:func:`push_timeout`), so no hook and no network hang holds a
 tick. A timed-out push is a failed push: the ref is logged and the caller goes on; the branch
 stays as it was (git updates a remote ref only once the hook passed and the pack went through).
+
+Every push passes a ``guard`` (:class:`asf.refguard.Guard`, keyed on the repository being
+pushed): a target that is that repository's trunk or a protected ref is warned about or refused
+here, before ``git`` runs, by ``conventions.flags.refguard``. Only a landing path built to advance
+the trunk passes a door (``guard.door``); the record's publish passes
+:data:`asf.refguard.RECORD`. the clients lint checks every call passes ``guard=``.
 """
 import os
 import signal
 import subprocess
 import sys
 
-from asf import hermetic, mutation_guard
+from asf import hermetic, mutation_guard, refguard
 from asf.conventions import DEFAULT_PUSH_TIMEOUT_S
+
+#: The push door takes a ref guard: the clients lint enforces ``guard=`` at every
+#: ``gitpush.push(`` call while this is set.
+__gitpush_door__ = True
 
 #: The returncode a push killed on its timeout reports (the ``timeout(1)`` convention).
 TIMED_OUT = 124
@@ -41,7 +51,19 @@ def push_args(args, refs_only=False):
     return ['git', 'push'] + (['--no-verify'] if refs_only else []) + list(args)
 
 
-def push(args, cwd, refs_only=False, timeout=None, env=None, log=None):
+def targets(args):
+    """The refspecs of ``git push <args>``: every argument after the remote that is not an
+    option (``-q``, ``--force-with-lease=…``, ``--delete``). After ``--delete`` a name is the
+    ref deleted — the target all the same."""
+    words = [str(a) for a in args if not str(a).startswith('-')]
+    return words[1:]
+
+
+def _say(log, line):
+    (log or (lambda s: print(s, file=sys.stderr)))(line)
+
+
+def push(args, cwd, *, guard, refs_only=False, timeout=None, env=None, log=None):
     """``git push <args>`` in ``cwd``: a :class:`subprocess.CompletedProcess` (text output).
 
     ``refs_only``: the push carries no new code — ``--no-verify``, the product's hook skipped.
@@ -50,11 +72,23 @@ def push(args, cwd, refs_only=False, timeout=None, env=None, log=None):
     ``log`` (default stderr). A dry run in progress (:mod:`asf.mutation_guard`) refuses instead of
     running ``git`` at all — the backstop for a caller that never threaded its own ``dry_run``
     flag this far (2026-09-29): a non-zero, non-:data:`TIMED_OUT` ``returncode`` and ``stderr``
-    naming why, exactly the shape a refused push already is to every caller here."""
+    naming why, exactly the shape a refused push already is to every caller here.
+
+    ``guard`` (required, :class:`asf.refguard.Guard`): each target (:func:`targets`) is asked
+    :meth:`~asf.refguard.Guard.refusal` first. Under ``refuse`` the push returns
+    ``CompletedProcess(cmd, 1, '', line)`` without running ``git``; under ``warn`` the line goes
+    to ``log`` and the push proceeds."""
     cmd = push_args(args, refs_only)
+    for target in targets(args):
+        line = guard.refusal(target)
+        if not line:
+            continue
+        _say(log, line)
+        if guard.mode == refguard.REFUSE:
+            return subprocess.CompletedProcess(cmd, 1, '', line)
     if mutation_guard.is_active():
         line = mutation_guard.would_line('git', cmd)
-        (log or (lambda s: print(s, file=sys.stderr)))(line)
+        _say(log, line)
         return subprocess.CompletedProcess(cmd, 1, '', line)
     limit = timeout if timeout is not None else push_timeout()
     run_env = hermetic.git_env(env)
@@ -71,7 +105,7 @@ def push(args, cwd, refs_only=False, timeout=None, env=None, log=None):
         out, err = p.communicate()
         refs = ' '.join(a for a in args if not str(a).startswith('-') and a != 'origin')
         line = f'push timed out after {limit}s: {refs or "?"} — left as it was'
-        (log or (lambda s: print(s, file=sys.stderr)))(line)
+        _say(log, line)
         return subprocess.CompletedProcess(cmd, TIMED_OUT, out or '',
                                            ((err or '') + '\n' + line).strip())
     return subprocess.CompletedProcess(cmd, p.returncode, out, err)
