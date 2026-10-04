@@ -27,7 +27,7 @@ import re
 import subprocess
 import time
 
-from asf import env, github, gitpush, refguard
+from asf import env, gh_limit, github, gitpush, refguard
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
@@ -218,21 +218,28 @@ class Gh:
         return ok, err
 
     def find_run(self, workflow, run_name):
-        """``{id, url, status}`` of the dispatched run titled ``run_name``, else None."""
-        ok, out, _err = self.call(['run', 'list', '-R', self.slug, '--workflow', workflow,
-                                   '--event', 'workflow_dispatch', '-L', '50', '--json',
-                                   'databaseId,displayTitle,status,url'])
+        """The dispatched run titled ``run_name`` as an :class:`asf.github.Result`: ``ok`` with
+        ``data`` ``{id, url, status}`` (found) or ``None`` (a definite "not there"), else
+        Unknown — a failed call, unparseable output or a rate limit is never "not found"."""
+        try:
+            ok, out, err = self.call(['run', 'list', '-R', self.slug, '--workflow', workflow,
+                                      '--event', 'workflow_dispatch', '-L', '50', '--json',
+                                      'databaseId,displayTitle,status,url'])
+        except gh_limit.RateLimited as e:
+            return github.unknown(f'rate limited ({e})' if str(e) else 'rate limited')
         if not ok:
-            return None
+            return github.unknown(err or 'gh run list failed')
         try:
             runs = json.loads(out or '[]')
         except ValueError:
-            return None
-        for r in runs if isinstance(runs, list) else ():
-            if r.get('displayTitle') == run_name:
-                return {'id': str(r.get('databaseId')), 'url': r.get('url'),
-                        'status': r.get('status')}
-        return None
+            return github.unknown('bad json')
+        if not isinstance(runs, list):
+            return github.unknown('bad json')
+        for r in runs:
+            if isinstance(r, dict) and r.get('displayTitle') == run_name:
+                return github.Result(True, {'id': str(r.get('databaseId')), 'url': r.get('url'),
+                                            'status': r.get('status')}, 0, as_of=github.now_iso())
+        return github.Result(True, None, 0, as_of=github.now_iso())
 
     def view(self, run_id):
         """``{status, conclusion}`` of the run, or None when gh cannot say."""
@@ -350,11 +357,11 @@ class ActionsRuntime(runtime_mod.Runtime):
         if not ok:
             delete_brief(job.cwd, ref)
             raise SpawnError(f'cloud lane: gh workflow run {s.workflow} refused ({err})')
-        hit = self.gh.find_run(s.workflow, run_name)
+        hit = self.gh.find_run(s.workflow, run_name).get()  # Unknown: look again, as for a miss
         deadline = self._clock() + max(0.0, s.launch_wait_s)
         while hit is None and self._clock() < deadline:
             self._sleep(2.0)
-            hit = self.gh.find_run(s.workflow, run_name)
+            hit = self.gh.find_run(s.workflow, run_name).get()
         run_id = hit['id'] if hit else None
         tok = cloudpid.token(run_id or job.session or job.name)
         line = runtime_mod._session_line(job)

@@ -12,7 +12,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import env, gh_limit
 from asf.workers import actions
 from asf.workers import cloud
 from asf.workers import cloudpid
@@ -27,6 +27,10 @@ from asf.workers import wave as wave_mod
 import asf.briefs.build  # noqa: E402,F401 — the module; the package exports a build() function
 build_mod = sys.modules['asf.briefs.build']
 
+try:
+    from tests import contracts
+except ImportError:  # pragma: no cover - `discover -s tests`
+    import contracts
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_cloud` does not
     from test_workers import Home, feature_row, git
 except ImportError:  # pragma: no cover - import shape only
@@ -805,6 +809,72 @@ class Sync(Placement):
                       'url': 'https://example.test/runs/501'}]
         self.assertEqual(self.sync(fake)[0][2], 'run 501 in_progress')
         self.assertEqual(pool_mod.load_sessions(self.product)['spec-1']['actions_run_id'], '501')
+
+    def unread_lookup(self, rc, err):
+        """A launched run whose id was never read, past LOST_AFTER_MIN, over a ``gh`` whose
+        ``run list`` answers ``(rc, err)``: ``(found, lines, rec)``."""
+        rec = self.launch()
+        pool_mod.update_session(self.product, 'spec-1', actions_run_id=None)
+        fake = FakeGh()
+        plain = fake.__call__
+
+        def answer(argv, **kw):
+            if argv[1:3] == ['run', 'list']:
+                fake.calls.append(argv)
+                return subprocess.CompletedProcess(argv, rc, stdout='', stderr=err)
+            return plain(argv, **kw)
+        lines = []
+        self.addCleanup(gh_limit.reset)
+        found = self.sync(answer, lines=lines, now=time.time() + (cloud.LOST_AFTER_MIN + 5) * 60)
+        return found, lines, rec
+
+    def assert_left_as_it_is(self, found, lines, rec):
+        (job, status, why), = found
+        self.assertEqual((job, status), ('spec-1', cloud.WORKING), why)
+        self.assertNotIn('never appeared', why)
+        self.assertTrue(lifecycle.pid_alive(rec['pid']))
+        self.assertFalse(pool_mod.load_sessions(self.product)['spec-1'].get('ended'))
+        self.assertTrue(any('run lookup unreadable' in ln for ln in lines), lines)
+
+    def test_an_unreadable_run_lookup_is_never_a_lost_run(self):
+        # gh fails (a 502): Unknown, not "not found" — the run stays as it is, logged
+        self.assert_left_as_it_is(*self.unread_lookup(1, 'HTTP 502: Bad Gateway'))
+
+    def test_a_rate_limited_run_lookup_is_never_a_lost_run(self):
+        rc, _out, err = contracts.load('rate-limit', 'run-list')  # the recorded host answer
+        self.assert_left_as_it_is(*self.unread_lookup(rc, err))
+
+    def test_a_definite_not_found_past_the_window_is_dead(self):
+        self.launch()
+        pool_mod.update_session(self.product, 'spec-1', actions_run_id=None)
+        fake = FakeGh(runs=[{'databaseId': 501, 'displayTitle': 'another run'}])
+        (_job, status, why), = self.sync(
+            fake, now=time.time() + (cloud.LOST_AFTER_MIN + 5) * 60)
+        self.assertEqual((status, why), (cloud.DEAD, 'the dispatched run never appeared'))
+
+
+class FindRun(unittest.TestCase):
+    """``Gh.find_run`` answers through :mod:`asf.github`: a hit, a definite miss (``ok`` with
+    ``None``), or Unknown — a failed call, bad JSON and a rate limit are never a miss."""
+
+    def gh(self, rc, out='', err=''):
+        self.addCleanup(gh_limit.reset)
+        return actions.Gh(env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'}),
+                          run=lambda argv, **_kw: subprocess.CompletedProcess(argv, rc, out, err))
+
+    def test_hit_miss_and_unknown(self):
+        with mock.patch('asf.ci_pool._gh_env', return_value={}):
+            hit = self.gh(0, json.dumps([{'databaseId': 7, 'displayTitle': 'asf x'}]))
+            self.assertEqual(hit.find_run('w.yml', 'asf x').data['id'], '7')
+            miss = hit.find_run('w.yml', 'asf y')
+            self.assertTrue(miss.ok)
+            self.assertIsNone(miss.data)
+            self.assertTrue(self.gh(1, err='HTTP 502').find_run('w.yml', 'asf x').unknown)
+            self.assertTrue(self.gh(0, 'not json').find_run('w.yml', 'asf x').unknown)
+            rc, _out, err = contracts.load('rate-limit', 'run-list')
+            limited = self.gh(rc, err=err).find_run('w.yml', 'asf x')
+            self.assertTrue(limited.unknown)
+            self.assertIn('rate limit', limited.reason)
 
 
 class Doctor(unittest.TestCase):
