@@ -402,7 +402,7 @@ def regate_holds(lane, heads, trunk_sha):
             continue
         f = {'branch': b, 'run': run, 'prev': rec, 'head': rec['head'], 'item': rec.get('item')}
         lane.set(f, lane_mod.PUSHED, f'gated again: the landing-gate hold was no document defect — {why}')
-        H.mark_session(lane.state_dir, run.get('job') or b, correction=None)
+        H.mark_session(lane.state_dir, run.get('job') or b, correction=None, branch=b)
         lane.out(f"merge queue: {b} (PR #{rec.get('pr')}) landing-gate hold cleared — {why}; "
                  f"gated again")
         out.append(b)

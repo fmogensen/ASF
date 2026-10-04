@@ -756,6 +756,11 @@ def sessions_by_branch(state_dir):
 
 
 def mark_session(state_dir, job, **fields):
+    """One update line for ``job``. A ``branch`` names the run of the job it is for
+    (:func:`asf.workers.lifecycle.fold`): one job name can hold runs on two branches. An empty
+    one is left off — it would blank the run's branch, not route the line."""
+    if not fields.get('branch'):
+        fields.pop('branch', None)
     path = sessions_path(state_dir)
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     with open(path, 'a', encoding='utf-8') as f:

@@ -789,6 +789,46 @@ class LaneRepo(LaneFixture):
         self.assertEqual(results, {'worker/T-0001': 'landed'})
 
 
+class OneJobTwoBranches(LaneFixture):
+    """A product's F-0011: its spec and plan PRs (#1023, #1037) were each corrected under the one
+    job name ``correct-f-0011`` — the spec run first, the plan run later. Every lane write went
+    to the job's latest run, so the spec branch's record landed on the plan run: each tick the
+    plan read the spec's head as its own ("head moved a1cfbfc → 21807f8"), the spec never saw
+    its own record move ("head moved 3024d40 → a1cfbfc"), and both re-entered PUSHED → PR_OPEN
+    → REVIEW/GATE for good — a fresh review round asked for on every pass."""
+
+    def launch(self, job, branch, kind, started):
+        p = subprocess.Popen(['true'])
+        p.wait()
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': job, 'item': 'F-0011', 'feature': 'F-0011',
+                                'branch': branch, 'kind': kind, 'pid': p.pid,
+                                'started': started}) + '\n')
+            f.write(json.dumps({'job': job, 'ended': started.replace('00Z', '05Z'),
+                                'end_reason': 'finished', 'rc': 0}) + '\n')
+
+    def test_a_spec_and_plan_pair_under_one_job_name_converge_in_one_pass_and_stay(self):
+        self.push_lane('spec/F-0011', {'specs/f-0011.md': 'the spec\n'}, 'spec(F-0011): spec')
+        self.push_lane('plan/F-0011', {'plans/f-0011.md': 'the plan\n'}, 'plan(F-0011): plan')
+        self.launch('correct-f-0011', 'spec/F-0011', 'correct', '2026-09-27T05:39:00Z')
+        self.launch('correct-f-0011', 'plan/F-0011', 'correct', '2026-09-27T08:42:00Z')
+        heads = {b: sh(['git', 'rev-parse', b], cwd=self.origin).stdout.strip()
+                 for b in ('spec/F-0011', 'plan/F-0011')}
+        product = self.product()
+        lane.lane_pass(product, self.state_dir, out=lambda *_: None)
+        for b, sha in heads.items():
+            self.assertEqual(self.lane_of(b).get('head'), sha, f'{b} holds its own head')
+        before = {b: self.lane_of(b) for b in heads}
+        for _ in range(2):
+            lines = []
+            lane.lane_pass(product, self.state_dir, out=lines.append)
+            self.assertEqual([ln for ln in lines if 'head moved' in ln or ' → ' in ln], [],
+                             'a pass on unmoved heads moves neither branch')
+            for b, sha in heads.items():
+                self.assertEqual(self.lane_of(b).get('head'), sha)
+                self.assertEqual(self.lane_of(b).get('state'), before[b].get('state'))
+
+
 class DeliveryLaneTest(LaneFixture):
     """A delivery's branch (F-0102): a lead whose ``delivers:`` names its members, one commit per
     member — accepted; a member no commit names is reported on the landing line, not refused."""
