@@ -1267,7 +1267,38 @@ def lane_docs(product, prs, commits=None, paths_of=None, merges=None):
     return out
 
 
-def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
+def merge_landed(ids, landed, product, green=None):
+    """``ids`` (an :func:`id_evidence` map) with every ``{iid: sha}`` of ``landed`` folded in:
+    ``commit`` fills when the id carries none yet, ``landed`` carries the sha itself (so
+    ``closing.Ev.landed`` can tell a reconciled entry from a commit-subject one), and ``green``
+    is computed by the same ``ancestor_of`` walk over the same green runs :func:`id_evidence`'s
+    own tail asks — one function, so a reconciled item's entry is indistinguishable from a
+    commit-subject one except for carrying ``landed``. Called last: a sha a commit subject
+    already carried is never overwritten."""
+    if not landed:
+        return ids
+    out = dict(ids)
+    has_ci = ci_provider(product) is not None
+    if has_ci:
+        green = ci_green_runs(product) if green is None else green
+    under_green = None
+    for iid, sha in landed.items():
+        r = dict(out.get(iid) or {"branches": [], "open_prs": [], "commit": None,
+                                  "pr": None, "green": False})
+        r["landed"] = sha
+        if not r.get("commit"):
+            r["commit"] = sha
+            if has_ci:
+                if under_green is None:
+                    under_green = ancestry(product, list(green))
+                r["green"] = under_green(sha)
+            else:
+                r["green"] = True
+        out[iid] = r
+    return out
+
+
+def id_evidence(product, branches, prs, commits=None, green=None, merges=None, landed=None):
     """{id: {branches, open_prs, commit, green}} — every id a branch, PR or commit on main names.
 
     `commit` is first the lane's merge fact for the id (``merges``, the ``code`` half of
@@ -1277,7 +1308,8 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
     PR whose head is its branch or whose title names it (:func:`pr_naming_ids`), through its
     merge commit. A PR body names nothing. `green`
     says a CI run on main passed at or after it, and is true outright for a product with no CI
-    provider.
+    provider. `landed` (``{iid: sha}``, a typed reconciliation sha) is folded in last through
+    :func:`merge_landed`, never overwriting a commit a lane or a commit subject already carried.
     """
     main_ref = f"origin/{product.main}"
     out = {}
@@ -1353,7 +1385,7 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
     if ci_provider(product) is None:
         for r in out.values():
             r["green"] = bool(r["commit"])
-        return out
+        return merge_landed(out, landed, product)
     green = ci_green_runs(product) if green is None else green
     covered = {}
     under_green = None  # one rev-list over every green run's sha, made on first use
@@ -1366,7 +1398,7 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
                 under_green = ancestry(product, list(green))
             covered[c] = under_green(c)
         r["green"] = covered[c]
-    return out
+    return merge_landed(out, landed, product, green=green)
 
 
 #: A trunk commit's ``git log --format=%H%x1e%B`` record: the 40-hex sha the record separator
@@ -1587,7 +1619,10 @@ def _gh_json(args, timeout=60, product=None):
 # task brief, each as one pure function taking plain evidence, no git/gh access.
 
 def task_state(in_plan, branch, pr_state, merged_sha):
-    """Task: New (in plan, no branch) → Active (branch or PR) → Closed (PR merged)."""
+    """Task: New (in plan, no branch) → Active (branch or PR) → Closed (PR merged).
+
+    ``asf.evidence.closing.RULES`` is the live rule a real ingest closes a Task by; this ladder
+    is not it."""
     if merged_sha:
         return "Closed"
     if branch or pr_state:
@@ -1599,7 +1634,10 @@ def task_state(in_plan, branch, pr_state, merged_sha):
 
 def story_state(any_task_active, matrix_status):
     """Story: New (no impl cited) → Active (a Task lists it, Active) → Resolved (matrix "doing")
-    → Closed (matrix "done")."""
+    → Closed (matrix "done").
+
+    ``asf.evidence.closing.RULES`` is the live rule a real ingest closes a Story by; this ladder
+    is not it."""
     if matrix_status == "done":
         return "Closed"
     if matrix_status == "doing":
@@ -1611,7 +1649,10 @@ def story_state(any_task_active, matrix_status):
 
 def feature_state(spec_on_main, plan_approved, all_tasks_closed, all_merged_in_prod, all_prs_checked):
     """Feature: New (no spec on main) → Active (spec on main or plan approved) →
-    Resolved (every Task Closed) → Closed (+ merge sha in prod deploy + the operator's checked ✓)."""
+    Resolved (every Task Closed) → Closed (+ merge sha in prod deploy + the operator's checked ✓).
+
+    ``asf.evidence.closing.RULES`` is the live rule a real ingest closes a Feature by; this
+    ladder is not it."""
     if all_tasks_closed and all_merged_in_prod and all_prs_checked:
         return "Closed"
     if all_tasks_closed:
@@ -1668,7 +1709,10 @@ def _spec_stage(spec):
 def bug_state(has_fixer_evidence, merged_sha, merged_in_prod):
     """Bug: New → Active (fixer branch/PR) → Resolved (merged) → Closed (merged sha in prod AND
     the signature absent 3 days — that half is T10's; a Bug merged in prod stays Resolved here
-    with a "pending 3-day quiet" note)."""
+    with a "pending 3-day quiet" note).
+
+    ``asf.evidence.closing.RULES`` is the live rule a real ingest closes a Bug by; this ladder
+    is not it."""
     if merged_sha:
         return "Resolved"
     if has_fixer_evidence:
@@ -1678,7 +1722,10 @@ def bug_state(has_fixer_evidence, merged_sha, merged_in_prod):
 
 def epic_state(children_states, typed_closed):
     """Epic: New (typed) → Active (any child Active) → Resolved (all children Closed) →
-    Closed only if `closed: true` is typed by the operator."""
+    Closed only if `closed: true` is typed by the operator.
+
+    ``asf.evidence.closing.RULES`` is the live rule a real ingest closes an Epic by; this ladder
+    is not it."""
     if typed_closed:
         return "Closed"
     if children_states and all(s == "Closed" for s in children_states):

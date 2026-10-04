@@ -618,6 +618,59 @@ class DiscoverIdEvidenceTests(unittest.TestCase):
         self.assertTrue(cache.startswith(env.ASF_HOME), cache)
 
 
+class MergeLandedTests(unittest.TestCase):
+    """``merge_landed`` folds a typed ``landed:`` sha into the same ``{id: evidence}`` map a
+    commit subject would have produced, through the same green walk ``id_evidence`` uses (§1.2's
+    one named exception)."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+
+    def test_a_typed_landed_sha_fills_commit_and_green(self):
+        ev = self.r.discover(self.r.product(), green=[self.r.head])
+        ids = evidence.merge_landed(ev["ids"], {"T-0099": self.r.head}, self.r.product(),
+                                    green=[self.r.head])
+        self.assertEqual(ids["T-0099"]["commit"], self.r.head)
+        self.assertTrue(ids["T-0099"]["green"])
+        self.assertEqual(ids["T-0099"]["landed"], self.r.head)
+
+    def test_green_is_computed_by_the_same_walk_an_uncovered_sha_is_not_green(self):
+        ev = self.r.discover(self.r.product(), green=[])
+        ids = evidence.merge_landed(ev["ids"], {"T-0099": self.r.head}, self.r.product(),
+                                    green=[])
+        self.assertFalse(ids["T-0099"]["green"])
+
+    def test_a_commit_a_commit_subject_already_carried_is_never_overwritten(self):
+        ev = self.r.discover(self.r.product())
+        before = ev["ids"]["B-0001"]["commit"]
+        ids = evidence.merge_landed(ev["ids"], {"B-0001": self.r.head}, self.r.product(),
+                                    green=[self.r.head])
+        self.assertEqual(ids["B-0001"]["commit"], before)
+        self.assertEqual(ids["B-0001"]["landed"], self.r.head)
+
+    def test_no_ci_provider_a_landed_commit_is_green_outright(self):
+        ids = evidence.merge_landed({}, {"T-0099": self.r.head}, self.r.product(ci=None))
+        self.assertTrue(ids["T-0099"]["green"])
+
+    def test_empty_landed_is_a_no_op_same_object_back(self):
+        ev = self.r.discover(self.r.product())
+        self.assertIs(evidence.merge_landed(ev["ids"], {}, self.r.product()), ev["ids"])
+
+    def test_id_evidence_folds_a_typed_landed_sha_in(self):
+        ids = evidence.id_evidence(self.r.product(), [], [], green=[self.r.head],
+                                   landed={"T-0099": self.r.head})
+        self.assertEqual(ids["T-0099"]["commit"], self.r.head)
+        self.assertTrue(ids["T-0099"]["green"])
+        self.assertEqual(ids["T-0099"]["landed"], self.r.head)
+
+    def test_id_evidence_with_no_ci_provider_still_folds_landed_in(self):
+        ids = evidence.id_evidence(self.r.product(ci=None), [], [],
+                                   landed={"T-0099": self.r.head})
+        self.assertEqual(ids["T-0099"]["commit"], self.r.head)
+        self.assertTrue(ids["T-0099"]["green"])
+
+
 class AncestryTests(unittest.TestCase):
     """``ancestry`` answers every question ``ancestor_of`` answers, from one rev-list."""
 
