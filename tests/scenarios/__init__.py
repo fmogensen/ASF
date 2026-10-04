@@ -42,7 +42,9 @@ is one entry here and one row there.
 **An edit** (:data:`EDITS`) changes the world before the path runs: the named edges of a landing
 (:data:`EDGES`, S-M14 — the merge methods, a reworded squash, a revert, the document lane, an
 archive, a cloud session, a batch ref, an attested sha; ``test_edges.py``), the voided landing,
-and a card newer than the commit said to cover it. :func:`run_written` is a row of
+a card newer than the commit said to cover it, and a host that knows no PR of the Task's
+(``no-pr``: the one world where a ``covers`` close stands — a PR of its own, open or closed
+unmerged, holds the Task's work). :func:`run_written` is a row of
 ``test_i14_refuse.py``: the path under ``flags.i14``, then the record's guarded ingest write, the
 Task's card read back from disk.
 """
@@ -324,12 +326,15 @@ def derive(product):
 @contextlib.contextmanager
 def deciding(f):
     """The fork's environment (its home, its ``PATH`` with the fake ``gh`` first) and its
-    product, with the process-wide rate-limit latch and read caches clear going in and out."""
+    product, with the process-wide rate-limit latch and read caches clear going in and out — the
+    pass's facts (:mod:`asf.facts.cache`) too: each row is a pass of its own, as each tick is."""
     from asf import attestation, env, gh_limit, stale_ref
+    from asf.facts import cache as facts_cache
     gh_limit.reset()
     # the process-wide read caches: every fork's PR #1 has the same head and run ids
     attestation._SEEN.clear()
     stale_ref._RUNS.clear()
+    facts_cache.clear()
     try:
         with f.seams():
             yield env.load_product(NAME)
@@ -337,6 +342,7 @@ def deciding(f):
         gh_limit.reset()
         attestation._SEEN.clear()
         stale_ref._RUNS.clear()
+        facts_cache.clear()
 
 
 def _decide(fn, product, out):
@@ -680,8 +686,21 @@ def card_after_cover(world, f):
         fh.write(text)
 
 
+def no_pr(world, f):
+    """The host knows no PR of the Task's (PR #1 dropped, its head branch kept): nothing open,
+    nothing closed unmerged — the one world where a ``covers`` close still stands."""
+    gh(f, 'e2e', 'drop-pr', '1')
+
+
+def no_pr_card_after_cover(world, f):
+    """:func:`no_pr`, and the card newer than the commit said to cover it."""
+    no_pr(world, f)
+    card_after_cover(world, f)
+
+
 EDITS = {'voided-landing': voided_landing, 'doc-lane-landing': doc_lane_landing,
-         'card-after-cover': card_after_cover,
+         'card-after-cover': card_after_cover, 'no-pr': no_pr,
+         'no-pr-card-after-cover': no_pr_card_after_cover,
          'squash': edge_squash, 'merge-commit': edge_merge_commit,
          'rebase-merge': edge_rebase_merge, 'reworded-patch': edge_reworded_patch,
          'revert': edge_revert, 'doc-lane': edge_doc_lane, 'archive-branch': edge_archive_branch,

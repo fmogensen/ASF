@@ -68,6 +68,45 @@ def prime(product, *, run=None):
     return put(product, OPEN_PRS, '', '', OpenPrs(prs, at))
 
 
+#: The PRs of one item, every state (:func:`item_prs`): a list this long may be cut short.
+ITEM_PRS, ITEM_PR_LIMIT = 'item_prs', 100
+#: What :func:`item_prs` asks for: whether a PR naming the item is open, merged or closed unmerged.
+ITEM_FIELDS = ('number', 'title', 'headRefName', 'state', 'mergedAt')
+
+
+def item_prs(product, item, *, run=None):
+    """The PRs of every state whose title or head names ``item`` as the host listed them (one
+    ``gh pr list --state all --search <item>`` per item per pass, kept either way):
+    :class:`OpenPrs` (its ``prs`` carry ``state``/``mergedAt``) or :class:`Unknown` — no slug, a
+    refused read, a rate limit, a page that may be cut short."""
+    from asf.evidence import evidence as ev
+    key = str(item or '').upper()
+    got = get(product, ITEM_PRS, key)
+    if got is not MISS:
+        return got
+    slug = getattr(product, 'repo_slug', None)
+    if not isinstance(slug, str) or not slug or not key:
+        return put(product, ITEM_PRS, key, '', Unknown('no repo_slug' if key else 'no item',
+                                                        AsOf.now()))
+    try:
+        r = github.prs(slug, state='all', search=key, limit=ITEM_PR_LIMIT, fields=ITEM_FIELDS,
+                       run=run)
+    except gh_limit.RateLimited:
+        return put(product, ITEM_PRS, key, '', Unknown('rate limited', AsOf.now()))
+    at = AsOf('', github_stamp(r.as_of))
+    if not r.ok:
+        return put(product, ITEM_PRS, key, '', Unknown(r.reason or 'unreadable', at))
+    if r.data is not None and not isinstance(r.data, list):
+        return put(product, ITEM_PRS, key, '', Unknown('bad json', at))
+    if len(r.data or ()) >= ITEM_PR_LIMIT:
+        return put(product, ITEM_PRS, key, '',
+                   Unknown(f'{ITEM_PR_LIMIT} listed, the list may be cut short', at))
+    prs = tuple(p for p in (r.data or ()) if isinstance(p, dict)
+                and (key in ev.naming_ids(p.get('title') or '')
+                     or key in ev.branch_ids(p.get('headRefName') or '')))
+    return put(product, ITEM_PRS, key, '', OpenPrs(prs, at))
+
+
 def open_prs(product):
     """The open PRs :func:`prime` read this pass; a miss is :class:`Unknown` — never a call."""
     got = get(product, OPEN_PRS, '')
