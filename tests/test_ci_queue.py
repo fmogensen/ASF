@@ -87,6 +87,8 @@ class FakeGh:
                 for i in range(1, len(self.history) + 1)])
         elif argv[:3] == ['gh', 'run', 'list']:
             out = str(self.inflight)
+        elif argv[:2] == ['gh', 'api'] and any('/status?' in a for a in argv):
+            out = json.dumps({'state': 'pending', 'statuses': []})   # no attestation (S-M23)
         elif self.running and argv[:2] == ['gh', 'api'] and any(
                 'actions/runs?status=' in a for a in argv):
             # unset ``running`` (the default): unreadable, today's behaviour against every other

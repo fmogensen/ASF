@@ -368,8 +368,11 @@ ASF reads the attestation back wherever it judges the trunk's required checks: t
 head that is a trunk sha, and the CI queue's trunk relief. On a sha with `asf/attested` =
 `success`, a required job that concluded `skipped` counts as green. A required job that ran there
 and failed (the gate, a rules job) is still red, one still queued or running is still pending,
-and a `pending` or `failure` attestation counts for nothing. `ci.attest_status` renames the
-context, for both the status the queue posts and the one ASF reads.
+and a `pending` or `failure` attestation counts for nothing. A status read that fails (an outage,
+a timeout) is unknown, not "not attested": each reader holds and reads again — the deploy picks
+nothing that tick, `trunk_red` gives the check no verdict on that sha, the CI queue's relief
+cancels nothing — and never reads it as red. `ci.attest_status` renames the context, for both
+the status the queue posts and the one ASF reads.
 
 ### `models` — the model a session runs on
 

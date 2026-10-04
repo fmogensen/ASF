@@ -574,7 +574,8 @@ def unexpanded_key(name):
 def _jobs_verdict(product, run, req, sh):
     """``(green, rule)`` for one run (completed, queued or in progress) under the required-jobs
     rule, reading the jobs of its latest attempt (``gh run view --json jobs``); ``rule`` names
-    what decided. A required
+    what decided. ``green`` is ``None`` — Unknown — when a required job skipped and the sha's
+    attestation did not read: the pick holds rather than judge the run. A required
     job is green only when it concluded ``success``: ``skipped``, ``neutral``, ``cancelled`` or
     missing never are — except ``skipped`` on a sha the merge queue attested
     (:mod:`asf.attestation`): the batch run judged that exact sha green, so the trunk push skipped
@@ -605,6 +606,10 @@ def _jobs_verdict(product, run, req, sh):
             if attested is None:  # read once, and only when a required job skipped
                 attested = attestation.product_attested(
                     product, run.get('headSha'), read=lambda p: _json(sh(['gh', 'api', p]), dict))
+                if attested is None:  # Unknown (S-M23): no verdict on this run — hold, read again
+                    return None, (f"run {run.get('databaseId')}: required job {name} skipped and "
+                                  f"its attestation ({attestation.context(product)}) unreadable "
+                                  f"— read again next tick")
             if attested:
                 covered.append(name)
                 continue
@@ -638,6 +643,8 @@ def _pick(product, env, ci_runs, sh, limit=10):
         ok, rule = _jobs_verdict(product, r, req, sh)
         if ok:
             return r.get('headSha'), rule
+        if ok is None:
+            return None, rule   # Unknown: hold this tick, never an older sha picked past it
     return None, None
 
 

@@ -25,7 +25,7 @@ check). Three parts answer it:
 2. **The full run** (:func:`tick`, from :func:`asf.trunk_watch.tick`). When the stall alarm fires
    (``ci.trunk_stall_hours``) or a trunk red is suspected, the trunk's workflow
    (:func:`asf.ci_queue.workflow_for` ``trunk``) is dispatched on the trunk — ``gh workflow run
-   <wf> --ref <trunk>``, through the start queue's own ``gh`` door — **once per tip**. A
+   <wf> --ref <trunk>``, through :mod:`asf.github` (the product's ``gh`` auth) — **once per tip**. A
    ``workflow_dispatch`` run is never a ``push``, so it never takes the attested skip: every heavy
    job runs. Its verdict, its failed required jobs flake-triaged (:func:`asf.flake.triage`, one
    re-run), decides: **red** confirms trunk red — one ``trunk watch: TRUNK RED`` line, and one S1
@@ -41,11 +41,17 @@ check). Three parts answer it:
 ``asf status`` and ``asf doctor`` show ``TRUNK RED: <check> (seen on #a, #b)`` while one holds —
 off the state file, no host call. A trunk move clears it: a batch lands only with every required
 check green at its sha. State: ``state/<product>/trunk-red.json``. Never raises into the tick.
+
+A ``gh`` read that does not answer is **Unknown** (:class:`asf.github.Result`), never an empty
+listing: an unread run list neither loses a dispatched run nor finds "no full run on record" and
+dispatches the safety net on it — the next read decides.
 """
 import datetime
 import json
 import os
 import time
+
+from asf import gh_limit, github
 
 STATE_FILE = 'trunk-red.json'
 #: how long a landing's red counts towards a suspicion
@@ -244,23 +250,41 @@ def seen_on(landings):
 
 # ---- 2 and 3. the full run on the trunk ---------------------------------------------------------
 
+def _auth_env(product):
+    from asf import ci_pool
+    return ci_pool._gh_env(product)
+
+
+class Door:
+    """The trunk watch's ``gh`` door: :func:`asf.github.gh` under the product's ``gh`` auth
+    (``auth_env``). A test passes its own object with the same ``gh(args, json=)``."""
+
+    def __init__(self, product):
+        self.product = product
+
+    def gh(self, args, json=False):
+        from asf import mutation_guard
+        if mutation_guard.is_mutating_gh(args):
+            gh_limit.forget()   # a write can change any listing this process read before it
+        return github.gh(args, json=json, timeout=github.JSON_TIMEOUT_S,
+                         env=_auth_env(self.product))
+
+
 def _source(product, src):
-    if src is not None:
-        return src
-    from asf import ci_queue
-    return ci_queue.GitHubSource(product)
+    return src if src is not None else Door(product)
 
 
-def _gh(src, args):
-    from asf import ci_queue
-    return ci_queue._gh_try(src, args)
+def _read(src, args, kind):
+    """``src``'s JSON answer to ``args`` when it is a ``kind`` — else None: Unknown (the read
+    did not answer, or answered something else)."""
+    r = src.gh(args, json=True)
+    return r.data if r.ok and isinstance(r.data, kind) else None
 
 
-def _json(text):
-    try:
-        return json.loads(text) if text else None
-    except ValueError:
-        return None
+def _why(r):
+    """The reason a refused call gives: ``gh``'s own last line, else the client's reason."""
+    lines = [ln.strip() for ln in (r.stderr or '').splitlines() if ln.strip()]
+    return lines[-1] if lines else (r.reason or 'refused')
 
 
 def _epoch(iso):
@@ -286,8 +310,9 @@ def dispatch(product, data, tip, why, now, src, out):
     trunk, wf = product.conventions.main, workflow(product)
     prev = data.get('full') or {}
     tries = (prev.get('tries') or 0) + 1 if prev.get('sha') == tip else 1
-    ok, err = _gh(src, ['workflow', 'run', wf, '--ref', trunk, '-R', product.repo_slug])
-    if ok is None:
+    r = src.gh(['workflow', 'run', wf, '--ref', trunk, '-R', product.repo_slug])
+    if not r.ok:
+        err = _why(r)
         out(f'trunk watch: full run of {wf} on {trunk} @ {_short(tip)} refused — {err} '
             f'({why}); asked again next tick')
         data['full'] = {'sha': tip, 'at': int(now), 'why': why, 'state': 'refused',
@@ -301,16 +326,22 @@ def dispatch(product, data, tip, why, now, src, out):
     return True
 
 
+#: what :func:`_find_run` returns when the listing did not read
+UNKNOWN = object()
+
+
 def _find_run(product, src, full):
     """The ``workflow_dispatch`` run of the trunk's workflow made for ``full`` (its sha, created
-    after the dispatch), or None."""
+    after the dispatch), None when the listing holds none, :data:`UNKNOWN` when it did not
+    read."""
     trunk, wf = product.conventions.main, workflow(product)
-    text, _err = _gh(src, ['run', 'list', '-R', product.repo_slug, '-w', wf, '-b', trunk,
-                           '-e', 'workflow_dispatch', '-L', '10', '--json',
-                           'databaseId,headSha,status,conclusion,createdAt,url'])
-    runs = _json(text)
-    for r in runs if isinstance(runs, list) else ():
-        made = _epoch(r.get('createdAt'))
+    runs = _read(src, ['run', 'list', '-R', product.repo_slug, '-w', wf, '-b', trunk,
+                       '-e', 'workflow_dispatch', '-L', '10', '--json',
+                       'databaseId,headSha,status,conclusion,createdAt,url'], list)
+    if runs is None:
+        return UNKNOWN
+    for r in runs:
+        made = _epoch(r.get('createdAt')) if isinstance(r, dict) else None
         if r.get('headSha') == full.get('sha') and made is not None \
                 and made >= (full.get('at') or 0) - 120:
             return r
@@ -358,6 +389,8 @@ def read_full(product, data, now, src, out):
     trunk, slug = product.conventions.main, product.repo_slug
     if not full.get('run'):
         r = _find_run(product, src, full)
+        if r is UNKNOWN:
+            return      # the listing did not read: never "lost" on it — read again
         if r is None:
             if now - (full.get('at') or now) > FIND_S:
                 full['state'] = 'lost'
@@ -366,10 +399,9 @@ def read_full(product, data, now, src, out):
             return
         full['run'], full['url'] = str(r.get('databaseId')), r.get('url')
         full['state'] = 'running'
-    text, _err = _gh(src, ['run', 'view', full['run'], '-R', slug, '--json',
-                           'status,conclusion,url,jobs'])
-    got = _json(text)
-    if not isinstance(got, dict) or got.get('status') != 'completed':
+    got = _read(src, ['run', 'view', full['run'], '-R', slug, '--json',
+                      'status,conclusion,url,jobs'], dict)
+    if got is None or got.get('status') != 'completed':
         return
     full['url'] = got.get('url') or full.get('url')
     sha = full.get('sha')
@@ -502,14 +534,15 @@ def _file(product, data, k, rec, out):
 
 def _last_full(product, src):
     """Epoch of the newest ``schedule`` or ``workflow_dispatch`` run of the trunk's workflow on
-    the trunk (every heavy job ran), or None."""
+    the trunk (every heavy job ran), None when the listing holds none, :data:`UNKNOWN` when it
+    did not read."""
     trunk, wf = product.conventions.main, workflow(product)
-    text, _err = _gh(src, ['run', 'list', '-R', product.repo_slug, '-w', wf, '-b', trunk,
-                           '-L', '30', '--json', 'event,createdAt,headSha'])
-    runs = _json(text)
+    runs = _read(src, ['run', 'list', '-R', product.repo_slug, '-w', wf, '-b', trunk,
+                       '-L', '30', '--json', 'event,createdAt,headSha'], list)
+    if runs is None:
+        return UNKNOWN
     times = [_epoch(r.get('createdAt')) for r in runs if isinstance(r, dict)
-             and r.get('event') in ('schedule', 'workflow_dispatch')] \
-        if isinstance(runs, list) else []
+             and r.get('event') in ('schedule', 'workflow_dispatch')]
     times = [t for t in times if t]
     return max(times) if times else None
 
@@ -584,9 +617,15 @@ def tick(product, stall=None, out=print, now=None, src=None):
             if now - last >= every * 3600 and now - (data.get('listed') or 0) >= LIST_EVERY_S:
                 data['listed'] = int(now)
                 seen = _last_full(product, src)
+                if seen is UNKNOWN:
+                    out(f'trunk watch: the runs of {workflow(product)} on '
+                        f'{product.conventions.main} unreadable — the safety net is asked '
+                        f'again in {LIST_EVERY_S // 60} min, never dispatched on an unread list')
+                    seen = None
+                    every = None
                 if seen and seen > last:
                     data['full_at'] = last = seen
-                if now - last >= every * 3600:
+                if every and now - last >= every * 3600:
                     dispatch(product, data, tip, f'safety net: no full run of '
                              f'{product.conventions.main} in {every}h '
                              f'(conventions.ci.trunk_full_every_hours)', now, src, out)

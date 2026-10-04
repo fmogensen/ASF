@@ -18,10 +18,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import env, flake
+from asf import env, flake, github
 from asf.harvest import harvest, lane
 from asf.views import status
 
+from tests import contracts
 from tests.test_merge_queue import QueueRepo, check_run
 
 HEAD = 'a' * 40
@@ -81,7 +82,7 @@ class Triage(unittest.TestCase):
     def head_red(self, gh):
         host = lane.GitHubHost(self.product)
         host.lane = mock.Mock(state_dir=self.state_dir, repo=None, out=self.lines.append)
-        with mock.patch.object(harvest, '_gh', side_effect=gh), \
+        with mock.patch.object(github, 'call', side_effect=contracts.as_call(gh)), \
                 mock.patch.object(host, 'merge_required', return_value=(('gate', 'gate-tests'), None)), \
                 mock.patch('asf.harvest.pr_graph.checks_for', return_value=None):
             return host.head_red(self.F, 902)
@@ -202,6 +203,30 @@ class Triage(unittest.TestCase):
 def reruns(gh):
     """The ``gh run rerun`` calls a mocked ``gh`` saw (the annotation reads aside)."""
     return [c for c in gh.call_args_list if list(c.args[0][:2]) == ['run', 'rerun']]
+
+
+class Door(unittest.TestCase):
+    """flake reads and re-runs through :mod:`asf.github`; a test's own ``gh`` may still answer
+    ``(rc, stdout, stderr)`` or a :class:`asf.github.Result`."""
+
+    def test_the_default_door_is_the_github_client(self):
+        ann = [{'annotation_level': 'failure', 'message': 'The runner has received a shutdown '
+                                                           'signal.'}]
+        with mock.patch.object(github, 'gh', return_value=github.Result(True, json.dumps(ann))) \
+                as gh:
+            self.assertIsNotNone(flake.infra_red('o/p', '12', None))
+        self.assertEqual(gh.call_args.args[0], ['api', 'repos/o/p/check-runs/12/annotations'])
+
+    def test_an_unknown_read_is_no_infra_red(self):
+        with mock.patch.object(github, 'gh', return_value=github.unknown('timeout')):
+            self.assertIsNone(flake.infra_red('o/p', '12', None))
+
+    def test_an_injected_door_may_answer_a_result_or_a_triple(self):
+        ann = json.dumps([{'annotation_level': 'failure',
+                           'message': 'The runner has received a shutdown signal.'}])
+        for answer in ((0, ann, ''), github.Result(True, ann, 0, ann)):
+            self.assertIsNotNone(flake.infra_red('o/p', '12', lambda _a, answer=answer: answer))
+        self.assertIsNone(flake.infra_red('o/p', '12', lambda _a: (1, '', 'HTTP 502')))
 
 
 class Quarantine(unittest.TestCase):

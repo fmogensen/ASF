@@ -264,14 +264,19 @@ def _runner_class(labels, ignore=()):
     return rest[0] if rest else (names[0] if names else '')
 
 
+#: `GitHubRuns.workflow_id`'s answer when the workflow listing did not read (Unknown)
+UNREAD = object()
 #: `GitHubRuns.workflow_id` has not yet resolved this instance's selector (`None` is itself a
 #: valid, cacheable outcome — the selector matched nothing — so it cannot double as "unresolved").
 _UNRESOLVED = object()
 
 
 class GitHubRuns:
-    """The completed runs of one workflow and their job logs, off ``gh``. A test passes a fake
-    with the same three methods."""
+    """The completed runs of one workflow and their job logs, off ``gh`` through
+    :func:`asf.github.gh` (the rate-limit latch, the escape-sequence retry, the timeout). A read
+    that does not answer is ``None`` — Unknown — from every method, never an empty listing or an
+    empty log: the pass then leaves the window where it was and the run unread. A test passes a
+    fake with the same three methods."""
 
     def __init__(self, product, run=None):
         self.product = product
@@ -281,28 +286,21 @@ class GitHubRuns:
         self.workflow_names = []
 
     def _gh(self, args):
-        from asf import ci_pool, gh_limit
-        gh_limit.guard(args)
+        """``gh <args>``'s stdout, or None when Unknown."""
+        from asf import ci_pool, gh_limit, github
         if self._run is subprocess.run and gh_limit.low(self.product):
             return None  # a history read, never urgent: unreadable under the reserve
-        try:
-            p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
-                          env=ci_pool._gh_env(self.product))
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        gh_limit.inspect_proc(args, p)
-        from asf.harvest import harvest as H
-        if H.escapes_refused(args, p.returncode, getattr(p, 'stderr', '')):   # a coloured job log (gh 2.101)
-            try:
-                p = self._run(['gh', *H.with_escapes(args)], capture_output=True, text=True,
-                              timeout=GH_TIMEOUT_S, env=ci_pool._gh_env(self.product))
-            except (OSError, subprocess.TimeoutExpired):
-                return None
-        return p.stdout if p.returncode == 0 else None
+        r = github.gh(args, timeout=GH_TIMEOUT_S, run=self._run,
+                      env=ci_pool._gh_env(self.product))
+        return r.data if r.ok else None
 
     def _lines(self, args):
+        """The JSON line of each object ``gh --jq … @json`` printed, or None when Unknown."""
+        text = self._gh(args)
+        if text is None:
+            return None
         out = []
-        for line in (self._gh(args) or '').splitlines():
+        for line in text.splitlines():
             try:
                 out.append(json.loads(line))
             except ValueError:
@@ -319,10 +317,13 @@ class GitHubRuns:
         """The numeric id of the workflow ``selector`` names — its own id, its display ``name``,
         or its file name (``conventions.ci_workflow`` may hold any of the three, P2) — or None
         with :attr:`workflow_names` set to the names the listing held, for the caller's one line
-        (D2). Resolved once per instance (D3)."""
+        (D2). Resolved once per instance (D3); a listing that did not read resolves nothing — it
+        returns :data:`UNREAD` and is asked again."""
         if self._workflow_id is _UNRESOLVED:
             rows = self._lines(['api', f'repos/{self.slug}/actions/workflows?per_page=100',
                                 '--paginate', '--jq', '.workflows[]|{id,name,path}|@json'])
+            if rows is None:
+                return UNREAD
             self.workflow_names = [r.get('name') or '' for r in rows]
             match = next((r for r in rows if str(r.get('id')) == str(selector)
                          or r.get('name') == selector
@@ -335,8 +336,11 @@ class GitHubRuns:
         on or after ``since`` (an ISO timestamp). One workflow's runs, asked of the workflow (D1)
         — ``repos/{slug}/actions/workflows/{id}/runs`` — so no display-name filter stands between
         the listing and the pass. When the selector resolves to nothing the listing falls back to
-        every workflow's runs with the old filter, unchanged (D2)."""
+        every workflow's runs with the old filter, unchanged (D2). None when a listing did not
+        read (Unknown)."""
         wf_id = self.workflow_id(workflow)
+        if wf_id is UNREAD:
+            return None
         if wf_id is None:
             print(f"file-bugs: flaky — ci_workflow {workflow!r} matches none of: "
                   f"{', '.join(self.workflow_names) or '(none)'}")
@@ -344,13 +348,14 @@ class GitHubRuns:
                                        f'&status=completed&per_page=100', '--paginate', '--jq',
                                 '.workflow_runs[]|{id,name,head_branch,created_at,updated_at,'
                                 'html_url}|@json'])
-            return [self._row(r) for r in rows if r.get('name') == workflow]
+            return None if rows is None else [self._row(r) for r in rows
+                                              if r.get('name') == workflow]
         rows = self._lines(['api', f'repos/{self.slug}/actions/workflows/{wf_id}/runs?'
                                    f'created=%3E%3D{since}&status=completed&per_page=100',
                             '--paginate', '--jq',
                             '.workflow_runs[]|{id,name,head_branch,created_at,updated_at,'
                             'html_url}|@json'])
-        return [self._row(r) for r in rows]
+        return None if rows is None else [self._row(r) for r in rows]
 
     def jobs(self, run_id):
         """``[{id, runner_name, labels}]``, or None when the listing failed."""
@@ -362,7 +367,8 @@ class GitHubRuns:
         return [json.loads(l) for l in text.splitlines() if l.strip().startswith('{')]
 
     def log(self, job_id):
-        return self._gh(['api', f'repos/{self.slug}/actions/jobs/{job_id}/logs']) or ''
+        """The job's log, or None when it did not read (Unknown — never "no flaky test")."""
+        return self._gh(['api', f'repos/{self.slug}/actions/jobs/{job_id}/logs'])
 
 
 def state_path(product):
@@ -402,6 +408,10 @@ def collect(state, source, workflow, conv, now, out=print):
     """Read the unread completed runs of ``workflow`` into ``state``. Returns the keys touched."""
     since = window_since(state, now)
     listed = source.runs(workflow, since)
+    if listed is None:
+        out(f"file-bugs: flaky — the runs of {workflow} since {since} unreadable: the window "
+            f"stays, read again next pass")
+        return set()
     if len(listed) >= TRUNCATED_ROWS:
         out(f"file-bugs: flaky — {len(listed)} runs listed since {since}: the window is "
             f"truncated, runs older than it cannot be read")
@@ -418,10 +428,14 @@ def collect(state, source, workflow, conv, now, out=print):
         if jobs is None:
             failed.append(r)
             continue  # read again next pass
+        logs = [(j, source.log(j['id'])) for j in jobs]
+        if any(log is None for _j, log in logs):
+            failed.append(r)
+            continue  # a log did not read: never "no flaky test" — read again next pass
         flaky = []
-        for j in jobs:
+        for j, log in logs:
             klass = _runner_class(j.get('labels'), ignore)
-            for t in parse_flaky(source.log(j['id'])):
+            for t in parse_flaky(log):
                 flaky.append((t, j.get('runner_name'), klass))
         run = dict(r, trunk=conv.is_trunk(r['branch']))
         touched |= record_run(state, run, flaky)

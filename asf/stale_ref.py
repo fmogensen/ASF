@@ -22,19 +22,27 @@ before any flake re-run, any correct round, any trunk-red count (:mod:`asf.trunk
 
 Only a red on a fresh merge ref is a verdict. State: ``state/<product>/stale-ref.json``
 (``{"<pr>": {head, tip, at}}``). Never raises.
+
+``gh`` goes through :mod:`asf.github`, ``git`` through :mod:`asf.gitops`. A run's ``(event,
+created)`` is read once a **pass** — kept in :mod:`asf.facts.cache`, which the tick, the detached
+harvest and the ci-queue pass each clear at their entry — never once a process: no run read
+(nor an Unknown one) outlives the pass that read it.
 """
 import datetime
 import json
 import os
 import time
 
+from asf import github, gitops
+from asf.facts import cache as facts_cache
+
 STATE_FILE = 'stale-ref.json'
 #: how long a reopened PR's fresh run may take to show before the red is judged as it stands
 WAIT_S = 1800
 #: records older than this are dropped
 KEEP_S = 3 * 86400
-
-_RUNS = {}      # run id -> (event, created epoch), read once a process
+#: the :mod:`asf.facts.cache` fact a run's ``(event, created epoch)`` is kept under, a pass
+RUN_FACT = 'workflow_run'
 
 
 def _sd(product):
@@ -49,21 +57,14 @@ def _epoch(iso):
         return None
 
 
-def _gh():
-    from asf.harvest import harvest as H
-    return H
-
-
 def arrival(product, repo, tip):
     """Epoch the trunk's tip ``tip`` arrived: when the trunk watch saw the trunk move to it (or,
     the watch having last read an older tip, its last look), and never before the tip's own
     commit time. None when nothing reads."""
     from asf import trunk_watch
-    H = _gh()
     times = []
     if repo and tip:
-        got = H.sh(['git', 'log', '-1', '--format=%ct', tip], cwd=repo)
-        ct = (got.stdout or '').strip() if got.returncode == 0 else ''
+        ct = gitops.log1(repo, tip, '%ct') or ''
         if ct.isdigit():
             times.append(int(ct))
     tw = trunk_watch.load(_sd(product))
@@ -75,17 +76,20 @@ def arrival(product, repo, tip):
 
 
 def run_of(slug, link):
-    """``(event, created epoch)`` of the workflow run a check's link names, or None."""
+    """``(event, created epoch)`` of the workflow run a check's link names, or None (no run
+    named, or its read Unknown). Read once a pass (:data:`RUN_FACT`)."""
     from asf.harvest import lane as lane_mod
     m = lane_mod._RUN_RE.search(link or '')
     if not m:
         return None
     rid = m.group(1)
-    if rid not in _RUNS:
-        got = _gh().gh_json(['api', f'repos/{slug}/actions/runs/{rid}'], None)
-        _RUNS[rid] = ((got.get('event'), _epoch(got.get('created_at')))
-                      if isinstance(got, dict) else None)
-    return _RUNS[rid]
+    got = facts_cache.get(slug, RUN_FACT, rid)
+    if got is facts_cache.MISS:
+        r = github.api(f'repos/{slug}/actions/runs/{rid}')
+        got = facts_cache.put(slug, RUN_FACT, rid, '',
+                              (r.data.get('event'), _epoch(r.data.get('created_at')))
+                              if r.ok and isinstance(r.data, dict) else None)
+    return got
 
 
 def stale(product, slug, red, tip, repo):
@@ -148,21 +152,20 @@ def refresh(product, slug, number, head, tip, names, out=print, now=None):
         if getattr(product, 'conventions', None) is None:
             return None
         trunk = product.conventions.main
-        H = _gh()
         why = (f'ASF: the red {", ".join(names)} ran on a merge ref of {trunk} from before '
                f'{trunk} moved to {tip[:9]}; a re-run would replay it. Closed and reopened for a '
                f'fresh run on today\'s {trunk} (asf.stale_ref).')
-        rc, _o, err = H._gh(['pr', 'close', str(number), '-R', slug, '--comment', why])
-        if rc != 0:
+        r = github.gh(['pr', 'close', str(number), '-R', slug, '--comment', why])
+        if not r.ok:
             out(f'stale merge ref: closing PR #{number} for a fresh run refused — '
-                f'{(err or "").strip()[-200:]}')
+                f'{(r.stderr or r.reason).strip()[-200:]}')
             return None
-        rc, _o, err = H._gh(['pr', 'reopen', str(number), '-R', slug])
-        if rc != 0:
-            rc, _o, err = H._gh(['pr', 'reopen', str(number), '-R', slug])
-        if rc != 0:
+        r = github.gh(['pr', 'reopen', str(number), '-R', slug])
+        if not r.ok:
+            r = github.gh(['pr', 'reopen', str(number), '-R', slug])
+        if not r.ok:
             out(f'stale merge ref: PR #{number} closed but its reopen was refused — '
-                f'{(err or "").strip()[-200:]}; reopen it')
+                f'{(r.stderr or r.reason).strip()[-200:]}; reopen it')
             return None
         data[str(number)] = {'head': head, 'tip': tip, 'at': int(now), 'names': list(names)}
         save(sd, data)

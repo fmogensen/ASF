@@ -980,7 +980,7 @@ class Source:
 
     def attested(self, sha):
         """True when ``sha`` carries the merge queue's attestation (:mod:`asf.attestation`);
-        False when it does not or it is unreadable."""
+        False when it does not; None when it is unreadable (Unknown: the relief holds)."""
         return False
 
 
@@ -3695,7 +3695,12 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                    if r.online and any(w <= r.norm_labels() for w in want)]
     elif not run_level:
         return 0
-    elif src.attested(target.get('headSha')):
+    elif (attested := src.attested(target.get('headSha'))) is None:
+        # Unknown (S-M23): whether its heavy jobs skip is not known — no sizing, no cancel
+        out(f"relief: none for {owner} — {sha}'s attestation unreadable "
+            f"({attestation.context(product)}): read again next pass")
+        return 0
+    elif attested:
         # the merge queue attested the sha: its heavy jobs skip there, so the run-level sizing
         # (measured on full runs) overstates what it waits for — only a starved required job
         # (the jobs it does run: the gate, the rules) is relieved, above

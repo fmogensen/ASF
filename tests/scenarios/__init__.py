@@ -29,7 +29,9 @@ which proves a row can see a close at all). The check behaviours (:data:`CHECK_B
 W6-PR0b) change only what the host says about PR #1's checks, each the fake's stand-in for a
 recorded ``gh`` answer under ``tests/fixtures/gh``: ``stale-merge-ref`` (red from a run on a
 merge ref the trunk moved past), ``skip-job`` and ``skip-job-attested`` (the required check
-skipped, on a head without and with the merge queue's attestation), ``hide-job-failure`` (a run
+skipped, on a head without and with the merge queue's attestation), ``skip-job-unknown`` (the
+same attested head whose commit-status read fails: the attestation Unknown, S-M23; no recording —
+a GitHub outage's 502), ``hide-job-failure`` (a run
 concluding success over a failed job) and ``path-filter`` (the required check never created).
 
 **A path** (:data:`PATHS`) is one close decider, run on a fresh fork the way the tick runs it,
@@ -242,6 +244,13 @@ def _skip_job_attested(f):
     gh(f, 'e2e', 'skip-job', '1', CHECK, 'attested')
 
 
+def _skip_job_unknown(f):
+    """PR #1's required check skipped on a head the merge queue attested — and the host's
+    commit-status read fails (an outage): the attestation is Unknown (S-M23)."""
+    gh(f, 'e2e', 'skip-job', '1', CHECK, 'attested')
+    gh(f, 'e2e', 'status-unreadable', WORLD.hand)
+
+
 def _hide_job_failure(f):
     """PR #1's run concludes success while a job of it failed."""
     gh(f, 'e2e', 'hide-job-failure', '1', HIDDEN_JOB)
@@ -260,13 +269,14 @@ BEHAVIOURS = {
     'stale-merge-ref': _stale_merge_ref,
     'skip-job': _skip_job,
     'skip-job-attested': _skip_job_attested,
+    'skip-job-unknown': _skip_job_unknown,
     'hide-job-failure': _hide_job_failure,
     'path-filter': _path_filter,
 }
 #: The behaviours that change only what the host says about PR #1's checks: the PR stays open,
 #: its work unmerged — no close path reads checks, so each answers as under ``open``.
-CHECK_BEHAVIOURS = ('stale-merge-ref', 'skip-job', 'skip-job-attested', 'hide-job-failure',
-                    'path-filter')
+CHECK_BEHAVIOURS = ('stale-merge-ref', 'skip-job', 'skip-job-attested', 'skip-job-unknown',
+                    'hide-job-failure', 'path-filter')
 #: Their rows of the close-path table, ``(path, behaviour, expected, gap, edit)`` as
 #: ``test_close_paths.ROWS`` (run by ``test_host_behaviours.py``): open, unmerged work on every
 #: path, whatever the host says about its checks.
@@ -328,12 +338,12 @@ def deciding(f):
     """The fork's environment (its home, its ``PATH`` with the fake ``gh`` first) and its
     product, with the process-wide rate-limit latch and read caches clear going in and out — the
     pass's facts (:mod:`asf.facts.cache`) too: each row is a pass of its own, as each tick is."""
-    from asf import attestation, env, gh_limit, stale_ref
+    from asf import attestation, env, gh_limit
     from asf.facts import cache as facts_cache
     gh_limit.reset()
-    # the process-wide read caches: every fork's PR #1 has the same head and run ids
+    # the read caches: every fork's PR #1 has the same head and run ids (a run is kept a pass in
+    # asf.facts.cache — a fork is a pass of its own)
     attestation._SEEN.clear()
-    stale_ref._RUNS.clear()
     facts_cache.clear()
     try:
         with f.seams():
@@ -341,7 +351,6 @@ def deciding(f):
     finally:
         gh_limit.reset()
         attestation._SEEN.clear()
-        stale_ref._RUNS.clear()
         facts_cache.clear()
 
 
