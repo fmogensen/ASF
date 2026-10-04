@@ -18,8 +18,9 @@ Every row is filled from what exists, or says which key would fill it —
   starts" only while the cap holds a launching row, else "the cap holds no row now";
 * **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
   closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
-* **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
-  ``index.json``, less the sessions in flight);
+* **Ready to launch** — the rows this tick's wave would start: the feeder over the record's
+  ``index.json``, less the sessions in flight, through the wave's own per-row filter
+  (:func:`asf.tick.step_wave.would_start`) — held back and failing-to-spawn rows named apart;
 * **Decisions** — the undecided cards (D6's one ranking) and the first few to decide;
 * **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
   cell naming the band when it is not ``free``, and a stopped account's reset (``— resets
@@ -282,22 +283,36 @@ def _residue(item):
 
 
 def ready_cell(root, product):
-    """``asf next --json``'s rows: how many would launch, and the first of them."""
+    """How many rows this tick's wave would start, and the first of them — the wave's own filter
+    (:func:`asf.tick.step_wave.would_start`: approval holds, trunk closes, host pressure, seats,
+    the relaunch cap), so N is never a row the wave then refuses. A row the plan launches but
+    that filter refuses is counted as held back, by why; a row failing to spawn tick after tick
+    is tried by the wave but not counted as starting."""
     from asf.feeder import rows as feeder_rows
-    from asf.tick.step_wave import capacity, inflight, plan_inputs
-    from asf.views import index_reader as ix
+    from asf.tick import step_wave
     if not root or not os.path.exists(os.path.join(root, 'index.json')):
         return not_configured('backlog_dir (no index.json)')
-    items, _generated = ix.load(root)
-    rows = feeder_rows.plan_rows(items, product, inflight(product), capacity(product),
-                                 **plan_inputs(product, root))
-    launching = [r for r in rows if r.launches]
-    if not launching:
-        return f"0 ({len(rows)} row(s) waiting)" if rows else "0"
-    first = launching[0]
-    failing = sum(1 for r in launching if feeder_rows.FAILING_TO_SPAWN in r.action)
-    return (f"{len(launching)} — first: {first.kind} {first.item_id}"
-            + (f"; {failing} {feeder_rows.FAILING_TO_SPAWN.lower()}" if failing else ''))
+    screened, _seats, _running = step_wave.would_start(product, root)
+    starting = [s for s in screened if s.starts]
+    failing = [s for s in starting if feeder_rows.FAILING_TO_SPAWN in s.row.action]
+    ready = [s for s in starting if s not in failing]
+    back = {}
+    for s in screened:
+        if s.row.launches and s.why:
+            back[s.kind] = back.get(s.kind, 0) + 1
+    notes = []
+    if failing:
+        notes.append(f"{len(failing)} {feeder_rows.FAILING_TO_SPAWN.lower()}")
+    if back:
+        notes.append(f"{sum(back.values())} held back ("
+                     + ', '.join(f'{k} {n}' for k, n in sorted(back.items())) + ')')
+    tail = ''.join(f'; {n}' for n in notes)
+    if not ready:
+        waiting = sum(1 for s in screened if not s.row.launches)
+        parts = ([f"{waiting} row(s) waiting"] if waiting else []) + notes
+        return f"0 ({'; '.join(parts)})" if parts else "0"
+    first = ready[0].row
+    return f"{len(ready)} — first: {first.kind} {first.item_id}{tail}"
 
 
 def build_cell(root, product):

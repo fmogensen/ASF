@@ -1,10 +1,11 @@
 """asf.tick.steps — the step manifest ``asf tick`` carries, and who owns each step.
 
-The scheduler runs eight steps: ``record``, ``health``, ``groom``, ``wave``, ``prs``, ``harvest``,
-``batch`` (its own job) and daily ``daily``. Each resolves to an owner:
+The scheduler runs nine steps: ``record``, ``health``, ``groom``, ``wave``, ``prs``, ``harvest``,
+``batch`` (its own job), ``watchdog`` (the dwell-time watchdog, :mod:`asf.dwell`) and daily
+``daily``. Each resolves to an owner:
 
 * ``asf``    — a python callable in this package (``record``, ``health``, ``groom``, ``wave``, ``prs``,
-  ``harvest``, ``daily`` — :data:`ASF_CALLABLES`);
+  ``harvest``, ``watchdog``, ``daily`` — :data:`ASF_CALLABLES`);
 * a command  — ``steps: {health: "bash ~/x/health.sh --fix"}`` in the product yaml, run as a
   subprocess with a timeout, its output written to the tick log with a ``[command:<step>]`` prefix;
 * ``off``    — ``steps: {batch: off}``: the operator says another job still runs it.
@@ -24,7 +25,7 @@ import time
 
 from asf import env
 
-STEPS = ['record', 'health', 'groom', 'wave', 'prs', 'harvest', 'batch', 'daily']
+STEPS = ['record', 'health', 'groom', 'wave', 'prs', 'harvest', 'batch', 'watchdog', 'daily']
 
 # the steps with an asf implementation, and where each lives (the --manifest command column)
 ASF_CALLABLES = {
@@ -34,6 +35,7 @@ ASF_CALLABLES = {
     'wave': 'asf.tick.step_wave:run',
     'prs': 'asf.tick.step_prs:run',
     'harvest': 'asf.tick.step_harvest:run',
+    'watchdog': 'asf.tick.step_watchdog:run',
     'daily': 'asf.tick.step_daily:run',
 }
 ASF_STEPS = tuple(ASF_CALLABLES)

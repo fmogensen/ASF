@@ -389,6 +389,8 @@ def cmd_tick(args, root=None):
     # a tick that never ends held this lock forever and no later tick started (2026-10-04):
     # past its wall-clock budget it names its step and exits, which releases the lock
     timer = watchdog.arm(tick_budget_s(product, [r[0] for r in rows]))
+    from asf import dwell
+    dwell.mark_tick(product)   # what the dwell watchdog's tick_running ages
     try:
         return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=True))
     finally:
@@ -453,6 +455,13 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         marker = upgrade.read_pending(product.name)
         print(f'tick: upgrade to {marker["sha"][:7]} pending — this tick runs'
               ' without a new background harvest; the install goes at the next start')
+    if any(s == 'wave' and o == 'asf' for s, o, _ in rows) and not any(s == 'watchdog' for s, _, _ in rows):
+        # the dwell watchdog (asf.dwell) runs with every asf wave, whichever clock carries it — a
+        # product whose clocks predate the step is watched too; `steps: {watchdog: off}` stops it
+        w_step, w_owner, w_command = steps.resolve(product, ['watchdog'])[0]
+        if w_owner != 'off':
+            at = max(i for i, r in enumerate(rows) if r[0] in ('wave', 'prs', 'harvest', 'batch'))
+            rows = list(rows[:at + 1]) + [(w_step, w_owner, w_command)] + list(rows[at + 1:])
     if not any(s == 'daily' for s, _, _ in rows):
         # this tick's own clock doesn't carry daily (it isn't the daily clock) — catch it up
         # when its own clock's time has passed and it still hasn't succeeded today (B-0123)
