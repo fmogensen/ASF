@@ -101,6 +101,45 @@ def ci_signatures(root, now, conv=None):
     return out
 
 
+def _open_ci_red_bug(canonical, name):
+    """The signature of an open Bug already filed for CI red on check ``name``, or None."""
+    for rec in (canonical or {}).values():
+        typed, machine = frontmatter.split_machine(rec.get('meta') or {})
+        state = machine.get('state') or typed.get('state')
+        if (typed.get('type') == 'bug' and not typed.get('removed')
+                and state not in ('Resolved', 'Closed')
+                and str(typed.get('title') or '').startswith(f'{CI_RED_TITLE}{name}:')
+                and typed.get('signature')):
+            return typed['signature']
+    return None
+
+
+def trunk_red_signatures(state_dir, canonical, now=None):
+    """One S1 signature per trunk check a PR has waited on past the lane's bound
+    (:func:`asf.harvest.lane.trunk_red_overdue`): the open ``CI red: <check>:`` Bug already filed
+    for it is refreshed (bumped), else a ``<check>: trunk red`` Bug is filed."""
+    if not state_dir:
+        return {}
+    from asf.harvest import lane
+    out = {}
+    for name, v in sorted(lane.trunk_red_overdue(state_dir, now).items()):
+        sig = _open_ci_red_bug(canonical, name) or f'{name}: trunk red'
+        since = float(v.get('since') or 0)
+        hours = ((now or datetime.datetime.now(datetime.timezone.utc).timestamp()) - since) / 3600
+        prs = ', '.join(f'PR #{n}' for n in v.get('prs') or [])
+        trunk = v.get('trunk') or 'the trunk'
+        out[sig] = {
+            'title': truncate(f"{CI_RED_TITLE}{name}: {trunk} red for {hours:.0f}h, PRs wait on it",
+                              120),
+            'severity': 'S1',
+            'evidence': [f"{trunk} red on `{name}` at {str(v.get('sha') or '?')[:9]} for "
+                         f"{hours:.1f}h; waiting on it: {prs or 'PRs'}"],
+            'runs': [],
+            'acceptance': [f"`{name}` is green on {trunk} and no PR waits on it"],
+        }
+    return out
+
+
 def refusal_signatures(root, now):
     cutoff = now - datetime.timedelta(hours=CI_REFUSAL_WINDOW_H)
     totals = {}
@@ -427,6 +466,10 @@ def cmd_file_bugs(args, root):
     signatures.update(ci_signatures(root, now, conv))
     signatures.update(refusal_signatures(root, now))
     signatures.update(rule_violation_signatures(root, rule_data))
+    trunk_red_dir = getattr(args, 'state_dir', None) or (
+        os.path.dirname(ledger_file) if ledger_file else None)
+    for sig, info in trunk_red_signatures(trunk_red_dir, canonical).items():
+        signatures.setdefault(sig, info)
     if rule_data is not None:
         report_check_failures(rule_data.get('broken') or [], ledger,
                               now.strftime('%Y-%m-%dT%H:%M:%SZ'))

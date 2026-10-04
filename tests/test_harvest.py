@@ -2383,6 +2383,76 @@ class ProductHarvestTests(unittest.TestCase):
                       'may land', lines)
         self.assertEqual(len(self.merges(calls)), 1)
 
+    def test_the_trunk_red_bugs_own_pr_red_on_that_check_goes_back_to_its_session(self):
+        """Review: the Bug PR written to fix the red trunk is red on the same check — waiting on
+        the trunk would wait on itself for good. Its red is its own: a normal correction."""
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'fail'}], trunk={'gate': 'failure'})
+        self.push_fix(['approved'])
+        items = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'Active',
+                            'title': 'CI red: gate: run the tests'}}
+        lines = []
+        results = harvest.run_product_harvest(self.pr_conv(landing_checks=['gate']),
+                                              self.state_dir, out=lines.append, items=items)
+        self.assertEqual(results, {'fix/B-0001': 'held'}, lines)
+        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'gate')
+        self.assertEqual(self.merges(calls), [])
+
+    def test_a_trunk_red_wait_past_its_bound_is_loud_and_asks_for_the_trunk_bug(self):
+        """Review: a PR waiting on a red trunk waited forever with no signal. Past
+        TRUNK_RED_MAX_WAIT_S the lane says NEEDS OPERATOR, the status and doctor rows name it,
+        and file-bugs files (or refreshes) the trunk's Bug from it."""
+        self.fake_gh([{'name': 'gate', 'bucket': 'fail'}], trunk={'gate': 'failure'})
+        self.push_fix(['approved'])
+        with mock.patch.object(lane, 'TRUNK_RED_MAX_WAIT_S', 0), \
+                mock.patch.object(env, 'state_dir', lambda *_a, **_k: self.state_dir):
+            results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+            self.assertEqual(results, {'fix/B-0001': 'waiting'}, lines)
+            self.assertTrue([l for l in lines if l.startswith('NEEDS OPERATOR: main red on gate')],
+                            lines)
+            product = self.pr_conv(landing_checks=['gate'])
+            row = lane.trunk_red_line(product)
+            self.assertTrue(row and 'gate' in row and 'PR #41' in row, row)
+            from asf import doctor
+            from asf.views import status
+            self.assertEqual(doctor.check_trunk_red(product), row)
+            self.assertEqual(status.trunk_red_cell(product), row)
+        from asf.tick import file_bugs
+        sigs = file_bugs.trunk_red_signatures(self.state_dir, {})
+        self.assertEqual(list(sigs), ['gate: trunk red'])
+        self.assertEqual(sigs['gate: trunk red']['severity'], 'S1')
+        self.assertIn('PR #41', ' '.join(sigs['gate: trunk red']['evidence']))
+        # an open Bug already filed for the trunk's red on that check is refreshed, not doubled
+        canonical = {'B-0009': {'meta': {'type': 'bug', 'title': 'CI red: gate: run the tests',
+                                         'signature': 'gate: run the tests', 'state': 'Active'}}}
+        self.assertEqual(list(file_bugs.trunk_red_signatures(self.state_dir, canonical)),
+                         ['gate: run the tests'])
+
+    def test_a_skipped_check_does_not_turn_the_red_trunk_check_green(self):
+        """Review: a path filter that skipped the check proves nothing about the trunk's red."""
+        self.push_trunk()
+        self.push_fix(['approved'])
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'skipping'}], trunk={'gate': 'failure'})
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'fix/B-0001': 'waiting'}, lines)
+        self.assertEqual(self.merges(calls), [])
+
+    def test_a_cancelled_trunk_run_is_not_red_the_one_before_it_judges(self):
+        """Review: a cancelled run (superseded by a newer push) says nothing about the check."""
+        older = self.push_trunk('a.txt')
+        newest = self.push_trunk('b.txt')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        runs = {newest: [{'name': 'gate', 'status': 'completed', 'conclusion': 'cancelled'},
+                         {'name': 'lint', 'status': 'completed', 'conclusion': 'cancelled'}],
+                older: [{'name': 'gate', 'status': 'completed', 'conclusion': 'success'},
+                        {'name': 'lint', 'status': 'completed', 'conclusion': 'failure'}]}
+
+        def gh(args):
+            sha = args[1].split('/commits/')[1].split('/')[0]
+            return 0, json.dumps({'check_runs': runs.get(sha, [])}), ''
+        host_ = lane.Lane(self.pr_conv(), self.state_dir).host
+        with mock.patch.object(harvest, '_gh', side_effect=gh):
+            self.assertEqual(host_.trunk_red(['gate', 'lint']), {'lint': older})
+
     def test_trunk_red_judges_the_latest_completed_run(self):
         """A check still running on the trunk's head is judged by its run one commit back; a
         check green on the head is green whatever came before; an unreadable host is not red."""

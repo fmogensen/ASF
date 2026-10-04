@@ -307,6 +307,13 @@ def lane_push_cell(product):
     return lane.ref_push_line(product)
 
 
+def trunk_red_cell(product):
+    """``trunk red past <n>h: …`` when a PR has waited on a red trunk check past the lane's
+    bound, else None (no row)."""
+    from asf.harvest import lane
+    return lane.trunk_red_line(product)
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
@@ -325,7 +332,8 @@ def render(root, product, cfg=None):
                        ('Cron', lambda: cron_cell(cfg, product)),
                        ('Groom', lambda: groom_cell(root, product)),
                        ('Gate', lambda: gate_cell(product)),
-                       ('Lane pushes', lambda: lane_push_cell(product))):
+                       ('Lane pushes', lambda: lane_push_cell(product)),
+                       ('Trunk red', lambda: trunk_red_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table

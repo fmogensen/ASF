@@ -125,8 +125,21 @@ SUBJECT_METHODS = ('--squash', '--merge')
 #: required check a path filter skipped (``skipping``) decided it is not needed: passed (§12).
 RED_BUCKETS = ('fail', 'cancel')
 PASS_BUCKETS = ('pass', 'skipping')
-#: A trunk check run that ended in one of these is red (:meth:`GitHubHost.trunk_red`).
-TRUNK_RED_CONCLUSIONS = ('failure', 'cancelled', 'timed_out', 'startup_failure')
+#: A trunk check run that ended in one of these is red (:meth:`GitHubHost.trunk_red`). A
+#: ``cancelled`` run (superseded by a newer push, or stopped by hand) says nothing about the
+#: check: it is skipped and the latest completed run before it judges.
+TRUNK_RED_CONCLUSIONS = ('failure', 'timed_out', 'startup_failure')
+#: the one ``gh pr checks`` bucket that shows a PR turns a red trunk check green — a ``skipping``
+#: check (a path filter) passes a required check, but proves nothing about the trunk's red
+GREEN_BUCKET = 'pass'
+#: A PR waits on a red trunk at most this long before the lane says NEEDS OPERATOR, the status
+#: and doctor rows name it, and file-bugs files or refreshes the trunk's Bug
+#: (:func:`asf.tick.file_bugs.trunk_red_signatures`) from :data:`TRUNK_RED_OVERDUE`.
+TRUNK_RED_MAX_WAIT_S = 6 * 3600
+TRUNK_RED_OVERDUE = 'trunk-red-overdue.json'
+#: an overdue entry not written again for this long is over (the trunk went green, or no PR
+#: waits on it any more)
+TRUNK_RED_FRESH_S = 2 * 3600
 #: How many trunk commits, newest first, are read for a check's latest completed run.
 TRUNK_RED_DEPTH = 5
 #: ``conventions.landing_checks_missing`` values.
@@ -1474,6 +1487,81 @@ def note_timeout(lane, entries, line):
             pass
 
 
+def trunk_red_bug(items, item, names):
+    """``item`` when its card is the Bug filed for the trunk's red on one of ``names`` (a
+    ``CI red: <name>: …`` title, or a ``<name>: …`` signature — :mod:`asf.tick.file_bugs`),
+    else None."""
+    card = (items or {}).get(item or '') or {}
+    if card.get('type') != 'bug' or card.get('state') in ('Resolved', 'Closed'):
+        return None
+    title, sig = str(card.get('title') or ''), str(card.get('signature') or '')
+    for n in names or ():
+        if title.startswith(f'CI red: {n}:') or sig.startswith(f'{n}:'):
+            return item
+    return None
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json(path, data):
+    tmp = f'{path}.{os.getpid()}.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def clear_trunk_red(lane, names):
+    """Drop the overdue entries of ``names`` — checks the trunk is no longer red on."""
+    path = os.path.join(lane.state_dir, TRUNK_RED_OVERDUE)
+    if not names or lane.dry_run or not os.path.exists(path):
+        return
+    data = _read_json(path)
+    kept = {k: v for k, v in data.items() if k not in names}
+    if kept != data:
+        if kept:
+            _write_json(path, kept)
+        else:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def trunk_red_overdue(state_dir, now=None):
+    """``{check: {sha, since, at, prs, trunk}}`` — the checks a PR has waited on past
+    :data:`TRUNK_RED_MAX_WAIT_S`, written within :data:`TRUNK_RED_FRESH_S`."""
+    now = time.time() if now is None else now
+    data = _read_json(os.path.join(state_dir, TRUNK_RED_OVERDUE))
+    return {k: v for k, v in data.items() if isinstance(v, dict)
+            and now - float(v.get('at') or 0) < TRUNK_RED_FRESH_S}
+
+
+def trunk_red_line(product):
+    """``trunk red <h>h on <check> — PR #… wait(s)`` when a PR has waited on a red trunk past
+    :data:`TRUNK_RED_MAX_WAIT_S`, else None — for the status and doctor rows."""
+    over = trunk_red_overdue(env.state_dir(product))
+    if not over:
+        return None
+    now = time.time()
+    parts = []
+    for name, v in sorted(over.items()):
+        prs = ', '.join(f'PR #{n}' for n in v.get('prs') or [])
+        parts.append(f"{name} for {(now - float(v.get('since') or now)) / 3600:.1f}h at "
+                     f"{str(v.get('sha') or '?')[:9]} ({prs or 'PRs'} waiting)")
+    return (f"trunk red past {TRUNK_RED_MAX_WAIT_S // 3600}h: {'; '.join(parts)} — "
+            f"file-bugs files or refreshes the trunk Bug")
+
+
 def gate_slow_line(product):
     """``gate too slow: <n>s vs gate_timeout_s`` when the gate timed out twice in a row and has
     not been green since, else None — for the status and doctor rows."""
@@ -1998,10 +2086,15 @@ class GitHubHost(Host):
             red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS
                    and (not required or c.get('name') in required)]
             on_trunk = self.trunk_red(red)
-            if red and all(n in on_trunk for n in red):
+            fixes = trunk_red_bug(lane.items, f.get('item'), red)
+            if red and all(n in on_trunk for n in red) and fixes:
+                # the Bug for the trunk's red: waiting on the trunk would wait on itself
+                lane.out(f'harvest: {b}: PR #{number} is {fixes}, the Bug for the red '
+                         f'{self.trunk} ({", ".join(red)}) — still red on it: back to its session')
+            elif red and all(n in on_trunk for n in red):
                 lane.out(f'waiting {b}: PR #{number} checks red: {detail} — red on {self.trunk} '
                          f'too, not its fault; it lands once {self.trunk} is green')
-                wait(lane, f, f'trunk-red: {", ".join(red)}')
+                self.wait_trunk_red(f, number, {n: on_trunk[n] for n in red})
                 return None
             if lane.dry_run:
                 lane.out(f'DRY: would hold {b}: PR #{number} checks red: {detail}')
@@ -2010,16 +2103,19 @@ class GitHubHost(Host):
             send_back(lane, f, 'gate', f'PR #{number} checks red: {detail}', ())
             return None
         passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
-        on_trunk = self.trunk_red(required or [c.get('name') for c in checks if c.get('name')])
+        greened = {c.get('name') for c in checks if c.get('bucket') == GREEN_BUCKET}
+        judged = required or [c.get('name') for c in checks if c.get('name')]
+        on_trunk = self.trunk_red(judged)
+        clear_trunk_red(lane, [n for n in judged if n not in on_trunk])
         if on_trunk:
             tip = f.get('head') or f'origin/{b}'
             unfixed = [n for n, sha in on_trunk.items()
-                       if n not in passed or not lane.is_ancestor(sha, tip)]
+                       if n not in greened or not lane.is_ancestor(sha, tip)]
             if unfixed:
                 lane.out(f'waiting {b}: {self.trunk} is red on {", ".join(unfixed)} and PR '
                          f'#{number} does not turn it green on top of that red — it lands once '
                          f'{self.trunk} is green')
-                wait(lane, f, f'trunk-red: {", ".join(unfixed)}')
+                self.wait_trunk_red(f, number, {n: on_trunk[n] for n in unfixed})
                 return None
             lane.out(f'harvest: {b}: PR #{number} turns {", ".join(on_trunk)} green on top of '
                      f'the red {self.trunk} — it may land')
@@ -2045,9 +2141,34 @@ class GitHubHost(Host):
         return 'gate'
 
 
+    def wait_trunk_red(self, f, number, red):
+        """WAITING ``trunk-red: <names>`` — no one's fault — with ``red_since`` kept across ticks.
+        Past :data:`TRUNK_RED_MAX_WAIT_S` it is loud: a NEEDS OPERATOR line, and an entry in
+        :data:`TRUNK_RED_OVERDUE` the status and doctor rows read and file-bugs files or
+        refreshes the trunk's Bug from."""
+        lane, rec = self.lane, f.get('prev') or {}
+        now = lane.now or time.time()
+        since = (rec.get('red_since') if rec.get('state') == WAITING
+                 and str(rec.get('reason') or '').startswith('trunk-red') and rec.get('red_since')
+                 else now)
+        wait(lane, f, f'trunk-red: {", ".join(red)}', red_since=since)
+        waited = now - float(since)
+        if waited < TRUNK_RED_MAX_WAIT_S or lane.dry_run:
+            return
+        lane.out(f'NEEDS OPERATOR: {self.trunk} red on {", ".join(red)} for '
+                 f'{waited / 3600:.1f}h — PR #{number} ({f["branch"]}) waits on it; file-bugs '
+                 f'files or refreshes the trunk Bug')
+        data = _read_json(os.path.join(lane.state_dir, TRUNK_RED_OVERDUE))
+        for name, sha in red.items():
+            entry = data.get(name) if isinstance(data.get(name), dict) else {}
+            prs = sorted(set(entry.get('prs') or []) | {int(number)})
+            data[name] = {'sha': sha, 'since': min(float(entry.get('since') or since), since),
+                          'at': now, 'prs': prs, 'trunk': self.trunk}
+        _write_json(os.path.join(lane.state_dir, TRUNK_RED_OVERDUE), data)
+
     def trunk_red(self, names):
         """``{name: sha}`` — each of ``names`` whose latest *completed* run on the trunk failed,
-        was cancelled or timed out, with the commit that run judged. The trunk's first-parent
+        or timed out, with the commit that run judged (a cancelled run is skipped). The trunk's first-parent
         history is walked newest first (at most :data:`TRUNK_RED_DEPTH` commits) until every
         name has a completed run; a check still running on the newest commit is judged by the
         one before. Unreadable (no ``gh``, no access) reads as not red — the PR's own checks and
@@ -2071,7 +2192,8 @@ class GitHubHost(Host):
                 break
             for name in sorted(left):
                 done = [r for r in runs if r.get('name') == name
-                        and r.get('status') == 'completed']
+                        and r.get('status') == 'completed'
+                        and r.get('conclusion') != 'cancelled']
                 if not done:
                     continue
                 left.discard(name)

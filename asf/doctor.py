@@ -746,6 +746,9 @@ def run(product_name):
     refused = check_ref_pushes(product)
     if refused:
         rows.append(('lane pushes', False, False, refused))
+    red = check_trunk_red(product)
+    if red:
+        rows.append(('trunk red', False, False, red))
     return rows
 
 
@@ -765,6 +768,16 @@ def check_ref_pushes(product):
     from asf.harvest import lane
     try:
         return lane.ref_push_line(product)
+    except (OSError, ValueError):
+        return None
+
+
+def check_trunk_red(product):
+    """The ``trunk red past <n>h: …`` line when a PR has waited on a red trunk check past the
+    lane's bound (:func:`asf.harvest.lane.trunk_red_line`), else None."""
+    from asf.harvest import lane
+    try:
+        return lane.trunk_red_line(product)
     except (OSError, ValueError):
         return None
 
