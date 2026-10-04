@@ -46,6 +46,9 @@ Prints, in order:
   (:func:`asf.invariants.feeder_gate`) — dropped rows never launch here either; under host
   pressure (:func:`asf.tick.step_wave.host_hold`) every launching row is a ``waits … — held:
   host pressure …`` line and the section ends on ``wave: held: …``, as a live tick's would;
+* ``== groom rules`` — only under ``flags.groom_rules``: a ``would close``/``keeps`` line per
+  duplicate the dedupe rules find and a ``would file a verify Task`` line per covered Feature
+  (:func:`asf.groom.policy.apply_groom_rules`);
 * ``== harvest`` — the gate's own lines: any ``held``/``waiting``/``landed`` outcome the real
   gate would reach for a branch the lane pass brought to GATE.
 
@@ -326,6 +329,11 @@ def run(product, fresh=False, out=print, state_copy=None):
             step_wave.lane_pass(ctx, out, dry_run=True)  # land_spec.adopt + the code lane (R2)
 
             _wave_rows(product, root, out)
+
+            from asf.groom import policy as groom_policy
+            if groom_policy.groom_rules(product):   # flags.groom_rules unset: no section at all
+                out('== groom rules')
+                groom_policy.apply_groom_rules(product, root, out=out, dry_run=True)
 
             out('== harvest')
             if product.repo_dir:

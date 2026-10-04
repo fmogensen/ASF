@@ -62,6 +62,19 @@ covers the item's `writes:` and its report says `done`, else reset; a park older
 `roots_park_stale_days` (3) with at least `roots_min_dependants` (5) rows behind it becomes the
 first NEEDS DECISION line of `asf next` and one groom question. Nothing is unparked by code.
 
+`groom_rules: [dedupe-findings, dedupe-scorecard, report-covered]` (default none) adds rules
+the groom step runs every tick. `dedupe-findings`: the younger of two open invariant-finding
+Bugs of one `(invariant, cause)` closes as a duplicate of the oldest — a Bug the filer keyed on a
+card path (before one Bug per cause) is keyed on its first evidence line's message.
+`dedupe-scorecard`: the younger of two open cards the scorecard loop filed for one cause class
+(`failure` of `failure:failed: not pushed`) closes into the oldest. A younger card already
+started — not `New`, with children, a branch, or named in a `blockedBy` — is left. Under either
+rule `close_exact_duplicate` also answers a `dupes` question on the key. `report-covered`: a
+Feature at `plan-approved` or building whose every open Task's `writes:` one trunk commit since
+the Task was created covers (a commit naming no item) gets one verify Task under it — never a
+close: a covering diff is a hint, not the Task's landing. `asf tick --dry-run` prints a `== groom
+rules` section of `would …` lines while the flag is set. Undo a close with `asf reopen`.
+
 `facts: old | shadow | new` (default `old`) moves a decider onto its fact (`asf/facts/`): every
 fact says when it was read (`as_of`) and is `Unknown` when it could not be, never an empty
 answer. `shadow` runs both the decider and the fact, returns the decider's answer and logs each

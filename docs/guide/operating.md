@@ -408,6 +408,12 @@ With `approvals.groom: auto` the groom also answers what its policies can (exact
 recurring Bugs), sends the rest to an adjudicate session, and writes a daily digest; only what is
 left comes to you as `NEEDS OPERATOR` lines.
 
+`conventions.flags.groom_rules` adds rules the groom step runs every tick, whether or not a
+question was asked: one open Bug per invariant finding's cause and one open scorecard card per
+cause class (the younger ones close as duplicates of the oldest, unless work on them began), and
+one verify Task for a Feature whose open Tasks' `writes:` the trunk already covers — never a
+close (guide/product-config.md). `asf reopen` undoes a close.
+
 **The daily stamp.** The `daily` step runs at most once a day, remembered in
 `~/.ASF/state/<p>/daily.stamp` as the **local** date. A stamp written today by something other
 than the daily clock — a hand-run `asf tick --daily`, a copied state directory — makes the
