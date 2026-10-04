@@ -72,6 +72,19 @@ from asf.workers import spawn as spawn_mod
 UNPUSHED_REASON_PREFIXES = ('failed: not pushed', f'failed: {report_mod.UNPUSHED}')
 
 
+def ruling_ready(run):
+    """B-0064's ruling, read as a publish instruction (F-0176): an ``adjudicate`` run whose REPORT
+    carries a ``ruling:`` and claims no ``blocked_on:`` has declared its branch ready. The session
+    cannot put it on origin — it has no push credential, and a rebased lane branch needs the force
+    the rules forbid it (B-0056) — so the factory publishes the head the ruling ruled on, whatever
+    the run's own ``end_reason`` class. Read off the log, not off git: no subprocess runs here."""
+    if (run or {}).get('kind') != 'adjudicate':
+        return False
+    rec = runtime_mod.read_result((run or {}).get('log'))
+    text = str(rec.get('result') or '') if isinstance(rec, dict) else ''
+    return bool(report_mod.ruling(text)) and report_mod.ruling_fields(text)['blocked_on'] is None
+
+
 pid_alive = lifecycle.pid_alive
 
 #: seconds an ended run's own process gets to exit by itself before health stops it (T-0196)
@@ -394,13 +407,15 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     B-0094); a commit the repo's hooks refuse stays a hold. Returns
     ``(reason, evidence, line)``; ``line`` is None when nothing was attempted."""
     wt, branch = run.get('worktree'), run.get('branch')
-    result_ok = reason == lifecycle.FINISHED or (reason or '').startswith(UNPUSHED_REASON_PREFIXES)
+    ready = ruling_ready(run)
+    result_ok = (reason == lifecycle.FINISHED
+                 or (reason or '').startswith(UNPUSHED_REASON_PREFIXES) or ready)
     if not result_ok or not branch:
         return reason, ev, None
     if not wt or not os.path.isdir(wt):
         return reason, ev, None
     lines = []
-    if ev.uncommitted:
+    if ev.uncommitted and not ready:   # F-0176: the ruling ruled on the committed HEAD
         ok, line = lifecycle.commit_leftovers(wt, branch)  # B-0094
         if not ok:
             return reason, ev, line
@@ -532,7 +547,8 @@ def republish_steps(product, registry, job, run, alive, found):
     recorded is not printed again."""
     reason = run.get('end_reason') or ''
     wt, branch = run.get('worktree'), run.get('branch')
-    if not reason.startswith(UNPUSHED_REASON_PREFIXES) or run.get('harvested') or not branch:
+    if not (reason.startswith(UNPUSHED_REASON_PREFIXES) or ruling_ready(run)) \
+            or run.get('harvested') or not branch:
         return
     if not wt or not os.path.isdir(wt) or alive(run.get('pid')):
         return
