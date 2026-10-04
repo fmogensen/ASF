@@ -3,8 +3,8 @@
 * past the attempt limit an item is the adjudicate row, or a PARKED row once adjudicated on its
   card — never dropped with no row at all (T-0338, T-0349);
 * a landing the lifecycle records is honoured by ``after:`` only when it is the item's own
-  (#560: attributable, not a merge parent, not a document lane); one that is not is a NEEDS
-  DECISION row, never a silent no-row (T-0091);
+  (#560: attributable, not a merge parent); one that is not is a NEEDS DECISION row, never a
+  silent no-row (T-0091) — a document lane's merge is no landing of the item at all (W8-PR3);
 * an ``after:`` on a removed card reads its merge survivor, or is dropped when the card was
   removed outright; a survivor removed unlanded is a decision (T-0163 on T-0162);
 * a delivery member only the console may edit, or one a cross-delivery cycle defers, never
@@ -178,11 +178,12 @@ class VerifyLandingsTest(unittest.TestCase):
         self.assertEqual(got, {})
         self.assertIn('is not its commit', bad['T-0001'])
 
-    def test_a_document_lane_landing_never_does(self):
+    def test_a_document_lane_landing_is_neither(self):
+        """W8-PR3: a spec/plan lane merged a document, not the item's work — no landing to
+        verify and nothing to decide; the Task stays at its build stage."""
         got, bad = self.verify({'T-0003': self.shas['c.md']}, {'T-0003': 'plan/T-0003'},
                                [task('T-0003', state='Active')])
-        self.assertEqual(got, {})
-        self.assertIn('plan lane', bad['T-0003'])
+        self.assertEqual((got, bad), ({}, {}))
 
     def test_a_closed_card_and_an_unfetched_sha_claim_nothing(self):
         got, bad = self.verify({'T-0001': self.shas['a.py'], 'T-0002': 'f' * 40},

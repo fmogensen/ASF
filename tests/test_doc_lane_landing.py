@@ -382,6 +382,75 @@ class LandedIsTheMergeFact(unittest.TestCase):
         m = self.p.meta("F-0200")
         self.assertEqual((m["state"], m["stage"]), ("Active", "plan-approved"))
 
+    def test_a_plan_lane_merge_on_a_task_never_lands_it_nor_asks_a_decision(self):
+        """W8-PR3 (S-M18): a reshape's plan lane, run on a Task, merged its plan. The merge fact
+        is the document's (``merge_facts`` files it under ``docs``), so the Task is not landed —
+        and :func:`verify_landings` calls it neither verified nor unverified: no NEEDS DECISION
+        row (a product's T-0073/T-0130/T-0102 held 82 rows behind one), the Task stays New at its
+        build stage, and nothing is written to the run (no re-harvest, no second gate)."""
+        from asf.feeder import rows
+        from asf.workers import landing, lifecycle
+        s = self.p.sha
+        self.p.item("T-0910", "task", parent="F-0200", typed_lines=["writes: [src/reader.ts]"])
+        self.ledger(run_line("plan-f-0200", "F-0200", "cloud/plan-F-0200", harvested=s["plan"]),
+                    run_line("reshape-t-0910", "T-0910", "cloud/plan-T-0910",
+                             harvested=s["plan"]))
+        path = os.path.join(self.home, "state", "sample", "sessions.jsonl")
+        with open(path) as f:
+            ledger_before = f.read()
+        ev = self.p.discover([])
+        self.assertIsNone((ev["ids"].get("T-0910") or {}).get("commit"))
+        self.p.record_step(ev)
+        m = self.p.meta("F-0200")
+        self.assertEqual((m["state"], m["stage"]), ("Active", "plan-approved"))
+        self.assertEqual(self.p.meta("T-0910", "task")["state"], "New")
+        occ = lifecycle.occupancy(path, alive=lambda _pid: False)
+        self.assertEqual(occ["landed_on"].get("T-0910"), "cloud/plan-T-0910")
+        with open(os.path.join(self.p.backlog, "index.json")) as f:
+            index = json.load(f)
+        verified, unverified = landing.verify_landings(
+            self.p.product(), occ, rows.items_of(index), path=path, repo=self.p.repo,
+            main="main")
+        self.assertEqual((verified, unverified), ({}, {}))
+        got = [r for r in rows.candidates(index, self.p.product(), [], occupancy=occ,
+                                          landed_shas=verified, unverified_landed=unverified)
+               if r.item_id == "T-0910"]
+        self.assertNotIn(rows.NEEDS_DECISION, [r.action for r in got])
+        with open(path) as f:
+            self.assertEqual(f.read(), ledger_before)  # harvested untouched: no second gate
+        self.assertEqual(len(lifecycle.item_runs(path, "T-0910")), 1)
+
+    def test_a_task_active_on_its_merged_plan_branch_still_gets_its_coder_row(self):
+        """The live shape of W8-PR3 (a product's T-0073, T-0102): the plan branch stays on
+        origin, so the record calls the Task Active (``branch plan-…``: in flight). Its landing
+        is the document's, so it neither holds the idle-branch row (a landing the record has
+        yet to ingest) nor asks a decision: the feeder offers the coder on the Task's own code
+        branch — never no row at all."""
+        from asf.feeder import rows
+        from asf.workers import landing, lifecycle
+        s = self.p.sha
+        git(self.p.work, "push", "-q", "origin", f"{s['plan']}:refs/heads/cloud/plan-T-0910")
+        self.p.publish()
+        self.p.item("T-0910", "task", parent="F-0200", typed_lines=["writes: [src/reader.ts]"])
+        self.ledger(run_line("plan-f-0200", "F-0200", "cloud/plan-F-0200", harvested=s["plan"]),
+                    run_line("reshape-t-0910", "T-0910", "cloud/plan-T-0910",
+                             harvested=s["plan"]))
+        path = os.path.join(self.home, "state", "sample", "sessions.jsonl")
+        self.p.record_step(self.p.discover([]))
+        self.assertEqual(self.p.meta("T-0910", "task")["state"], "Active")
+        occ = lifecycle.occupancy(path, alive=lambda _pid: False)
+        with open(os.path.join(self.p.backlog, "index.json")) as f:
+            index = json.load(f)
+        verified, unverified = landing.verify_landings(
+            self.p.product(), occ, rows.items_of(index), path=path, repo=self.p.repo,
+            main="main")
+        self.assertEqual((verified, unverified), ({}, {}))
+        got = [r for r in rows.candidates(index, self.p.product(), [], occupancy=occ,
+                                          landed_shas=verified, unverified_landed=unverified)
+               if r.item_id == "T-0910"]
+        self.assertEqual([(r.kind, r.action, r.branch) for r in got],
+                         [(rows.PLAN_CODE, rows.LAUNCH, "cloud/T-0910")])
+
 
 class DocsOnlyTests(unittest.TestCase):
     DIRS = ("docs/specs/", "docs/plans/", "docs/reviews/")
