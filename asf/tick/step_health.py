@@ -37,17 +37,43 @@ def log_tail(path, n=LOG_TAIL_LINES):
     return '\n'.join(lines[-n:])
 
 
+def wrote_a_result(session):
+    """True when the session's log ends its last run in a result record — whatever that record
+    says. A run that wrote one did not die: B-0123's two adjudicate logs both ended in a
+    ``"type":"result"`` carrying a full ruling while the hold said they "both ended without a
+    result" and then quoted one of them (F-0176). This is the presence of the record, never its
+    verdict — ``ran_to_its_end`` reads the verdict, and an ``is_error`` result slipped past it."""
+    return runtime_mod.read_result(session.get('log')) is not None
+
+
+def outcome_text(session):
+    """What a run that wrote a result actually came to: the ledger's own ``end_reason``, else the
+    failure the result declares (:func:`asf.workers.runtime.failure_reason`), else that it
+    declared none."""
+    reason = (session.get('end_reason') or '').strip()
+    if not reason:
+        reason = runtime_mod.failure_reason(runtime_mod.read_result(session.get('log'))) or ''
+    return reason or 'no failure declared'
+
+
 def error_text(session):
     tail = log_tail(session.get('log'))
-    return (f"the session's process (pid {session.get('pid')}) died before it wrote a result"
-            + (f"; the last lines of its log:\n{tail}" if tail else '.'))
+    if wrote_a_result(session):
+        head = (f"the session (pid {session.get('pid')}) wrote a result and then failed: "
+                f"{outcome_text(session)}")
+    else:
+        head = f"the session's process (pid {session.get('pid')}) died before it wrote a result"
+    return head + (f"; the last lines of its log:\n{tail}" if tail else '.')
 
 
 def died_text(session):
-    """The correction a twice-dead session hands its next run (B-0062)."""
-    tail = error_text(session).strip().splitlines()
-    return 'died twice: the session and its cold retry both ended without a result — ' + \
-        (tail[-1].strip() if tail else 'no log lines')
+    """The correction a twice-dead session hands its next run (B-0062) — or, when its log does
+    carry a result, what that run actually came to (F-0176). The phrase "without a result" is
+    never written about a log that holds one."""
+    last = (error_text(session).strip().splitlines() or ['no log lines'])[-1].strip()
+    if wrote_a_result(session):
+        return f'the retry ended with a result, not a death: {outcome_text(session)} — {last}'
+    return 'died twice: the session and its cold retry both ended without a result — ' + last
 
 
 def operator_line(session):
