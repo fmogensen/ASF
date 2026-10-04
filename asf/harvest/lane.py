@@ -117,6 +117,11 @@ Transitions (plan §2 plus the §9 overrides):
                                Never with a session running on the item, an operator park, an
                                ``asf correct`` instruction or ruling, a reset of H, or past
                                ``transplant.CAP`` transplants of H
+- T13m BACK/wait → PUSHED       ``flags.mechanical``: a pending conflict/copies/merge correction
+                               (an ``at_cap`` one headed for adjudication too) retried by the
+                               table (:func:`asf.harvest.mechanical.retry_pending`) once the head
+                               or the trunk moved — rebuilt on the trunk, no session; an approval
+                               current on the head it left is carried (``mechanical_from``)
 - Th  any open, head moved     → PUSHED(new head) (R4)
 - Tp  any open (not MERGING/QUEUED) → PARKED  the PR reads ``isDraft``: the owner parked it —
                                no merge, no review/correction/adjudicate/fix row, no reword or
@@ -1605,6 +1610,16 @@ class Lane:
                     card = (self.items or {}).get(item or '') or {'id': item}
                     f['ruled'] = rulings_mod.reraised_only(
                         body, rulings_mod.standing(self.product, card))
+        mf = rec.get('mechanical_from')
+        rv = f.get('review') or {}
+        if f.get('review_required') and mf and rec.get('head') == head and rv \
+                and not rv.get('current') and rv.get('verdict') == review_mod.APPROVED \
+                and mechanical.enabled(self.product) \
+                and review_mod.is_current(repo, conv, mf, rv, mf, trunk=f'origin/{trunk}'):
+            # flags.mechanical: the approval of the head the table's own move left (a clean
+            # rebuild on the trunk, no session) is carried — no review round for code no session
+            # touched; the gate runs on this head
+            f['review'] = dict(rv, current=True, carried=mf)
         tp = rec.get('transplant') or {}
         if f['review_required'] and tp.get('carried') and tp.get('head') == head \
                 and rec.get('state') in (PUSHED, PR_OPEN, REVIEW):
@@ -1951,6 +1966,10 @@ class Lane:
         if tp and tp.get('head') == f.get('head') and state not in TERMINAL_STATES:
             # T13t: the approval a transplant carried stays bound to the head it was made for
             rec['transplant'] = tp
+        if prev.get('mechanical_from') and prev.get('head') == f.get('head') \
+                and state not in TERMINAL_STATES:
+            # flags.mechanical: the head the table's own move left, while the head it made stands
+            rec['mechanical_from'] = prev['mechanical_from']
         rec.update({k: v for k, v in extra.items() if v is not None})
         return rec
 
@@ -2024,6 +2043,12 @@ class Lane:
                 and (f.get('correction') or {}).get('kind') == lifecycle.NAMING:
             rec = self.repair_naming(f)
             moved = rec if rec not in (None, DEFERRED) else moved
+        # flags.mechanical: a pending correction a rebuild on the moved trunk may settle (a copies
+        # hold, a conflict — at_cap ones headed for adjudication too): the table tries it first
+        if self.repo:
+            got = mechanical.retry_pending(self, f)
+            if got is not None and got.resolved:
+                moved = f.get('prev') or moved
         # approved content held only by git mechanics: the lane transplants it onto the trunk
         if self.repo:
             moved = self.transplant(f) or moved
@@ -2376,6 +2401,8 @@ class Lane:
             self.results[b] = hold_with_correction(self.state_dir, b, f['run'], COPIES, text,
                                                    self.out, head=old, main=self.trunk)
             f['correction'] = {'kind': COPIES, 'text': text}
+            # flags.mechanical: this was the table's try — counted, not tried again on this head
+            mechanical.note(self, f, mechanical.Outcome(COPIES, False, old, text))
             return rec
         new = res['new']
         if not new:
@@ -2396,6 +2423,8 @@ class Lane:
             self.results[b] = hold_with_correction(self.state_dir, b, f['run'], COPIES, text,
                                                    self.out, head=old, main=self.trunk)
             f['correction'] = {'kind': COPIES, 'text': text}
+            # flags.mechanical: this was the table's try — counted, not tried again on this head
+            mechanical.note(self, f, mechanical.Outcome(COPIES, False, old, text))
             return rec
         if ok is None:
             self.out(f'drop copies {b}: deferred — {line}')
@@ -2414,7 +2443,11 @@ class Lane:
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         state = BACK if f.get('correction') else PUSHED
-        return self.set(f, state, f'dropped {dropped} trunk copies')
+        on = mechanical.enabled(self.product)
+        if on:  # flags.mechanical: counted as the table's, the approval of the old head carried
+            mechanical.note(self, f, mechanical.Outcome(COPIES, True, new, 'dropped'))
+        return self.set(f, state, f'dropped {dropped} trunk copies',
+                        **({'mechanical_from': old} if on else {}))
 
     def normalise_commits(self, f):
         """The session exit contract's half the lane owns: a factory branch's own commits get
@@ -2817,9 +2850,13 @@ class Lane:
         rec = self.set(f, BACK, reason)
         finding = review_mod.c_items((f.get('review') or {}).get('body')) if kind == 'review' \
             else f.get('incomplete') if kind == lifecycle.INCOMPLETE else None
+        # flags.mechanical: a refusal the table holds (naming, merge) is tried by code first
+        table = {'lane': self, 'f': f} if kind != 'review' else {}
         self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out,
                                                head=f.get('head'), finding=finding,
-                                               main=self.trunk)
+                                               main=self.trunk, **table)
+        if self.results[b] == 'mechanical':
+            return f.get('prev')
         f['correction'] = {'kind': kind, 'text': text}
         return rec
 
