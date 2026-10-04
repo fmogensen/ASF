@@ -185,6 +185,27 @@ def stood_aside_line(branch, detail, n):
 #: worktree for the factory to file (:mod:`asf.evidence.review_store`) — never a commit or a push.
 REVIEW_KIND = 'review'
 
+#: Run kinds whose brief makes a push conditional (briefs/templates/adjudicate.md: only an
+#: upheld ruling edits the branch). Such a run that left its branch exactly as it was launched on
+#: — clean, ``HEAD`` still the launch head — has nothing of its own to push, whatever origin's
+#: branch holds by then; its stop is never refused (2026-10-04: adjudicate-t-0571 was held over a
+#: commit it never made).
+OPTIONAL_PUSH_KINDS = ('adjudicate',)
+
+
+def untouched(worktree, launch_head):
+    """True when ``worktree`` is clean and its ``HEAD`` is ``launch_head`` — the session committed
+    nothing and left nothing. False when it cannot be told (no launch head, git failed)."""
+    from asf import gitops
+    if not launch_head:
+        return False
+    st = gitops.git(['status', '--porcelain'], worktree)
+    if not st.ok or st.data:
+        return False
+    head = gitops.rev_parse(worktree, 'HEAD')
+    return bool(head) and head.lower() == str(launch_head).lower()
+
+
 #: The line the session reads when its review's verdict block is missing or bound elsewhere.
 VERDICT_REFUSAL = ('REFUSED: {why} — end `{path}` with exactly one fenced block:\n'
                    '  ```verdict\n  verdict: approved | changes\n  head: {head}\n'
@@ -284,6 +305,8 @@ def _run(stdin_text, environ, out, product, job):
         return 0
     protected = refguard.patterns(prod.main, refguard.listed(prod.conventions))
     if any(branch == p or fnmatch.fnmatchcase(branch, p) for p in protected):
+        return 0
+    if run.get('kind') in OPTIONAL_PUSH_KINDS and untouched(worktree, run.get('launch_head')):
         return 0
     ok, detail = lifecycle.unpublished(worktree, branch, prod.main)
     if ok:

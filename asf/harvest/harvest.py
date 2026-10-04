@@ -493,8 +493,9 @@ def push_ff(repo, sha, trunk='main'):
 def remote_head(repo, branch):
     """``origin/<branch>``'s head as origin holds it now (``''`` when the branch is not there).
     Read before any rebase or merge work, it is the lease :func:`push_branch` pushes against."""
-    ls = sh(['git', 'ls-remote', '--heads', 'origin', branch], cwd=repo)
-    return ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    from asf import gitops  # the exact ref: a bare name also matches ``archive/<branch>``
+    ls = sh(['git', 'ls-remote', '--heads', 'origin', gitops.head_ref(branch)], cwd=repo)
+    return gitops.head_sha(ls.stdout, branch) if ls.returncode == 0 else ''
 
 
 def push_branch(repo, sha, branch, expected, main='main', protected=None):

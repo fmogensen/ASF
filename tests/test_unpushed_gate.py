@@ -304,6 +304,93 @@ class VerdictBlockGateTests(GateHome):
         self.assertNotIn('verdict', out)
 
 
+class FalsePositiveTests(GateHome):
+    """2026-10-04: an adjudicate and a correct run were held over "1 unpushed
+    commit(s)" with ``HEAD`` == ``origin/cloud/T-0571``. Each case failed on the old code."""
+
+    def archive_namesake(self):
+        """origin gains ``archive/<BRANCH>`` — sorting before ``<BRANCH>`` — holding an empty
+        ``archive(…)`` commit on a commit the session's ``HEAD`` lacks, as the archive step left."""
+        self.write('old')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'task(T-0522): an older take')
+        self.git('commit', '-q', '--allow-empty', '-m', 'archive(T-0522): superseded [skip ci]')
+        self.git('push', '-q', 'origin', f'HEAD:refs/heads/archive/{BRANCH}')
+        self.git('reset', '-q', '--hard', f'origin/{BRANCH}')
+
+    def test_an_archive_namesake_is_not_the_branch(self):
+        self.archive_namesake()
+        self.write('new')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'task(T-0522): the real work')
+        self.git('push', '-q', 'origin', BRANCH)
+        self.write_session(kind='correct')
+        self.assertEqual(self.call(), (0, ''))
+
+    def test_remote_head_reads_the_exact_ref(self):
+        self.archive_namesake()
+        from asf.workers import lifecycle
+        self.assertEqual(lifecycle.remote_head(self.wt, BRANCH), self.git('rev-parse', 'HEAD'))
+        self.assertEqual(lifecycle.remote_head(self.wt, 'T-0522'), '')
+
+    def test_remote_heads_snapshot_reads_the_exact_ref(self):
+        self.archive_namesake()
+        from asf.workers import lifecycle
+        self.assertEqual(lifecycle.RemoteHeads().sha(self.wt, BRANCH),
+                         self.git('rev-parse', 'HEAD'))
+
+    def test_an_empty_commit_origin_lacks_is_not_unpushed(self):
+        # origin was rebuilt tree-identically without the empty commit the worktree still has
+        self.write('w')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'task(T-0522): work')
+        self.git('push', '-q', 'origin', BRANCH)
+        self.git('commit', '-q', '--allow-empty', '-m', 'archive(T-0522): marker [skip ci]')
+        self.git('fetch', '-q', 'origin')
+        from asf.workers import lifecycle
+        remote = lifecycle.remote_head(self.wt, BRANCH)
+        self.assertEqual(lifecycle.unpushed_commits(self.wt, remote, 'main'), 0)
+        self.write_session()
+        self.assertEqual(self.call(), (0, ''))
+
+    def test_a_real_commit_beside_an_empty_one_still_counts(self):
+        self.git('commit', '-q', '--allow-empty', '-m', 'archive(T-0522): marker [skip ci]')
+        self.write('w')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'task(T-0522): unpushed work')
+        self.write_session()
+        rc, out = self.call()
+        self.assertEqual(rc, 2)
+        self.assertIn('0 uncommitted file(s), 1 unpushed commit(s)', out)
+
+    def test_an_untouched_adjudicate_run_is_let_through(self):
+        launch = self.git('rev-parse', 'HEAD')
+        # origin's branch is not what the worktree holds: a namesake-free mismatch the run never made
+        self.git('checkout', '-q', '-b', 'worker/T-0524')
+        self.write_session(kind='adjudicate', branch='worker/T-0524', launch_head=launch)
+        self.assertEqual(self.call(), (0, ''))
+
+    def test_an_adjudicate_run_that_committed_is_still_held(self):
+        launch = self.git('rev-parse', 'HEAD')
+        self.write('ruling-edit')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'fix(T-0522): the upheld edit')
+        self.write_session(kind='adjudicate', launch_head=launch)
+        rc, out = self.call()
+        self.assertEqual(rc, 2)
+        self.assertIn('1 unpushed commit(s)', out)
+
+    def test_an_adjudicate_run_with_a_dirty_tree_is_still_held(self):
+        self.write_session(kind='adjudicate', launch_head=self.git('rev-parse', 'HEAD'))
+        self.write('a')
+        self.assertEqual(self.call()[0], 2)
+
+    def test_a_review_run_with_its_untracked_review_is_let_through(self):
+        self.write_session(kind='review')
+        self.write('3-t-0522.md')
+        self.assertEqual(self.call(), (0, ''))
+
+
 class SpawnClearTests(Home):
     """T3 fence: ``spawn`` launching a run under a job removes that job's counter file first."""
 

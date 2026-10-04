@@ -533,7 +533,9 @@ def _branch_exists_on_origin(repo, branch):
     kind is ``adjudicate``, not ``correct``, so keying on kind alone missed it and spawned it
     fresh off main, silently losing the branch's own history) but whether ``branch`` is already
     a ref on origin."""
-    return bool(_git(['ls-remote', '--heads', 'origin', branch], repo).strip())
+    from asf import gitops  # the exact ref: ``archive/<branch>`` is not ``<branch>``
+    return bool(gitops.head_sha(
+        _git(['ls-remote', '--heads', 'origin', gitops.head_ref(branch)], repo), branch))
 
 
 def make_worktree(product, job, branch, kind=None):
@@ -779,9 +781,10 @@ def _rebase_onto_trunk(path, branch, main, kind=None):
     origin holds, and its own pushes are fast-forwards — it never faces the non-fast-forward
     that made sessions merge their stale remote. A head the rebase is skipped for is origin's
     own (or a fast-forward of it), so the session's pushes are fast-forwards too."""
-    ls = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=path,
-                        capture_output=True, text=True)
-    remote_sha = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    from asf import gitops  # the exact ref: ``archive/<branch>`` is not ``<branch>``
+    ls = subprocess.run(['git', 'ls-remote', '--heads', 'origin', gitops.head_ref(branch)],
+                        cwd=path, capture_output=True, text=True)
+    remote_sha = gitops.head_sha(ls.stdout, branch) if ls.returncode == 0 else ''
     if remote_sha and not _catch_up(path, branch, remote_sha, kind, main):
         return  # behind origin and not caught up: never rebased or published from here
     if not remote_sha or trunk_rebase_needed(path, main):

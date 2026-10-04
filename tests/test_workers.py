@@ -1697,13 +1697,17 @@ class TestHealth(Home):
         self.assertEqual(reapable, {'done': 'empty', 'gone': 'empty'})
 
     def _ls_remote_one(self, cwd, branch):
-        p = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=cwd,
-                           capture_output=True, text=True)
-        return p.stdout.split()[0] if p.returncode == 0 and p.stdout.strip() else ''
+        p = subprocess.run(['git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}'],
+                           cwd=cwd, capture_output=True, text=True)
+        want = f'refs/heads/{branch}'
+        return next((ln.split()[0] for ln in p.stdout.splitlines()
+                     if ln.split()[1:] == [want]), '') if p.returncode == 0 else ''
 
     def test_remote_heads_answers_as_ls_remote_of_the_one_branch(self):
-        # ls-remote's pattern is a tail match: `B-1` finds refs/heads/B-1 and refs/heads/x/B-1
-        # alike, the first in ref order — the one snapshot must pick the same sha
+        # ls-remote's bare pattern is a tail match: `B-1` finds refs/heads/B-1 and
+        # refs/heads/x/B-1 alike, and `x/B-1` sorts first — the snapshot answers the exact
+        # refs/heads/<branch> only (2026-10-04: archive/<branch> read as the branch held a
+        # session's Stop over a commit origin already had)
         rec = self.spawn('snap', {'running': True, 'pid': 5})
         wt = rec['worktree']
         self.commit(wt, 'a')

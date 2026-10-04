@@ -72,7 +72,7 @@ import stat
 import subprocess
 import time
 
-from asf import budget, env, tokens
+from asf import budget, env, gitops, tokens
 from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import runtime as runtime_mod
@@ -1430,6 +1430,39 @@ def _count(p):
     return int(p.stdout.strip()) if p.returncode == 0 and p.stdout.strip().isdigit() else 0
 
 
+def remote_head(wt, branch):
+    """``origin``'s head of exactly ``branch``, asked of origin now (``ls-remote`` of
+    ``refs/heads/<branch>``, :func:`asf.gitops.head_sha`) — ``''`` when origin has no such head
+    or could not be asked. Never the first line of a bare ``ls-remote <branch>``: git matches that
+    against every ref's tail, and ``archive/<branch>`` sorts before ``<branch>``."""
+    if not branch:
+        return ''
+    ls = _git(['ls-remote', '--heads', 'origin', gitops.head_ref(branch)], wt)
+    return gitops.head_sha(ls.stdout, branch) if ls.returncode == 0 else ''
+
+
+def _with_changes(wt, shas):
+    """``shas`` less every commit that changes no file — its tree is its first parent's (an
+    ``archive(…): … [skip ci]`` marker, a ``--allow-empty`` note). Such a commit has no patch,
+    so ``git cherry`` never finds it on origin and would count it unpushed for good, with no work
+    in it to lose. A commit git cannot read is kept (counted), never dropped."""
+    shas = [s for s in shas if s]
+    if not shas:
+        return []
+    p = _git(['log', '--no-walk=unsorted', '--format=%H %T %P', *shas], wt)
+    if p.returncode != 0:
+        return shas
+    rows = [ln.split() for ln in p.stdout.splitlines() if ln.strip()]
+    parents = [r[2] for r in rows if len(r) > 2]
+    trees = {}
+    if parents:
+        t = _git(['log', '--no-walk=unsorted', '--format=%H %T', *parents], wt)
+        if t.returncode == 0:
+            trees = dict(ln.split()[:2] for ln in t.stdout.splitlines() if len(ln.split()) >= 2)
+    empty = {r[0] for r in rows if len(r) > 2 and trees.get(r[2]) == r[1]}
+    return [s for s in shas if s not in empty]
+
+
 def unpushed_commits(wt, remote_sha, main='main'):
     """How many of the session's *own* commits are missing from ``origin/<branch>``.
 
@@ -1446,13 +1479,19 @@ def unpushed_commits(wt, remote_sha, main='main'):
     ``git cherry <remote> HEAD <limit>`` answers the question that was meant: of the commits above
     the trunk, which have no equivalent patch on the remote branch (``+``) and which have one
     (``-``).
+
+    A commit that changes no file (:func:`_with_changes`) is never counted: it has no patch for
+    ``git cherry`` to find on origin, so it would read unpushed forever with no work in it.
     """
     if not remote_sha:
         return _count(_git(['rev-list', '--count', f'origin/{main}..HEAD'], wt))
     p = _git(['cherry', remote_sha, 'HEAD', f'origin/{main}'], wt)
     if p.returncode != 0:  # no origin/<main> here, or a remote sha this repo has not fetched
-        return _count(_git(['rev-list', '--count', f'{remote_sha}..HEAD'], wt))
-    return len([ln for ln in p.stdout.splitlines() if ln.startswith('+')])
+        r = _git(['rev-list', f'{remote_sha}..HEAD'], wt)
+        return len(_with_changes(wt, r.stdout.split())) if r.returncode == 0 else 0
+    plus = [ln.split()[1] for ln in p.stdout.splitlines()
+            if ln.startswith('+') and len(ln.split()) > 1]
+    return len(_with_changes(wt, plus))
 
 
 #: The line a push refused for a stale head carries: origin holds commits the new head lacks.
@@ -2132,10 +2171,10 @@ class RemoteHeads:
         self._by_repo = {}
 
     def sha(self, wt, branch):
-        """What ``git ls-remote --heads origin <branch>`` run in ``wt`` would give as its first
-        sha — git matches the pattern against the tail of each ref (``refs/heads/x/<branch>``
-        too), first in ref order — ``''`` when no head matches; None when the snapshot cannot
-        answer (a glob in the name, a checkout it cannot place, ``ls-remote`` failed)."""
+        """``origin``'s sha for exactly ``refs/heads/<branch>`` (:func:`asf.gitops.head_ref` —
+        never a ``refs/heads/x/<branch>`` a bare tail pattern would also match) — ``''`` when
+        origin has no such head; None when the snapshot cannot answer (a glob in the name, a
+        checkout it cannot place, ``ls-remote`` failed)."""
         if not branch or self._GLOB & set(branch):
             return None
         repo = _common_git_dir(wt)
@@ -2148,8 +2187,8 @@ class RemoteHeads:
         refs = self._by_repo[repo]
         if refs is None:
             return None
-        tail = '/' + branch
-        return next((sha for sha, ref in refs if ref.endswith(tail)), '')
+        want = gitops.head_ref(branch)
+        return next((sha for sha, ref in refs if ref.strip() == want), '')
 
 
 def gather(product, run, alive=None, worktree=None, heads=None):
@@ -2171,8 +2210,7 @@ def gather(product, run, alive=None, worktree=None, heads=None):
     if branch:
         known = heads.sha(wt, branch) if heads is not None else None
         if known is None:
-            ls = _git(['ls-remote', '--heads', 'origin', branch], wt)
-            known = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+            known = remote_head(wt, branch)
         ev.remote_sha = known
         log = _git(['reflog', 'show', '--format=%gs', f'refs/heads/{branch}'], wt)
         ev.has_commits = log.returncode == 0 and any(
@@ -2227,8 +2265,7 @@ def unpublished(wt, branch, main='main'):
         return False, 'no branch'
     st = _git(['status', '--porcelain'], wt)
     n = len([line for line in st.stdout.splitlines() if line.strip()]) if st.returncode == 0 else 0
-    ls = _git(['ls-remote', '--heads', 'origin', branch], wt)
-    remote = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    remote = remote_head(wt, branch)  # asked of origin now, by its full ref — never a namesake
     m = unpushed_commits(wt, remote, main)
     if n == 0 and m == 0 and remote:
         return True, ''

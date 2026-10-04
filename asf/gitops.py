@@ -76,6 +76,26 @@ def rev_list_count(cwd, a, b):
     return int(r.data) if r.ok and r.data.isdigit() else None
 
 
+def head_ref(branch):
+    """The full ref ``git ls-remote --heads origin`` is asked for: ``refs/heads/<branch>``. A
+    bare ``<branch>`` pattern is matched by git against the *tail* of every ref, so
+    ``lane/x`` also answers ``refs/heads/archive/lane/x`` — which sorts first (2026-10-04:
+    the archive step's ``archive/<branch>`` was read as ``origin/<branch>``, and the Stop
+    gate held a session whose head origin already had as "1 unpushed commit")."""
+    return f'refs/heads/{branch}'
+
+
+def head_sha(ls_remote_out, branch):
+    """The sha ``ls-remote`` output names for exactly ``refs/heads/<branch>`` — ``''`` when no
+    line is that ref. Pure: a line for any other ref (``refs/heads/x/<branch>``) is never it."""
+    want = head_ref(branch)
+    for line in (ls_remote_out or '').splitlines():
+        sha, _, ref = line.strip().partition('\t')
+        if ref.strip() == want and sha:
+            return sha.strip()
+    return ''
+
+
 #: Seconds a fetch may take.
 FETCH_TIMEOUT_S = 120
 

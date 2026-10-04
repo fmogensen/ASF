@@ -74,8 +74,10 @@ def head_of(repo, branch, main):
     the branch's own head, which it is not."""
     if not repo or not os.path.isdir(repo):
         return '', False, ''
-    ls = _git_text(repo, ['ls-remote', '--heads', 'origin', branch]) if branch else ''
-    sha = ls.split()[0] if ls else ''
+    from asf import gitops  # the exact ref: ``archive/<branch>`` is not ``<branch>``
+    ls = _git_text(repo, ['ls-remote', '--heads', 'origin', gitops.head_ref(branch)]) \
+        if branch else ''
+    sha = gitops.head_sha(ls, branch) if ls else ''
     exists = bool(sha)
     rev = sha if sha and _git(repo, ['cat-file', '-e', f'{sha}^{{commit}}']) is not None else ''
     if sha and not rev:
