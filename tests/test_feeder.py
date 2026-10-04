@@ -268,6 +268,36 @@ class FootprintHoldersAreLiveRuns(unittest.TestCase):
         self.assertEqual(rows.running_footprints(self.items(), {'T-0001'}), [('T-0001', ['a.py'])])
 
 
+class AClosedItemHoldsNoWidenedRow(unittest.TestCase):
+    """A footprint correction stored ``waits`` on an owner that has since closed (T-0281 behind
+    T-0195): the row never names a done or removed owner, and a done card in play holds no files."""
+
+    def items(self, state, removed=False):
+        return {'T-0195': {'id': 'T-0195', 'type': 'task', 'state': state, 'writes': ['a.py'],
+                           'removed': removed},
+                'T-0281': {'id': 'T-0281', 'type': 'task', 'state': 'Active', 'writes': ['b.py']}}
+
+    def row(self, state, removed=False):
+        c = {'kind': 'footprint', 'verdict': 'waits', 'detail': 'T-0195', 'text': 't'}
+        items = self.items(state, removed)
+        return rows.footprint_row(items['T-0281'], product(), c, 2, '', 'worker/T-0281',
+                                  items=items)
+
+    def test_a_closed_owner_is_not_waited_on(self):
+        for state in ('Closed', 'Resolved'):
+            self.assertNotIn('T-0195', self.row(state).action)
+        self.assertNotIn('T-0195', self.row('Active', removed=True).action)
+
+    def test_an_open_owner_is_waited_on(self):
+        self.assertEqual(self.row('Active').action, 'WAITS ON T-0195')
+
+    def test_a_closed_card_in_play_holds_no_footprint(self):
+        self.assertEqual(rows.running_footprints(self.items('Closed'), {'T-0195'}), [])
+        self.assertEqual(rows.running_footprints(self.items('Active', True), {'T-0195'}), [])
+        self.assertEqual(rows.running_footprints(self.items('Active'), {'T-0195'}),
+                         [('T-0195', ['a.py'])])
+
+
 class ADoneCardHoldsNoFootprint(unittest.TestCase):
     """A Resolved/Closed card's branch is on the trunk: even when the ledger still lists it as
     awaiting harvest, it blocks no sibling ("WAITS ON" a landed Task for ever)."""

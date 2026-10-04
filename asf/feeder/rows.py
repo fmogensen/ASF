@@ -815,7 +815,7 @@ def foreign_row(product, item, tier, feature_id, brief_kind, kind):
                waits_on='decision')
 
 
-def footprint_row(item, product, c, tier, fid, branch):
+def footprint_row(item, product, c, tier, fid, branch, items=None):
     """The row a ``footprint`` correction (:mod:`asf.feeder.widen`) stands for until the rule
     has widened the Task — a widened one is an ordinary FIX → CORRECT row, on the wider
     ``writes:``. A reshape verdict is the RESHAPE row (the card's ``reshape:`` says why); a path
@@ -830,13 +830,20 @@ def footprint_row(item, product, c, tier, fid, branch):
     if verdict == 'approval':
         action, waits, why = f'WAITS ON approval {detail}', 'approval', \
             f'footprint needs a path under {detail}: approvals decide'
-    elif verdict == 'waits':
+    elif verdict == 'waits' and not _owner_done(items, detail):
         action, waits, why = f'WAITS ON {detail}', detail, f'footprint widening overlaps {detail}'
     else:
         action, waits, why = 'WAITS ON widen_footprint', 'widen', \
             f"footprint needs {' '.join(c.get('needs') or ())}: the rule decides next tick"
     return Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=action,
                brief_kind='correct', branch=branch, reason=why, waits_on=waits)
+
+
+def _owner_done(items, owner):
+    """True when ``owner`` is a card the record holds that is Resolved, Closed or removed: it holds
+    no footprint, so a ``waits`` verdict stored on it is stale (the tick re-decides it)."""
+    card = (items or {}).get(owner)
+    return bool(card) and (bool(card.get('removed')) or not is_open(card))
 
 
 def landed_doc(item, product, c):
@@ -898,7 +905,7 @@ def correction_rows(items, product, busy, corrections):
                                   f"cannot land as it stands"))
             continue
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
-            out.append(footprint_row(item, product, c, tier, fid, branch))
+            out.append(footprint_row(item, product, c, tier, fid, branch, items=items))
             continue
         if same >= CORRECTION_ROUNDS and c.get('kind') not in (NAMING, COPIES) \
                 and not c.get('ruled'):  # an adjudication's instruction: a session carries it out
@@ -1088,7 +1095,7 @@ def running_footprints(items, busy):
     on the member (F-0102 D-line)."""
     out = []
     for t in sorted(ix.of_type(items, 'task'), key=lambda v: v['id']):
-        if t['id'] in busy and t.get('writes'):
+        if t['id'] in busy and t.get('writes') and is_open(t) and not t.get('removed'):
             out.append((t['id'], list(t['writes'])))
     for v in sorted(items.values(), key=lambda v: v['id']):
         if v.get('delivers') and v['id'] in busy and is_open(v):
