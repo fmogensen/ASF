@@ -26,6 +26,25 @@ those causes, applied by the lane (:mod:`asf.harvest.lane`) *before* it writes a
   Anything else origin holds that the push would lose still refuses, as today; no commits is
   the ``empty branch`` path.
 
+* ``copies`` / ``merge`` (W2-PR3c) → the same rebuild on the trunk as ``conflict``: trunk
+  history under the branch (copies of trunk commits, a merge of the trunk) dropped, its own
+  commits picked onto a fresh trunk. The lane's own :meth:`asf.harvest.lane.Lane.drop_copies`
+  tries it first on every pass; the table is what retries a copies hold once the trunk moved.
+* ``naming`` (W2-PR3c) → :meth:`asf.harvest.lane.Lane.repair_naming`; a branch it cannot reword
+  because it is not a straight line on the trunk is rebuilt on the trunk first, then reworded.
+* ``hook refused`` (W2-PR3c) — the f-0086 loop: a session's worktree that merged the trunk in
+  carries trunk history, so the publish's lane-N rewrite (a plain chain only) cannot run and the
+  repo's hook refuses every run. :func:`publish_worktree` drops that history
+  (:func:`drop_trunk_history`: the own commits rebased onto ``origin/<main>``) and publishes
+  again; a finding of the session's own still refuses, the worktree as it was.
+
+A pending correction of a :data:`RETRY` kind is tried again by :func:`retry_pending` on a later
+pass — a new head, or the trunk given :data:`RETRY_AFTER` to move — before any session or an
+adjudication (``at_cap``) takes it: the review/adjudicate rows a mechanical cause alone raised.
+A resolved move records the head it left (``mechanical_from`` on the lane record); an approval
+current on that head is carried to the new one (:func:`carry_review`), so a clean rebuild buys no
+fresh review round — the gate still runs on the new head.
+
 Every entry is a function ``(lane, f, cause) -> Outcome`` over what the lane already does, never
 a new git path. :func:`apply` runs one, only under ``conventions.flags.mechanical: on`` (default
 off — today's rows), writes the event on the run (``mechanical: {event, kind, head, resolved}``;
@@ -33,7 +52,9 @@ a resolved one also on the lane record, reason ``mechanical:<kind>``) and says o
 gate still runs on the rebuilt head: a resolved cause goes back to PUSHED, never past it.
 """
 import dataclasses
+import datetime
 import os
+import re
 
 from asf import gitpush, refguard
 from asf.feeder import footprint, widen
@@ -50,7 +71,13 @@ EVENT = 'mechanical'
 PUSHED = 'PUSHED'
 #: A resolved cause clears a pending correction of these kinds — the work they asked for is done.
 CLEARS = ('conflict', lifecycle.REBASE_CONFLICT, lifecycle.NAMING, lifecycle.COPIES, 'merge',
-          lifecycle.UNPUSHED)
+          lifecycle.UNPUSHED, lifecycle.HOOK_REFUSED)
+#: The pending corrections :func:`retry_pending` tries again by code on a later pass: the ones a
+#: rebuild on a moved trunk may settle with no session (W2-PR3c).
+RETRY = ('conflict', lifecycle.REBASE_CONFLICT, lifecycle.COPIES, 'merge')
+#: How long an unresolved try on one head waits before the table tries it again: the trunk has
+#: moved by then, or it has not and the try costs a rebase and nothing else.
+RETRY_AFTER = datetime.timedelta(hours=1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -119,6 +146,32 @@ def widen_footprint(lane, f, cause):
     return Outcome('footprint', False, head,
                    f'mechanical: the widening rule says {v.kind} +{" ".join(v.paths)}{detail}; '
                    f'a wider writes: alone leaves this head red — make the failing tests pass')
+
+
+def naming(lane, f, cause):
+    """``naming``: the lane rewords the subjects itself (:meth:`asf.harvest.lane.Lane.
+    repair_naming`, trees identical). A branch it cannot reword because it is not its own
+    straight line on the trunk (trunk history under it) is rebuilt on the trunk first
+    (:meth:`asf.harvest.lane.Lane.rebase_onto_trunk`) and reworded on the rebuilt head."""
+    head = f.get('head') or ''
+    rec = lane.repair_naming(f)
+    if isinstance(rec, dict):
+        return Outcome(lifecycle.NAMING, True, f.get('head') or head, 'reworded the subjects')
+    if rec is not None:  # DEFERRED: a later pass, never a session
+        return Outcome(lifecycle.NAMING, False, head, '')
+    got = lane.rebase_onto_trunk(f) or {}
+    if not got.get('pushed'):
+        return Outcome(lifecycle.NAMING, False, head, '')
+    f.pop('naming_repair', None)
+    still = (f.get('refusal') or (None,))[0] == lifecycle.NAMING
+    rec = lane.repair_naming(f) if still else None
+    if still and not isinstance(rec, dict):  # rebuilt, the subjects still not reworded
+        return Outcome(lifecycle.NAMING, False, f.get('head') or got['pushed'],
+                       f'The lane rebuilt the branch on origin/{lane.trunk} and still cannot '
+                       f'reword its subjects — name the item in each subject')
+    return Outcome(lifecycle.NAMING, True, f.get('head') or got['pushed'],
+                   f'rebuilt on origin/{lane.trunk}'
+                   + (', the subjects reworded' if isinstance(rec, dict) else ''))
 
 
 def round_file(conv):
@@ -191,6 +244,52 @@ def declared_transplant(wt, branch, remote_sha, declared, seen):
     return bool(head) and head.startswith(declared)
 
 
+def trunk_history(wt, main):
+    """True when ``wt``'s HEAD carries trunk history past ``origin/<main>`` (freshly fetched):
+    a merge commit, or a commit whose patch the trunk already holds (``git cherry`` ``-``)."""
+    tracking = f'refs/remotes/origin/{main}'
+    if _git(wt, 'fetch', '-q', 'origin', f'+refs/heads/{main}:{tracking}').returncode != 0:
+        return False
+    merges = _git(wt, 'rev-list', '--merges', f'{tracking}..HEAD')
+    if merges.returncode == 0 and merges.stdout.split():
+        return True
+    cherry = _git(wt, 'cherry', tracking, 'HEAD')
+    return cherry.returncode == 0 and any(ln.startswith('- ') for ln in cherry.stdout.splitlines())
+
+
+#: A refusal the repo's hook (or the factory's own redaction scan, the same refusal) made.
+HOOK_WORDS_RE = re.compile(r'\bhook\b|pre-push|declined', re.I)
+
+
+def hook_refusal(line):
+    """True for a publish refused by the repo's pre-push hook or the redaction scan it runs —
+    not the factory's own lease/loss refusals, which say ``refused`` too."""
+    line = line or ''
+    return lifecycle.push_failure(line) == lifecycle.HOOK_REFUSED and bool(
+        lifecycle.HOOK_REDACTION_RE.search(line) or lifecycle.REDACT_REFUSAL_RE.search(line)
+        or HOOK_WORDS_RE.search(line))
+
+
+def drop_trunk_history(wt, main):
+    """``(ok, line)``: ``wt``'s own commits rebased onto ``origin/<main>`` — its merges of the
+    trunk and its copies of trunk commits dropped (``git rebase``), the worktree moved to the
+    result. Only a clean worktree that carries trunk history (:func:`trunk_history`); a conflict
+    is aborted and the worktree reset to where it was: ``(False, line)``. Never a push."""
+    st = _git(wt, 'status', '--porcelain', '--untracked-files=no')
+    if st.returncode != 0 or st.stdout.strip() or not trunk_history(wt, main):
+        return False, ''
+    head = _git(wt, 'rev-parse', 'HEAD').stdout.strip()
+    tracking = f'refs/remotes/origin/{main}'
+    r = _git(wt, 'rebase', '-q', tracking)
+    if r.returncode != 0:
+        files = _git(wt, 'diff', '--name-only', '--diff-filter=U').stdout.split()
+        _git(wt, 'rebase', '--abort')
+        _git(wt, 'reset', '-q', '--hard', head)
+        return False, (f'dropping the trunk history conflicts in: {", ".join(files) or "?"}')
+    own = lifecycle._count(_git(wt, 'rev-list', '--count', f'{tracking}..HEAD'))
+    return True, f'dropped the trunk history ({own} own commit(s) on origin/{main})'
+
+
 def publish_worktree(product, wt, branch, remote_sha, main='main', protected=None,
                      push_timeout_s=None, declared=''):
     """``(ok, line, outcome)``: :func:`asf.workers.lifecycle.publish` of ``wt``'s HEAD with the
@@ -227,18 +326,37 @@ def publish_worktree(product, wt, branch, remote_sha, main='main', protected=Non
             ok, line = True, f'the run declared a transplant: {line2}'
         else:
             line = f'{line} (published as the declared transplant, that refused too: {line2})'
+    kind = UNPUSHED
+    if not ok and hook_refusal(line):
+        # W2-PR3c: the hook refused what the worktree's trunk history carries — dropped, and the
+        # publish (its lane-N rewrite now on a plain chain) runs again; else as it was
+        head = _git(wt, 'rev-parse', 'HEAD').stdout.strip()
+        dropped, how = drop_trunk_history(wt, main)
+        if dropped:
+            kind = lifecycle.HOOK_REFUSED
+            ok2, line2 = lifecycle.publish(wt, branch, remote_sha, main=main,
+                                           protected=protected, push_timeout_s=push_timeout_s,
+                                           droppable=droppable)
+            if ok2:
+                ok, line = True, f'{how}: {line2}'
+            else:
+                _git(wt, 'reset', '-q', '--hard', head)
+                line = f'{line} (the factory {how}, and that refused too: {line2})'
+        elif how:
+            line = f'{line} ({how})'
     new = _git(wt, 'rev-parse', 'HEAD').stdout.strip()
-    return ok, line, Outcome(UNPUSHED, bool(ok), new, line)
+    return ok, line, Outcome(kind, bool(ok), new, line)
 
 
 def unpushed(lane, f, cause):
-    """``unpushed``: the run's worktree published (:func:`publish_worktree`) — resolved when it
-    went out. No worktree, or none on disk: a residue (the hold as today)."""
+    """``unpushed`` / ``hook refused``: the run's worktree published (:func:`publish_worktree`,
+    which drops trunk history a hook refused) — resolved when it went out. No worktree, or none
+    on disk: a residue (the hold as today)."""
     run = f.get('run') or {}
     wt, b = run.get('worktree'), f.get('branch') or run.get('branch')
     head = f.get('head') or ''
     if not wt or not b or not os.path.isdir(wt):
-        return Outcome(UNPUSHED, False, head, '')
+        return Outcome((cause or {}).get('kind') or UNPUSHED, False, head, '')
     product = getattr(lane, 'product', None)
     conv = getattr(product, 'conventions', None)
     _ok, _line, out = publish_worktree(
@@ -253,12 +371,16 @@ def unpushed(lane, f, cause):
 #: The cause kind of a run that ended ``not pushed`` with its work in the worktree.
 UNPUSHED = lifecycle.UNPUSHED
 
-#: The table: cause kind → entry. 3c adds ``copies``, ``hook refused``, ``naming``.
+#: The table: cause kind → entry.
 MECHANICAL = {
     'conflict': rebase,
     lifecycle.REBASE_CONFLICT: rebase,
+    lifecycle.COPIES: rebase,
+    'merge': rebase,
+    lifecycle.NAMING: naming,
     lifecycle.FOOTPRINT: widen_footprint,
     lifecycle.UNPUSHED: unpushed,
+    lifecycle.HOOK_REFUSED: unpushed,
 }
 
 
@@ -269,10 +391,94 @@ def handles(product, kind):
     return kind in MECHANICAL and enabled(product)
 
 
-def event(out, at=None):
-    """The ``mechanical`` event of ``out`` as written on the run."""
-    return {'event': EVENT, 'kind': out.kind, 'head': out.head, 'resolved': out.resolved,
-            'at': at or now_iso()}
+def event(out, at=None, trunk=None):
+    """The ``mechanical`` event of ``out`` as written on the run; ``trunk``, when the lane
+    knows it, the trunk sha it was tried on."""
+    ev = {'event': EVENT, 'kind': out.kind, 'head': out.head, 'resolved': out.resolved,
+          'at': at or now_iso()}
+    if trunk:
+        ev['trunk'] = trunk
+    return ev
+
+
+def trunk_of(lane):
+    """The lane's ``origin/<trunk>`` sha, or None when it has no repo to read it from."""
+    read = getattr(lane, 'trunk_sha_now', None)
+    if read is None or not getattr(lane, 'repo', None):
+        return None
+    try:
+        return read() or None
+    except Exception:  # noqa: BLE001 — a fact for the retry's bound, never a reason to fail
+        return None
+
+
+def to_dt(stamp):
+    """An ISO ``…Z`` stamp as an aware datetime, or None."""
+    try:
+        return datetime.datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+
+
+def tried(run, kind, head, now=None, trunk=None):
+    """True when ``run`` already carries an unresolved ``kind`` try on ``head`` — on this very
+    ``trunk``, or younger than :data:`RETRY_AFTER` — so the table does not try it again yet."""
+    ev = (run or {}).get(EVENT) or {}
+    if ev.get('kind') != kind or ev.get('head') != head or ev.get('resolved'):
+        return False
+    if trunk and ev.get('trunk') == trunk:
+        return True
+    at = to_dt(ev.get('at'))
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return at is not None and now - at < RETRY_AFTER
+
+
+def note(lane, f, out):
+    """Write ``out``'s event on ``f``'s run (and on the run in hand) — a try the lane made on its
+    own path (:meth:`asf.harvest.lane.Lane.drop_copies`), counted like the table's. No-op with
+    the flag off or on a dry run."""
+    if not enabled(getattr(lane, 'product', None)) or getattr(lane, 'dry_run', False):
+        return
+    run = f.get('run') or {}
+    job = run.get('job') or f.get('branch')
+    if not job:
+        return
+    ev = event(out, trunk=trunk_of(lane))
+    H.mark_session(lane.state_dir, job, mechanical=ev)
+    if f.get('run') is not None:
+        f['run'][EVENT] = ev
+
+
+def carry_review(lane, f, was):
+    """The approval current on the head the table's move left (``was``: ``(head, review)``
+    before it) carried to the head it made: ``f['review']`` current again, ``carried`` naming the
+    old head. Only for an approved review that was current there."""
+    old, rv = was
+    now = f.get('review') or {}
+    if not rv or not rv.get('current') or now.get('current') or not old \
+            or old == f.get('head') or rv.get('verdict') != 'approved':
+        return
+    if not now or now.get('path') == rv.get('path'):
+        f['review'] = dict(now or rv, current=True, carried=old)
+        lane.out(f'{EVENT} {f.get("branch")}: {rv.get("path")} approved {old[:9]} — carried to '
+                 f'{(f.get("head") or "")[:9]} (the lane\'s own move; the gate runs on it)')
+
+
+def retry_pending(lane, f):
+    """A pending correction of a :data:`RETRY` kind tried again by the table (:func:`apply`)
+    before a session — or an adjudication, ``at_cap`` — takes it: with the flag on, no session
+    live on the branch, not parked, and not :func:`tried` on this head within
+    :data:`RETRY_AFTER`. The :class:`Outcome`, or None when nothing was tried."""
+    corr = f.get('correction') or {}
+    kind = corr.get('kind')
+    if kind not in RETRY or corr.get('parked') or corr.get('ruled') or f.get('live') \
+            or not f.get('head') \
+            or not f.get('kind') or f.get('foreign') or not enabled(getattr(lane, 'product', None)) \
+            or getattr(lane, 'dry_run', False):
+        return None
+    if tried(f.get('run'), kind, f['head'], trunk=trunk_of(lane)):
+        return None
+    return apply(lane, f, {'kind': kind, 'text': corr.get('text') or ''})
 
 
 def apply(lane, f, cause):
@@ -286,6 +492,8 @@ def apply(lane, f, cause):
     if entry is None or not enabled(getattr(lane, 'product', None)) \
             or getattr(lane, 'dry_run', False):
         return None
+    was = (f.get('head'), dict(f['review']) if f.get('review') else None)  # a snapshot: the
+    # entry's push reads the review's currency again, on the same dict
     out = entry(lane, f, cause)
     b = f.get('branch')
     run = f.get('run') or {}
@@ -293,19 +501,27 @@ def apply(lane, f, cause):
         if f.get('run') is None:
             lane.write(f, lane.record(f, PUSHED, 'adopted'))
             run = f.get('run') or {}
-        lane.set(f, PUSHED, f'{EVENT}:{kind}', event=EVENT, mechanical=kind)
+        moved = was[0] if was[0] and was[0] != (out.head or f.get('head')) else None
+        lane.set(f, PUSHED, f'{EVENT}:{kind}', event=EVENT, mechanical=kind,
+                 mechanical_from=moved)
+        carry_review(lane, f, was)
         corr = f.get('correction') or {}
-        fields = {'mechanical': event(out)}
+        fields = {'mechanical': event(out, trunk=trunk_of(lane))}
         if corr.get('kind') in CLEARS:
             fields['correction'] = None
             f['correction'] = None
         H.mark_session(lane.state_dir, run.get('job') or b, **fields)
+        if f.get('run') is not None:
+            f['run'][EVENT] = fields[EVENT]
         lane.results[b] = 'mechanical'
         lane.out(f'{EVENT}:{kind} {b}: resolved — {out.why} '
                  f'({out.head[:9]}, no session; the gate runs on the new head)')
     else:
         if run.get('job') or b:
-            H.mark_session(lane.state_dir, run.get('job') or b, mechanical=event(out))
+            ev = event(out, trunk=trunk_of(lane))
+            H.mark_session(lane.state_dir, run.get('job') or b, mechanical=ev)
+            if f.get('run') is not None:
+                f['run'][EVENT] = ev
         lane.out(f'{EVENT}:{kind} {b}: residue — '
                  + (out.why.split('\n', 1)[0] if out.why else 'not the lane\'s to settle')
                  + ' — a session gets it')

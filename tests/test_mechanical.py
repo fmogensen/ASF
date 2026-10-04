@@ -14,6 +14,7 @@ import unittest
 from types import SimpleNamespace
 
 from asf import env
+from asf import redact as redact_mod
 from asf.feeder import widen
 from asf.harvest import harvest, lane, mechanical
 from asf.workers import health as health_mod
@@ -641,3 +642,281 @@ class DeclaredTransplantHealth(UnpushedHealth):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ---- W2-PR3c: copies / hook refused / naming; mechanical-cause review and adjudicate rows ----
+
+class Table3c(unittest.TestCase):
+
+    def test_the_table_holds_copies_naming_merge_and_hook_refused(self):
+        p = env.Product('sample', {'repo_dir': '/nonexistent', 'main': 'main',
+                                   'conventions': {'flags': ON}})
+        for kind in (lifecycle.COPIES, lifecycle.NAMING, 'merge', lifecycle.HOOK_REFUSED):
+            self.assertTrue(mechanical.handles(p, kind), kind)
+        self.assertIn(lifecycle.HOOK_REFUSED, mechanical.CLEARS)
+
+    def test_a_pending_correction_is_retried_once_per_head_and_hour(self):
+        run = {'mechanical': {'kind': 'copies', 'head': 'abc', 'resolved': False,
+                              'at': '2026-10-04T10:00:00Z'}}
+        at = mechanical.to_dt('2026-10-04T10:30:00Z')
+        self.assertTrue(mechanical.tried(run, 'copies', 'abc', at))
+        self.assertFalse(mechanical.tried(run, 'copies', 'def', at))      # a new head
+        self.assertFalse(mechanical.tried(run, 'conflict', 'abc', at))    # another cause
+        later = mechanical.to_dt('2026-10-04T11:30:00Z')
+        self.assertFalse(mechanical.tried(run, 'copies', 'abc', later))   # the trunk had time
+        self.assertFalse(mechanical.tried({}, 'copies', 'abc', at))
+        run['mechanical']['trunk'] = 't1'
+        self.assertTrue(mechanical.tried(run, 'copies', 'abc', later, trunk='t1'))  # unmoved
+        self.assertFalse(mechanical.tried(run, 'copies', 'abc', later, trunk='t2'))
+
+    def test_a_ruled_or_parked_correction_is_never_retried(self):
+        ln = SimpleNamespace(product=env.Product('sample', {
+            'repo_dir': '/nonexistent', 'main': 'main', 'conventions': {'flags': ON}}),
+            dry_run=False)
+        for extra in ({'ruled': True}, {'parked': True}):
+            f = {'branch': 'b', 'kind': 'code', 'head': 'abc', 'run': {},
+                 'correction': dict({'kind': 'conflict', 'text': 'x'}, **extra)}
+            self.assertIsNone(mechanical.retry_pending(ln, f), extra)
+
+
+class HookRefusedDrop(unittest.TestCase):
+    """The f-0086 loop (S-2: 95 of 118 hook-refused endings since 09-25 were redaction refusals
+    naming a worker account): the session's worktree carries trunk history (it merged
+    origin/main in), so the publish's lane-N rewrite — a plain chain only — cannot run, and the
+    hook refuses every run. Under ``flags.mechanical`` the trunk history is dropped (the own
+    commits rebased onto origin/<main>) and the publish runs again: the rewrite clears it. A
+    finding in the session's own content still refuses, the worktree as it was."""
+
+    _P = TLC.PublishRedactionTests
+    sh, write_commit = _P.sh, _P.write_commit
+    B = 'fix/B-9997'
+
+    def setUp(self):
+        self._P.setUp(self)
+        self.write_commit('plan.md', f'a plan naming {self.account}\n', 'task(B-9997): a plan')
+        # the trunk moves, and the session merges it in
+        self.sh(['checkout', '-q', '-B', 'tmp', 'origin/main'], self.repo)
+        self.write_commit('trunk.txt', 'trunk\n', 'fix: the trunk moved (#9)')
+        self.sh(['push', '-q', 'origin', 'tmp:main'], self.repo)
+        self.sh(['checkout', '-q', self.B], self.repo)
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+        self.sh(['merge', '-q', '--no-edit', 'origin/main'], self.repo)
+        self.merged = self.sh(['rev-parse', 'HEAD'], self.repo)
+
+    def product(self, flags=ON):
+        return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                      'conventions': {'flags': flags}})
+
+    def test_without_the_entry_the_publish_is_refused_every_run(self):
+        ok, line = lifecycle.publish(self.repo, self.B, '', main='main')
+        self.assertFalse(ok, line)
+        self.assertEqual(lifecycle.push_failure(line), lifecycle.HOOK_REFUSED)
+        self.assertIn('names a worker account', line)
+
+    def test_the_trunk_history_is_dropped_and_the_names_rewritten(self):
+        ok, line, out = mechanical.publish_worktree(self.product(), self.repo, self.B, '',
+                                                    main='main')
+        self.assertTrue(ok, line)
+        self.assertIn('dropped the trunk history', line)
+        self.assertIn('worker-account names rewritten to lane-N', line)
+        remote = self.sh(['rev-parse', f'origin/{self.B}'], self.repo)
+        self.assertEqual(self.sh(['rev-list', '--merges', f'origin/main..{remote}'], self.repo),
+                         '')
+        self.assertEqual(self.sh(['rev-parse', f'{remote}~1'], self.repo),
+                         self.sh(['rev-parse', 'origin/main'], self.repo))
+        self.assertNotIn(self.account,
+                         self.sh(['log', '-p', '--format=%B', f'origin/main..{remote}'], self.repo))
+        self.assertEqual((out.kind, out.resolved, out.head),
+                         (lifecycle.HOOK_REFUSED, True, remote))
+
+    def test_a_finding_of_the_sessions_own_still_refuses_the_worktree_as_it_was(self):
+        with open(os.path.join(self.home, 'redact-names.txt'), 'w', encoding='utf-8') as f:
+            f.write('operator-' + 'private\n')
+        redact_mod._DEFAULT_CACHE.clear()
+        self.write_commit('own.md', 'naming operator-' + 'private\n', 'task(B-9997): own')
+        head = self.sh(['rev-parse', 'HEAD'], self.repo)
+        ok, line, out = mechanical.publish_worktree(self.product(), self.repo, self.B, '',
+                                                    main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('names a protected name', line)
+        self.assertEqual(self.sh(['rev-parse', 'HEAD'], self.repo), head)
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', self.B], self.repo), '')
+        self.assertFalse(out.resolved)
+
+    def test_a_worktree_with_no_trunk_history_is_not_rebased(self):
+        self.sh(['reset', '-q', '--hard', 'HEAD~1'], self.repo)   # the merge undone
+        self.sh(['commit', '-q', '--allow-empty', '-m', 'merge placeholder'], self.repo)
+        with open(os.path.join(self.home, 'redact-names.txt'), 'w', encoding='utf-8') as f:
+            f.write('operator-' + 'private\n')
+        redact_mod._DEFAULT_CACHE.clear()
+        self.write_commit('own.md', 'naming operator-' + 'private\n', 'task(B-9997): own')
+        ok, line, _out = mechanical.publish_worktree(self.product(), self.repo, self.B, '',
+                                                     main='main')
+        self.assertFalse(ok, line)
+        self.assertNotIn('dropped the trunk history', line)
+        self.assertEqual(self.sh(['rev-list', '--count', 'origin/main..HEAD'], self.repo), '3')
+
+
+class _Held(TL.LaneFixture):
+    """A lane branch with a pending correction the lane's table may settle on a later pass."""
+
+    _G = TL.GitMechanicsNeverSpawnASession
+    B, AUTHOR = _G.B, _G.AUTHOR
+    tip, commit, own, sessions = _G.tip, _G.commit, _G.own, _G.sessions
+    branch, archive = _G.branch, _G.archive
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def corrections(self):
+        return lifecycle.corrections(self.sessions())
+
+    def hold(self, kind, text, **extra):
+        harvest.mark_session(self.state_dir, 'coder-t-0001',
+                             correction=dict({'kind': kind, 'text': text,
+                                              'at': '2026-09-21T00:06:00Z'}, **extra))
+
+
+class CopiesRetried(_Held):
+    """A copies hold — the lane's rebuild conflicted — waited for a session even after the
+    trunk moved so the rebuild applies (a product's T-0338 / T-0349: adjudicated for a pick
+    git now makes). Under the flag the table retries it once the trunk moved: rebuilt, pushed,
+    the hold cleared, no session; never twice on one trunk."""
+
+    def copies_hold(self, flags=ON):
+        self.push_main({'c.txt': 'base\n'}, 'chore: c')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('fix(ci): home-clock', {'x.txt': 'x\n'})
+        self.commit('fix(T-0001): the hinge', {'c.txt': 'branch\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        self.push_main({'c.txt': 'trunk\n'}, 'fix: c on the trunk (#813)')
+        old = self.tip()
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lane.lane_pass(self.product(flags=flags), self.state_dir, out=self.lines.append)
+        self.assertEqual(self.corrections()['T-0001']['kind'], lane.COPIES)
+        return old
+
+    def test_the_first_pass_tries_the_rebuild_once(self):
+        old = self.copies_hold()
+        self.assertEqual(sum(1 for l in self.lines if l.startswith(f'drop copies {self.B}:')),
+                         1, self.lines)
+        self.assertFalse(any(l.startswith('mechanical:copies') and 'resolved' in l
+                             for l in self.lines), self.lines)
+        ev = harvest.read_sessions(self.state_dir)['coder-t-0001']['mechanical']
+        self.assertEqual((ev['kind'], ev['head'], ev['resolved']), (lane.COPIES, old, False))
+        more = []
+        lane.lane_pass(self.product(flags=ON), self.state_dir, out=more.append)
+        self.assertEqual(self.tip(), old)
+        self.assertFalse(any(l.startswith(('mechanical:', 'held ', 'rebased ')) for l in more),
+                         more)
+
+    def test_once_the_trunk_lets_it_the_rebuild_is_pushed_and_the_hold_cleared(self):
+        old = self.copies_hold()
+        self.push_main({'c.txt': 'base\n'}, 'revert: c on the trunk (#814)')
+        harvest.mark_session(self.state_dir, 'coder-t-0001', mechanical=dict(
+            harvest.read_sessions(self.state_dir)['coder-t-0001']['mechanical'],
+            at='2026-09-21T00:00:00Z'))
+        trunk = self.origin_main()
+        more = []
+        lane.lane_pass(self.product(flags=ON), self.state_dir, out=more.append)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        self.assertEqual(self.own(new), ['fix(T-0001): the hinge'])
+        self.assertEqual(sh(['git', 'rev-parse', f'{new}~1'], cwd=self.origin).stdout.strip(),
+                         trunk)
+        self.assertEqual(self.corrections(), {})
+        self.assertTrue(any(l.startswith(f'mechanical:copies {self.B}: resolved')
+                            for l in more), more)
+        self.assertEqual(self.origin_main(), trunk)
+
+    def test_flag_off_the_hold_waits_for_its_session(self):
+        old = self.copies_hold(flags={})
+        self.push_main({'c.txt': 'base\n'}, 'revert: c on the trunk (#814)')
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(self.tip(), old)
+        self.assertEqual(self.corrections()['T-0001']['kind'], lane.COPIES)
+        self.assertNotIn('mechanical', harvest.read_sessions(self.state_dir)['coder-t-0001'])
+
+
+class AdjudicateSkipped(_Held):
+    """F-M4: an adjudicate row raised by a mechanical cause only — the same conflict held three
+    times, ``at_cap`` — is skipped when git settles it: the table rebases the branch before the
+    ruling is launched, and the hold is cleared."""
+
+    def test_an_at_cap_conflict_git_now_rebases_is_cleared(self):
+        old = self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        self.session('coder-t-0001', 'T-0001', self.B)
+        self.hold('conflict', 'PR #7 conflicts with origin/main in a.txt', at_cap=True, same=3)
+        self.assertTrue(self.corrections()['T-0001'].get('at_cap'))
+        lane.lane_pass(self.product(flags=ON), self.state_dir, out=self.lines.append)
+        self.assertNotEqual(self.tip(), old)
+        self.assertEqual(self.corrections(), {})
+        self.assertTrue(any(l.startswith(f'mechanical:conflict {self.B}: resolved')
+                            for l in self.lines), self.lines)
+
+    def test_flag_off_the_adjudication_stays_pending(self):
+        old = self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        self.session('coder-t-0001', 'T-0001', self.B)
+        self.hold('conflict', 'PR #7 conflicts with origin/main in a.txt', at_cap=True, same=3)
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(self.tip(), old)
+        self.assertTrue(self.corrections()['T-0001'].get('at_cap'))
+
+
+class ReviewCarried(_Held):
+    """F-M4: a review round raised by a mechanical cause only. The lane rebased an approved
+    branch onto a trunk that changed a line beside its own (a clean pick, so the same change —
+    but the patch's context differs, so ``same_code`` no longer recognises the reviewed head):
+    a fresh review round was wanted for code no session touched. Under the flag the approval
+    the table's own move left behind is carried to the head it made; the gate still runs."""
+
+    LINES = ''.join(f'l{n}\n' for n in range(1, 8))
+
+    def setUp(self):
+        super().setUp()
+        self.push_main({'a.txt': self.LINES}, 'chore: a')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('feat(T-0001): the door', {'a.txt': self.LINES.replace('l4', 'L4')})
+        code = sh(['git', 'rev-parse', 'HEAD'], cwd=self.worker).stdout.strip()
+        self.commit('review(T-0001): round 1 — approved', {
+            'reviews/1-t-0001.md': f'verdict: approved\nhead: {code}\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'a.txt': self.LINES.replace('l1', 'L1')}, 'fix: l1 (#815)')
+        self.session('coder-t-0001', 'T-0001', self.B)
+        self.hold('conflict', 'PR #7 conflicts with origin/main')
+
+    def product(self, **conv):
+        return super().product(lane={'review': {'code': 'required'}}, **conv)
+
+    def test_the_approval_is_carried_to_the_rebuilt_head(self):
+        old = self.tip()
+        lane.lane_pass(self.product(flags=ON), self.state_dir, out=self.lines.append)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        rec_ = self.lane_of(self.B)
+        self.assertNotEqual(rec_['state'], lane.REVIEW, self.lines)
+        self.assertEqual(rec_.get('mechanical_from'), old)
+        more = []
+        lane.lane_pass(self.product(flags=ON), self.state_dir, out=more.append)
+        self.assertNotEqual(self.lane_of(self.B)['state'], lane.REVIEW, more)
+        self.assertFalse(any('round 2 wanted' in l for l in self.lines + more), more)
+
+    def test_a_later_pass_carries_it_from_the_lane_record(self):
+        harvest.mark_session(self.state_dir, 'coder-t-0001', correction=None)
+        old = self.tip()
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        ln = lane.Lane(self.product(flags=ON), self.state_dir, out=self.lines.append)
+        f = ln.gather(prs=False)[self.B]
+        self.assertEqual(lane.send_back(ln, f, 'conflict', 'PR #7 conflicts', []), 'mechanical')
+        rec_ = self.lane_of(self.B)
+        self.assertEqual((rec_['state'], rec_['mechanical_from']), (lane.PUSHED, old))
+        more = []
+        lane.lane_pass(self.product(flags=ON), self.state_dir, out=more.append)
+        self.assertNotEqual(self.lane_of(self.B)['state'], lane.REVIEW, more)
+        self.assertFalse(any('round 2 wanted' in l for l in more), more)
