@@ -66,6 +66,7 @@ import marshal
 import os
 import re
 import signal
+import stat
 import subprocess
 import time
 
@@ -341,6 +342,8 @@ class _Folded:
         self.voids = voids or {}
         self.standing = standing or {}
         self._by_item = None
+        self.sig = None         # the stat signature this content was read under (_folded)
+        self.read_ns = 0        # when it was read, wall clock
 
     def by_item(self):
         """``{item: [run, ...]}`` in :func:`runs` order — the view's runs, not copies. A run
@@ -366,20 +369,56 @@ class _Folded:
 _EMPTY = _Folded(b'', {})
 
 
+#: A stat signature recorded less than this long after the file's own mtime is not trusted
+#: (git's "racy" rule): a rewrite within the same filesystem clock tick can leave every stat
+#: field unchanged, so such a hit is checked against the bytes until a later read settles it.
+_RACY_NS = 2 * 1_000_000_000
+
+
+def _signature(st):
+    """What identifies one content of the registry without reading it: inode, size, mtime and
+    ctime (the last is the kernel's own, never set by ``utime``)."""
+    return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _settled(hit, sig):
+    """``hit`` still holds the file whose stat is ``sig``, by the stat alone: the signature it
+    was read under is unchanged and that read came well after the file's last change."""
+    return (hit.sig is not None and hit.sig == sig
+            and hit.read_ns - max(sig[2], sig[3]) >= _RACY_NS)
+
+
 def _folded(path):
     """The registry at ``path`` as a :class:`_Folded` (read-only view; :data:`_EMPTY` when there
-    is no file)."""
-    if not path or not os.path.isfile(path):
+    is no file).
+
+    A hit is O(1): one ``stat``. Every question the tick asks (``rounds_of``, ``item_runs``,
+    ``voided_sha``… per row, per item, per run) used to read the whole file and compare its
+    bytes with the cached copy — with an 8.9 MB, 21,827-line registry, a wave step spent 23+
+    minutes at 100% CPU in that ``read`` and ``memcmp`` and held the tick lock throughout
+    (2026-10-04). The bytes are read and compared only when the stat moved or is too fresh to
+    trust (:func:`_settled`)."""
+    try:
+        st = os.stat(path) if path else None
+    except OSError:
+        st = None
+    if st is None or not stat.S_ISREG(st.st_mode):
         return _EMPTY
-    with open(path, 'rb') as f:
-        data = f.read()
     key = (os.path.abspath(path), env.ASF_HOME)
     hit = _REGISTRY_CACHE.get(key)
+    sig = _signature(st)
+    if hit is not None and _settled(hit, sig):
+        return hit
+    read_ns = time.time_ns()
+    with open(path, 'rb') as f:
+        data = f.read()
     if hit is not None and hit.data == data:
+        hit.sig, hit.read_ns = sig, read_ns
         return hit
     lines = _parse_registry(data, _product_from_registry_dir(path))
     hit = _Folded(data, fold(lines), _resets(lines), _parks(lines), _voids(lines),
                   _standing(lines))
+    hit.sig, hit.read_ns = sig, read_ns
     _REGISTRY_CACHE.pop(key, None)
     while len(_REGISTRY_CACHE) >= _REGISTRY_CACHE_MAX:
         _REGISTRY_CACHE.pop(next(iter(_REGISTRY_CACHE)))
