@@ -1135,14 +1135,6 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
                 stage_val[iid] = 'landed'
                 lines = (id_lines if commit else []) + (
                     [f"{len(kids)}/{len(kids)} children Closed"] if kids_closed else [])
-            elif c.rule == 'children-open':
-                # work under way beneath it: the ladder says building, so its open Tasks launch
-                tstates = [new_state[cid] for cid in kid_ids
-                           if canonical[cid]['meta'].get('type') == 'task']
-                closed_n = sum(1 for t in tstates if t == closing.CLOSED)
-                stage_val[iid] = f"building {closed_n}/{len(tstates)}" if tstates else 'card'
-                done_n = sum(1 for k in kids if k in closing._DONE)
-                lines = id_lines + [f"{done_n}/{len(kids)} children done"]
             else:
                 # a Feature nothing in the product repo knows yet IS a card — an empty stage would
                 # make a decided card invisible to the CARD → SPEC feeder row that reads this stage.

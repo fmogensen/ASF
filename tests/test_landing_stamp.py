@@ -144,7 +144,10 @@ class EachClosingRuleStamps(_Record):
         self.assertEqual((m['landing']['sha'], m['landing']['by']), (A, 'children'))
 
     def test_a_child_descent_closed_carries_its_parents_sha(self):
-        write(self.root, 'F-0001', 'feature')
+        # S6: an open Story keeps its Feature from deriving Closed, so descent meets an
+        # evidence-free Story only under a Feature an earlier pass already closed
+        write(self.root, 'F-0001', 'feature',
+              machine=tuple(l.replace('state: New', 'state: Closed') for l in NEW))
         rel = write(self.root, 'S-0001', 'story', parent='F-0001')
         fev = {'alias': None, 'spec': 'origin/main:docs/specs/f-0001.md', 'spec_branch': None,
                'spec_on_main': True, 'spec_review': None, 'plan': None, 'plan_branch': None,

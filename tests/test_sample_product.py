@@ -307,9 +307,10 @@ GREEN_COUNT = ('def count(text):\n    if not text:\n        return 0\n'
                '    return len(text.split())\n')
 
 # F-0033/§2.3: one entry per tick of `WholeLoopFromCardToRelease` — a stage that repeats or never
-# appears names its own hinge.
+# appears names its own hinge. S6: the sample's own T-0001 (filed under S-0001) is a Task of
+# F-0001 too, and it never lands in this loop — so the Feature builds 1 of 2 and does not land.
 EXPECTED_LADDER = ['card', 'card', 'card', 'spec-draft', 'spec-approved',
-                   'spec-approved', 'plan-approved', 'building 0/1', 'landed']
+                   'spec-approved', 'plan-approved', 'building 0/2', 'building 1/2']
 
 
 class FailurePathsBase(unittest.TestCase):

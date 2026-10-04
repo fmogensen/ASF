@@ -114,7 +114,10 @@ class TheRuleIsPure(unittest.TestCase):
     def test_a_feature_with_an_open_child_story_is_not_resolved(self):
         c = closing.state_of('feature', closing.Ev(
             children=(closing.CLOSED, closing.CLOSED, closing.CLOSED, closing.NEW)))
-        self.assertEqual((c.state, c.rule), (closing.ACTIVE, 'children-open'))
+        self.assertNotIn(c.state, (closing.RESOLVED, closing.CLOSED))
+        c = closing.state_of('feature', closing.Ev(
+            children=(closing.CLOSED, closing.NEW), spec_on_main=True))
+        self.assertEqual((c.state, c.rule), (closing.ACTIVE, 'documented'))
 
 
 class StoryNeedsEveryLineProved(RecordCase):
@@ -248,12 +251,13 @@ class ReopenAStoryReopensItsFeature(RecordCase):
                 id='S-1158', reason='line 3 unproved', product=None), self.root)
         self.assertEqual(rc, 0)
         self.assertEqual(self.state(s), 'Active')
-        self.assertEqual(self.state(f), 'Active')
-        self.assertIn('F-0106: reopened — state Closed → Active', out.getvalue())
+        self.assertNotIn(self.state(f), ('Resolved', 'Closed'))
+        self.assertIn('F-0106: reopened — state Closed → ', out.getvalue())
         self.assertIn('its Story S-1158 reopened', self.read(f)[1])
         # and the next plain ingest keeps both open
         self.ingest(ev)
-        self.assertEqual((self.state(s), self.state(f)), ('Active', 'Active'))
+        self.assertEqual(self.state(s), 'Active')
+        self.assertNotIn(self.state(f), ('Resolved', 'Closed'))
 
 
 class ReCreditAndUntick(RecordCase):
@@ -414,7 +418,7 @@ class AuditProofs(RecordCase):
         self.assertEqual(self.state('stories/S-0001.md'), 'Active')
         self.assertEqual(self.state('stories/S-0004.md'), 'Active')
         self.assertEqual(self.state('stories/S-0002.md'), 'Resolved')
-        self.assertEqual(self.state('features/F-0001.md'), 'Active')
+        self.assertNotIn(self.state('features/F-0001.md'), ('Resolved', 'Closed'))
         self.assertIn('S-0001: reopened — state Closed → Active', text)
 
 

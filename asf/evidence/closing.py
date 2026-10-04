@@ -38,7 +38,6 @@ The rules, first match per type after the two `any` rows:
   feature  landed-green       no children, a naming commit, green, in prod       -> Closed
   feature  landed             no children, a naming commit                       -> Resolved
   feature  documented         a spec on main or an approved plan                 -> Active
-  feature  children-open      some child under way or done, not all done        -> Active
   feature  card               otherwise                                          -> New
   epic     children-closed    its children all Closed                            -> Closed
   epic     typed-closed       the operator typed `closed: true` (the early close) -> Closed
@@ -147,9 +146,6 @@ RULES = (
      'no children and a naming commit'),
     ('feature', 'documented', lambda ev: bool(ev.spec_on_main or ev.plan_approved), ACTIVE,
      'a spec on main or an approved plan'),
-    ('feature', 'children-open',
-     lambda ev: any(s in (ACTIVE, RESOLVED, CLOSED) for s in ev.children), ACTIVE,
-     'a child is under way or done, and not every child is'),
     ('feature', 'card', lambda ev: True, NEW, 'a card only'),
     ('epic', 'children-closed', lambda ev: _all(ev, (CLOSED,)), CLOSED, 'every child Closed'),
     ('epic', 'typed-closed', lambda ev: ev.typed_closed, CLOSED,
