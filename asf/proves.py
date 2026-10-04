@@ -91,7 +91,8 @@ def validate(claims, task, items, root, tree=None):
 
     * ``no claim``          — ``claims`` is empty
     * ``unknown story``     — the id is not in ``items``, or is not a Story
-    * ``not this Task's``   — the Story is not in the Task's ``stories:``
+    * ``not this Task's``   — the Story is not one of the Task's (:func:`stories_of_task`:
+                              its ``stories:``, or its ``parent:`` when that is a Story)
     * ``no such line``      — ``n`` is outside ``1..len(card_bullets(...))``
     * ``no such test``      — ``tree`` is given and the path before ``::`` is not in it
 
@@ -99,7 +100,7 @@ def validate(claims, task, items, root, tree=None):
     and ``good`` is non-empty (D3)."""
     if not claims:
         return [], ['no claim']
-    task_stories = (task or {}).get('stories') or []
+    task_stories = stories_of_task(task, items)
     good, problems = [], []
     for claim in claims:
         story_item = (items or {}).get(claim.story)
@@ -117,6 +118,19 @@ def validate(claims, task, items, root, tree=None):
             continue
         good.append(claim)
     return good, problems
+
+
+def stories_of_task(task, items):
+    """The Stories a Task covers: its ``stories:`` list, and its ``parent:`` when the record says
+    that parent is a Story — a Task filed under a Story is one of its Tasks whether or not its
+    ``stories:`` repeats the id. ``items`` maps an id to its meta (``type`` read); upper-cased
+    ids, first-seen order."""
+    task = task or {}
+    out = [str(s).upper() for s in (task.get('stories') or [])]
+    parent = str(task.get('parent') or '').upper()
+    if parent and ((items or {}).get(parent) or {}).get('type') == 'story':
+        out.append(parent)
+    return list(dict.fromkeys(out))
 
 
 def claims_on_branch(git, trunk, branch):
@@ -165,3 +179,114 @@ def render(claims):
     """The ``## Proves`` block a pull-request body carries — one bullet per claim, the same text
     the trailer had."""
     return '\n'.join(f'- {c.story} line {c.line} — {c.test}' for c in claims)
+
+
+# ---- "no test, no done": which acceptance lines a Story has proved --------------------------
+
+#: The ``## History`` entry ingest writes when a landed (or review) claim proves a line — the one
+#: record that a line is proved. ``- <stamp> ingest: proved line <n> — <task…> (<test>)``.
+PROVED_ENTRY_RE = re.compile(r'^-[^\n]*?\bingest: proved line (\d+)\b')
+#: The ``## History`` entry ``asf untick`` writes: the line's earlier proof no longer counts.
+UNTICK_ENTRY_RE = re.compile(r'^-[^\n]*?\buntick: line (\d+)\b')
+#: A bullet deferred by a decision: ``deferred`` and a ``D-nnnn`` on the bullet's own text.
+DEFERRED_RE = re.compile(r'\bdeferred\b.*?\b(D-\d{4,})\b', re.I)
+
+
+def _history_lines(body):
+    inside = False
+    for line in (body or '').splitlines():
+        if line.startswith('## '):
+            inside = line[3:].strip().lower() == 'history'
+            continue
+        if inside:
+            yield line
+
+
+def proved_lines(body):
+    """The acceptance line numbers the card's ``## History`` records as proved — a ``proved
+    line <n>`` entry not followed by an ``untick: line <n>`` one. Pure, over the card body."""
+    proved = set()
+    for line in _history_lines(body):
+        m = PROVED_ENTRY_RE.match(line)
+        if m:
+            proved.add(int(m.group(1)))
+            continue
+        m = UNTICK_ENTRY_RE.match(line)
+        if m:
+            proved.discard(int(m.group(1)))
+    return proved
+
+
+def deferred_lines(body):
+    """``{line_no: decision_id}`` for the acceptance bullets that say they are deferred by a
+    decision (``… — deferred by D-0012``). Whether that decision exists is the caller's
+    question (:func:`unproved`)."""
+    out = {}
+    for n, text in enumerate(bullets(body), start=1):
+        m = DEFERRED_RE.search(text)
+        if m:
+            out[n] = m.group(1).upper()
+    return out
+
+
+def _bullet_indexes(lines):
+    idxs = []
+    inside = False
+    for i, line in enumerate(lines):
+        stripped = line.rstrip('\n').rstrip('\r')
+        if stripped.startswith('## '):
+            inside = stripped[3:].strip().lower() == 'acceptance'
+            continue
+        if inside and _ACCEPTANCE_BULLET_RE.match(stripped):
+            idxs.append(i)
+    return idxs
+
+
+def is_ticked(body, line_no):
+    """True when the ``line_no``-th acceptance bullet exists and reads ``- [x]``."""
+    lines = body.splitlines(keepends=True)
+    idxs = _bullet_indexes(lines)
+    if not (1 <= line_no <= len(idxs)):
+        return False
+    return not _UNTICKED_RE.match(lines[idxs[line_no - 1]])
+
+
+def unproved(body, register=(), also_proved=()):
+    """``[(line_no, text, why), …]`` — every acceptance line of a Story that is neither proved
+    (:func:`proved_lines`, or a line in ``also_proved``: claims the same pass is about to
+    record) nor deferred by a decision that ``register`` holds. ``why`` names a deferral whose
+    decision the register lacks. A Story is done only when this is empty ("no test, no
+    done"); a body with no acceptance bullet has nothing to prove."""
+    proved = proved_lines(body) | set(also_proved)
+    deferred = deferred_lines(body)
+    register = {str(d).upper() for d in register}
+    out = []
+    for n, text in enumerate(bullets(body), start=1):
+        if n in proved:
+            continue
+        did = deferred.get(n)
+        if did and did in register:
+            continue
+        why = f'deferred by {did}, not in the decision register' if did else 'no proved-line entry'
+        out.append((n, text, why))
+    return out
+
+
+#: The ticked half of `_ACCEPTANCE_BULLET_RE`, for `untick`.
+_TICKED_RE = re.compile(r'^([ \t]*- )\[[xX]\]')
+
+
+def untick(body, line_no):
+    """``(new_body, changed)`` — flip the ``line_no``-th acceptance bullet from ``- [x]`` back to
+    ``- [ ]``: the operator's ``asf untick``, the one reverse of :func:`tick`. Every other
+    character stays; ``changed`` is False when the bullet does not exist or is not ticked."""
+    lines = body.splitlines(keepends=True)
+    idxs = _bullet_indexes(lines)
+    if not (1 <= line_no <= len(idxs)):
+        return body, False
+    i = idxs[line_no - 1]
+    new_line, count = _TICKED_RE.subn(r'\1[ ]', lines[i], count=1)
+    if not count:
+        return body, False
+    lines[i] = new_line
+    return ''.join(lines), True

@@ -867,12 +867,19 @@ class IngestTestCase(unittest.TestCase):
 
 
 class DescentTests(IngestTestCase):
+    maxDiff = None
     """§2.4: a Feature that closed closes the children beneath it that have no evidence of their
-    own — and only those."""
+    own — and only those. A Feature's children are its Stories and their Tasks too (S6), so an
+    open one keeps it from deriving Closed: the Feature here is the one an earlier pass already
+    closed (the terminal hold), the only way descent still meets an evidence-free child."""
 
-    def tree(self):
+    CLOSED_LINES = ('state: Closed', 'stage_since: 2026-01-01T00:00:00Z',
+                    'updated: 2026-01-01T00:00:00Z')
+
+    def tree(self, closed=True):
         write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
-        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001',
+              **({'machine_lines': self.CLOSED_LINES} if closed else {}))
         write(self.root, 'S-0001', 'story', 'No Task at all', 'stories', parent='F-0001')
         write(self.root, 'S-0002', 'story', 'A Task is under way', 'stories', parent='F-0001')
         write(self.root, 'T-0001', 'task', 'Under the childless Story', 'tasks', parent='S-0001')
@@ -897,7 +904,8 @@ class DescentTests(IngestTestCase):
 
     def test_a_story_whose_matrix_row_says_todo_is_not_closed_by_its_parent(self):
         write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
-        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001',
+              machine_lines=self.CLOSED_LINES)
         write(self.root, 'S-0003', 'story', 'Never built', 'stories', parent='F-0001',
               typed_lines=['legacy_id: F-VOX-8'])
         write(self.root, 'T-0003', 'task', 'Under the unbuilt Story', 'tasks', parent='S-0003')
@@ -931,10 +939,10 @@ class DescentTests(IngestTestCase):
         self.run_ingest(self.evidence())
         self.assertEqual(self.meta('bugs', 'B-0001')['state'], 'New')
 
-    def test_descent_writes_nothing_when_the_feature_is_merely_resolved(self):
-        self.tree()
+    def test_descent_writes_nothing_when_the_feature_is_not_closed(self):
+        self.tree(closed=False)
         self.run_ingest(self.evidence(feature_green=False))
-        self.assertEqual(self.meta('features', 'F-0001')['state'], 'Resolved')
+        self.assertNotEqual(self.meta('features', 'F-0001')['state'], 'Closed')
         self.assertEqual(self.meta('stories', 'S-0001')['state'], 'New')
         self.assertEqual(self.meta('tasks', 'T-0001')['state'], 'New')
 

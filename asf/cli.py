@@ -206,6 +206,21 @@ def build_parser():
     p_reopen.add_argument('--reason', required=True, help='why the prior closing was wrong')
     p_reopen.add_argument('--product')
 
+    p_untick = sub.add_parser(
+        'untick', help="clear a Story's acceptance tick and its proof: the line must be proved "
+                       "again (a Resolved/Closed Story reopens, its Feature with it)")
+    p_untick.add_argument('id', help='the Story')
+    p_untick.add_argument('line', type=int, help='the acceptance line, 1-based')
+    p_untick.add_argument('--reason', help='why the tick does not count')
+    p_untick.add_argument('--product')
+
+    p_audit_proofs = sub.add_parser(
+        'audit-proofs', help='list every Resolved or Closed Story with an acceptance line no '
+                             'test proved ("no test, no done"); --apply reopens them')
+    p_audit_proofs.add_argument('--apply', action='store_true',
+                                help='reopen each listed Story (and its Feature)')
+    p_audit_proofs.add_argument('--product')
+
     p_check = sub.add_parser('check', help='validate the backlog')
     p_check.add_argument('paths', nargs='*')
     p_check.add_argument('--product')
@@ -509,6 +524,16 @@ def _main(argv=None):
         from asf.record.reopen import cmd_reopen
         return _published(cmd_reopen, args, resolve_record(args, announce=_announce_stderr),
                           f"record: reopen {args.id}")
+    if args.command == 'untick':
+        from asf.record.reopen import cmd_untick
+        return _published(cmd_untick, args, resolve_record(args, announce=_announce_stderr),
+                          f"record: untick {args.id} line {args.line}")
+    if args.command == 'audit-proofs':
+        from asf.record.reopen import cmd_audit_proofs
+        record = resolve_record(args, announce=_announce_stderr)
+        if not args.apply:
+            return cmd_audit_proofs(args, record)
+        return _published(cmd_audit_proofs, args, record, "record: audit-proofs --apply")
     if args.command == 'check':
         from asf.record.check import cmd_check, cmd_check_invariants
         if getattr(args, 'invariants', False) or getattr(args, 'deep', False):
