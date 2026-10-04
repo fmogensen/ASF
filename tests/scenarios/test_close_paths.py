@@ -78,7 +78,7 @@ ROWS = (
     (MF, 'merged', 'none', None, None),
     # the voided landing: a reset names the landing's (pr, head) — no merge fact from it, even
     # while the host says the PR merged
-    (MF, 'merged', 'none', 'W4-PR5', 'voided-landing'),
+    (MF, 'merged', 'none', None, 'voided-landing'),
 )
 
 

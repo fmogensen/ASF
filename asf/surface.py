@@ -56,6 +56,7 @@ COMMANDS = {
     'unpark':               ('release an item the pool is holding', RECORD, None),
     'park':                 ('hold an item or a branch until it is released', RECORD, None),
     'correct':              ('ask for one correction round on an item, with instructions', RECORD, None),
+    'reset':                ("record that an item's landing claim was wrong, void it and start the item over", RECORD, None),
     'brief':                ('print the brief a worker would be given, for the next row or for one item', None, None),
     'import-sessions':      ("import an earlier runner's session log into the factory's metrics", RECORD, None),
     'approvals':            ('print the approval matrix and the open holds, or resolve one', RECORD, 'resolve'),
