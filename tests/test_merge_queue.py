@@ -1062,3 +1062,195 @@ class OutOfTheQueue(QueueRepo):
             self.assertEqual(merge_queue.cmd_land(args), 0)
         self.assertEqual(merge_queue.load_withdrawn(self.state_dir)['1']['head'],
                          self.heads()['worker/T-0001'])
+
+
+def stamp(offset_s=0):
+    import datetime
+    t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset_s)
+    return t.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+class NoVerdictGH(FakeGH):
+    """:class:`FakeGH` plus the workflow runs on a sha and ``gh run rerun``."""
+
+    def __init__(self):
+        super().__init__()
+        self.wf = {}          # sha -> [{id, status, conclusion}]
+
+    def __call__(self, args):
+        if args[0] == 'api' and '/actions/runs?head_sha=' in args[1]:
+            self.calls.append(list(args))
+            sha = args[1].split('head_sha=')[1].split('&')[0]
+            return 0, json.dumps({'workflow_runs': self.wf.get(sha, [])}), ''
+        if args[:2] == ['run', 'rerun']:
+            self.calls.append(list(args))
+            return 0, '', ''
+        return super().__call__(args)
+
+    def reruns(self):
+        return [c for c in self.calls if c[:2] == ['run', 'rerun']]
+
+
+def run_check(name, conclusion='success', status_='completed', run=500001, completed=None):
+    return {'name': name, 'status': status_, 'conclusion': conclusion,
+            'details_url': f'https://github.com/o/p/actions/runs/{run}/job/{run + 1}',
+            'html_url': f'https://github.com/o/p/actions/runs/{run}/job/{run + 1}',
+            'completed_at': completed or stamp(-3600)}
+
+
+class NoVerdict(QueueRepo):
+    """A cancelled (timed out, stale, never started) required check on a batch is a terminal
+    non-verdict: re-run once per (batch sha, job), then cut again with an ALARM — never waited on
+    forever, never red against the members, never green (2026-10-04: a batch whose ``gate`` was
+    cancelled sat "pending" 3 h and held the green batch behind it)."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.gh = NoVerdictGH()
+        patch = mock.patch.object(github, 'call', side_effect=contracts.as_call(self.gh))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+
+    def cut_one(self):
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1),
+                                      self.entry('worker/T-0002', 2, 'T-0002')])
+        (batch,) = self.batches()
+        return batch
+
+    def cancel(self, batch, conclusion='cancelled', completed=None):
+        self.gh.checks[batch['sha']] = [run_check('gate', conclusion, completed=completed),
+                                        run_check('gate-tests')]
+        self.gh.wf[batch['sha']] = [{'id': 500001, 'status': 'completed',
+                                     'conclusion': conclusion}]
+
+    def test_a_cancelled_gate_is_rerun_once_and_never_red(self):
+        from asf import ci_queue
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '500001', '-R', SLUG, '--failed']])
+        self.assertTrue(any('cancelled — rerun once' in l and 'gate' in l for l in self.lines),
+                        self.lines)
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])   # still in flight
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.QUEUED)
+        self.assertEqual(self.backs, [])
+        claim = ci_queue.load_claims(self.state_dir)['500001']
+        self.assertEqual((claim['cause'], claim['sha'], claim['jobs']),
+                         (merge_queue.MQ_RERUN, batch['sha'], ['gate']))
+        # the next pass, before the host shows the re-run: no second ask, still pending
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.gh.reruns()), 1)
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+
+    def test_a_second_cancel_recuts_the_batch_with_an_alarm(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.gh.reruns()), 1)
+        self.cancel(batch, completed=stamp(120))      # the re-run, cancelled again
+        # a re-cut comes a pass (minutes) after the cut: in a test the two fall in one second,
+        # and git's one-second commit dates would make the same merge commits — the same sha
+        # and ref. Let the clock pass the cut's second, as any real pass does.
+        cut_second = int(time.time())
+        while int(time.time()) == cut_second:
+            pass
+        ln = self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.gh.reruns()), 1)    # never a second re-run on the sha
+        self.assertTrue(any('ALARM' in l and batch['ref'] in l for l in self.lines), self.lines)
+        self.assertEqual(self.backs, [])               # no member blamed
+        self.assertNotIn(batch['ref'], self.heads())
+        (recut,) = self.batches()
+        self.assertNotEqual(recut['sha'], batch['sha'])
+        self.assertEqual([m['branch'] for m in recut['members']],
+                         ['worker/T-0001', 'worker/T-0002'])
+        self.assertEqual(ln.results['worker/T-0001'], 'queued')
+        self.assertEqual(self.heads()['main'], batch['base'])   # nothing landed
+        self.assertFalse(os.path.exists(os.path.join(self.state_dir, 'gates.jsonl')))
+        rows = merge_queue.doctor_rows(self.product())
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0][:2], (True, False))
+        self.assertIn('ALARM', rows[0][2])
+        self.assertIn(batch['sha'][:9], rows[0][2])
+        # the new sha gets its own one re-run
+        self.cancel(recut)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.gh.reruns()), 2)
+
+    def nonverdict(self, concl):
+        batch = self.cut_one()
+        self.cancel(batch, concl)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.gh.reruns()), 1, concl)
+        self.assertEqual(self.backs, [])
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+
+    def test_timed_out_is_rerun_not_red(self):
+        self.nonverdict('timed_out')
+
+    def test_stale_is_rerun_not_red(self):
+        self.nonverdict('stale')
+
+    def test_startup_failure_is_rerun_not_red(self):
+        self.nonverdict('startup_failure')
+
+    def test_stuck_pending_with_no_run_in_flight_gets_a_rerun(self):
+        batch = self.cut_one()
+        self.gh.checks[batch['sha']] = [run_check('gate-tests')]     # gate never started
+        self.gh.wf[batch['sha']] = [{'id': 500007, 'status': 'completed', 'conclusion': 'success'}]
+        self.queue_pass(self.lane(), [])                 # young: waits
+        self.assertEqual(self.gh.reruns(), [])
+        data = merge_queue.load(self.state_dir)
+        data['batches'][0]['cut_at'] = stamp(-91 * 60)
+        merge_queue.save(self.state_dir, data)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '500007', '-R', SLUG]])
+        self.assertTrue(any('stuck pending — rerun once' in l for l in self.lines), self.lines)
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+
+    def test_stuck_pending_honours_merge_queue_stuck_min(self):
+        product = self.product(merge_queue={'ref_prefix': 'batch/', 'stuck_min': 300})
+        self.assertEqual(merge_queue.settings(product.conventions)['stuck_min'], 300)
+        self.assertEqual(merge_queue.settings(self.product().conventions)['stuck_min'], 90)
+
+    def test_a_cancel_with_a_newer_run_in_progress_is_left_alone(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.gh.wf[batch['sha']].append({'id': 500009, 'status': 'in_progress',
+                                         'conclusion': None})
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [])
+        self.assertFalse(any('ALARM' in l for l in self.lines), self.lines)
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        # a newer attempt of the job itself in progress: left alone as well
+        self.gh.wf[batch['sha']] = [{'id': 500001, 'status': 'completed',
+                                     'conclusion': 'cancelled'}]
+        self.gh.checks[batch['sha']].append(run_check('gate', None, 'in_progress'))
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [])
+
+    def test_a_cancel_the_ci_start_queue_made_is_its_own(self):
+        from asf import ci_queue
+        batch = self.cut_one()
+        self.cancel(batch)
+        with mock.patch.object(ci_queue, 'load',
+                               lambda _n: {'relief': [{'branch': batch['ref'], 'id': 500001}]}):
+            self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [])
+
+    def test_cancelled_never_counts_as_green(self):
+        req = ('gate', 'gate-tests')
+        for concl in merge_queue.NONVERDICT:
+            state, why = merge_queue.verdict([check_run('gate', concl), check_run('gate-tests')],
+                                             req, merge_queue.NONVERDICT)
+            self.assertEqual(state, 'pending', concl)
+            self.assertIn(concl, why)
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.gh.pr_state = {1: 'MERGED', 2: 'MERGED'}
+        for _ in range(2):
+            self.queue_pass(self.lane(), [])
+            self.assertEqual(self.heads()['main'], batch['base'])
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.QUEUED)

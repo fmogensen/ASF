@@ -74,6 +74,8 @@ conventions:
   #   batch_size: 3
   #   inflight: 2
   #   timeout_min: 360
+  #   stuck_min: 90       # a batch pending this long with no run queued or in progress on its
+  #                       # sha is re-run once, then cut again (a cancelled required check: at once)
   #   start_kind: trunk   # the CI start queue admits the batch push as a trunk start (trunk priority,
   #                       # every runner, never held at capacity.ci) | batch (the batch step's kind).
   #                       # Which runners the run lands on is the workflow's runs-on for a push of
