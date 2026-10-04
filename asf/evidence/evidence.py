@@ -1006,8 +1006,9 @@ def pr_naming_ids(pr):
 
 
 def ci_provider(product):
-    """The product's `ci.provider`, lower-cased; None for `ci: none` or no provider at all."""
-    ci = product.ci if product is not None else None
+    """The product's `ci.provider`, lower-cased; None for `ci: none`, no provider, or a product
+    with no `ci` field at all."""
+    ci = getattr(product, "ci", None) if product is not None else None
     name = ci if isinstance(ci, str) else (ci or {}).get("provider") if isinstance(ci, dict) else None
     name = str(name).strip().lower() if name else ""
     return None if name in ("", "none", "off") else name
@@ -1278,22 +1279,26 @@ def merge_landed(ids, landed, product, green=None):
     if not landed:
         return ids
     out = dict(ids)
-    has_ci = ci_provider(product) is not None
-    if has_ci:
-        green = ci_green_runs(product) if green is None else green
+    # an explicit `green` (even `[]`) is the caller's own answer to "is there CI" — it stands in
+    # for `ci_provider(product)` without re-asking the product, the way a caller holding the
+    # product's `ci:` field through `ev['ci']` already resolved it
+    has_ci = green is not None or ci_provider(product) is not None
+    if has_ci and green is None:
+        green = ci_green_runs(product)
     under_green = None
     for iid, sha in landed.items():
         r = dict(out.get(iid) or {"branches": [], "open_prs": [], "commit": None,
                                   "pr": None, "green": False})
         r["landed"] = sha
         if not r.get("commit"):
-            r["commit"] = sha
             if has_ci:
                 if under_green is None:
                     under_green = ancestry(product, list(green))
-                r["green"] = under_green(sha)
+                is_green = under_green(sha)
             else:
-                r["green"] = True
+                is_green = True
+            if is_green:
+                r["commit"], r["green"] = sha, True
         out[iid] = r
     return out
 

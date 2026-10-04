@@ -905,7 +905,17 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     reconciled = {iid: sha for iid, rec in canonical.items()
                   for sha in (_typed_landed(rec['meta']),) if sha and on_trunk(sha)}
     if reconciled:
-        ev = dict(ev, ids=evidence.merge_landed(ev.get('ids') or {}, reconciled, product))
+        # `ev['ci']` is `discover()`'s own `ci_provider(product)` read at evidence-gather time
+        # (W4-PR3a); handing it to `merge_landed` as `green` answers "is there CI" without
+        # `merge_landed` re-asking a `product` that, off a bare ingest call, may carry no `ci`
+        # field at all
+        green = evidence.ci_green_runs(product) if ev.get('ci') else None
+        ev = dict(ev, ids=evidence.merge_landed(ev.get('ids') or {}, reconciled, product,
+                                                green=green))
+    # a typed `landed:` the trunk does not carry is a claim, never a close (see above) — but it
+    # is still named in the item's evidence, the way the old Task-only block used to
+    off_trunk = {iid: sha for iid, rec in canonical.items()
+                 for sha in (_typed_landed(rec['meta']),) if sha and not on_trunk(sha)}
 
     def settle(iid, type_, ev_obj, lines, sha=''):
         """The one place a state is chosen: `closing.state_of`, held by `closing.sticky` — unless
@@ -936,6 +946,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         _st, id_lines = match_ids(iid, ev)
         if iid in void_hit:
             id_lines = id_lines + [f"landing {void_hit[iid][:9]} voided (asf reset)"]
+        if iid in off_trunk:
+            id_lines = id_lines + [f"typed landed {off_trunk[iid][:9]} is not on the trunk"]
         if tev is not None:
             branch, pr_state = tev.get('branch') or '', tev.get('pr_state') or ''
         else:  # nothing matched it by document: the id tokens naming it are what is left
