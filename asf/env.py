@@ -520,7 +520,7 @@ PRODUCT_FIELDS = {
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
-    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST, 'ids': _MAP,
+    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status

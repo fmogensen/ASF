@@ -24,13 +24,14 @@ attempt goes above both. Attempts are bounded (:data:`ATTEMPTS`).
 Where it runs: :func:`asf.workers.spawn.reserve_id_range` claims a job's ``BACKLOG_ID_RANGE``
 here before any launch (local env var, and the cloud brief's text), and ``asf new`` claims its
 single id here when it runs outside a job's range. Claims are on unless the product sets
-``ids: {claim: off}``; a record repo with no ``origin`` keeps the local-only behaviour.
+``conventions.flags.id_claim: off``; a record repo with no ``origin`` keeps the local-only behaviour.
 """
 import os
 import re
 import subprocess
 import uuid
 from collections import namedtuple
+from types import SimpleNamespace
 
 REF_NS = 'refs/asf/ids'
 ATTEMPTS = 8
@@ -47,16 +48,28 @@ class ClaimError(RuntimeError):
 
 
 def _git(repo, *args, env=None):
-    full = {**os.environ, **(env or {})}
-    return subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True, env=full,
-                          input='')
+    """One git call through :func:`asf.gitops.git`, read as ``returncode``/``stdout``/``stderr``."""
+    from asf import gitops
+    r = gitops.git(list(args), repo, env=env)
+    return SimpleNamespace(returncode=0 if r.ok else (r.rc or -1), stdout=r.stdout or '',
+                           stderr=r.stderr or r.reason or '')
+
+
+def _empty_tree(repo):
+    """Write the empty tree into ``repo`` (commit-tree needs the object) and return its id."""
+    p = subprocess.run(['git', '-C', repo, 'mktree'], capture_output=True, text=True,  # client-exempt: mktree reads its (empty) stdin, which gitops.git does not feed
+                       input='')
+    return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else EMPTY_TREE
 
 
 def enabled(product=None):
-    """Claims are on by default; a product turns them off with ``ids: {claim: off}``."""
-    block = (getattr(product, '_get', lambda _k: None)('ids') or {}) if product else {}
-    v = str((block or {}).get('claim', 'push')).strip().lower()
-    return v not in ('off', 'false', 'no', 'none', 'local', '0')
+    """Claims are on by default; a product turns them off with ``conventions.flags.id_claim:
+    off`` (a flag, not a new product key: a pinned older reader would refuse a new key)."""
+    try:
+        v = product.conventions.flag('id_claim', 'push') if product is not None else 'push'
+    except Exception:  # noqa: BLE001 — a product without conventions keeps the default
+        v = 'push'
+    return str(v).strip().lower() not in ('off', 'false', 'no', 'none', 'local', '0')
 
 
 def has_origin(repo, remote='origin'):
@@ -118,8 +131,7 @@ def _commit(repo, prefix, lo, hi, claimant):
            f'claimant: {claimant}\nnonce: {uuid.uuid4().hex}\n')
     ident = {'GIT_AUTHOR_NAME': 'asf', 'GIT_AUTHOR_EMAIL': 'asf@localhost',
              'GIT_COMMITTER_NAME': 'asf', 'GIT_COMMITTER_EMAIL': 'asf@localhost'}
-    t = _git(repo, 'mktree')  # the empty tree, written so commit-tree finds it
-    tree = t.stdout.strip() if t.returncode == 0 and t.stdout.strip() else EMPTY_TREE
+    tree = _empty_tree(repo)
     p = _git(repo, 'commit-tree', tree, '-m', msg, env=ident)
     if p.returncode != 0:
         raise ClaimError(f'commit-tree: {p.stderr.strip()}')

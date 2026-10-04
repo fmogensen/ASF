@@ -149,7 +149,8 @@ class LaunchClaimsItsBlock(unittest.TestCase):
 
     def test_claims_off_keeps_the_local_block(self):
         p = env.Product('host3', {'repo_dir': self.o.tmp, 'repo_slug': 'x/y', 'main': 'main',
-                                  'backlog_dir': self.o.clone('b3'), 'ids': {'claim': 'off'}})
+                                  'backlog_dir': self.o.clone('b3'),
+                                  'conventions': {'flags': {'id_claim': 'off'}}})
         self.assertEqual(spawn.reserve_id_range(p, 'j'), 'S:5000-5049,T:5000-5049,B:5000-5049')
         self.assertEqual(self.o.refs(), [])
 

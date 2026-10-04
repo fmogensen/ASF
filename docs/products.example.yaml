@@ -22,13 +22,6 @@ main: main
 # and pushes to origin, so `git pull` here before reading the tables.
 backlog_dir: ~/Code/acme/sample-backlog
 
-# ids: how a new S-/T-/B- id is taken. `claim: push` (the default) takes it by creating a ref
-# refs/asf/ids/<P>-<nnnn> on the record's origin — create-only, so two writers never get the same
-# number; a launch claims its session's whole BACKLOG_ID_RANGE block with one push, and a cloud
-# session reads that block from its brief. `claim: off` keeps the host-local reservation only.
-ids:
-  claim: push
-
 # conventions: every path/naming choice the record and tick tools need, so no tool hardcodes a
 # directory name or branch prefix.
 conventions:
@@ -243,6 +236,10 @@ conventions:
   #   verdict_block: warn   # off (default) | warn | on: a review's ```verdict block is read
   #                         # first (the table is the fallback); at `on` the Stop gate refuses
   #                         # a review that ends without one bound to its head
+  #   id_claim: push   # push (default) | off: a new S-/T-/B- id, and a session's whole
+  #                    # BACKLOG_ID_RANGE block, is taken by a create-only ref
+  #                    # refs/asf/ids/<P>-<nnnn> on the record's origin; a cloud session reads
+  #                    # its block from its brief. off: the host-local reservation only
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

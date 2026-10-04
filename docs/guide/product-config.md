@@ -155,7 +155,7 @@ and `asf new` commit and push for you). What the tick derived reaches your check
 checkout, so pull before you read them. Each table prints `record: <path>` first, and the board
 and roadmap print when their `index.json` was generated.
 
-### Ids are claimed by push (`ids.claim`)
+### Ids are claimed by push (`conventions.flags.id_claim`)
 
 A new id is taken by **creating a ref on the record's `origin`**: `refs/asf/ids/<P>-<nnnn>`,
 `<nnnn>` the first number of the block. The push is create-only (`--force-with-lease=<ref>:`,
@@ -173,7 +173,7 @@ block (`range: T:5000-5049`) and its claimant (the job or session).
   whose `(parent, stories, writes)` equals an open Task's is not minted; the line names the
   existing Task (`asf new task` refuses the same, `--force` overrides).
 
-`ids: {claim: off}` keeps the host-local reservation (`~/.ASF/state/<product>/id-ranges.tsv`)
+`conventions.flags.id_claim: off` keeps the host-local reservation (`~/.ASF/state/<product>/id-ranges.tsv`)
 only; a record with no `origin` behaves the same way.
 
 ## Conventions

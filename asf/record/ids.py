@@ -7,7 +7,7 @@ Ids are claimed by push (:mod:`asf.record.idclaim`): a job's block is a create-o
 ``refs/asf/ids/<P>-<lo>`` on the record repo's origin, claimed before the launch (so a cloud
 session, which has neither the env var's host nor the asf CLI, is safe too — its brief carries
 the range); ``asf new`` outside a block claims its single id the same way. A record repo
-without ``origin``, or a product with ``ids: {claim: off}``, keeps the local behaviour.
+without ``origin``, or a product with ``conventions.flags.id_claim: off``, keeps the local behaviour.
 At land, :mod:`asf.record.idcheck` refuses a plan whose new ids no claim covers.
 """
 import os
