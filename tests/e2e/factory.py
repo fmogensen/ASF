@@ -235,6 +235,8 @@ class Factory:
         and ``GH_CONFIG_DIR`` an empty dir — a real ``gh`` that runs anyway (one reached by a
         hard-coded ``PATH`` prefix) finds no login and asks no network."""
         return dict(IDENTITY, ASF_HOME=self.home, GH_TOKEN='', GITHUB_TOKEN='',
+                    # a fixed quiet host: the host-pressure guard never reads the real machine's load
+                    ASF_HOST_READING='0 1 0',
                     GH_CONFIG_DIR=os.path.join(self.tmp, 'gh-config'), GH_PROMPT_DISABLED='1',
                     PATH=self.bin + os.pathsep + os.environ.get('PATH', ''))
 
