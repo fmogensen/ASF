@@ -257,17 +257,10 @@ def trunk_history(wt, main):
     return cherry.returncode == 0 and any(ln.startswith('- ') for ln in cherry.stdout.splitlines())
 
 
-#: A refusal the repo's hook (or the factory's own redaction scan, the same refusal) made.
-HOOK_WORDS_RE = re.compile(r'\bhook\b|pre-push|declined', re.I)
-
-
 def hook_refusal(line):
     """True for a publish refused by the repo's pre-push hook or the redaction scan it runs —
-    not the factory's own lease/loss refusals, which say ``refused`` too."""
-    line = line or ''
-    return lifecycle.push_failure(line) == lifecycle.HOOK_REFUSED and bool(
-        lifecycle.HOOK_REDACTION_RE.search(line) or lifecycle.REDACT_REFUSAL_RE.search(line)
-        or HOOK_WORDS_RE.search(line))
+    :func:`asf.workers.lifecycle.push_failure`'s one definition."""
+    return lifecycle.push_failure(line) == lifecycle.HOOK_REFUSED
 
 
 def drop_trunk_history(wt, main):
