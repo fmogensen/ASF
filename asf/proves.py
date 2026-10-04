@@ -251,24 +251,143 @@ def is_ticked(body, line_no):
     return not _UNTICKED_RE.match(lines[idxs[line_no - 1]])
 
 
-def unproved(body, register=(), also_proved=()):
-    """``[(line_no, text, why), …]`` — every acceptance line of a Story that is neither proved
-    (:func:`proved_lines`, or a line in ``also_proved``: claims the same pass is about to
-    record) nor deferred by a decision that ``register`` holds. ``why`` names a deferral whose
-    decision the register lacks. A Story is done only when this is empty ("no test, no
-    done"); a body with no acceptance bullet has nothing to prove."""
+#: Why an acceptance line is unproved — the first word of each ``why`` :func:`unproved` returns.
+NO_PROOF = 'no proof'
+PATH_MISSING = 'path missing'
+NAME_MISSING = 'test name not found'
+
+#: An inline proof on a ticked bullet: ``… — proven by <path>[:line] ["name"][, <path> …]``.
+_PROVEN_BY_RE = re.compile(r'\bproven by\b[ \t]*', re.I)
+#: One cited path: a backticked or bare token with no space, quote, comma or semicolon in it.
+_PROOF_PATH_RE = re.compile(r'`(?P<tick>[^`\s]+)`|(?P<bare>[^\s,;"“”`]+)')
+#: An optional test name after a path: ``"name"``, ``“name”`` or ``("name")``.
+_PROOF_NAME_RE = re.compile(r'[ \t]*\(?[ \t]*(?:"(?P<a>[^"\n]+)"|“(?P<b>[^”\n]+)”)[ \t]*\)?')
+#: The separator between two cited paths: a comma, a semicolon or ``and``.
+_PROOF_SEP_RE = re.compile(r'[ \t]*(?:,|;)?[ \t]*(?:\band\b)?[ \t]*', re.I)
+_LINE_SUFFIX_RE = re.compile(r':\d+(?::\d+)?$')
+#: A path names a file: a directory part, or a file extension. ``the``, ``absence`` are prose.
+_PATHLIKE_RE = re.compile(r'(?:/|\.[A-Za-z0-9]+$)')
+
+
+def inline_proofs(text):
+    """``[(path, name_or_None), …]`` — the files a bullet's ``proven by`` cites, in order. Paths
+    are separated by ``,``, ``;`` or ``and``; each may carry a ``:line`` suffix (dropped) and a
+    quoted test name. The list stops at the first token that is not a path, so ``proven by the
+    absence of …`` cites nothing — an absence is never a proof."""
+    m = _PROVEN_BY_RE.search(text or '')
+    if not m:
+        return []
+    rest, pos, out = text, m.end(), []
+    while pos < len(rest):
+        pm = _PROOF_PATH_RE.match(rest, pos)
+        if not pm:
+            break
+        path = pm.group('tick') or pm.group('bare')
+        path = path.rstrip('.')
+        while path.endswith(')') and path.count(')') > path.count('('):
+            path = path[:-1]
+        path = _LINE_SUFFIX_RE.sub('', path)
+        if not path or not _PATHLIKE_RE.search(path) or path.startswith(('http:', 'https:')):
+            break
+        pos = pm.end()
+        nm = _PROOF_NAME_RE.match(rest, pos)
+        name = None
+        if nm:
+            name = nm.group('a') or nm.group('b')
+            pos = nm.end()
+        out.append((path, name))
+        sm = _PROOF_SEP_RE.match(rest, pos)
+        if not sm or sm.end() == pos or not rest[pos:sm.end()].strip():
+            break
+        pos = sm.end()
+    return out
+
+
+def _repo_file(repo_dir, path):
+    """The absolute file ``path`` names inside ``repo_dir``, or None when it is not a file there
+    (or would resolve outside the checkout)."""
+    if not repo_dir or os.path.isabs(path):
+        return None
+    root = os.path.realpath(repo_dir)
+    full = os.path.realpath(os.path.join(root, path))
+    if full != root and not full.startswith(root + os.sep):
+        return None
+    return full if os.path.isfile(full) else None
+
+
+def inline_proof(text, repo_dir, _cache=None):
+    """``(proved, why)`` for a bullet's inline ``proven by``: proved when at least one cited path
+    is a file in the product checkout ``repo_dir`` and, when that citation quotes a test name,
+    the name appears in the file. ``why`` names the failure: :data:`NO_PROOF` (nothing cited),
+    :data:`PATH_MISSING` or :data:`NAME_MISSING`."""
+    cited = inline_proofs(text)
+    if not cited:
+        return False, NO_PROOF
+    cache = _cache if _cache is not None else {}
+    missing_name = None
+    for path, name in cited:
+        full = _repo_file(repo_dir, path)
+        if full is None:
+            continue
+        if not name:
+            return True, ''
+        if full not in cache:
+            try:
+                with open(full, encoding='utf-8', errors='replace') as f:
+                    cache[full] = f.read()
+            except OSError:
+                cache[full] = ''
+        if name in cache[full]:
+            return True, ''
+        missing_name = missing_name or (path, name)
+    if missing_name:
+        return False, f'{NAME_MISSING}: "{missing_name[1]}" in {missing_name[0]}'
+    return False, f'{PATH_MISSING}: {", ".join(p for p, _n in cited)}'
+
+
+def _bullet_states(body):
+    """``[(ticked, text), …]`` — :func:`bullets` with each bullet's tick."""
+    out = []
+    inside = False
+    for line in (body or '').splitlines():
+        if line.startswith('## '):
+            inside = line[3:].strip().lower() == 'acceptance'
+            continue
+        m = _ACCEPTANCE_BULLET_RE.match(line) if inside else None
+        if m:
+            out.append((not _UNTICKED_RE.match(line), m.group(1)))
+    return out
+
+
+def unproved(body, register=(), also_proved=(), repo_dir=None, _cache=None):
+    """``[(line_no, text, why), …]`` — every acceptance line of a Story that nothing proves. The
+    one predicate "no test, no done" reads; a line is proved when any of these holds:
+
+    * the card's History records ``proved line N`` (:func:`proved_lines`), or the line is in
+      ``also_proved`` (claims the same pass is about to record);
+    * the bullet says ``deferred by D-nnnn`` and ``register`` holds that decision;
+    * the bullet is ticked and carries an inline ``proven by <path>`` whose path is a file in
+      the product checkout ``repo_dir`` (:func:`inline_proof`).
+
+    ``why`` names the reason: :data:`NO_PROOF`, :data:`PATH_MISSING`, :data:`NAME_MISSING`, or a
+    deferral whose decision the register lacks. A Story is done only when this is empty; a body
+    with no acceptance bullet has nothing to prove."""
     proved = proved_lines(body) | set(also_proved)
     deferred = deferred_lines(body)
     register = {str(d).upper() for d in register}
     out = []
-    for n, text in enumerate(bullets(body), start=1):
+    for n, (ticked, text) in enumerate(_bullet_states(body), start=1):
         if n in proved:
             continue
         did = deferred.get(n)
         if did and did in register:
             continue
-        why = f'deferred by {did}, not in the decision register' if did else 'no proved-line entry'
-        out.append((n, text, why))
+        if did:
+            out.append((n, text, f'deferred by {did}, not in the decision register'))
+            continue
+        ok, why = inline_proof(text, repo_dir, _cache) if ticked else (False, NO_PROOF)
+        if not ok:
+            out.append((n, text, why))
     return out
 
 

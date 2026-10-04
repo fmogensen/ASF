@@ -17,7 +17,8 @@ _CODE_RE = re.compile(r'```.*?```|`[^`\n]*`', re.S)
 DOCS_DIR = os.path.join('docs', 'decisions')
 
 
-def _repo_dir(product):
+def repo_dir(product):
+    """The product's code checkout (``product.repo_dir``), or None when it has none."""
     try:
         return getattr(product, 'repo_dir', None) if product is not None else None
     except Exception:  # an unset repo_dir raises on some Product shapes: no docs, no ids
@@ -58,7 +59,7 @@ def register(canonical, product=None):
     """Every decision id that exists: the record's decision cards and the product's docs."""
     ids = {str(iid).upper() for iid, rec in (canonical or {}).items()
            if (rec.get('meta') or {}).get('type') == 'decision'}
-    return ids | docs_ids(_repo_dir(product))
+    return ids | docs_ids(repo_dir(product))
 
 
 def cited(text):
@@ -70,3 +71,4 @@ def unknown(text, known):
     """The ids ``text`` cites that ``known`` lacks."""
     known = {k.upper() for k in known}
     return [d for d in cited(text) if d.upper() not in known]
+

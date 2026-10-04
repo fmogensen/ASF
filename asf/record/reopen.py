@@ -24,6 +24,7 @@ that Story. ``asf untick`` (the one reverse of a tick) and ``asf audit-proofs`` 
 done": every Resolved/Closed Story with an unproved acceptance line) live here, and reopen
 through the same :func:`reopen`.
 """
+import collections
 import dataclasses
 import sys
 
@@ -240,18 +241,21 @@ def cmd_untick(args, root):
 
 # ---- asf audit-proofs: every done Story with an unproved line ---------------------------------
 
-def audit(canonical, register):
+def audit(canonical, register, repo_dir=None):
     """``[(story, state, feature, [(line, text, why), …]), …]`` — every Story that reads
-    Resolved or Closed while an acceptance line has no proved-line entry and no registered
-    deferral (:func:`asf.proves.unproved`). Pure over the record's cards."""
+    Resolved or Closed while an acceptance line has no proved-line entry, no registered
+    deferral and no inline ``proven by`` a file in the checkout ``repo_dir``
+    (:func:`asf.proves.unproved`). Reads the record's cards and, for inline proofs, the
+    checkout; writes nothing."""
     out = []
+    cache = {}
     for sid, rec in sorted(canonical.items()):
         if rec['meta'].get('type') != 'story' or rec['meta'].get('removed'):
             continue
         state = frontmatter.split_machine(rec['meta'])[1].get('state', 'New')
         if state not in (closing.RESOLVED, closing.CLOSED):
             continue
-        lines = proves.unproved(rec['body'], register)
+        lines = proves.unproved(rec['body'], register, repo_dir=repo_dir, _cache=cache)
         if lines:
             out.append((sid, state, rec['meta'].get('parent') or '', lines))
     return out
@@ -264,13 +268,17 @@ def cmd_audit_proofs(args, root):
     canonical = _canonical(root)
     if canonical is None:
         return 1
-    found = audit(canonical, decisions.register(canonical, product))
+    found = audit(canonical, decisions.register(canonical, product), decisions.repo_dir(product))
     print('| Story | State | Feature | Unproved |')
     print('|---|---|---|---|')
     for sid, state, fid, lines in found:
-        what = '; '.join(f"{n}: {t[:60]}" + ('' if w == 'no proved-line entry' else f" ({w})")
-                         for n, t, w in lines)
+        what = '; '.join(f"{n}: {t[:60]} ({w})" for n, t, w in lines)
         print(f"| {sid} | {state} | {fid or '—'} | {what.replace('|', '/')} |")
+    why = collections.Counter('unregistered deferral' if w.startswith('deferred') else w.split(':', 1)[0]
+                              for *_x, lines in found for _n, _t, w in lines)
+    if why:
+        print('\nunproved lines by reason: '
+              + ', '.join(f'{k} {v}' for k, v in sorted(why.items(), key=lambda kv: -kv[1])))
     print(f"\n{len(found)} Resolved/Closed Story(ies) with an unproved acceptance line"
           + ('' if getattr(args, 'apply', False) or not found else ' — --apply reopens them'))
     if not getattr(args, 'apply', False) or not found:

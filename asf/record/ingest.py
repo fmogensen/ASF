@@ -992,6 +992,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     story_tasks = _story_tasks(canonical)
     review_claims = review_proven(canonical, task_ev)
     register = decisions.register(canonical, product)
+    repo = decisions.repo_dir(product)
+    proof_cache = {}
 
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'story':
@@ -1019,7 +1021,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines.append(f"acceptance {len(claims)}/{m} proven ({_newest_review_path(claims, task_ev)})")
         # "no test, no done": Task closure is necessary, never sufficient — every acceptance
         # line needs its proved-line entry (or a registered deferral) before a done rule fires
-        open_lines = unproved_of(iid, rec, register, ev, claims)
+        open_lines = unproved_of(iid, rec, register, ev, claims, repo_dir=repo, _cache=proof_cache)
         if open_lines and closing.state_of('story', ev_obj, new_state[iid]).state in closing._DONE:
             # only where it decides something: the lines a done rule would have closed over
             lines.extend(unproved_line(*u) for u in open_lines)
@@ -1249,16 +1251,16 @@ def _story_tasks(canonical):
     return out
 
 
-def unproved_of(sid, rec, register, ev=None, review=None):
+def unproved_of(sid, rec, register, ev=None, review=None, repo_dir=None, _cache=None):
     """``[(line, text, why), …]``: Story ``sid``'s acceptance lines that no ``proved line`` entry,
-    no claim this pass records (``ev['proves']``, ``review``) and no registered deferral covers
-    (:func:`asf.proves.unproved`)."""
+    no claim this pass records (``ev['proves']``, ``review``), no registered deferral and no
+    inline ``proven by`` a file in ``repo_dir`` covers (:func:`asf.proves.unproved`)."""
     body = rec['body']
     m = len(proves.bullets(body))
     claims = list(((ev or {}).get('proves') or {}).get(sid) or []) + list(review or [])
     pending = {int(c.get('line') or 0) for c in claims}
     pending = {n for n in pending if 1 <= n <= m}
-    return proves.unproved(body, register, also_proved=pending)
+    return proves.unproved(body, register, also_proved=pending, repo_dir=repo_dir, _cache=_cache)
 
 
 def unproved_line(n, text, why):
