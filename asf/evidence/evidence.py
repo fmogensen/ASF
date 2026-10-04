@@ -431,8 +431,15 @@ def pick_review(conv, reviews_dir, names, slugs, legacy_prefixes, trunk=None):
     return path[len(rdir) + 1:], n, legacy
 
 
-TASK_HEAD = re.compile(r"^#{2,4}\s+(?:Task\s+|T(?=\d))(\d+[a-z]?)\b(?P<rest>[^\n]*)",
+#: A plan's Task heading. The shapes plans really use: `### Task 1:`, `### Task T1:`, `### T1:`,
+#: `### T1 —`, `## Task T1 -`, with or without `**` bold, any case. `rest` is what follows the id.
+TASK_HEAD = re.compile(r"^#{2,4}[ \t]+\**[ \t]*(?:Task[ \t]+T?|T(?=\d))(\d+[a-z]?)\b(?P<rest>[^\n]*)",
                        re.MULTILINE | re.IGNORECASE)
+#: A heading that looks like a Task heading — the doctor/minter flag one a plan has when
+#: TASK_HEAD matches none, so a format drift cannot silently mint nothing.
+TASK_LIKE_HEAD = re.compile(
+    r"^#{1,6}[ \t]+[*_ \t]*(?:Task[ \t]*[#:.\-]*[ \t]*[A-Za-z]{0,2}|T[#:.\-]*)\d+[^\n]*$",
+    re.MULTILINE | re.IGNORECASE)
 BRANCH_STEM = re.compile(r"^(.*?)-(?:t\d+[a-z]?|w\d+[a-z]?)$", re.IGNORECASE)
 BRANCH_TOKEN = branch_token()  # the default prefixes; discover() builds the product's own
 TASK_TOKEN = re.compile(r"\bT(\d+[a-z]?)\b")

@@ -71,7 +71,7 @@ def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
 
 
 def _mint(root, product, ev, out=print, read_ref=None):
-    from asf.tick.migrate import plan_task_records, writes_lines
+    from asf.tick.migrate import plan_task_records, task_like_headings, writes_lines
     read_ref = read_ref or (lambda ref: evidence.read_ref(ref, product=product))
     by_id, _errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
@@ -101,6 +101,11 @@ def _mint(root, product, ev, out=print, read_ref=None):
             continue
         plan_path = ref.split(':', 1)[1] if ':' in ref else ref
         records = plan_task_records(text)
+        if not records and task_like_headings(text):
+            out(f'plan-tasks: {fid}: {plan_path} has {len(task_like_headings(text))} Task-like '
+                f'heading(s) but parses to 0 Tasks — nothing minted (heading format drift: '
+                f'{task_like_headings(text)[0]!r})')
+            continue
         if not records:
             out(f'plan-tasks: {fid}: {plan_path} has no `### Task N:` heading — nothing to mint')
             continue

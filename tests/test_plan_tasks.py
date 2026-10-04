@@ -95,6 +95,16 @@ class PlanTasksTests(unittest.TestCase):
         self.assertEqual(self.mint(text='# Plan\n\nprose only\n'), [])
         self.assertEqual(self.lines, ['plan-tasks: F-0001: docs/plans/f-0001.md has no `### Task N:` heading — nothing to mint'])
 
+    def test_a_task_t1_plan_mints(self):
+        text = PLAN.replace('### Task 1:', '### Task T1:').replace('### Task 2:', '### Task T2 \u2014')
+        self.assertEqual(self.mint(text=text), ['T-0001', 'T-0002'])
+
+    def test_task_like_headings_that_parse_to_nothing_are_flagged(self):
+        self.assertEqual(self.mint(text='# Plan\n\n### Task #1 - x\nbody\n'), [])
+        self.assertEqual(len(self.lines), 1)
+        self.assertIn('Task-like heading', self.lines[0])
+        self.assertIn('parses to 0 Tasks', self.lines[0])
+
 
 if __name__ == '__main__':
     unittest.main()

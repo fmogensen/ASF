@@ -717,6 +717,36 @@ def check_product_warnings(product):
     return rows or [(True, 'no unknown keys, no unknown flags')]
 
 
+def check_plan_headings(product):
+    """[(ok, detail)] — the ``plans`` row: a plan in ``plans_dir`` with Task-like headings that
+    parse to 0 Tasks mints no Task cards (a format drift). ``'warn'`` per plan, one ok row when
+    every plan parses or has no Task headings. Reads the checkout read-only."""
+    from asf.tick import migrate
+    d = product.repo_dir
+    conv = getattr(product, 'conventions', None)
+    rel = conv.doc_dir('plan') if hasattr(conv, 'doc_dir') else 'plans'
+    root = os.path.join(d, rel) if d else ''
+    if not root or not os.path.isdir(root):
+        return [(True, 'no plans directory')]
+    rows, n = [], 0
+    for dirpath, _dirs, files in sorted(os.walk(root)):
+        for name in sorted(files):
+            if not name.endswith('.md'):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                with open(path, encoding='utf-8') as f:
+                    text = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            n += 1
+            like = migrate.task_like_headings(text)
+            if like:
+                rows.append(('warn', f'{os.path.relpath(path, d)}: {len(like)} Task-like heading(s) '
+                                     f'parse to 0 Tasks (e.g. {like[0]!r}) — no Task cards will mint'))
+    return rows or [(True, f'{n} plan(s): every Task-like heading parses')]
+
+
 def check_cli_dispatcher(product, path=None, timeout=60):
     """[(required, ok, detail)] — the CLI every hook and session calls (``~/.local/bin/asf``,
     :mod:`asf.dispatch`) resolves this product into its pin. The dispatcher is run with
@@ -1279,6 +1309,8 @@ def run(product_name):
         rows.append(('agent homes asf', required, ok, detail))
     for ok, detail in check_product_warnings(product):
         rows.append(('product', False, ok, detail))
+    for ok, detail in check_plan_headings(product):
+        rows.append(('plans', False, ok, detail))
     net = check_network(cfg)
     if net is not None:
         rows.append(('network', False, net[0], net[1]))

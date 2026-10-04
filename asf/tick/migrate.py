@@ -179,9 +179,19 @@ def parse_goals(text):
 
 def task_title(rest):
     t = rest.strip()
-    t = re.sub(r'^[:\-—–]+\s*', '', t)
+    t = re.sub(r'^[\s*:\-—–]+', '', t)
+    t = t.rstrip('* \t')
     t = re.sub(r'\s*\bDONE\b\s*$', '', t, flags=re.IGNORECASE)
     return t.strip()
+
+
+def task_like_headings(plan_text):
+    """The Task-like headings of a plan that parse to no Task (evidence.TASK_HEAD misses them):
+    the drift a plan with a new heading shape would otherwise hide. [] when none, or when the
+    plan's Task headings parse."""
+    if evidence.TASK_HEAD.search(plan_text or ''):
+        return []
+    return [m.group(0).strip() for m in evidence.TASK_LIKE_HEAD.finditer(plan_text or '')]
 
 
 def plan_task_records(plan_text):

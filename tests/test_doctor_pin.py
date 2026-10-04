@@ -311,5 +311,33 @@ class ProductWarningsRowTests(unittest.TestCase):
         self.assertEqual(rows, [(True, 'no unknown keys, no unknown flags')])
 
 
+class PlanHeadingsRowTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix='plan_rows_')
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        os.makedirs(os.path.join(self.repo, 'docs', 'plans'))
+        self.product = env.Product('sample', {'repo_dir': self.repo,
+                                              'conventions': {'plans_dir': 'docs/plans'}})
+
+    def plan(self, name, text):
+        with open(os.path.join(self.repo, 'docs', 'plans', name), 'w') as f:
+            f.write(text)
+
+    def test_a_plan_with_task_like_headings_and_no_parsed_task_is_a_warn_row(self):
+        self.plan('good.md', '### Task T1: a\n')
+        self.plan('drift.md', '# P\n### Task #1 - a\n### Task #2 - b\n')
+        self.plan('prose.md', '# P\nno tasks\n')
+        rows = doctor.check_plan_headings(self.product)
+        self.assertEqual([ok for ok, _d in rows], ['warn'])
+        self.assertIn('docs/plans/drift.md', rows[0][1])
+        self.assertIn('2 Task-like heading', rows[0][1])
+        self.assertNotIn('good.md', rows[0][1])
+
+    def test_clean_plans_are_one_ok_row(self):
+        self.plan('good.md', '### Task T1: a\n')
+        self.assertEqual(doctor.check_plan_headings(self.product),
+                         [(True, '1 plan(s): every Task-like heading parses')])
+
+
 if __name__ == '__main__':
     unittest.main()
