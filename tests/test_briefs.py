@@ -1052,6 +1052,30 @@ class KindModelGrantTest(unittest.TestCase):
             for sev in ('S1', 'S2', 'S3'):
                 self.assertEqual(build_mod.model_for(p, kind, self.BUG(sev)), 'cheap', kind)
 
+    def test_a_cardless_pr_review_runs_light_and_a_carded_feature_review_heavy(self):
+        p = product()
+        self.assertEqual(build_mod.model_for(p, 'review', None, 'PR-0877'), 'light')
+        self.assertEqual(build_mod.model_for(p, 'review', {'id': 'PR-1024'}), 'light')
+        self.assertEqual(build_mod.item_class({}, 'PR-1024'), 'cardless')
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}, 'F-0011'), 'heavy')
+
+    def test_reshape_and_replan_run_light(self):
+        p = product()
+        for kind in ('reshape', 'replan'):
+            self.assertEqual(build_mod.model_for(p, kind), 'light', kind)
+            self.assertEqual(build_mod.model_for(p, kind, {'type': 'task'}), 'light', kind)
+            self.assertEqual(build_mod.model_for(p, kind, {'type': 'feature'}), 'light', kind)
+
+    def test_the_override_still_wins_over_the_cardless_and_reshape_defaults(self):
+        p = product(conventions={'models': {'review': 'heavy', 'reshape': 'heavy'}})
+        self.assertEqual(build_mod.model_for(p, 'review', None, 'PR-0877'), 'heavy')
+        self.assertEqual(build_mod.model_for(p, 'reshape', {'type': 'task'}), 'heavy')
+
+    def test_a_built_pr_review_brief_carries_the_light_label(self):
+        r = row('PUSHED → REVIEW', 'PR-0877', 'review', 'cloud/pr-0877', 'adopted PR #877',
+                feature_id='')
+        self.assertEqual(briefs.build(product(), r, index(), [], REPO_FACTS).model, 'light')
+
     def test_adjudicate_runs_light_unless_the_item_is_s1(self):
         # operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on
         # heavy — a ruling over a held branch runs light; heavy stays for an S1 alone
@@ -1097,7 +1121,7 @@ class KindModelGrantTest(unittest.TestCase):
         lines = doctor.model_table_lines(product(conventions={'models': {'close': 'heavy'}}))
         self.assertIn('spec: heavy', lines)
         self.assertIn('close: heavy', lines)
-        self.assertIn('review: heavy (S1 story feature epic) · light (S2 S3 task)', lines)
+        self.assertIn('review: heavy (S1 story feature epic) · light (S2 S3 task cardless)', lines)
 
     def test_the_product_can_override_a_label(self):
         p = product(conventions={'models': {'review': 'light'}})
