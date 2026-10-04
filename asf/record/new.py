@@ -15,7 +15,8 @@ from asf.schema import SCHEMA_VERSION
 SEVERITIES = ('S1', 'S2', 'S3')
 
 # Typed fields `--set` may write, beyond the ones that have their own flag.
-_COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'legacy_id')
+_COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'legacy_id',
+               'local_only')
 SETTABLE = {t: set(_COMMON_SET) for t in TYPES}
 SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check', 'supersedes', 'superseded_by'}
 SETTABLE['decision'] |= {'decided_by', 'date', 'supersedes', 'superseded_by'}
@@ -26,6 +27,9 @@ SETTABLE['decision'] |= {'decided_by', 'date', 'supersedes', 'superseded_by'}
 SETTABLE['feature'] |= {'lane', 'size', 'ab_pair'}
 #: The values a word-valued settable field takes; any other is refused before the card is touched.
 FIELD_WORDS = {'lane': ('direct', 'full'), 'size': ('s', 'm', 'l')}
+#: Boolean fields: ``true`` / ``false`` (``local_only: true`` keeps a card's rows off the cloud
+#: lane, :func:`asf.workers.cloud.local_only`); anything else is refused before the card is touched.
+BOOL_FIELDS = ('local_only',)
 
 
 def _parse_sets(type_, pairs):
@@ -43,6 +47,8 @@ def _parse_sets(type_, pairs):
         words = FIELD_WORDS.get(top)
         if words and value not in (None, '') and str(value) not in words:
             raise ValueError(f"{key}={raw!r} — one of {', '.join(words)}")
+        if top in BOOL_FIELDS and not isinstance(value, bool):
+            raise ValueError(f"{key}={raw!r} — one of true, false")
         out.append((top, sub if dot else None, value))
     return out
 
