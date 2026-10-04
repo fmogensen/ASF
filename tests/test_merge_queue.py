@@ -1151,6 +1151,12 @@ class NoVerdict(QueueRepo):
         self.queue_pass(self.lane(), [])
         self.assertEqual(len(self.gh.reruns()), 1)
         self.cancel(batch, completed=stamp(120))      # the re-run, cancelled again
+        # a re-cut comes a pass (minutes) after the cut: in a test the two fall in one second,
+        # and git's one-second commit dates would make the same merge commits — the same sha
+        # and ref. Let the clock pass the cut's second, as any real pass does.
+        cut_second = int(time.time())
+        while int(time.time()) == cut_second:
+            pass
         ln = self.queue_pass(self.lane(), [])
         self.assertEqual(len(self.gh.reruns()), 1)    # never a second re-run on the sha
         self.assertTrue(any('ALARM' in l and batch['ref'] in l for l in self.lines), self.lines)
