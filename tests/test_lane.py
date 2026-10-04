@@ -439,6 +439,30 @@ class LaneRepo(LaneFixture):
             written = [json.loads(ln) for ln in f if '"lane"' in ln]
         self.assertTrue(written and all(ln['job'] == 'coder-t-0001' for ln in written))
 
+    def test_review_none_never_gates_a_code_head_its_own_review_says_changes_on(self):
+        """2026-10-04, T-0571 #1058: a restored CODE branch walked STALE → PR_OPEN → GATE as
+        ``review: none`` although the only review of its exact head said ``changes``. A waived
+        (or not required) review never walks past a current changes verdict: the branch goes
+        back as on any review hold; with no review, or an approving one, it gates as before."""
+        for verdict, want in (('changes requested\n\n## C\n\n- C1 a.txt:1 is wrong\n', lane.BACK),
+                              ('approved\n', lane.GATE), (None, lane.GATE)):
+            with self.subTest(verdict=verdict):
+                self.setUp()
+                files = {'a.txt': 'a\n'}
+                if verdict:
+                    files['reviews/1-t-0001.md'] = f'verdict: {verdict}'
+                self.push_lane('worker/T-0001', files, 'feat(T-0001): a')
+                self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+                lines = []
+                lane.lane_pass(self.product(lane={'review': {'code': 'none'}}), self.state_dir,
+                               out=lines.append)
+                rec_ = self.lane_of('worker/T-0001')
+                self.assertEqual(rec_['state'], want, (rec_, lines))
+                if want == lane.BACK:
+                    self.assertEqual(rec_['reason'], 'kind=review')
+                else:
+                    self.assertEqual(rec_['reason'], 'review: none')
+
     def test_an_open_pr_whose_item_is_no_card_is_never_adopted(self):
         # `worker/retro-2026-09-19` only looks like an id (RETRO-2026): with no card, no session
         # could answer a hold, so adopting it would park it in BACK for good

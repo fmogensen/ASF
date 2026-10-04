@@ -47,15 +47,31 @@ trunk's tip, a new sha whose push starts a fresh run.
 **Stacking.** Up to ``merge_queue.inflight`` batches form a chain: each is cut on the sha of the
 one before it, not the trunk, so two batches overlap in CI instead of queueing. The chain's
 order is the landing order; a dropped batch drops every batch stacked on it (they contain its
-commits). A green batch above a pending one waits for it.
+commits). A green batch stacked on a pending one waits for it; a green batch that contains the
+trunk's tip and is stacked on no pending batch lands at once, before anything below it in the
+chain — those are cut again on the new tip. A green chain is never made stale by a later cut.
 
-**Priority.** ``asf land --priority`` goes first in line, and a full chain does not hold it: a
-batch of the priority requests alone is cut on the trunk's tip beyond ``merge_queue.inflight`` and
-put at the front of the chain, so it lands first (the batches behind it are cut again on the new
-tip). One such batch at a time. Its CI start has runner priority
+**Priority.** ``asf land --priority`` orders the *next* cut: its PRs go first in line, ahead of
+the factory's members and the plain requests. It never re-bases or stales a batch already cut and
+never takes the chain past ``merge_queue.inflight`` — a full chain holds it as it holds every PR
+(2026-10-04: a priority batch cut on the trunk at the front of the chain held a green batch 50+
+min and starved the plain PRs). Priority is a property of the request, read again every pass:
+``asf land <pr>`` without ``--priority`` (or ``asf land <pr> --demote``) demotes it, a batch
+already cut included. A batch holding a priority request has runner priority for its CI start
 (:func:`asf.ci_queue.urgent_batch`): trunk priority, never cancelled by relief, its runners set
 aside from the PR starts behind it until its jobs have them — as has any batch once the trunk has
 stood still past half ``ci.trunk_stall_hours``.
+
+**Out of the queue.** A member whose head moved, whose PR turned draft, or whose PR the operator
+withdrew (``asf land <pr> --withdraw``, a factory PR included: :data:`WITHDRAWN_FILE` holds it out
+until ``asf land <pr>`` asks again or its head moves) drops its batch — it counts as moved, the
+rest are cut again. A request is consumed when its PR lands, whoever queued it, and dropped when
+its head is already on the trunk: a landed PR is never cut again.
+
+**One tested tree lands once.** A batch of one PR cut on the trunk's tip whose tree is the PR
+head's own tree (the head contains the tip) is the very tree the PR's own run judged: when every
+required check concluded ``success`` on that head, the batch inherits that verdict — no batch ref
+is pushed, no second heavy run, and the attestation names the PR's run.
 
 **State.** ``state/<product>/merge-queue.json`` holds the chain; each member's lane record
 (QUEUED, ``batch``, ``sha``) is on its run line as every other lane state. A product not on
@@ -92,7 +108,7 @@ import shutil
 import tempfile
 import time
 
-from asf import attestation, ci_queue, flake, gitpush, refguard, stale_ref
+from asf import attestation, ci_queue, flake, github, gitops, gitpush, refguard, stale_ref
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.state import store
@@ -120,6 +136,9 @@ MERGE_SUBJECT = 'merge-queue: #{pr} ({branch} @ {head})'
 TRAILER = 'Landed-by: asf merge queue'
 #: ``state/<product>/land-requests.json``: the PRs ``asf land`` asked the queue to take
 REQUESTS_FILE = 'land-requests.json'
+#: ``state/<product>/land-withdrawn.json``: ``{'<pr>': {at, head?, by?}}`` — the PRs the operator
+#: withdrew (``asf land --withdraw``), held out of every batch until asked again or moved
+WITHDRAWN_FILE = 'land-withdrawn.json'
 #: ``state/<product>/merge-queue-rebuild.json``: ``{ref: {why, at}}`` — batches the CI start
 #: queue gave up on (a cancelled run on a stale workflow, or stuck); the next pass rebuilds them
 REBUILD_FILE = 'merge-queue-rebuild.json'
@@ -438,10 +457,16 @@ def run(lane, ready):
     lane.trunk_sha = trunk_sha
     heads = lane.remote_heads()
     regate_holds(lane, heads, trunk_sha)
+    # the operator's withdraws and the draft PRs, read once a pass: either takes a member out
+    # of its batch, whoever queued it (judge), and keeps it out of the next cut
+    withdrawn = lane.mq_withdrawn = withdrawn_now(lane, heads)
+    drafts = lane.mq_drafts = _drafts(lane, data['batches'])
 
     chain, groups, loose, settled = [], [], [], set()
     dropped = set()     # the dropped batches: every batch stacked on one of them goes too
     for i, batch in enumerate(data['batches']):
+        for m in batch['members']:   # priority is the request's, as it reads this pass
+            _sync_priority(m, asked)
         ref, members = batch['ref'], [_member_facts(batch, m, runs) for m in batch['members']]
         if batch.get('base_ref') in dropped:
             _drop(lane, batch, f"its base batch {batch['base_ref']} was dropped")
@@ -526,14 +551,22 @@ def run(lane, ready):
                 lane.results[f['branch']] = 'queued'
             chain.append(batch)
         else:  # green
-            if chain:   # a green batch above a pending one lands after it
-                lane.out(f"merge queue: {ref} green, waits for {chain[-1]['ref']} below it")
+            below = [b for b in chain if b['ref'] == batch.get('base_ref')]
+            if below:   # stacked on a pending batch: it holds that batch's commits, lands after
+                lane.out(f"merge queue: {ref} green, waits for {below[0]['ref']} below it")
                 for f in members:
                     lane.results[f['branch']] = 'queued'
                 chain.append(batch)
             elif land(lane, batch, members, trunk_sha, runs=detail):
                 trunk_sha = batch['sha']
                 lane.trunk_sha = trunk_sha
+                # green on the trunk's tip, it went first: what was below it in the chain no
+                # longer contains the trunk — each is cut again on the new tip this pass
+                for b in chain:
+                    _drop(lane, b, f'{ref} was green on {trunk} and landed first')
+                    loose.extend(_member_facts(b, m, runs) for m in b['members'])
+                    dropped.add(b['ref'])
+                chain = []
             else:
                 chain.append(batch)
         # after every verdict, the unjudged still there: a crash mid-pass loses no batch
@@ -554,8 +587,12 @@ def run(lane, ready):
     # ---- cut what is ready, the halves of a split first; then the PRs `asf land` asked for
     asked_ready = requested_ready(lane, heads, trunk_sha,
                                   taken | {f['branch'] for f in ready} | handed)
-    # `asf land --priority`: ahead of the factory's members and the other requests (stable: the
-    # rest keep their order); only the batches already in CI stay in front of it
+    # `asf land --priority` orders the next cut — ahead of the factory's members and the other
+    # requests (stable: the rest keep their order). It never jumps the chain: the batches already
+    # cut keep their place, and merge_queue.inflight holds it as it holds every PR. Priority is
+    # the request's as it reads now (a demoted request is plain, a cut member included).
+    for f in list(ready) + loose:
+        _sync_priority(f, asked)
     ready = sorted(list(ready) + asked_ready, key=lambda f: not f.get('priority'))
     fresh = []
     for f in sorted(list(ready) + loose, key=lambda f: not f.get('priority')):
@@ -565,28 +602,17 @@ def run(lane, ready):
         if f in loose and heads.get(f['branch']) != f['head']:   # handed back, and moved since
             _wait(lane, f, 'merge queue: head moved')
             continue
+        if str(_pr(f)) in withdrawn:
+            lane.out(f"merge queue: {f['branch']} (PR #{_pr(f)}) withdrawn by asf land --withdraw "
+                     f"— held out until asf land {_pr(f)} asks again or its head moves")
+            _wait(lane, f, 'merge queue: withdrawn (asf land --withdraw)', green=f.get('green'))
+            continue
+        if f['branch'] in drafts:
+            _wait(lane, f, 'merge queue: its PR is a draft')
+            continue
         fresh.append(f)
     halves = len(groups)
     for i, group in enumerate(groups + _pack(fresh, st['batch_size'])):
-        jump = (len(chain) >= st['inflight'] and any(f.get('priority') for f in group)
-                and not any(m.get('priority') for b in chain for m in b['members']))
-        if jump:
-            # `asf land --priority` is never held behind a full chain: its requests alone are
-            # cut on the trunk beyond merge_queue.inflight and go to the front of the chain
-            rest = [f for f in group if not f.get('priority')]
-            for f in rest:
-                lane.out(f"waiting {f['branch']}: PR #{_pr(f)} green — merge queue full "
-                         f"({len(chain)} batch(es) in flight, merge_queue.inflight)")
-                _wait(lane, f, f'merge queue: {len(chain)} batch(es) in flight',
-                      green=f.get('green'))
-            group = [f for f in group if f.get('priority')]
-            lane.out(f"merge queue: priority {', '.join(f'#{_pr(f)}' for f in group)} cut "
-                     f"ahead of {len(chain)} batch(es) in flight (asf land --priority)")
-            batch = cut(lane, group, trunk_sha, None, st)
-            if batch:
-                chain.insert(0, batch)
-                save(lane.state_dir, {'batches': chain}, _owner(lane))
-            continue
         if len(chain) >= st['inflight']:
             for f in group:
                 lane.out(f"waiting {f['branch']}: PR #{_pr(f)} green — merge queue full "
@@ -598,8 +624,20 @@ def run(lane, ready):
         # its own half (stacked, the upper half would re-run the red whole)
         stack = chain and i >= halves
         base_sha, base_ref = (chain[-1]['sha'], chain[-1]['ref']) if stack else (trunk_sha, None)
+        # one tested tree lands once: a lone PR on the trunk's tip whose head already contains
+        # the tip is the tree its own green run judged
+        inherit = inherited_runs(lane, group[0], trunk_sha) \
+            if len(group) == 1 and base_ref is None else None
         batch = cut(lane, group, base_sha, base_ref, st,
-                    base_members=chain[-1]['members'] if base_ref else ())
+                    base_members=chain[-1]['members'] if base_ref else (), inherit=inherit)
+        if batch and batch.get('inherited'):
+            members = [_member_facts(batch, m, lifecycle.by_branch(lane.path))
+                       for m in batch['members']]
+            if land(lane, batch, members, trunk_sha, runs=batch['inherited']['runs']):
+                trunk_sha = batch['sha']
+                lane.trunk_sha = trunk_sha
+                save(lane.state_dir, {'batches': chain}, _owner(lane))
+                continue
         if batch:
             chain.append(batch)
             save(lane.state_dir, {'batches': chain}, _owner(lane))
@@ -613,10 +651,16 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     be read at its sha."""
     ref, sha = batch['ref'], batch['sha']
     moved = []
+    drafts = getattr(lane, 'mq_drafts', None) or set()
+    withdrawn = getattr(lane, 'mq_withdrawn', None) or {}
     for f in members:
         rec = f.get('prev') or {}
         if heads.get(f['branch']) != f['head']:
             moved.append((f, 'head moved'))
+        elif f['branch'] in drafts:   # whoever queued it: its owner parked it
+            moved.append((f, 'left the queue (its PR is a draft)'))
+        elif str(_pr(f)) in withdrawn:
+            moved.append((f, 'left the queue (withdrawn: asf land --withdraw)'))
         elif f.get('requested'):   # an `asf land` PR: its request is its record
             if str(_pr(f)) not in load_requests(lane.state_dir):
                 moved.append((f, 'left the queue (its asf land request was withdrawn)'))
@@ -624,6 +668,13 @@ def judge(lane, batch, members, heads, trunk_sha, st):
             moved.append((f, f"left the queue ({rec.get('state') or 'no record'})"))
     if moved:
         return 'moved', ', '.join(f"{f['branch']} {w}" for f, w in moved), moved
+    if batch.get('inherited'):
+        # one tested tree (cut()): no batch ref, no batch run — the PR head's green verdict
+        if not gitops.git(['cat-file', '-e', f'{sha}^{{commit}}'], lane.repo).ok:
+            return 'stale', f'its commit {sha[:9]} is gone from the checkout', None
+        if not lane.is_ancestor(trunk_sha, sha):
+            return 'stale', f'{lane.trunk} moved to {trunk_sha[:9]}, which the batch does not contain', None
+        return 'green', '', list(batch['inherited'].get('runs') or ())
     asked = load_rebuilds(lane.state_dir).get(ref)
     if asked:   # the CI start queue gave up on its run: cut again on the tip, a fresh run
         return 'stale', f"rebuilt on {lane.trunk} — {asked.get('why') or 'its run is stuck'}", None
@@ -872,7 +923,7 @@ def _trunk_conflict(lane, head):
     return sorted({l.strip() for l in lines if l.strip()})
 
 
-def cut(lane, group, base_sha, base_ref, st, base_members=()):
+def cut(lane, group, base_sha, base_ref, st, base_members=(), inherit=None):
     """Merge each entry of ``group`` ``--no-ff`` onto ``base_sha`` in a throwaway worktree, push
     the result once as a new batch ref and QUEUE the members on it. The batch record, or None
     when nothing was cut (every member conflicted, the CI queue or the push held it).
@@ -880,7 +931,11 @@ def cut(lane, group, base_sha, base_ref, st, base_members=()):
     Two entries that conflict with each other never share a batch: the later one (group order,
     priority first) is deferred — ``waits on #N (conflicting files: …)`` — and cut on a later pass,
     after the earlier one landed or went. The same for a conflict with a batch ahead
-    (``base_members``): it waits on that batch's PR instead of going red."""
+    (``base_members``): it waits on that batch's PR instead of going red.
+
+    ``inherit`` (:func:`inherited_runs`: the green runs of a lone member's head) and a batch tree
+    that is the head's own tree: the batch inherits that verdict — nothing is pushed, no CI start
+    is asked, and the record carries ``inherited`` (judged green at once, :func:`judge`)."""
     trunk, out = lane.trunk, lane.out
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
     holder = tempfile.mkdtemp(prefix='merge-queue-')
@@ -950,6 +1005,15 @@ def cut(lane, group, base_sha, base_ref, st, base_members=()):
             return None
         sha = H.sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
         ref = f"{st['ref_prefix']}{stamp}-{sha[:7]}"   # the sha names it: never a name reused
+        if inherit and len(members) == 1 and _same_tree(lane.repo, sha, members[0]['head']):
+            f = members[0]
+            batch = _record(ref, sha, base_sha, base_ref, members)
+            batch['inherited'] = {'head': f['head'], 'runs': list(inherit)}
+            _queue_members(lane, members, ref, sha)
+            out(f"merge queue: cut {ref} @ {sha[:12]} on {trunk} {base_sha[:9]} — PR #{_pr(f)}: "
+                f"its tree is the head {f['head'][:9]}'s, green on its own run "
+                f"{inherit[0]} — one tested tree lands once, no batch run")
+            return batch
         guard = refguard.refusal(ref, f'push batch {ref}', trunk, refguard.listed(lane.conv),
                                  out=out)
         if guard:
@@ -976,27 +1040,63 @@ def cut(lane, group, base_sha, base_ref, st, base_members=()):
                 _wait(lane, f, f'merge queue: push of {ref} refused: {why}', 'held',
                               green=f.get('green'))
             return None
-        batch = {'ref': ref, 'sha': sha, 'base': base_sha, 'base_ref': base_ref,
-                 'cut_at': now_iso(),
-                 'members': [{'branch': f['branch'], 'pr': _pr(f), 'head': f['head'],
-                              'item': f.get('item'), 'kind': f.get('kind'),
-                              'class': f.get('class'), 'files': list(f.get('files') or ()),
-                              'green': f.get('green'),
-                              **({'requested': True} if f.get('requested') else {}),
-                              **({'priority': True} if f.get('priority') else {})}
-                             for f in members]}
-        for f in members:
-            if f.get('requested'):   # no lane record: the batch and the request are its record
-                lane.results[f['branch']] = 'queued'
-                continue
-            lane.set(f, lane_mod.QUEUED, f'batch {ref}', result='queued', batch=ref, sha=sha,
-                     green=f.get('green'))
+        batch = _record(ref, sha, base_sha, base_ref, members)
+        _queue_members(lane, members, ref, sha)
         out(f"merge queue: cut {ref} @ {sha[:12]} on {base_ref or trunk} {base_sha[:9]} — "
             f"{len(members)} PR(s): {', '.join(f'#{_pr(f)}' for f in members)}")
         return batch
     finally:
         H.sh(['git', 'worktree', 'remove', '--force', tmp], cwd=lane.repo)
         shutil.rmtree(holder, ignore_errors=True)
+
+
+def _record(ref, sha, base_sha, base_ref, members):
+    """The chain's record of a batch just cut."""
+    return {'ref': ref, 'sha': sha, 'base': base_sha, 'base_ref': base_ref, 'cut_at': now_iso(),
+            'members': [{'branch': f['branch'], 'pr': _pr(f), 'head': f['head'],
+                         'item': f.get('item'), 'kind': f.get('kind'),
+                         'class': f.get('class'), 'files': list(f.get('files') or ()),
+                         'green': f.get('green'),
+                         **({'requested': True} if f.get('requested') else {}),
+                         **({'priority': True} if f.get('priority') else {})}
+                        for f in members]}
+
+
+def _queue_members(lane, members, ref, sha):
+    for f in members:
+        if f.get('requested'):   # no lane record: the batch and the request are its record
+            lane.results[f['branch']] = 'queued'
+            continue
+        lane.set(f, lane_mod.QUEUED, f'batch {ref}', result='queued', batch=ref, sha=sha,
+                 green=f.get('green'))
+
+
+def _same_tree(repo, a, b):
+    """True when commits ``a`` and ``b`` carry the same tree (False when either is unreadable)."""
+    ta, tb = gitops.rev_parse(repo, f'{a}^{{tree}}'), gitops.rev_parse(repo, f'{b}^{{tree}}')
+    return bool(ta) and ta == tb
+
+
+def inherited_runs(lane, f, trunk_sha):
+    """The green runs a lone member ``f`` brings into its batch, or None (the batch runs CI as
+    ever). Its head must contain the trunk's tip — the merge onto the tip is then the head's own
+    tree, the very tree the PR's run judged (a pull_request run's merge ref of an older trunk is
+    that tree too: every trunk since is an ancestor of the head) — and every required check
+    (:func:`required_set`, read at the head and the tip) must have concluded ``success`` on the
+    head's newest runs: strict, never the admission's reading of a skipped job."""
+    head = f.get('head')
+    if not head or not trunk_sha or gitops.is_ancestor(lane.repo, trunk_sha, head) is not True:
+        return None
+    required, _why = required_set(lane, head, trunk_sha)
+    if not required:
+        return None
+    runs = check_runs(lane.slug, head)
+    if not runs:
+        return None
+    runs = newest(runs)
+    if verdict(runs, required)[0] != 'green':
+        return None
+    return attested_runs(runs, required) or None
 
 
 def attested_runs(runs, required):
@@ -1020,16 +1120,20 @@ def attested_runs(runs, required):
     return sorted(order, key=lambda i: (-count[i], order.index(i)))
 
 
-def attest(lane, sha, run_ids):
+def attest(lane, sha, run_ids, tree_of=None):
     """Set :data:`ATTEST_CONTEXT` = ``success`` on ``sha``, its ``target_url`` the batch run
     (``run_ids[0]``) and its description ``ASF-Batch-Run: <id>``: the exact sha a green batch
-    run gated. True when the host took it. Never raises; nothing without a run id."""
+    run gated — or, with ``tree_of`` (an inherited verdict, :func:`inherited_runs`), the PR head
+    whose run judged this very tree. True when the host took it. Never raises; nothing without a
+    run id."""
     if not run_ids or not sha:
         return False
     rid = run_ids[0]
     url = f'https://github.com/{lane.slug}/actions/runs/{rid}'
     more = f' (+{len(run_ids) - 1} run)' if len(run_ids) > 1 else ''
-    desc = f'{ATTEST_KEY}: {rid}{more} — required checks green at this exact sha'
+    desc = (f'{ATTEST_KEY}: {rid}{more} — required checks green on this exact tree '
+            f'(PR head {tree_of[:9]})' if tree_of else
+            f'{ATTEST_KEY}: {rid}{more} — required checks green at this exact sha')
     context = attestation.context(getattr(lane, 'product', None))
     try:
         rc, _o, err = H._gh(['api', '-X', 'POST', f'repos/{lane.slug}/statuses/{sha}',
@@ -1057,7 +1161,8 @@ def land(lane, batch, members, trunk_sha, runs=None):
         return False
     # the attestation goes on the sha before the trunk points at it: the trunk's push run reads
     # it at its start (a status after the push would race it)
-    attested = attest(lane, sha, runs) if runs else False
+    attested = attest(lane, sha, runs, tree_of=(batch.get('inherited') or {}).get('head')) \
+        if runs else False
     if attested:
         batch['attested'] = runs[0]
     for f in members:
@@ -1088,9 +1193,9 @@ def land(lane, batch, members, trunk_sha, runs=None):
             + (f" ({ATTEST_KEY}: {batch['attested']})" if batch.get('attested') else ''))
     for f in members:
         b = f['branch']
-        if f.get('requested'):
-            drop_request(lane.state_dir, _pr(f), _owner(lane), out=lane.out)
-        else:
+        # a landed PR's request is consumed, whoever queued it: never cut again
+        drop_request(lane.state_dir, _pr(f), _owner(lane), out=lane.out)
+        if not f.get('requested'):
             rec = lane.record(f, lane_mod.MERGED, 'method=queue', sha=sha, method='queue',
                               batch=ref)
             lane.write(f, rec, harvested=sha, correction=None)
@@ -1149,7 +1254,35 @@ def _member_facts(batch, m, runs):
             'head': m.get('head'), 'run': run, 'prev': lifecycle.lane_of(run) or None,
             'pr': {'number': m.get('pr'), 'state': 'OPEN'}, 'files': list(m.get('files') or ()),
             'class': m.get('class'), 'how': 'ci', 'green': m.get('green'), 'batch': batch['ref'],
-            'requested': bool(m.get('requested'))}
+            'requested': bool(m.get('requested')),
+            **({'priority': True} if m.get('priority') else {})}
+
+
+def _sync_priority(m, asked):
+    """Set ``m``'s ``priority`` (a batch member's record, or an entry) to its request's as the
+    requests file reads now: a request asked again plain, or ``--demote``d, is plain."""
+    n = m.get('pr')
+    n = n.get('number') if isinstance(n, dict) else n
+    if n is None:
+        n = (m.get('prev') or {}).get('pr')
+    if n is not None and (asked.get(str(n)) or {}).get('priority'):
+        m['priority'] = True
+    else:
+        m.pop('priority', None)
+
+
+def _drafts(lane, batches):
+    """The branches whose open PR is a draft: the lane's own PR read this pass when it made one
+    (``lane.pr_map``), else one ``gh pr list`` while batches are in flight; unreadable is none."""
+    pr_map = getattr(lane, 'pr_map', None)
+    if pr_map:
+        return {b for b, p in pr_map.items()
+                if p.get('draft') and str(p.get('state') or 'OPEN').upper() == 'OPEN'}
+    if not batches or not lane.slug:
+        return set()
+    got = github.open_prs(lane.slug, fields=('headRefName', 'isDraft'))
+    return {p.get('headRefName') for p in (got.data or []) if isinstance(p, dict)
+            and p.get('isDraft')} if got.ok and isinstance(got.data, list) else set()
 
 
 def _pack(entries, size):
@@ -1186,6 +1319,8 @@ def _drop(lane, batch, why):
 
 
 def _delete_ref(lane, batch):
+    if batch.get('inherited'):   # an inherited verdict pushed no batch ref
+        return
     ref, sha = batch['ref'], batch['sha']
     lane.ref_push(f':refs/heads/{ref}', f'delete {ref}', lease=f'refs/heads/{ref}:{sha}',
                   done=lambda: lane.ref_gone(ref))
@@ -1361,6 +1496,105 @@ def drop_request(state_dir, number, product=None, out=None):
     return False
 
 
+def demote_request(state_dir, number, product=None):
+    """Make PR ``number``'s request plain (``asf land --demote``), keeping its place in time;
+    True when it was a priority one. The batch it is in reads the request again next pass."""
+    key = str(int(number))
+    if store_on(product):
+        done = []
+
+        def demote(data):
+            data = data if isinstance(data, dict) else {}
+            r = (data.get('requests') or {}).get(key)
+            if isinstance(r, dict) and r.pop('priority', None):
+                done.append(key)
+            return data
+        store.update_at(requests_path(state_dir), demote, default={'requests': {}})
+        return bool(done)
+    reqs = load_requests(state_dir)
+    if key in reqs and reqs[key].pop('priority', None):
+        save_requests(state_dir, reqs)
+        return True
+    return False
+
+
+def withdrawn_path(state_dir):
+    return os.path.join(state_dir, WITHDRAWN_FILE)
+
+
+def load_withdrawn(state_dir):
+    """``{'<pr>': {at, head?, by?}}``: the operator's withdraws; unreadable is none."""
+    try:
+        with open(withdrawn_path(state_dir), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {str(k): v for k, v in data.items() if isinstance(v, dict)} \
+        if isinstance(data, dict) else {}
+
+
+def _write_withdrawn(state_dir, fn, product=None):
+    if store_on(product):
+        def apply(data):
+            return fn(data if isinstance(data, dict) else {})
+        store.update_at(withdrawn_path(state_dir), apply, default={})
+        return
+    data = fn(load_withdrawn(state_dir))
+    os.makedirs(state_dir, exist_ok=True)
+    tmp = withdrawn_path(state_dir) + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, sort_keys=True, indent=1)
+    os.replace(tmp, withdrawn_path(state_dir))
+
+
+def mark_withdrawn(state_dir, number, head=None, by=None, product=None):
+    """Hold PR ``number`` out of every batch (``asf land --withdraw``), whoever queued it — until
+    ``asf land <pr>`` asks again or its head moves past ``head``."""
+    mark = {'at': now_iso(), **({'head': head} if head else {}), **({'by': by} if by else {})}
+
+    def put(data):
+        data[str(int(number))] = mark
+        return data
+    _write_withdrawn(state_dir, put, product)
+
+
+def clear_withdrawn(state_dir, numbers, product=None):
+    keys = {str(n) for n in numbers}
+    if not keys & set(load_withdrawn(state_dir)):
+        return
+
+    def drop(data):
+        for k in keys:
+            data.pop(k, None)
+        return data
+    _write_withdrawn(state_dir, drop, product)
+
+
+def withdrawn_now(lane, heads):
+    """``{'<pr>': mark}``: the withdraws that hold this pass. A mark whose PR's head moved past
+    the one it was written at is spent (dropped): new work is gated again from the start."""
+    marks = load_withdrawn(lane.state_dir)
+    if not marks:
+        return {}
+    by_pr = {}
+    for b, run in lifecycle.by_branch(lane.path).items():
+        n = lifecycle.lane_of(run).get('pr')
+        if n:
+            by_pr[str(n)] = b
+    for k, r in load_requests(lane.state_dir).items():
+        by_pr.setdefault(k, r.get('branch'))
+    spent = [k for k, m in marks.items() if m.get('head') and by_pr.get(k)
+             and heads.get(by_pr[k]) and heads[by_pr[k]] != m['head']]
+    if spent:
+        lane.out(f"merge queue: withdraw of {', '.join(f'#{k}' for k in spent)} spent — its head "
+                 f"moved since")
+        try:
+            clear_withdrawn(lane.state_dir, spent, _owner(lane))
+        except store.StoreError as e:
+            lane.out(f'merge queue: {WITHDRAWN_FILE} not written — {e}')
+    return {k: m for k, m in marks.items() if k not in spent}
+
+
 def ordered_requests(reqs):
     """``[(key, request)]`` in line order: the ``--priority`` requests first, then each group in
     the order it was asked."""
@@ -1423,6 +1657,16 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                 changes.append(('drop', key))
             else:
                 lane.out(f'merge queue: asf land PR #{n}: {b} is not on origin — waits')
+            continue
+        if gitops.is_ancestor(lane.repo, head, trunk_sha) is True:
+            # landed already (a batch, or a door of its own): its request is consumed — a
+            # landed PR is never cut again
+            lane.out(f'merge queue: asf land PR #{n} is on {lane.trunk} already ({head[:12]}) — '
+                     f'request dropped')
+            changes.append(('drop', key))
+            continue
+        if b in (getattr(lane, 'mq_drafts', None) or ()):
+            lane.out(f'merge queue: asf land PR #{n} is a draft — waits until it is ready')
             continue
         red = r.get('red') or {}
         if red.get('head') == head and not (red.get('kind') == 'checks'
@@ -1590,15 +1834,32 @@ def cmd_land(args):
         print(f"land: {product.name} is not on conventions.merge: queue — no queue to enter")
         return 2
     n = int(args.pr)
+    slug = lane_mod.repo_slug(product)
     if args.withdraw:
+        # whoever queued it: a factory PR in a batch leaves it too, and stays out until asked
+        # again or its head moves
+        got = github.pr(slug, n, ('headRefOid',)) if slug else None
+        head = got.data.get('headRefOid') if got is not None and got.ok \
+            and isinstance(got.data, dict) else None
         try:
             dropped = drop_request(state_dir, n, product)
+            mark_withdrawn(state_dir, n, head=head, by=os.environ.get('USER'), product=product)
         except store.StoreError as e:
             print(f'land: PR #{n} request not withdrawn — {e}')
             return 1
-        print(f'land: PR #{n} request withdrawn' if dropped else f'land: PR #{n} had no request')
+        print(f"land: PR #{n} {'request ' if dropped else ''}withdrawn — out of its batch and "
+              f"every next cut until `asf land {n}` asks again"
+              + (f' or its head moves past {head[:9]}' if head else ''))
         return 0
-    slug = lane_mod.repo_slug(product)
+    if getattr(args, 'demote', False):
+        try:
+            was = demote_request(state_dir, n, product)
+        except store.StoreError as e:
+            print(f'land: PR #{n} not demoted — {e}')
+            return 1
+        print(f'land: PR #{n} demoted to a plain request — its batch, if cut, reads it next pass'
+              if was else f'land: PR #{n} had no priority request')
+        return 0
     got = H.gh_json(['pr', 'view', str(n), '-R', slug, '--json',
                      'number,state,baseRefName,headRefName,isCrossRepository'], None)
     if not isinstance(got, dict) or not got.get('headRefName'):
@@ -1616,6 +1877,7 @@ def cmd_land(args):
     try:
         add_request(state_dir, n, got['headRefName'], by=os.environ.get('USER'),
                     priority=bool(args.priority), product=product)
+        clear_withdrawn(state_dir, [n], product)   # asked again: an earlier withdraw is spent
     except store.StoreError as e:
         print(f'land: PR #{n} not requested — {e}')
         return 1
@@ -1634,8 +1896,11 @@ Every landing on the trunk goes through the merge queue (conventions.merge: queu
 checks (landing_checks plus the deploy's required jobs) are success on its exact head, the
 queue cuts it into a batch with the factory's PRs, runs the batch's full CI, and
 fast-forwards the trunk only when the batch sha is green. `--priority` (or `--front`) puts the
-request ahead of the factory's PRs and the other requests (behind the batches already in CI). A red head or a conflict marks
-the request red until the head moves; a PR closed or merged elsewhere drops it.
+request ahead of the factory's PRs and the other requests in the next cut (behind the batches
+already in CI, within merge_queue.inflight); `asf land <pr>` again without it, or `--demote`,
+makes it plain. `--withdraw` takes the PR out of the queue and out of its batch, whoever queued
+it, until asked again or its head moves. A red head or a conflict marks the request red until
+the head moves; a PR closed, merged, or already on the trunk drops it.
 Never `gh pr merge` onto the trunk: asf status and asf doctor flag every trunk commit
 that did not come through the queue."""
 
@@ -1649,6 +1914,11 @@ def register(sub):
     p.add_argument('--priority', '--front', dest='priority', action='store_true',
                    help='go to the front of the line: ahead of the factory\'s PRs and the other '
                         'land requests, behind batches already in CI')
-    p.add_argument('--withdraw', action='store_true', help='take the request back')
+    how = p.add_mutually_exclusive_group()
+    how.add_argument('--withdraw', action='store_true',
+                     help='take the PR out of the queue — its request, and its batch whoever '
+                          'queued it — until asked again or its head moves')
+    how.add_argument('--demote', action='store_true',
+                     help='make a --priority request plain (a batch already cut included)')
     p.set_defaults(func=cmd_land)
     return p
