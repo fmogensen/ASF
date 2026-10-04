@@ -1379,18 +1379,100 @@ class LaunchAndReapInvariants(unittest.TestCase):
         # an alive pid is never reapable either
         for ev in evidences():
             self.assertEqual(lc.reap_verdict(landed, ev, 'main', lambda pid: True)[0], 'keep')
-        # B-0019: finished, pushed, with commits, reached the trunk — and nothing short of it
+        # B-0019/F-0201: finished, with commits of its own, and the trunk holds them — whatever
+        # origin still has of the branch. The two origin-shaped rows are the landing path: the
+        # lane lands a rebased or squashed tip and deletes the branch, so this tree's HEAD may
+        # appear on no origin branch at all and its own row may carry no landing.
         fin = {'job': 'j', 'ended': 't', 'end_reason': 'finished', 'pid': 1}
         full = lc.Evidence(remote_sha='s', head_on_remote=True, has_commits=True, in_trunk=True)
         self.assertEqual(lc.reap_verdict(fin, full, 'main', dead), ('reapable', 'ended'))
-        for short in (dict(remote_sha=''), dict(head_on_remote=False), dict(has_commits=False),
-                      dict(in_trunk=False), dict(uncommitted=1)):
+        for short in (dict(remote_sha=''), dict(head_on_remote=False)):
             ev = lc.Evidence(**dict(dataclassfields(full), **short))
-            self.assertEqual(lc.reap_verdict(fin, ev, 'main', dead)[0], 'keep', short)
+            self.assertEqual(lc.reap_verdict(fin, ev, 'main', dead), ('reapable', 'ended'), short)
+        for short, why in ((dict(has_commits=False), 'ended: no commits yet'),
+                           (dict(in_trunk=False), 'ended: not in origin/main'),
+                           (dict(uncommitted=1), 'ended: uncommitted changes')):
+            ev = lc.Evidence(**dict(dataclassfields(full), **short))
+            self.assertEqual(lc.reap_verdict(fin, ev, 'main', dead), ('keep', why), short)
 
 
 def dataclassfields(ev):
     return {f: getattr(ev, f) for f in ev.__dataclass_fields__}
+
+
+class ALandingOnTheBranch(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, 's.jsonl')
+
+    def write(self, *lines):
+        with open(self.path, 'a') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    def test_branch_landings_over_a_written_registry(self):
+        # a branch whose latest run carries `harvested` maps to that sha
+        self.write({'job': 'j1', 'branch': 'plan/F-0201', 'started': 't1', 'pid': 1},
+                   {'job': 'j1', 'ended': 't2', 'end_reason': 'finished', 'harvested': 'sha1'})
+        # an earlier run on this branch landed; its later run has not — absent (C3, PD6)
+        self.write({'job': 'j2', 'branch': 'fix/B-0001', 'started': 't1', 'pid': 1},
+                   {'job': 'j2', 'ended': 't2', 'end_reason': 'finished', 'harvested': 'sha2'},
+                   {'job': 'j3', 'branch': 'fix/B-0001', 'started': 't3', 'pid': 2},
+                   {'job': 'j3', 'ended': 't4', 'end_reason': 'finished'})
+        # `harvested: 'superseded'` is no landing (C5)
+        self.write({'job': 'j4', 'branch': 'fix/B-0002', 'started': 't1', 'pid': 1},
+                   {'job': 'j4', 'ended': 't2', 'end_reason': 'finished', 'harvested': 'superseded'})
+        # nobody landed this branch
+        self.write({'job': 'j5', 'branch': 'fix/B-0003', 'started': 't1', 'pid': 1},
+                   {'job': 'j5', 'ended': 't2', 'end_reason': 'dead pid'})
+        # a run with no branch contributes nothing
+        self.write({'job': 'j6', 'started': 't1', 'pid': 1},
+                   {'job': 'j6', 'ended': 't2', 'end_reason': 'finished', 'harvested': 'sha6'})
+        self.assertEqual(lc.branch_landings(self.path), {'plan/F-0201': 'sha1'})
+
+    def test_the_in_trunk_ground(self):
+        dead = lambda pid: False
+        fin = {'job': 'j', 'ended': 't', 'end_reason': 'finished', 'pid': 1}
+        clean = lc.Evidence(remote_sha='', head_on_remote=False, has_commits=True, in_trunk=True)
+        self.assertEqual(lc.reap_verdict(fin, clean, 'main', dead), ('reapable', 'ended'))
+        dirty = lc.Evidence(**dict(dataclassfields(clean), uncommitted=1))
+        self.assertEqual(lc.reap_verdict(fin, dirty, 'main', dead), ('keep', 'ended: uncommitted changes'))
+        fresh = lc.Evidence(**dict(dataclassfields(clean), has_commits=False))
+        self.assertEqual(lc.reap_verdict(fin, fresh, 'main', dead), ('keep', 'ended: branch not pushed'))
+
+    def test_the_branch_landed_ground(self):
+        dead = lambda pid: False
+        fin = {'job': 'j', 'ended': 't', 'end_reason': 'finished', 'pid': 1}
+        ev = lc.Evidence(has_commits=True, in_trunk=False)
+        self.assertEqual(lc.reap_verdict(fin, ev, 'main', dead, branch_landed='4d2e1b9c0'),
+                         ('reapable', 'landed 4d2e1b9c0 on its branch'))
+        self.assertEqual(lc.reap_verdict(fin, ev, 'main', dead, branch_landed=''),
+                         ('keep', 'ended: branch not pushed'))
+        pushed = lc.Evidence(**dict(dataclassfields(ev), remote_sha='s', head_on_remote=True))
+        self.assertEqual(lc.reap_verdict(fin, pushed, 'main', dead, branch_landed=''),
+                         ('keep', 'ended: not in origin/main'))
+        dirty = lc.Evidence(**dict(dataclassfields(ev), uncommitted=1))
+        self.assertEqual(lc.reap_verdict(fin, dirty, 'main', dead, branch_landed='4d2e1b9c0'),
+                         ('keep', 'ended: uncommitted changes'))
+
+    def test_the_guards_hold_under_any_branch_landed(self):
+        dead = lambda pid: False
+        live = {'job': 'j', 'pid': 1, 'started': 't'}
+        for ev in evidences():
+            self.assertNotEqual(lc.reap_verdict(live, ev, 'main', dead, branch_landed='sha')[0], 'reapable')
+        fin = {'job': 'j', 'ended': 't', 'end_reason': 'finished', 'pid': 1}
+        for ev in evidences():
+            self.assertEqual(lc.reap_verdict(fin, ev, 'main', lambda pid: True, branch_landed='sha')[0], 'keep')
+
+    def test_the_orphan_strings_are_unchanged(self):
+        dead = lambda pid: False
+        self.assertEqual(lc.reap_verdict(None, lc.Evidence(), 'main', dead),
+                         ('keep', 'orphan: branch not pushed'))
+        self.assertEqual(lc.reap_verdict(None, lc.Evidence(remote_sha='s'), 'main', dead),
+                         ('keep', 'orphan: no commits yet'))
+        self.assertEqual(lc.reap_verdict(None, lc.Evidence(has_commits=True, in_trunk=True), 'main', dead),
+                         ('reapable', 'orphan'))
 
 
 class UnpushedAfterARebaseTest(unittest.TestCase):

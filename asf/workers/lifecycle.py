@@ -14,7 +14,9 @@ the branch is what lands. The states, and what each one rests on::
     corrected  a new run on the same branch started after the correction (the answer)
     adjudicate held at the round cap (:data:`ROUND_CAP`): the feeder's ADJUDICATE row, once
     landed     ``harvested: <sha>`` on the run — harvest pushed the rebased tip to the trunk
-    reaped     landed (or empty) and the worktree is gone
+    reaped     landed (or empty) and the worktree is gone, or the trunk holds what the tree
+               holds — whatever origin still has of the branch, or a landing the ledger
+               recorded on another run of it
 
 Only ``reaped`` is terminal: every other state has a successor (:data:`TRANSITIONS`), so no
 branch can sit still forever.
@@ -953,6 +955,21 @@ def eligible(run):
 
 #: ``harvested:`` values that are not a landing: harvest archived the run, nothing reached the trunk
 NOT_A_LANDING = ('superseded',)
+
+
+def branch_landings(path):
+    """``{branch: the sha its latest run landed at}`` — the landings the ledger records, by
+    branch. The *latest* run on each branch (:func:`by_branch`) and no earlier one: a branch
+    whose last run carries no landing has work on it that has not landed, whoever landed it a
+    round ago. An archival (:data:`NOT_A_LANDING`) is no landing.
+
+    A lane branch is landed on the run the lane held for it, which is not always the run that
+    owns the worktree sitting on that branch: an approved spec or plan the lane adopted lands
+    on a synthetic run with no session and no worktree (:mod:`asf.tick.land_spec`), and the
+    session that wrote the document keeps a row with no ``harvested``. This is how that tree's
+    reap finds the landing (F-0201)."""
+    return {b: r['harvested'] for b, r in by_branch(path).items()
+            if r.get('harvested') and r['harvested'] not in NOT_A_LANDING}
 
 
 def landed_earlier(path, run):
@@ -2966,11 +2983,14 @@ def may_launch(path, job, worktree_path, alive=None):
     return not what, why
 
 
-def reap_verdict(run, ev, main, alive):
+def reap_verdict(run, ev, main, alive, branch_landed=''):
     """``(what, detail)`` for a worktree: ``opening`` | ``keep`` | ``reapable``. ``run`` is None
-    for an orphan. Reapable under three rules — landed (the harvested sha is the evidence,
-    B-0049); an ended-not-finished run with nothing in the tree to lose (B-0025); a finished run
-    whose pushed branch has commits and reached the trunk (B-0019)."""
+    for an orphan. ``branch_landed`` is the sha the ledger says this worktree's *branch* landed
+    at (:func:`branch_landings`), '' when it says none. Reapable under four rules — landed (the
+    harvested sha is the evidence, B-0049); an ended-not-finished run with nothing in the tree to
+    lose (B-0025); a finished run with commits of its own that the trunk holds, whatever origin
+    still has of the branch (B-0019, F-0201); a finished run with commits of its own whose branch
+    the ledger says landed under another run (F-0201)."""
     if run is not None and is_live(run):
         return ('opening', 'live session, no commits yet') if not ev.has_commits else (None, None)
     what = 'orphan' if run is None else 'ended'
@@ -2984,12 +3004,14 @@ def reap_verdict(run, ev, main, alive):
         return 'keep', f'{what}: session {run.get("end_reason")}, not finished'
     if ev.uncommitted:
         return 'keep', f'{what}: uncommitted changes'
+    if not ev.has_commits:  # B-0019: a fresh branch is an ancestor of the trunk too — opening
+        return 'keep', f'{what}: {"no commits yet" if ev.remote_sha else "branch not pushed"}'
+    if ev.in_trunk:  # the trunk holds every commit this tree has: nothing here is only here
+        return 'reapable', what
+    if branch_landed:  # the lane landed this branch on another run — a rebase or a squash
+        return 'reapable', f'landed {branch_landed} on its branch'
     if not ev.remote_sha:
         return 'keep', f'{what}: branch not pushed'
     if not ev.head_on_remote:
         return 'keep', f'{what}: local commits not pushed'
-    if not ev.has_commits:
-        return 'keep', f'{what}: no commits yet'
-    if not ev.in_trunk:
-        return 'keep', f'{what}: not in origin/{main}'
-    return 'reapable', what
+    return 'keep', f'{what}: not in origin/{main}'
