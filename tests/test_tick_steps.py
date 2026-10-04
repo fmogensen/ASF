@@ -1208,6 +1208,102 @@ class PrsStepTests(StepsTestCase):
         self.assertIn('prs: cap 1 reached — the rest next tick', self.lines)
         self.assertEqual(self.lane_of('worker/B-0006')['state'], 'PUSHED')
 
+    def push_commits(self, branch, messages):
+        _git(['checkout', '-q', '-b', branch, 'main'], self.repo)
+        for i, msg in enumerate(messages):
+            with open(os.path.join(self.repo, f"{branch.replace('/', '_')}_{i}"), 'w') as f:
+                f.write(f'{i}\n')
+            _git(['add', '-A'], self.repo)
+            _git(['commit', '-q', '-m', msg], self.repo)
+        _git(['push', '-q', 'origin', branch], self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+
+    def queue_holds(self):
+        """The CI start queue holds every ``pr:`` start, as a product's did on 2026-10-04 (``heavy
+        4 free, needs 5``; ``runners set aside for priority batch``)."""
+        from asf import ci_queue
+        line = 'ci queue: B-0001 waits — heavy 0 free, needs 5 (other, 1st in line)'
+        dropped = []
+
+        class HeldQueue:
+            mode = 'on'
+
+            def __init__(self, *_a, **_k):
+                pass
+
+            def drop(self, keys):
+                dropped.extend(keys)
+                return len(keys)
+
+        def admit(_product, key, kind, **_kw):
+            if kind == 'pr':
+                self.lines.append(line)
+                return ci_queue.Decision(False, line)
+            return ci_queue.Decision(True, '')
+        for target, value in (('admit', admit), ('Queue', HeldQueue)):
+            p = mock.patch.object(ci_queue, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        return dropped
+
+    def test_a_pushed_branch_gets_its_pr_in_the_same_pass_though_the_ci_queue_holds(self):
+        """2026-10-04, a product: cloud/T-0592, T-0598, T-0599, T-0600 and T-0604 finished and
+        pushed; the lane's T2 asked the CI start queue first and, held (``heavy 0 free, needs
+        5``), left each branch PUSHED with no PR — "awaiting harvest" until a human opened the
+        PRs by hand. The PR is opened in the pass that finds the branch pushed; the queue's hold
+        is said, and its ``pr:`` entry leaves the line (the PR's own run is on the host now)."""
+        dropped = self.queue_holds()
+        self.push_branch('fix/B-0001')
+        self.finished('fix-bug-b-0001', 'fix/B-0001')
+        step_prs.run(self.ctx(), out=self.lines.append)
+        self.assertEqual([c[c.index('--head') + 1] for c in self.creates()], ['fix/B-0001'])
+        self.assertIn(self.lane_of('fix/B-0001')['state'], ('PR_OPEN', 'REVIEW'))
+        self.assertTrue(self.lane_of('fix/B-0001')['pr'])
+        self.assertTrue(any(l.startswith('prs: opened PR #') and 'ci queue held' in l
+                            for l in self.lines), self.lines)
+        self.assertEqual(dropped, ['pr:fix/B-0001'])
+        # idempotent: the next pass finds the PR open and opens no second one
+        self.open_prs['fix/B-0001'] = self.lane_of('fix/B-0001')['pr']
+        step_prs.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(len(self.creates()), 1)
+
+    def test_a_bundle_owners_branch_gets_its_pr_with_every_item_and_proves_line(self):
+        """T-0604's bundle carried T-0624 (opened #1101 by hand): the delivery owner's
+        branch is opened like any other, and its body names every item its commits name and
+        every ``Proves:`` trailer they carry."""
+        self.queue_holds()
+        self.push_commits('fix/B-0001', [
+            'fix(B-0001): the first half\n\nProves: S-0077 line 1 — tests/test_a.py',
+            'task(T-0624): the member\n\nProves: S-0077 line 2 — tests/test_b.py::test_b'])
+        self.finished('fix-bug-b-0001', 'fix/B-0001')
+        step_prs.run(self.ctx(), out=self.lines.append)
+        (argv,) = self.creates()
+        body = argv[argv.index('--body') + 1]
+        self.assertIn('## Items\n\n- B-0001\n- T-0624\n', body)
+        self.assertIn('## Proves\n\n- S-0077 line 1 — tests/test_a.py\n'
+                      '- S-0077 line 2 — tests/test_b.py::test_b\n', body)
+
+    def test_a_closed_unmerged_pr_is_reported_never_reopened_or_doubled(self):
+        """A PR a human closed unmerged on the branch's head stays their decision: no second PR,
+        the branch goes STALE and says why."""
+        self.push_branch('fix/B-0001')
+        self.finished('fix-bug-b-0001', 'fix/B-0001')
+        head = _git(['rev-parse', 'fix/B-0001'], self.repo)
+
+        def gh(args):
+            self.gh_calls.append(args)
+            if args[:2] == ['pr', 'list']:
+                return 0, json.dumps([{'number': 9, 'headRefName': 'fix/B-0001',
+                                       'state': 'CLOSED', 'headRefOid': head}]), ''
+            if args[:2] == ['pr', 'create']:
+                return 0, 'https://example.invalid/o/r/pull/99\n', ''
+            return 1, '', f'unexpected gh {args}'
+        with mock.patch.object(harvest_mod, '_gh', gh):
+            step_prs.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.lane_of('fix/B-0001')['state'], 'STALE')
+        self.assertIn('closed unmerged', self.lane_of('fix/B-0001')['reason'])
+
     def test_a_gh_refusal_is_one_line_and_the_branch_stays_pushed(self):
         self.push_branch('worker/B-0005')
         self.finished('one', 'worker/B-0005', item='B-0005')

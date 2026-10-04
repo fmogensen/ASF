@@ -480,6 +480,35 @@ def first_commit_body(repo, trunk, branch):
     return body.stdout.strip() if body.returncode == 0 else ''
 
 
+#: an item id a commit subject names (``task(T-0491): …``, ``fix(B-0001): …``)
+_SUBJECT_ID_RE = re.compile(r'\b([A-Z]-\d{4,})\b')
+
+
+def commits_note(repo, trunk, branch):
+    """The part of a PR body the branch's own commits say (``origin/<trunk>..origin/<branch>``,
+    oldest first): ``## Items`` — every item id a subject names — and ``## Proves`` — every
+    ``Proves:`` trailer (:func:`asf.proves.parse`). '' when they say neither, or git cannot
+    read the range."""
+    from asf import gitops, proves
+    r = gitops.git(['log', '--reverse', '--no-merges', '--format=%B%x1e',
+                    f'origin/{trunk}..origin/{branch}'], repo) if repo else None
+    if r is None or not r.ok:
+        return ''
+    messages = [m.strip() for m in (r.stdout or '').split('\x1e') if m.strip()]
+    ids = []
+    for m in messages:
+        for i in _SUBJECT_ID_RE.findall(m.splitlines()[0]):
+            if i not in ids:
+                ids.append(i)
+    claims = proves.parse('\n'.join(messages))
+    out = ''
+    if ids:
+        out += '\n## Items\n\n' + ''.join(f'- {i}\n' for i in ids)
+    if claims:
+        out += '\n## Proves\n\n' + proves.render(claims) + '\n'
+    return out
+
+
 def _subjects(repo, trunk, branch):
     return H.sh(['git', 'log', '--no-merges', '--format=%s', f'origin/{trunk}..origin/{branch}'],
                 cwd=repo).stdout.splitlines()
@@ -1996,6 +2025,15 @@ class Lane:
             self.ci_queue = ci_queue.Queue(self.product, out=self.out)
         ci_queue.forget(self.product, f['branch'], queue=self.ci_queue)
 
+    def ci_drop_pr(self, f):
+        """A PR opened past the queue's hold: its ``pr:`` entry leaves the line, so the queue's
+        pass never opens it again nor re-runs the run its opening started."""
+        from asf import ci_queue
+        if self.ci_queue is None:
+            self.ci_queue = ci_queue.Queue(self.product, out=self.out)
+        if getattr(self.ci_queue, 'mode', 'off') != 'off':
+            self.ci_queue.drop([f"pr:{f['branch']}"])
+
     # ---- writing ------------------------------------------------------------------------
 
     def record(self, f, state, reason, **extra):
@@ -2156,8 +2194,12 @@ class Lane:
                     self.out(f'prs: cap {cap} reached — the rest next tick')
                     self.opened += 1
                 return None
-            if not self.ci_admits(f, 'pr'):
-                return None  # the branch stays PUSHED; the next pass asks the queue again
+            # The queue is asked so an admitted start is counted as started; its hold never
+            # keeps the PR from opening. 2026-10-04, a product: five pushed branches held here
+            # ("heavy 0 free, needs 5", runners set aside for a priority batch) sat PUSHED with
+            # no PR — no review, no run, "awaiting harvest" — until a human opened them by hand.
+            # The PR is what review and the gate wait on; runner order is the host's queue's.
+            held = not self.ci_admits(f, 'pr')
             self.opened += 1
             number, why = self.host.open(b, item)
             if not number:
@@ -2166,7 +2208,12 @@ class Lane:
                     self.set(f, PUSHED, f'PR not opened: {why}')
                 return None
             f['pr'] = {'number': number, 'state': 'OPEN', 'head': f.get('head')}
-            self.out(f'prs: opened PR #{number} for {b}')
+            if held:
+                self.ci_drop_pr(f)  # the run is on the host now: no "would start" for it
+                self.out(f'prs: opened PR #{number} for {b} (the ci queue held its start — '
+                         f'the PR opens anyway; its run waits for runners on the host)')
+            else:
+                self.out(f'prs: opened PR #{number} for {b}')
             return self.set(f, PR_OPEN, f'PR #{number}')
         if state == PR_OPEN and reason.startswith('no PR host'):
             self.out(f'pr-lane {b}')
@@ -3955,6 +4002,7 @@ class GitHubHost(Host):
             note = first_commit_body(self.product.repo_dir, self.trunk, branch)
             if note:  # the direct session's spec+plan note: the PR description carries it
                 body = f'{body}\n## What and how\n\n{note}\n'
+        body += commits_note(self.product.repo_dir, self.trunk, branch)
         rc, stdout, err = H._gh(['pr', 'create', '-R', self.slug, '--base', self.trunk,
                                  '--head', branch, '--title', title, '--body', body])
         m = re.search(r'/pull/(\d+)', f'{stdout}\n{err}')
