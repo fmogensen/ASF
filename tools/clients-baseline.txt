@@ -53,7 +53,7 @@ git asf/tick/dry_run.py 1
 git asf/tick/land_spec.py 1
 git asf/tick/shadow.py 25
 git asf/tick/step_prs.py 1
-git asf/tick/step_wave.py 4
+git asf/tick/step_wave.py 3
 git asf/tick/widen_footprint.py 1
 git asf/trunk_watch.py 1
 git asf/upgrade.py 5

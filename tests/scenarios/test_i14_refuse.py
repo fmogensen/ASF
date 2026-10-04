@@ -29,15 +29,16 @@ IN = 'ingest.derive via merge_facts'
 
 #: ``(path, behaviour, expected, gap, edit)``
 REFUSE_ROWS = (
-    # a covers close stands: REPORT done, no open work (the PR closed unmerged), the covering
-    # commit newer than the card ...
-    (CB, 'close-unmerged', 'decoy', None, None),
-    (CP, 'close-unmerged', 'decoy', None, None),
-    (RC, 'close-unmerged', 'decoy', None, None),
+    # a covers close stands: REPORT done, no PR of the Task's on the host (one open or closed
+    # unmerged is its own work: no covers close at all), the covering commit newer than the card
+    # ...
+    (CB, 'open', 'decoy', None, 'no-pr'),
+    (CP, 'open', 'decoy', None, 'no-pr'),
+    (RC, 'open', 'decoy', None, 'no-pr'),
     # ... and is put back when the card is newer than the commit said to cover it
-    (CB, 'close-unmerged', 'none', None, 'card-after-cover'),
-    (CP, 'close-unmerged', 'none', None, 'card-after-cover'),
-    (RC, 'close-unmerged', 'none', None, 'card-after-cover'),
+    (CB, 'open', 'none', None, 'no-pr-card-after-cover'),
+    (CP, 'open', 'none', None, 'no-pr-card-after-cover'),
+    (RC, 'open', 'none', None, 'no-pr-card-after-cover'),
     # the record's own close on the host's merged PR stands; on a voided or a reverted landing
     # it is put back
     (IN, 'merged', 'closes', None, None),

@@ -5,8 +5,9 @@
 
 * ``none`` — the path closes nothing: no landing stamp, no close it writes;
 * ``decoy`` — the path closes the Task on the trunk commit covering its ``writes:`` (the
-  REPORT's sha), never on the PR's own head: a PR the host closed unmerged is neither open work
-  nor a landing;
+  REPORT's sha), never on the PR's own head — only where the host knows no PR of the Task's
+  (``no-pr``) or one merged: a PR of its own still open, or closed unmerged, holds the Task's
+  work, and the covering commit is someone else's;
 * ``closes`` — the path closes the Task (the positive control: the host merged PR #1).
 
 ``gap`` names the plan item that fixes a row the code still fails today (one of
@@ -44,18 +45,23 @@ ROWS = (
     # the wave's trunk check before a launch: the open PR is the Task's own unmerged work
     (CB, 'open', 'none', None, None),
     (CB, 'rate-limit', 'none', None, None),
-    (CB, 'close-unmerged', 'decoy', None, None),
+    (CB, 'close-unmerged', 'none', None, None),
     (CB, 'merged', 'decoy', None, None),
     # a park carrying the verified evidence
     (CP, 'open', 'none', None, None),
     (CP, 'rate-limit', 'none', None, None),
-    (CP, 'close-unmerged', 'decoy', None, None),
+    (CP, 'close-unmerged', 'none', None, None),
     (CP, 'merged', 'decoy', None, None),
     # the relaunch cap: park, or close on evidence that re-verifies with the host
     (RC, 'open', 'none', None, None),
     (RC, 'rate-limit', 'none', None, None),
-    (RC, 'close-unmerged', 'decoy', None, None),
+    (RC, 'close-unmerged', 'none', None, None),
     (RC, 'merged', 'decoy', None, None),
+    # a covers close stands only where the host knows no PR of the Task's: one closed unmerged
+    # (above) or open is its own work, and the covering commit someone else's
+    (CB, 'open', 'decoy', None, 'no-pr'),
+    (CP, 'open', 'decoy', None, 'no-pr'),
+    (RC, 'open', 'decoy', None, 'no-pr'),
     # the record's ingest: a PR closed unmerged is no landing, a refused host no answer
     (IN, 'open', 'none', None, None),
     (IN, 'rate-limit', 'none', None, None),

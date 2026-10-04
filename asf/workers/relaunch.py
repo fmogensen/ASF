@@ -181,6 +181,9 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
     """``(reason, landed)``: :func:`verdict`'s reason (or None), and the sha of the commit the
     last report names that git verified on ``origin/<main>`` ('' when none) — the evidence a
     park closes its card on instead of waiting for a person (:mod:`asf.workers.trunkclose`).
+    The host is asked too (:func:`_held`): an open PR of the item's means not landed, and a
+    host that could not answer makes ``landed`` :class:`asf.workers.landing.Unknown` — no
+    decision this pass, neither a park nor a close.
     Under ``product``'s ``flags.facts: shadow`` the ``landed`` half is compared with the landing
     fact (:func:`asf.facts.landing.landed`); the answer is always this one."""
     runs = streak(path, job, item, head, card, cause)
@@ -206,12 +209,12 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
            + (f', its last report: {claim[:300]}' if claim else ''))
     landed = on_trunk(repo, main, text, exclude=[r.get('launch_head') for r in runs], item=item,
                       writes=writes, prs=landing.run_prs(path, item)) if claim else ''
-    if landed and landing.open_work(repo, main, path, item, [r.get('branch') for r in runs],
-                                    ask_gh=False):
-        landed = ''  # the item's own commits are unmerged: nothing on the trunk is its landing
     if landed and lifecycle.voided_sha(path, item, landed):
         why += f' — claims voided landing {landed[:7]}'
         landed = ''  # the operator voided it (`asf reset`): parked, never closed on it
+    if landed:
+        landed = _held(product, repo, main, path, item, landed, writes,
+                       [r.get('branch') for r in runs])
     if claim and product is not None and repo and item:
         from asf.facts import landing as facts_landing
         landed = facts_landing.shadow(
@@ -225,6 +228,34 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
                 f'{item} on that evidence')
     return (f'{why}. Not relaunched: the row is parked until a new commit, review, card edit or '
             f'decision changes its state, or `asf unpark {item}`'), landed
+
+
+def _held(product, repo, main, path, item, sha, writes, branches):
+    """``sha`` when it stands as the item's landing; '' when the item's own work is unmerged —
+    a branch of its runs, or an open PR naming it (the pass's open-PR read,
+    :func:`asf.workers.landing.pass_open_work`; with no product, :func:`asf.workers.landing.
+    open_prs`) — or when ``sha`` only covers the item's ``writes:`` and its own PR is open or
+    was closed unmerged (:func:`asf.workers.landing.covers_refused`); :class:`asf.workers.
+    landing.Unknown` when the host could not tell."""
+    if landing.open_work(repo, main, path, item, branches, ask_gh=False):
+        return ''  # the item's own commits are unmerged: nothing on the trunk is its landing
+    if product is None:
+        work = landing.open_work(repo, main, path, item, branches, ask_gh=True)
+    else:
+        work = landing.pass_open_work(product, repo, main, item)
+    if work is None:
+        return landing.Unknown('the open PRs could not be read')
+    if work:
+        return ''  # an open PR holds the item's work: the trunk commit is not its landing
+    if product is not None \
+            and landing.attribution(repo, main, sha, item, writes,
+                                    landing.run_prs(path, item)) == 'covers':
+        held = landing.covers_refused(product, item)
+        if held is None:
+            return landing.Unknown('the item\'s PRs could not be read')
+        if held:
+            return ''  # its own PR is open or closed unmerged: the cover is not its work
+    return sha
 
 
 def park_fields(reason, card, now):
