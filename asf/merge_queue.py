@@ -95,6 +95,7 @@ import time
 from asf import attestation, ci_queue, flake, gitpush, refguard, stale_ref
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
+from asf.state import store
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
 
@@ -128,6 +129,12 @@ ATTEST_CONTEXT = attestation.CONTEXT
 ATTEST_KEY = 'ASF-Batch-Run'
 #: how long a landed member's PR is given to read MERGED on the host before it is closed by hand
 PR_MARK_TRIES, PR_MARK_SLEEP_S = 3, 2
+#: ``conventions.flags.queue_store``: ``on`` moves every write of the three files above to
+#: :mod:`asf.state.store` — a per-file lock around each read-modify-write and a temp file of its
+#: own (never the fixed ``.tmp`` two writers shared), so an ``asf land`` or a CI-queue rebuild
+#: request written while a pass runs is never lost; ``off`` (the default) writes as before. The
+#: files keep their shape either way: every reader, and an older venv's, reads them unchanged.
+STORE_FLAG = 'queue_store'
 #: the merge commits' identity when the checkout has none configured
 IDENT = {'GIT_AUTHOR_NAME': 'asf merge queue', 'GIT_AUTHOR_EMAIL': 'asf-merge-queue@localhost',
          'GIT_COMMITTER_NAME': 'asf merge queue', 'GIT_COMMITTER_EMAIL': 'asf-merge-queue@localhost'}
@@ -157,6 +164,33 @@ def path(state_dir):
     return os.path.join(state_dir, QUEUE_FILE)
 
 
+def store_on(product):
+    """True when ``product`` sets ``flags.queue_store: on`` (:data:`STORE_FLAG`); no product (a
+    caller that has none to hand) is off."""
+    flag = getattr(product, 'flag', None)
+    value = flag(STORE_FLAG, 'off') if callable(flag) else 'off'
+    return value is True or str(value).strip().lower() in ('on', 'true', 'yes', '1')
+
+
+def _owner(lane):
+    """The product a lane pass runs for (its flags), or None."""
+    return getattr(lane, 'product', None)
+
+
+def _store_update(target, fn, default, out=None):
+    """:func:`asf.state.store.update_at` on ``target``; True when written. A file the store will
+    not touch — corrupt (copied aside, never overwritten), or its lock held past the timeout — is
+    said in one line and left alone: the request stays as the file holds it, and nothing is
+    wiped."""
+    try:
+        store.update_at(target, fn, default=default)
+        return True
+    except store.StoreError as e:
+        line = f'merge queue: {os.path.basename(target)} not written — {e}'
+        (out or (lambda s: print(s, flush=True)))(line)
+        return False
+
+
 def load(state_dir):
     """The chain as the file holds it; an unreadable or misshapen file is an empty chain."""
     try:
@@ -169,7 +203,10 @@ def load(state_dir):
                         and b.get('sha') and isinstance(b.get('members'), list)]}
 
 
-def save(state_dir, data):
+def save(state_dir, data, product=None):
+    if store_on(product):
+        store.write_at(path(state_dir), data)
+        return
     os.makedirs(state_dir, exist_ok=True)
     tmp = path(state_dir) + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fh:
@@ -201,7 +238,7 @@ def holds(state_dir, ref):
     return any(b.get('ref') == ref for b in load(state_dir)['batches'])
 
 
-def request_rebuild(state_dir, ref, why):
+def request_rebuild(state_dir, ref, why, product=None):
     """Ask the next pass to drop batch ``ref`` and cut its members again on the trunk's tip —
     a new batch sha whose push starts a fresh run on the trunk's own workflow. The CI start
     queue's answer to a batch run it can neither re-run nor replace
@@ -209,13 +246,28 @@ def request_rebuild(state_dir, ref, why):
     True when the chain holds ``ref`` (the request is written), else False."""
     if not holds(state_dir, ref):
         return False
+    if store_on(product):
+        def ask(data):
+            data = data if isinstance(data, dict) else {}
+            data[ref] = {'why': why, 'at': now_iso()}
+            return data
+        return _store_update(os.path.join(state_dir, REBUILD_FILE), ask, {})
     data = load_rebuilds(state_dir)
     data[ref] = {'why': why, 'at': now_iso()}
     _save_rebuilds(state_dir, data)
     return True
 
 
-def _clear_rebuild(state_dir, ref):
+def _clear_rebuild(state_dir, ref, product=None):
+    if store_on(product):
+        target = os.path.join(state_dir, REBUILD_FILE)
+        if ref in load_rebuilds(state_dir):     # lock-free look first: most drops asked nothing
+            def clear(data):
+                data = data if isinstance(data, dict) else {}
+                data.pop(ref, None)
+                return data
+            _store_update(target, clear, {})
+        return
     data = load_rebuilds(state_dir)
     if data.pop(ref, None) is not None:
         _save_rebuilds(state_dir, data)
@@ -485,7 +537,7 @@ def run(lane, ready):
             else:
                 chain.append(batch)
         # after every verdict, the unjudged still there: a crash mid-pass loses no batch
-        save(lane.state_dir, {'batches': chain + data['batches'][i + 1:]})
+        save(lane.state_dir, {'batches': chain + data['batches'][i + 1:]}, _owner(lane))
 
     # a member QUEUED on a batch the chain no longer holds (a file lost, a record from before
     # a drop that died mid-write) would sit QUEUED for good: it waits, and is cut again
@@ -533,7 +585,7 @@ def run(lane, ready):
             batch = cut(lane, group, trunk_sha, None, st)
             if batch:
                 chain.insert(0, batch)
-                save(lane.state_dir, {'batches': chain})
+                save(lane.state_dir, {'batches': chain}, _owner(lane))
             continue
         if len(chain) >= st['inflight']:
             for f in group:
@@ -550,8 +602,8 @@ def run(lane, ready):
                     base_members=chain[-1]['members'] if base_ref else ())
         if batch:
             chain.append(batch)
-            save(lane.state_dir, {'batches': chain})
-    save(lane.state_dir, {'batches': chain})
+            save(lane.state_dir, {'batches': chain}, _owner(lane))
+    save(lane.state_dir, {'batches': chain}, _owner(lane))
 
 
 def judge(lane, batch, members, heads, trunk_sha, st):
@@ -1037,7 +1089,7 @@ def land(lane, batch, members, trunk_sha, runs=None):
     for f in members:
         b = f['branch']
         if f.get('requested'):
-            drop_request(lane.state_dir, _pr(f))
+            drop_request(lane.state_dir, _pr(f), _owner(lane), out=lane.out)
         else:
             rec = lane.record(f, lane_mod.MERGED, 'method=queue', sha=sha, method='queue',
                               batch=ref)
@@ -1129,7 +1181,7 @@ def _admits(lane, key, kind, f, sha, run_branch=None, urgent=''):
 
 def _drop(lane, batch, why):
     lane.out(f"merge queue: batch {batch['ref']} dropped — {why}")
-    _clear_rebuild(lane.state_dir, batch['ref'])
+    _clear_rebuild(lane.state_dir, batch['ref'], _owner(lane))
     _delete_ref(lane, batch)
 
 
@@ -1183,10 +1235,14 @@ def _send_back(lane, f, kind, text, files, rebase=True):
     lane.out(f"merge queue: {f['branch']} (PR #{_pr(f)}, asf land) {kind} at "
              f"{(f.get('head') or '')[:12]} — {text}; taken again once its head moves")
     lane.results[f['branch']] = 'back'
+    red = {'head': f.get('head'), 'kind': kind, 'why': text[:400], 'at': now_iso()}
+    if store_on(_owner(lane)):
+        _apply_requests(lane.state_dir, [('red', str(_pr(f)), red)], out=lane.out)
+        return
     reqs = load_requests(lane.state_dir)
     r = reqs.get(str(_pr(f)))
     if r is not None:
-        r['red'] = {'head': f.get('head'), 'kind': kind, 'why': text[:400], 'at': now_iso()}
+        r['red'] = red
         save_requests(lane.state_dir, reqs)
 
 
@@ -1225,16 +1281,79 @@ def save_requests(state_dir, reqs):
     os.replace(tmp, requests_path(state_dir))
 
 
-def add_request(state_dir, number, branch, by=None, priority=False):
+def _change_requests(state_dir, changes):
+    """Apply ``changes`` to the requests file in one :func:`asf.state.store.update_at`, on what
+    the file holds *now* — never on a copy read before a pass's host calls, which would put back
+    what another process dropped and drop what it added. Each change names its request by key:
+    ``('add', key, request)``, ``('drop', key)``, ``('red', key, red)``, ``('unred', key)``; a
+    change to a request no longer there is skipped (withdrawn or landed meanwhile). The keys it
+    changed; a :class:`asf.state.store.StoreError` propagates."""
+    done = set()
+
+    def apply(data):
+        data = data if isinstance(data, dict) else {}
+        reqs = data.get('requests')
+        reqs = reqs if isinstance(reqs, dict) else {}
+        for change in changes:
+            verb, key = change[0], change[1]
+            if verb == 'add':
+                reqs[key] = change[2]
+            elif verb == 'drop':
+                if reqs.pop(key, None) is None:
+                    continue
+            elif not isinstance(reqs.get(key), dict):
+                continue
+            elif verb == 'red':
+                reqs[key]['red'] = change[2]
+            elif verb == 'unred':
+                reqs[key].pop('red', None)
+            done.add(key)
+        data['requests'] = reqs
+        return data
+    if changes:
+        store.update_at(requests_path(state_dir), apply, default={'requests': {}})
+    return done
+
+
+def _apply_requests(state_dir, changes, out=None):
+    """:func:`_change_requests` for a pass: a file the store will not write (corrupt — copied
+    aside, never overwritten — or its lock held past the timeout) is one line, and the requests
+    stay as the file holds them."""
+    try:
+        return _change_requests(state_dir, changes)
+    except store.StoreError as e:
+        (out or (lambda s: print(s, flush=True)))(
+            f'merge queue: {REQUESTS_FILE} not written — {e}')
+        return set()
+
+
+def add_request(state_dir, number, branch, by=None, priority=False, product=None):
+    """Record the ``asf land`` request for PR ``number``. Under ``flags.queue_store`` a file the
+    store refuses raises :class:`asf.state.store.StoreError` (the caller says so)."""
+    key = str(int(number))
+    req = {'pr': int(number), 'branch': branch, 'at': now_iso(), **({'by': by} if by else {}),
+           **({'priority': True} if priority else {})}
+    if store_on(product):
+        _change_requests(state_dir, [('add', key, req)])
+        return req
     reqs = load_requests(state_dir)
-    reqs[str(int(number))] = {'pr': int(number), 'branch': branch, 'at': now_iso(),
-                              **({'by': by} if by else {}),
-                              **({'priority': True} if priority else {})}
+    reqs[key] = req
     save_requests(state_dir, reqs)
-    return reqs[str(int(number))]
+    return req
 
 
-def drop_request(state_dir, number):
+def drop_request(state_dir, number, product=None, out=None):
+    """Drop PR ``number``'s request; True when there was one. Under ``flags.queue_store`` with
+    ``out`` (a pass: a landing must not fail on its bookkeeping) a file the store refuses is a
+    line through ``out``; without it, the refusal raises."""
+    if store_on(product):
+        key = str(number)
+        if key not in load_requests(state_dir):   # lock-free look: nothing to drop
+            return False
+        changes = [('drop', key)]
+        done = _apply_requests(state_dir, changes, out) if out else \
+            _change_requests(state_dir, changes)
+        return key in done
     reqs = load_requests(state_dir)
     if reqs.pop(str(number), None) is not None:
         save_requests(state_dir, reqs)
@@ -1288,7 +1407,9 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
     red stays out until it moves; a pending one waits with a line."""
     from asf.harvest import deploy
     reqs = load_requests(lane.state_dir)
-    out, changed = [], False
+    # every change is collected here and applied once, at the end, on the file as it is then
+    # (flags.queue_store): a request `asf land` adds while this loop waits on the host survives
+    out, changes = [], []
     for key, r in ordered_requests(reqs):
         b, n = r['branch'], r['pr']
         if b in taken:
@@ -1299,8 +1420,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             state = got.get('state') if isinstance(got, dict) else None
             if state and state != 'OPEN':
                 lane.out(f'merge queue: asf land PR #{n} is {state.lower()} — request dropped')
-                reqs.pop(key)
-                changed = True
+                changes.append(('drop', key))
             else:
                 lane.out(f'merge queue: asf land PR #{n}: {b} is not on origin — waits')
             continue
@@ -1311,7 +1431,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
         if r.get('red'):
             # the head moved: the old head's red is not this head's verdict
             r.pop('red')
-            changed = True
+            changes.append(('unred', key))
         H.sh(['git', 'fetch', '-q', 'origin', f'+refs/heads/{b}:refs/remotes/origin/{b}'],
              cwd=lane.repo)
         required, why = required_set(lane, head, trunk_sha)
@@ -1336,7 +1456,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             why = f'conflicts with {lane.trunk} — merge or rebase it'
             lane.out(f'merge queue: asf land PR #{n} red at {head[:12]} — {why}')
             r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
-            changed = True
+            changes.append(('red', key, r['red']))
             continue
         if state == 'red':
             failed = [{'name': c.get('name'), 'link': c.get('html_url')}
@@ -1352,7 +1472,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                          f'{lane.trunk} {trunk_sha[:9]} (its red {", ".join(old)} ran on a merge '
                          f'ref from before {lane.trunk} moved)')
                 if r.pop('red', None) is not None:
-                    changed = True
+                    changes.append(('unred', key))
                 continue
             lost = failed and all(
                 flake.infra_red(lane.slug, flake._ids(c['link'])[1], H._gh) for c in failed)
@@ -1372,7 +1492,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             lane.out(f'merge queue: asf land PR #{n} red at its head {head[:12]} — {why}; '
                      f'taken once a new head is green')
             r['red'] = {'head': head, 'kind': 'checks', 'why': why, 'at': now_iso()}
-            changed = True
+            changes.append(('red', key, r['red']))
             continue
         if state != 'green':
             lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — {why}')
@@ -1384,8 +1504,14 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                     'pr': {'number': n, 'state': 'OPEN'}, 'files': files,
                     'class': lane_mod.CODE, 'how': 'ci', 'green': None, 'requested': True,
                     **({'priority': True} if r.get('priority') else {})})
-    if changed:
-        save_requests(lane.state_dir, reqs)
+    if changes:
+        if store_on(_owner(lane)):
+            _apply_requests(lane.state_dir, changes, out=lane.out)
+        else:
+            for change in changes:   # the dropped ones left the loop's copy as they went
+                if change[0] == 'drop':
+                    reqs.pop(change[1], None)
+            save_requests(lane.state_dir, reqs)
     return out
 
 
@@ -1465,8 +1591,12 @@ def cmd_land(args):
         return 2
     n = int(args.pr)
     if args.withdraw:
-        print(f'land: PR #{n} request withdrawn' if drop_request(state_dir, n)
-              else f'land: PR #{n} had no request')
+        try:
+            dropped = drop_request(state_dir, n, product)
+        except store.StoreError as e:
+            print(f'land: PR #{n} request not withdrawn — {e}')
+            return 1
+        print(f'land: PR #{n} request withdrawn' if dropped else f'land: PR #{n} had no request')
         return 0
     slug = lane_mod.repo_slug(product)
     got = H.gh_json(['pr', 'view', str(n), '-R', slug, '--json',
@@ -1483,8 +1613,12 @@ def cmd_land(args):
     if got.get('isCrossRepository'):
         print(f'land: PR #{n} is from a fork — the queue merges branches on {slug} only')
         return 1
-    add_request(state_dir, n, got['headRefName'], by=os.environ.get('USER'),
-                priority=bool(args.priority))
+    try:
+        add_request(state_dir, n, got['headRefName'], by=os.environ.get('USER'),
+                    priority=bool(args.priority), product=product)
+    except store.StoreError as e:
+        print(f'land: PR #{n} not requested — {e}')
+        return 1
     print(f"land: PR #{n} ({got['headRefName']}) requested"
           f"{' at the front of the line' if args.priority else ''} — the merge queue takes it once its "
           f"required checks are success on its exact head, and lands it when its batch is green "
