@@ -41,6 +41,7 @@ class FakeGH:
         self.mergeable = {}   # number -> CONFLICTING|MERGEABLE (default UNKNOWN)
         self.head_oid = {}    # number -> current head sha (when a test reads it)
         self.annotations = {}  # job id -> [annotation]
+        self.drafts = None    # branches whose open PR is a draft (None: `pr list` unread)
         self.calls = []
         self.logs, self.steps = {}, {}
 
@@ -62,6 +63,8 @@ class FakeGH:
             return 0, '', ''
         if args[:2] == ['run', 'list']:
             return 0, '[]', ''
+        if args[:2] == ['pr', 'list'] and self.drafts is not None:
+            return 0, json.dumps([{'headRefName': b, 'isDraft': True} for b in self.drafts]), ''
         if args[0] == 'api' and '/actions/jobs/' in args[-1]:
             job = args[-1].split('/actions/jobs/')[1].split('/')[0]
             if args[-1].endswith('/logs'):
@@ -936,3 +939,126 @@ class StaleBatchAheadConflict(RegateHolds):
 
     test_a_hold_on_a_job_nobody_re_ran_is_gated_again = None
     test_a_hold_the_triage_re_ran_stands = None
+
+
+class OneTestedTree(QueueRepo):
+    """Memo C1: a 1-member batch whose tree is the PR head's own, green on its own run, inherits
+    that verdict — no batch ref, no second heavy run."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')   # on the trunk's tip
+
+    def test_a_lone_head_green_on_the_trunk_tip_lands_on_its_own_verdict(self):
+        head = self.heads()['worker/T-0001']
+        self.gh.checks[head] = [check_run('gate'), check_run('gate-tests')]
+        trunk = self.heads()['main']
+        ln = self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        main = self.heads()['main']
+        self.assertNotEqual(main, trunk)
+        self.assertEqual(ln.results, {'worker/T-0001': 'landed'})
+
+        def tree(s):
+            return sh(['git', 'rev-parse', f'{s}^{{tree}}'], cwd=self.origin).stdout.strip()
+        self.assertEqual(tree(main), tree(head))
+        self.assertTrue(ln.is_ancestor(head, main))
+        self.assertEqual(self.batches(), [])
+        self.assertFalse([b for b in self.heads() if b.startswith('batch/')])   # nothing pushed
+        self.assertTrue(any('one tested tree lands once' in l for l in self.lines), self.lines)
+        statuses = [c for c in self.gh.calls if c[:2] == ['api', '-X'] and '/statuses/' in c[3]]
+        self.assertTrue(any('on this exact tree' in ' '.join(c) for c in statuses), statuses)
+        r = self.lane_of('worker/T-0001')
+        self.assertEqual((r['state'], r['sha']), (lane.MERGED, main))
+
+    def test_a_head_behind_the_trunk_tip_runs_the_batch_as_ever(self):
+        head = self.heads()['worker/T-0001']
+        self.gh.checks[head] = [check_run('gate'), check_run('gate-tests')]
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        (batch,) = self.batches()
+        self.assertNotIn('inherited', batch)
+        self.assertEqual(self.heads()[batch['ref']], batch['sha'])
+
+    def test_a_head_not_green_on_every_required_check_runs_the_batch(self):
+        head = self.heads()['worker/T-0001']
+        for checks in ([check_run('gate'), check_run('gate-tests', 'skipped')],
+                       [check_run('gate')], []):
+            self.gh.checks[head] = checks
+            self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+            (batch,) = self.batches()
+            self.assertNotIn('inherited', batch)
+            merge_queue.save(self.state_dir, {'batches': []})
+
+    def test_two_members_never_inherit(self):
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        for b in ('worker/T-0001', 'worker/T-0002'):
+            self.gh.checks[self.heads()[b]] = [check_run('gate'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1),
+                                      self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',))])
+        (batch,) = self.batches()
+        self.assertNotIn('inherited', batch)
+
+
+class OutOfTheQueue(QueueRepo):
+    """A draft PR, or an operator withdraw of a lane-queued PR, takes it out of its batch."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1),
+                                      self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',))])
+        (self.batch,) = self.batches()
+
+    def test_a_draft_pr_leaves_its_batch_whoever_queued_it(self):
+        self.gh.drafts = {'worker/T-0001'}
+        self.green(self.batch['sha'])
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], self.batch['base'])      # never landed
+        self.assertNotIn(self.batch['ref'], self.heads())
+        r = self.lane_of('worker/T-0001')
+        self.assertEqual(r['state'], lane.WAITING)
+        self.assertIn('draft', r['reason'])
+        (recut,) = self.batches()
+        self.assertEqual([m['branch'] for m in recut['members']], ['worker/T-0002'])
+
+    def test_an_operator_withdraw_of_a_lane_queued_pr_takes_it_out_until_asked_again(self):
+        merge_queue.mark_withdrawn(self.state_dir, 1, head=self.heads()['worker/T-0001'])
+        self.green(self.batch['sha'])
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], self.batch['base'])
+        r = self.lane_of('worker/T-0001')
+        self.assertEqual(r['state'], lane.WAITING)
+        self.assertIn('withdrawn', r['reason'])
+        (recut,) = self.batches()
+        self.assertEqual([m['branch'] for m in recut['members']], ['worker/T-0002'])
+        # the lane gates it again: the queue keeps it out of the next cut
+        merge_queue.save(self.state_dir, {'batches': []})
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        self.assertEqual(self.batches(), [])
+        # asked again (asf land 1 clears the mark): cut again
+        merge_queue.clear_withdrawn(self.state_dir, [1])
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        self.assertEqual([m['pr'] for m in self.batches()[0]['members']], [1])
+
+    def test_a_withdraw_is_spent_once_the_head_moves(self):
+        merge_queue.mark_withdrawn(self.state_dir, 1, head=self.heads()['worker/T-0001'])
+        self.queue_pass(self.lane(), [])
+        self.push_lane('worker/T-0001', {'a.txt': 'a2\n'}, 'feat: a again')
+        merge_queue.save(self.state_dir, {'batches': []})
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        self.assertEqual(merge_queue.load_withdrawn(self.state_dir), {})
+        self.assertEqual([m['pr'] for m in self.batches()[0]['members']], [1])
+
+    def test_asf_land_withdraw_marks_a_factory_pr(self):
+        from asf import cli
+        self.gh.head_oid = {1: self.heads()['worker/T-0001']}
+        args = cli.build_parser().parse_args(['land', '1', '--withdraw'])
+        with mock.patch.object(env, 'load_product', lambda *_a: self.product()), \
+                mock.patch('builtins.print'):
+            self.assertEqual(merge_queue.cmd_land(args), 0)
+        self.assertEqual(merge_queue.load_withdrawn(self.state_dir)['1']['head'],
+                         self.heads()['worker/T-0001'])

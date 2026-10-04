@@ -234,8 +234,13 @@ branch's head once it has a PR — two runs, one sha, twice the runners.
 push, the lane's post-merge cancel) names run id, branch, head sha, reason and what replaces it,
 and writes a claim (:func:`claim_cancel`, ``ci-cancels.json``). :func:`explain_cancels` (each
 pass) tells every other cancelled run apart: a job past its ``timeout-minutes`` is a verdict
-(named, never re-run), a concurrency supersede names the newer run, and an orphaned open-PR head
-or trunk run is re-run once. Relief never cancels a trunk run; ``relief: exempt`` is a run it
+(named, never re-run) — unless the job's measured p50 (:meth:`Source.job_p50_min`) is under half
+that timeout: then the timeout measured runner contention, not the code, and the run's failed and
+cancelled jobs are re-run once per head (``contention-rerun``); a second such cancel of the same
+job on the same head is not re-run but raised as an alarm (``ci queue: ALARM …``, a red doctor
+row, :func:`contention_lines`) — 2026-10-04, a 10 min ``rules`` job (p50 2.5 min) cancelled by its
+timeout held a PR for hours as if it were red. A concurrency supersede names the newer run, and an
+orphaned open-PR head or trunk run is re-run once. Relief never cancels a trunk run; ``relief: exempt`` is a run it
 left alone.
 
 :func:`cancel_duplicate_pushes` (every tick, from the lane's pass, before the relief and on the
@@ -965,6 +970,11 @@ class Source:
         ``timeout-minutes``, ``()`` when none did, None when unreadable."""
         return None
 
+    def job_p50_min(self, workflow, job):
+        """The p50 wall minutes of job ``job`` (its key: a matrix leg's suffix dropped) over the
+        workflow's recent green runs, or None when unknown."""
+        return None
+
     def busy_runners(self):
         """``{runner name: {'run': run, 'job': name, 'repo': slug}}`` for every job in progress
         on a runner, across every repo the runners serve; None when any of it is unreadable."""
@@ -1222,7 +1232,8 @@ class GitHubSource(Source):
         if not self.slug or not run_id:
             return None
         text = self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}/jobs', '--paginate',
-                         '--jq', '.jobs[]|select(.conclusion=="cancelled")|[.id,.name]|@tsv'])
+                         '--jq', '.jobs[]|select(.conclusion=="cancelled" or '
+                                 '.conclusion=="timed_out")|[.id,.name]|@tsv'])
         if text is None:
             return None
         for line in text.splitlines():
@@ -1233,6 +1244,30 @@ class GitHubSource(Source):
             if got:
                 return name, int(got.group(1) or 0)
         return ()
+
+    def job_p50_min(self, workflow, job):
+        key = (self.slug, workflow, _job_key(job))
+        if key in _JOB_P50:
+            return _JOB_P50[key]
+        ids = self.run_ids(workflow, JOB_P50_RUNS) if self.slug and workflow else None
+        if ids is None:
+            return None                         # unreadable: not cached, asked again
+        mins = []
+        for rid, attempt in ids:
+            text = self._gh(['api', f'repos/{self.slug}/actions/runs/{rid}/attempts/{attempt}/'
+                                    'jobs?per_page=100',
+                             '--jq', '.jobs[]|select(.conclusion=="success")|'
+                                     '[.name,.started_at,.completed_at]|@tsv'])
+            for line in (text or '').splitlines():
+                parts = line.split('\t')
+                if len(parts) != 3 or _job_key(parts[0]) != key[2]:
+                    continue
+                a, b = _parse(parts[1]), _parse(parts[2])
+                if a is not None and b is not None and b >= a:
+                    mins.append((b - a).total_seconds() / 60)
+        got = round(_p50(mins), 2) if mins else None
+        _JOB_P50[key] = got
+        return got
 
     def run_workflow(self, run_id):
         if not self.slug or not run_id:
@@ -1752,7 +1787,8 @@ def runner_rows(product, now=None):
         return []
     now = now or _now()
     ph = _phantoms(load(product.name), now)
-    stuck = [(True, False, text) for text in stuck_lines(product, now)]
+    stuck = [(True, False, text) for text in stuck_lines(product, now)
+             + contention_lines(product, now)]
     if not ph:
         return [(True, True, 'no runner busy without a job'), *stuck]
     return [(True, _age(ph[n].get('since'), now) <= PHANTOM_RED_S, phantom_text(n, ph[n], now))
@@ -2765,6 +2801,87 @@ def _sha9(sha):
     return str(sha or '?')[:9]
 
 
+#: how many recent green runs of a workflow a job's p50 is measured over
+JOB_P50_RUNS = 10
+#: ``{(slug, workflow, job key): p50 minutes or None}``, measured once a process
+_JOB_P50 = {}
+#: the claim causes of a timeout read as contention (:func:`_contention`)
+CONTENTION_RERUN, CONTENTION_ALARM = 'contention-rerun', 'contention-alarm'
+
+
+def _job_key(name):
+    """A job's name without its matrix leg: ``test (3.12)`` → ``test``."""
+    return re.sub(r'\s*\([^()]*\)\s*$', '', str(name or '')).strip()
+
+
+def _p50(values):
+    """The nearest-rank median of ``values`` (non-empty)."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(0.5 * len(ordered)) - 1)]
+
+
+def _new_attempt(claim, run):
+    """True when ``run`` is a later attempt than the one a contention re-run claimed: the
+    re-run was cancelled again and is judged once more."""
+    if not isinstance(claim, dict) or claim.get('cause') != CONTENTION_RERUN:
+        return False
+    a, c = run.get('attempt'), claim.get('attempt')
+    return isinstance(a, int) and isinstance(c, int) and a > c
+
+
+def _contention(product, src, wf, run, job, mins, claims, state_dir, who, out, dry_run, now):
+    """True when the timeout of ``job`` (``mins`` its ``timeout-minutes``) on ``run`` is runner
+    contention, not a verdict — the job's measured p50 is under half that timeout — and was
+    handled: re-run once per head and job, or, the second time, raised as an alarm. False (the
+    timeout stands as a verdict) when the p50 is unknown or not that short."""
+    if not mins:
+        return False
+    p50 = src.job_p50_min(wf, job)
+    if p50 is None or p50 >= mins / 2:
+        return False
+    rid, branch, sha = run.get('databaseId'), run.get('headBranch') or '?', run.get('headSha')
+    key = _job_key(job)
+    seen = any(isinstance(c, dict) and c.get('cause') in (CONTENTION_RERUN, CONTENTION_ALARM)
+               and c.get('sha') == sha and c.get('branch') == branch and c.get('job') == key
+               for c in claims.values())
+    attempt = run.get('attempt')
+    extra = {'job': key, 'sha': sha, 'branch': branch, 'p50': p50, 'timeout': mins,
+             'attempt': attempt if isinstance(attempt, int) else 1}
+    if seen:
+        out(f'ci queue: ALARM {who} — job {job} cancelled by its {mins} min timeout again on '
+            f'the same head (p50 {p50} min): runner contention twice, not re-run')
+        if not dry_run:
+            claim_cancel(state_dir, rid, 'contention-alarm', now, **extra)
+        return True
+    if dry_run:
+        out(f'ci queue: would re-run {who} — job {job} hit its {mins} min timeout with p50 '
+            f'{p50} min: contention, not a verdict')
+        return True
+    ok = src._gh(['run', 'rerun', str(rid), '--failed', '-R', product.repo_slug]) is not None
+    out(f'ci queue: {who} cancelled by the host — job {job} hit its {mins} min timeout but its '
+        f'p50 is {p50} min: runner contention, not a verdict — '
+        + ('re-run of its failed jobs requested (once per head)' if ok
+           else 're-run refused, not asked again'))
+    claim_cancel(state_dir, rid, 'contention-rerun' if ok else 'contention-refused', now,
+                 **extra)
+    return True
+
+
+def contention_lines(product, now=None):
+    """One line per contention alarm still in the claims (a job cancelled by its timeout twice
+    on one head while its p50 is under half that timeout) — the doctor's red row. No ``gh``
+    call."""
+    now = now or _now()
+    out = []
+    for rid, c in sorted(load_claims(env.state_dir(product.name)).items()):
+        if isinstance(c, dict) and c.get('cause') == CONTENTION_ALARM \
+                and _age(c.get('at'), now) <= CLAIM_TTL_S:
+            out.append(f"CI CONTENTION run {rid} on {c.get('branch') or '?'} at "
+                       f"{_sha9(c.get('sha'))}: job {c.get('job')} cancelled by its "
+                       f"{c.get('timeout')} min timeout twice (p50 {c.get('p50')} min)")
+    return out
+
+
 def explain_cancels(product, source=None, out=print, dry_run=False, listing=None, now=None):
     """Give every cancelled run one cause. A run the factory cancelled itself is claimed
     (:func:`claim_cancel`, or a ``relief`` / ``stalls`` record) and skipped. Any other cancelled
@@ -2801,8 +2918,10 @@ def _explain(product, source, out, dry_run, listing, now):
         runs = _list_runs(src, product, wf, listing) or ()
         for r in runs:
             rid = r.get('databaseId')
-            if (not rid or r.get('status') != 'completed' or r.get('conclusion') != 'cancelled'
-                    or str(rid) in claims or str(rid) in known):
+            if (not rid or r.get('status') != 'completed'
+                    or r.get('conclusion') not in ('cancelled', 'timed_out')
+                    or str(rid) in known or (str(rid) in claims
+                                             and not _new_attempt(claims[str(rid)], r))):
                 continue
             created = _parse(r.get('createdAt'))
             if created is None or (now - created).total_seconds() > EXPLAIN_WINDOW_S:
@@ -2814,6 +2933,10 @@ def _explain(product, source, out, dry_run, listing, now):
                 continue                        # unreadable: asked again next pass
             if got:
                 job, mins = got
+                if _contention(product, src, wf, r, job, mins, claims, state_dir, who, out,
+                               dry_run, now):
+                    n += 1
+                    continue
                 out(f'ci queue: {who} cancelled by the host — job {job} passed its {mins} min '
                     f'timeout; a timeout is a verdict, not re-queued (a re-run would time out '
                     f'again), replaced by nothing')

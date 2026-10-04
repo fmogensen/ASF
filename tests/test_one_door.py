@@ -34,6 +34,8 @@ class AsfLand(QueueRepo):
         merge_queue.add_request(self.state_dir, 7, 'hotfix/fix-x')
 
     def test_asf_land_lands_a_hotfix_through_the_queue_only_on_green(self):
+        # the trunk moved past the head: the batch is a tree no run judged yet
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
         # pending on its head: not cut
         self.gh.checks[self.head] = [check_run('gate'), check_run('gate-tests', None, 'in_progress')]
         self.queue_pass(self.lane(), [])
@@ -216,34 +218,138 @@ class AsfLand(QueueRepo):
         (batch,) = self.batches()
         self.assertEqual([m['pr'] for m in batch['members']], [9, 7])
 
-    def test_a_priority_request_is_cut_ahead_of_a_full_chain_and_lands_first(self):
+    def test_a_priority_request_orders_the_next_cut_never_jumps_a_full_chain(self):
+        """2026-10-04: a priority cut on the trunk tip went in at chain[0], past
+        merge_queue.inflight, and held #1081's green batch 50+ min. Priority orders the next cut
+        only: the chain keeps its batches, its order and its limit."""
         mq = {'merge_queue': {'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 1}}
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')     # each batch is a tree of its own
         self.green(self.head)
         self.queue_pass(self.lane(self.product(**mq)), [])
         (ahead,) = self.batches()                          # #7 fills the one in-flight slot
         self.push_lane('hotfix/fix-y', {'y.txt': 'y\n'}, 'hotfix: y')
+        self.push_lane('hotfix/fix-z', {'z.txt': 'z\n'}, 'hotfix: z')
+        self.push_main({'n.txt': 'n\n'}, 'trunk moves again')
+        merge_queue.add_request(self.state_dir, 8, 'hotfix/fix-z')
         merge_queue.add_request(self.state_dir, 9, 'hotfix/fix-y', priority=True)
         self.green(self.heads()['hotfix/fix-y'])
-        trunk = self.heads()['main']
+        self.green(self.heads()['hotfix/fix-z'])
+        # the trunk moved, so #7's batch is cut again — within the limit, never beside a jump
         self.queue_pass(self.lane(self.product(**mq)), [])
-        first, second = self.batches()                     # cut, and put first in the chain
-        self.assertEqual([m['pr'] for m in first['members']], [9])
-        self.assertTrue(first['members'][0]['priority'])
-        self.assertEqual((first['base'], first['base_ref']), (trunk, None))
-        self.assertEqual(second['ref'], ahead['ref'])
-        self.assertTrue(any('priority #9 cut ahead of 1 batch(es) in flight' in l
+        self.assertEqual(len(self.batches()), 1)
+        self.assertFalse(any('cut ahead of' in l for l in self.lines), self.lines)
+        (ahead,) = self.batches()
+        self.assertEqual(sorted(m['pr'] for m in ahead['members'])[:1], [7])
+        # the batch in flight goes green: it lands, the priority request goes first in the next cut
+        self.green(ahead['sha'])
+        self.gh.pr_state = {7: 'MERGED'}
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        self.assertEqual(self.heads()['main'], ahead['sha'])
+
+    def test_a_full_chain_holds_a_priority_request_and_its_green_batch_is_never_staled(self):
+        mq = {'merge_queue': {'ref_prefix': 'batch/', 'batch_size': 1, 'inflight': 1}}
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+        self.green(self.head)
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        (ahead,) = self.batches()
+        self.green(ahead['sha'])                           # green on the trunk tip
+        self.push_lane('hotfix/fix-y', {'y.txt': 'y\n'}, 'hotfix: y')
+        merge_queue.add_request(self.state_dir, 9, 'hotfix/fix-y', priority=True)
+        self.green(self.heads()['hotfix/fix-y'])
+        self.gh.pr_state = {7: 'MERGED'}
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        # the green batch landed first, as cut; the priority request is the next cut, on top
+        self.assertEqual(self.heads()['main'], ahead['sha'])
+        (nxt,) = self.batches()
+        self.assertEqual([m['pr'] for m in nxt['members']], [9])
+        self.assertEqual(nxt['base'], ahead['sha'])
+        # while the chain is full, a priority request waits: nothing is cut past inflight
+        self.push_lane('hotfix/fix-w', {'w.txt': 'w\n'}, 'hotfix: w')
+        merge_queue.add_request(self.state_dir, 10, 'hotfix/fix-w', priority=True)
+        self.green(self.heads()['hotfix/fix-w'])
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        self.assertEqual([b['ref'] for b in self.batches()], [nxt['ref']])
+        self.assertTrue(any('PR #10' in l and 'merge queue full' in l for l in self.lines)
+                        or any('PR #10, asf land) waits' in l for l in self.lines), self.lines)
+
+    def test_a_green_batch_on_the_trunk_tip_lands_before_a_pending_one_below_it(self):
+        """A batch cut on the trunk (not stacked) that is green lands at once, whatever sits
+        below it in the chain: the pending ones are cut again on the new tip."""
+        self.setUpBacks()
+        merge_queue.drop_request(self.state_dir, 7)
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        # a chain as an older pass (a priority jump, a split) left it: both cut on the trunk
+        ln = self.lane()
+        ln.fresh_trunk()
+        trunk, st = self.heads()['main'], merge_queue.settings(ln.conv)
+        low = merge_queue.cut(ln, [self.entry('worker/T-0001', 1)], trunk, None, st)
+        alone = merge_queue.cut(ln, [self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',))],
+                                trunk, None, st)
+        merge_queue.save(self.state_dir, {'batches': [low, alone]})
+        self.green(alone['sha'])                          # green on the trunk tip; `low` pending
+        self.gh.pr_state = {2: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], alone['sha'])
+        self.assertTrue(any(f"{alone['ref']} was green on main and landed first" in l
                             for l in self.lines), self.lines)
-        # a second pass cuts nothing more past the limit: one priority batch at a time
-        self.queue_pass(self.lane(self.product(**mq)), [])
-        self.assertEqual(len(self.batches()), 2)
-        # it lands first; the batch it jumped is cut again on the new tip
-        self.green(first['sha'])
-        self.gh.pr_state = {9: 'MERGED'}
-        self.queue_pass(self.lane(self.product(**mq)), [])
-        self.assertEqual(self.heads()['main'], first['sha'])
-        (again,) = self.batches()
-        self.assertEqual([m['pr'] for m in again['members']], [7])
-        self.assertEqual(again['base'], first['sha'])
+        (again,) = self.batches()                         # `low` cut again on the new tip
+        self.assertEqual([m['pr'] for m in again['members']], [1])
+        self.assertEqual(again['base'], alone['sha'])
+
+    def test_priority_is_re_read_every_pass_a_plain_request_demotes_a_cut_batch(self):
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+        merge_queue.add_request(self.state_dir, 7, 'hotfix/fix-x', priority=True)
+        self.green(self.head)
+        self.queue_pass(self.lane(), [])
+        (batch,) = self.batches()
+        self.assertTrue(batch['members'][0].get('priority'))
+        # asked again, plain: the batch already cut reads it on the next pass
+        merge_queue.add_request(self.state_dir, 7, 'hotfix/fix-x')
+        self.queue_pass(self.lane(), [])
+        (batch,) = self.batches()
+        self.assertNotIn('priority', batch['members'][0])
+        # --demote does the same
+        merge_queue.add_request(self.state_dir, 7, 'hotfix/fix-x', priority=True)
+        self.queue_pass(self.lane(), [])
+        self.assertTrue(self.batches()[0]['members'][0].get('priority'))
+        self.assertTrue(merge_queue.demote_request(self.state_dir, 7))
+        self.assertFalse(merge_queue.demote_request(self.state_dir, 7))
+        self.queue_pass(self.lane(), [])
+        self.assertNotIn('priority', self.batches()[0]['members'][0])
+        self.assertNotIn('priority', merge_queue.load_requests(self.state_dir)['7'])
+
+    def test_a_landed_prs_request_is_consumed_and_never_cut_again(self):
+        """2026-10-04: a landed PR's request lingered and the PR was cut into a new batch."""
+        self.green(self.head)
+        sh(['git', 'push', '-q', 'origin', 'hotfix/fix-x:main'], cwd=self.worker)   # landed elsewhere
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])
+        self.assertEqual(merge_queue.load_requests(self.state_dir), {})
+        self.assertTrue(any('is on main already' in l for l in self.lines), self.lines)
+
+    def test_a_factory_prs_request_is_consumed_when_its_batch_lands(self):
+        self.setUpBacks()
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+        merge_queue.drop_request(self.state_dir, 7)
+        merge_queue.add_request(self.state_dir, 1, 'worker/T-0001')
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        (batch,) = self.batches()
+        self.green(batch['sha'])
+        self.gh.pr_state = {1: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], batch['sha'])
+        self.assertEqual(merge_queue.load_requests(self.state_dir), {})
+
+    def test_land_demote_flag_is_parsed(self):
+        from asf import cli
+        p = cli.build_parser()
+        self.assertTrue(p.parse_args(['land', '7', '--demote']).demote)
+        self.assertFalse(p.parse_args(['land', '7']).demote)
+        with self.assertRaises(SystemExit), mock.patch('sys.stderr'):
+            p.parse_args(['land', '7', '--demote', '--withdraw'])
 
     def test_land_priority_flag_is_parsed_and_persisted(self):
         from asf import cli

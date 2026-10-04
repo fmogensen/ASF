@@ -569,9 +569,10 @@ class StaleMergeRef(QueueRepo):
                                      red_run('gate-tests', 501, started='2026-10-02T09:49:00Z'),
                                      red_run('gate-tests', 502, 'success',
                                              started='2026-10-03T07:00:00Z')]
-        self.queue_pass(self.lane(), [])
-        (batch,) = self.batches()
-        self.assertEqual([m['branch'] for m in batch['members']], ['hotfix/clock'])
+        ln = self.queue_pass(self.lane(), [])
+        # its head holds the trunk's tip and is green: one tested tree, it lands on that verdict
+        self.assertEqual(ln.results, {'hotfix/clock': 'landed'})
+        self.assertTrue(ln.is_ancestor(self.head, self.heads()['main']))
 
     def test_red_again_on_the_fresh_merge_ref_is_its_own(self):
         self.gh.checks[self.head] = [check_run('gate'), red_run('gate-tests', 501)]

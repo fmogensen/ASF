@@ -1433,6 +1433,9 @@ class Lane:
         self.results = {}
         self.opened = 0
         self.orphans = {}
+        #: ``{branch: pr}`` the last facts pass read on the host (None: not read this pass) — the
+        #: merge queue reads a member's draft flag here
+        self.pr_map = None
         self.orphans_taken = 0
         self.ref_wt = None
         self.ref_wt_error = None
@@ -1476,6 +1479,7 @@ class Lane:
         self.trunk_sha = heads.get(trunk) or H.sh(['git', 'rev-parse', f'origin/{trunk}'],
                                                  cwd=self.repo).stdout.strip()
         pr_map = self.host.prs() if prs else {}
+        self.pr_map = pr_map if prs else None
         self.orphans = self.orphan_claims(runs, heads, pr_map) if prs else {}
         self.orphans_taken = 0
         running = H.try_lock_held(self.state_dir)
@@ -1619,7 +1623,11 @@ class Lane:
         f['customer'] = customer_content.touched(conv, f['files'])
         # a customer page is never landed unread: its diff needs a review whatever its class
         f['review_required'] = f['review_required'] or bool(f['customer'])
-        if f['review_required'] and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
+        # a CODE branch whose review is waived (or not required) is still read: a review of its
+        # exact head that says `changes` is never walked past to GATE as `review: none`
+        # (2026-10-04, T-0571 #1058 — STALE → PR_OPEN → GATE over a changes verdict)
+        if (f['review_required'] or f['class'] == CODE) \
+                and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
             rv = review_mod.review_at(repo, conv, f'origin/{b}', item,
                                        reviews.required(review_kind(f['kind'])),
                                        store=os.path.join(self.state_dir, review_store.DIRNAME))
@@ -1629,7 +1637,14 @@ class Lane:
                                                        trunk=f'origin/{trunk}')
                 body = rv.pop('body', '')
                 rv['customer_row'] = customer_content.has_customer_row(body)
-            f['review'] = rv
+            if not f['review_required'] and rv and rv.get('current') \
+                    and rv.get('verdict') == review_mod.CHANGES:
+                f['review_unwaived'] = (f"{rv.get('path')} says changes on this head"
+                                        + (f" (waiver: {f['review_waived']})"
+                                           if f.get('review_waived') else ''))
+                f['review_required'] = True
+            if f['review_required']:
+                f['review'] = rv
             if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
                 f['review_answered'] = lifecycle.review_answered(self.path, item, rv.get('path'),
                                                                  head)

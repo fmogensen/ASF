@@ -872,6 +872,95 @@ class TestExplainCancels(Base):
         self.assertEqual(self.explain([self.run_of(36618622420)], cause=self.TIMEOUT)[0], 0)
         self.assertEqual(self.lines, [])            # said once
 
+    RULES_TIMEOUT = 'The job has exceeded the maximum execution time of 10m0s\nThe operation was canceled.'
+
+    def contended(self, runs, p50, **kw):
+        """:meth:`explain` with the job's measured p50 answered by ``p50`` (minutes or None)."""
+        orig = ci_queue.GitHubSource.job_p50_min
+        asked = []
+
+        def fake(src, wf, job):
+            asked.append((wf, job))
+            return p50
+        ci_queue.GitHubSource.job_p50_min = fake
+        try:
+            n, gh = self.explain(runs, cause=self.RULES_TIMEOUT, **kw)
+        finally:
+            ci_queue.GitHubSource.job_p50_min = orig
+        return n, gh, asked
+
+    def reruns(self, gh):
+        return [c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']]
+
+    def test_a_timeout_on_a_job_whose_p50_is_under_half_its_timeout_is_contention_rerun_once(self):
+        # 2026-10-04: `rules` (timeout 10 min, p50 2.5 min) cancelled by its timeout held a PR
+        # for hours — contention, not a verdict
+        n, gh, asked = self.contended([dict(self.run_of(1), attempt=1)], 2.5)
+        self.assertEqual(n, 1)
+        self.assertEqual(asked, [('ci.yml', 'm5-soak')])
+        self.assertEqual(self.reruns(gh), [['gh', 'run', 'rerun', '1', '--failed', '-R', 'o/r']])
+        self.assertTrue(any('runner contention, not a verdict' in l for l in self.lines),
+                        self.lines)
+        claim = ci_queue.load_claims(env.state_dir('p'))['1']
+        self.assertEqual((claim['cause'], claim['job'], claim['sha'], claim['branch'],
+                          claim['p50'], claim['timeout']),
+                         ('contention-rerun', 'm5-soak', 'a' * 40, 'task/T-0341', 2.5, 10))
+        # the same attempt is never judged twice
+        self.lines.clear()
+        n, gh, _a = self.contended([dict(self.run_of(1), attempt=1)], 2.5)
+        self.assertEqual((n, self.reruns(gh), self.lines), (0, [], []))
+
+    def test_a_second_contention_cancel_on_the_same_head_is_an_alarm_never_a_second_rerun(self):
+        self.contended([dict(self.run_of(1), attempt=1)], 2.5)
+        self.lines.clear()
+        # the re-run (attempt 2) is cancelled by the same timeout again
+        n, gh, _a = self.contended([dict(self.run_of(1), attempt=2)], 2.5)
+        self.assertEqual(n, 1)
+        self.assertEqual(self.reruns(gh), [])
+        self.assertTrue(any(l.startswith('ci queue: ALARM run 1') for l in self.lines), self.lines)
+        self.assertEqual(ci_queue.load_claims(env.state_dir('p'))['1']['cause'],
+                         'contention-alarm')
+        rows = ci_queue.runner_rows(product(), now=self.t0)
+        self.assertTrue(any(not ok and 'CI CONTENTION run 1' in text and 'm5-soak' in text
+                            for _req, ok, text in rows), rows)
+        # another run on the same head and job is the same alarm, not a re-run
+        self.lines.clear()
+        n, gh, _a = self.contended([dict(self.run_of(2), attempt=1)], 2.5)
+        self.assertEqual(self.reruns(gh), [])
+        self.assertTrue(any('ALARM' in l for l in self.lines), self.lines)
+
+    def test_a_timeout_on_a_job_whose_p50_is_not_that_short_is_still_a_verdict(self):
+        n, gh, _a = self.contended([self.run_of(1)], 6)
+        self.assertEqual(self.reruns(gh), [])
+        self.assertEqual(ci_queue.load_claims(env.state_dir('p'))['1']['cause'], 'job-timeout')
+        self.assertTrue(any('a timeout is a verdict' in l for l in self.lines), self.lines)
+
+    def test_a_timeout_with_no_measured_p50_is_still_a_verdict(self):
+        n, gh, _a = self.contended([self.run_of(1)], None)
+        self.assertEqual(self.reruns(gh), [])
+        self.assertEqual(ci_queue.load_claims(env.state_dir('p'))['1']['cause'], 'job-timeout')
+        self.assertEqual(ci_queue.runner_rows(product(), now=self.t0)[-1][1], True)
+
+    def test_job_p50_is_measured_from_the_workflows_green_runs_by_job_key(self):
+        listed = [{'databaseId': 11, 'conclusion': 'success', 'attempt': 1},
+                  {'databaseId': 12, 'conclusion': 'failure', 'attempt': 2}]
+        jobs = {'11': 'rules (ubuntu)\t2026-10-04T10:00:00Z\t2026-10-04T10:02:00Z\n'
+                      'site\t2026-10-04T10:00:00Z\t2026-10-04T10:30:00Z\n',
+                '12': 'rules\t2026-10-04T11:00:00Z\t2026-10-04T11:03:00Z\n'}
+
+        def run(argv, **k):
+            if argv[:3] == ['gh', 'run', 'list']:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(listed), '')
+            if argv[:2] == ['gh', 'api']:
+                rid = argv[2].split('/runs/')[1].split('/')[0]
+                return subprocess.CompletedProcess(argv, 0, jobs[rid], '')
+            return subprocess.CompletedProcess(argv, 1, '', 'no')
+        ci_queue._JOB_P50.clear()
+        self.addCleanup(ci_queue._JOB_P50.clear)
+        src = ci_queue.GitHubSource(product(), run=run)
+        self.assertEqual(src.job_p50_min('ci.yml', 'rules (3.12)'), 2.0)
+        self.assertIsNone(src.job_p50_min('ci.yml', 'missing'))
+
     def test_a_supersede_names_the_run_that_replaced_it(self):
         later = dict(self.run_of(2), status='in_progress', conclusion='',
                      createdAt='2026-09-25T11:40:00Z', headSha='b' * 40)

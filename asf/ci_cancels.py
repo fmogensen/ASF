@@ -40,7 +40,10 @@ GROUPS = {
 #: plus the host's own annotation for a job that hit its declared limit — stronger evidence than
 #: any supersede rule, so it is honoured as a claim rather than re-read from the head pair.
 HONOURED = {'relief': 'relief', 'stall': 'stall', 'duplicate-push': 'dedupe',
-            'merged-pr': 'merged', 'job-timeout': 'timeout'}
+            'merged-pr': 'merged', 'job-timeout': 'timeout',
+            # a timeout read as runner contention (asf.ci_queue._contention): still the job's limit
+            'contention-rerun': 'timeout', 'contention-alarm': 'timeout',
+            'contention-refused': 'timeout'}
 
 #: the landed cause strings that are `explain_cancels`' own readings of the evidence, not a claim
 #: of authorship, and are re-classified here from the head pair instead. `superseded` in
