@@ -84,6 +84,21 @@ conventions:
   #   gate: combined
   #   branches_per_tick: 12
   #   gate_timeout_s: 600
+  # the dwell-time watchdog (asf.dwell; `asf watchdog`, and the tick's `watchdog` step, which runs
+  # with every wave): the longest each state may last, in minutes, or `off` (defaults shown).
+  # Only check_cancelled (re-run the failed jobs once per head) and ungrantable_hold (drop it)
+  # act; every other breach is a `watchdog: BREACH` line, a `watchdog` event and a Bug.
+  # watchdog:
+  #   tick_running: 15
+  #   pr_green_not_landing: 30
+  #   check_cancelled: 10
+  #   green_batch_blocked: 10
+  #   chain_no_cut: 20
+  #   launchable_idle: 10
+  #   ungrantable_hold: 0
+  #   record_behind: 15
+  #   runner_offline: 10
+  #   branch_no_pr: 10
   # prs_per_tick: 6
   # land_window_days: 7    # the window `asf status`'s Features row measures time-to-land over
   # the heading a plan uses to mark one task's section (default "### Task"; not read by the

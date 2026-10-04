@@ -578,14 +578,10 @@ def worker_row(row, brief, items, host_load_bypass=False):
                         local_only=cloud_mod.truthy(item.get('local_only')))
 
 
-def relaunch_capped(product, row, wrow, out=print):
-    """True when ``wrow`` is not launched: the same job was handed the same state (head, card,
-    cause) :data:`asf.workers.relaunch.CAP` times, or once with a terminal report
-    (:func:`asf.workers.relaunch.verdict`). The job's newest run is parked instead — the feeder
-    shows it ``PARKED`` from the next read on — unless the last report names a commit git
-    verifies on the trunk and the branch holds nothing past it: then the run is closed on that
-    sha (:func:`asf.workers.trunkclose.close`), never parked. ``wrow.cause`` is set for the
-    ledger either way."""
+def relaunch_assessment(product, row, wrow):
+    """``(reason, landed, hit)`` — the relaunch cap's judgement of ``wrow``, read-only
+    (:func:`asf.workers.relaunch.assess`, and the trunk evidence a park would close on); sets
+    ``wrow.cause``. :func:`relaunch_capped` acts on it; :func:`screen`'s preview only reads it."""
     wrow.cause = relaunch.cause_key(row.kind, getattr(row, 'correction', '') or '')
     path = pool_mod.sessions_path(product)
     head = None
@@ -594,15 +590,27 @@ def relaunch_capped(product, row, wrow, out=print):
                             f'refs/remotes/origin/{wrow.branch}'],
                            cwd=product.repo_dir, capture_output=True, text=True)
         head = p.stdout.strip() if p.returncode == 0 else None
+    reason, landed = relaunch.assess(path, wrow.job, wrow.item, head=head,
+                                     card=wrow.card_digest, cause=wrow.cause,
+                                     repo=product.repo_dir, main=product.main,
+                                     writes=landing.item_writes(product, wrow.item),
+                                     product=product)
+    hit = trunkclose.evidence(path, wrow.item, product.repo_dir, product.main,
+                              landing.item_writes(product, wrow.item), product=product) \
+        if reason and landed else None
+    return reason, landed, hit
+
+
+def relaunch_capped(product, row, wrow, out=print):
+    """True when ``wrow`` is not launched: the same job was handed the same state (head, card,
+    cause) :data:`asf.workers.relaunch.CAP` times, or once with a terminal report
+    (:func:`asf.workers.relaunch.verdict`). The job's newest run is parked instead — the feeder
+    shows it ``PARKED`` from the next read on — unless the last report names a commit git
+    verifies on the trunk and the branch holds nothing past it: then the run is closed on that
+    sha (:func:`asf.workers.trunkclose.close`), never parked. ``wrow.cause`` is set for the
+    ledger either way."""
     try:
-        reason, landed = relaunch.assess(path, wrow.job, wrow.item, head=head,
-                                         card=wrow.card_digest, cause=wrow.cause,
-                                         repo=product.repo_dir, main=product.main,
-                                         writes=landing.item_writes(product, wrow.item),
-                                         product=product)
-        hit = trunkclose.evidence(path, wrow.item, product.repo_dir, product.main,
-                                  landing.item_writes(product, wrow.item), product=product) \
-            if reason and landed else None
+        reason, landed, hit = relaunch_assessment(product, row, wrow)
     except Exception as e:  # noqa: BLE001 — the cap never blocks a wave by failing
         out(f'relaunch: cap check failed for {wrow.job} — {e}')
         return False
@@ -625,6 +633,158 @@ def relaunch_capped(product, row, wrow, out=print):
                             **relaunch.park_fields(reason, wrow.card_digest, pool_mod.now_iso()))
     out(f'parked   {wrow.job:<24} {wrow.item:<10} — {reason}')
     return True
+
+
+#: what :func:`screen` says of a row (``Screened.kind``): it starts, or why it does not
+STARTS, WAITS, HELD, CLOSED, HOST, NO_SEAT, CAPPED = (
+    '', 'waits', 'held', 'closed', 'host', 'no seat', 'relaunch cap')
+
+
+class Screened:
+    """One planned row through :func:`screen`: ``why`` empty when the wave starts it, else the
+    wave's own words for why not, ``kind`` one of the names above. ``wrow``/``brief`` are the
+    worker row and brief a starting row launches with (the live wave's; a preview's ``wrow`` is
+    the bare row the relaunch cap judged)."""
+
+    def __init__(self, row, why='', kind=STARTS, bypass=False, wrow=None, brief=None):
+        self.row, self.why, self.kind, self.bypass = row, why, kind, bypass
+        self.wrow, self.brief = wrow, brief
+
+    @property
+    def starts(self):
+        return self.row.launches and not self.why
+
+
+def _quiet(_line):
+    return None
+
+
+def preview_row(product, row, items):
+    """The worker row the relaunch cap judges, without a brief: the job a brief of ``row``'s
+    kind launches as and the card digest it would state (:func:`asf.briefs.build.card_digest`)."""
+    briefs_build = importlib.import_module('asf.briefs.build')  # the module, not briefs.build()
+    kind = briefs_build.normalize_kind(row.brief_kind)
+    attr = KIND_JOB_KEY.get(kind)
+    return pool_mod.Row(job_name(kind, row.item_id, key=getattr(row, attr, None) if attr else None),
+                        row.item_id, kind=kind, branch=row.branch or None,
+                        card_digest=briefs_build.card_digest(product, row.item_id, items))
+
+
+def _preview_capped(product, row, wrow):
+    """The relaunch cap's refusal of ``wrow`` in words, '' when it would launch — what
+    :func:`relaunch_capped` would print, never parking or closing anything."""
+    try:
+        reason, landed, hit = relaunch_assessment(product, row, wrow)
+    except Exception:  # noqa: BLE001 — as in the wave: a failed cap check never refuses
+        return ''
+    if not reason:
+        return ''
+    if isinstance(landed, landing.Unknown):
+        return f'{trunkclose.WAITS_UNKNOWN}: {landed.why}'
+    if hit:
+        return f'landed: {hit[0][:9]} (verified on origin/{product.main}); closed, not relaunched'
+    return reason
+
+
+def screen(product, planned, items, running, held, seats, host=None, bypass_open=False,
+           act=False, out=print, build=None, ctx=None):
+    """``[Screened]`` — the wave's one per-row filter over ``planned``, in plan order: a row
+    that does not launch (``WAITS ON …``); an item an approval hold parks (``held``,
+    :func:`asf.approvals.parked`); one whose work is verified on the trunk
+    (:func:`asf.workers.trunkclose.closes_before_launch`); the host-pressure hold (``host`` —
+    ``(held, why)`` — which an S1 row may pass once while ``bypass_open``); no seat left of
+    ``seats`` less ``running``; the relaunch cap (:func:`relaunch_capped`). What passes all of
+    them starts.
+
+    The live wave (``act``) prints each ``waits`` line, closes and parks as each check says, and
+    builds each starting row's brief and worker row through ``build(row, bypass)``. The status
+    cell's preview (``act`` false, :func:`would_start`) runs the same checks in the same order
+    and changes nothing — so "Ready to launch N" is the N rows this wave would start."""
+    host_held, host_why = tuple(host or (False, ''))[:2]
+    say = out if act else _quiet
+    room = max(0, seats - len(running))
+    started = 0
+    result = []
+    for row in planned:
+        cause = getattr(row, 'cause', '')
+        if act and cause:                       # §2.5: a cheap cause is said, held or re-run
+            ctx.event('triage', item=row.item_id, cause=cause, row=row.kind, action=row.action)
+            out(f'triage   {row.item_id:<10} — {cause}: {row.reason}')
+        if not row.launches:
+            say(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
+            result.append(Screened(row, row.action, WAITS))
+            continue
+        job = job_name(row.brief_kind, row.item_id)
+        if row.item_id in held:                 # §2.4: a harvest merge hold parks its item
+            cls, level = held[row.item_id]
+            why = f'held {cls} ({level})'
+            say(f'waits    {job:<24} {row.item_id:<10} — {why}')
+            result.append(Screened(row, why, HELD))
+            continue
+        if trunkclose.closes_before_launch(product, row.brief_kind, row.item_id, say,
+                                           **({} if act else {'dry_run': True})):
+            result.append(Screened(row, 'its work is verified on the trunk — closed, not '
+                                        'launched', CLOSED))
+            continue
+        bypass = bypass_open and (items.get(row.item_id) or {}).get('severity') == 'S1'
+        if host_held and not bypass:             # a loaded host takes no new session this tick
+            why = f'held: {host_why}'
+            say(f'waits    {job:<24} {row.item_id:<10} — {why}')
+            result.append(Screened(row, why, HOST))
+            continue
+        if room <= 0 and not bypass:
+            why = (f'no seat left: share {seats}, in flight {len(running)}, '
+                   f'this wave {started}')
+            say(f'waits    {job:<24} {row.item_id:<10} — {why}')
+            result.append(Screened(row, why, NO_SEAT))
+            continue
+        room -= 1
+        if bypass:
+            bypass_open = False                 # one bypass at a time, across the whole wave
+        if act:
+            wrow, brief = build(row, bypass)
+            capped = 'parked' if relaunch_capped(product, row, wrow, out) else ''
+        else:
+            wrow, brief = preview_row(product, row, items), None
+            capped = _preview_capped(product, row, wrow)
+        if capped:
+            room += 1
+            if bypass:
+                bypass_open = True
+            result.append(Screened(row, capped, CAPPED, wrow=wrow))
+            continue
+        started += 1
+        result.append(Screened(row, bypass=bypass, wrow=wrow, brief=brief))
+    return result
+
+
+def would_start(product, root, items=None):
+    """``(screened, seats, running)`` — the wave this tick would run, previewed: the plan the
+    wave cuts (the same ceiling, cloud seats, gate and holds) through :func:`screen` with
+    nothing acted on. What ``asf status`` counts as Ready to launch, and what the dwell
+    watchdog (:mod:`asf.dwell`) asks why a free seat stays free."""
+    from asf.views import index_reader
+    if items is None:
+        items, _generated = index_reader.load(root)
+        if product.repo_dir:
+            items = plan_order.overlay(items, plan_order.trunk_reader(product))
+    running = inflight(product)
+    r = capacity_mod.resolve(product)
+    cloud = cloud_settings(product)
+    ready = cloud_readiness(product, cloud)
+    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    inputs = plan_inputs(product, root, items)
+    seats = r.sessions + extra
+    planned, _dropped = gated_plan(items, product, running, seats, inputs, out=_quiet)
+    host_held, host_why, reading = host_hold(planned)
+    host_held, _local, _extra = split_hold(cloud, ready, host_held, host_why)
+    bypass_open = bool(host_held
+                       and host_mod.load_only_hold(reading,
+                                                   host_mod.guards_from_config(env.load_config()))
+                       and not s1_bypass_live())
+    held = approvals.parked(product)
+    return (screen(product, planned, items, running, held, seats, (host_held, host_why),
+                   bypass_open, act=False), seats, running)
 
 
 def host_hold(planned):
@@ -845,42 +1005,12 @@ def launch(ctx, out=print):
     s1_bypass_open = (host_held
                       and host_mod.load_only_hold(reading, host_mod.guards_from_config(env.load_config()))
                       and not s1_bypass_live())
-    bypassed = False
     # the hard cap: whatever the plan holds, this wave starts at most share - live, live being the
     # one count the Capacity row shows (capacity_mod.live_sessions) — the S1 bypass the only row
     # that may pass it, and its session counts toward live on every later wave
     seats = r.sessions + extra
-    room = max(0, seats - len(running))
-    worker_rows, texts, kinds = [], {}, {}
-    for row in planned:
-        cause = getattr(row, 'cause', '')
-        if cause:                               # §2.5: a cheap cause is said, held or re-run
-            ctx.event('triage', item=row.item_id, cause=cause, row=row.kind, action=row.action)
-            out(f'triage   {row.item_id:<10} — {cause}: {row.reason}')
-        if not row.launches:
-            out(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
-            continue
-        if row.item_id in held:                 # §2.4: a harvest merge hold parks its item
-            cls, level = held[row.item_id]
-            job = job_name(row.brief_kind, row.item_id)
-            out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')
-            continue
-        if trunkclose.closes_before_launch(product, row.brief_kind, row.item_id, out):
-            continue                            # its work is verified on the trunk: closed
-        bypass = s1_bypass_open and (items.get(row.item_id) or {}).get('severity') == 'S1'
-        if host_held and not bypass:             # a loaded host takes no new session this tick
-            job = job_name(row.brief_kind, row.item_id)
-            out(f'waits    {job:<24} {row.item_id:<10} — held: {host_why}')
-            continue
-        if room <= 0 and not bypass:
-            job = job_name(row.brief_kind, row.item_id)
-            out(f'waits    {job:<24} {row.item_id:<10} — no seat left: share {seats}, '
-                f'in flight {len(running)}, this wave {len(worker_rows)}')
-            continue
-        room -= 1
-        if bypass:
-            s1_bypass_open = False              # one bypass at a time, across the whole wave
-            bypassed = True
+
+    def build(row, bypass):
         if row.brief_kind == 'adjudicate' and getattr(row, 'between', ()):
             (la, ta), (lb, tb) = row.between
             pair = getattr(row, 'common', '')
@@ -889,16 +1019,14 @@ def launch(ctx, out=print):
             out(f'adjudicate {job:<24} {row.item_id:<10} — {la}: {ta[:60]} ↔ {lb}: {tb[:60]}{common}')
         brief = _build(product, row, items, running,
                        repo_facts=_repo_facts(product, row, items, running))
-        wrow = worker_row(row, brief, items, host_load_bypass=bypass)
-        parked = relaunch_capped(product, row, wrow, out)
-        if parked:
-            room += 1
-            if bypass:
-                s1_bypass_open, bypassed = True, False
-            continue
-        worker_rows.append(wrow)
-        texts[wrow.job] = brief.text
-        kinds[wrow.job] = brief.kind
+        return worker_row(row, brief, items, host_load_bypass=bypass), brief
+    screened = screen(product, planned, items, running, held, seats, (host_held, host_why),
+                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx)
+    starting = [s for s in screened if s.starts]
+    bypassed = any(s.bypass for s in starting)
+    worker_rows = [s.wrow for s in starting]
+    texts = {s.wrow.job: s.brief.text for s in starting}
+    kinds = {s.wrow.job: s.brief.kind for s in starting}
     ctx.event('capacity', sessions=r.sessions, sessions_inflight=len(running),
               sessions_bound_by=r.sessions_bound, fair_share=r.fair_share, usable=r.usable,
               borrowed=r.borrowed,

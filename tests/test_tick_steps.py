@@ -145,7 +145,7 @@ class OrderedTickTests(StepsTestCase):
         line = json.loads(tick_log.splitlines()[-1])
         self.assertEqual([(s['step'], s['ok']) for s in line['steps']],
                          [('record', True), ('health', False), ('groom', True), ('wave', True), ('prs', True),
-                          ('harvest', True), ('batch', True), ('daily', True)])
+                          ('harvest', True), ('batch', True), ('watchdog', True), ('daily', True)])
         self.assertEqual(line['product'], 'sample')
         # the line keeps the ticks stream's schema: the scorecard reads it without a KeyError
         metrics.scorecard_rows([], [], [line])
@@ -1561,7 +1561,7 @@ class DailyPartsTests(StepsTestCase):
 class GroomStepTests(StepsTestCase):
     def test_the_step_is_in_its_place_and_owned_by_asf(self):
         self.assertEqual(steps.STEPS, ['record', 'health', 'groom', 'wave', 'prs', 'harvest',
-                                       'batch', 'daily'])
+                                       'batch', 'watchdog', 'daily'])
         rows = {s: (owner, cmd) for s, owner, cmd in steps.resolve(self.product)}
         self.assertEqual(rows['groom'][0], 'asf')
         self.assertEqual(steps.ASF_CALLABLES['groom'], 'asf.tick.step_groom:run')

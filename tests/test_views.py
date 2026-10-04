@@ -322,14 +322,27 @@ class StatusViewTests(ViewsTestCase):
         mk = lambda iid, action: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
                                                  feature_id='F-0001', action=action,
                                                  brief_kind='task', branch='', reason='')
-        planned = [mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2'),
-                   mk('T-0002', 'would launch')]
-        with mock.patch.object(feeder_rows, 'plan_rows', return_value=planned), \
-                mock.patch.object(step_wave, 'plan_inputs', return_value={}), \
-                mock.patch.object(step_wave, 'inflight', return_value=[]), \
-                mock.patch.object(step_wave, 'capacity', return_value=5):
+        screened = [step_wave.Screened(mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2')),
+                    step_wave.Screened(mk('T-0002', 'would launch'))]
+        with mock.patch.object(step_wave, 'would_start', return_value=(screened, 5, [])):
             cell = status.ready_cell(self.root, self.product)
-        self.assertEqual(cell, f'2 — first: {feeder_rows.PLAN_CODE} T-0001; 1 failing to spawn')
+        # the wave tries the failing row, but it does not start: N is the one that does
+        self.assertEqual(cell, f'1 — first: {feeder_rows.PLAN_CODE} T-0002; 1 failing to spawn')
+
+    def test_the_ready_cell_counts_only_what_the_wave_would_start(self):
+        # 2026-10-04: status said 2 ready while the wave launched 0 — an ungrantable approval
+        # hold and a relaunch-cap park, both refused by the wave's own filter
+        from asf.feeder import rows as feeder_rows
+        from asf.tick import step_wave
+        mk = lambda iid: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
+                                         feature_id='F-0001', action='would launch',
+                                         brief_kind='task', branch='', reason='')
+        screened = [step_wave.Screened(mk('T-0001'), 'held touch_amendable_set (human-now)',
+                                       step_wave.HELD),
+                    step_wave.Screened(mk('T-0002'), 'launched 2 time(s)', step_wave.CAPPED)]
+        with mock.patch.object(step_wave, 'would_start', return_value=(screened, 5, [])):
+            cell = status.ready_cell(self.root, self.product)
+        self.assertEqual(cell, '0 (2 held back (held 1, relaunch cap 1))')
 
 
 class DecisionsCellTests(ViewsTestCase):
