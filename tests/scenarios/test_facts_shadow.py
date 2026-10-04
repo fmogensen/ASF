@@ -9,8 +9,9 @@ Two tables on the one world:
 * :data:`SHADOW_ROWS` — a close path run the way the tick runs it under ``flags.facts: shadow``
   (the pass primed: its one open-PR read): the path's verdict is unchanged (``S.holds`` against
   the close-path table's expectation), and the deciders that disagree with the fact are exactly
-  the ones named — none on the known-good rows, the old decider named on the deliberately-wrong
-  ones (a ``covers``-only close: the trunk commit only touches the Task's ``writes:``).
+  the ones named — none on every edge of a PR the Task owns (open, merged, closed unmerged), the
+  old decider named on the deliberately-wrong one (a ``covers``-only close where the host knows
+  no PR of the Task's: the trunk commit only touches the Task's ``writes:``).
 """
 import contextlib
 import io
@@ -46,23 +47,31 @@ FACT_EDGES = (
     ('open', 'batch-ref', 'NotLanded', ''),
     ('open', 'attested-sha', 'Landed', 'pr-merge'),
     ('merged', 'voided-landing', 'NotLanded', ''),
+    ('open', 'no-pr', 'NotLanded', ''),          # no PR at all: the decoy is still a hint
 )
 #: What the fact says of ``why`` on the rows that name it.
 WHY = {('open', 'revert'): 'reverted by', ('merged', 'voided-landing'): 'voided'}
 
-#: ``(path, behaviour, expected, disagreeing deciders)`` — ``expected`` as the close-path table.
+#: ``(path, behaviour, expected, disagreeing deciders, edit)`` — ``expected`` as the close-path
+#: table. Strict: the old deciders agree with the fact on every edge of a PR the Task owns —
+#: open, merged, closed unmerged (a ``covers`` commit never closes over a PR of its own) — and
+#: the one row they still disagree on is the ``covers`` close the fact never makes: the host
+#: knows no PR of the Task's (``no-pr``).
 SHADOW_ROWS = (
-    (CB, 'open', 'none', ()),
-    (CB, 'merged', 'decoy', ()),
-    (CB, 'close-unmerged', 'decoy', ('trunkclose',)),   # a covers-only close
-    (CB, 'rate-limit', 'none', ()),
-    (CP, 'open', 'none', ()),
-    (CP, 'merged', 'decoy', ()),
-    (CP, 'close-unmerged', 'decoy', ('trunkclose',)),
-    # the cap's landed half asks no host: it names the decoy while PR #1 is open
-    (RC, 'open', 'none', ('relaunch',)),
-    (RC, 'merged', 'decoy', ()),
-    (RC, 'close-unmerged', 'decoy', ('relaunch', 'trunkclose')),
+    (CB, 'open', 'none', (), None),
+    (CB, 'merged', 'decoy', (), None),
+    (CB, 'close-unmerged', 'none', (), None),
+    (CB, 'rate-limit', 'none', (), None),
+    (CB, 'open', 'decoy', ('trunkclose',), 'no-pr'),   # a covers-only close
+    (CP, 'open', 'none', (), None),
+    (CP, 'merged', 'decoy', (), None),
+    (CP, 'close-unmerged', 'none', (), None),
+    (CP, 'open', 'decoy', ('trunkclose',), 'no-pr'),
+    # the cap's landed half reads the pass's open PRs: PR #1 open is no landing
+    (RC, 'open', 'none', (), None),
+    (RC, 'merged', 'decoy', (), None),
+    (RC, 'close-unmerged', 'none', (), None),
+    (RC, 'open', 'decoy', ('relaunch', 'trunkclose'), 'no-pr'),
 )
 
 
@@ -104,7 +113,7 @@ class FactEdges(unittest.TestCase):
         why = WHY.get((behaviour, edit))
         if why:
             self.assertIn(why, got.why, got)
-        if behaviour == 'open' and edit is None:
+        if behaviour == 'open' and edit in (None, 'no-pr'):
             self.assertEqual(got.hint_sha, S.WORLD.decoy)  # covers is a hint, never a landing
 
 
@@ -123,10 +132,10 @@ for _row in FACT_EDGES:
 class ShadowRows(unittest.TestCase):
     """One generated test per row of :data:`SHADOW_ROWS`."""
 
-    def check(self, path, behaviour, expected, deciders):
+    def check(self, path, behaviour, expected, deciders, edit):
         from asf.facts import disagree, landing as facts_landing
         lines = []
-        with shadowed(behaviour) as (f, product):
+        with shadowed(behaviour, edit) as (f, product):
             self.assertEqual(product.flag('facts'), 'shadow')
             verdict, waited = S.PATHS[path](S.WORLD, f, product, lines.append)
             log = [r for r in disagree.records(product) if r.get('fact') == facts_landing.FACT]
@@ -135,7 +144,8 @@ class ShadowRows(unittest.TestCase):
             o.closed, o.how = True, f'{path} ({verdict})'
         if not o.closed and o.stamp:
             o.closed, o.how = True, f'a landing stamp ({o.stamp[:9]})'
-        said = f'{path} × {behaviour}: {o}\n' + '\n'.join(lines) + f'\nlog: {log}'
+        said = (f'{path} × {behaviour}{" + " + edit if edit else ""}: {o}\n'
+                + '\n'.join(lines) + f'\nlog: {log}')
         self.assertTrue(S.holds(expected, o), f'the shadow changed the verdict\n{said}')
         got = sorted({r.get("decider") for r in log})
         self.assertEqual(got, sorted(deciders), said)
@@ -145,13 +155,16 @@ class ShadowRows(unittest.TestCase):
 def _shadow_test(row):
     def test(self):
         self.check(*row)
-    path, behaviour, expected, deciders = row
-    test.__doc__ = f'{path} × {behaviour} under shadow: {expected}, disagree {deciders or "none"}'
+    path, behaviour, expected, deciders, edit = row
+    test.__doc__ = (f'{path} × {behaviour}{" + " + edit if edit else ""} under shadow: '
+                    f'{expected}, disagree {deciders or "none"}')
     return test
 
 
 for _row in SHADOW_ROWS:
-    setattr(ShadowRows, f'test_{_slug(_row[0])}__{_slug(_row[1])}', _shadow_test(_row))
+    _name = f'test_{_slug(_row[0])}__{_slug(_row[1])}' + (f'__{_slug(_row[4])}' if _row[4] else '')
+    assert not hasattr(ShadowRows, _name), _name
+    setattr(ShadowRows, _name, _shadow_test(_row))
 
 
 if __name__ == '__main__':

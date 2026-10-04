@@ -39,19 +39,10 @@ DONE = 'status done'
 FULL_SHA_RE = re.compile(r'[0-9a-f]{40}')
 
 
-class Unknown:
-    """:func:`evidence` when the open PRs could not be read: not evidence (falsy — nothing
-    closes on it) and not "no evidence" either — a launch the evidence would have stopped waits
-    (:func:`closes_before_launch`)."""
-
-    def __init__(self, why):
-        self.why = why
-
-    def __bool__(self):
-        return False
-
-    def __repr__(self):
-        return f'Unknown({self.why!r})'
+#: :func:`evidence` when the host could not be read (the open PRs, or — for a ``covers`` close —
+#: the item's own PRs): not evidence (falsy — nothing closes on it) and not "no evidence" either
+#: — a launch the evidence would have stopped waits (:func:`closes_before_launch`).
+Unknown = landing.Unknown
 
 
 #: The wait a row shows while :func:`evidence` is :class:`Unknown`.
@@ -143,7 +134,7 @@ def evidence(path, item, repo, main='main', writes=(), ask_gh=True, product=None
     """:func:`_evidence` — under ``product``'s ``flags.facts: shadow`` with the landing fact
     (:func:`asf.facts.landing.landed`) compared beside it; the answer is always this one. A run
     already closed here is not asked (its "no new evidence" is not a "not landed")."""
-    got = _evidence(path, item, repo, main, writes, ask_gh)
+    got = _evidence(path, item, repo, main, writes, ask_gh, product)
     if product is None or not repo or not item:
         return got
     run = newest_ended(path, item)
@@ -158,13 +149,15 @@ def evidence(path, item, repo, main='main', writes=(), ask_gh=True, product=None
         view=facts_landing.view_evidence)
 
 
-def _evidence(path, item, repo, main='main', writes=(), ask_gh=True):
+def _evidence(path, item, repo, main='main', writes=(), ask_gh=True, product=None):
     """``(sha, run, claim)`` when ``item``'s work is verified on the trunk, else None: its newest
     ended run's REPORT ends ``status: done`` (:func:`asf.workers.relaunch.terminal`) and names a
     commit on ``origin/<main>`` that is not the run's own work (:func:`trunk_sha`), and the run's
     branch holds nothing past the trunk (:func:`unlanded`), nor does any other branch of the item's
-    runs or an open PR naming it (:func:`asf.workers.landing.open_work`). A run already closed
-    here is no new evidence."""
+    runs or an open PR naming it (:func:`asf.workers.landing.open_work`). A commit attributed only
+    by ``covers`` (its ``writes:``) also needs the host to say no PR of the item's own is open or
+    was closed unmerged (:func:`asf.workers.landing.covers_refused`): such a PR is the item's work,
+    and the covering commit someone else's. A run already closed here is no new evidence."""
     if not repo or not item:
         return None
     run = newest_ended(path, item)
@@ -186,6 +179,12 @@ def _evidence(path, item, repo, main='main', writes=(), ask_gh=True):
         return Unknown('the open PRs could not be read')  # never a close on an unknown
     if work:
         return None  # the item's own work is unmerged: nothing on the trunk closes it
+    if arm == 'covers' and ask_gh:
+        held = landing.covers_refused(product, item)
+        if held is None:
+            return Unknown('the item\'s PRs could not be read')  # a covers close needs them
+        if held:
+            return None  # its own PR is open or was closed unmerged: the cover is not its work
     return full_sha(repo, sha) or sha, dict(run, trunk_arm=arm), claim
 
 

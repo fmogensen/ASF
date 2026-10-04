@@ -174,6 +174,17 @@ def open_prs(slug, limit=300, fields=('number', 'headRefName', 'headRefOid'), **
                ','.join(fields)], json=True, **kw)
 
 
+def prs(slug, *, state='all', search='', limit=100,
+        fields=('number', 'title', 'headRefName', 'state', 'mergedAt'), **kw):
+    """``gh pr list --state <state> [--search <search>]`` for ``slug`` — a list, newest first (an
+    empty list is a real "none")."""
+    args = ['pr', 'list', '-R', slug, '--state', state, '--limit', str(limit), '--json',
+            ','.join(fields)]
+    if search:
+        args += ['--search', search]
+    return gh(args, json=True, **kw)
+
+
 def merge_commit(slug, number, **kw):
     """The sha PR ``number`` merged at, as ``data`` (``''`` when it has not merged)."""
     r = pr(slug, number, ['mergeCommit'], **kw)

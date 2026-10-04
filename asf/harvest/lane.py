@@ -438,6 +438,22 @@ def small_task(items, item):
     return str(feature.get('size') or '').lower() == 's' and feature.get('lane') != DIRECT
 
 
+def docs_only_task(product, items, item_id, files=None):
+    """True when ``flags.docs_review: skip`` is set, the Task/Bug's ``writes:`` all lie under a
+    docs root (:func:`landing_class`) and ``lane.review.docs`` is not ``required`` — its branch
+    needs no review row (W2-PR7). ``files`` (the branch's diff), when given, must also stay inside
+    the declared ``writes:``: a branch that wrote elsewhere is still reviewed."""
+    conv = _conv(product)
+    if str(conv.flag('docs_review') or '').strip().lower() != 'skip' or conv.review_required(DOCS):
+        return False
+    item = (items or {}).get(item_id) or {}
+    from asf.feeder import widen  # local: the feeder imports the lane
+    writes = widen.norm_writes(item.get('writes'))  # a plan's `[a b c]` is three paths
+    if item.get('type') not in ('task', 'bug') or not writes or landing_class(product, writes) != DOCS:
+        return False
+    return all(any(_glob_hit(w, f) for w in writes) for f in files or ())
+
+
 def review_waived(conv, kind, items, item, lines):
     """Why a code branch needs no ASF review of its head, else '': a ``lane: direct`` Feature's
     branch (one session, no review round — CI and the gate judge it), or a small Feature's Task
@@ -1577,6 +1593,9 @@ class Lane:
                      and small_task(self.items, item) else None)
             f['review_waived'] = review_waived(conv, f['kind'], self.items, item, lines)
             f['review_required'] = not f['review_waived']
+            if f['review_required'] and docs_only_task(self.product, self.items, item, files):
+                f['review_waived'] = 'docs-only writes: flags.docs_review skips the review'
+                f['review_required'] = False
         if self.mode == 'pr' and self.slug and not f['foreign'] \
                 and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
             # T2c/T5e: GitHub runs no pull_request workflow on a PR that conflicts with the

@@ -608,6 +608,12 @@ def relaunch_capped(product, row, wrow, out=print):
         return False
     if not reason:
         return False
+    if isinstance(landed, landing.Unknown):
+        # the host could not say whether the item's own PR holds its work: neither a park nor a
+        # close this tick (a park on an unknown would wait for a person)
+        out(f'waits    {wrow.job:<24} {wrow.item:<10} — {trunkclose.WAITS_UNKNOWN}: '
+            f'{landed.why}')
+        return True
     if hit:
         # the park would only ask a person to close what git already proves landed
         sha, run, _claim = hit

@@ -36,6 +36,8 @@ and the harness's own verbs, which move the forge the way a person or CI would:
   recorded answer, ``tests/fixtures/gh/rate-limit``): the host knows its state but tells nothing
 * ``e2e close-unmerged <n>`` — the host closes PR ``n`` without merging it (a person, or the
   host itself): ``CLOSED``, no ``mergedAt``, no merge commit, its head branch kept
+* ``e2e drop-pr <n>`` — the host knows no PR ``n`` (the item never opened one): gone from
+  every list and view, its head branch kept
 * ``e2e status <sha> <context> <state>`` — a commit status on ``sha`` (the merge queue's
   ``asf/attested`` on a batch sha)
 * ``e2e skip-job <n> <name> [attested]`` — PR ``n``'s check ``name`` concluded ``skipped`` (an
@@ -617,6 +619,10 @@ def e2e(state, argv):
         return
     if verb == 'close-unmerged':
         pr_close(state, [argv[1]])
+        return
+    if verb == 'drop-pr':
+        pr = find(state, argv[1])
+        state['prs'] = [p for p in state['prs'] if p is not pr]
         return
     if verb == 'skip-job':
         pr = find(state, argv[1])

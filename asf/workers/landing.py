@@ -216,6 +216,65 @@ def open_work(repo, main, path, item, branches=(), ask_gh=True):
     return ''
 
 
+class Unknown:
+    """A landing decider's answer when the host could not be read: not evidence (falsy — nothing
+    closes on it) and not "no evidence" either — the decision waits a pass."""
+
+    def __init__(self, why):
+        self.why = why
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return f'Unknown({self.why!r})'
+
+
+def pass_open_work(product, repo, main, item):
+    """The head of an open PR naming ``item`` whose commits the trunk does not carry, read from
+    the pass's one open-PR list (:func:`asf.facts.cache.prime` — the host asked at most once per
+    pass), '' when none, ``None`` — *unknown* — when the list could not be read or may be cut
+    short. A PR head git cannot place counts as open work."""
+    from asf.facts import cache
+    from asf.facts.types import is_unknown
+    got = cache.prime(product)
+    if is_unknown(got) or len(got.prs) >= PR_LIMIT:
+        return None
+    want = str(item or '').upper()
+    for pr in got.prs:
+        head = pr.get('headRefName') or ''
+        if want not in ev_mod.naming_ids(pr.get('title') or '') \
+                and want not in ev_mod.branch_ids(head):
+            continue
+        oid = pr.get('headRefOid') or ''
+        if not oid or gitops.is_ancestor(repo, oid, f'origin/{main}') is not True:
+            return head or f"#{pr.get('number')}"
+    return ''
+
+
+def covers_refused(product, item):
+    """Why a trunk commit that only **covers** ``item``'s ``writes:`` may not close it: a PR of
+    its own is still open, or was closed unmerged (and none merged) — the item's work is that
+    PR's, and the covering commit is someone else's. '' when nothing holds it, ``None`` —
+    *unknown* — when the item's PRs could not be read (:func:`asf.facts.cache.item_prs`, one
+    read per item per pass): an unknown never closes."""
+    from asf.facts import cache
+    from asf.facts.types import is_unknown
+    got = cache.item_prs(product, item)
+    if is_unknown(got):
+        return None
+    states = [(str(pr.get('state') or '').upper(), pr) for pr in got.prs]
+    for st, pr in states:
+        if st == 'OPEN':
+            return f"its PR #{pr.get('number')} is open"
+    if any(st == 'MERGED' or pr.get('mergedAt') for st, pr in states):
+        return ''
+    for st, pr in states:
+        if st == 'CLOSED':
+            return f"its PR #{pr.get('number')} was closed unmerged"
+    return ''
+
+
 def item_writes(product, item):
     """``item``'s ``writes:`` footprint from the product's record index, or []."""
     root = getattr(product, 'backlog_dir', None)

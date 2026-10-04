@@ -13,7 +13,7 @@ from unittest import mock
 
 from asf.metrics import metrics
 from asf.tick import step_wave
-from asf.workers import lifecycle, pool as pool_mod, relaunch
+from asf.workers import landing, lifecycle, pool as pool_mod, relaunch
 
 HEAD = 'e0920dc75051f5f2f109068f70bd85d872fb5f9d'
 CARD = 'eeda7f0410a1c9a4'
@@ -217,12 +217,29 @@ class TrunkEvidenceTests(_Ledger):
             '-m', 'task(T-0332): the work')
         self.sha = git('rev-parse', 'HEAD')
         git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        # gh is a fake here: no open PR names the item, unless a test says otherwise
+        p = mock.patch.object(landing, 'open_prs', lambda _r, _i: [])
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_an_already_on_main_claim_is_verified_against_git(self):
         self.run_once(report('done', f'the split — on origin/main under {self.sha[:9]}'))
         why = self.verdict(head=HEAD, repo=self.repo)
         self.assertIn(f'on origin/main at {self.sha[:9]} (verified)', why)
         self.assertIn('close T-0332', why)
+
+    def test_an_open_pr_of_the_item_is_no_landing_and_an_unread_host_no_decision(self):
+        self.run_once(report('done', f'the split — on origin/main under {self.sha[:9]}'))
+        with mock.patch.object(landing, 'open_prs', lambda _r, _i: ['cloud/T-0332-b']):
+            reason, landed = relaunch.assess(self.path, self.JOB, 'T-0332', head=HEAD,
+                                             card=CARD, repo=self.repo)
+        self.assertEqual(landed, '')
+        self.assertNotIn('(verified)', reason)
+        with mock.patch.object(landing, 'open_prs', lambda _r, _i: None):
+            reason, landed = relaunch.assess(self.path, self.JOB, 'T-0332', head=HEAD,
+                                             card=CARD, repo=self.repo)
+        self.assertIsInstance(landed, landing.Unknown)
+        self.assertNotIn('(verified)', reason)
 
     def test_a_trunk_commit_of_another_item_is_no_evidence(self):
         git = lambda *a: subprocess.run(['git', *a], cwd=self.repo, check=True,  # noqa: E731

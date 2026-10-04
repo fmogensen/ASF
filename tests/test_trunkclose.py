@@ -335,6 +335,42 @@ class AttributionTests(_Repo):
         self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False,
                                               writes=['apps/panel.tsx', 'apps/other.tsx']))
 
+    def test_a_covers_commit_never_closes_over_the_items_own_pr(self):
+        from asf import github
+        from asf.facts import cache
+        self.git('update-ref', '-d', f'refs/remotes/origin/{self.BRANCH}')
+        os.makedirs(os.path.join(self.repo, 'apps'))
+        with open(os.path.join(self.repo, 'apps', 'panel.tsx'), 'w') as f:
+            f.write('x')
+        self.git('add', '-A')
+        self.commit('chore: the sweep')
+        sweep = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.run_once(report('done', f'on origin/main at {sweep[:9]}'), head=self.head)
+        product = mock.Mock(repo_dir=self.repo, main='main', repo_slug='o/r')
+        product.name = 'p-covers'
+
+        def host(*prs, ok=True):
+            data = [dict(title=f'{self.ITEM}: the panel', headRefName='hand/x', **p) for p in prs]
+            return lambda *_a, **_k: github.Result(ok, data if ok else None, 0, '', '', '',
+                                                   '' if ok else 'rc 1')
+
+        def ask(answer):
+            cache.clear()
+            self.addCleanup(cache.clear)
+            with mock.patch.object(github, 'prs', answer):
+                return trunkclose.evidence(self.path, self.ITEM, self.repo,
+                                           writes=['apps/panel.tsx'], product=product)
+
+        closed = dict(number=7, state='CLOSED', mergedAt=None)
+        self.assertIsNone(ask(host(closed)))                                # closed unmerged
+        self.assertIsNone(ask(host(dict(number=8, state='OPEN', mergedAt=None))))   # still open
+        got = ask(host(closed, ok=False))
+        self.assertIsInstance(got, trunkclose.Unknown)                      # never on unknown
+        self.assertEqual(ask(host())[0], sweep)                             # no PR of its own
+        merged = dict(number=9, state='MERGED', mergedAt='2026-09-30T05:00:00Z')
+        self.assertEqual(ask(host(closed, merged))[0], sweep)               # one of them merged
+
     def test_the_items_own_pr_merge_is_evidence(self):
         self.git('update-ref', '-d', f'refs/remotes/origin/{self.BRANCH}')
         self.commit('The prompt inspector (#902)')
