@@ -44,30 +44,37 @@ def names(repo, main, sha, item, prs=()):
     rules (a spec/plan/review commit names its item by convention, never its landing), a trailer
     value, or the merge of one of ``prs`` (``… (#902)``, ``Merge pull request #902``,
     ``merge-queue: #902 (…)``). ``None`` when git could not read the message."""
+    arm = _named_by(repo, main, sha, item, prs)
+    return arm if arm is None else bool(arm)
+
+
+def _named_by(repo, main, sha, item, prs=()):
+    """:func:`names` saying how: ``'names'`` (the subject or a trailer names ``item``), ``'pr'``
+    (the merge of one of ``prs``), ``''`` (neither), ``None`` (git could not read it)."""
     item = (item or '').upper()
     if not item:
-        return False
+        return ''
     body = gitops.log1(repo, sha, '%B')
     if body is None:
         return None
     subject = body.split('\n', 1)[0].strip()
     if not subject:
-        return False
+        return ''
     if not ev_mod.lands_nothing(subject) and item in ev_mod.naming_ids(subject, main):
-        return True
+        return 'names'
     trailers = gitops.log1(repo, sha, '%(trailers:only,unfold)')
     if trailers is None:
         return None
     for line in trailers.splitlines():
         _key, _, value = line.partition(':')
         if item in ev_mod.id_tokens(value):
-            return True
+            return 'names'
     for pr in prs or ():
         n = str(pr).lstrip('#')
         if n.isdigit() and re.search(
                 rf'(\(#{n}\)\s*$|^Merge pull request #{n}\b|^merge-queue: #{n}\b)', subject):
-            return True
-    return False
+            return 'pr'
+    return ''
 
 
 def changed(repo, sha):
@@ -98,16 +105,29 @@ def attributable(repo, main, sha, item, writes=(), prs=()):
     trunk head a branch merged in, another item's merge-queue commit — never counts. ``None`` —
     *unknown* — when git could not answer a question the verdict hangs on: callers treat it as
     "do not close", and :func:`verify_landings` decides nothing on it this tick."""
+    arm = attribution(repo, main, sha, item, writes, prs)
+    return arm if arm is None else bool(arm)
+
+
+#: The arms of :func:`attribution`, in the order they are tried.
+ARMS = ('names', 'pr', 'covers')
+
+
+def attribution(repo, main, sha, item, writes=(), prs=()):
+    """:func:`attributable` saying which arm holds: ``'names'``, ``'pr'`` (one of ``prs``'s
+    merge), ``'covers'`` (its diff covers ``writes:`` — a hint, weaker than a name: the landing
+    stamp and invariant I14 keep it apart), ``''`` (none, or not on the trunk), ``None``
+    (unknown)."""
     trunk = on_trunk(repo, main, sha)
     if not trunk:
-        return trunk
-    named = names(repo, main, sha, item, prs)
+        return None if trunk is None else ''
+    named = _named_by(repo, main, sha, item, prs)
     if named:
-        return True
+        return named
     covered = covers(repo, sha, writes)
     if covered:
-        return True
-    return None if named is None or covered is None else False
+        return 'covers'
+    return None if named is None or covered is None else ''
 
 
 def unlanded(repo, main, branch):

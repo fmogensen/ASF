@@ -10,7 +10,9 @@ step is a sequence of *staged* writers:
 2. :func:`validate` runs the ``record`` invariants (:mod:`asf.invariants`, I1 per writer, I2
    after ingest's restamp, I3, I10, I11) over that writer's change alone.
 3. :func:`refuse` puts back only the offending paths of that writer — to the content they had
-   before *it* ran, not to ``HEAD``, so an earlier writer's good output stays.
+   before *it* ran, not to ``HEAD``, so an earlier writer's good output stays. A finding whose
+   refusal must carry the closes it cascaded names them too (:func:`cascaded`: the Task and the
+   parents the same writer resolved on it, one set).
 
 :func:`run_writers` is the loop, and :func:`guarded` is one turn of it for a writer that guards
 itself (``asf ingest``, the plan-task minter, ``asf set`` / the widen pass through
@@ -141,6 +143,51 @@ def refuse(root, staged, findings):
         with open(full, 'wb') as f:
             f.write(text.encode('utf-8', 'surrogateescape'))
     return tuple(named)
+
+
+#: A card in one of these is closed or landed (the cascade a Task's close sets off).
+_CLOSED_STATES = ('Resolved', 'Closed')
+_LANDED_STAGES = ('landed', 'on-prod')
+
+
+def _meta(text, rel):
+    from asf.record import frontmatter
+    if not text:
+        return {}
+    try:
+        return frontmatter.parse(text, path=rel)[0] or {}
+    except frontmatter.FrontmatterError:
+        return {}
+
+
+def _closed(meta):
+    return meta.get('state') in _CLOSED_STATES or meta.get('stage') in _LANDED_STAGES
+
+
+def cascaded(root, staged, paths):
+    """A refusal *set*: ``paths`` plus every card the same writer (``staged``) moved to closed or
+    landed whose child is in the set, transitively. A Feature or Story that a writer resolved
+    because the Task it just closed was its last never stays resolved when that Task's close is
+    refused (passed as a finding's ``paths``, :func:`refuse` puts them back together)."""
+    moved = {}
+    after = {}
+    for rel in staged.paths:
+        if not rel.endswith('.md'):
+            continue
+        meta = _meta(_read(os.path.join(root, rel)), rel)
+        after[rel] = meta
+        if meta.get('id') and _closed(meta) and not _closed(_meta(staged.before.get(rel), rel)):
+            moved[str(meta['id'])] = rel
+    out = list(dict.fromkeys(paths))
+    queue = list(out)
+    while queue:
+        rel = queue.pop()
+        parent = (after.get(rel) or _meta(_read(os.path.join(root, rel)), rel)).get('parent')
+        up = moved.get(str(parent)) if parent else None
+        if up and up not in out:
+            out.append(up)
+            queue.append(up)
+    return tuple(out)
 
 
 def _after_refusal(staged, restored):

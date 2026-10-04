@@ -5,10 +5,12 @@ Each :class:`Invariant` has an ``id`` (``I1``…), a ``scope`` and a ``check(ctx
 pure over the facts ``ctx`` carries. They run at three points of the tick, and every one fails
 **soft** (R9) — an invariant never aborts a tick, and a check that raises is one line:
 
-- ``record`` (I1, I2, I3, I10, I11): each staged writer's change before the tick's commit
+- ``record`` (I1, I2, I3, I10, I11, I14): each staged writer's change before the tick's commit
   (:mod:`asf.record.stage`; I2 after ingest's restamp). A finding puts back only the offending
   paths, the rest of the tick commits, and :func:`asf.tick.tick.file_invariant_bugs` files one
   Bug per ``(invariant, cause)`` (:func:`asf.tick.file_bugs.cause_key`), listing the paths.
+  I14 (a close needs a landing fact) runs under ``flags.i14``: ``off`` by default, ``report``
+  (a line and ``invariants-report.jsonl``, the write stands) or ``refuse``.
 - ``feeder`` (I4, I5, I7): over ``plan_rows`` before the wave (:func:`feeder_gate`). A
   violating row is dropped and logged as ``INVARIANT <id>: <row> — <why>``.
 - ``lane`` (I8): after harvest (:func:`lane_report`). Reported only. I9 is an event there, not a
@@ -18,6 +20,7 @@ pure over the facts ``ctx`` carries. They run at three points of the tick, and e
 (``--deep`` adds I6). I6, I12 and I13 are tests (:data:`TEST_ONLY`), never tick checks (R13).
 """
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -47,7 +50,7 @@ class Invariant:
     check: Callable
 
 
-#: The registry the tick runs: I1–I3, I10, I11 (record), I4, I5, I7 (feeder), I8 (lane).
+#: The registry the tick runs: I1–I3, I10, I11, I14 (record), I4, I5, I7 (feeder), I8 (lane).
 INVARIANTS = []
 
 
@@ -69,7 +72,7 @@ def run(ctx, scope=None, out=None):
     return findings
 
 
-# ---- the record invariants (I1, I2, I3, I10, I11) ------------------------------------------
+# ---- the record invariants (I1, I2, I3, I10, I11, I14) -------------------------------------
 #
 # Each reads a ``stage.RecordContext``: the clone ``root`` and one writer's ``Staged`` change.
 # A finding names only paths that writer changed, and only a violation the writer *introduced*
@@ -405,6 +408,278 @@ def check_i11(ctx):
     return out
 
 
+# ---- I14: a close needs a landing fact ----------------------------------------------------
+
+#: ``flags.i14``: ``off`` (not checked), ``report`` (a line + ``invariants-report.jsonl``, the
+#: write stands), ``refuse`` (a finding: the close and the parents it cascaded are put back).
+I14_MODES = ('off', 'report', 'refuse')
+#: The card types whose close I14 judges.
+I14_TYPES = ('task', 'bug', 'story')
+def _landing_by():
+    """Who may stamp a landing (``landing.by``): the ingest's own set
+    (:data:`asf.record.ingest.LANDING_BY`)."""
+    from asf.record.ingest import LANDING_BY
+    return LANDING_BY
+#: The stamp of a close on a commit that only covers the card's ``writes:`` — a hint, not a
+#: name: it holds only under :func:`_i14_covers`.
+I14_COVERS = 'trunkclose/covers'
+#: The state file report mode appends to (:mod:`asf.state.store`).
+I14_REPORT = 'invariants-report.jsonl'
+#: The writer :func:`record_audit` stages as: an audit lists, it never reports or refuses.
+AUDIT_WRITER = 'check'
+_HEX40 = re.compile(r'[0-9a-f]{40}')
+
+
+def i14_mode(product):
+    """``flags.i14`` of ``product`` as one of :data:`I14_MODES`; ``off`` when unset, unreadable,
+    or a yaml ``off`` (False)."""
+    try:
+        value = product.flag('i14', 'off') if product is not None else 'off'
+    except Exception:  # noqa: BLE001 — a product without flags is off
+        return 'off'
+    value = 'off' if value is False or value is None else str(value).strip().lower()
+    return value if value in I14_MODES else 'off'
+
+
+def _dt(stamp):
+    from asf.scorecard.facts import to_dt
+    return to_dt(str(stamp or '').strip().strip('\'"'))
+
+
+def _last_reopen(meta):
+    """The newest ``reopened:`` marker's time (``<iso>: <reason> — …``), or None."""
+    marks = meta.get('reopened') or []
+    if isinstance(marks, str):
+        marks = [marks]
+    stamps = [_dt(str(m).strip().strip('\'"').split(': ', 1)[0]) for m in marks]
+    stamps = [d for d in stamps if d is not None]
+    return max(stamps) if stamps else None
+
+
+def _i14_repo(ctx, product):
+    """``(repo, main)`` of the product, its trunk fetched once per validation (S-m14); ``None``
+    when there is no readable repository."""
+    repo = getattr(product, 'repo_dir', None)
+    if not isinstance(repo, str) or not os.path.isdir(repo):
+        return None
+    main = getattr(product, 'main', None) or 'main'
+    return repo, main
+
+
+def _i14_known(ctx, repo, main, sha):
+    """True when git has ``sha``: fetched once per validation when it does not (S-m14); False
+    when it still does not — the close is deferred, never judged on a missing object."""
+    from asf import gitops
+    if gitops.rev_parse(repo, f'{sha}^{{commit}}'):
+        return True
+    if not ctx.cache.get('i14_fetched'):
+        ctx.cache['i14_fetched'] = True
+        gitops.fetch(repo, 'origin', main)
+        return bool(gitops.rev_parse(repo, f'{sha}^{{commit}}'))
+    return False
+
+
+def _i14_covers(product, repo, main, item, sha, created):
+    """S-M16 — a ``trunkclose/covers`` close holds only when the run it closed on reported
+    ``done``, the item has no open work with gh known, and the covering commit is newer than the
+    card. ``''`` when it holds, the reason when it does not, ``None`` when unknown (deferred)."""
+    from asf import gitops
+    from asf.workers import landing, lifecycle, pool as pool_mod, relaunch, trunkclose
+    path = pool_mod.sessions_path(product)
+    runs = [r for r in lifecycle.item_runs(path, item)
+            if r.get('trunk_closed') and str(r.get('harvested') or '')[:7] == sha[:7]]
+    if not runs:
+        return f'{I14_COVERS} with no trunk-closed run on {sha[:9]}'
+    run = max(runs, key=lambda r: r.get('started') or '')
+    claim = relaunch.terminal(relaunch._result_text(run))
+    if not claim.startswith(trunkclose.DONE):
+        return f'{I14_COVERS}: the run {run.get("job")} did not report done ({claim or "no claim"})'
+    work = landing.open_work(repo, main, path, item, [run.get('branch')])
+    if work is None:
+        return None
+    if work:
+        return f'{I14_COVERS}: its work is still open on {work}'
+    when = gitops.log1(repo, sha, '%cI')
+    if when is None:
+        return None
+    made, born = _dt(when), _dt(created)
+    if made is None or born is None:
+        return None  # the card's age or the commit's is not known: deferred
+    if made <= born:
+        return (f'{I14_COVERS}: the covering commit {sha[:9]} ({when[:10]}) is not newer than '
+                f'the card ({str(created)[:10] or "no created"})')
+    return ''
+
+
+def _i14_void(product, item, sha):
+    """The ``asf reset`` that voids ``item``'s landing on ``sha``, or None: a void naming the sha,
+    or a standing reset naming the lane PR of a run that landed it
+    (:func:`asf.workers.lifecycle.voided_run`)."""
+    from asf.workers import lifecycle, pool as pool_mod
+    path = pool_mod.sessions_path(product)
+    void = lifecycle.voided_sha(path, item, sha)
+    if void:
+        return void
+    # every run of the item, those a reset made history included: the void names them
+    every = [r for rs in lifecycle.runs(path).values() for r in rs if r.get('item') == item]
+    for run in every:
+        lane = run.get('lane') if isinstance(run.get('lane'), dict) else {}
+        if any(str(h or '')[:7] == sha[:7] for h in (run.get('harvested'), lane.get('sha'))):
+            void = lifecycle.voided_run(path, run, sha)
+            if void:
+                return void
+    return None
+
+
+_CREATED_RE = re.compile(r'^- (\d{4}-\d\d-\d\d)[^:\n]*: created\b', re.M)
+
+
+def _card_created(meta, text):
+    """When the card was created: its ``created:`` field, else the date of its History
+    ``- <date>: created`` line; ``''`` when neither says."""
+    if meta.get('created'):
+        return str(meta['created'])
+    m = _CREATED_RE.search(text or '')
+    return m.group(1) if m else ''
+
+
+def i14_reason(ctx, product, after, before, text=None):
+    """Why the close ``after`` (from ``before``) does not stand on a landing fact; ``''`` when
+    it does or is not a close I14 judges; ``None`` when a fact is unknown (deferred this tick,
+    S-m14)."""
+    if not after or after.get('type') not in I14_TYPES or not _landed_state(after):
+        return ''
+    if before and _landed_state(before):
+        return ''  # already closed before this writer: not its close to answer for
+    stamp = after.get('landing')
+    if not isinstance(stamp, dict):
+        return 'closed with no landing: stamp'
+    by = str(stamp.get('by') or '').strip().strip('\'"')
+    sha = str(stamp.get('sha') or '').strip().strip('\'"').lower()
+    if by == 'migration':
+        return ''  # stamped by `migrate-landing` on a card closed before the stamp existed
+    if by == 'reverted':
+        return (f'its landing {str(stamp.get("reverts") or "")[:9] or "?"} was reverted on the '
+                f'trunk: nothing of it stands')
+    if by not in _landing_by():
+        return f'landing.by {by or "missing"} is not one of {", ".join(_landing_by())}'
+    if not _HEX40.fullmatch(sha):
+        return f'landing.sha {sha or "missing"} is not a full sha'
+    as_of, reopened = _dt(stamp.get('as_of')), _last_reopen(after)
+    if as_of is None:
+        return 'landing.as_of missing or unreadable'
+    if reopened is not None and as_of <= reopened:
+        return (f'landing {sha[:9]} stamped {stamp.get("as_of")} predates the last reopen '
+                f'({reopened.isoformat()}): a reopened card closes on a new landing (S-M15)')
+    item = str(after.get('id') or '')
+    void = _i14_void(product, item, sha) if item else None
+    if void:
+        return (f'landing {sha[:9]} was voided by {void.get("by") or "a reset"}'
+                f'{" at " + str(void.get("at")) if void.get("at") else ""}')
+    where = _i14_repo(ctx, product)
+    if where is None:
+        return None  # no repository to ask: unknown, deferred
+    repo, main = where
+    if not _i14_known(ctx, repo, main, sha):
+        return None  # not fetched: deferred silently, no Bug (S-m14)
+    from asf.workers import landing
+    trunk = landing.on_trunk(repo, main, sha)
+    if trunk is None:
+        return None
+    if not trunk:
+        return f'landing {sha[:9]} is not on origin/{main}'
+    created = _card_created(after, text)
+    if by == I14_COVERS:
+        return _i14_covers(product, repo, main, item, sha, created)
+    return ''
+
+
+def _landed_state(meta):
+    return _machine(meta).get('state') in ('Resolved', 'Closed')
+
+
+def check_i14(ctx):
+    """I14 — a Task, Bug or Story closes only on a landing fact: the ``landing:`` stamp the
+    closing writer put on it names a full sha on ``origin/<main>`` (the trunk fetched first; an
+    object git still lacks defers the close silently — S-m14), stamped after the card's last
+    reopen (S-M15), not voided by ``asf reset``, and by a known closer; a ``trunkclose/covers``
+    stamp also needs its run's REPORT ``done``, no open work, and the covering commit newer than
+    the card (S-M16). Judges the close *transition* only.
+
+    ``flags.i14`` (:func:`i14_mode`): ``off`` — nothing; ``report`` — each finding is one
+    ``INVARIANT I14 (report): …`` line and one ``invariants-report.jsonl`` record, and the write
+    stands; ``refuse`` — the finding is returned, naming the card and the parents the same writer
+    resolved on it (:func:`asf.record.stage.cascaded`: one refusal set — S-m13). The audit
+    (``asf check --invariants``) lists the findings in either mode and writes nothing."""
+    product = getattr(ctx, 'product', None)
+    mode = i14_mode(product)
+    if mode == 'off':
+        return []
+    from asf.record import stage
+    audit = ctx.staged.writer == AUDIT_WRITER
+    out = []
+    for path in _card_paths(ctx.staged):
+        text, after = _after(ctx, path)
+        _bt, before = _before(ctx, path)
+        why = i14_reason(ctx, product, after, before, text)
+        if not why:
+            continue  # holds, or unknown this tick
+        subject = after.get('id') or path
+        if audit or mode == 'refuse':
+            paths = (path,) if audit else stage.cascaded(ctx.root, ctx.staged, [path])
+            out.append(Finding('I14', 'record', subject, why, tuple(paths)))
+            continue
+        i14_report(product, ctx.staged.writer, subject, path, why)
+    return out
+
+
+def i14_report(product, writer, subject, path, why, now=None, out=None):
+    """Report mode's record of one I14 finding: the line, and one ``invariants-report.jsonl``
+    record (through :mod:`asf.state.store`). A store that cannot take it costs the record, never
+    the tick."""
+    import datetime
+    out = out or print
+    out(f'INVARIANT I14 (report): {writer} closed {path} — {why}')
+    at = now or datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+    try:
+        from asf.state import store
+        store.append(product, I14_REPORT, {'at': at, 'invariant': 'I14', 'mode': 'report',
+                                           'writer': writer, 'item': subject, 'path': path,
+                                           'message': why})
+    except Exception as e:  # noqa: BLE001 — a report line never fails the record step
+        out(f'INVARIANT I14 (report): could not record the line — {type(e).__name__}: {e}')
+
+
+def i14_report_lines(product, start=None, end=None):
+    """How many I14 report records ``product``'s ``invariants-report.jsonl`` holds in
+    ``[start, end)`` (aware datetimes; either open). ``None`` when the file is unreadable."""
+    from asf.state import store
+    try:
+        target = store.path(product, I14_REPORT)
+    except Exception:  # noqa: BLE001 — no state, no count
+        return None
+    if not os.path.exists(target):
+        return 0
+    import json
+    n = 0
+    try:
+        with open(target, encoding='utf-8') as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get('invariant') != 'I14':
+                    continue
+                at = _dt(rec.get('at'))
+                if (start and (at is None or at < start)) or (end and (at is None or at >= end)):
+                    continue
+                n += 1
+    except OSError:
+        return None
+    return n
+
+
 def _staged_only(check):
     """A record check reads a writer's staged change; any other context has none to judge."""
     def run_it(ctx):
@@ -422,6 +697,7 @@ INVARIANTS.extend([
     Invariant('I3', 'record', _staged_only(check_i3)),
     Invariant('I10', 'record', _staged_only(check_i10)),
     Invariant('I11', 'record', _staged_only(check_i11)),
+    Invariant('I14', 'record', _staged_only(check_i14)),
 ])
 
 
@@ -968,7 +1244,7 @@ def record_audit(root, product=None):
         d = os.path.join(root, folder)
         if os.path.isdir(d):
             paths += [f'{folder}/{n}' for n in sorted(os.listdir(d)) if n.endswith('.md')]
-    staged = stage.Staged('check', tuple(paths), {p: None for p in paths})
+    staged = stage.Staged(AUDIT_WRITER, tuple(paths), {p: None for p in paths})
     return run(stage.RecordContext(root, staged, product), scope='record')
 
 

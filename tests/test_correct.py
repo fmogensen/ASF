@@ -329,7 +329,7 @@ class ResetTests(unittest.TestCase):
         self.ledger(again)
         text = f'REPORT\nstatus: done\nleft out: already on origin/main at {self.SHA[:7]}\n'
         with mock.patch.object(relaunch, '_result_text', return_value=text), \
-                mock.patch.object(trunkclose, 'trunk_sha', return_value=self.SHA), \
+                mock.patch.object(trunkclose, 'trunk_sha', return_value=(self.SHA, 'names')), \
                 mock.patch.object(trunkclose, 'unlanded', return_value=False), \
                 mock.patch.object(trunkclose.landing, 'open_work', return_value=False):
             self.assertIsNone(trunkclose.evidence(self.path, 'T-0091', self.tmp))

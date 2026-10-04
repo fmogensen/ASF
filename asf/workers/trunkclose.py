@@ -108,15 +108,16 @@ def _is_ancestor(repo, sha, ref):
 
 
 def trunk_sha(repo, main, run, text, item='', writes=(), prs=()):
-    """The first commit ``text`` names that is on ``origin/<main>`` and is not the run's own
-    work: not its launch head, not a sha its REPORT's ``pushed:``/``commits:`` name
+    """``(sha, arm)``: the first commit ``text`` names that is on ``origin/<main>`` and is not the
+    run's own work: not its launch head, not a sha its REPORT's ``pushed:``/``commits:`` name
     (:func:`own_shas`), not a commit between its launch head and the head it pushed, and not a
     trunk commit whose message names the run's branch (its merge) — and that is attributable to
-    ``item`` (:func:`asf.workers.landing.attributable`: named by it, its PR's merge, or covering its
-    ``writes:``). '' when there is none — a session whose own output landed (a reshape's split), or
-    one naming the trunk head its branch merged in, proves nothing about the Task's work."""
+    ``item``, with the arm that attributes it (:func:`asf.workers.landing.attribution`: ``names``,
+    ``pr`` — its PR's merge — or ``covers`` — its ``writes:``). ``('', '')`` when there is none —
+    a session whose own output landed (a reshape's split), or one naming the trunk head its
+    branch merged in, proves nothing about the Task's work."""
     if not repo or not text:
-        return ''
+        return '', ''
     launch = run.get('launch_head') or ''
     branch = run.get('branch') or ''
     skip = {s[:7] for s in own_shas(text) + [launch] if s}
@@ -131,10 +132,11 @@ def trunk_sha(repo, main, run, text, item='', writes=(), prs=()):
             if body is None or branch in body:
                 continue  # the trunk's merge of the run's own branch (a merge queue's commit),
                 # or a message git could not read: unknown is never evidence
-        if not landing.attributable(repo, main, sha, item or run.get('item') or '', writes, prs):
+        arm = landing.attribution(repo, main, sha, item or run.get('item') or '', writes, prs)
+        if not arm:
             continue  # merely an ancestor of the trunk: another item's commit, the head merged in
-        return sha
-    return ''
+        return sha, arm
+    return '', ''
 
 
 def evidence(path, item, repo, main='main', writes=(), ask_gh=True):
@@ -155,7 +157,7 @@ def evidence(path, item, repo, main='main', writes=(), ask_gh=True):
     claim = relaunch.terminal(text)
     if not claim.startswith(DONE):
         return None
-    sha = trunk_sha(repo, main, run, text, item, writes, landing.run_prs(path, item))
+    sha, arm = trunk_sha(repo, main, run, text, item, writes, landing.run_prs(path, item))
     if not sha or unlanded(repo, main, run.get('branch')):
         return None
     if lifecycle.voided_sha(path, item, sha):
@@ -165,13 +167,19 @@ def evidence(path, item, repo, main='main', writes=(), ask_gh=True):
         return Unknown('the open PRs could not be read')  # never a close on an unknown
     if work:
         return None  # the item's own work is unmerged: nothing on the trunk closes it
-    return full_sha(repo, sha) or sha, run, claim
+    return full_sha(repo, sha) or sha, dict(run, trunk_arm=arm), claim
 
 
-def close(product, job, sha, why):
+def close(product, job, sha, why, arm=''):
     """Close ``job``'s latest run on ``sha``: the landing mark the ingest reads as the item's
-    merge fact, the reason beside it, and its pending correction (a park included) cleared."""
-    pool_mod.update_session(product, job, harvested=sha, trunk_closed=why, correction=None)
+    merge fact, the reason beside it, the attributing arm (``trunk_arm``: ``names``/``pr``/
+    ``covers`` — the ingest's ``landing:`` stamp says ``by: trunkclose/<arm>``, and invariant I14
+    holds a ``covers`` close to its own rule), and its pending correction (a park included)
+    cleared."""
+    fields = dict(harvested=sha, trunk_closed=why, correction=None)
+    if arm:
+        fields['trunk_arm'] = arm
+    pool_mod.update_session(product, job, **fields)
 
 
 def closes_before_launch(product, row_kind, item, out=print, dry_run=False):
@@ -200,7 +208,7 @@ def closes_before_launch(product, row_kind, item, out=print, dry_run=False):
     if dry_run:
         out(f'would close {row_kind}-{item.lower():<17} {item:<10} — {why}')
         return True
-    close(product, run['job'], sha, why)
+    close(product, run['job'], sha, why, run.get('trunk_arm', ''))
     out(f'closed   {row_kind}-{item.lower():<17} {item:<10} — not launched: {why}')
     return True
 
@@ -240,7 +248,7 @@ def close_parked(product, out=print, dry_run=False):
         if dry_run:
             out(f'would close {job:<24} {item:<10} — {why}')
         else:
-            close(product, run['job'], sha, why)
+            close(product, run['job'], sha, why, run.get('trunk_arm', ''))
             if run['job'] != job:
                 pool_mod.update_session(product, job, correction=None)
             out(f'closed   {job:<24} {item:<10} — {why} (landed: {sha[:9]})')

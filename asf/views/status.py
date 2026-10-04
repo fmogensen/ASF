@@ -572,6 +572,19 @@ def release_cell(root, product):
     return cell(root, product)
 
 
+def i14_cell(product, now=None):
+    """Invariant I14's report count over the last 24 h, with its mode; ``None`` (no row) while
+    ``flags.i14`` is off and nothing was reported."""
+    from asf import invariants
+    mode = invariants.i14_mode(product)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    n = invariants.i14_report_lines(product, now - datetime.timedelta(hours=24), None)
+    if mode == 'off' and not n:
+        return None
+    count = '?' if n is None else str(n)
+    return f"{count} report line(s) in 24 h (i14: {mode})"
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
@@ -604,7 +617,8 @@ def render(root, product, cfg=None):
                        ('Land requests', lambda: land_red_cell(product)),
                        ('Trunk stall', lambda: trunk_stall_cell(product)),
                        ('Trunk red', lambda: trunk_red_cell(product)),
-                       ('Facts', lambda: facts_cell(product))):
+                       ('Facts', lambda: facts_cell(product)),
+                       ('I14', lambda: i14_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table

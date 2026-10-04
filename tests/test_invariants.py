@@ -18,6 +18,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -364,7 +365,7 @@ class R13TestsOnlyInvariants(unittest.TestCase):
         self.assertEqual(registered & {'I6', 'I9', 'I12', 'I13'}, set())
         self.assertEqual(set(invariants.TEST_ONLY), {'I6', 'I12', 'I13'})
         self.assertEqual({i.id for i in invariants.INVARIANTS},
-                         {'I1', 'I2', 'I3', 'I4', 'I5', 'I7', 'I8', 'I10', 'I11'})
+                         {'I1', 'I2', 'I3', 'I4', 'I5', 'I7', 'I8', 'I10', 'I11', 'I14'})
 
     def test_r13_i13_an_explicit_type_decides_the_minted_type(self):
         self.assertEqual(invariants.check_i13('bug', 'bug'), [])
@@ -554,6 +555,270 @@ class OrderedOverlapTests(unittest.TestCase):
         before_text = _read(os.path.join(self.root, p2))
         _card(self.root, 'T-0002', 'lib/x.py', after=('T-0001',))
         self.assertEqual(self.check([p2], before={p2: before_text}), [])
+
+
+def _closing(root, rel, iid, state, *, typ='task', parent='F-0001', landing=None, reopened=(),
+             created='2026-09-01'):
+    """Write card ``rel`` (``iid``, ``state``) with an optional ``landing:`` stamp."""
+    os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
+    machine = [f'schema_version: 1', f'state: {state}']
+    if landing is not None:
+        machine.append('landing:')
+        machine += [f'  {k}: {v}' for k, v in landing.items()]
+    if reopened:
+        machine.append('reopened:')
+        machine += [f"  - '{r}'" for r in reopened]
+    typed = [f'id: {iid}', f'type: {typ}', f'title: {iid}', f'created: {created}']
+    if parent:
+        typed.append(f'parent: {parent}')
+    text = ('---\n' + '\n'.join(typed) + '\n# ---- machine ----\n' + '\n'.join(machine) +
+            '\n---\n## Description\n\n## History\n- 2026-01-01: created\n')
+    with open(os.path.join(root, rel), 'w', encoding='utf-8') as f:
+        f.write(text)
+    return text
+
+
+class _I14(unittest.TestCase):
+    """A record clone, a product repository whose ``origin/main`` holds ``self.sha`` (and not
+    ``self.off_trunk``), a temporary ASF home, and ``print`` captured in ``self.lines``."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix='i14_')
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.root = os.path.join(self.d, 'record')
+        self.repo = os.path.join(self.d, 'repo')
+        os.makedirs(self.repo)
+        self.git('init', '-q')
+        self.commit('task(T-0001): the work')
+        self.sha = self.git('rev-parse', 'HEAD')
+        self.commit('task(T-0002): not on the trunk yet')
+        self.off_trunk = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', self.sha)
+        p = mock.patch.object(env, 'ASF_HOME', os.path.join(self.d, 'home'))
+        p.start()
+        self.addCleanup(p.stop)
+        self.lines = []
+        p = mock.patch('builtins.print', lambda *a, **_k: self.lines.append(' '.join(map(str, a))))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def git(self, *a):
+        return subprocess.run(['git', *a], cwd=self.repo, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def commit(self, msg):
+        self.git('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '--allow-empty',
+                 '-m', msg)
+
+    def product(self, mode):
+        flags = {} if mode is None else {'i14': mode}
+        return env.Product('p', {'repo_dir': self.repo, 'main': 'main',
+                                 'conventions': {'flags': flags}})
+
+    def stamp(self, sha=None, by='pr-merge', as_of='2026-10-01T00:00:00Z'):
+        return {'sha': sha or self.sha, 'as_of': as_of, 'by': by}
+
+    def close(self, mode, landing=None, before_state='Active', typ='task', rel='tasks/T-0001.md',
+              iid='T-0001', writer='ingest', **kw):
+        """Stage one writer that moved ``rel`` from ``before_state`` to Closed; the findings."""
+        before = _closing(self.root, rel, iid, before_state, typ=typ, **kw)
+        _closing(self.root, rel, iid, 'Closed', typ=typ, landing=landing, **kw)
+        staged = stage.Staged(writer, (rel,), {rel: before})
+        return invariants.check_i14(stage.RecordContext(self.root, staged, self.product(mode)))
+
+    def reported(self):
+        return invariants.i14_report_lines(self.product('report'))
+
+
+class I14CloseNeedsALandingFact(_I14):
+    """I14 (W4-PR3b): a Task/Bug/Story closes only on a ``landing:`` stamp naming a full sha on
+    ``origin/<main>``; ``flags.i14`` off by default, ``report`` writes a line and a jsonl record,
+    ``refuse`` returns the finding with the parents the writer cascaded."""
+
+    def test_off_by_default_judges_nothing(self):
+        self.assertEqual(invariants.i14_mode(self.product(None)), 'off')
+        self.assertEqual(invariants.i14_mode(self.product(False)), 'off')  # yaml `off`
+        self.assertEqual(self.close(None), [])
+        self.assertEqual(self.close('off'), [])
+        self.assertEqual(self.lines, [])
+        self.assertEqual(self.reported(), 0)
+
+    def test_report_mode_prints_and_records_and_the_write_stands(self):
+        self.assertEqual(self.close('report'), [])
+        self.assertEqual(len(self.lines), 1, self.lines)
+        self.assertTrue(self.lines[0].startswith('INVARIANT I14 (report): ingest closed '
+                                                 'tasks/T-0001.md — closed with no landing'))
+        self.assertEqual(self.reported(), 1)
+        with open(os.path.join(env.ASF_HOME, 'state', 'p', 'invariants-report.jsonl')) as f:
+            rec = json.loads(f.readline())
+        self.assertEqual((rec['invariant'], rec['item'], rec['writer']), ('I14', 'T-0001', 'ingest'))
+
+    def test_refuse_mode_returns_the_finding(self):
+        found = self.close('refuse')
+        self.assertEqual(ids(found), [('I14', 'T-0001')])
+        self.assertEqual(found[0].paths, ('tasks/T-0001.md',))
+        self.assertEqual(self.reported(), 0)
+
+    def test_a_stamped_close_on_the_trunk_holds(self):
+        for by in ('pr-merge', 'names', 'trunkclose/names', 'trunkclose/pr', 'console', 'groom',
+                   'children', 'matrix', 'descent'):
+            self.assertEqual(self.close('refuse', self.stamp(by=by)), [], by)
+        self.assertEqual(self.close('refuse', {'sha': "''", 'as_of': '2026-10-01', 'by': 'migration',
+                                               'note': 'pre-I14'}), [])
+
+    def test_a_bad_stamp_is_a_finding(self):
+        for stamp, said in ((self.stamp(by='covers'), 'landing.by covers'),
+                            (self.stamp(sha=self.sha[:9]), 'not a full sha'),
+                            (self.stamp(as_of='never'), 'as_of'),
+                            (self.stamp(sha=self.off_trunk), 'is not on origin/main'),
+                            ({'sha': "''", 'as_of': '2026-10-01T00:00:00Z', 'by': 'reverted',
+                              'reverts': self.sha}, 'was reverted'),
+                            ({'sha': "''", 'as_of': '2026-10-01T00:00:00Z', 'by': 'children'},
+                             'not a full sha')):
+            found = self.close('refuse', stamp)
+            self.assertEqual(len(found), 1, stamp)
+            self.assertIn(said, found[0].message)
+
+    def test_an_unfetched_sha_defers_silently(self):
+        # no origin to fetch from: the object stays unknown — no finding, no line, no Bug
+        found = self.close('refuse', self.stamp(sha='f' * 40))
+        self.assertEqual(found, [])
+        self.assertEqual(self.close('report', self.stamp(sha='f' * 40)), [])
+        self.assertEqual(self.reported(), 0)
+
+    def test_a_stamp_older_than_the_last_reopen_is_a_finding(self):
+        found = self.close('refuse', self.stamp(as_of='2026-09-20T00:00:00Z'),
+                           reopened=('2026-09-25T10:00:00Z: wrong close — Closed → New',))
+        self.assertIn('predates the last reopen', found[0].message)
+        self.assertEqual(self.close('refuse', self.stamp(as_of='2026-09-26T00:00:00Z'),
+                                    reopened=('2026-09-25T10:00:00Z: x — Closed → New',)), [])
+
+    def test_a_voided_sha_is_a_finding(self):
+        from asf.workers import lifecycle
+        void = {'head': self.sha, 'by': 'operator', 'at': '2026-10-01T00:00:00Z'}
+        with mock.patch.object(lifecycle, 'voided_sha', return_value=void):
+            found = self.close('refuse', self.stamp())
+        self.assertIn('voided by operator', found[0].message)
+
+    def test_only_the_close_transition_of_a_task_bug_or_story_is_judged(self):
+        self.assertEqual(self.close('refuse', before_state='Closed'), [])     # already closed
+        self.assertEqual(self.close('refuse', typ='feature', rel='features/F-0009.md',
+                                    iid='F-0009', parent=''), [])
+        self.assertEqual(len(self.close('refuse', typ='bug', rel='bugs/B-0001.md',
+                                        iid='B-0001')), 1)
+        self.assertEqual(len(self.close('refuse', typ='story', rel='stories/S-0001.md',
+                                        iid='S-0001')), 1)
+
+    def test_refuse_reverts_the_parents_the_writer_cascaded(self):
+        task, feat, other = 'tasks/T-0001.md', 'features/F-0001.md', 'tasks/T-0003.md'
+        tb = _closing(self.root, task, 'T-0001', 'Active')
+        fb = _closing(self.root, feat, 'F-0001', 'Active', typ='feature', parent='')
+        ob = _closing(self.root, other, 'T-0003', 'Active')
+        _closing(self.root, task, 'T-0001', 'Closed')                        # no stamp
+        _closing(self.root, feat, 'F-0001', 'Resolved', typ='feature', parent='')
+        _closing(self.root, other, 'T-0003', 'Active', parent='F-0001')     # an unrelated edit
+        staged = stage.Staged('ingest', (feat, task, other), {task: tb, feat: fb, other: ob})
+        found = invariants.check_i14(stage.RecordContext(self.root, staged, self.product('refuse')))
+        self.assertEqual(sorted(found[0].paths), [feat, task])
+        restored = stage.refuse(self.root, staged, found)
+        self.assertEqual(sorted(restored), [feat, task])
+        self.assertEqual(_read(os.path.join(self.root, feat)), fb)
+        self.assertEqual(_read(os.path.join(self.root, task)), tb)
+
+    def test_the_audit_lists_in_report_mode_and_writes_nothing(self):
+        _closing(self.root, 'tasks/T-0001.md', 'T-0001', 'Closed')
+        _closing(self.root, 'tasks/T-0002.md', 'T-0002', 'Closed', landing=self.stamp())
+        found = [f for f in invariants.record_audit(self.root, self.product('report'))
+                 if f.invariant == 'I14']
+        self.assertEqual(ids(found), [('I14', 'T-0001')])
+        self.assertEqual(self.reported(), 0)
+        self.assertEqual([ln for ln in self.lines if 'I14' in ln], [])
+
+    def test_a_close_the_ingest_stamps_holds_and_an_unstamped_one_is_refused(self):
+        # the closing writer itself (asf ingest, W4-PR3a's stamp) staged and judged end to end
+        import types
+        from asf.record import ingest
+        for folder in ('epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules'):
+            os.makedirs(os.path.join(self.root, folder), exist_ok=True)
+        _closing(self.root, 'tasks/T-0001.md', 'T-0001', 'New', parent='')
+        ev = {'features': {}, 'stories': {}, 'prod_sha': None, 'dev_sha': None,
+              'checked': set(), 'main_sha': None, 'merged': {}, 'branches': [], 'ci': True,
+              'ids': {'T-0001': {'branches': [], 'open_prs': [], 'commit': self.sha,
+                                 'pr': None, 'green': True}}}
+
+        def run_ingest(root):
+            with mock.patch.object(ingest.evidence, 'load', return_value=ev):
+                return ingest.cmd_ingest(types.SimpleNamespace(fresh=False, registry=False),
+                                         root)
+        staged = stage.stage(self.root, 'ingest', run_ingest)
+        self.assertIn('tasks/T-0001.md', staged.paths)
+        ctx = stage.RecordContext(self.root, staged, self.product('refuse'))
+        self.assertEqual([f for f in invariants.check_i14(ctx)], [])
+        # the same close with the stamp taken off is a finding
+        rel = os.path.join(self.root, 'tasks/T-0001.md')
+        text = _read(rel)
+        with open(rel, 'w', encoding='utf-8') as f:
+            f.write(re.sub(r'landing:.*\n(  .*\n)*', '', text))
+        ctx = stage.RecordContext(self.root, staged, self.product('refuse'))
+        self.assertEqual(ids(invariants.check_i14(ctx)), [('I14', 'T-0001')])
+
+    def test_the_report_count_shows_in_status_and_the_scorecard(self):
+        from asf.scorecard import program
+        from asf.views import status
+        self.assertIsNone(status.i14_cell(self.product('off')))
+        self.close('report')
+        self.assertEqual(status.i14_cell(self.product('report')),
+                         '1 report line(s) in 24 h (i14: report)')
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        row = program.row([], now - datetime.timedelta(days=1), now + datetime.timedelta(seconds=1),
+                          product=self.product('report'))
+        self.assertEqual(row['i14_report_lines'], 1)
+        self.assertIsNone(program.row([], now, now)['i14_report_lines'])
+
+
+class I14CoversRule(_I14):
+    """S-M16: a ``trunkclose/covers`` close holds only with a ``done`` REPORT, no open work with
+    gh known, and the covering commit newer than the card."""
+
+    def setUp(self):
+        super().setUp()
+        from asf.workers import landing, lifecycle, relaunch
+        self.run = {'job': 'coder-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001',
+                    'harvested': self.sha, 'trunk_closed': 'verified', 'started': '2026-10-01'}
+        self.text = 'status: done'
+        self.work = ''
+        for target, name, fn in (
+                (lifecycle, 'item_runs', lambda _p, _i: [self.run]),
+                (relaunch, '_result_text', lambda _r: self.text),
+                (relaunch, 'terminal', lambda t: 'status done' if 'done' in t else 'status partial'),
+                (landing, 'open_work', lambda *_a, **_k: self.work)):
+            p = mock.patch.object(target, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def covers(self, created='2020-01-01'):
+        return self.close('refuse', self.stamp(by='trunkclose/covers'), created=created)
+
+    def test_covers_holds_with_its_three_facts(self):
+        self.assertEqual(self.covers(), [])
+
+    def test_covers_without_a_done_report_is_a_finding(self):
+        self.text = 'status: partial'
+        self.assertIn('did not report done', self.covers()[0].message)
+
+    def test_covers_with_open_work_is_a_finding_and_unknown_defers(self):
+        self.work = 'worker/T-0001'
+        self.assertIn('still open on worker/T-0001', self.covers()[0].message)
+        self.work = None
+        self.assertEqual(self.covers(), [])
+
+    def test_covers_by_a_commit_older_than_the_card_is_a_finding(self):
+        self.assertIn('is not newer than the card', self.covers(created='2999-01-01')[0].message)
+
+    def test_covers_with_no_trunk_closed_run_is_a_finding(self):
+        self.run = dict(self.run, trunk_closed=None)
+        self.assertIn('no trunk-closed run', self.covers()[0].message)
 
 
 if __name__ == '__main__':

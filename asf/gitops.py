@@ -13,8 +13,9 @@ DECISION row, or reads "no branch left" and closes a card. Here the two are kept
 * the helpers answer the questions the landing checks ask, and each returns ``None`` —
   **Unknown** — when git could not answer, never ``False``/``''``/``0``.
 
-Pushing stays in :mod:`asf.gitpush`. The repository's ``check_clients`` script counts the raw
-``git`` argv sites left outside these modules; each migration lowers its baseline.
+:func:`fetch` is the one write here, to remote-tracking refs; pushing stays in
+:mod:`asf.gitpush`. The repository's ``check_clients`` script counts the raw ``git`` argv sites
+left outside these modules; each migration lowers its baseline.
 """
 import subprocess
 
@@ -73,3 +74,14 @@ def rev_list_count(cwd, a, b):
     not answer (a ref missing, a timeout)."""
     r = git(['rev-list', '--count', f'{a}..{b}'], cwd)
     return int(r.data) if r.ok and r.data.isdigit() else None
+
+
+#: Seconds a fetch may take.
+FETCH_TIMEOUT_S = 120
+
+
+def fetch(cwd, remote='origin', ref=None, *, timeout=FETCH_TIMEOUT_S):
+    """``git fetch -q <remote> [<ref>]`` — the one write here, to remote-tracking refs only. The
+    :class:`Result`; not ``ok`` (offline, no such remote, a timeout) leaves the refs as they
+    were, and a caller reads what it then cannot find as Unknown."""
+    return git(['fetch', '-q', remote, *([ref] if ref else [])], cwd, timeout=timeout)
