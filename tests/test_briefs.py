@@ -22,6 +22,7 @@ import unittest
 from unittest import mock
 
 from asf import briefs
+from asf import env
 from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
 from asf.env import Product
@@ -1203,6 +1204,54 @@ class KindModelGrantTest(unittest.TestCase):
     def test_a_groom_brief_grants_the_intake_directory_its_inbox_lines_name(self):
         brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
         self.assertIn('inbox', brief.add_dirs)
+
+
+class ModelMapThroughTheProductFileTests(unittest.TestCase):
+    """F-0211, P11: a ``conventions.models`` map reaches :func:`model_for` through a *product
+    file* — the yaml subset reader and the product validator, not a dict built in Python — in
+    the three shapes ``docs/guide/product-config.md:327-332`` tells an operator to write."""
+
+    BLOCK = ('repo_slug: a/b', 'conventions:', '  models:', '    review:',
+             '      S1: heavy', '      S2: light', '      default: light', '    spec: heavy')
+    FLOW = ('repo_slug: a/b', 'conventions:', '  models:',
+            '    review: {S1: heavy, S2: light, S3: light, feature: heavy, default: light}')
+    STRING = ('repo_slug: a/b', 'conventions:', '  models:', '    review: light')
+
+    BUG = staticmethod(lambda sev: {'type': 'bug', 'severity': sev})
+
+    def _product(self, lines):
+        text = '\n'.join(lines)
+        self.assertEqual(env.validate_product_text(text), [])
+        return env.Product('x', env.loads(text))
+
+    def test_the_block_form_validates_parses_and_resolves(self):
+        p = self._product(self.BLOCK)
+        self.assertEqual(env.loads('\n'.join(self.BLOCK))['conventions']['models'],
+                         {'review': {'S1': 'heavy', 'S2': 'light', 'default': 'light'},
+                          'spec': 'heavy'})
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S2')), 'light')
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S1')), 'heavy')
+
+    def test_the_guides_flow_form_validates_parses_and_resolves(self):
+        p = self._product(self.FLOW)
+        self.assertEqual(env.loads('\n'.join(self.FLOW))['conventions']['models'],
+                         {'review': {'S1': 'heavy', 'S2': 'light', 'S3': 'light',
+                                     'feature': 'heavy', 'default': 'light'}})
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S2')), 'light')
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S1')), 'heavy')
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}), 'heavy')
+
+    def test_a_map_default_covers_a_class_the_map_does_not_name(self):
+        p = self._product(self.BLOCK)
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}), 'light')
+        self.assertEqual(build_mod.model_for(p, 'spec'), 'heavy')
+
+    def test_a_string_in_a_product_file_still_covers_every_class(self):
+        p = self._product(self.STRING)
+        self.assertEqual(env.loads('\n'.join(self.STRING))['conventions']['models'],
+                         {'review': 'light'})
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}), 'light')
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S1')), 'light')
 
 
 class CheapTierTests(unittest.TestCase):
