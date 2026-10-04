@@ -1307,6 +1307,18 @@ class DependencyRootRules(unittest.TestCase):
             self.assertEqual(a.word, 'reset')
             self.assertIn('unverified for 30 h', a.why)
 
+    def test_unknown_covers_never_acts(self):
+        for report in ('done', 'partial', ''):
+            self.assertIsNone(policy.decide_unverified_landing('T-0001', 'abc', 30, None, report, 24))
+        self.assertEqual(policy.decide_unverified_landing('T-0001', 'abc', 30, False, 'done',
+                                                          24).word, 'reset')
+
+    def test_apply_waits_on_git_when_covers_is_unknown(self):
+        done, closes, resets, said = self._apply([('T-0001', {'job': 'j'}, 'abc', 30, None,
+                                                   'done')])
+        self.assertEqual((done, closes, resets), ([], [], []))
+        self.assertTrue(any('waits on git' in l for l in said), said)
+
     def _apply(self, facts, flags=None, reset_rc=0):
         from unittest import mock
         from asf.tick import step_wave
