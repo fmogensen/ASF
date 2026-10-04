@@ -36,6 +36,28 @@ and the harness's own verbs, which move the forge the way a person or CI would:
   recorded answer, ``tests/fixtures/gh/rate-limit``): the host knows its state but tells nothing
 * ``e2e close-unmerged <n>`` — the host closes PR ``n`` without merging it (a person, or the
   host itself): ``CLOSED``, no ``mergedAt``, no merge commit, its head branch kept
+* ``e2e status <sha> <context> <state>`` — a commit status on ``sha`` (the merge queue's
+  ``asf/attested`` on a batch sha)
+* ``e2e skip-job <n> <name> [attested]`` — PR ``n``'s check ``name`` concluded ``skipped`` (an
+  ``if:`` false, a ``needs:`` upstream that skipped it); with ``attested`` the head also carries
+  the merge queue's ``asf/attested`` = ``success`` commit status (the recorded pair
+  ``tests/fixtures/gh/skipped-required-job/{attested,not-attested}``)
+* ``e2e hide-job-failure <n> [<name>]`` — PR ``n``'s workflow run concludes ``success`` while
+  its job ``name`` (``e2e-nightly``) failed under ``continue-on-error``
+  (``tests/fixtures/gh/run-success-hiding-job``)
+* ``e2e path-filter <name>`` — the workflow's path filter never creates job ``name``: it is
+  gone from every open PR's checks and from the checks a new PR starts with, while branch
+  protection may still require it (``tests/fixtures/gh/path-filtered-check``)
+* ``e2e stale-merge-ref <n> [<name>]`` — PR ``n``'s check ``name`` (``tests``) is red from a
+  ``pull_request`` run made on a merge ref of the trunk as it stood before its current tip: the
+  run's ``created_at`` predates every commit, ``baseRefOid`` stays at the trunk the ref was cut
+  on and ``mergeStateStatus`` reads ``BEHIND`` once the trunk moves
+  (``tests/fixtures/gh/stale-merge-ref``)
+
+Each PR's checks belong to one ``pull_request`` workflow run of its own (``runs/<id>/job/<id>``
+links), read back through ``pr checks``, ``api repos/<slug>/commits/<sha>/check-runs``,
+``api repos/<slug>/commits/<sha>/status``, ``api repos/<slug>/actions/runs[?head_sha=…]``,
+``api repos/<slug>/actions/runs/<id>[/jobs]``, ``run view <id>`` and ``run list``.
 
 Anything else exits 1 with ``fake gh: unsupported``.
 """
@@ -54,7 +76,14 @@ LOCK = os.path.join(HERE, 'gh-state.lock')
 
 PR_FIELDS = ('number', 'title', 'body', 'state', 'headRefName', 'baseRefName', 'mergedAt',
              'mergeCommit', 'autoMergeRequest', 'reviewDecision', 'headRefOid', 'isDraft',
-             'url', 'createdAt', 'updatedAt', 'mergeable', 'closedAt')
+             'url', 'createdAt', 'updatedAt', 'mergeable', 'closedAt', 'baseRefOid',
+             'mergeStateStatus')
+
+#: ``gh pr checks`` bucket → the check run's ``conclusion`` (``pending``: not completed)
+CONCLUSIONS = {'pass': 'success', 'fail': 'failure', 'skipping': 'skipped',
+               'cancel': 'cancelled'}
+#: the ``created_at`` of a run made on a stale merge ref: before any commit a test makes
+STALE_RUN_AT = '2000-01-01T00:00:00Z'
 
 
 class Refusal(Exception):
@@ -172,12 +201,92 @@ def view(state, pr, fields=None):
         live = ref_sha(state, pr['headRefName']) if pr['state'] == 'OPEN' else ''
         full['headRefOid'] = live or pr.get('headRefOid') or ''
     full['url'] = f"https://example.invalid/{state['slug']}/pull/{pr['number']}"
-    if fields is None or 'mergeable' in fields:
+    if fields is None or 'mergeable' in fields or 'mergeStateStatus' in fields:
         full['mergeable'] = mergeable(state, pr)
+    if fields is None or 'baseRefOid' in fields or 'mergeStateStatus' in fields:
+        tip = ref_sha(state, pr['baseRefName'])
+        full['baseRefOid'] = pr.get('merge_base') or tip
+        full['mergeStateStatus'] = (
+            'BEHIND' if pr.get('merge_base') and pr['merge_base'] != tip
+            else {'MERGEABLE': 'CLEAN', 'CONFLICTING': 'DIRTY'}.get(full['mergeable'], 'UNKNOWN'))
+    for key in ('run', 'run_conclusion', 'run_created', 'merge_base'):  # the fake's own
+        full.pop(key, None)
     full.setdefault('reviewDecision', '')
     if fields is None:
         return full
     return {f: full.get(f) for f in fields}
+
+
+# ---- workflow runs and check runs ----------------------------------------------------------
+
+def ensure_run(state, pr):
+    """PR ``pr``'s one ``pull_request`` workflow run id, and a job id on each of its checks."""
+    if not pr.get('run'):
+        state['next_id'] = state.get('next_id', 20001) + 1
+        pr['run'] = state['next_id']
+    for c in pr.get('checks') or []:
+        if not c.get('job'):
+            state['next_id'] = state.get('next_id', 20001) + 1
+            c['job'] = state['next_id']
+    return pr['run']
+
+
+def link(state, pr, c):
+    return (f"https://example.invalid/{state['slug']}/actions/runs/{pr['run']}"
+            f"/job/{c['job']}")
+
+
+def run_of(state, pr):
+    """PR ``pr``'s workflow run as ``api …/actions/runs/<id>`` shows it, its jobs included."""
+    ensure_run(state, pr)
+    checks = pr.get('checks') or []
+    done = all(c.get('bucket') != 'pending' for c in checks)
+    failed = any(c.get('bucket') in ('fail', 'cancel') for c in checks)
+    conclusion = pr.get('run_conclusion') or (('failure' if failed else 'success') if done else None)
+    head = view(state, pr, ['headRefOid'])['headRefOid']
+    at = pr.get('run_created') or pr['createdAt']
+    jobs = [{'databaseId': c['job'], 'name': c['name'],
+             'status': 'in_progress' if c.get('bucket') == 'pending' else 'completed',
+             'conclusion': CONCLUSIONS.get(c.get('bucket')), 'startedAt': at,
+             'completedAt': None if c.get('bucket') == 'pending' else at,
+             'url': link(state, pr, c)} for c in checks]
+    return {'id': pr['run'], 'databaseId': pr['run'], 'name': 'ci', 'workflowName': 'ci',
+            'event': 'pull_request', 'head_sha': head, 'headSha': head,
+            'head_branch': pr['headRefName'], 'headBranch': pr['headRefName'],
+            'status': 'completed' if done else 'in_progress', 'conclusion': conclusion,
+            'created_at': at, 'createdAt': at, 'updated_at': at, 'run_attempt': 1,
+            'attempt': 1,
+            'html_url': f"https://example.invalid/{state['slug']}/actions/runs/{pr['run']}",
+            'url': f"https://example.invalid/{state['slug']}/actions/runs/{pr['run']}",
+            'jobs': jobs}
+
+
+def runs(state):
+    """Every PR's run that has a check — the newest PR first."""
+    return [run_of(state, pr) for pr in sorted(state['prs'], key=lambda p: -p['number'])
+            if pr.get('checks')]
+
+
+def check_runs(state, sha):
+    """The check runs on commit ``sha``: the checks of every PR whose head is ``sha``."""
+    out = []
+    for run in runs(state):
+        if run['head_sha'] != sha:
+            continue
+        for j in run['jobs']:
+            out.append({'id': j['databaseId'], 'name': j['name'], 'status': j['status'],
+                        'conclusion': j['conclusion'], 'head_sha': sha,
+                        'started_at': j['startedAt'], 'completed_at': j['completedAt'],
+                        'html_url': j['url'], 'details_url': j['url'],
+                        'url': f"https://example.invalid/check-runs/{j['databaseId']}"})
+    return {'total_count': len(out), 'check_runs': out}
+
+
+def find_run(state, rid):
+    for run in runs(state):
+        if str(run['id']) == str(rid):
+            return run
+    raise Refusal(f'could not find any workflow run with ID {rid} (HTTP 404)')
 
 
 def find(state, key):
@@ -324,7 +433,14 @@ def pr_checks(state, argv):
     if not checks:
         raise Refusal(f"no checks reported on the '{pr['headRefName']}' branch")
     fields = json_fields(argv) or ['name', 'bucket']
-    emit([{f: c.get(f) for f in fields} for c in checks], argv)
+    run = run_of(state, pr)
+
+    def row(c):
+        full = {'link': link(state, pr, c), 'workflow': run['workflowName'],
+                'startedAt': run['created_at'],
+                'state': (CONCLUSIONS.get(c.get('bucket')) or 'in_progress').upper(), **c}
+        return {f: full.get(f) for f in fields}
+    emit([row(c) for c in checks], argv)
 
 
 def pr_merge(state, argv):
@@ -404,10 +520,68 @@ def api(state, argv):
             pr_close(state, [m.group(1)])
         emit(rest_pull(state, pr), argv)
         return
+    m = re.fullmatch(r'repos/[^/]+/[^/]+/commits/([0-9a-f]{40})/check-runs(?:\?.*)?', path)
+    if m:
+        emit(check_runs(state, m.group(1)), argv)
+        return
+    m = re.fullmatch(r'repos/[^/]+/[^/]+/commits/([0-9a-f]{40})/status(?:\?.*)?', path)
+    if m:
+        got = list((state.get('statuses') or {}).get(m.group(1)) or [])
+        overall = 'success' if got and all(s['state'] == 'success' for s in got) else 'pending'
+        emit({'sha': m.group(1), 'state': overall, 'statuses': got, 'total_count': len(got),
+              'url': f"https://example.invalid/{state['slug']}/commits/{m.group(1)}/status"},
+             argv)
+        return
+    m = re.fullmatch(r'repos/[^/]+/[^/]+/actions/runs(?:\?(.*))?', path)
+    if m:
+        want = dict(kv.partition('=')[::2] for kv in (m.group(1) or '').split('&') if kv)
+        listed = [{k: v for k, v in r.items() if k != 'jobs'} for r in runs(state)
+                  if not want.get('head_sha') or r['head_sha'] == want['head_sha']]
+        emit({'total_count': len(listed), 'workflow_runs': listed}, argv)
+        return
+    m = re.fullmatch(r'repos/[^/]+/[^/]+/actions/runs/(\d+)(/jobs)?(?:\?.*)?', path)
+    if m:
+        run = find_run(state, m.group(1))
+        jobs = [{'id': j['databaseId'], 'name': j['name'], 'status': j['status'],
+                 'conclusion': j['conclusion'], 'started_at': j['startedAt'],
+                 'completed_at': j['completedAt'], 'html_url': j['url']} for j in run['jobs']]
+        emit({'total_count': len(jobs), 'jobs': jobs} if m.group(2)
+             else {k: v for k, v in run.items() if k != 'jobs'}, argv)
+        return
     if re.fullmatch(r'repos/[^/]+/[^/]+/issues/\d+/comments', path):
         emit({'id': 1, 'body': fields.get('body', '')}, argv)
         return
     raise Refusal(f'fake gh: unsupported api path {path}')
+
+
+def set_check(pr, name, bucket):
+    """PR ``pr``'s check ``name`` at ``bucket``, its job id kept (one run, one job a name)."""
+    checks = pr.setdefault('checks', [])
+    for c in checks:
+        if c.get('name') == name:
+            c['bucket'] = bucket
+            return
+    checks.append({'name': name, 'bucket': bucket})
+
+
+def run_list(state, argv):
+    branch, status = opt(argv, '--branch', '-b'), opt(argv, '--status', '-s')
+    limit = int(opt(argv, '--limit', '-L') or 20)
+    out = []
+    for run in runs(state):
+        if branch and run['head_branch'] != branch:
+            continue
+        if status and status not in (run['status'], run['conclusion']):
+            continue
+        out.append(run)
+    fields = json_fields(argv) or ['databaseId', 'status', 'conclusion']
+    emit([{f: r.get(f) for f in fields} for r in out[:limit]], argv)
+
+
+def run_view(state, argv):
+    run = find_run(state, positional(argv))
+    fields = json_fields(argv) or ['databaseId', 'status', 'conclusion', 'url', 'jobs']
+    emit({f: run.get(f) for f in fields}, argv)
 
 
 def e2e(state, argv):
@@ -444,6 +618,37 @@ def e2e(state, argv):
     if verb == 'close-unmerged':
         pr_close(state, [argv[1]])
         return
+    if verb == 'skip-job':
+        pr = find(state, argv[1])
+        set_check(pr, argv[2], 'skipping')
+        if argv[3:4] == ['attested']:
+            e2e(state, ['status', view(state, pr, ['headRefOid'])['headRefOid'],
+                        'asf/attested', 'success'])
+        return
+    if verb == 'status':
+        state.setdefault('statuses', {}).setdefault(argv[1], []).insert(0, {
+            'context': argv[2], 'state': argv[3], 'created_at': now(), 'updated_at': now(),
+            'id': len(state['statuses'][argv[1]]) + 1})
+        return
+    if verb == 'hide-job-failure':
+        pr = find(state, argv[1])
+        set_check(pr, argv[2] if len(argv) > 2 else 'e2e-nightly', 'fail')
+        pr['run_conclusion'] = 'success'
+        return
+    if verb == 'path-filter':
+        name = argv[1]
+        state['default_checks'] = [c for c in state.get('default_checks') or []
+                                   if c.get('name') != name]
+        for pr in state['prs']:
+            if pr['state'] == 'OPEN':
+                pr['checks'] = [c for c in pr.get('checks') or [] if c.get('name') != name]
+        return
+    if verb == 'stale-merge-ref':
+        pr = find(state, argv[1])
+        set_check(pr, argv[2] if len(argv) > 2 else 'tests', 'fail')
+        pr['run_created'] = STALE_RUN_AT
+        pr['merge_base'] = ref_sha(state, pr['baseRefName'])
+        return
     raise Refusal(f'fake gh: unsupported e2e verb {verb}')
 
 
@@ -474,8 +679,9 @@ def dispatch(state, argv):
     if argv[:1] == ['api']:
         return api(state, argv[1:])
     if head == ['run', 'list']:
-        print('[]')
-        return None
+        return run_list(state, argv[2:])
+    if head == ['run', 'view']:
+        return run_view(state, argv[2:])
     if head == ['auth', 'status']:
         print('Logged in to example.invalid as e2e (fake)')
         return None

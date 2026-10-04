@@ -9,11 +9,16 @@
   nor a landing;
 * ``closes`` — the path closes the Task (the positive control: the host merged PR #1).
 
-``gap`` names the plan item that fixes a row the code still fails today (``W4-PR2``: Unknown
-never closes; ``W4-PR5``: a voided landing is no merge fact). Such a row asserts the defect is
-still there, so the PR that fixes it turns the row red here and drops the marker in the same
-change — the row is that PR's acceptance. A new path or behaviour is one entry in the harness
-and rows here; one test method is generated per row.
+``gap`` names the plan item that fixes a row the code still fails today (one of
+:data:`scenarios.GAPS`). Such a row asserts the defect is still there, so the PR that fixes it
+turns the row red here and drops the marker in the same change — the row is that PR's
+acceptance. A new path or behaviour is one entry in the harness and rows here; one test method
+is generated per row.
+
+The rows of the check behaviours (:data:`scenarios.CHECK_ROWS`) run in
+``test_host_behaviours.py``, beside the fake's answers to them and the readers that do read
+checks; the table below counts them. The named edges of a landing (S-M14) are
+``test_edges.py``; the I14 ``refuse`` rows ``test_i14_refuse.py``.
 """
 import json
 import re
@@ -83,6 +88,9 @@ ROWS = (
     # no code merge fact, no close, and no NEEDS DECISION (the edit checks verify_landings)
     (IN, 'open', 'none', None, 'doc-lane-landing'),
     (MF, 'open', 'none', None, 'doc-lane-landing'),
+    # ... and the record's ingest reads the host's merged PR past the void: the Task `asf reset`
+    # started over is closed again on the very claim the reset voided
+    (IN, 'merged', 'none', 'W4-PR5', 'voided-landing'),
 )
 
 
@@ -102,8 +110,7 @@ class ClosePaths(unittest.TestCase):
         scenario, o = S.run(path, behaviour, edit)
         self.assertEqual(scenario.host_behaviour, behaviour)
         said = f'{path} × {behaviour}{" + " + edit if edit else ""}: {o}\n' + '\n'.join(o.lines)
-        holds = (not o.closed) if expected == 'none' else (
-            o.closed and (expected != 'decoy' or o.stamp == S.WORLD.decoy))
+        holds = S.holds(expected, o)
         if gap:
             self.assertFalse(holds, f'{gap} has landed — this row now holds: drop its gap marker.'
                                     f'\n{said}')
@@ -131,7 +138,7 @@ class Table(unittest.TestCase):
     anywhere once its gaps land."""
 
     def test_every_path_meets_every_behaviour(self):
-        seen = {(p, b) for p, b, _e, _g, edit in ROWS if not edit}
+        seen = {(p, b) for p, b, _e, _g, edit in ROWS + S.CHECK_ROWS if not edit}
         missing = [(p, b) for p in S.PATHS for b in S.BEHAVIOURS if (p, b) not in seen]
         self.assertEqual(missing, [])
 
@@ -139,12 +146,13 @@ class Table(unittest.TestCase):
         self.assertEqual([r for r in ROWS if r[1] == 'rate-limit' and r[2] != 'none'], [])
 
     def test_the_gaps_are_named_plan_items(self):
-        for row in ROWS:
-            self.assertIn(row[3], (None, 'W4-PR2', 'W4-PR5'), row)
+        for row in ROWS + S.CHECK_ROWS:
+            self.assertIn(row[3], (None, *S.GAPS), row)
 
 
 class TheWorld(unittest.TestCase):
-    """What every row stands on, checked once: the fake host's two behaviours do what they say."""
+    """What every row stands on, checked once: the fake host's closing behaviours do what they
+    say (its check behaviours: ``test_host_behaviours.py``)."""
 
     def test_the_closed_prs_head_never_reaches_the_trunk(self):
         f = S.WORLD.fork()
