@@ -76,6 +76,26 @@ class FeedTests(unittest.TestCase):
 
         return calls, fake_run
 
+    def test_an_unknown_read_is_a_host_error_never_an_empty_feed(self):
+        from asf import gh_limit
+
+        def failed(args, **_kw):
+            return subprocess.CompletedProcess(args, 1, stdout='', stderr='HTTP 404\n')
+
+        def timed_out(args, **_kw):
+            raise subprocess.TimeoutExpired('gh', alerts.TIMEOUT_S)
+
+        def limited(args, **_kw):
+            return subprocess.CompletedProcess(args, 1, stdout='', stderr='API rate limit exceeded')
+        try:
+            for fake_run, why in ((failed, 'HTTP 404'), (timed_out, 'timeout'),
+                                  (limited, 'rate limited')):
+                with self.assertRaises(alerts.HostError) as ctx:
+                    alerts.GitHubHost(product(), run=fake_run).secrets()
+                self.assertIn(why, str(ctx.exception))
+        finally:
+            gh_limit.reset()
+
     def test_the_jq_selection_never_names_the_secret_field(self):
         calls, fake_run = self._calls()
         host = alerts.GitHubHost(product(), run=fake_run)

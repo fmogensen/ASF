@@ -10,7 +10,8 @@ import types
 import unittest
 from unittest import mock
 
-from asf import attestation, env, gh_limit, merge_queue, stale_ref, trunk_red
+from asf import (attestation, capacity, ci_flight, env, gh_limit, merge_queue, stale_ref,
+                 trunk_red, upgrade)
 from asf.harvest import deploy
 from asf.harvest import lane
 from asf.harvest import harvest as H
@@ -213,6 +214,65 @@ class RateLimit(Base):
             H._gh(argv)
         self.assertEqual(fx.calls, [argv])
         self.assertTrue(gh_limit.latched())
+
+
+class UpgradeReadsThroughTheClient(Base):
+    """``asf upgrade``'s CI readers (W5-PR4) over the recorded host: a recorded verdict is read
+    as recorded; anything the host did not answer is Unknown — never green."""
+    B = 'skipped-required-job/attested'
+    URL = f'https://github.com/{SLUG}.git'
+
+    def verdict(self, *names):
+        self.through_subprocess(self.B)
+        return upgrade.ci_verdict(self.URL, sha_of(self.B), run=None, checks=list(names))
+
+    def test_recorded_success_and_failure_read_as_recorded(self):
+        self.assertEqual(self.verdict('job-12', 'job-13')[0], 'green')
+        self.assertEqual(self.verdict('job-5')[0], 'red')
+
+    def test_a_check_only_an_unanswered_status_read_could_name_is_unknown(self):
+        self.assertEqual(self.verdict('asf/attested'), ('unknown', 'asf/attested has no run'))
+
+    def test_an_unrecorded_run_list_defers_the_plain_install(self):
+        self.through_subprocess(self.B)
+        self.assertEqual(upgrade.ci_state(self.URL, sha_of(self.B), run=None)[0], 'unknown')
+        self.assertIsNone(upgrade.ci_red(self.URL, sha_of(self.B), run=None))
+
+    def test_a_rate_limit_is_unknown_and_latches(self):
+        self.through_subprocess('rate-limit')
+        r = upgrade._gh(None, contracts.fixture('rate-limit', 'run-list')['argv'])
+        self.assertEqual((r.ok, r.reason), (False, 'rate limited'))
+        self.assertTrue(gh_limit.latched())
+
+
+class InFlightReadersOverARateLimit(Base):
+    """The capacity count and the rewrite guard over a rate-limited host: Unknown, latched, and
+    no rewrite pushed on it."""
+
+    def product(self):
+        from asf import env
+        return env.Product('p', {'repo_slug': SLUG, 'ci': {'workflow': 'ci.yml'}})
+
+    def limited(self):
+        """Every ``gh`` call answers the recorded rate limit, whatever its argv."""
+        rc, stdout, stderr = contracts.load('rate-limit', 'run-list')
+        patch = mock.patch.object(subprocess, 'run', side_effect=lambda cmd, *_a, **_kw:
+                                  subprocess.CompletedProcess(list(cmd), rc, stdout, stderr))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_capacity_reads_none(self):
+        self.limited()
+        with mock.patch('asf.ci_pool._gh_env', return_value={}):
+            self.assertIsNone(capacity.ci_runs_in_flight(self.product()))
+        self.assertTrue(gh_limit.latched())
+
+    def test_the_rewrite_guard_defers(self):
+        self.limited()
+        with mock.patch('asf.ci_pool._gh_env', return_value={}):
+            got = ci_flight.verdict(self.product(), 'worker/B-1', 'rebase',
+                                    needed=ci_flight.CONFLICT)
+        self.assertEqual(got, 'rebase deferred: worker/B-1 CI in flight unknown (rate limited)')
 
 
 class PrClosedUnmerged(Base):

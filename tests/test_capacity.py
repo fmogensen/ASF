@@ -124,13 +124,27 @@ class ResolveCi(Home):
             self.assertIsNone(capacity.CiRuns().read(p))
         with mock.patch('subprocess.run', side_effect=subprocess.TimeoutExpired('gh', 1)):
             self.assertIsNone(capacity.CiRuns().read(p))
-        with mock.patch('subprocess.run', return_value=mock.Mock(returncode=1, stdout='')):
+        with mock.patch('subprocess.run', return_value=mock.Mock(returncode=1, stdout='', stderr='')):
             self.assertIsNone(capacity.CiRuns().read(p))
         cfg = {'capacity': {'total': {'ci': 2}}}
         with mock.patch('subprocess.run', side_effect=OSError('boom')):
             r = capacity.resolve(p, cfg=cfg, ci_source=capacity.CiRuns())
         self.assertIsNone(r.ci_inflight)
         self.assertEqual(r.ci, 2)  # unknown never lowers ci (D8)
+
+    def test_a_rate_limited_read_is_none_and_never_raises(self):
+        from asf import gh_limit
+        self.write_product('asf')
+        p = product('asf', {'repo_slug': 'acme/x', 'ci': {'workflow': 'ci.yml'},
+                            'capacity': {'ci': 5}})
+        gh_limit.reset()
+        limited = mock.Mock(returncode=1, stdout='', stderr='API rate limit exceeded')
+        try:
+            with mock.patch('subprocess.run', return_value=limited):
+                self.assertIsNone(capacity.CiRuns().read(p))
+            self.assertTrue(gh_limit.latched())
+        finally:
+            gh_limit.reset()
 
     def test_ci_none_product_never_calls_gh(self):
         self.write_product('asf')

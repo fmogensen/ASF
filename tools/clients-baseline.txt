@@ -1,21 +1,15 @@
 # tools/clients-baseline.txt — raw gh/git call sites per file,
 # the ceiling tools/check_clients.sh enforces. Lower a line when a PR migrates a
 # site; never raise one (`python3 tools/check_clients.py --write-baseline`).
-gh asf/capacity.py 1
-gh asf/ci_flight.py 1
 gh asf/ci_pool.py 1
 gh asf/ci_queue.py 1
-gh asf/doctor.py 1
 gh asf/evidence/sources.py 1
 gh asf/gh_limit.py 1
 gh asf/harvest/deploy.py 6
 gh asf/metrics/metrics.py 1
-gh asf/security/alerts.py 1
 gh asf/tick/flaky.py 2
-gh asf/upgrade.py 3
 gh asf/views/pr_annotate.py 1
 gh asf/views/status.py 1
-gh asf/workers/actions.py 1
 gh asf/workers/landing.py 1
 git asf/approvals.py 1
 git asf/briefs/facts.py 1
