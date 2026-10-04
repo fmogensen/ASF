@@ -223,6 +223,43 @@ class TestRuntime(unittest.TestCase):
                 f.write(json.dumps({'type': 'result', 'subtype': 'error', 'is_error': True}) + '\n')
             self.assertFalse(runtime_mod.result_ok(runtime_mod.read_result(log)))
 
+    def test_a_cloud_relaunch_never_reads_the_earlier_local_runs_result(self):
+        # a cloud launch writes only asf header lines, never a system/init: its header is the
+        # boundary, or the earlier local run's result is read as the live cloud run's own
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, 'j.jsonl')
+            local = ({'type': 'asf', 'subtype': 'session', 'session': 'p/j@20261004T100000Z'},
+                     {'type': 'system', 'subtype': 'init', 'session_id': 'local-1'},
+                     {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'old'})
+            cloud = ({'type': 'asf', 'subtype': 'session', 'session': 'p/j@20261004T200000Z'},
+                     {'type': 'asf', 'subtype': 'cloud', 'runtime': 'claude-remote',
+                      'trigger': 't1', 'run': 'r1'})
+            with open(log, 'w') as f:
+                for rec in local + cloud:
+                    f.write(json.dumps(rec) + '\n')
+            self.assertIsNone(runtime_mod.read_result(log))
+            self.assertIsNone(runtime_mod.init_line(log))
+            self.assertEqual(runtime_mod.runtime_session(log), '')
+            # the cloud run's own result, appended when it finishes, is the one that counts
+            with open(log, 'a') as f:
+                f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                    'result': 'new'}) + '\n')
+                # a later status line of the same run is no new launch
+                f.write(json.dumps({'type': 'asf', 'subtype': 'cloud', 'status': 'dead',
+                                    'why': 'x'}) + '\n')
+            self.assertEqual(runtime_mod.read_result(log)['result'], 'new')
+
+    def test_a_header_only_launch_without_a_session_id_is_still_a_boundary(self):
+        # an actions-lane launch of a job with no session id writes only the cloud header
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, 'j.jsonl')
+            with open(log, 'w') as f:
+                for rec in ({'type': 'system', 'subtype': 'init'},
+                            {'type': 'result', 'subtype': 'success', 'is_error': False},
+                            {'type': 'asf', 'subtype': 'cloud', 'runtime': 'actions'}):
+                    f.write(json.dumps(rec) + '\n')
+            self.assertIsNone(runtime_mod.read_result(log))
+
     def test_fake_runtime_replays_a_fixture(self):
         rt = runtime_mod.FakeRuntime(path=os.path.join(FIXTURES, 'fake-results.json'))
         self.assertEqual([s['ok'] for s in rt.script], [False, True])
