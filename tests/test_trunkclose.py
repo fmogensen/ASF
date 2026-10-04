@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from asf import env
 from asf.evidence import evidence as evidence_mod
 from asf.tick import step_wave
 from asf.workers import landing, lifecycle, pool as pool_mod, relaunch, trunkclose
@@ -437,6 +438,58 @@ class UnknownTests(_Repo):
         with mock.patch('sys.stderr'), self.assertRaises(gh_limit.RateLimited):
             trunkclose.close_parked(self.product, lambda _l: None)
         self.assertEqual(self.writes, [])
+
+
+class GitUnknownTests(_Repo):
+    """A git call that cannot answer (a timeout) is Unknown and closes nothing (W5-PR2): the
+    trunk check, the attribution and the branch check all fail closed, and a landing whose
+    attribution git could not answer is neither verified nor unverified this tick (S-m4)."""
+
+    def hang(self, *subcommands):
+        """``subprocess.run`` timing out for every ``git <subcommand>`` named (all git calls
+        when none is)."""
+        real = subprocess.run
+
+        def run(argv, *a, **kw):
+            if argv and argv[0] == 'git' and (not subcommands or any(
+                    s in argv for s in subcommands)):
+                raise subprocess.TimeoutExpired(argv, kw.get('timeout') or 1)
+            return real(argv, *a, **kw)
+        p = mock.patch('subprocess.run', run)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def done(self):
+        self.run_once(report('done', f'the whole scope is on origin/main under {self.sha[:9]}'))
+
+    def test_a_git_timeout_closes_nothing(self):
+        self.done()
+        self.hang()
+        self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo))
+        self.assertFalse(trunkclose.closes_before_launch(self.product, 'coder', self.ITEM,
+                                                         lambda _l: None))
+        self.assertEqual(self.writes, [])
+
+    def test_on_trunk_and_attributable_are_unknown_not_false(self):
+        self.hang('merge-base')
+        self.assertIsNone(landing.on_trunk(self.repo, 'main', self.sha))
+        self.assertIsNone(landing.attributable(self.repo, 'main', self.sha, self.ITEM))
+
+    def test_a_naming_read_that_times_out_is_unknown(self):
+        self.hang('log')
+        self.assertIsNone(landing.attributable(self.repo, 'main', self.sha, self.ITEM))
+
+    def test_an_unreadable_branch_holds_work(self):
+        self.hang('rev-parse')
+        self.assertTrue(landing.unlanded(self.repo, 'main', self.BRANCH))
+
+    def test_verify_landings_skips_an_item_git_could_not_attribute(self):
+        occ = {'landed': {self.ITEM: self.sha}, 'landed_on': {self.ITEM: self.BRANCH}}
+        items = {self.ITEM: {'type': 'task', 'state': 'Active'}}
+        product = env.Product('p', {'repo_dir': self.repo, 'main': 'main'})
+        self.hang('log')
+        verified, unverified = landing.verify_landings(product, occ, items, path=self.path)
+        self.assertEqual((verified, unverified), ({}, {}))  # no NEEDS DECISION on a timeout
 
 
 _REAL_OPEN_PRS = landing.open_prs

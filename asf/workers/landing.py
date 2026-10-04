@@ -19,35 +19,45 @@ import json
 import re
 import subprocess
 
+from asf import gitops
 from asf.evidence import evidence as ev_mod
 from asf.workers import lifecycle
 
 
 def _git(repo, args):
-    p = subprocess.run(['git', *args], cwd=repo, capture_output=True, text=True)
-    return p.stdout.strip() if p.returncode == 0 else None
+    """``git <args>``'s stdout, stripped, or ``None`` when it failed or could not answer
+    (:func:`asf.gitops.git`)."""
+    r = gitops.git(args, repo)
+    return r.data if r.ok else None
 
 
 def on_trunk(repo, main, sha):
-    """True when ``sha`` is an ancestor of ``origin/<main>``."""
-    return bool(repo and sha) and subprocess.run(
-        ['git', 'merge-base', '--is-ancestor', sha, f'origin/{main}'], cwd=repo,
-        capture_output=True).returncode == 0
+    """True when ``sha`` is an ancestor of ``origin/<main>``, False when it is not, ``None`` —
+    *unknown* — when git could not tell (a sha not fetched, a timeout): never a close."""
+    if not (repo and sha):
+        return False
+    return gitops.is_ancestor(repo, sha, f'origin/{main}')
 
 
 def names(repo, main, sha, item, prs=()):
     """True when commit ``sha``'s message names ``item``: its subject by the evidence naming
     rules (a spec/plan/review commit names its item by convention, never its landing), a trailer
     value, or the merge of one of ``prs`` (``… (#902)``, ``Merge pull request #902``,
-    ``merge-queue: #902 (…)``)."""
+    ``merge-queue: #902 (…)``). ``None`` when git could not read the message."""
     item = (item or '').upper()
-    body = _git(repo, ['log', '-1', '--format=%B', sha]) or ''
+    if not item:
+        return False
+    body = gitops.log1(repo, sha, '%B')
+    if body is None:
+        return None
     subject = body.split('\n', 1)[0].strip()
-    if not item or not subject:
+    if not subject:
         return False
     if not ev_mod.lands_nothing(subject) and item in ev_mod.naming_ids(subject, main):
         return True
-    trailers = _git(repo, ['log', '-1', '--format=%(trailers:only,unfold)', sha]) or ''
+    trailers = gitops.log1(repo, sha, '%(trailers:only,unfold)')
+    if trailers is None:
+        return None
     for line in trailers.splitlines():
         _key, _, value = line.partition(':')
         if item in ev_mod.id_tokens(value):
@@ -61,19 +71,22 @@ def names(repo, main, sha, item, prs=()):
 
 
 def changed(repo, sha):
-    """The paths commit ``sha`` changed against its first parent (a root commit: all of it)."""
+    """The paths commit ``sha`` changed against its first parent (a root commit: all of it), or
+    ``None`` when git could not answer."""
     out = _git(repo, ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-m',
                       '--first-parent', sha])
-    return [p for p in (out or '').splitlines() if p]
+    return None if out is None else [p for p in out.splitlines() if p]
 
 
 def covers(repo, sha, writes):
     """True when ``writes`` is non-empty and every entry of it (a path or a glob) matches a path
-    commit ``sha`` changed."""
+    commit ``sha`` changed. ``None`` when git could not list the commit's paths."""
     writes = [w for w in (writes or ()) if w]
     if not writes:
         return False
     paths = changed(repo, sha)
+    if paths is None:
+        return None
     return bool(paths) and all(
         any(p == w or fnmatch.fnmatch(p, w) or p.startswith(w.rstrip('/') + '/') for p in paths)
         for w in writes)
@@ -82,21 +95,34 @@ def covers(repo, sha, writes):
 def attributable(repo, main, sha, item, writes=(), prs=()):
     """True when ``sha`` is on ``origin/<main>`` AND is ``item``'s: named by it (:func:`names`) or
     covering its ``writes:`` (:func:`covers`). A trunk commit that is merely an ancestor — the
-    trunk head a branch merged in, another item's merge-queue commit — never counts."""
-    if not on_trunk(repo, main, sha):
-        return False
-    return names(repo, main, sha, item, prs) or covers(repo, sha, writes)
+    trunk head a branch merged in, another item's merge-queue commit — never counts. ``None`` —
+    *unknown* — when git could not answer a question the verdict hangs on: callers treat it as
+    "do not close", and :func:`verify_landings` decides nothing on it this tick."""
+    trunk = on_trunk(repo, main, sha)
+    if not trunk:
+        return trunk
+    named = names(repo, main, sha, item, prs)
+    if named:
+        return True
+    covered = covers(repo, sha, writes)
+    if covered:
+        return True
+    return None if named is None or covered is None else False
 
 
 def unlanded(repo, main, branch):
     """True when ``origin/<branch>`` carries a commit ``origin/<main>`` does not. A branch gone
-    from origin, or none, holds nothing."""
+    from origin, or none, holds nothing. Fails closed: when git cannot answer, the branch holds
+    work."""
     if not branch or branch == main:
         return False
-    if _git(repo, ['rev-parse', '--verify', '-q', f'refs/remotes/origin/{branch}']) is None:
+    ref = gitops.rev_parse(repo, f'refs/remotes/origin/{branch}')
+    if ref is None:
+        return True  # unknown: never read as "nothing left"
+    if not ref:
         return False
-    n = _git(repo, ['rev-list', '--count', f'origin/{main}..origin/{branch}'])
-    return n is None or not n.isdigit() or int(n) > 0
+    n = gitops.rev_list_count(repo, f'origin/{main}', f'origin/{branch}')
+    return n is None or n > 0
 
 
 def run_branches(path, item):
@@ -222,7 +248,10 @@ def verify_landings(product, occupancy, items, path=None, repo=None, main=None):
         if not repo or not sha or not on_trunk(repo, main, sha):
             continue
         writes = [str(w) for w in card.get('writes') or ()]
-        if attributable(repo, main, sha, iid, writes, run_prs(path, iid)):
+        mine = attributable(repo, main, sha, iid, writes, run_prs(path, iid))
+        if mine is None:
+            continue  # git could not answer: decided next tick, no NEEDS DECISION row (S-m4)
+        if mine:
             verified[iid] = (sha, _git(repo, ['log', '-1', '--format=%s', sha]) or '')
         else:
             unverified[iid] = (f'its recorded landing {sha[:9]} on origin/{main} is not its '
