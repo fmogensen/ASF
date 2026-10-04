@@ -4237,6 +4237,10 @@ def cmd_queue(args, source=None, out=print):
     ``--apply``: run the queue's pass instead (:func:`apply`) — the scheduler's queue job."""
     product = env.load_product(args.product)
     if getattr(args, 'apply', False):
+        from asf import upgrade
+        if upgrade.moving(product.name):  # the move drains the floor: no pass starts meanwhile
+            out(f'ci queue: waiting — a move of {product.name} is draining (asf upgrade --product)')
+            return 0
         return apply(product, source=source, out=out)
     m = mode(product)
     if m == 'off':

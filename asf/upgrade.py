@@ -698,11 +698,13 @@ def _install(ref, run, out, pin=None):
 # A pinned product (``state/<p>/install.json``, :mod:`asf.installs`) runs its own venv,
 # ``asf-factory-<p>-<sha7>``. A move installs the target venv beside the running one (or finds it
 # already on disk — then it is a local switch, no network), requires positive CI evidence on the
-# exact sha, and then quiesces the product before it re-points anything: pause every clock,
-# wait until no tick, ``ci queue`` pass or background harvest of the product runs, its
-# ``harvest.lock`` is free and no merge-queue batch is in flight — else refuse after
-# ``--wait-s`` — record the pin with the venv it replaces as ``previous``, render the clocks and
-# the hooks from it, resume. ``--rollback`` moves back to ``previous`` the same way, offline.
+# exact sha, and then quiesces the product before it re-points anything: record every clock's
+# pause (no bootout yet — that kills a running tick), wait until no tick, ``ci queue`` pass or
+# background harvest of the product runs, its ``harvest.lock`` is free and no merge-queue batch
+# is in flight — else resume and refuse after ``--wait-s`` — only then boot the clocks out,
+# record the pin with the venv it replaces as ``previous``, render the clocks and the hooks from
+# it, smoke, re-render a stale host clock, resume. ``--rollback`` moves back to ``previous`` the
+# same way, offline.
 
 #: ``asf upgrade --product`` waits this long for the product's floor to drain before refusing
 DEFAULT_MOVE_WAIT_S = 900
@@ -888,8 +890,23 @@ class MoveOps:
         return set(scheduler.read_pauses(product_name))
 
     def pause(self, product_name, clocks, by):
+        """The pause record only — no bootout: ``launchctl bootout`` kills a running tick, and
+        the drain must see it end on its own (:meth:`bootout`, after the drain)."""
         from asf import scheduler
-        return scheduler.pause(product_name, clocks, reason='upgrade', by=by)
+        return scheduler.pause(product_name, clocks, reason='upgrade', by=by, bootout=False)
+
+    def bootout(self, product_name, clocks):
+        from asf import scheduler
+        return scheduler.bootout_clocks(product_name, clocks)
+
+    def install_host(self):
+        """Re-render the host clocks when the one on disk is not what a render writes now
+        (:func:`asf.scheduler.refresh_host`) — only while ``network.probe`` is on."""
+        from asf import scheduler
+        try:
+            return scheduler.refresh_host()
+        except (env.ConfigError, scheduler.SchedulerError, OSError) as e:
+            return [f'upgrade: WARNING — the host clocks were not re-rendered ({e})']
 
     def resume(self, product_name, clocks):
         from asf import scheduler
@@ -922,6 +939,14 @@ def _mark(product_name, sha, now=None):
     while it drains — written whatever an earlier expiry's cool-down says."""
     _write_json(pending_path(product_name), {'sha': sha, 'owner': None, 'pid': os.getpid(),
                                              'move': True, 'at': now or time.time()})
+
+
+def moving(product_name):
+    """The marker of a move of ``product_name`` that is still running, else ``None`` — what a
+    clock that does not tick (``asf ci queue --apply``) reads so it starts no pass while the
+    move drains."""
+    data = held(product_name)
+    return data if data and data.get('move') else None
 
 
 def _actor():
@@ -995,16 +1020,20 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
     if not local:
         steps.append(' '.join(pipx_suffix_command(url, product_name, sha)))
     clocks = [c for c in ops.clock_names(product_name) if c not in ops.paused(product_name)]
-    steps += [f'pause clocks {", ".join(clocks) or "(none)"}',
+    steps += [f'pause clocks {", ".join(clocks) or "(none)"} (the record: no new tick starts)',
               f'drain: no tick / ci queue / harvest of {product_name}, harvest.lock free, '
-              f'no merge-queue batch (up to {int(wait_s)}s)',
+              f'no merge-queue batch (up to {int(wait_s)}s; else resume, nothing moved)',
+              f'bootout clocks {", ".join(clocks) or "(none)"}',
               f'record {installs.record_path(product_name)}: {sha[:7]} {venv}; previous '
               f'{((previous or {}).get("sha") or "none")[:7]} {(previous or {}).get("venv") or ""}',
               f'asf scheduler install --product {product_name}',
               f'asf hooks install --product {product_name}',
-              'smoke: each clock plist\'s interpreter imports asf.cli and loads the product; '
+              'smoke: each clock plist\'s interpreter imports asf.cli and loads the product, '
+              'and runs the clock\'s own command in its no-op form (tick --manifest); '
               'gh auth status, git/claude/toolchain --version under the plist env '
               '(any failure: roll back)',
+              'host clocks: asf scheduler install --host when the one on disk is stale '
+              '(network.probe on)',
               f'resume clocks {", ".join(clocks) or "(none)"}']
     if dry_run:
         out(f'upgrade: dry run — the move of {product_name} to {sha[:7]}:')
@@ -1034,10 +1063,16 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
 def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by, run, out,
                      sleep, ops):
     from asf import installs
+    # 1. no new tick starts: the move's marker parks the product's ticks, ci queue passes and
+    # harvests (:func:`waiting`, :func:`moving`), and the pause record keeps every render from
+    # loading a clock. Nothing is booted out yet: ``launchctl bootout`` kills a running job, and
+    # the drain below must see the tick end on its own (2026-10-04 canary: the pause booted the
+    # clocks out first, and the drain never saw the tick it had just killed mid-wave)
     _mark(product_name, sha)
     try:
         for line in ops.pause(product_name, clocks, by) or ():
             out(line)
+        # 2. the drain: every running process of the product ends, or the move gives up
         busy = floor_busy(product_name, run)
         waited = 0
         if busy:
@@ -1055,6 +1090,9 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
             for line in busy:
                 out(f'  {line}')
             return MOVE_DEFERRED
+        # 3. only now, with nothing of the product running, the clocks leave launchd
+        for line in ops.bootout(product_name, clocks) or ():
+            out(line)
         installs.write(product_name, sha, venv, previous=previous, by=by)
         out(f'upgrade: {product_name} pinned to {sha[:7]} ({venv})')
         rc = ops.install_clocks(product_name)
@@ -1091,7 +1129,9 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
             out(f'NEEDS OPERATOR: the smoke of {product_name} at {sha[:7]} failed — rolled back to '
                 f'{(rec.sha if rec else "the shared install")[:7]} (clocks rc {back}, hooks rc '
                 f'{brc}); the clocks resume on what they ran')
+            _host_clocks(ops, out)
             return 1
+        _host_clocks(ops, out)
         out(f'upgrade: moved {product_name} to {sha[:7]}'
             + (f' (previous {(previous.get("sha") or "?")[:7]} stays on disk for --rollback)'
                if previous else ''))
@@ -1100,6 +1140,13 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
         for line in ops.resume(product_name, clocks) or ():
             out(line)
         clear_pending(product_name)
+
+
+def _host_clocks(ops, out):
+    """The host clocks follow the pin a move or rollback just wrote (#695/#701 rendered the
+    probe against one product's venv)."""
+    for line in ops.install_host() or ():
+        out(line)
 
 
 def products():

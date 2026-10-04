@@ -579,22 +579,36 @@ def render(product, clock, cfg=None, venv=_PIN):
 def render_host(cfg=None):
     """The job definition of the host's network probe clock — ``asf.host.net-probe``, ``asf
     net-probe`` every 60 s — in :func:`render`'s shape, or None while ``config.yaml
-    network.probe`` is not on. Log only: the job probes and writes ``state/network.json``."""
+    network.probe`` is not on. Log only: the job probes and writes ``state/network.json``.
+
+    It runs the dispatcher (``~/.local/bin/asf``, :mod:`asf.dispatch`) when one this factory
+    wrote is there: the dispatcher picks the default product's pin at run time, so a move or a
+    rollback of that product needs no re-render (#695/#701 baked in the venv that installed the
+    clock). No ``PYTHONPATH`` then — it would shadow the pinned venv's own package. Without a
+    dispatcher it runs this process's interpreter, as before, and a move re-renders it
+    (:func:`refresh_host`)."""
+    from asf import dispatch
     from asf.tick import network
     cfg = env.load_config() if cfg is None else cfg
     if not network.enabled(cfg):
         return None
     label = label_for(HOST_PRODUCT, HOST_CLOCK, cfg)
     log = os.path.join(env.ASF_HOME, 'logs', f'{HOST_CLOCK}.log')
-    argv = [sys.executable, '-m', 'asf.cli', 'net-probe']
+    dispatcher = dispatch.default_path()
+    env_vars = {'PATH': _absolute_path_entries(drop_checkouts=True),
+                'HOME': os.path.expanduser('~'), 'ASF_HOME': env.ASF_HOME}
+    if dispatch.is_ours(dispatcher) and os.access(dispatcher, os.X_OK):
+        argv, cwd = [dispatcher, 'net-probe'], env.ASF_HOME
+    else:
+        argv, cwd = [sys.executable, '-m', 'asf.cli', 'net-probe'], repo_root()
+        env_vars = {'PATH': _absolute_path_entries(), 'HOME': os.path.expanduser('~'),
+                    'PYTHONPATH': repo_root(), 'ASF_HOME': env.ASF_HOME}
     job = {'kind': kind(cfg), 'label': label, 'log': log, 'argv': argv, 'product': HOST_PRODUCT,
            'clock': HOST_CLOCK, 'steps': [], 'every_s': network.PROBE_EVERY_S}
     if job['kind'] == 'launchd':
         job['plist'] = {
-            'Label': label, 'ProgramArguments': argv, 'WorkingDirectory': repo_root(),
-            'EnvironmentVariables': {'PATH': _absolute_path_entries(),
-                                     'HOME': os.path.expanduser('~'),
-                                     'PYTHONPATH': repo_root(), 'ASF_HOME': env.ASF_HOME},
+            'Label': label, 'ProgramArguments': argv, 'WorkingDirectory': cwd,
+            'EnvironmentVariables': env_vars,
             'StandardOutPath': log, 'StandardErrorPath': log,
             'RunAtLoad': True, 'StartInterval': network.PROBE_EVERY_S,
         }
@@ -640,6 +654,23 @@ def install_host(cfg=None):
     return install(job)
 
 
+def refresh_host(cfg=None):
+    """:func:`install_host` when the host clock on disk is not what a render writes now — after
+    a move or rollback (:func:`asf.upgrade._host_clocks`). ``[]`` while ``network.probe`` is off
+    (the move never installs nor removes it) or the plist is already current."""
+    cfg = env.load_config() if cfg is None else cfg
+    job = render_host(cfg)
+    if job is None or job.get('kind') != 'launchd':
+        return []
+    try:
+        with open(job['path'], 'rb') as f:
+            if plistlib.load(f) == job['plist']:
+                return []
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        pass
+    return install_host(cfg)
+
+
 # ---- the smoke a move runs before it resumes the clocks ----------------------
 
 #: Run by the plist's own interpreter: imports the CLI it ticks and loads the product file with
@@ -656,12 +687,31 @@ def _tool_probe(tool):
     return [tool, '--version']
 
 
+def noop_command(argv):
+    """The clock's own command in a form that changes nothing, else ``None``: ``asf tick …``
+    with ``--manifest`` (argv parsed, product loaded, ``--steps`` resolved, the table printed,
+    nothing run; ``--shadow`` dropped, as it would run step 0 first), ``asf ci queue …`` with
+    ``--help`` in place of ``--apply``. Any interpreter or launcher before ``asf.cli`` is kept."""
+    argv = [str(a) for a in argv]
+    if 'asf.cli' not in argv:
+        return None
+    at = argv.index('asf.cli') + 1
+    head, rest = argv[:at], argv[at:]
+    if rest[:1] == ['tick']:
+        return head + [a for a in rest if a != '--shadow'] + ['--manifest']
+    if rest[:2] == ['ci', 'queue']:
+        return head + [a for a in rest if a != '--apply'] + ['--help']
+    return None
+
+
 def smoke(product, cfg=None, run=subprocess.run, timeout=SMOKE_TIMEOUT_S):
     """Run read-only commands under each installed clock plist's *exact* environment, working
     directory and interpreter — what the clock will run, not what this shell has: the plist's
     interpreter imports ``asf.cli`` and loads the product file, ``gh auth status --active``, and
     ``<tool> --version`` for every other tool of :func:`required_tools`, each resolved on the
-    plist's ``PATH``. Returns ``(ok_lines, failures)``; a failure names the clock and the command.
+    plist's ``PATH`` — once per interpreter/env/cwd — and then every clock's *own* command in its
+    no-op form (:func:`noop_command`), so a tick broken by its own argv rolls the move back too
+    (2026-10-04: the daily and the tick shared one interpreter, and only the daily was smoked). Returns ``(ok_lines, failures)``; a failure names the clock and the command.
     Only launchd plists are read (a cron line has no plist to replay); none on disk is a
     failure — a move that leaves no clock has nothing ticking."""
     cfg = env.load_config() if cfg is None else cfg
@@ -685,17 +735,22 @@ def smoke(product, cfg=None, run=subprocess.run, timeout=SMOKE_TIMEOUT_S):
         job_env = {str(k): str(v) for k, v in (plist.get('EnvironmentVariables') or {}).items()}
         cwd = plist.get('WorkingDirectory') or '/'
         key = (tuple(argv[:1]), tuple(sorted(job_env.items())), cwd)
-        if not argv or key in seen:
+        if not argv:
             continue
-        seen.add(key)
         label = plist.get('Label') or os.path.basename(path)
-        commands = [[argv[0], '-c', _SMOKE_IMPORT, name]]
-        for tool in tools:
-            found = shutil.which(tool, path=job_env.get('PATH', ''))
-            if found is None:
-                failures.append(f'{label}: {tool} not on the plist PATH')
-                continue
-            commands.append(_tool_probe(found))
+        commands = []
+        if key not in seen:
+            seen.add(key)
+            commands.append([argv[0], '-c', _SMOKE_IMPORT, name])
+            for tool in tools:
+                found = shutil.which(tool, path=job_env.get('PATH', ''))
+                if found is None:
+                    failures.append(f'{label}: {tool} not on the plist PATH')
+                    continue
+                commands.append(_tool_probe(found))
+        own = noop_command(argv)
+        if own is not None:
+            commands.append(own)
         for cmd in commands:
             shown = ' '.join(cmd[:1] + ['-c', '<import asf.cli; load product>'] + cmd[3:]) \
                 if cmd[1:2] == ['-c'] else ' '.join(cmd)
@@ -882,22 +937,38 @@ def resume_hint(label, cfg=None):
     return f'`asf scheduler resume --product {parts[0]} --clock {parts[1]}`'
 
 
-def pause(product_name, clock_names, reason, by, cfg=None, now=None):
+def pause(product_name, clock_names, reason, by, cfg=None, now=None, bootout=True):
     """Record the pause of each clock, then boot it out. The record is written first, so an
-    upgrade or install racing this call finds it before it could load the clock again."""
+    upgrade or install racing this call finds it before it could load the clock again.
+
+    ``bootout=False`` writes the record only: ``launchctl bootout`` kills the job's running
+    process, so a move records the pause, drains the running ticks, and only then calls
+    :func:`bootout_clocks` (2026-10-04: a move's pause killed a tick mid-wave)."""
     import datetime
     at = (now or datetime.datetime.now()).astimezone().isoformat(timespec='seconds')
     pauses = read_pauses(product_name)
     for clock in clock_names:
         pauses[clock] = {'reason': reason, 'by': by, 'at': at}
     _write_pauses(product_name, pauses)
-    lines = []
+    if not bootout:
+        return [f'scheduler: paused {label_for(product_name, clock, cfg)} (recorded; still '
+                f'loaded until its running process ends) — {reason}' for clock in clock_names]
+    return [f'scheduler: paused {label} ({state}) — {reason}'
+            for label, state in _bootout_each(product_name, clock_names, cfg)]
+
+
+def _bootout_each(product_name, clock_names, cfg=None):
     for clock in clock_names:
         label = label_for(product_name, clock, cfg)
-        rc, _out, err = _launchctl(['bootout', f'gui/{_uid()}/{label}'])
-        state = 'booted out' if rc == 0 else 'was not loaded'
-        lines.append(f'scheduler: paused {label} ({state}) — {reason}')
-    return lines
+        rc, _out, _err = _launchctl(['bootout', f'gui/{_uid()}/{label}'])
+        yield label, ('booted out' if rc == 0 else 'was not loaded')
+
+
+def bootout_clocks(product_name, clock_names, cfg=None):
+    """``launchctl bootout`` each clock — which kills a running process of it, so a caller
+    that must not kill one drains first (:func:`asf.upgrade._quiesced_switch`)."""
+    return [f'scheduler: {label} {state}'
+            for label, state in _bootout_each(product_name, clock_names, cfg)]
 
 
 def resume(product_name, clock_names, cfg=None):

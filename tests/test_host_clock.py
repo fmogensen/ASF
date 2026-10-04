@@ -83,6 +83,41 @@ class HostClockTest(SchedulerTestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(self.plist()))
 
+    def dispatcher(self):
+        from asf import dispatch
+        path = dispatch.default_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(f'#!/bin/sh\n{dispatch.MARKER}\nexit 0\n')
+        os.chmod(path, 0o755)
+        return path
+
+    def test_the_host_clock_runs_the_dispatcher_not_one_products_venv(self):
+        """#695/#701 pinned the probe to the venv that installed it; a move or rollback of that
+        product left it on the old venv. Through the dispatcher it follows the default
+        product's pin at run time, with no PYTHONPATH to shadow that venv's own package."""
+        path = self.dispatcher()
+        job = scheduler.render_host(self.cfg())
+        self.assertEqual(job['argv'], [path, 'net-probe'])
+        self.assertNotIn('PYTHONPATH', job['plist']['EnvironmentVariables'])
+        self.assertEqual(job['plist']['WorkingDirectory'], self.asf_home)
+
+    def test_refresh_host_rewrites_a_stale_host_clock_only(self):
+        scheduler.install_host(self.cfg())            # no dispatcher yet: the interpreter form
+        self.assertEqual(scheduler.refresh_host(self.cfg()), [])  # current: nothing touched
+        self.dispatcher()
+        lines = scheduler.refresh_host(self.cfg())
+        self.assertTrue(any('bootstrapped' in l for l in lines), lines)
+        with open(self.plist(), 'rb') as f:
+            import plistlib
+            self.assertEqual(plistlib.load(f)['ProgramArguments'][-1], 'net-probe')
+        self.assertEqual(scheduler.refresh_host(self.cfg()), [])
+
+    def test_refresh_host_does_nothing_while_the_probe_is_off(self):
+        self.dispatcher()
+        self.assertEqual(scheduler.refresh_host(self.cfg('off')), [])
+        self.assertFalse(os.path.exists(self.plist()))
+
     def test_doctor_row(self):
         self.assertIsNone(doctor.check_host_clock(self.cfg('off')))
         ok, detail = doctor.check_host_clock(self.cfg())

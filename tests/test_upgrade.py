@@ -92,6 +92,14 @@ class FakeOps:
         self.log.append(('pause', product, tuple(clocks)))
         return [f'paused {c}' for c in clocks]
 
+    def bootout(self, product, clocks):
+        self.log.append(('bootout', product, tuple(clocks)))
+        return []
+
+    def install_host(self):
+        self.log.append(('host',))
+        return []
+
     def resume(self, product, clocks):
         self.log.append(('resume', product, tuple(clocks)))
         return []
@@ -152,8 +160,9 @@ class MoveTest(MoveCase):
         self.assertEqual(os.path.basename(rec.venv), 'asf-factory-alpha-8d5e25a')
         self.assertEqual(rec.sha, SHA)
         self.assertEqual(ops.log, [('pause', 'alpha', ('tick', 'ci-queue')),
+                                   ('bootout', 'alpha', ('tick', 'ci-queue')),
                                    ('clocks', 'alpha', SHA), ('hooks', 'alpha'),
-                                   ('smoke', 'alpha', SHA),
+                                   ('smoke', 'alpha', SHA), ('host',),
                                    ('resume', 'alpha', ('tick', 'ci-queue'))])
         self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
 
@@ -348,7 +357,54 @@ class QuiesceTest(MoveCase):
         self.assertIn('harvest.lock is held', '\n'.join(out))
         self.assertIsNone(installs.read('alpha'))
         self.assertEqual([e[0] for e in ops.log], ['pause', 'resume'])  # resumed, nothing moved
+        self.assertNotIn('bootout', [e[0] for e in ops.log])  # nothing was killed
         self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
+
+    def test_a_running_tick_is_waited_for_never_booted_out(self):
+        """2026-10-04 canary: the pause booted the clocks out before the drain looked, and
+        ``launchctl bootout`` kills a job's running process — the drain never saw the tick it had
+        just killed mid-wave. The pause is a record; the bootout comes after the floor is quiet."""
+        run = FakeRun(self.venvs, procs=['73\n', '73\n', ''])
+        run.listing = lambda: [(73, 'tick --product alpha --steps record,wave')]
+        seen = []
+
+        class Ops(FakeOps):
+            def bootout(inner, product, clocks):
+                seen.append((len(self.slept), list(run.procs)))
+                return super().bootout(product, clocks)
+        ops = Ops()
+        rc, out = self.move(run, ops, to=SHA)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(seen, [(2, [''])])  # booted out only once the tick had ended
+        names = [e[0] for e in ops.log]
+        self.assertEqual(names[:3], ['pause', 'bootout', 'clocks'])
+        self.assertTrue(any('tick --product alpha' in ln for ln in out), out)
+
+    def test_a_drain_timeout_boots_nothing_out_and_moves_nothing(self):
+        run = FakeRun(self.venvs, procs=['73\n'])
+        run.listing = lambda: [(73, 'tick --product alpha --steps record,wave')]
+        ops = FakeOps()
+        rc, out = self.move(run, ops, to=SHA, wait_s=10)
+        self.assertEqual(rc, upgrade.MOVE_DEFERRED)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual([e[0] for e in ops.log], ['pause', 'resume'])
+        self.assertIsNone(installs.read('alpha'))
+        self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
+
+    def test_a_ci_queue_pass_does_not_start_while_the_move_drains(self):
+        from asf import ci_queue
+        with open(env.product_path('alpha'), 'w', encoding='utf-8') as f:
+            f.write('product: alpha\nrepo_slug: o/alpha\nmain: main\n')
+        args = argparse.Namespace(product='alpha', apply=True)
+        out = []
+        upgrade._mark('alpha', SHA)
+        with mock.patch.object(ci_queue, 'apply', return_value=0) as apply:
+            self.assertEqual(ci_queue.cmd_queue(args, out=out.append), 0)
+            self.assertFalse(apply.called)
+            self.assertIn('move', '\n'.join(out))
+            upgrade.clear_pending('alpha')
+            ci_queue.cmd_queue(args, out=out.append)
+            self.assertTrue(apply.called)
 
     def test_a_batch_in_flight_refuses(self):
         os.makedirs(self.state(), exist_ok=True)
@@ -403,9 +459,10 @@ class MoveSmokeTest(MoveCase):
         self.assertEqual(rc, 1, out)
         self.assertEqual(installs.read('alpha').sha, OLD)
         self.assertEqual(ops.log, [('pause', 'alpha', ('tick', 'ci-queue')),
+                                   ('bootout', 'alpha', ('tick', 'ci-queue')),
                                    ('clocks', 'alpha', SHA), ('hooks', 'alpha'),
                                    ('smoke', 'alpha', SHA),
-                                   ('clocks', 'alpha', OLD), ('hooks', 'alpha'),
+                                   ('clocks', 'alpha', OLD), ('hooks', 'alpha'), ('host',),
                                    ('resume', 'alpha', ('tick', 'ci-queue'))])
         text = '\n'.join(out)
         self.assertIn('smoke FAILED asf.alpha.tick: gh not on the plist PATH', text)
@@ -443,9 +500,11 @@ class MoveOpsTest(MoveCase):
             ops.pause('alpha', ['tick'], 'tester')
             self.assertEqual(scheduler.read_pauses('alpha')['tick']['reason'], 'upgrade')
             self.assertEqual(ops.paused('alpha'), {'tick'})
+            self.assertEqual(calls, [])  # the pause is a record: a running tick is never killed
+            ops.bootout('alpha', ['tick'])
+            self.assertEqual(calls, [['bootout', f'gui/{os.getuid()}/asf.alpha.tick']])
             ops.resume('alpha', ['tick'])
             self.assertEqual(scheduler.read_pauses('alpha'), {})
-        self.assertEqual(calls[0][0], 'bootout')
 
 
 if __name__ == '__main__':
