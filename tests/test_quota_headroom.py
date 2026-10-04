@@ -302,6 +302,123 @@ class TestExhaustedRun(HomeCase):
         step_health.hold_failed_corrections(ctx, lifecycle.latest(path), out=lambda s: None)
         self.assertEqual(lifecycle.latest(path)['spec-f-1']['correction']['kind'], 'died')
 
+
+class AResultIsNeverADeathTests(HomeCase):
+    """F-0176: a hold's text never says "without a result" when a result record exists —
+    B-0123's two logs both ended in a ``"type":"result"`` carrying a ruling while the hold
+    quoted one of them and said both "ended without a result"."""
+
+    def ledger(self, *lines):
+        path = pool_mod.sessions_path(self.product)
+        with open(path, 'a') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return path
+
+    def _log(self, name, *records):
+        path = os.path.join(os.path.dirname(pool_mod.sessions_path(self.product)), name)
+        with open(path, 'w') as f:
+            for rec in records:
+                f.write(json.dumps(rec) + '\n')
+        return path
+
+    def test_a_result_record_carrying_a_ruling_is_not_called_a_death(self):
+        from asf.tick import step_health
+        log = self._log('b-123-correction.jsonl',
+                        {'type': 'system', 'subtype': 'init', 'session_id': 's'},
+                        {'type': 'result', 'subtype': 'error', 'is_error': True,
+                         'result': 'REPORT\nitem: B-0123\nkind: adjudicate\nstatus: done\n'
+                                   'branch: fix/B-0123\n'
+                                   'ruling: the branch is ready; only the missing push '
+                                   'credential stands between this HEAD and origin/fix/B-0123\n'
+                                   'blocked_on: none\n'
+                                   'pushed: rebased abc1234 — the factory publishes\n'
+                                   'commits: none\ntests: none\nwrites: none\n'})
+        path = self.ledger(
+            {'job': 'fix-b-123', 'item': 'B-0123', 'started': '2026-09-27T10:00:00Z', 'pid': 1},
+            {'job': 'fix-b-123', 'ended': '2026-09-27T10:20:00Z', 'end_reason': 'dead pid',
+             'corrected': True},
+            {'job': 'fix-b-123-correction', 'item': 'B-0123', 'started': '2026-09-27T10:40:00Z',
+             'pid': 2, 'log': log},
+            {'job': 'fix-b-123-correction', 'ended': '2026-09-27T10:50:00Z',
+             'end_reason': 'failed: unpushed work', 'log': log})
+        ctx = mock.Mock(product=self.product)
+        lines = []
+        step_health.hold_failed_corrections(ctx, lifecycle.latest(path), out=lines.append)
+        run = lifecycle.latest(path)['fix-b-123']
+        self.assertEqual(run['correction']['kind'], 'died')
+        self.assertEqual(run['rounds'], 1)
+        held = [ln for ln in lines if ln.startswith('held ')]
+        self.assertEqual(len(held), 1, lines)
+        for text in (held[0], run['correction']['text']):
+            self.assertIn('the retry ended with a result, not a death: failed: unpushed work',
+                          text)
+            self.assertNotIn('without a result', text)
+            self.assertNotIn('died before it wrote a result', text)
+
+    def test_a_log_with_no_result_record_still_says_without_a_result(self):
+        from asf.tick import step_health
+        log = self._log('spec-f-1-correction.jsonl', {'type': 'system'})
+        path = self.ledger(
+            {'job': 'spec-f-1', 'item': 'F-0001', 'started': '2026-09-25T10:00:00Z', 'pid': 1},
+            {'job': 'spec-f-1', 'ended': '2026-09-25T10:20:00Z', 'end_reason': 'dead pid',
+             'corrected': True},
+            {'job': 'spec-f-1-correction', 'item': 'F-0001', 'started': '2026-09-25T10:40:00Z',
+             'pid': 2, 'log': log},
+            {'job': 'spec-f-1-correction', 'ended': '2026-09-25T10:50:00Z',
+             'end_reason': 'dead pid', 'log': log})
+        ctx = mock.Mock(product=self.product)
+        step_health.hold_failed_corrections(ctx, lifecycle.latest(path), out=lambda s: None)
+        text = lifecycle.latest(path)['spec-f-1']['correction']['text']
+        self.assertIn('died twice: the session and its cold retry both ended without a result',
+                      text)
+
+    def test_a_result_that_declares_no_failure_reads_no_failure_declared(self):
+        from asf.tick import step_health
+        log = self._log('spec-f-2-correction.jsonl',
+                        {'type': 'system', 'subtype': 'init'},
+                        {'type': 'result', 'subtype': 'error', 'is_error': True,
+                         'result': 'REPORT\nstatus: done\npushed: yes abc1234\n'})
+        path = self.ledger(
+            {'job': 'spec-f-2', 'item': 'F-0002', 'started': '2026-09-25T10:00:00Z', 'pid': 1},
+            {'job': 'spec-f-2', 'ended': '2026-09-25T10:20:00Z', 'end_reason': 'dead pid',
+             'corrected': True},
+            {'job': 'spec-f-2-correction', 'item': 'F-0002', 'started': '2026-09-25T10:40:00Z',
+             'pid': 2, 'log': log},
+            {'job': 'spec-f-2-correction', 'ended': '2026-09-25T10:50:00Z', 'log': log})
+        ctx = mock.Mock(product=self.product)
+        step_health.hold_failed_corrections(ctx, lifecycle.latest(path), out=lambda s: None)
+        text = lifecycle.latest(path)['spec-f-2']['correction']['text']
+        self.assertIn('the retry ended with a result, not a death: no failure declared', text)
+        self.assertNotIn('without a result', text)
+
+    def test_wrote_a_result_reads_the_log_not_the_verdict(self):
+        from asf.tick import step_health
+        self.assertFalse(step_health.wrote_a_result({'pid': 1}))
+        self.assertFalse(step_health.wrote_a_result({'pid': 1, 'log': '/no/such/path.jsonl'}))
+        no_result = self._log('no-result.jsonl', {'type': 'system', 'subtype': 'init'})
+        self.assertFalse(step_health.wrote_a_result({'pid': 1, 'log': no_result}))
+        has_result = self._log('has-result.jsonl',
+                               {'type': 'system', 'subtype': 'init'},
+                               {'type': 'result', 'subtype': 'error', 'is_error': True,
+                                'result': 'boom'})
+        self.assertTrue(step_health.wrote_a_result({'pid': 1, 'log': has_result}))
+
+    def test_outcome_text_prefers_the_ledgers_own_reason(self):
+        from asf.tick import step_health
+        log = self._log('outcome.jsonl',
+                        {'type': 'result', 'subtype': 'error', 'is_error': True,
+                         'result': 'REPORT\npushed: no — the sandbox has no credential\n'})
+        self.assertEqual(
+            step_health.outcome_text({'log': log, 'end_reason': 'failed: unpushed work'}),
+            'failed: unpushed work')
+        self.assertEqual(step_health.outcome_text({'log': log}), 'unpushed work')
+        clean = self._log('outcome-clean.jsonl',
+                          {'type': 'result', 'subtype': 'error', 'is_error': True,
+                           'result': 'REPORT\nstatus: done\npushed: yes abc\n'})
+        self.assertEqual(step_health.outcome_text({'log': clean}), 'no failure declared')
+
+
 try:
     from test_workers import Home as RepoHome, feature_row
 except ImportError:  # pragma: no cover - import shape only
