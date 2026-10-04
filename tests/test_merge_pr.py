@@ -1,5 +1,8 @@
 """tools/merge-pr.sh against a fake gh and a fake git: nothing touches the network."""
+import contextlib
 import os
+import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -139,23 +142,98 @@ def _write_lock(d, pid):
     return lock
 
 
+def setup_gated(d):
+    """setup() whose `gh pr merge` announces itself on the fifo d/entered (with the lock holder's
+    pid in the log) and then blocks on the fifo d/gate until the test opens it."""
+    env = setup(d)
+    for n in ('entered', 'gate'):
+        os.mkfifo(os.path.join(d, n))
+    gh = os.path.join(d, 'bin', 'gh')
+    with open(gh) as f:
+        body = f.read()
+    body = body.replace(
+        '"pr merge") echo "merge-start $3" >> "$FAKE/log"; sleep 0; ',
+        '"pr merge") echo "merge-start $3 $(cat "$XDG_CACHE_HOME/asf/merge-pr.lock/pid")" >> "$FAKE/log"; '
+        'echo "$3" > "$FAKE/entered"; read -r _ < "$FAKE/gate"; ')
+    assert 'entered' in body
+    with open(gh, 'w') as f:
+        f.write(body)
+    return env
+
+
+def _popen(env, pr):
+    return subprocess.Popen(['bash', SCRIPT, pr], env=env, stdout=subprocess.PIPE, text=True)
+
+
+def _entered(d):
+    """blocks until some invocation is inside `gh pr merge`; returns its PR number"""
+    with open(os.path.join(d, 'entered')) as f:
+        return f.read().strip()
+
+
+def _open_gate(d):
+    with open(os.path.join(d, 'gate'), 'w') as f:
+        f.write('go\n')
+
+
+@contextlib.contextmanager
+def _deadline(seconds):
+    """a hang (a fifo nobody opens) fails the test instead of the run"""
+    def boom(*_):
+        raise AssertionError('merge-pr lock test hung for %ss' % seconds)
+    old = signal.signal(signal.SIGALRM, boom)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
 class MergePrLockTests(unittest.TestCase):
     def test_two_concurrent_invocations_serialize(self):
+        # No timing: A's merge parks on a fifo gate while holding the lock; B is started only
+        # after A is inside its merge and is shown blocked on the lock (its "waiting" line); A is
+        # released only then. Every merge records the lock holder it ran under.
         with tempfile.TemporaryDirectory() as d:
-            env = setup(d, merge_sleep=1)
-            ps = [subprocess.Popen(['bash', SCRIPT, n], env=env, stdout=subprocess.PIPE, text=True)
-                  for n in ('7', '8')]
-            for p in ps:
-                p.communicate(timeout=60)
-            self.assertEqual([p.returncode for p in ps], [0, 0])
+            env = setup_gated(d)
+            with _deadline(60):
+                a = _popen(env, '7')
+                self.assertEqual(_entered(d), '7')
+                b = _popen(env, '8')
+                self.assertIn('waiting for the merge lock', b.stdout.readline())
+                _open_gate(d)                      # A finishes its merge and releases
+                self.assertEqual(_entered(d), '8')  # only now does B get in
+                _open_gate(d)
+                for p in (a, b):
+                    p.communicate()
+            self.assertEqual([a.returncode, b.returncode], [0, 0])
             with open(os.path.join(d, 'log')) as f:
                 marks = [l.split() for l in f if l.startswith(('merge-start', 'merge-end'))]
-            # start A, end A, start B, end B: never two merges in flight
-            self.assertEqual([m[0] for m in marks], ['merge-start', 'merge-end'] * 2)
-            self.assertEqual(marks[0][1], marks[1][1])
-            self.assertEqual(marks[2][1], marks[3][1])
-            self.assertNotEqual(marks[0][1], marks[2][1])
+            self.assertEqual([m[:2] for m in marks],
+                             [['merge-start', '7'], ['merge-end', '7'], ['merge-start', '8'], ['merge-end', '8']])
+            # each merge ran while its own invocation held the lock
+            self.assertEqual(marks[0][2], str(a.pid))
+            self.assertEqual(marks[2][2], str(b.pid))
             self.assertFalse(os.path.exists(os.path.join(d, 'cache', 'asf', 'merge-pr.lock')))
+
+    def test_live_holder_still_writing_its_lock_is_not_broken(self):
+        # the CI flake: a holder between `pid` and `since` read as since=0, i.e. ancient, and
+        # a waiter broke a live lock and merged alongside it
+        with tempfile.TemporaryDirectory() as d:
+            env = setup(d)
+            lock = os.path.join(d, 'cache', 'asf', 'merge-pr.lock')
+            os.makedirs(lock)
+            with open(os.path.join(lock, 'pid'), 'w') as f:
+                f.write('%d\n' % os.getpid())
+            with _deadline(60):
+                p = _popen(env, '7')
+                self.assertIn('waiting for the merge lock', p.stdout.readline())
+                shutil.rmtree(lock)                # the holder releases
+                out, _ = p.communicate()
+            self.assertEqual(p.returncode, 0)
+            self.assertNotIn('breaking', out)
+            self.assertIn('merged PR #7', out)
 
     def test_stale_lock_with_dead_pid_is_broken(self):
         with tempfile.TemporaryDirectory() as d:

@@ -86,7 +86,11 @@ lock_stale() {
     [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; return
   fi
   kill -0 "$hp" 2>/dev/null || return 0
-  since="$(cat "$lock/since" 2>/dev/null || echo 0)"; now="$(date +%s)"
+  # a live holder with no readable start time is never stale (a missing `since` once read as 0,
+  # i.e. "ancient", and broke a lock its holder was still filling in)
+  since="$(cat "$lock/since" 2>/dev/null || true)"
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  now="$(date +%s)"
   [ $((now - since)) -gt $((timeout_s + 600)) ]
 }
 
@@ -108,8 +112,11 @@ lock_acquire() {
   mkdir -p "$(dirname "$lock")"
   while :; do
     if mkdir "$lock" 2>/dev/null; then
-      echo "$$" > "$lock/pid"; echo "$pr" > "$lock/pr"; date +%s > "$lock/since"
-      have_lock=1; return 0
+      # pid last and by rename: once a waiter can read a pid, `since` and `pr` are already whole
+      have_lock=1
+      date +%s > "$lock/since"; echo "$pr" > "$lock/pr"
+      echo "$$" > "$lock/pid.$$" && mv "$lock/pid.$$" "$lock/pid"
+      return 0
     fi
     if lock_stale; then
       echo "merge-pr: breaking a stale merge lock (held by PR #$(cat "$lock/pr" 2>/dev/null || echo ?), pid $(cat "$lock/pid" 2>/dev/null || echo ?))"
