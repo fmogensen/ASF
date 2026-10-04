@@ -468,14 +468,31 @@ def _session_line(job):
                        'product': product, 'job': name, 'started': started})
 
 
+def launch_boundary(rec):
+    """True when ``rec`` opens a new run in a job log: the runtime's ``system``/``init`` line, or
+    the factory's own launch header — the ``asf``/``session`` line every launch writes, and the
+    ``asf``/``cloud`` line a cloud launch writes (a status line it appends later, with its
+    ``status``, is no launch). A cloud run writes only these headers, never an ``init``: without
+    them as the boundary, an earlier run's result in the same log reads as the live run's own."""
+    if not isinstance(rec, dict):
+        return False
+    kind, sub = rec.get('type'), rec.get('subtype')
+    if kind == 'system':
+        return sub == 'init'
+    if kind == 'asf':
+        return sub == 'session' or (sub == 'cloud' and 'status' not in rec)
+    return False
+
+
 def read_result(log_path):
     """The parsed result line of the log's **last run**, else None.
 
-    A run opens with a ``system``/``init`` line and closes with a ``result`` line — but the
-    runtime may write more ``system`` lines (background-task bookkeeping) after the result, so
-    the result is not necessarily the last line (B-0028). A later ``init`` (a same-session
-    correction appended to the same log) starts a new run: its result is the one that counts,
-    and until it arrives the session is still running."""
+    A run opens with a launch boundary (:func:`launch_boundary`: the factory's launch header, the
+    runtime's ``system``/``init`` line) and closes with a ``result`` line — but the runtime may
+    write more ``system`` lines (background-task bookkeeping) after the result, so the result is
+    not necessarily the last line (B-0028). A later boundary (a same-session correction appended
+    to the same log, or a relaunch on another runtime) starts a new run: its result is the one
+    that counts, and until it arrives the session is still running."""
     if not log_path or not os.path.exists(log_path):
         return None
     result = None
@@ -489,7 +506,7 @@ def read_result(log_path):
                 continue
             if not isinstance(rec, dict):
                 continue
-            if rec.get('type') == 'system' and rec.get('subtype') == 'init':
+            if launch_boundary(rec):
                 result = None
             elif rec.get('type') == 'result':
                 result = rec
@@ -498,7 +515,7 @@ def read_result(log_path):
 
 def init_line(log_path):
     """The last run's ``system``/``init`` record, or None — the same scan :func:`read_result`
-    makes, rewinding at every ``init``."""
+    makes, rewinding at every launch boundary (:func:`launch_boundary`)."""
     if not log_path or not os.path.exists(log_path):
         return None
     init = None
@@ -510,8 +527,9 @@ def init_line(log_path):
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(rec, dict) and rec.get('type') == 'system' and rec.get('subtype') == 'init':
-                init = rec
+            if not launch_boundary(rec):
+                continue
+            init = rec if rec.get('type') == 'system' else None
     return init
 
 
