@@ -8,6 +8,14 @@ import os
 import shutil
 import tempfile
 
+# The operator's own files (~/.ASF's config and product files, the runtime's settings in every
+# worker account the config names) are snapshotted now and checked at exit: a process that wrote
+# a path of its own into one exits non-zero, whatever its tests said. First, so its exit check runs
+# after the temp home's cleanup below. Twin: tests/test_00_home.py.
+from asf import hermetic  # imports nothing of asf.env: ASF_HOME below is still read after it
+
+hermetic.guard_operator_files()
+
 if not os.environ.get('ASF_TESTS_HOME') and not os.environ.get('ASF_HOME', '').startswith(tempfile.gettempdir()):
     os.environ['ASF_HOME'] = tempfile.mkdtemp(prefix='asf-tests-home-')
     atexit.register(shutil.rmtree, os.environ['ASF_HOME'], True)  # never left in $TMPDIR
@@ -16,13 +24,14 @@ elif os.environ.get('ASF_TESTS_HOME'):
 # The host-pressure guard reads a quiet host in the suite (asf.workers.host): a loaded developer
 # machine must not hold every launch a test expects. Subprocesses inherit it.
 os.environ['ASF_HOST_READING'] = '0 1 0'
+# The runtime's config dir is the caller's (a worker session's is its account's, and a runtime CLI
+# a test reaches writes its settings there): the suite's is a dir under its own temp home.
+os.environ[hermetic.RUNTIME_CONFIG_DIR] = os.path.join(os.environ['ASF_HOME'], 'runtime-config')
 # B-0114: a session that runs the suite carries its own core.hooksPath in GIT_CONFIG_*, and git
 # applies it to every repo — a fixture repo this suite creates would answer with the caller's hook
 # dir, and `asf hooks install` would call those hooks foreign. `tests/test_00_home.py` drops it for
 # `discover -s tests`; this drops it for every other entry point, `python -m unittest tests.<mod>`
 # first among them, since importing any test module imports this package before that one.
-from asf import hermetic  # after the ASF_HOME lines above: asf.env reads ASF_HOME at import
-
 hermetic.strip_git_config(os.environ)
 # The same leak through a hook's own variables: a suite run from a pre-commit / pre-push hook
 # inherits GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE, and every `git -C <fixture>` would then act on
