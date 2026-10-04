@@ -395,10 +395,12 @@ def write_machine(path, machine):
         f.write(new_text)
 
 
-#: The machine keys a writer may drop: each is re-derived by every ingest (invariant I1). Any
-#: other machine key — ``schema_version``, ``cost``, ``spend_usd``, one a later version adds — is
-#: carried through by every writer, byte for byte.
-DERIVABLE_KEYS = ('stage', 'evidence', 'blocked', 'blocked_by_open')
+#: The machine keys a writer may drop: each is re-derived by every ingest (invariant I1) —
+#: ``landing`` is re-stamped by the next close, and ``asf reopen`` / an ingest that sees the card
+#: open again / ``asf migrate-landing --revert`` clear it. Any other machine key —
+#: ``schema_version``, ``cost``, ``spend_usd``, one a later version adds — is carried through by
+#: every writer, byte for byte.
+DERIVABLE_KEYS = ('stage', 'evidence', 'blocked', 'blocked_by_open', 'landing')
 
 
 def _split_header(path, text):

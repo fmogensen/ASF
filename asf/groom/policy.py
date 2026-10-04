@@ -570,6 +570,22 @@ def suppress(sections, index, inflight, product):
 #: the ``trunk_closed:`` reason an accepted unverified landing carries — the rule's own name, so
 #: the ledger says which rule closed the item
 COVERS_ACCEPT = 'groom-covers-accept'
+#: the ``by:`` of the ``landing:`` stamp the ingest writes when the card closes on a landing
+#: this rule accepted (:func:`landing_by`) — the groom decided it, not a trunk arm
+COVERS_ACCEPT_BY = 'groom'
+
+
+def landing_by(trunk_closed, arm=''):
+    """The ``landing: by`` for a card whose landing run was closed on trunk evidence
+    (``trunk_closed:`` on the run): ``groom`` when this module's covers rule accepted it
+    (:data:`COVERS_ACCEPT`), else ``trunkclose/<arm>`` — the arm that attributed the sha
+    (``names``, ``pr`` or ``covers``). A run that names no arm is stamped ``trunkclose/covers``,
+    the arm I14 holds to the strictest proof. ``''`` when the run was not closed that way."""
+    if not trunk_closed:
+        return ''
+    if str(trunk_closed).startswith(COVERS_ACCEPT):
+        return COVERS_ACCEPT_BY
+    return 'trunkclose/' + (arm if arm in ('names', 'pr', 'covers') else 'covers')
 
 
 def decide_unverified_landing(item_id, sha, age_hours, covers, report, hours):

@@ -85,6 +85,42 @@ def residue_gaps(meta, evidence, canonical):
     return ', '.join(gaps)
 
 
+LANDING_FULL_SHA_RE = re.compile(r'[0-9a-f]{40}')
+LANDING_AS_OF_RE = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?')
+
+
+def landing_problems(landing):
+    """What is wrong with a card's ``landing:`` stamp (``[]`` when nothing): a mapping whose
+    ``sha`` is 40-hex or ``''``, ``as_of`` an ISO timestamp, ``by`` one of
+    :data:`asf.record.ingest.LANDING_BY`; a ``by: reverted`` stamp names the reverted sha in
+    ``reverts`` (40-hex). Whether the sha is on the trunk is not this pass's question."""
+    from asf.record.ingest import LANDING_BY
+    if not isinstance(landing, dict):
+        return [f"landing: {landing!r} is not a {{sha, as_of, by}} mapping"]
+    out = []
+    sha = landing.get('sha')
+    if sha is None or (str(sha) != '' and not LANDING_FULL_SHA_RE.fullmatch(str(sha))):
+        out.append(f"landing.sha {sha!r} is neither a 40-character hex sha nor ''")
+    if not LANDING_AS_OF_RE.fullmatch(str(landing.get('as_of') or '')):
+        out.append(f"landing.as_of {landing.get('as_of')!r} is not an ISO timestamp")
+    by = landing.get('by')
+    if by not in LANDING_BY:
+        out.append(f"landing.by {by!r} is not one of {', '.join(LANDING_BY)}")
+    if by == 'reverted' and not LANDING_FULL_SHA_RE.fullmatch(str(landing.get('reverts') or '')):
+        out.append(f"landing.reverts {landing.get('reverts')!r} is not a 40-character hex sha")
+    return out
+
+
+def check_landing(canonical, add, find_line):
+    """The ``landing:`` stamp's shape (:func:`landing_problems`) on every card carrying one."""
+    for rec in canonical.values():
+        _typed, machine = frontmatter.split_machine(rec['meta'])
+        if 'landing' not in machine:
+            continue
+        for why in landing_problems(machine['landing']):
+            add(rec, find_line(rec, 'landing'), why)
+
+
 def check_residue(canonical, add, find_line, warn=None):
     """§2.7: an item whose last evidence line is `rule: no-rule` is one no closing rule sees —
     a finding the day it is written; and a typed `landed:` must at least be shaped like a sha
@@ -291,6 +327,7 @@ def record_findings(root, scrub=None, layout=True, shared=()):
 
     check_deliveries(canonical, add, find_line)
     check_residue(canonical, add, find_line, warn)
+    check_landing(canonical, add, find_line)
 
     # Size: an item whose History records a shape reading is held to that type's size (D6) —
     # an item never typed by shape (no `— shape:` line) is grandfathered and skipped.

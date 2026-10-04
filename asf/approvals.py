@@ -1143,17 +1143,24 @@ def close_landed(product, items, out=None):
     """Close ``done`` every open hold whose item the record calls Resolved or Closed: the work
     landed another way, and the hold is no one's question any more (asf 2026-09-25: eight
     ``touch_amendable_set`` holds on landed Bugs raised NEEDS OPERATOR every tick). Returns the
-    holds closed."""
+    holds closed. The card's ``landing:`` stamp, when it carries one, is the resolution's
+    evidence: the event keeps it and the line names its sha and path."""
     closed = []
     for e in open_holds(product):
-        if (items.get(e['item']) or {}).get('state') in ('Resolved', 'Closed'):
+        item = items.get(e['item']) or {}
+        if item.get('state') in ('Resolved', 'Closed'):
             hold = f"{e['item']}/{e['class']}"
-            append(product, {'event': 'resolved', 'hold': hold, 'resolution': 'done',
-                             'by': 'tick: item landed', 'ts': _now_iso()})
+            landing = item.get('landing') if isinstance(item.get('landing'), dict) else None
+            event = {'event': 'resolved', 'hold': hold, 'resolution': 'done',
+                     'by': 'tick: item landed', 'ts': _now_iso()}
+            if landing:
+                event['landing'] = dict(landing)
+            append(product, event)
             closed.append(hold)
             if out:
-                out(f"approvals: {hold} closed done — {e['item']} is "
-                    f"{items[e['item']]['state']}")
+                on = (f" (landing {str(landing.get('sha') or '')[:9] or 'no sha'}, "
+                      f"by {landing.get('by')})" if landing else '')
+                out(f"approvals: {hold} closed done — {e['item']} is {item['state']}{on}")
     return closed
 
 

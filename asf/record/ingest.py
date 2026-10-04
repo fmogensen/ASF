@@ -36,6 +36,90 @@ RULE_PREFIX = 'rule: '
 # read by the rollup's first line (F-0044)
 ON_PROD_EVENT = 'feature-on-prod'
 
+# ---- the `landing:` stamp: which commit closed a Task/Bug/Story, when, and by which path -------
+#: the machine key; a dict ``{sha, as_of, by}`` (``reverts:`` / ``note:`` beside it when they apply)
+LANDING_KEY = 'landing'
+#: the types a close stamps (a Feature/Epic closes by its children, which carry the stamps)
+LANDING_TYPES = ('task', 'bug', 'story')
+#: every ``by:`` a stamp may carry: the path whose evidence closed the card. ``pr-merge`` a merged
+#: PR or the lane's landing of the run's branch; ``names`` a trunk commit whose subject names the
+#: id; ``trunkclose/<arm>`` a run closed on verified trunk evidence, by the arm that attributed
+#: the sha; ``groom`` a landing the groom's covers rule accepted; ``console`` a typed ``landed:``;
+#: ``children`` a Story whose Tasks closed; ``matrix`` a Story its plan's matrix closed;
+#: ``descent`` a child its closed parent closed; ``migration`` stamped after the fact by
+#: ``asf migrate-landing``; ``reverted`` the landing commit was reverted on the trunk.
+LANDING_BY = ('pr-merge', 'names', 'trunkclose/names', 'trunkclose/pr', 'trunkclose/covers',
+              'console', 'groom', 'children', 'matrix', 'descent', 'migration', 'reverted')
+_DONE_STATES = ('Resolved', 'Closed')
+_FULL_SHA_RE = re.compile(r'[0-9a-f]{40}')
+_KEEP, _DROP = object(), object()   # :func:`_ingest_fields`' `landing`: leave it, or clear it
+
+
+def landing_stamp(sha, by, as_of, reverts=None):
+    """The ``landing:`` value: ``{sha, as_of, by}`` with ``sha`` the full 40-hex commit (``''``
+    when none is known). A ``sha`` the trunk has since reverted (``reverts``: ``{reverted sha:
+    reverting sha}``, :func:`asf.evidence.evidence.trunk_reverts`) is written as
+    ``{sha: '', as_of, by: reverted, reverts: <sha>}`` — the landing no longer stands."""
+    sha = str(sha or '')
+    if sha and (reverts or {}).get(sha):
+        return {'sha': '', 'as_of': as_of, 'by': 'reverted', 'reverts': sha}
+    return {'sha': sha if _FULL_SHA_RE.fullmatch(sha) else '', 'as_of': as_of, 'by': by}
+
+
+def _by_of_ids(iev):
+    """The ``by:`` of a landing read off an id's evidence (:func:`evidence.id_evidence`): a run
+    closed on trunk evidence (:func:`asf.groom.policy.landing_by`), a lane merge fact or a merged
+    PR (``pr-merge``), else a trunk commit whose subject names the id (``names``)."""
+    if iev.get('trunk_closed'):
+        from asf.groom import policy
+        return policy.landing_by(iev['trunk_closed'], iev.get('trunk_arm') or '')
+    if 'merge' in iev or iev.get('pr'):
+        return 'pr-merge'
+    return 'names'
+
+
+def landing_of(iid, rule, canonical, ev, task_ev, derived, story_tasks=None):
+    """``(sha, by)`` of the evidence the closing rule ``rule`` closed ``iid`` on — the sha may be
+    short (a typed ``landed:``) or ``''`` (a matrix close with no landed Task)."""
+    meta = canonical[iid]['meta']
+    type_ = meta.get('type')
+    if rule == 'reconciled':
+        return str(frontmatter.split_machine(meta)[0].get('landed') or ''), 'console'
+    if rule == 'parent-closed':
+        parent, seen = meta.get('parent'), set()
+        while parent and parent in canonical and parent not in seen:
+            seen.add(parent)
+            if derived.get(parent) is not None and derived[parent].sha:
+                return derived[parent].sha, 'descent'
+            parent = canonical[parent]['meta'].get('parent')
+        return '', 'descent'
+    if type_ == 'story':
+        tasks = (story_tasks if story_tasks is not None else _story_tasks(canonical)).get(iid, [])
+        return _landing_sha(tasks, task_ev, ev), ('matrix' if rule.startswith('matrix')
+                                                  else 'children')
+    sha = derived[iid].sha if derived.get(iid) is not None else ''
+    iev = _ids_of(iid, ev)
+    if sha and sha == iev.get('commit'):
+        return sha, _by_of_ids(iev)
+    return sha, 'pr-merge'
+
+
+def _landing_update(machine, new_state, now, reverts, closes):
+    """What the write does to the card's ``landing:``: :data:`_KEEP`, :data:`_DROP` (the card is
+    open again), or a new value — the stamp when the card closes now and carries none
+    (``closes()`` gives it), the reverted form when its landing commit was reverted."""
+    old = machine.get(LANDING_KEY)
+    if new_state not in _DONE_STATES:
+        return _DROP if old is not None else _KEEP
+    if isinstance(old, dict):
+        sha = str(old.get('sha') or '')
+        if sha and old.get('by') != 'reverted' and (reverts or {}).get(sha):
+            return landing_stamp(sha, old.get('by'), now, reverts)
+        return _KEEP
+    if old is None and machine.get('state', 'New') != new_state:
+        return closes()
+    return _KEEP
+
 
 def write_on_prod_event(root, iid, from_stage, now):
     """Append one `metrics/events/<day>.jsonl` line for `iid`'s transition into `on-prod`.
@@ -314,11 +398,16 @@ def _phrase(ev_lines):
     return '; '.join(rules[-1:] + [l for l in ev_lines if not l.startswith(RULE_PREFIX)])
 
 
-def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
-    """(ordered_machine_or_None, [history_line, ...]) — None means "no change, skip the write"."""
+def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now, landing=_KEEP):
+    """(ordered_machine_or_None, [history_line, ...]) — None means "no change, skip the write".
+    ``landing`` is :func:`_landing_update`'s answer: keep the stamp, drop it, or write this one."""
     old_state = machine.get('state', 'New')
     old_stage = machine.get('stage')
     fields = dict(machine)
+    if landing is _DROP:
+        fields.pop(LANDING_KEY, None)
+    elif landing is not _KEEP:
+        fields[LANDING_KEY] = landing
     fields['state'] = new_state
     if stage is not None:
         fields['stage'] = stage
@@ -356,6 +445,10 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
     if stage is not None and stage != old_stage:
         phrase = _phrase(ev_lines)
         history.append(f"- {stamp} ingest: stage {old_stage or 'card'} → {stage} ({phrase})")
+    if isinstance(landing, dict) and landing.get('by') == 'reverted' \
+            and (machine.get(LANDING_KEY) or {}).get('by') != 'reverted':
+        history.append(f"- {stamp} ingest: landing {str(landing.get('reverts'))[:9]} reverted "
+                       f"on the trunk")
     return ordered, history
 
 
@@ -1096,8 +1189,20 @@ def ingest_into(root, ev, product=None):
 
     now = now_iso()
     date = today()
-    new_state, closings, _derived, stage_val, task_ev, evs = derive(canonical, ev, product, now, date)
+    new_state, closings, derived, stage_val, task_ev, evs = derive(canonical, ev, product, now, date)
     since = product.conventions.get('id_in_subject_since') if product is not None else None
+    story_tasks = _story_tasks(canonical)
+    reverts = ev.get('reverts') or {}
+
+    def closes(iid):
+        """The stamp for ``iid``, closing now: its rule's evidence, spelled in full."""
+        def stamp():
+            sha, by = landing_of(iid, closings[iid].rule, canonical, ev, task_ev, derived,
+                                 story_tasks)
+            if sha and not _FULL_SHA_RE.fullmatch(sha):
+                sha = evidence.full_shas(product, [sha]).get(sha, '')
+            return landing_stamp(sha, by, now, reverts)
+        return stamp
 
     # ---- write: state/stage/evidence/blocked, one write_machine + History append per changed item
     for iid, rec in canonical.items():
@@ -1113,8 +1218,10 @@ def ingest_into(root, ev, product=None):
             lines.insert(len(lines) - 1, closing.PREDATES_LINE % closing.created_of(rec['meta']))
         _typed, machine = frontmatter.split_machine(rec['meta'])
         old = machine.get('stage')
+        landing = (_landing_update(machine, new_state[iid], now, reverts, closes(iid))
+                   if type_ in LANDING_TYPES else _KEEP)
         ordered, history = _ingest_fields(machine, new_state[iid], stage_val.get(iid), lines,
-                                          blocked_pair, now)
+                                          blocked_pair, now, landing)
         if ordered is None:
             continue
         write_fields(rec['path'], machine, ordered)
