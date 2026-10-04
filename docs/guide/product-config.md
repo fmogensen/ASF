@@ -155,6 +155,27 @@ and `asf new` commit and push for you). What the tick derived reaches your check
 checkout, so pull before you read them. Each table prints `record: <path>` first, and the board
 and roadmap print when their `index.json` was generated.
 
+### Ids are claimed by push (`conventions.flags.id_claim`)
+
+A new id is taken by **creating a ref on the record's `origin`**: `refs/asf/ids/<P>-<nnnn>`,
+`<nnnn>` the first number of the block. The push is create-only (`--force-with-lease=<ref>:`,
+an empty expected value: the ref must not exist), so of two writers that compute the same next
+number one wins; the other is refused, fetches `refs/asf/ids/*` and takes the block above the
+new top, a bounded number of times. The ref points at an empty commit whose message names the
+block (`range: T:5000-5049`) and its claimant (the job or session).
+
+- **A launch** claims its session's `BACKLOG_ID_RANGE` — one block per prefix, one atomic push —
+  before the session starts. A local session gets it as the env var; a cloud session, which has
+  neither the env nor the asf CLI, reads it from the CLOUD block of its brief.
+- **`asf new`** outside a block claims its one id the same way (a block of one).
+- **At land**, a plan that cites an S-/T-/B- id the record lacks and no claim covers — or that
+  redeclares a record id for another card — mints nothing, and its line names the id. A plan Task
+  whose `(parent, stories, writes)` equals an open Task's is not minted; the line names the
+  existing Task (`asf new task` refuses the same, `--force` overrides).
+
+`conventions.flags.id_claim: off` keeps the host-local reservation (`~/.ASF/state/<product>/id-ranges.tsv`)
+only; a record with no `origin` behaves the same way.
+
 ## Conventions
 
 `conventions:` holds every path and name the record and the tick need, so no tool hardcodes one.

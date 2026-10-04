@@ -236,6 +236,10 @@ conventions:
   #   verdict_block: warn   # off (default) | warn | on: a review's ```verdict block is read
   #                         # first (the table is the fallback); at `on` the Stop gate refuses
   #                         # a review that ends without one bound to its head
+  #   id_claim: push   # push (default) | off: a new S-/T-/B- id, and a session's whole
+  #                    # BACKLOG_ID_RANGE block, is taken by a create-only ref
+  #                    # refs/asf/ids/<P>-<nnnn> on the record's origin; a cloud session reads
+  #                    # its block from its brief. off: the host-local reservation only
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

@@ -399,6 +399,13 @@ def cloud_brief(text, job, setting=None):
         'exported, and the product setup has already run.',
         f'- The repository is checked out on branch `{job.branch}` (base `{job.base}`). '
         f'Commit and push on `{job.branch}` only; never push `{job.base}`, never force-push.']
+    id_range = ((getattr(job, 'env', None) or {}).get('BACKLOG_ID_RANGE') or '').strip()
+    if id_range:  # claimed on origin before launch (asf.record.idclaim): the text is the handover
+        setting.append(
+            f'- Your id block, claimed for this session: `BACKLOG_ID_RANGE={id_range}`. Every '
+            'new S-/T-/B- id you write (a card, a spec, a plan) is the next free number of '
+            'this block for its prefix; never invent one outside it — the record refuses an '
+            'id no claim covers when the work lands.')
     lines = ['', '', 'CLOUD SESSION', *setting,
              f'- Every commit message carries the trailer `{SESSION_TRAILER}: {sid}` '
              f'(`git commit --trailer "{SESSION_TRAILER}: {sid}"`).',

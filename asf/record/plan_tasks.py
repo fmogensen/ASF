@@ -14,13 +14,16 @@ Task of a plan launched at once and each successor's coder found nothing to buil
 Ids are minted by :func:`asf.record.ids.mint_id` — never by a session. A Feature that already
 has a Task child is left alone: the plan was read once, a re-run is a no-op. A plan whose Tasks
 cite a decision id (``D-nnnn``, outside a code span) the decision register lacks
-(:mod:`asf.record.decisions`) mints nothing: its line names the missing ids.
+(:mod:`asf.record.decisions`) mints nothing: its line names the missing ids. Nor does a plan
+citing an S-/T-/B- id no claim covers, or redeclaring one the record holds
+(:mod:`asf.record.idcheck`); a Task whose (parent, stories, writes) equals an open Task's — or
+an earlier Task of the same plan — is not minted, and its line names the existing id.
 """
 import re
 
 from asf.evidence import evidence
 from asf.record.core import canonicalize, load_items, today
-from asf.record import decisions, plan_order
+from asf.record import decisions, idcheck, idclaim, plan_order
 from asf.record.ids import mint_id, write_new_item
 from asf.record.ingest import is_retired, match_feature
 
@@ -61,6 +64,17 @@ def own_lane_plan(fid, ref, ev):
     return path in (((ev or {}).get('lane_docs') or {}).get(fid.upper()) or {}).get('plan', [])
 
 
+def _claim_view(root):
+    """Origin's id claims (the local mirror when origin cannot be read); [] without one."""
+    if not idclaim.has_origin(root):
+        return []
+    try:
+        idclaim.fetch(root)
+    except idclaim.ClaimError:
+        pass
+    return idclaim.claims(root)
+
+
 def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
     """Mint the Task cards of every landed plan that has none yet. Returns the new ids. One
     writer through the record stage (R14): a card an invariant refuses is not written, the rest
@@ -80,6 +94,7 @@ def _mint(root, product, ev, out=print, read_ref=None):
     features = (ev or {}).get('features') or {}
     made = []
     known = None   # the decision register, read once and only when a plan is about to mint
+    claimed = None  # origin's id claims, read once and only when a plan is about to mint
     for fid in sorted(canonical):
         rec = canonical[fid]
         if rec['meta'].get('type') != 'feature':
@@ -122,7 +137,17 @@ def _mint(root, product, ev, out=print, read_ref=None):
             out(f"plan-tasks: {fid}: {plan_path} cites decision(s) not in the register: "
                 f"{', '.join(missing)} — nothing minted (record the decision, or drop the id)")
             continue
+        # the ids the plan mints must be its session's claimed ones (asf.record.idcheck): an
+        # invented id, or one the record holds for another card, refuses the plan whole
+        if claimed is None:
+            claimed = _claim_view(root)
+        bad = idcheck.check_doc(text, canonical, claimed, fid)
+        if bad:
+            out(f"plan-tasks: {fid}: {plan_path} mints id(s) no claim covers: {'; '.join(bad)} "
+                f"— nothing minted (take ids from the session's BACKLOG_ID_RANGE)")
+            continue
         ids = []
+        keys = {}
         for t in records:
             typed = {'title': t['title'] or f"{fid} {t['tid']}", 'parent': fid, 'decided': True,
                      'links': {'plan': plan_path}}
@@ -132,7 +157,14 @@ def _mint(root, product, ev, out=print, read_ref=None):
             stories = stories_of(t['body'], canonical)
             if stories:
                 typed['stories'] = stories
+            dup = idcheck.duplicate_task(canonical, fid, typed.get('stories'), typed.get('writes'),
+                                         extra=keys)
+            if dup:  # the same (parent, stories, writes) as an open Task: the same work twice
+                out(f"plan-tasks: {fid}: {plan_path} {t['tid']} duplicates {dup} "
+                    f"(same parent, stories and writes) — not minted")
+                continue
             new_id = mint_id(root, canonical, 'task')
+            keys[new_id] = idcheck.task_key(fid, typed.get('stories'), typed.get('writes'))
             body = t['body'].strip()[:DESCRIPTION_CHARS]
             write_new_item(root, canonical, 'task', new_id, typed, body, today(), f'plan {fid}')
             ids.append(new_id)
