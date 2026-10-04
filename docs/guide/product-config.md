@@ -89,6 +89,11 @@ cap, the landing verification, the ledger's `landed`) keep their own answer unde
 `new` until each is cut over; each distinct disagreement is logged once a day. `asf facts
 replay --product P [--since ISO]` runs the same comparison offline over the ledger.
 
+`docs_review: skip` (unset: today's behaviour) gives a Task or Bug whose `writes:` all lie under a
+docs root (`specs_dir`, `plans_dir`, `reviews_dir`, `doc_paths`) no review: the lane waives the
+review of a branch whose diff stays inside those `writes:`, and the feeder shows a `WAITS ON
+landing` row instead of PUSHED → REVIEW. `lane.review.docs: required` keeps the review.
+
 `console_wait: aside` (default `hold`) stops work only the console can move from ordering
 anything: an item whose only row is CONSOLE → AMEND (its `writes:` reach the amendable set)
 keeps that row, ranked behind the live rows of its tier, but an `after:` naming it no longer

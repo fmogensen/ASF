@@ -958,7 +958,7 @@ def lane_rows(items, product, busy, occupancy):
     occ = occupancy or {}
     held = [(iid, h, True) for iid, h in (occ.get('review') or {}).items()]
     held += [(iid, h, False) for iid, h in (occ.get('landing') or {}).items()]
-    from asf.harvest.lane import is_pr_item  # local: the lane imports the feeder
+    from asf.harvest.lane import docs_only_task, is_pr_item  # local: the lane imports the feeder
     for iid, h, review in sorted(held, key=lambda t: t[0]):
         item = items.get(iid)
         foreign = not item and is_pr_item(iid)  # merge: auto — a PR no factory item made
@@ -977,6 +977,9 @@ def lane_rows(items, product, busy, occupancy):
         what = f'PR #{number}' if number else branch
         if foreign:
             what += ' (opened outside the factory, no card)'
+        if review and not foreign and docs_only_task(product, items, iid):
+            review = False  # docs-only ``writes:``: no review session (flags.docs_review)
+            h = dict(h, state='REVIEW', why='docs-only writes: no review (flags.docs_review)')
         if review:
             rnd = int(h.get('round') or 1)
             out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid,
