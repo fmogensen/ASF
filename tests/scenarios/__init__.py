@@ -1,4 +1,4 @@
-"""The scenario harness (W6-PR0a): every close path, one fixture product, one fake PR host.
+"""The scenario harness (W6-PR0a, W6-PR0b): every close path, one fixture product, one fake PR host.
 
 A close decision is spread over seven readers — the wave's trunk check before a launch, the
 parked-run sweep, the relaunch cap's park-or-close, the record's ingest (whose merge facts the
@@ -17,14 +17,20 @@ product checkout, the record, the operator home and the fake ``gh`` first on ``P
 * the Task's own work on ``hand/t-0001``, open as PR #1 (titled with the Task's id), never fetched
   into the product checkout — only the host knows it is there;
 * the Task's run branch ``feature/t-0001`` on origin at the old trunk head (nothing past it);
-* one ended coder run of the Task whose REPORT says ``status: done`` and names the decoy.
+* one ended coder run of the Task whose REPORT says ``status: done`` and names the decoy;
+* the trunk's branch protection requiring one check (:data:`CHECK`), green on PR #1.
 
 With the host answering, PR #1 is open work: no path may close the Task. A **host behaviour**
 (:data:`BEHAVIOURS`) then changes what the host says — ``rate-limit`` (every call refused for
 rate, the fake's ``e2e rate-limit on`` with the recorded refusal of ``tests/fixtures/gh/
 rate-limit``), ``close-unmerged`` (PR #1 closed without a merge, the
 fake's ``e2e close-unmerged 1``), and ``merged`` (PR #1 squash-merged: the positive control,
-which proves a row can see a close at all).
+which proves a row can see a close at all). The check behaviours (:data:`CHECK_BEHAVIOURS`,
+W6-PR0b) change only what the host says about PR #1's checks, each the fake's stand-in for a
+recorded ``gh`` answer under ``tests/fixtures/gh``: ``stale-merge-ref`` (red from a run on a
+merge ref the trunk moved past), ``skip-job`` and ``skip-job-attested`` (the required check
+skipped, on a head without and with the merge queue's attestation), ``hide-job-failure`` (a run
+concluding success over a failed job) and ``path-filter`` (the required check never created).
 
 **A path** (:data:`PATHS`) is one close decider, run on a fresh fork the way the tick runs it,
 and read back as an :class:`Outcome`: whether it closed the Task (a landing stamp on the run
@@ -32,6 +38,13 @@ line — ``harvested:`` — a derived ``Resolved``/``Closed``, a closed hold, a 
 or a "landed" release-note line) and whether it waited (the host refused for rate). The table
 of ``(path × behaviour) → expected`` lives in ``test_close_paths.py``: a new path or behaviour
 is one entry here and one row there.
+
+**An edit** (:data:`EDITS`) changes the world before the path runs: the named edges of a landing
+(:data:`EDGES`, S-M14 — the merge methods, a reworded squash, a revert, the document lane, an
+archive, a cloud session, a batch ref, an attested sha; ``test_edges.py``), the voided landing,
+and a card newer than the commit said to cover it. :func:`run_written` is a row of
+``test_i14_refuse.py``: the path under ``flags.i14``, then the record's guarded ingest write, the
+Task's card read back from disk.
 """
 import atexit
 import contextlib
@@ -63,6 +76,10 @@ WRITES = ('src/lines.py', 'tests/test_lines.py')
 CARD = 'c0ffee00c0ffee00'
 STARTED, ENDED = '2026-01-02T09:00:00Z', '2026-01-02T09:30:00Z'
 DONE_STATES = ('Resolved', 'Closed')
+#: The trunk's one required check (branch protection), green on PR #1 as the world starts.
+CHECK = 'tests'
+#: The job a hidden failure is in: not required, its run concluding success all the same.
+HIDDEN_JOB = 'e2e-nightly'
 
 
 def report(sha):
@@ -133,6 +150,8 @@ class World:
                            f'{ITEM}: count_lines, by hand')
         _git(['push', '-q', f.repo_origin, f'{self.base}:refs/heads/{RUN_BRANCH}'], cwd=f.repo)
         _git(['fetch', '-q', 'origin', 'main', RUN_BRANCH], cwd=f.repo)
+        gh(f, 'e2e', 'required', CHECK)
+        gh(f, 'e2e', 'default-checks', f'{CHECK}=pass')
         number = f.open_pr(PR_HEAD, PR_TITLE)
         assert number == 1, number
         self._ledger(f)
@@ -204,12 +223,56 @@ def _merged(f):
     gh(f, 'pr', 'merge', '1', '-R', SLUG, '--squash')
 
 
+def _stale_merge_ref(f):
+    """PR #1 red on its required check from a run on a merge ref the trunk has since moved
+    past (the recorded ``tests/fixtures/gh/stale-merge-ref``): the run predates the tip."""
+    gh(f, 'e2e', 'stale-merge-ref', '1', CHECK)
+    f.push('main', {'NOTES': 'an unrelated trunk change\n'}, 'chore: notes')
+
+
+def _skip_job(f):
+    """PR #1's required check skipped on a head nobody attested."""
+    gh(f, 'e2e', 'skip-job', '1', CHECK)
+
+
+def _skip_job_attested(f):
+    """PR #1's required check skipped on a head the merge queue attested."""
+    gh(f, 'e2e', 'skip-job', '1', CHECK, 'attested')
+
+
+def _hide_job_failure(f):
+    """PR #1's run concludes success while a job of it failed."""
+    gh(f, 'e2e', 'hide-job-failure', '1', HIDDEN_JOB)
+
+
+def _path_filter(f):
+    """The workflow's path filter never creates PR #1's required check."""
+    gh(f, 'e2e', 'path-filter', CHECK)
+
+
 BEHAVIOURS = {
     'open': _open,
     'rate-limit': _rate_limit,
     'close-unmerged': _close_unmerged,
     'merged': _merged,
+    'stale-merge-ref': _stale_merge_ref,
+    'skip-job': _skip_job,
+    'skip-job-attested': _skip_job_attested,
+    'hide-job-failure': _hide_job_failure,
+    'path-filter': _path_filter,
 }
+#: The behaviours that change only what the host says about PR #1's checks: the PR stays open,
+#: its work unmerged — no close path reads checks, so each answers as under ``open``.
+CHECK_BEHAVIOURS = ('stale-merge-ref', 'skip-job', 'skip-job-attested', 'hide-job-failure',
+                    'path-filter')
+#: Their rows of the close-path table, ``(path, behaviour, expected, gap, edit)`` as
+#: ``test_close_paths.ROWS`` (run by ``test_host_behaviours.py``): open, unmerged work on every
+#: path, whatever the host says about its checks.
+CHECK_ROWS = tuple((p, b, 'none', None, None) for b in CHECK_BEHAVIOURS for p in (
+    'trunkclose.closes_before_launch', 'trunkclose.close_parked',
+    'relaunch.assess → step_wave park/close', 'ingest.derive via merge_facts',
+    'approvals.close_landed', 'groom/policy.close_*', 'release notes (I12)',
+    'evidence.merge_facts'))
 
 
 # ---- reading a fork ----------------------------------------------------------------------------
@@ -261,14 +324,19 @@ def derive(product):
 @contextlib.contextmanager
 def deciding(f):
     """The fork's environment (its home, its ``PATH`` with the fake ``gh`` first) and its
-    product, with the process-wide rate-limit latch clear going in and coming out."""
-    from asf import env, gh_limit
+    product, with the process-wide rate-limit latch and read caches clear going in and out."""
+    from asf import attestation, env, gh_limit, stale_ref
     gh_limit.reset()
+    # the process-wide read caches: every fork's PR #1 has the same head and run ids
+    attestation._SEEN.clear()
+    stale_ref._RUNS.clear()
     try:
         with f.seams():
             yield env.load_product(NAME)
     finally:
         gh_limit.reset()
+        attestation._SEEN.clear()
+        stale_ref._RUNS.clear()
 
 
 def _decide(fn, product, out):
@@ -455,10 +523,193 @@ def doc_lane_landing(world, f):
     assert got == ({}, {}), f'a plan-lane merge is neither verified nor unverified: {got}'
 
 
-EDITS = {'voided-landing': voided_landing, 'doc-lane-landing': doc_lane_landing}
+def _trunk(f):
+    return _git(['rev-parse', 'main'], cwd=f.repo_origin)
+
+
+def _commit(f, ref, parents, message, tree_of=None):
+    """A commit on the bare origin made by hand (``commit-tree``): ``tree_of``'s tree (the first
+    parent's when None) under ``parents``, written to ``refs/heads/<ref>``. Returns its sha."""
+    tree = _git(['rev-parse', f'{tree_of or parents[0]}^{{tree}}'], cwd=f.repo_origin)
+    args = ['commit-tree', tree, '-m', message]
+    for p in parents:
+        args += ['-p', p]
+    sha = _git(args, cwd=f.repo_origin)
+    _git(['update-ref', f'refs/heads/{ref}', sha], cwd=f.repo_origin)
+    return sha
+
+
+def _lane_merged(f, world, sha, job=JOB, branch=PR_HEAD, pr=1, **extra):
+    """The lane's record of PR ``pr`` merged at ``sha`` on ``job``'s run line."""
+    append_runs(f, {'job': job, 'harvested': sha, **extra,
+                    'lane': {'pr': pr, 'head': world.hand, 'state': 'MERGED', 'sha': sha,
+                             'branch': branch}})
+
+
+def edge_squash(world, f):
+    """PR #1 squash-merged: one new trunk commit, its subject the PR's title and number."""
+    gh(f, 'pr', 'merge', '1', '-R', SLUG, '--squash')
+
+
+def edge_merge_commit(world, f):
+    """PR #1 merged with a merge commit: the PR's own commit reaches the trunk as a parent."""
+    gh(f, 'pr', 'merge', '1', '-R', SLUG, '--merge')
+
+
+def edge_rebase_merge(world, f):
+    """PR #1 rebase-merged: its commit replayed on the trunk (a new sha, the same subject)."""
+    gh(f, 'pr', 'merge', '1', '-R', SLUG, '--rebase')
+
+
+def edge_reworded_patch(world, f):
+    """PR #1 squash-merged under a subject a person reworded: it names neither the Task nor the
+    PR's title."""
+    gh(f, 'e2e', 'squash-subject', 'shared line counting')
+    gh(f, 'pr', 'merge', '1', '-R', SLUG, '--squash')
+
+
+def edge_revert(world, f):
+    """PR #1 squash-merged, then reverted on the trunk (``This reverts commit <sha>.``): the
+    trunk holds the Task's work no more (S-M15)."""
+    gh(f, 'pr', 'merge', '1', '-R', SLUG, '--squash')
+    merged = _trunk(f)
+    _commit(f, 'main', [merged], f'Revert "{PR_TITLE} (#1)"\n\nThis reverts commit {merged}.',
+            tree_of=f'{merged}^')
+
+
+#: The Task's spec, merged through the document lane.
+SPEC_BRANCH = 'spec/t-0001'
+
+
+def edge_doc_lane(world, f):
+    """PR #1 closed unmerged; the Task's *spec* merged through the document lane (a ``spec/``
+    branch, its PR titled with the Task's id, the lane's ``MERGED`` record on a spec run): a
+    document landed, not the Task's code."""
+    gh(f, 'e2e', 'close-unmerged', '1')
+    f.push(SPEC_BRANCH, {'specs/t-0001.md': f'# {ITEM} — count_lines\n'}, f'{ITEM}: spec')
+    number = f.open_pr(SPEC_BRANCH, f'{ITEM} spec — count_lines')
+    gh(f, 'pr', 'merge', str(number), '-R', SLUG, '--squash')
+    append_runs(f, {'job': 'spec-t-0001', 'item': ITEM, 'kind': 'spec', 'branch': SPEC_BRANCH,
+                    'pid': 4243, 'started': STARTED, 'ended': ENDED, 'end_reason': 'finished',
+                    'harvested': _trunk(f),
+                    'lane': {'pr': number, 'state': 'MERGED', 'sha': _trunk(f),
+                             'branch': SPEC_BRANCH}})
+
+
+#: The archive a closed PR's head is kept under (:data:`asf.evidence.evidence.ARCHIVE_PR_TAG`).
+ARCHIVE_BRANCH = 'archive/t-0001'
+
+
+def edge_archive_branch(world, f):
+    """PR #1 closed unmerged, its head kept as the ``archive/pr-1`` tag and an ``archive/``
+    branch naming the Task: provenance, never a landing."""
+    gh(f, 'e2e', 'close-unmerged', '1')
+    _git(['update-ref', 'refs/tags/archive/pr-1', world.hand], cwd=f.repo_origin)
+    _git(['update-ref', f'refs/heads/{ARCHIVE_BRANCH}', world.hand], cwd=f.repo_origin)
+
+
+def edge_cloud_session(world, f):
+    """A cloud session's run of the Task: its branch ends in the empty ``asf: report`` commit
+    (the REPORT in its message), its PR squash-merged, the lane's ``MERGED`` record on the cloud
+    run's line (a ``cloud:`` pid token)."""
+    tip = _commit(f, PR_HEAD, [world.hand],
+                  f'asf: report cloud-t-0001\n\n{report(world.decoy)}')
+    gh(f, 'pr', 'merge', '1', '-R', SLUG, '--squash')
+    append_runs(f, {'job': 'cloud-t-0001', 'item': ITEM, 'kind': KIND, 'branch': PR_HEAD,
+                    'pid': 'cloud:t-0001', 'started': STARTED, 'ended': ENDED,
+                    'end_reason': 'finished', 'launch_head': world.base})
+    _lane_merged(f, world, _trunk(f), job='cloud-t-0001', head_tip=tip)
+
+
+def edge_cloud_report_only(world, f):
+    """PR #1 closed unmerged; only a cloud session's empty ``asf: report`` commit — its subject
+    naming the job, its body the REPORT naming the Task — reached the trunk: nothing landed."""
+    gh(f, 'e2e', 'close-unmerged', '1')
+    trunk = _trunk(f)
+    _commit(f, 'main', [trunk], f'asf: report {JOB}\n\n{report(world.decoy)}\n\n'
+                                f'item: {ITEM}')
+
+
+#: The merge queue's batch ref prefix (``merge_queue.DEFAULTS['ref_prefix']``).
+BATCH_REF = 'batch/20260102T0930'
+
+
+def _batch(world, f):
+    from asf import merge_queue
+    return _commit(f, BATCH_REF, [_trunk(f), world.hand],
+                   f'Merge PR #1 ({PR_TITLE}) into main\n\n{merge_queue.TRAILER}')
+
+
+def edge_batch_ref(world, f):
+    """The merge queue cut a batch of PR #1 (a ``--no-ff`` merge on the trunk's tip, pushed as
+    ``batch/<stamp>``) whose checks have not finished: the batch is on origin, not on the
+    trunk."""
+    sha = _batch(world, f)
+    append_runs(f, {'job': JOB, 'lane': {'pr': 1, 'head': world.hand, 'state': 'QUEUED',
+                                         'batch': BATCH_REF, 'sha': sha}})
+
+
+def edge_attested_sha(world, f):
+    """The merge queue landed PR #1's batch: the trunk fast-forwarded to the batch sha, which
+    carries ``asf/attested`` = success; the host had not marked the PR merged, so the queue
+    closed it; the lane's ``MERGED`` record names the batch sha."""
+    from asf import merge_queue
+    sha = _batch(world, f)
+    _git(['update-ref', 'refs/heads/main', sha], cwd=f.repo_origin)
+    _git(['update-ref', '-d', f'refs/heads/{BATCH_REF}'], cwd=f.repo_origin)
+    gh(f, 'e2e', 'status', sha, merge_queue.ATTEST_CONTEXT, 'success')
+    gh(f, 'pr', 'close', '1', '-R', SLUG)
+    _lane_merged(f, world, sha, batch=BATCH_REF)
+
+
+def card_after_cover(world, f):
+    """The Task's card was created the day after the trunk commit covering its ``writes:`` (the
+    decoy): that commit cannot be the Task's work (S-M16's ``covers`` rule)."""
+    product_dir = os.path.join(f.record_dir, 'tasks')
+    at = datetime.datetime.fromtimestamp(
+        int(_git(['log', '-1', '--format=%ct', world.decoy], cwd=f.repo_origin)),
+        datetime.timezone.utc) + datetime.timedelta(days=1)
+    day, stamp = at.strftime('%Y-%m-%d'), at.strftime('%Y-%m-%dT%H:%M:%SZ')
+    path = os.path.join(product_dir, f'{ITEM}.md')
+    with open(path, encoding='utf-8') as fh:
+        text = fh.read()
+    text = (text.replace('2026-01-01T09:00:00Z', stamp)
+            .replace('- 2026-01-01: created', f'- {day}: created'))
+    assert stamp in text, path
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+
+
+EDITS = {'voided-landing': voided_landing, 'doc-lane-landing': doc_lane_landing,
+         'card-after-cover': card_after_cover,
+         'squash': edge_squash, 'merge-commit': edge_merge_commit,
+         'rebase-merge': edge_rebase_merge, 'reworded-patch': edge_reworded_patch,
+         'revert': edge_revert, 'doc-lane': edge_doc_lane, 'archive-branch': edge_archive_branch,
+         'cloud-session': edge_cloud_session, 'cloud-report-only': edge_cloud_report_only,
+         'batch-ref': edge_batch_ref, 'attested-sha': edge_attested_sha}
+#: The named edges of S-M14, each an edit on the ``open`` world.
+EDGES = ('squash', 'merge-commit', 'rebase-merge', 'reworded-patch', 'revert', 'doc-lane',
+         'archive-branch', 'cloud-session', 'cloud-report-only', 'batch-ref', 'attested-sha')
 #: The edits that write a landing stamp themselves: the row's premise, not the path's close —
 #: such a row is read by its path's verdict alone.
-STAMPING_EDITS = ('voided-landing', 'doc-lane-landing')
+STAMPING_EDITS = ('voided-landing', 'doc-lane-landing', 'doc-lane', 'cloud-session',
+                  'attested-sha')
+
+
+#: The plan items a gap row names (``gap``): the item whose change turns that row green.
+GAPS = {
+    'W4-PR3b': 'I14 under flags.i14: refuse puts back a close without a sound landing',
+    'W4-PR5': "an `asf reset` void holds against the ingest's own read of the host",
+    'W6-PR6c': 'the record\'s readers cut over to facts/landing (the revert rule)',
+}
+
+
+def holds(expected, o, world=WORLD):
+    """Whether outcome ``o`` is ``expected``: ``none`` (closed nothing), ``closes``, or
+    ``decoy`` (closed on the trunk commit covering the Task's ``writes:``)."""
+    if expected == 'none':
+        return not o.closed
+    return o.closed and (expected != 'decoy' or o.stamp == world.decoy)
 
 
 def run(path, behaviour, edit=None, world=WORLD):
@@ -482,3 +733,58 @@ def run(path, behaviour, edit=None, world=WORLD):
     if not o.closed and o.stamp and edit not in STAMPING_EDITS:
         o.closed, o.how = True, f'a landing stamp on the run line ({o.stamp[:9]})'
     return scenario, o
+
+
+# ---- the I14 refuse rows -----------------------------------------------------------------------
+
+def set_flag(f, name, value):
+    """``conventions.flags.<name>: <value>`` in the fork's product file — what every load of the
+    product reads (:meth:`asf.conventions.Conventions.flag`)."""
+    path = os.path.join(f.home, 'products', f'{NAME}.yaml')
+    with open(path, encoding='utf-8') as fh:
+        text = fh.read()
+    assert '\nconventions:\n' in text and '\n  flags:' not in text, path
+    text = text.replace('\nconventions:\n', f'\nconventions:\n  flags:\n    {name}: {value}\n', 1)
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+
+
+def write_record(product, out):
+    """The tick's ingest *write*: :func:`asf.record.ingest.ingest_into` over fresh evidence
+    through :func:`asf.record.stage.guarded` — every close the paths' stamps and the host's word
+    lead to reaches the record this one way, and the record invariants (I14 among them under
+    ``flags.i14``) put back what they refuse. ``(findings, waited)``."""
+    from asf import gh_limit
+    from asf.evidence import evidence
+    from asf.record import ingest, stage
+    try:
+        ev = evidence.load(fresh=True, product=product)
+    except gh_limit.RateLimited as e:
+        gh_limit.reset()
+        return [], f'rate-limited: {e}'
+    _rc, _staged, findings = stage.guarded(product.backlog_dir, 'ingest', ingest.ingest_into,
+                                           (ev, product), product=product, out=out)
+    return findings, ''
+
+
+def run_written(path, behaviour, edit=None, i14='refuse', world=WORLD):
+    """One refuse row: as :func:`run`, under ``flags.i14: <i14>``, then the record's guarded
+    ingest write. The outcome is the Task's card *on disk* — the one close I14 guards."""
+    scenario = world.scenario(behaviour)
+    f = world.fork()
+    set_flag(f, 'i14', i14)
+    BEHAVIOURS[behaviour](f)
+    lines = []
+    with deciding(f) as product, contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(io.StringIO()):
+        assert product.flag('i14') == i14, product.flag('i14')
+        if edit:
+            EDITS[edit](world, f)
+        _verdict, waited = PATHS[path](world, f, product, lines.append)
+        findings, wrote = write_record(product, lines.append)
+        state = on_disk_state(product)
+    o = Outcome(waited=waited or wrote, lines=lines, stamp=stamp(f), state=state)
+    o.closed, o.how = state in DONE_STATES, f'the record ({state})'
+    o.lines += [f'finding: {x}' for x in findings]
+    return scenario, o
+
