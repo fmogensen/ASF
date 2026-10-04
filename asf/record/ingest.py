@@ -500,6 +500,94 @@ def _prod_reach(ev, product=None):
     return check
 
 
+def _trunk_reach(ev, product=None):
+    """``sha -> bool``: is ``sha`` on the trunk — an ancestor of (or equal to) ``main_sha``, the
+    ``origin/<main>`` the evidence was read at. One ``rev-list`` with a product, read the first
+    time one is asked; without one, :func:`evidence.ancestor_of`'s answer. No ``main_sha``, or a
+    sha git cannot place, is not on the trunk: nothing closes on a sha the trunk does not carry."""
+    base = ev.get('main_sha')
+    if product is None:
+        return lambda sha: bool(sha and base) and evidence.ancestor_of(sha, base)
+    reach = []
+
+    def check(sha):
+        if not sha or not base:
+            return False
+        if not reach:
+            reach.append(evidence.ancestry(product, [base]))
+        return reach[0](sha)
+    return check
+
+
+def _voided_landings(product):
+    """``{item: (shas, prs)}`` — the landing claims ``asf reset`` voided, off the product's run
+    lines: a void's own ``head``/``pr`` (:func:`asf.workers.lifecycle.voids`), and every run whose
+    merge claim :func:`asf.workers.lifecycle.voided_run` voids (its merge sha, its lane's head and
+    sha) — the check :func:`asf.evidence.evidence.merge_facts` and ``trunkclose`` make. ``{}``
+    with no product or no ledger."""
+    if product is None:
+        return {}
+    from asf.workers import lifecycle
+    try:
+        path = os.path.join(env.state_dir(product), 'sessions.jsonl')
+    except Exception:
+        return {}
+    if not os.path.exists(path):
+        return {}
+    out = {}
+
+    def add(item, shas=(), pr=None):
+        rec = out.setdefault(str(item).upper(), (set(), set()))
+        rec[0].update(str(x) for x in shas if x)
+        if pr:
+            rec[1].add(pr)
+    for rs in lifecycle.runs(path).values():
+        for run in rs:
+            item = run.get('item')
+            if not item or not isinstance(item, str):
+                continue
+            sha = evidence._merge_sha(run)
+            if sha is None or not lifecycle.voided_run(path, run, sha):
+                continue
+            lane = run.get('lane') if isinstance(run.get('lane'), dict) else {}
+            add(item, (sha, lane.get('head'), lane.get('sha')))
+    for item in list(out) + [str(i).upper() for i in lifecycle.resets(path)]:
+        for v in lifecycle.voids(path, item):
+            add(item, (v.get('head'),), v.get('pr'))
+    return out
+
+
+def _void_ids(ev, voided):
+    """``(ev, hit)``: ``ev`` with every id's trunk evidence that is a voided landing claim
+    (:func:`_voided_landings`) taken out — its commit, merge, PR and green — and ``{id: sha}`` of
+    what was taken. A reset ``(pr, head)`` is never a merge fact, whatever the host says (W4-PR5):
+    the commit naming the id, or the PR the host merged, is that same voided claim."""
+    if not voided:
+        return ev, {}
+    ids, hit = dict(ev.get('ids') or {}), {}
+    for iid, iev in (ev.get('ids') or {}).items():
+        shas, prs = voided.get(str(iid).upper(), ((), ()))
+        c = iev.get('commit') or ''
+        if c and (any(_sha_prefix(c, v) for v in shas) or (iev.get('pr') and iev['pr'] in prs)):
+            rec = {k: v for k, v in iev.items() if k not in ('merge', 'trunk_closed', 'trunk_arm')}
+            rec.update(commit=None, pr=None, green=False)
+            ids[iid], hit[iid] = rec, c
+    return (dict(ev, ids=ids) if hit else ev), hit
+
+
+def _sha_prefix(a, b):
+    a, b = str(a or ''), str(b or '')
+    return len(a) >= 7 and len(b) >= 7 and (a.startswith(b) or b.startswith(a))
+
+
+def _typed_landed(meta):
+    """The card's typed ``landed:`` sha (§2.5) when it is shaped like one (``asf check``'s
+    :data:`asf.record.check.LANDED_SHA_RE`), lower-cased; ``''`` otherwise."""
+    from asf.record import check
+    value = str(frontmatter.split_machine(meta)[0].get('landed') or '').strip()
+    return value.lower() if value and check.LANDED_SHA_RE.fullmatch(value) else ''
+
+
 def _merged_in_prod(child_ids, task_ev, ev, reach=None):
     """Every child Task's landing sha is an ancestor of the deploy. False for a child nothing
     says landed: nothing says where its merge is. `reach` is a :func:`_prod_reach` to ask."""
@@ -803,7 +891,13 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     task_ev = {}
     evs = {}          # iid -> the Ev its closing was chosen from, what `predates` reads
     since = product.conventions.get('id_in_subject_since') if product is not None else None
+    # an `asf reset` void holds against the ingest's own read of the host (W4-PR5): the voided
+    # claim's commit, merge and PR are no evidence, for every rule below
+    voided = _voided_landings(product)
+    ev, void_hit = _void_ids(ev, voided)
     reach = _prod_reach(ev, product)  # one rev-list of the deploy for every in-prod question
+    on_trunk = _trunk_reach(ev, product)  # and one of the trunk, for a typed `landed:` sha
+    green_after = None
 
     def settle(iid, type_, ev_obj, lines, sha=''):
         """The one place a state is chosen: `closing.state_of`, held by `closing.sticky` — unless
@@ -827,7 +921,13 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         iev = _ids_of(iid, ev)
         commit = iev.get('commit') or ''
         merged = (tev or {}).get('merged_sha') or ''
+        vshas, vprs = voided.get(iid.upper(), ((), ()))
+        if merged and (any(_sha_prefix(merged, v) for v in vshas) or (tev or {}).get('pr') in vprs):
+            void_hit.setdefault(iid, merged)
+            merged = ''
         _st, id_lines = match_ids(iid, ev)
+        if iid in void_hit:
+            id_lines = id_lines + [f"landing {void_hit[iid][:9]} voided (asf reset)"]
         if tev is not None:
             branch, pr_state = tev.get('branch') or '', tev.get('pr_state') or ''
         else:  # nothing matched it by document: the id tokens naming it are what is left
@@ -841,8 +941,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines = id_lines + ([f"in plan {slug} ({tid})"] if tev is not None else [])
         elif tev is None:
             lines = id_lines or [f"no evidence found ({date})"]
-        elif tev.get('merged_sha'):
-            lines = [f"PR #{tev.get('pr')} merged ({tev['merged_sha'][:9]})"]
+        elif merged:
+            lines = [f"PR #{tev.get('pr')} merged ({merged[:9]})"]
         elif tev.get('branch') and tev.get('pr'):
             lines = [f"branch {tev['branch']}, PR #{tev['pr']} {tev.get('pr_state')}"]
         elif tev.get('branch'):
@@ -858,9 +958,22 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines = [ln for ln in lines if not ln.startswith('no evidence found')] + [reset_line(reset)]
         # a merged PR is its own green: a plan's Task never waited on CI to close
         green = bool(iev.get('green')) if commit else bool(merged)
-        settle(iid, 'task', closing.Ev(commit=commit, green=green, merged_sha=merged,
-                                       branch=branch, pr_state=pr_state,
-                                       open_prs=tuple(iev.get('open_prs') or ())), lines)
+        ev_obj = closing.Ev(commit=commit, green=green, merged_sha=merged, branch=branch,
+                            pr_state=pr_state, open_prs=tuple(iev.get('open_prs') or ()))
+        # a typed `landed:` (§2.5, F-0106 C6/C7) hands `reconciled` its sha — Tasks only, and
+        # only a sha the trunk carries: one it does not is a claim, never a close
+        landed = _typed_landed(rec['meta'])
+        if landed and on_trunk(landed):
+            if green_after is None:
+                green_after = _green_after(ev, product)
+            if green_after(landed):
+                ev_obj.landed, ev_obj.green = landed, True
+                lines = lines + [f"typed landed {landed[:9]} on the trunk"]
+            else:
+                lines = lines + [f"typed landed {landed[:9]} on the trunk, no green CI at or after it"]
+        elif landed:
+            lines = lines + [f"typed landed {landed[:9]} is not on the trunk"]
+        settle(iid, 'task', ev_obj, lines, sha=ev_obj.landed or '')
 
     # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
     story_tasks = _story_tasks(canonical)
@@ -891,7 +1004,6 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         settle(iid, 'story', ev_obj, lines)
 
     # ---- Bugs: independent of other items
-    green_after = None
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'bug':
             continue
