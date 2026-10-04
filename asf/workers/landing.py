@@ -249,7 +249,11 @@ def verify_landings(product, occupancy, items, path=None, repo=None, main=None):
     a reshape's split, a plan) merged a document, not the item's work; the record files it under
     ``docs`` (:func:`asf.evidence.evidence.merge_facts`), so the item stays at its build stage,
     with no NEEDS DECISION row and no new stamp on its run (W8-PR3). Nor a landing whose sha the
-    trunk does not carry yet (origin not fetched): it is left as the lifecycle says."""
+    trunk does not carry yet (origin not fetched): it is left as the lifecycle says.
+
+    Under ``flags.facts: shadow`` each decision (verified, unverified, or git could not answer)
+    is compared with the landing fact (:func:`asf.facts.landing.landed`); the answer is this
+    one."""
     from asf.evidence import evidence as ev
     occ = occupancy or {}
     landed, on = occ.get('landed') or {}, occ.get('landed_on') or {}
@@ -269,6 +273,7 @@ def verify_landings(product, occupancy, items, path=None, repo=None, main=None):
             continue
         writes = [str(w) for w in card.get('writes') or ()]
         mine = attributable(repo, main, sha, iid, writes, run_prs(path, iid))
+        mine = _shadowed(product, iid, sha, mine, repo, main, path, writes)
         if mine is None:
             continue  # git could not answer: decided next tick, no NEEDS DECISION row (S-m4)
         if mine:
@@ -277,3 +282,14 @@ def verify_landings(product, occupancy, items, path=None, repo=None, main=None):
             unverified[iid] = (f'its recorded landing {sha[:9]} on origin/{main} is not its '
                                f'commit (not named by it, not its PR merge, not its writes:)')
     return verified, unverified
+
+
+def _shadowed(product, iid, sha, mine, repo, main, path, writes):
+    """``mine`` — always; the landing fact compared beside it under ``flags.facts: shadow``."""
+    from asf.facts import landing as facts_landing
+    return facts_landing.shadow(
+        product, facts_landing.VERIFY, iid, mine,
+        lambda: facts_landing.landed(product, iid, sha=sha, repo=repo, main=main, path=path,
+                                     writes=writes),
+        agree=lambda m, new: facts_landing.agree_tri('unknown' if m is None else bool(m), new),
+        view=lambda m: 'unknown' if m is None else bool(m))

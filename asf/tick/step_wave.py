@@ -598,9 +598,10 @@ def relaunch_capped(product, row, wrow, out=print):
         reason, landed = relaunch.assess(path, wrow.job, wrow.item, head=head,
                                          card=wrow.card_digest, cause=wrow.cause,
                                          repo=product.repo_dir, main=product.main,
-                                         writes=landing.item_writes(product, wrow.item))
+                                         writes=landing.item_writes(product, wrow.item),
+                                         product=product)
         hit = trunkclose.evidence(path, wrow.item, product.repo_dir, product.main,
-                                  landing.item_writes(product, wrow.item)) \
+                                  landing.item_writes(product, wrow.item), product=product) \
             if reason and landed else None
     except Exception as e:  # noqa: BLE001 — the cap never blocks a wave by failing
         out(f'relaunch: cap check failed for {wrow.job} — {e}')

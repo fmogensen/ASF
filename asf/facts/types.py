@@ -76,7 +76,7 @@ class Dead:
 @dataclass(frozen=True)
 class OpenPrs:
     """The product's open PRs as the host listed them: ``prs``, a tuple of ``{number,
-    headRefName, headRefOid}``. An empty tuple is a real "none open"."""
+    headRefName, headRefOid, title}``. An empty tuple is a real "none open"."""
     prs: tuple = field(default_factory=tuple)
     as_of: AsOf = field(default_factory=AsOf)
 

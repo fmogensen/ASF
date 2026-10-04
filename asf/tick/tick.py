@@ -167,8 +167,10 @@ class Context:
         self._record = None
         self.stale_reason = None  # set when the record step failed: the index is not this tick's
         self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
-        from asf.facts import cache as facts_cache
+        from asf.facts import cache as facts_cache, landing as facts_landing
         facts_cache.clear()  # a tick reads its facts afresh (asf.facts.cache)
+        # under flags.facts shadow|new: the pass's one open-PR read, the shadow's only gh fact
+        facts_landing.prime(product)
 
     @property
     def has_record(self):

@@ -19,6 +19,8 @@ from asf.facts.types import AsOf, OpenPrs, Unknown
 #: What :func:`get` returns for a key the pass has not read (``None`` is a legitimate value).
 MISS = object()
 OPEN_PRS = 'open_prs'
+#: What the one open-PR read asks for: the head (and its sha) and the title that names an item.
+FIELDS = ('number', 'headRefName', 'headRefOid', 'title')
 
 _cache = {}
 
@@ -54,7 +56,7 @@ def prime(product, *, run=None):
     if not slug:
         return put(product, OPEN_PRS, '', '', Unknown('no repo_slug', AsOf.now()))
     try:
-        r = github.open_prs(slug, run=run)
+        r = github.open_prs(slug, fields=FIELDS, run=run)
     except gh_limit.RateLimited:
         return put(product, OPEN_PRS, '', '', Unknown('rate limited', AsOf.now()))
     at = AsOf('', github_stamp(r.as_of))

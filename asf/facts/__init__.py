@@ -16,7 +16,8 @@ A decider moves in three steps, one product flag for all of them —
 * ``new``    — the fact's answer.
 
 No decider is wired here: :func:`shadow` is the seam each one calls with its current answer as
-``old_fn``.
+``old_fn``. The landing fact (:mod:`asf.facts.landing`) is the first in shadow, under the
+workers' deciders.
 """
 from asf import gh_limit
 from asf.facts import cache, disagree
