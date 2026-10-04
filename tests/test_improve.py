@@ -219,6 +219,54 @@ class TableTests(unittest.TestCase):
         self.assertIsNone(t['minutes_per_landed_item'])
 
 
+class RelaunchMeasureTests(unittest.TestCase):
+    def test_ended_runs_numbers_a_jobs_runs_and_a_single_run_is_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = os.path.join(d, 'sessions.jsonl')
+            write_lines(ledger, [
+                {'job': 'a', 'started': '2026-01-01T00:00:00Z', 'pid': 1, 'ended': '2026-01-01T00:10:00Z'},
+                {'job': 'a', 'started': '2026-01-01T01:00:00Z', 'pid': 2, 'ended': '2026-01-01T01:10:00Z'},
+                {'job': 'a', 'started': '2026-01-01T02:00:00Z', 'pid': 3, 'ended': '2026-01-01T02:10:00Z'},
+                {'job': 'b', 'started': '2026-01-01T03:00:00Z', 'pid': 4, 'ended': '2026-01-01T03:10:00Z'}])
+            by_start = {r.started: r for r in measure.ended_runs(None, ledger=ledger, logs_dir=d)}
+        self.assertEqual([by_start[s].attempt for s in
+                           ('2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', '2026-01-01T02:00:00Z')], [1, 2, 3])
+        self.assertEqual(by_start['2026-01-01T03:00:00Z'].attempt, 1)
+
+    def test_attempt_defaults_to_one_on_the_suites_positional_construction(self):
+        self.assertEqual(measure.Run('j', 'k', 'm', None, 's', 'e', 60.0, True, 'finished', 1.0).attempt, 1)
+
+    def test_table_splits_relaunches_from_first_launches(self):
+        # coder-t-0001's three runs: attempt 1 (30 min, $0.6), attempt 2 (45 min, $0.9), attempt 3
+        # (15 min, $0.3); adjudicate-t-0002, spec-t-0003 and fix-bug-b-0005 are each a single,
+        # first-launch run (60/0/0 min, $3.0/$0.0/$0.0).
+        r = measure.table(fixture_runs())['relaunches']
+        self.assertEqual((r['sessions'], r['share']), (2, 0.333))         # 2 of 6 runs
+        self.assertEqual((r['usd_per_session'], r['hours_per_session']), (0.6, 0.5))      # (0.9+0.3)/2, (45+15)/2/60
+        self.assertEqual((r['first_usd_per_session'], r['first_hours_per_session']), (0.9, 0.5))  # (0.6+3+0+0)/4, (30+60+30+0)/4/60
+
+    def test_a_side_with_no_sessions_is_none_not_zero(self):
+        runs = [measure.Run('j', 'k', 'm', None, 's', 'e', 60.0, True, 'finished', 1.0)] * 3  # attempt 1 each
+        r = measure.table(runs)['relaunches']
+        self.assertEqual((r['sessions'], r['share']), (0, 0.0))
+        self.assertIsNone(r['usd_per_session'])
+        self.assertIsNone(r['hours_per_session'])
+        self.assertEqual((r['first_usd_per_session'], r['first_hours_per_session']), (1.0, 1.0))
+
+        runs = [measure.Run('j', 'k', 'm', None, 's', 'e', 60.0, True, 'finished', 1.0, attempt=2)] * 2
+        r = measure.table(runs)['relaunches']
+        self.assertEqual(r['sessions'], 2)
+        self.assertEqual((r['usd_per_session'], r['hours_per_session']), (1.0, 1.0))
+        self.assertIsNone(r['first_usd_per_session'])
+        self.assertIsNone(r['first_hours_per_session'])
+
+    def test_an_empty_window_reports_relaunches_as_zero_not_a_crash(self):
+        r = measure.table([])['relaunches']
+        self.assertEqual((r['sessions'], r['share']), (0, 0.0))
+        self.assertIsNone(r['usd_per_session'])
+        self.assertIsNone(r['first_usd_per_session'])
+
+
 class FrozenRegistryTests(unittest.TestCase):
     """The frozen 216-run cut reproduces the numbers the card asked for — no ~/.ASF, no logs."""
 

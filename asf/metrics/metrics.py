@@ -544,11 +544,13 @@ def intake_latency_rows(events, conv=None):
     return [('intake → decided', a, na), ('decided → first session', b, nb)]
 
 
-def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None):
+def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None, relaunches=None):
     """The rows of the waste table, computed from the streams. `landing`, when given, is
     `(non_landing_share, usd_per_landed_item, landed_items)` from `improve.measure.table` and
     leads the table; `None` still leads, reading `—` with a note explaining why (the session
-    registry is machine-local, so a rollup with no product cannot resolve it)."""
+    registry is machine-local, so a rollup with no product cannot resolve it). `relaunches`,
+    when given, is `improve.measure.table`'s `relaunches` block and renders the row right after
+    `landing`; `None` reads the same dash and the same note."""
     conv = conv or DEFAULTS
     rows = []
     if landing is None:
@@ -558,6 +560,14 @@ def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None):
         usd = '—' if usd_per_landed_item is None else f"${usd_per_landed_item:.2f}"
         rows.append(('landing', f"{round(100 * non_landing_share)} % of session time landed nothing",
                      f"{usd} per landed item ({landed_items} landed, 7 days)"))
+    if relaunches is None:
+        rows.append(('relaunch', '—', 'no product resolved — the session registry is machine-local'))
+    else:
+        n, pct = relaunches['sessions'], round(100 * relaunches['share'])
+        usd = '—' if relaunches['usd_per_session'] is None else f"${relaunches['usd_per_session']:.2f}"
+        first_usd = '—' if relaunches['first_usd_per_session'] is None else f"${relaunches['first_usd_per_session']:.2f}"
+        rows.append(('relaunch', f"{n} sessions were relaunches ({pct} %)",
+                     f"{usd} per relaunch vs {first_usd} per first launch (7 days)"))
     n = len(ci)
     green = sum(1 for r in ci if r['conclusion'] == 'success')
     red = sum(1 for r in ci if r['conclusion'] == 'failure')
@@ -751,6 +761,7 @@ def render_daily(root, day, items, conv=None, product=None):
     ticks = read_stream(root, 'ticks', [day])
     week = days_back(day, 7)
     landing = None
+    relaunches = None
     if product is not None:
         from asf.improve import measure
         from asf.workers import pool
@@ -758,10 +769,11 @@ def render_daily(root, day, items, conv=None, product=None):
             runs = measure.ended_runs(product, since=week[0], as_of=f'{day}T23:59:59Z')
             t = measure.table(runs)
             landing = (t['non_landing_share'], t['usd_per_landed_item'], t['landed_items'])
+            relaunches = t.get('relaunches')
     out = [f"# Factory scorecard {day}", '',
            f"generated: {day} — from metrics/ci ({len(ci)}), metrics/sessions ({len(sessions)}), metrics/ticks ({len(ticks)})", '',
            '## Waste', '', '| Metric | Value | Note |', '|---|---|---|']
-    for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week), landing):
+    for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week), landing, relaunches):
         out.append(f"| {esc(m)} | {esc(v)} | {esc(n)} |".replace('|  |', '| |'))
     out += ['', f"## Cost per Feature (7 days)", '', f"{week[0]} … {week[-1]}; a Feature's row sums its Tasks, Stories and Bugs; "
             "a CI run's minutes are split over the items it names; "
