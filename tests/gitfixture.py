@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 
 #: The files git keeps absolute paths in — a clone's remote URL, a worktree's ``gitdir``.
 _REWRITE = ('config', 'gitdir', 'commondir', 'FETCH_HEAD')
@@ -23,12 +24,32 @@ class Template:
         self.build = build
         self.prefix = prefix
         self.root = None
+        self._lock = threading.Lock()  # built once per process, even from two threads
 
     def _ensure(self):
+        with self._lock:
+            return self._ensure_locked()
+
+    def _ensure_locked(self):
         if self.root is None:
             root = tempfile.mkdtemp(prefix=self.prefix + 'template-')
             atexit.register(shutil.rmtree, root, True)
-            self.build(root)
+            # no background gc/maintenance from the builder's first commit on: it would repack
+            # and prune objects while the first copy walks the tree
+            quiet = {'GIT_CONFIG_COUNT': '3',
+                     'GIT_CONFIG_KEY_0': 'gc.auto', 'GIT_CONFIG_VALUE_0': '0',
+                     'GIT_CONFIG_KEY_1': 'gc.autoDetach', 'GIT_CONFIG_VALUE_1': 'false',
+                     'GIT_CONFIG_KEY_2': 'maintenance.auto', 'GIT_CONFIG_VALUE_2': 'false'}
+            saved = {k: os.environ.get(k) for k in quiet}
+            os.environ.update(quiet)
+            try:
+                self.build(root)
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
             _disable_hooks(root)
             for git_dir in _all_repo_roots(root):
                 _no_housekeeping(git_dir)
@@ -42,6 +63,25 @@ class Template:
         if dest is None:  # ours: removed at exit, like the template (a caller's dir is its own)
             dest = tempfile.mkdtemp(prefix=self.prefix)
             atexit.register(shutil.rmtree, dest, True)
+        for attempt in range(3):  # a copy that raced a vanishing file starts over, never half-used
+            try:
+                self._copy(root, dest)
+                break
+            except (OSError, shutil.Error):
+                if attempt == 2:
+                    raise
+                for name in os.listdir(dest):
+                    full = os.path.join(dest, name)
+                    if os.path.isdir(full) and not os.path.islink(full):
+                        shutil.rmtree(full, True)
+                    else:
+                        os.unlink(full)
+        _rewrite_paths(dest, {root: dest, os.path.realpath(root): os.path.realpath(dest)})
+        return dest
+
+
+    @staticmethod
+    def _copy(root, dest):
         for name in os.listdir(root):
             src = os.path.join(root, name)
             dst = os.path.join(dest, name)
@@ -52,8 +92,6 @@ class Template:
                                 ignore=shutil.ignore_patterns('*.lock', 'gc.pid'))
             else:
                 shutil.copy2(src, dst, follow_symlinks=False)
-        _rewrite_paths(dest, {root: dest, os.path.realpath(root): os.path.realpath(dest)})
-        return dest
 
 
 def _disable_hooks(root):
