@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import conventions, env, merge_queue
+from asf import conventions, env, merge_queue, stale_ref
 from asf.harvest import harvest, lane
 from asf.views import status
 from asf.workers import lifecycle
@@ -78,6 +78,9 @@ class QueueRepo(LaneFixture):
 
     def setUp(self):
         super().setUp()
+        # stale_ref reads a run once a process: a run id one test saw must not answer the next's
+        stale_ref._RUNS.clear()
+        self.addCleanup(stale_ref._RUNS.clear)
         self.gh = FakeGH()
         patch = mock.patch.object(harvest, '_gh', side_effect=self.gh)
         patch.start()

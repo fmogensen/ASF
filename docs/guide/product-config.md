@@ -81,6 +81,11 @@ read-modify-write per change, on the file as it is then, so an `asf land` or a r
 written while a queue pass runs is never lost, and a corrupt file is copied aside and left
 alone rather than overwritten. The files keep their shape; an older venv still reads them.
 
+`store_shared: on` (default off) is a product's vote for the shared state store
+(`asf/state/store.py`): a file shared by every product on the machine is written through the
+store only once every product under `products/` sets it, and the store refuses the write,
+naming the products that have not, until then.
+
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.
