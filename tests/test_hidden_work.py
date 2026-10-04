@@ -234,6 +234,59 @@ class AdjudicationsTest(unittest.TestCase):
         self.assertFalse(got['T-0338']['same_card'])
 
 
+class RulingLiftsParkTest(unittest.TestCase):
+    """T-0338 (2026-10-04): PARKED "adjudicated, card unchanged" with two binding operator
+    rulings on its History — the digest skips History (D4), so no ruling ever lifted the park.
+    An operator ruling (``adjudicate (operator)``, :func:`asf.workers.correct.file_ruling`)
+    stamped at or after the newest adjudicate run is a card change; a factory History line, an
+    adjudicate session's own ruling, or an operator ruling the newest run already saw is not."""
+
+    RUN = '2026-10-03T10:00:00Z'
+
+    def _check(self, *history):
+        from unittest import mock
+        from asf.evidence import rulings
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        p = product(backlog_dir=root)
+        card = rulings._card_file(p, 'T-0338')
+        os.makedirs(os.path.dirname(card))
+        with open(card, 'w', encoding='utf-8') as f:
+            f.write('---\nid: T-0338\n---\n\n## Description\nx\n\n## History\n'
+                    + ''.join(h + '\n' for h in history))
+        runs = {'adjudicate-t-0338': [{'item': 'T-0338', 'kind': 'adjudicate',
+                                       'started': self.RUN, 'ended': 'x', 'card_digest': 'd'}]}
+        with mock.patch.object(step_wave.lifecycle, 'runs', return_value=runs), \
+                mock.patch.object(step_wave.pool_mod, 'sessions_path', return_value='/x'), \
+                mock.patch('asf.briefs.build.card_digest', return_value='d'):
+            adj = step_wave.adjudications(p, {'items': {}}, {'T-0338': 51})
+        row = rows.Row(tier=2, kind=rows.FIX_CORRECT, item_id='T-0338', feature_id='',
+                       action=rows.LAUNCH, brief_kind='correct', branch='', reason='')
+        return rows._capped(row, {'T-0338': 51}, 3, p, adj)
+
+    def test_no_ruling_stays_parked(self):
+        self.assertTrue(self._check().action.startswith(rows.PARKED))
+
+    def test_an_operator_ruling_after_the_park_relaunches(self):
+        got = self._check('- 2026-10-02 09:00 adjudicate (operator): older, already seen',
+                          '- 2026-10-03 12:30 adjudicate (operator): C2 is non-blocking; land it')
+        self.assertEqual(got.action, rows.LAUNCH)
+        self.assertEqual(got.brief_kind, 'adjudicate')
+
+    def test_a_factory_status_line_after_the_park_stays_parked(self):
+        got = self._check('- 2026-10-03 12:30 state: Active -> Blocked (derived)',
+                          '- 2026-10-03 12:31 operator park: parked by the tick')
+        self.assertTrue(got.action.startswith(rows.PARKED))
+
+    def test_the_sessions_own_ruling_stays_parked(self):
+        got = self._check('- 2026-10-03 11:00 adjudicate (adjudicate-t-0338): C1 upheld')
+        self.assertTrue(got.action.startswith(rows.PARKED))
+
+    def test_an_operator_ruling_before_the_park_stays_parked(self):
+        got = self._check('- 2026-10-03 09:59 adjudicate (operator): already handed to the run')
+        self.assertTrue(got.action.startswith(rows.PARKED))
+
+
 class DeliveryLeftOutTest(unittest.TestCase):
     """T-0027's delivery: T-0027, T-0030, T-0032, T-0037 — only T-0037 (the close-out, after
     T-0032, writing a path in the amendable set) needs the console."""

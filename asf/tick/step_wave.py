@@ -351,7 +351,8 @@ def adjudications(product, index, tries):
     newest's start, and whether it was handed the card as it stands now (its ``card_digest`` is
     :func:`asf.briefs.build.card_digest` today; a run that recorded none counts as the same
     card). The feeder's over-limit row reads it (:func:`asf.feeder.rows._capped`): adjudicated on
-    this card already is a PARKED row, never a silent drop and never the same session again."""
+    this card already is a PARKED row, never a silent drop and never the same session again.
+    An operator ruling filed since that run (:func:`ruled_since`) is a card change."""
     from asf.feeder import rows as feeder_rows
     limit = feeder_rows.attempt_limit(product)
     over = {i for i, n in (tries or {}).items() if n > limit}
@@ -376,7 +377,28 @@ def adjudications(product, index, tries):
             now = ''
         cur['same_card'] = not cur['digest'] or not now or cur.pop('digest') == now
         cur.pop('digest', None)
+        if cur['same_card'] and ruled_since(product, item, cur['at']):
+            cur['same_card'] = False
     return out
+
+
+def ruled_since(product, item, at):
+    """The newest operator ruling (``adjudicate (operator)``, :func:`asf.workers.correct.file_ruling`)
+    on ``item``'s card stamped at or after ``at`` (the newest adjudicate run's start), or ''.
+
+    The digest skips ``## History`` (D4), so a person's ruling alone never lifted an
+    "adjudicated, card unchanged" park (a product's T-0338, 2026-10-04: parked with two binding
+    operator rulings on its History). Only an operator ruling counts: a factory History line
+    (a state note, a park) or an adjudicate session's own ruling (filed after the run it parks
+    on) is no decision, and counting either would unstick every park."""
+    from asf.evidence import rulings
+    from asf.workers.correct import OPERATOR
+    since = str(at or '')[:16].replace('T', ' ')
+    if not since:
+        return ''
+    stamps = [r['at'].replace('T', ' ') for r in rulings.standing(product, item)
+              if r.get('job') == OPERATOR]
+    return max((s for s in stamps if s >= since), default='')
 
 
 def invariant_gate(product):
