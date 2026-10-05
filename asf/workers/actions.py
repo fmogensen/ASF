@@ -247,8 +247,20 @@ class Gh:
         return v if isinstance(v, dict) else None
 
     def cancel(self, run_id):
-        ok, _out, err = self.call(['run', 'cancel', str(run_id), '-R', self.slug])
-        return ok, f'run {run_id} cancelled' if ok else f'run {run_id}: cancel refused ({err})'
+        """Cancel the worker's workflow run the one way (:func:`asf.run_cancel.cancel`): a
+        queued run is force-cancelled, and the run is read back. ``(ok, detail)``."""
+        from asf import run_cancel
+        errs = []
+
+        def call(args):
+            ok, out, err = self.call(args)
+            if not ok:
+                errs.append(err)
+            return ok, out
+        done = run_cancel.cancel(call, self.slug, run_id)
+        if not done:
+            return False, f'run {run_id}: cancel refused ({errs[-1] if errs else "?"})'
+        return True, run_cancel.unconfirmed(done) or f'run {run_id} cancelled'
 
     def workflow_on(self, s, ref):
         ok, _out, err = self.call(['api', f'repos/{self.slug}/contents/'

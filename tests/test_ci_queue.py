@@ -126,6 +126,24 @@ class FakeGh:
         return subprocess.CompletedProcess(argv, 0, out, '')
 
 
+
+def cancelled_ids(calls):
+    """The run ids cancelled, in order — a plain ``gh run cancel`` (a run in progress) or the
+    force-cancel a queued run gets (:mod:`asf.run_cancel`)."""
+    out = []
+    for c in calls:
+        if c[:3] == ['gh', 'run', 'cancel']:
+            out.append(c[3])
+        elif c[:4] == ['gh', 'api', '-X', 'POST'] and c[4].endswith('/force-cancel'):
+            out.append(c[4].split('/runs/')[1].split('/')[0])
+    return out
+
+
+def forced_ids(calls):
+    return [c[4].split('/runs/')[1].split('/')[0] for c in calls
+            if c[:4] == ['gh', 'api', '-X', 'POST'] and c[4].endswith('/force-cancel')]
+
+
 class DeadGh:
     """A ``gh`` that fails every call: the host is unreadable."""
 
@@ -694,7 +712,7 @@ class TestTrunkRunsNeverCancelled(Base):
                 return subprocess.CompletedProcess(argv, 0, json.dumps(runs), '')
             return base(argv, **kw)
         ci_queue.queue_pass(p, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append)
-        cancels = [c[3] for c in gh.calls if c[:3] == ['gh', 'run', 'cancel']]
+        cancels = cancelled_ids(gh.calls)
         self.assertEqual(cancels, [])
         self.assertFalse([l for l in self.lines if 'superseded' in l])
         self.assertFalse(hasattr(ci_queue, 'cancel_superseded'))
@@ -764,7 +782,7 @@ class TestDuplicatePush(Base):
                                                out=self.lines.append, **kw)
 
     def cancels(self, gh):
-        return [c[3] for c in gh.calls if c[:3] == ['gh', 'run', 'cancel']]
+        return cancelled_ids(gh.calls)
 
     def test_the_1735z_shape_cancels_both_push_runs_and_keeps_the_pr_run(self):
         p = product()
@@ -788,6 +806,15 @@ class TestDuplicatePush(Base):
         self.assertEqual(self.dedupe(p, run), 0)
         self.assertEqual(self.cancels(gh), [])
         self.assertEqual(self.lines, [])
+
+    def test_a_queued_duplicate_is_force_cancelled_one_in_progress_plain_cancelled(self):
+        # a plain cancel on a queued run is accepted and does nothing: the run stays queued
+        p = product()
+        gh, run = self.gh(self.runs())
+        self.dedupe(p, run)
+        self.assertEqual(forced_ids(gh.calls), ['900', '36259590441'])
+        self.assertEqual([c[3] for c in gh.calls if c[:3] == ['gh', 'run', 'cancel']],
+                         ['36259590283'])
 
     def test_exempt_globs_are_configurable(self):
         p = product(queue={'dedupe_exempt_branches': ['worktree-*']})
@@ -979,6 +1006,31 @@ class TestExplainCancels(Base):
         self.assertIn('ci queue: run 1 on task/T-0341 at aaaaaaaaa cancelled by the host with no '
                       'later run — re-run of run 1 requested', self.lines)
 
+    def test_an_old_cancelled_first_run_on_an_open_head_is_a_non_verdict_rerun_once(self):
+        # 2026-10-05: a PR head's first run queued for hours behind the pool, then cancelled
+        # with nothing after it — past the orphan window it was "left", and the head never got
+        # a verdict. A cancelled first run is no verdict: re-run once, whatever its age.
+        pr = {'number': 9, 'headRefName': 'task/T-0341', 'state': 'OPEN', 'isDraft': False,
+              'headRefOid': 'a' * 40}
+        old = dict(self.run_of(1, when='2026-09-25T08:00:00Z'), attempt=1)
+        n, gh = self.explain([old], prs=[pr])
+        self.assertEqual(n, 1)
+        self.assertIn(['gh', 'run', 'rerun', '1', '-R', 'o/r'], gh.calls)
+        self.assertTrue(any("its head's first run" in l and 're-run of run 1 requested' in l
+                            for l in self.lines), self.lines)
+        # once: its re-run cancelled again is not re-run a second time
+        self.lines.clear()
+        n, gh = self.explain([dict(old, attempt=2)], prs=[pr])
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
+
+    def test_an_old_cancelled_run_that_is_not_its_heads_first_is_still_left(self):
+        pr = {'number': 9, 'headRefName': 'task/T-0341', 'state': 'OPEN', 'isDraft': False,
+              'headRefOid': 'a' * 40}
+        n, gh = self.explain([dict(self.run_of(1, when='2026-09-25T08:00:00Z'), attempt=2)],
+                             prs=[pr])
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
+        self.assertTrue(any('replaced by nothing and left' in l for l in self.lines), self.lines)
+
     def test_an_orphan_that_is_no_open_head_or_is_old_is_told_and_left(self):
         n, gh = self.explain([self.run_of(1), self.run_of(3, 'task/T-0500', when='2026-09-25T08:00:00Z')])
         self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
@@ -1077,6 +1129,8 @@ class ReliefBase(Base):
             now=now if now is not None else self.t0 + datetime.timedelta(minutes=minutes), **kw)
 
     def cancels(self, gh, verb='cancel'):
+        if verb == 'cancel':
+            return cancelled_ids(gh.calls)
         return [c[3] for c in gh.calls if c[:3] == ['gh', 'run', verb]]
 
 
@@ -1203,7 +1257,8 @@ class TestTrunkRelief(ReliefBase):
         # own lookup (its own sha) is separate
         lookups = [c for c in gh.calls
                   if any(f'actions/runs/{i}' in a and '/jobs' not in a for i in (101, 102)
-                        for a in c)]
+                        for a in c)
+                  and '-X' not in c and c[-1] != '.status']   # not the cancel or its read-back
         self.assertEqual(len(lookups), 1)
 
     def test_stops_once_free_plus_freed_covers_the_trunk_run(self):

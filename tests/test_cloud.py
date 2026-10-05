@@ -63,6 +63,11 @@ class FakeGh:
             return done(json.dumps(self.view_))
         if a[:2] == ['run', 'cancel']:
             return done()
+        if a[0] == 'api' and a[-2:] == ['--jq', '.status']:
+            return done(self.view_['status'] + '\n')
+        if a[:3] == ['api', '-X', 'POST'] and a[3].endswith('/force-cancel'):
+            self.view_ = {'status': 'completed', 'conclusion': 'cancelled'}
+            return done()
         if a[:2] == ['secret', 'list']:
             if self.secrets is None:
                 return done(rc=1, err='HTTP 403')
@@ -794,6 +799,16 @@ class Sync(Placement):
         run = pool_mod.load_sessions(self.product)['spec-1']
         self.assertEqual(lifecycle.judge(run, lifecycle.gather(self.product, run)),
                          lifecycle.DEAD_PID)
+
+    def test_a_queued_run_past_its_limit_is_force_cancelled(self):
+        # a plain cancel on a queued run is accepted and does nothing (2026-10-05)
+        self.launch()
+        fake = FakeGh(view={'status': 'queued', 'conclusion': ''})
+        (_job, status, _why), = self.sync(fake, now=time.time() + 5 * 3600)
+        self.assertEqual(status, cloud.DEAD)
+        self.assertEqual(fake.named('run', 'cancel'), [])
+        self.assertEqual(len(fake.named('api', '-X', 'POST')), 1)
+        self.assertTrue(fake.named('api', '-X', 'POST')[0][4].endswith('/runs/500/force-cancel'))
 
     def test_the_run_id_is_found_later(self):
         self.launch()

@@ -1731,7 +1731,7 @@ class ProductHarvestTests(unittest.TestCase):
             if args[:2] == ['run', 'list']:
                 calls.append(list(args))
                 return (1, '', 'HTTP 502\n') if runs is None else (0, json.dumps(runs), '')
-            if args[:2] == ['run', 'cancel']:
+            if args[:2] == ['run', 'cancel'] or args[:3] == ['api', '-X', 'POST']:
                 calls.append(list(args))
                 return 0, '', ''
             return inner(args)
@@ -1753,7 +1753,10 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertIn('plan/F-0001', listed[0])
         self.assertIn('pull_request', listed[0])
-        self.assertEqual([c[2] for c in calls if c[:2] == ['run', 'cancel']], ['7', '8'])
+        # the queued run is force-cancelled (a plain cancel on a queued run does nothing), the
+        # one in progress gets the plain cancel
+        self.assertEqual([c[2] for c in calls if c[:2] == ['run', 'cancel']], ['8'])
+        self.assertIn(['api', '-X', 'POST', 'repos/o/p/actions/runs/7/force-cancel'], calls)
         self.assertIn('harvest: plan/F-0001: cancelled 2 CI run(s) of the merged PR #41 — the '
                       'trunk run judges it now', lines)
 

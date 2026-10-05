@@ -145,7 +145,8 @@ import subprocess
 import tempfile
 import time
 
-from asf import approvals, attestation, customer_content, env, gitpush, refguard, reviews
+from asf import (approvals, attestation, customer_content, env, gitpush, refguard, reviews,
+                 run_cancel)
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -4242,8 +4243,8 @@ class GitHubHost(Host):
             for r in runs if isinstance(runs, list) else ():
                 if not isinstance(r, dict) or r.get('status') == 'completed':
                     continue
-                if r.get('databaseId') and H._gh(['run', 'cancel', str(r['databaseId']),
-                                                  '-R', self.slug])[0] == 0:
+                if r.get('databaseId') and run_cancel.cancel(
+                        _ok_call, self.slug, r['databaseId'], status=r.get('status')):
                     n += 1
                     if self.lane is not None:
                         from asf import ci_queue
@@ -4873,6 +4874,13 @@ def red_tests(log):
         if name and not _FAIL_SKIP.match(name) and name not in out:
             out.append(name)
     return out[:RED_TESTS_MAX]
+
+
+def _ok_call(args):
+    """:func:`asf.harvest.harvest._gh` as ``(ok, stdout)`` — the shape :mod:`asf.run_cancel`
+    takes."""
+    rc, out, _err = H._gh(args)
+    return rc == 0, out or ''
 
 
 def _gh_json(args):

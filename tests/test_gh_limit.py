@@ -188,7 +188,9 @@ class CiQueue(tq.ReliefBase):
         self.assertEqual(writes(gh.calls), [])
 
     def test_a_rate_limited_cancel_is_the_last_call_of_the_pass(self):
-        gh = self.pass_with(lambda argv: argv[1:3] == ['run', 'cancel'])
+        # a queued run's cancel is the force-cancel (asf.run_cancel), a running one's the plain
+        gh = self.pass_with(lambda argv: argv[1:3] == ['run', 'cancel']
+                            or str(argv[-1]).endswith('/force-cancel'))
         self.assertEqual(len(writes(gh.calls)), 1)   # the refused one, and nothing after it
 
     def test_a_rate_limited_runner_read_is_no_backend_error_to_fall_back_on(self):
