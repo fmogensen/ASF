@@ -85,6 +85,21 @@ class CI(Protocol):
 
 
 @runtime_checkable
+class Runtime(Protocol):
+    """``runtime``: where an agent session runs. :meth:`local` and :meth:`cloud` return a session
+    runtime — ``run(job, wait=False)`` and ``continue_run(job)`` returning
+    :class:`asf.workers.runtime.Result` (``ok`` None while it runs; the log at ``job.log_path``)."""
+
+    name: str
+
+    def local(self):
+        """The runtime a session on this machine runs on."""
+
+    def cloud(self, settings, product):
+        """The runtime the cloud lane launches on (``settings``: :class:`asf.workers.cloud.Settings`)."""
+
+
+@runtime_checkable
 class Quota(Protocol):
     """``quota``: an account's usage, read for the quota guard."""
 

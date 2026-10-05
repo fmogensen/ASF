@@ -381,12 +381,10 @@ def is_cloud(run):
 
 
 def lane_runtime(s, product):
-    """The runtime object that launches this lane's sessions for ``product``."""
-    if s.runtime == RUNTIME_REMOTE:
-        from asf.workers import remote  # local: remote imports this module
-        return remote.RemoteRuntime(s, product)
-    from asf.workers import actions  # local: actions imports this module
-    return actions.ActionsRuntime(s, product)
+    """The runtime object that launches this lane's sessions for ``product``: the active runtime
+    connector's cloud runtime (``cloud.runtime``: ``claude-remote`` or ``actions``)."""
+    from asf import connectors  # local: the connector imports this module
+    return connectors.get('runtime').cloud(s, product)
 
 
 # ---- the brief --------------------------------------------------------------------------------

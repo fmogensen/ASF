@@ -21,13 +21,15 @@ import re
 import shutil
 import subprocess
 
+from asf.connectors import claude_code
+
 #: How long the probe waits for `<binary> --help`. A binary that cannot answer in this is treated
 #: as answering nothing — every new flag is skipped and the doctor row is red.
 PROBE_TIMEOUT_S = 20
 
-#: The binary probed when none is given. Named again here, rather than imported from
-#: `asf.workers.runtime`, so this module stays a leaf `runtime` can import (Task 4).
-DEFAULT_BINARY = 'claude'
+#: The binary probed when none is given: the runtime connector's (a leaf module, so this one
+#: stays a leaf `runtime` can import — Task 4).
+DEFAULT_BINARY = claude_code.DEFAULT_BINARY
 
 #: `--effort`'s own choices, used only when its help entry carries no parenthesised list to
 #: parse — a malformed page, not a missing flag.
@@ -96,12 +98,7 @@ def _fetch(binary, environ):
         return None
     if key in _CACHE:
         return _CACHE[key]
-    try:
-        proc = subprocess.run([resolved, '--help'], capture_output=True, text=True,
-                              timeout=PROBE_TIMEOUT_S, env=environ)
-        text = proc.stdout if proc.returncode == 0 and proc.stdout else None
-    except (OSError, subprocess.SubprocessError):
-        text = None
+    text = claude_code.help_text(resolved, environ, PROBE_TIMEOUT_S)
     _CACHE[key] = text
     return text
 

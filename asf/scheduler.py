@@ -58,6 +58,7 @@ import sys
 from collections import namedtuple
 
 from asf import env
+from asf.connectors import claude_code
 from asf import installs
 from asf import snapshot
 
@@ -207,7 +208,7 @@ def required_tools(product, cfg=None):
     tools = list(BASE_TOOLS)
     pool = (cfg or {}).get('worker_pool') or {}
     if str(pool.get('backend') or 'claude-code') != 'fake':
-        tools.append(str(pool.get('binary') or 'claude'))
+        tools.append(str(pool.get('binary') or claude_code.DEFAULT_BINARY))
     repo = getattr(product, 'repo_dir', None)
     if repo and os.path.isdir(repo):
         for lock, names in LOCKFILE_TOOLS:

@@ -99,3 +99,41 @@ class CommandConnector:
             return self.call(op, *args, **kwargs)
         operation.__name__ = op
         return operation
+
+
+class CommandRuntime:
+    """The ``runtime`` kind's command form. ``<cmd> run`` gets the job (its public attributes) on
+    stdin and answers ``{"ok": bool|null, "pid": …, "result": "…"}`` (``ok`` null: started, still
+    running); ``<cmd> continue_run`` the same for a continued conversation. The command serves
+    both lanes: :meth:`local` and :meth:`cloud` are this object."""
+
+    name = 'command'
+    binary = None
+    token_command = None
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def local(self):
+        return self
+
+    def cloud(self, settings, product):
+        return self
+
+    def _result(self, r, job):
+        from asf.workers import runtime as rt
+        log_path = getattr(job, 'log_path', None)
+        if not r.ok:
+            return rt.Result(ok=False, log_path=log_path, reason=r.reason)
+        data = r.data if isinstance(r.data, dict) else {}
+        ok = data.get('ok')
+        return rt.Result(ok=None if ok is None else bool(ok), pid=data.get('pid'),
+                         returncode=data.get('returncode'), text=str(data.get('result') or ''),
+                         log_path=log_path, reason=data.get('reason'))
+
+    def run(self, job, wait=False):
+        return self._result(self.conn.call('run', job, wait=wait), job)
+
+    def continue_run(self, job, wait=False):
+        r = self.conn.call('continue_run', job, wait=wait)
+        return self._result(r, job) if r.ok and r.data is not None else None
