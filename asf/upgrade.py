@@ -732,13 +732,18 @@ def _install(ref, run, out, pin=None):
 # A pinned product (``state/<p>/install.json``, :mod:`asf.installs`) runs its own venv,
 # ``asf-factory-<p>-<sha7>``. A move installs the target venv beside the running one (or finds it
 # already on disk — then it is a local switch, no network), requires positive CI evidence on the
-# exact sha, and then quiesces the product before it re-points anything: record every clock's
-# pause (no bootout yet — that kills a running tick), wait until no tick, ``ci queue`` pass or
-# background harvest of the product runs, its ``harvest.lock`` is free and no merge-queue batch
-# is in flight — else resume and refuse after ``--wait-s`` — only then boot the clocks out,
-# record the pin with the venv it replaces as ``previous``, render the clocks and the hooks from
-# it, smoke, re-render a stale host clock, resume. ``--rollback`` moves back to ``previous`` the
-# same way, offline.
+# exact sha, and then quiesces the product before it re-points anything. Drain first: the
+# drain marker (:func:`draining`) stops new launches and new merge-queue cuts, while the clocks
+# keep running — the tick's background harvest is what lands a batch in flight, and the ci
+# queue admits its run — until no batch is in flight. Only then the hold: record every clock's
+# pause (no bootout yet — that kills a running tick) and wait until no tick, ``ci queue`` pass or
+# background harvest of the product runs and its ``harvest.lock`` is free; a batch cut by a pass
+# that was already running lifts the hold again until it lands. After ``--wait-s`` the move
+# refuses and resumes exactly the clocks it paused. Then boot the clocks out, record the pin
+# with the venv it replaces as ``previous``, render the clocks and the hooks from it, smoke,
+# re-render a stale host clock, resume. ``--rollback`` moves back to ``previous`` the same way,
+# offline. A move killed outright leaves its pause records behind: they carry its pid, and the
+# next move or ``asf scheduler status`` lifts them (:func:`lift_stale_pauses`).
 
 #: ``asf upgrade --product`` waits this long for the product's floor to drain before refusing
 DEFAULT_MOVE_WAIT_S = 900
@@ -750,6 +755,101 @@ MOVE_PATTERN = r'(-m asf\.cli|/asf\S*) (tick|ci queue)( |$)|-m asf\.tick\.step_h
 MOVE_DEFERRED = 3
 #: a check run conclusion that is a red verdict (anything else not ``success`` is Unknown)
 RED_CONCLUSIONS = ('failure', 'timed_out', 'cancelled', 'startup_failure')
+
+
+#: the tick steps that still run while a move drains: they land what is in flight (the
+#: ``harvest`` step's background run judges the merge-queue batches) and launch nothing new
+DRAIN_STEPS = ('record', 'health', 'harvest')
+#: a pause record's ``reason`` written by a move (:meth:`MoveOps.pause`)
+PAUSE_REASON = 'upgrade'
+
+
+def draining_path(product):
+    """``state/<product>/upgrade-draining.json`` — a move's drain marker: no new launch and no
+    new merge-queue cut while the batches in flight land. Its own file, not the pending marker:
+    a clock on an older build reads the pending marker as a full hold, which would stop the very
+    harvest that lands the batch."""
+    return os.path.join(env.ASF_HOME, 'state', product, 'upgrade-draining.json')
+
+
+def _mark_draining(product, sha, now=None):
+    _write_json(draining_path(product), {'sha': sha, 'pid': os.getpid(), 'at': now or time.time()})
+
+
+def clear_draining(product):
+    try:
+        os.remove(draining_path(product))
+    except FileNotFoundError:
+        pass
+
+
+def draining(product):
+    """The drain marker of a move of ``product`` that is still running, else ``None`` — a
+    marker whose process is gone (the move was killed) is removed."""
+    try:
+        with open(draining_path(product), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    pid = data.get('pid') if isinstance(data, dict) else None
+    if not isinstance(pid, int) or pid <= 0 or not _alive(pid):
+        clear_draining(product)
+        return None
+    return data
+
+
+def _move_alive(product):
+    """True while a move of ``product`` runs: its hold or drain marker names a live process."""
+    data = read_pending(product)
+    pid = (data or {}).get('pid')
+    if data and data.get('move') and isinstance(pid, int) and pid > 0 and _alive(pid):
+        return True
+    return draining(product) is not None
+
+
+def stale_pauses(product_name):
+    """The clocks a move paused and never resumed — it was killed (SIGKILL, a closed
+    terminal) before its ``finally`` ran: a move's pause whose pid is gone, or an older move's
+    pause (no pid) while no move of the product runs. Sorted; an operator's pause never counts."""
+    from asf import scheduler
+    pauses = scheduler.read_pauses(product_name)
+    alive = None
+    stale = []
+    for clock, rec in pauses.items():
+        if rec.get('reason') != PAUSE_REASON:
+            continue
+        pid = rec.get('pid')
+        if isinstance(pid, int) and pid > 0:
+            if not _alive(pid):
+                stale.append(clock)
+            continue
+        if alive is None:
+            alive = _move_alive(product_name)
+        if not alive:
+            stale.append(clock)
+    return sorted(stale)
+
+
+def lift_stale_pauses(product_name, resume=None):
+    """Resume the clocks a killed move left paused (:func:`stale_pauses`) — the lines say so."""
+    clocks = stale_pauses(product_name)
+    if not clocks:
+        return []
+    if resume is None:
+        from asf import scheduler
+        resume = scheduler.resume
+    lines = [f'upgrade: stale pause of {", ".join(clocks)} (a move of {product_name} that '
+             'was killed before it resumed them) — lifted']
+    return lines + list(resume(product_name, clocks) or ())
+
+
+def in_flight(product_name):
+    """The refs of ``product_name``'s merge-queue batches in flight, else ``[]``."""
+    state = os.path.join(env.ASF_HOME, 'state', product_name)
+    if not os.path.exists(os.path.join(state, 'merge-queue.json')):
+        return []
+    from asf import merge_queue
+    return [b.get('ref') for b in merge_queue.load(state)['batches']]
 
 
 def product_processes(product_name, run=subprocess.run, me=None):
@@ -781,11 +881,9 @@ def floor_busy(product_name, run=subprocess.run):
         from asf.harvest import harvest
         if harvest.try_lock_held(state):
             busy.append('harvest.lock is held (a gate is running)')
-    if os.path.exists(os.path.join(state, 'merge-queue.json')):
-        from asf import merge_queue
-        refs = [b.get('ref') for b in merge_queue.load(state)['batches']]
-        if refs:
-            busy.append(f'merge-queue batch in flight ({", ".join(refs)})')
+    refs = in_flight(product_name)
+    if refs:
+        busy.append(f'merge-queue batch in flight ({", ".join(refs)})')
     return busy
 
 
@@ -923,7 +1021,8 @@ class MoveOps:
         """The pause record only — no bootout: ``launchctl bootout`` kills a running tick, and
         the drain must see it end on its own (:meth:`bootout`, after the drain)."""
         from asf import scheduler
-        return scheduler.pause(product_name, clocks, reason='upgrade', by=by, bootout=False)
+        return scheduler.pause(product_name, clocks, reason=PAUSE_REASON, by=by, bootout=False,
+                               pid=os.getpid())
 
     def bootout(self, product_name, clocks):
         from asf import scheduler
@@ -1049,10 +1148,18 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
     steps = []
     if not local:
         steps.append(' '.join(pipx_suffix_command(url, product_name, sha)))
+    if not dry_run:
+        # a killed move's pauses: lifted here, or they would read as the operator's below and
+        # stay paused after this move, too
+        for line in lift_stale_pauses(product_name, ops.resume):
+            out(line)
     clocks = [c for c in ops.clock_names(product_name) if c not in ops.paused(product_name)]
-    steps += [f'pause clocks {", ".join(clocks) or "(none)"} (the record: no new tick starts)',
-              f'drain: no tick / ci queue / harvest of {product_name}, harvest.lock free, '
-              f'no merge-queue batch (up to {int(wait_s)}s; else resume, nothing moved)',
+    steps += [f'drain: no new launch or merge-queue cut; the clocks run until no batch is in '
+              f'flight (up to {int(wait_s)}s in all; else refuse, nothing paused)',
+              f'pause clocks {", ".join(clocks) or "(none)"} (the record: no new tick starts)',
+              f'quiet: no tick / ci queue / harvest of {product_name}, harvest.lock free '
+              f'(a batch cut meanwhile: resume until it lands; past the wait resume, nothing '
+              f'moved)',
               f'bootout clocks {", ".join(clocks) or "(none)"}',
               f'record {installs.record_path(product_name)}: {sha[:7]} {venv}; previous '
               f'{((previous or {}).get("sha") or "none")[:7]} {(previous or {}).get("venv") or ""}',
@@ -1093,32 +1200,12 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
 def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by, run, out,
                      sleep, ops):
     from asf import installs
-    # 1. no new tick starts: the move's marker parks the product's ticks, ci queue passes and
-    # harvests (:func:`waiting`, :func:`moving`), and the pause record keeps every render from
-    # loading a clock. Nothing is booted out yet: ``launchctl bootout`` kills a running job, and
-    # the drain below must see the tick end on its own (2026-10-04 canary: the pause booted the
-    # clocks out first, and the drain never saw the tick it had just killed mid-wave)
-    _mark(product_name, sha)
+    paused = []     # exactly the clocks this attempt paused: what every exit resumes
+    previous_handlers = _trap_signals()
     try:
-        for line in ops.pause(product_name, clocks, by) or ():
-            out(line)
-        # 2. the drain: every running process of the product ends, or the move gives up
-        busy = floor_busy(product_name, run)
-        waited = 0
-        if busy:
-            out(f'upgrade: waiting up to {int(wait_s)}s for the floor of {product_name}:')
-            for line in busy:
-                out(f'  {line}')
-        while busy and waited < wait_s:
-            step = min(DRAIN_POLL_S, wait_s - waited)
-            sleep(step)
-            waited += step
-            busy = floor_busy(product_name, run)
-        if busy:
-            out(f'upgrade: refused — the floor of {product_name} is still busy after '
-                f'{int(waited)}s; nothing moved:')
-            for line in busy:
-                out(f'  {line}')
+        waited = _drain_and_hold(product_name, sha, clocks, wait_s, by, run, out, sleep, ops,
+                                 paused)
+        if waited is None:
             return MOVE_DEFERRED
         # 3. only now, with nothing of the product running, the clocks leave launchd
         for line in ops.bootout(product_name, clocks) or ():
@@ -1167,9 +1254,107 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
                if previous else ''))
         return 0
     finally:
-        for line in ops.resume(product_name, clocks) or ():
-            out(line)
+        if paused:
+            for line in ops.resume(product_name, paused) or ():
+                out(line)
         clear_pending(product_name)
+        clear_draining(product_name)
+        _restore_signals(previous_handlers)
+
+
+def _trap_signals():
+    """SIGTERM and SIGHUP end the move through its ``finally`` (the clocks it paused resume),
+    as Ctrl-C does; SIGKILL cannot be caught — :func:`lift_stale_pauses` covers that one."""
+    import signal
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+
+    def bail(signum, _frame):
+        raise SystemExit(128 + signum)
+    saved = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            saved[sig] = signal.signal(sig, bail)
+        except (ValueError, OSError):
+            pass
+    return saved
+
+
+def _restore_signals(saved):
+    import signal
+    for sig, handler in (saved or {}).items():
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError, TypeError):
+            pass
+
+
+def _drain_and_hold(product_name, sha, clocks, wait_s, by, run, out, sleep, ops, paused):
+    """Drain, then hold: the seconds waited once the floor is quiet with ``clocks`` paused (each
+    one appended to ``paused``), else ``None`` after the refusal's lines.
+
+    1. the drain: the drain marker stops new launches and new merge-queue cuts; the clocks run
+       on, so the batches in flight land (or drop) — a paused clock never lands one.
+    2. the hold: the move's marker parks the product's ticks, ci queue passes and harvests
+       (:func:`waiting`, :func:`moving`), and the pause record keeps every render from loading
+       a clock. Nothing is booted out yet: ``launchctl bootout`` kills a running job, and the
+       floor must be seen to go quiet on its own (2026-10-04 canary: the pause booted the clocks
+       out first, and the drain never saw the tick it had just killed mid-wave).
+    3. a batch cut meanwhile — by a pass already running when the hold went up, or a clock on
+       an older build that does not read the drain marker — lifts the hold: back to 1."""
+    _mark_draining(product_name, sha)
+    waited = 0
+
+    def nap():
+        nonlocal waited
+        step = min(DRAIN_POLL_S, wait_s - waited)
+        sleep(step)
+        waited += step
+
+    while True:
+        refs = in_flight(product_name)
+        if refs:
+            out(f'upgrade: draining {product_name} — no new launch or cut; the clocks run until '
+                f'the batch(es) in flight land ({", ".join(refs)}), up to {int(wait_s - waited)}s')
+        while refs and waited < wait_s:
+            nap()
+            refs = in_flight(product_name)
+        if refs:
+            out(f'upgrade: refused — the floor of {product_name} is still busy after '
+                f'{int(waited)}s; nothing paused, nothing moved:')
+            out(f'  merge-queue batch in flight ({", ".join(refs)})')
+            return None
+        _mark(product_name, sha)
+        lines = ops.pause(product_name, clocks, by) or ()
+        paused[:] = list(clocks)
+        for line in lines:
+            out(line)
+        busy = floor_busy(product_name, run)
+        if busy:
+            out(f'upgrade: waiting up to {int(wait_s - waited)}s for the floor of {product_name}:')
+            for line in busy:
+                out(f'  {line}')
+        while busy and waited < wait_s:
+            nap()
+            busy = floor_busy(product_name, run)
+            if in_flight(product_name):
+                break
+        if busy and in_flight(product_name) and waited < wait_s:
+            out(f'upgrade: a batch was cut while the floor of {product_name} went quiet — '
+                'the clocks resume until it lands')
+            clear_pending(product_name)
+            for line in ops.resume(product_name, paused) or ():
+                out(line)
+            paused[:] = []
+            continue
+        if busy:
+            out(f'upgrade: refused — the floor of {product_name} is still busy after '
+                f'{int(waited)}s; nothing moved:')
+            for line in busy:
+                out(f'  {line}')
+            return None
+        return waited
 
 
 def _host_clocks(ops, out):

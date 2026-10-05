@@ -650,6 +650,29 @@ class LegacyStepTests(TickTestCase):
         self.assertFalse(os.path.exists(steps.stamp_path(env.load_product('sample'))))
 
 
+class DrainingMoveTests(TickTestCase):
+    """While a move drains (``asf upgrade --product``), the tick launches nothing new: only the
+    steps that land what is in flight run — the background harvest judges the batches."""
+    product_yaml = ('steps:\n'
+                    '  health: python3 -c \'print("health ran")\'\n'
+                    '  wave: python3 -c \'print("wave launched")\'\n'
+                    '  prs: off\n'
+                    '  batch: off\n')
+
+    def test_a_draining_move_keeps_the_landing_steps_and_drops_the_launches(self):
+        from asf import upgrade
+        upgrade._write_json(upgrade.draining_path('sample'),
+                            {'sha': 'f' * 40, 'pid': os.getpid(), 'at': time.time()})
+        rc, out = self.run_tick(steps='health,wave')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('health ran', out)
+        self.assertNotIn('wave launched', out)
+        self.assertIn('drain', out)
+        upgrade.clear_draining('sample')
+        rc, out = self.run_tick(steps='health,wave')
+        self.assertIn('wave launched', out)
+
+
 class DailyCatchUpTests(TickTestCase):
     """B-0123: a daily that missed its own clock catches up on the next regular tick, once,
     instead of waiting for tomorrow's daily clock to fire again."""

@@ -692,6 +692,21 @@ class MovingParts(QueueRepo):
         self.assertEqual(waiting['green']['head'], ready[4]['head'])
 
 
+    def test_a_draining_move_cuts_no_new_batch_and_the_green_wait(self):
+        from asf import upgrade
+        ready = [self.entry('worker/T-0001', 1), self.entry('worker/T-0002', 2, 'T-0002')]
+        for f in ready:
+            f['green'] = {'head': f['head'], 'trunk': 'x' * 40}
+        with mock.patch.object(upgrade, 'draining', return_value={'sha': 'f' * 40}):
+            ln = self.queue_pass(self.lane(), ready)
+        self.assertEqual(self.batches(), [])
+        waiting = self.lane_of('worker/T-0001')
+        self.assertEqual(waiting['state'], lane.WAITING)
+        self.assertIn('move', waiting['reason'])
+        self.assertEqual(waiting['green']['head'], ready[0]['head'])
+        self.assertNotIn('queued', ln.results.values())
+
+
 class NotOptedIn(QueueRepo):
     """``merge: auto`` and ``manual`` are untouched: the direct ``gh pr merge`` path, no batch."""
 

@@ -378,6 +378,17 @@ def cmd_tick(args, root=None):
         print(f'tick: warning — {off}', file=sys.stderr)
     if upgrade.waiting(product.name):
         return 0  # a pending upgrade needs a gap between ticks: this one does not start
+    if upgrade.draining(product.name):
+        # a move drains: what is in flight lands (the harvest's background run judges the
+        # batches), nothing new launches
+        kept = [r for r in rows if r[0] in upgrade.DRAIN_STEPS]
+        dropped = [r[0] for r in rows if r[0] not in upgrade.DRAIN_STEPS]
+        if dropped:
+            print(f"tick: a move of {product.name} drains (asf upgrade --product) — "
+                  f"{', '.join(dropped)} wait; {', '.join(r[0] for r in kept) or 'nothing'} runs")
+        rows = kept
+        if not rows:
+            return 0
 
     if not any(owner == 'asf' for _, owner, _ in rows):
         return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=False))
