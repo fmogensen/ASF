@@ -69,13 +69,13 @@ class TickPrintsTheDriftLine(DriftTestCase):
     def test_a_tick_whose_installed_package_is_behind_prints_the_drift_line(self):
         lines = self.run_tick()
         self.assertEqual(lines[0],
-                         f'factory: asf {__version__} @ {self.installed[:7]} · '
-                         f'trunk {self.head[:7]} · BEHIND by 2 commits')
+                         f'factory: asf {__version__} ({self.installed[:9]}) · '
+                         f'trunk {__version__} ({self.head[:9]}) · BEHIND by 2 commits')
 
     def test_a_change_to_the_package_proposes_its_own_upgrade(self):
         lines = self.run_tick()
-        self.assertIn(f'UPGRADE AVAILABLE {__version__}@{self.installed[:7]} → '
-                      f'{__version__}@{self.head[:7]}', lines)
+        self.assertIn(f'UPGRADE AVAILABLE {__version__} ({self.installed[:9]}) → '
+                      f'{__version__} ({self.head[:9]})', lines)
 
     def test_it_stays_a_proposal_when_the_level_holds_it(self):
         upgrade = mock.Mock(return_value=0)

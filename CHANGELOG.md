@@ -2,6 +2,819 @@
 
 One entry per released version, newest first.
 
+## v0.1.130 — 2026-10-06
+
+### Bugs fixed
+
+- A failed or rate-limited check on a cloud session no longer marks it as lost; ASF waits and looks again (#747)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.130"`
+
+## v0.1.129 — 2026-10-06
+
+### Features landed
+
+- An approval class can now be recognised by the areas of the product it touches, and the doctor stops calling such a class blind (#496)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.129"`
+
+## v0.1.128 — 2026-10-06
+
+### Features landed
+
+- The same automatic bug is filed at most once per day, and a source can ask for a slower pace (#494)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.128"`
+
+## v0.1.127 — 2026-10-06
+
+### Features landed
+
+- The tick log now shows when each step starts as well as when it ends, and who ran it (#491)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.127"`
+
+## v0.1.126 — 2026-10-06
+
+### Features landed
+
+- A new asf review-checks command checks a review's table before a person or session reads it, and refuses an incomplete one (#487)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.126"`
+
+## v0.1.125 — 2026-10-06
+
+### Features landed
+
+- A rule that has been replaced by a newer one no longer runs, and no longer shows up as a gap (#484)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.125"`
+
+## v0.1.124 — 2026-10-06
+
+### Bugs fixed
+
+- Several stalls that left worker seats idle are gone: approved work with nothing to correct now lands, and replans are no longer blocked (#764)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.124"`
+
+## v0.1.123 — 2026-10-06
+
+### Bugs fixed
+
+- Cancelled CI runs are now actually stopped, first runs always get a verdict, and the chain alarm is honest (#765)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.123"`
+
+## v0.1.122 — 2026-10-06
+
+### Bugs fixed
+
+- A correction round is now briefed on the branch's real latest state, and the new asf answer command replies to a question without starting a round (#763)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.122"`
+
+## v0.1.121 — 2026-10-05
+
+### Bugs fixed
+
+- A product move now drains its queued batches first, then holds, and every exit restarts whatever it paused (#762)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.121"`
+
+## v0.1.120 — 2026-10-05
+
+### Bugs fixed
+
+- Deferred Stories are no longer re-decided, list fields in cards parse correctly, and asf set can change a parent (#761)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.120"`
+
+## v0.1.119 — 2026-10-05
+
+### Bugs fixed
+
+- A live merge batch now survives everything except a real verdict on its own code (#760)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.119"`
+
+## v0.1.118 — 2026-10-05
+
+### Bugs fixed
+
+- A ruling at the round cap is now one code session, closing counts every Task beneath an item, and a lead's file scope covers its whole delivery (#759)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.118"`
+
+## v0.1.117 — 2026-10-04
+
+### Bugs fixed
+
+- A cloud relaunch no longer mistakes the previous run's result for its own (#758)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.117"`
+
+## v0.1.116 — 2026-10-04
+
+### Bugs fixed
+
+- A parent and its children can no longer close each other by proving one another (#757)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.116"`
+
+## v0.1.115 — 2026-10-04
+
+### Features landed
+
+- Item ids are now handed out through one shared push, so local and cloud sessions never collide (#756)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.115"`
+
+## v0.1.114 — 2026-10-04
+
+### Bugs fixed
+
+- The stop gate no longer counts empty commits or an untouched review ruling as unpushed work (#755)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.114"`
+
+## v0.1.113 — 2026-10-04
+
+### Bugs fixed
+
+- A cancelled required check on a merge batch is no longer a verdict; it is re-run once, then the batch is cut again (#754)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.113"`
+
+## v0.1.112 — 2026-10-04
+
+### Bugs fixed
+
+- A pushed branch now gets its PR in the same pass, even while the CI queue is holding (#753)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.112"`
+
+## v0.1.111 — 2026-10-04
+
+### Features landed
+
+- A ticked acceptance line is now proven when it says "proven by" a file that exists (#752)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.111"`
+
+## v0.1.110 — 2026-10-04
+
+### Features landed
+
+- A Story now needs every acceptance line proved before it counts as done, and Features count their Stories (#750)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.110"`
+
+## v0.1.109 — 2026-10-04
+
+### Features landed
+
+- A new watchdog tracks how long items sit in a state, and the status Ready count uses the same filter as the wave (#751)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.109"`
+
+## v0.1.108 — 2026-10-04
+
+### Bugs fixed
+
+- Green merge chains now land first, priority only orders the next cut, and one tested tree lands once (#749)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.108"`
+
+## v0.1.107 — 2026-10-04
+
+### Features landed
+
+- A reconciled item now closes through the ordinary closing rules (#723)
+- Trunk-red, stale-ref, flaky-test and tick checks now read GitHub through one shared client (#734)
+- The verdict now looks at what the working tree holds before asking what the remote has (#424)
+- Picking a worker from the pool is now race-safe and sees every product's claims (#402)
+- A log that ends in a result is no longer mistaken for a dead session (#732)
+
+### Bugs fixed
+
+- An older cooldown setting name is still honoured with a warning, and more config keys are registered (#746)
+- The session registry is cheaper to read, and a tick that runs too long now names its step and exits (#748)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.107"`
+
+## v0.1.106 — 2026-10-04
+
+### Features landed
+
+- The groomer no longer treats a shared path as proof that two cards overlap (#392)
+- Every card is now written through the safe writer, and bug filing collapses id lists (#739)
+- New cloud modes (overflow, local, primary, off) with a visible fallback, plus automatic session capacity (#745)
+- CI flight, doctor, upgrade, security alerts, capacity and cloud actions now share one GitHub client (#735)
+- Doctor now warns about a config setting that no code reads (#741)
+
+### Bugs fixed
+
+- The plan-Task heading reader accepts more heading shapes, and a plan that yields zero Tasks is flagged (#744)
+- A spec and plan sharing one job name no longer swap lane records every tick (#742)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.106"`
+
+## v0.1.105 — 2026-10-04
+
+### Features landed
+
+- The measure page now counts a relaunch's cost per session (#740)
+- asf set can now change a local-only switch and take several ids in one commit (#743)
+- A Task that only changes documents no longer gets a review row (#726)
+- Copies, merges, naming and hook refusals are now settled by code; reviews raised only by those are skipped (#729)
+
+### Bugs fixed
+
+- A PR's first CI run is never cut by the factory, and every PR it opens gets a run (#738)
+- Hook-refused publishes are classified once and the worktree is restored after a refused publish (#737)
+- A commit that only covers an item can no longer close it over the item's own PR (#736)
+- Pushed work is never silent: an open Task or Bug with an open PR always gets a NEXT row (#733)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.105"`
+
+## v0.1.104 — 2026-10-04
+
+### Features landed
+
+- The landing fact now runs in shadow beside the workers' deciders, with a replay command (#730)
+- A card is now parsed once per version of its text, which speeds up the tick (#493)
+- A mechanical pass ahead of a review now counts as a repair (#445)
+- A ruling that says ready now publishes a branch the session could not push (#389)
+- Groom rules now remove duplicate findings and report coverage (#728)
+- Cards are now written atomically, so a reader never sees a half-written card (#727)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.104"`
+
+## v0.1.103 — 2026-10-04
+
+### Features landed
+
+- A models map in a real product file now reaches model routing in every documented shape (#725)
+- A verdict that changed now reaches the live event stream (#481)
+- New asf ruleset commands install, show and break-glass the trunk's required checks (#703)
+- Every push now passes a branch guard keyed on the repository (#710)
+- The wave's launch path now reads shared repository facts instead of its own copy (#485)
+- asf check now fails a supersession that dangles, loops or is written only once (#483)
+
+### Bugs fixed
+
+- Child processes given their own home no longer inherit the caller's config, and tests guard the operator's files (#724)
+- A run with local commits is never parked as having nothing to land, and a declared transplant is published (#721)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.103"`
+
+## v0.1.102 — 2026-10-04
+
+### Features landed
+
+- The planner is now told what is held before it books work (#449)
+
+### Bugs fixed
+
+- An unverified landing with unknown coverage now waits instead of being reset (#722)
+- An operator ruling filed since the last review now lifts the "card unchanged" park (#720)
+- New check that a close needs a landing fact, in report-only mode and off by default (#717)
+- A footprint wait never names a closed owner, and a finished card in play holds no footprint (#713)
+- A move now drains before shutting down, tests every clock's command, and keeps the host clock on the pin (#716)
+- End-to-end tests use a fixed host reading and a quieter, more reliable git template (#719)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.102"`
+
+## v0.1.101 — 2026-10-04
+
+### Features landed
+
+- Landings are now stamped on the card, with a migrate command and a reopen that clears the stamp (#709)
+- Git reads now return a clear result, so an unknown answer never closes anything (#706)
+- Merge-queue land requests and rebuilds now go through the shared state store (#712)
+- An item only the console can move no longer orders anything in the feeder (#708)
+- A new facts layer reports known or unknown values and logs disagreements with the old logic (#704)
+- Cardless PR reviews, reshapes and replans now run on the light model, and doctor warns when cheap falls back (#689)
+- Dependency roots are now decided by code (#699)
+- New asf reset command voids a wrong landing claim, with an undo (#684)
+- The scorecard now reports program metrics in its JSON output and check mode (#680)
+- Not-pushed work is now published by code, behind a switch that is off by default (#700)
+- New asf scheduler commands install, pause, resume and remove the host clock for the network probe (#701)
+- A single GitHub client now serves the public GitHub calls (#690)
+- A log-only network probe now records which layer fails each minute, with a doctor row (#695)
+- Specs and plans are now started just in time, metered against the build cap (#687)
+- Mechanical causes are now settled by code before a correction, behind a switch that is off by default (#692)
+- Reviews can now end in a structured verdict block, and the stop gate refuses a review without one (#696)
+- New state store: atomic, versioned, with per-file locks, a registry, a reaper and corrupt-file quarantine (#686)
+- Recorded GitHub behaviours now back the contract tests (#691)
+- Flaky timing tests now read one fixed clock (#685)
+- One reachability probe per tick; an offline upgrade is skipped rather than failed (#679)
+- Doctor now checks a pinned install by what really runs, and a product check command was added (#677)
+- Each product now gets its own venv per version, with an upgrade command that switches safely and can roll back offline (#674)
+- The asf command now runs the pinned venv of whichever product it acts on (#673)
+- More scenario tests now cover close paths and refusals (#711)
+- Scenario tests now cover every close path against every host behaviour (#693)
+
+### Bugs fixed
+
+- A typed landing now closes only by reconciliation, and a reset void holds against the ingest (#718)
+- The A/B dry run no longer copies caches, refuses under 10 GB free, and cleans up when killed (#714)
+- One new switch is now known, and a test memo no longer leaks between trunk-red tests (#715)
+- A document lane no longer lands the Task (#705)
+- A merge lock held by a live process is never treated as stale (#707)
+- An unknown answer never closes, and the hook smoke test now runs from the repo (#688)
+- Merges now take a host-wide lock, and a waiting PR no longer rebases or runs CI (#702)
+- A product test's push into a scratch repo no longer triggers the session's push guard (#698)
+- A run cancelled for relief is now re-run instead of dropped (#694)
+- An attested trunk run now counts a required job its path filter skipped (#697)
+- A repeating spawn failure now says so, and the retire guard compares content after archiving (#683)
+- Bug filing now makes one Bug per cause, not per path (#682)
+- A review of a pushed branch no longer waits on a dependency (#681)
+- A pinned clock keeps its tools, every agent home keeps its asf, and a move smoke-tests before resuming (#678)
+- A pinned product's clocks now run from its own venv (#676)
+- An unknown product-file key is now a warning, not a refusal (#675)
+- Put-aside work now says so, and the build cap counts only live work (#670)
+- A closed item that no rule closes any more now reopens as new (#672)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.101"`
+
+## v0.1.100 — 2026-10-03
+
+### Bugs fixed
+
+- A closed parent no longer closes unbuilt work, and a packed writes entry reads the same before and after a set (#667)
+- A red on a stale merge ref now gets a fresh run, and a red trunk is confirmed by a full run and owned (#669)
+- Approved content held only by git mechanics is now moved onto the trunk without a session (#668)
+- A stale open run no longer blocks asf correct (#664)
+
+### In progress
+
+- Planned: replan cut to the session's own identity and the check (#671)
+- Planned: replan cut to the lane-prefix guard (#666)
+- Planned: replan cut to the writer and the reader (#665)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.100"`
+
+## v0.1.99 — 2026-10-03
+
+### In progress
+
+- Planned: replan trimmed one work set to two Tasks, one already landed (#663)
+- Planned: replan trimmed the retirement-rule work to its first Task (#660)
+- Planned: replan rewrote one Task whole and dropped its guide paragraph (#662)
+- Planned: replan kept one combined Task and dropped the action cell and guides (#661)
+- Planned: replan rewrote one Task onto the memo and dropped the lease half (#659)
+- Planned: replan kept the optional step and dropped the doctor guard and guide (#658)
+- Planned: replan re-cut one card over the check and the index entry (#657)
+- Planned: replan kept one Task on unmoved anchors and dropped the guide half (#656)
+- Planned: three Tasks for a PR deadline with send-back, reaping and a churn cap (#655)
+- Planned: replan cut to the switch and the verdict that uses it (#654)
+- Planned: replan rewrote one Task to the pass alone (#653)
+- Planned: replan cut to the store and what fills it (#652)
+- Planned: replan cut to the pin and dropped the example product file (#651)
+- Planned: replan kept the reader and doctor row and dropped the upgrade half (#650)
+- Planned: replan cut to the collecting pass (#649)
+- Planned: replan cut to three Tasks and dropped the product threshold (#648)
+- Planned: replan merged two Tasks into one and dropped the drain window and two views (#647)
+- Planned: replan cut to the reader and the launch (#646)
+- Planned: replan re-cut one Task onto the landed gate and dropped another (#645)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.99"`
+
+## v0.1.98 — 2026-10-03
+
+### In progress
+
+- Planned: replan cut to Task 1, with one Task rewritten and one landed Task kept (#644)
+- Planned: replan cut to Task 1 and dropped the reshape brief's second mode (#643)
+- Planned: replan dropped a Task whose work had already landed (#642)
+- Planned: once opened, a PR has no deadline; bound every open lane state and reap what cannot land (#641)
+- Planned: replan kept the default and the S1 bypass as one Task (#640)
+- Planned: replan cut backfill to what the repository can say (#639)
+- Planned: replan cut to the read-only half and dropped the conversation Task (#638)
+- Planned: replan cut to measurement and dropped the admission gate (#637)
+- Planned: replan re-cut four open Tasks to discovery and measurement (#636)
+- Planned: replan cut to the seam and dropped two Tasks (#635)
+- Planned: replan cut to the groom's own commit and the gate a new product gets (#634)
+- Planned: replan cut to one connector kind end to end, split into six Tasks (#633)
+- Planned: replan cut to the two expression forms the workflow uses (#632)
+- Planned: replan cut to the one feeder row (#631)
+- Planned: replan re-cut to the daily prune (#630)
+- Planned: replan cut to the classification alone (#629)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.98"`
+
+## v0.1.97 — 2026-10-03
+
+### Features landed
+
+- New merge-pr.sh script is the one way to merge an agent PR (#618)
+- A live install checkout off main now shows red in doctor, warns each tick, and refuses upgrade without an explicit ref (#619)
+- asf correct now takes a reason and an optional PR number to ask for one correction round with instructions (#617)
+
+### Bugs fixed
+
+- Parity work is never hidden any more: over-limit items, unverified landings and console-only members now show (#626)
+- A conflict hold worded as another batch's, when the branch conflicts with the trunk, now gets a rebuild (#627)
+- A trunk conflict behind a batch now goes to the lane rebuild, and an untriaged landing-gate hold is gated again (#625)
+- The pre-push check now tests the branch merged with trunk, and asf correct at the cap files an operator ruling (#624)
+- An asf land verdict now judges only the PR's exact current head, and runner loss counts as infrastructure (#623)
+- asf land now admits a finished head whose CI never started a required job (#622)
+- Infrastructure reds are re-run, never corrected; a priority batch gets runners; asf land PRs are never factory work (#621)
+- asf land now admits a head whose own CI skipped a required job by path (#620)
+- A red batch's culprit is now named from the failing job's log and sent back alone while the rest are cut again (#616)
+- The install end-to-end test no longer rewrites settings, and test git repos never auto-clean (#615)
+
+### In progress
+
+- Planned: replan cut to putting the 32 steps on a clock (#628)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.97"`
+
+## v0.1.96 — 2026-10-02
+
+### Features landed
+
+- asf land can now go first in line, and a red-check correction brief names the step, tests and local reproduction (#612)
+- A trunk version marked as attested now reads its skipped required jobs as green (#611)
+- A queue status now appears on the landed commit, and doctor reads the trunk rules (#608)
+- Main now has an attestation step: a green batch is marked before the trunk moves (#607)
+- CI batches are now admitted by free heavy capacity, and relief cancels only on a saturated class (#606)
+- One door to main: asf land, a trunk watch and a runner-class doctor check (#604)
+- A red required job is now re-run once before any correction round, to tell flakes from defects (#603)
+- The pre-push check now depends on the brief kind, and a cancelled check is never red (#602)
+
+### Bugs fixed
+
+- A rewritten Task now keeps the file paths the factory widened it onto (#614)
+- A conflicting land request is red at once, and conflicting members never share a batch (#613)
+- A stale or stuck batch is rebuilt instead of waited out, and a trunk stall alarm was added (#610)
+- Each module now attests once (#609)
+- The stop gate is now wired in, a released stop counts as an unpushed defect, and the lane writes the trailers (#605)
+- A question needing input with no question is no longer asked, and shared writes are append-only (#601)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.96"`
+
+## v0.1.95 — 2026-10-01
+
+### Bugs fixed
+
+- Adjudicator rulings now bind later reviews, and one head takes at most two correction rounds (#600)
+- A session's report commit no longer lands its item (#599)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.95"`
+
+## v0.1.94 — 2026-09-30
+
+### Features landed
+
+- A started CI run is now counted once, and the page explains what a bracketed key means (#598)
+- The CI demand estimate now names the labels, and the queue holds the run (#597)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.94"`
+
+## v0.1.93 — 2026-09-30
+
+### Features landed
+
+- A card's acceptance now runs through the operator's own groom command (#594)
+- A runner that cannot take a job is no longer counted as free for it (#596)
+- The operator's page now describes the digest that actually exists (#595)
+- The loop-guard status row now prints the guard's own clock and threshold, and is silent where it never fires (#585)
+
+### In progress
+
+- Planned: three Tasks so the supply learns what a runner can take and the ledger counts a started run once (#591)
+- Planned: the Stale row reads the measured cadence (#590)
+- Planned: a publish counts as progress, and every hold passes the guard the trunk (#589)
+- Planned: four branches on the record and a WAITS row that names what holds an item (#587)
+- Planned: the row tells a clean exit from a death and counts from the exit (#588)
+- Planned: three Tasks for the retirement rule, the card's acceptance and the page (#586)
+- Planned: three Tasks so cancels name their cause and the readers print it (#592)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.93"`
+
+## v0.1.92 — 2026-09-30
+
+### Bugs fixed
+
+- One GitHub query per tick now fetches the checks for every open PR's head (#576)
+
+### In progress
+
+- Planned: a refused landing shows as a send-back row naming its own cause (#584)
+- Planned: the lane counts what a branch carried, and the DONE table credits only that (#583)
+- Planned: a runner counts as free only if it can take the jobs, and a started run counts once (#582)
+- Planned: the Stale row judges the tick's measured cadence and names an upgrade hold (#581)
+- Planned: a factory publish counts as progress for the loop guard (#580)
+- Planned: a decided S1 or S2 Bug is never silent in NEXT (#579)
+- Planned: a cleanly exited session counts as finished, not dead (#578)
+- Planned: three remaining gaps on a card that landed without naming it (#577)
+- Planned: credit a landing to the run that earned it, not to another item (#575)
+- Planned: the loop-guard row prints its own clock (#574)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.92"`
+
+## v0.1.91 — 2026-09-30
+
+### Features landed
+
+- The CI plan now stops keeping a busy runner free, and tells how long a hold lasts (#573)
+- ASF-prefixed runner labels are now reserved: a tier is placed, never declared, and an unroutable label is a red row (#566)
+
+### Bugs fixed
+
+- Pure git work no longer launches a session (#570)
+- Parks can now be scoped and undone with unpark (#569)
+- A red exact head is now also read on a new run's first pass (#568)
+
+### In progress
+
+- Planned: two Tasks so every push takes the clock of its own kind (#572)
+- Planned: two Tasks so the retirement rule lands first, then the word that says it (#571)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.91"`
+
+## v0.1.90 — 2026-09-30
+
+### Features landed
+
+- An inbox card's cleaned-up title is now checked against its raw file name (#562)
+- The launcher now refreshes itself from the snapshot it just made (#561)
+- One table now says which source dominates tick time and names the cut (#543)
+- The CI queue's wait limits now follow the measured median and can never be shortened below it (#558)
+- Batch parallelism and runners are now measured when a product declares neither (#557)
+
+### Bugs fixed
+
+- A red exact head is now read in more lane states and replaces a pending review round (#563)
+- Landing evidence must now be the item's own commit, never one merged in from the trunk (#560)
+
+### In progress
+
+- Planned: the record hook derives the index it cannot find, and the guide stops ordering that step (#564)
+- Planned: three Tasks so a slow-hook publish is measured, capped and parked (#565)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.90"`
+
+## v0.1.89 — 2026-09-30
+
+### Features landed
+
+- ASF can now discover the CI runner pool from the host, tier it by measured speed, and avoid flapping (#534)
+
+### Bugs fixed
+
+- A PR's checks now count its exact head's runs from every event, and a red head is a correct round (#556)
+
+### In progress
+
+- Planned: the CI queue status measures its preconditions and acceptance strings (#555)
+- Planned: the launcher refreshes itself, the pool is bounded by count, and doctor reports both (#554)
+- Planned: intake refuses a bad type line clearly, then the guide describes it (#553)
+- Planned: six Tasks to backfill a partly built product's history into the record (#552)
+- Planned: a retired Feature's stage is the retirement, and moved cards leave the tables (#551)
+- Planned: a publish gets 900 seconds and a plain push keeps 120, with the seconds shown (#550)
+- Planned: the Record row splits its count into work, resolved and records (#549)
+- Planned: a protected name stays on the card that holds it (#548)
+- Planned: a timed-out publish is parked instead of pushed forever (#547)
+- Planned: the record hook rebuilds a missing index and the guide drops the manual step (#546)
+- Planned: the mint gate learns the plan header and its skips now speak (#545)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.89"`
+
+## v0.1.88 — 2026-09-30
+
+### Bugs fixed
+
+- Heavy CI that never started is now started, a conflicting PR goes back, and a docs PR is not labelled (#542)
+
+### In progress
+
+- Planned: the status snapshot clock reaches the launcher copy, the pool and the row (#541)
+- Planned: a header line is never a title, and refusals name the line that would settle the card (#540)
+- Planned: backfill turns merged history into each card's typed answer (#539)
+- Planned: the Record row splits its count into work, resolved and records (#538)
+- Planned: a protected name stays on the card that holds it (#537)
+- Planned: four Tasks for the status snapshot, status line, setting and row (#536)
+- Planned: six Tasks for the command center, read-only (#535)
+- Planned: the mint gate learns the plan header and the plan briefs ask for the heading (#533)
+- Planned: four Tasks so a session commits under its own identity (#532)
+- Planned: five Tasks so the worker's allow list comes from the gate's own registry (#531)
+- Planned: the CI queue plan was updated after the trunk moved under it (#530)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.88"`
+
+## v0.1.87 — 2026-09-30
+
+### Features landed
+
+- The cloud default now uses a short exception list instead of an allow list (#529)
+- Every cancelled CI run now gets exactly one recorded cause (#528)
+- While any runner label is unresolved, none is removed and doctor says which (#526)
+- The product-config guide now documents model routing, quoted from doctor (#514)
+- The runner-label reader now asks the host for its variables and says when it cannot (#513)
+- A card now reads the usage record the factory already writes (#518)
+- ASF now measures each runner's median time, ratio and green rate per job kind and publishes a baseline (#517)
+
+### In progress
+
+- Planned: each tick leaves a status snapshot that the session's status line reads (#527)
+- Planned: the worker's allow list is the gate's own registry (#524)
+- Planned: six Tasks for running CI on any machine (#523)
+- Planned: six Tasks for the end-user review gate (#522)
+- Planned: a command center with one read-only table and live stream over every product (#525)
+- Planned: a session commits under its own identity, never the operator's (#521)
+- Planned: three Tasks for the cloud default, its exception list and the bypass (#520)
+- Planned: four Tasks so a refused reword is remembered (#519)
+- Planned: the CI queue stops keeping a busy runner free and holds starts that cannot finish first (#512)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.87"`
+
+## v0.1.86 — 2026-09-30
+
+### Features landed
+
+- A test now proves a skipped heavy CI check never merges a PR that has no label (#506)
+- The factory now makes one push per correction round and runs review before heavy CI (#500)
+
+### Bugs fixed
+
+- Work can now widen inside its Feature's scope, work already on the trunk is closed, and asf park was added (#516)
+- A GitHub rate limit is now treated as unknown rather than real state, so the factory pauses and budgets calls (#515)
+
+### In progress
+
+- Planned: CI on any machine reachable over ssh (#511)
+- Planned: an end-user review gate over landing and deploy, with operator sign-off on legal text (#509)
+- Planned: the cloud becomes the default place sessions run, with a short exception list (#510)
+- Planned: a refused naming reword is remembered so it is not retried every tick (#508)
+- Planned: three Tasks to find which superseded runs were waste (#507)
+- Planned: a refused push is remembered, earns a skip, and has a hold so it is never a dead end (#501)
+- Planned: a read cache and eight-wide fetching to speed up the wave step (#499)
+- Planned: three Tasks for pruning the shared build cache and reporting its size (#505)
+- Planned: three Tasks to document, exemplify and pin per-class model routing (#504)
+- Planned: nine Tasks so ASF discovers runners, measures them and places jobs itself (#503)
+- Planned: two Tasks so the runner-label reader resolves host variables and holds what it cannot judge (#502)
+- Planned: three Tasks for the CI artifact quota, prune and doctor rows (#498)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.86"`
+
+## v0.1.85 — 2026-09-30
+
+### Features landed
+
+- The flaky-test pass now asks for one workflow's runs over a window that only moves past what it has read (#492)
+
+### Bugs fixed
+
+- The status table's Parked row now names every item a park holds (#495)
+
+### In progress
+
+- Planned: three Tasks for the runner-label reader: freeze, evaluator, then repo variables and guide (#497)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.85"`
+
+## v0.1.84 — 2026-09-30
+
+### Bugs fixed
+
+- A row handed the same state twice now parks instead of relaunching, and every launch is recorded (#488)
+- Briefs now name the product's pre-push check as required, and targeted test runs pass the full-suite guard (#486)
+- Every cancelled CI run now gets one logged cause, job timeouts are named, and orphaned heads are re-run (#482)
+
+### In progress
+
+- Planned: every cancelled CI run gets a cause, told apart by its own head pair (#480)
+- Planned: a refused publish is remembered so health stops re-running the pre-push hook on untouched branches (#479)
+- Planned: the shared build cache is pruned past 7 days or 10 GB, with its size in doctor (#477)
+- Planned: per-class model routing gets documentation and a pinned product-file path (#476)
+- Planned: ASF reads the runner pool off the host, measures speed, and places and paces jobs (#475)
+- Planned: six Tasks for a second round of tick speed-ups (#478)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.84"`
+
+## v0.1.83 — 2026-09-30
+
+### Features landed
+
+- Doctor now names the install each clock runs, and goes red when it is not pinned and merged (#467)
+- A CI job's time limit is now read from the workflow file (#466)
+
+### In progress
+
+- Planned: two Tasks for the debug-toggle landing check, including a doctor row describing it (#474)
+- Planned: two more decisions on long Story ids and truncated card descriptions (#473)
+- Planned: a runner label is judged against the host's own variables, and an unresolved one holds every removal (#472)
+- Planned: the runner-label reader resolves expression forms over the repo's variables, and removes nothing it cannot resolve (#468)
+- Planned: the factory keeps its own CI artifact storage under quota with daily and early pruning (#471)
+- Planned: the wave step gets a read cache and eight-wide fetching (#470)
+- Planned: three Tasks for pausing a single product while the tick keeps recording (#469)
+- Planned: the flaky-test pass asks one workflow for its runs and git is asked once per pass (#465)
+- Planned: the landing gate refuses a branch that adds a debug toggle, with a per-line waiver that needs a reason (#464)
+- Planned: three Tasks for an optional native PR landing step with a doctor row and guide (#462)
+- Planned: capacity reads every usage window at each account's own scale (#463)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.83"`
+
 ## v0.1.82 — 2026-09-30
 
 ### Bugs fixed

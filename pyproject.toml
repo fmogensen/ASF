@@ -18,9 +18,6 @@ dependencies = []
 [project.scripts]
 asf = "asf.cli:main"
 
-[tool.setuptools.dynamic]
-version = {attr = "asf.__version__"}
-
 [tool.setuptools.packages.find]
 include = ["asf", "asf.*"]
 

@@ -481,17 +481,25 @@ def _age(seconds):
     return f"{seconds // 60}m ago"
 
 
-def version_cell(now=None):
-    """``running <asf --version>`` · ``latest release <newest v* tag> (<age>)``."""
+def version_cell(now=None, product=None):
+    """``running <asf --version>`` · ``pinned <the product's pin>`` · ``latest release <newest
+    tag> (<age>)`` — every one a version (``0.1.121 (267264dbe)``), the sha only as a detail."""
     from asf.cli import latest_release, version_string
     latest = latest_release()
     if latest is None:
         tail = "—"
     else:
         tag, when = latest
+        tag = tag[1:] if str(tag).startswith('v') else tag
         now = now or datetime.datetime.now(datetime.timezone.utc)
         tail = f"{tag} ({_age((now - when).total_seconds())})" if when else tag
-    return f"running {version_string()} · latest release {tail}"
+    pin = ''
+    name = getattr(product, 'name', None)
+    if name:
+        from asf import installs
+        rec = installs.read(name)
+        pin = f" · {name} pinned {rec.label}" if rec else f" · {name} runs the shared install"
+    return f"running {version_string()}{pin} · latest release {tail}"
 
 
 def gate_cell(product):
@@ -607,7 +615,7 @@ def render(root, product, cfg=None):
     out.append("| Metric | Now |")
     out.append("|---|---|")
     for name, cell in (('Stale', lambda: stale_cell(root, product)),
-                       ('Version', version_cell),
+                       ('Version', lambda: version_cell(product=product)),
                        ('Runners', lambda: runners_cell(product)),
                        ('Prod', lambda: prod_cell(product)),
                        ('Agents', lambda: agents_cell(product)),

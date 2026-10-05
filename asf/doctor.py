@@ -391,7 +391,8 @@ def _age_s_since(at):
 
 def _clock_install_phrase(inst):
     """The kind/venv/sha (or checkout) phrase a ``clock install`` row's detail opens with."""
-    sha = inst.sha[:7] if inst.sha else ''
+    from asf import version
+    sha = version.pin_label(inst.sha) if inst.sha else ''
     if inst.kind == 'pinned':
         return f'pinned {inst.venv} @ {sha or "(unknown)"}'
     if inst.kind == 'editable':
@@ -490,9 +491,8 @@ def pin_state(product_name):
 
 
 def _pin_phrase(rec):
-    prev = rec.previous_sha[:7] if rec.previous_sha else '-'
-    return (f'pin={rec.sha[:7]} venv={os.path.basename(rec.venv.rstrip(os.sep))} '
-            f'previous={prev}')
+    return (f'pin={rec.label} venv={os.path.basename(rec.venv.rstrip(os.sep))} '
+            f'previous={rec.previous_label}')
 
 
 def _per_product_venv(product_name, path):
@@ -959,6 +959,17 @@ def check_drift(product, installed=None):
     return True, drift.line(d)
 
 
+def check_release(product, health=None):
+    """(ok, detail) — the factory's own release rule (:func:`asf.version.health`): red when a
+    merge to main that changed the package carries no ``v<x.y.z>`` tag, or ``CHANGELOG.md`` has
+    no entry for the newest tag. A product that is not the factory's source: ok, and says so."""
+    from asf import version
+    repo = product.repo_dir
+    if not repo or not os.path.isdir(repo) or not drift.is_factory_source(repo):
+        return True, 'not the factory source (its releases are the rollup\'s)'
+    return (health or version.health)(repo, f'origin/{product.main}')
+
+
 # ---- the capacity row --------------------------------------------------------
 #
 # Spec f-0079 §2.5 has this row read the operator's `capacity.total.sessions`, every product's
@@ -1347,6 +1358,8 @@ def run(product_name):
         rows.append(('network clock', False, host[0], host[1]))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
+    ok, detail = check_release(product)
+    rows.append(('release', True, ok, detail))
     ok, detail = check_rule_checks(product)
     rows.append(('rule-checks', False, ok, detail))
     ok, detail = check_briefs(product)

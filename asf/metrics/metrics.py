@@ -1464,6 +1464,13 @@ def write_trunk_release(root, day, items, product):
     releases/<day>-<sha7>.md with the version's notes; then the GitHub Release and the changelog
     entry. Legacy releases are adopted first (:func:`migrate_releases`). Returns the path
     written, or None."""
+    from asf import version
+    if version.is_factory_source(product.repo_dir):
+        # the factory's own repo is versioned by its release workflow (asf.version): one patch
+        # version per merge that changes the package, however it landed. A second cutter here
+        # raced it, and its changelog commit named record titles the redaction gate refuses —
+        # 644 refused pushes from v0.1.83 on.
+        return None
     _git(product.repo_dir, 'fetch', '-q', '--tags', 'origin')     # tags another machine cut
     migrate_releases(root, items, product)
     path = _cut_trunk_release(root, day, items, product)

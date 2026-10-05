@@ -53,6 +53,19 @@ class Install:
     at: str = ''
     by: str = ''
     policy: str = POLICY
+    #: the release the record wrote at pin time (``0.1.121``); the factory's tags win when read
+    version: str = ''
+
+    @property
+    def label(self):
+        """The pin as the operator reads it: ``0.1.121 (267264dbe)``."""
+        from asf import version
+        return version.pin_label(self.sha, recorded=self.version or None)
+
+    @property
+    def previous_label(self):
+        from asf import version
+        return version.pin_label(self.previous_sha, recorded=None) if self.previous_sha else '-'
 
     @property
     def interpreter(self):
@@ -95,7 +108,8 @@ def read(product_name):
     return Install(product=product_name, sha=sha, venv=venv,
                    previous={'sha': prev['sha'], 'venv': prev['venv']} if prev else None,
                    at=str(data.get('at') or ''), by=str(data.get('by') or ''),
-                   policy=str(data.get('policy') or POLICY))
+                   policy=str(data.get('policy') or POLICY),
+                   version=str(data.get('version') or ''))
 
 
 def pinned(product_name):
@@ -108,7 +122,11 @@ def write(product_name, sha, venv, previous=None, by='', now=None):
     at = (now or datetime.datetime.now()).astimezone().isoformat(timespec='seconds')
     prev = ({'sha': previous.get('sha') or '', 'venv': previous['venv']}
             if previous and previous.get('venv') else None)
+    from asf import version as versions
+    release = versions.of_commit(versions.factory_repo(), sha) or ''
     data = {'sha': sha, 'venv': venv, 'previous': prev, 'at': at, 'by': by, 'policy': POLICY}
+    if release:
+        data['version'] = release
     path = record_path(product_name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f'{path}.{os.getpid()}.tmp'
@@ -116,7 +134,8 @@ def write(product_name, sha, venv, previous=None, by='', now=None):
         json.dump(data, f, indent=2)  # insertion order: sha, venv, previous, …
         f.write('\n')
     os.replace(tmp, path)
-    return Install(product=product_name, sha=sha, venv=venv, previous=prev, at=at, by=by)
+    return Install(product=product_name, sha=sha, venv=venv, previous=prev, at=at, by=by,
+                   version=release)
 
 
 # ---- venv names and places ----------------------------------------------------------------

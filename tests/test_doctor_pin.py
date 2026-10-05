@@ -131,7 +131,7 @@ class EffectiveImportTests(PinFixture):
         self.assertTrue(required)
         self.assertTrue(ok, detail)
         self.assertIn('pinned asf-factory-sample-abcdef1 (effective import ok)', detail)
-        self.assertIn('pin=abcdef1 venv=asf-factory-sample-abcdef1 previous=1234567', detail)
+        self.assertIn('pin=abcdef100 venv=asf-factory-sample-abcdef1 previous=123456700', detail)
 
     def test_a_plist_env_that_imports_another_venv_is_red(self):
         self.pin_it()
