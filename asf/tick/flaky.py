@@ -287,10 +287,10 @@ class GitHubRuns:
 
     def _gh(self, args):
         """``gh <args>``'s stdout, or None when Unknown."""
-        from asf import ci_pool, gh_limit, github
+        from asf import ci_pool, connectors, gh_limit
         if self._run is subprocess.run and gh_limit.low(self.product):
             return None  # a history read, never urgent: unreadable under the reserve
-        r = github.gh(args, timeout=GH_TIMEOUT_S, run=self._run,
+        r = connectors.ci().call(args, timeout=GH_TIMEOUT_S, run=self._run,
                       env=ci_pool._gh_env(self.product))
         return r.data if r.ok else None
 

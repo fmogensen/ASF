@@ -44,7 +44,7 @@ import os
 import re
 import subprocess
 
-from asf import env
+from asf import connectors, env
 
 
 def not_configured(key):
@@ -104,7 +104,7 @@ def runners_cell(product, source=None):
     org = ci.get('runner_org')
     if not org and not pool:
         return not_configured('ci.runner_org')
-    src = source or ci_queue.GitHubSource(product)
+    src = source or connectors.ci().source(product)
     try:
         runners = src.runners()
     except ci_pool.BackendError:

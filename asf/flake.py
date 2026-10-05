@@ -45,7 +45,7 @@ import json
 import os
 import re
 
-from asf import github
+from asf import connectors, github
 
 FILE = 'flake-triage.json'
 #: ``ci.quarantine_days`` default: how long a flaked job stays in quarantine
@@ -177,7 +177,7 @@ def _call(gh, args):
     ``gh`` when one is passed (``(rc, stdout, stderr)`` or a ``Result``). A ``gh`` that cannot
     run is Unknown."""
     if gh is None:
-        return github.gh(args)
+        return connectors.ci().call(args)
     try:
         got = gh(args)
     except OSError as e:

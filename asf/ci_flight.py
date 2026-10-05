@@ -14,7 +14,7 @@ wanted; each call site has already decided that. This module answers only *now, 
 A session's own push is never asked about: it carries the work, and :func:`asf.workers.lifecycle.
 publish` is its route. The guard sits at the rewrite sites, never in the funnel they share.
 """
-from asf import gh_limit, github
+from asf import connectors, gh_limit, github
 
 #: the PR does not merge cleanly into the trunk — its run is against a head that cannot land
 CONFLICT = 'conflicting'
@@ -47,7 +47,7 @@ def run_in_flight(product, branch, run=None, timeout=CI_FLIGHT_TIMEOUT_S):
         return None
     from asf import ci_pool
     try:
-        r = github.gh(['run', 'list', '-R', repo_slug, '--workflow', workflow, '--branch', branch,
+        r = connectors.ci().call(['run', 'list', '-R', repo_slug, '--workflow', workflow, '--branch', branch,
                        '--limit', '20', '--json', 'databaseId,status,createdAt'],
                       json=True, timeout=timeout, run=run, env=ci_pool._gh_env(product))
     except gh_limit.RateLimited:

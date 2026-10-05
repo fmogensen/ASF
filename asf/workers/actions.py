@@ -27,7 +27,7 @@ import re
 import subprocess
 import time
 
-from asf import env, gh_limit, github, gitpush, refguard
+from asf import connectors, env, gh_limit, github, gitpush, refguard
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
@@ -204,7 +204,7 @@ class Gh:
         if self._env is None:
             from asf import ci_pool
             self._env = ci_pool._gh_env(self.product)
-        r = github.gh(list(args), timeout=GH_TIMEOUT_S, run=self._run, env=self._env)
+        r = connectors.ci().call(list(args), timeout=GH_TIMEOUT_S, run=self._run, env=self._env)
         if r.ok:
             return True, r.stdout or '', ''
         lines = (r.stderr or r.stdout or '').strip().splitlines()
@@ -433,7 +433,7 @@ def checks(s, product, run_cmd=None):
     else:
         from asf import ci_pool
         try:
-            runners = ci_pool.GitHubBackend(product, run=run_cmd).runners()
+            runners = connectors.ci().backend(product, run=run_cmd).runners()
         except ci_pool.BackendError as e:
             rows.append(('runner', False, False, f'cannot list runners: {e}'))
         else:

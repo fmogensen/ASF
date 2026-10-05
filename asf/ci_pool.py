@@ -1003,7 +1003,8 @@ def backend_for(product):
     ci = product.ci if isinstance(product.ci, dict) else {}
     provider = str(ci.get('provider') or 'github-actions').lower()
     if provider in ('github-actions', 'github'):
-        return GitHubBackend(product)
+        from asf import connectors
+        return connectors.ci().backend(product)
     return None
 
 

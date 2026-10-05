@@ -13,6 +13,7 @@ from asf.connectors import command as command_mod
 from asf.connectors import fakes, protocols
 from asf.connectors import quota as quota_conn
 from asf.connectors import secrets as secrets_conn
+from asf.connectors.ci_github import GitHubActionsCI
 from asf.connectors.github_forge import GitHubForge
 from asf.workers import quota as quota_mod
 from asf.workers import runtime as runtime_mod
@@ -161,6 +162,63 @@ class FakeForgeTest(RegistryCase):
             got = cache.prime(P())
         self.assertEqual([p['number'] for p in got.prs], [3])
         self.assertEqual(fake.calls[0][0], 'open_prs')
+
+
+class GitHubActionsCITest(RegistryCase):
+    """The default CI is GitHub Actions through :mod:`asf.github`, argv for argv."""
+
+    def _run(self, calls, stdout='[]'):
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout, '')
+        return run
+
+    def test_default_and_protocol(self):
+        c = connectors.ci({})
+        self.assertIsInstance(c, GitHubActionsCI)
+        self.assertIsInstance(c, protocols.CI)
+        self.assertIsInstance(fakes.FakeCI(), protocols.CI)
+
+    def test_each_operation_is_the_gh_argv_it_replaced(self):
+        calls = []
+        c = GitHubActionsCI()
+        c.rerun('o/r', '12', run=self._run(calls))
+        c.run('o/r', 12, run=self._run(calls, '{}'))
+        c.runs_for_sha('o/r', 'abc', run=self._run(calls, '{}'))
+        c.cancel('o/r', 12, run=self._run(calls, ''))
+        c.call(['run', 'list', '-R', 'o/r'], run=self._run(calls))
+        self.assertEqual(calls, [
+            ['gh', 'run', 'rerun', '12', '--failed', '-R', 'o/r'],
+            ['gh', 'api', 'repos/o/r/actions/runs/12'],
+            ['gh', 'api', 'repos/o/r/actions/runs?head_sha=abc&per_page=100'],
+            ['gh', 'run', 'cancel', '12', '-R', 'o/r'],
+            ['gh', 'run', 'list', '-R', 'o/r']])
+
+    def test_source_and_backend_are_the_existing_github_adapters(self):
+        from asf import ci_pool, ci_queue
+
+        class P:
+            name = 'p'
+            repo_slug = 'o/r'
+            ci = {}
+            conventions = None
+        c = GitHubActionsCI()
+        with mock.patch.object(ci_queue, 'GitHubSource') as src, \
+                mock.patch.object(ci_pool, 'GitHubBackend') as be:
+            c.source(P())
+            c.backend(P(), run=print)
+        src.assert_called_once()
+        be.assert_called_once()
+        self.assertIs(be.call_args.kwargs['run'], print)
+
+    def test_callers_reach_the_configured_fake(self):
+        from asf import flake
+        fake = fakes.FakeCI(answers={'call': 'out'})
+        connectors.register('ci', 'github-actions', lambda cfg: fake)
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(env, 'ASF_HOME', home):
+            r = flake._call(None, ['run', 'view', '1'])
+        self.assertEqual(r.data, 'out')
+        self.assertEqual(fake.calls, [('call', (['run', 'view', '1'],), {})])
 
 
 class CommandFormTest(RegistryCase):

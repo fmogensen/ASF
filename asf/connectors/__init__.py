@@ -30,7 +30,7 @@ import importlib
 import os
 
 #: The kinds, in the order ``asf doctor`` lists them.
-KINDS = ('forge', 'quota', 'secrets')
+KINDS = ('forge', 'ci', 'quota', 'secrets')
 
 #: The entry-point group a third-party implementation of ``kind`` is published under.
 ENTRY_POINT_GROUP = 'asf.connectors.{kind}'
@@ -41,6 +41,7 @@ COMMAND = 'command'
 #: Each kind's implementation when nothing is configured: today's behaviour.
 DEFAULTS = {
     'forge': 'github',
+    'ci': 'github-actions',
     'quota': 'none',
     'secrets': 'file',
 }
@@ -50,6 +51,10 @@ BUILTIN = {
     'forge': {
         'github': 'asf.connectors.github_forge:GitHubForge',
         'fake': 'asf.connectors.fakes:FakeForge',
+    },
+    'ci': {
+        'github-actions': 'asf.connectors.ci_github:GitHubActionsCI',
+        'fake': 'asf.connectors.fakes:FakeCI',
     },
     'quota': {
         'none': 'asf.connectors.quota:none',
@@ -64,7 +69,7 @@ BUILTIN = {
 
 #: The kinds whose command form is the generic JSON contract of :mod:`asf.connectors.command`
 #: (``quota`` and ``secrets`` keep their own one-line contracts; see their modules).
-GENERIC_COMMAND_KINDS = ('forge',)
+GENERIC_COMMAND_KINDS = ('forge', 'ci')
 
 _registered = {}
 _instances = {}
@@ -207,6 +212,11 @@ def get(kind, cfg=None):
 def forge(cfg=None):
     """The active ``forge`` connector (:class:`asf.connectors.protocols.Forge`)."""
     return get('forge', cfg)
+
+
+def ci(cfg=None):
+    """The active ``ci`` connector (:class:`asf.connectors.protocols.CI`)."""
+    return get('ci', cfg)
 
 
 def active(cfg=None):

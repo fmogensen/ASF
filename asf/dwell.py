@@ -585,9 +585,8 @@ def rerun(facts, f, store):
     runs = (f.act or {}).get('runs') or []
     if not runs:
         return 'none (no run id on the checks)'
-    from asf import github
-    done = [rid for rid in runs if github.gh(['run', 'rerun', rid, '--failed', '-R',
-                                              facts.product.repo_slug]).ok]
+    from asf import connectors
+    done = [rid for rid in runs if connectors.ci().rerun(facts.product.repo_slug, rid).ok]
     if not done:
         return f"re-run refused for run(s) {', '.join(runs)}"
     store['acted'][mark] = _iso(facts.now)

@@ -49,6 +49,42 @@ class Forge(Protocol):
 
 
 @runtime_checkable
+class CI(Protocol):
+    """``ci``: workflow runs, their jobs and logs, rerun/cancel, the runners."""
+
+    name: str
+
+    def runs(self, slug: str, *, fields: Sequence[str] = (), limit: int = 50, **query):
+        """Runs filtered by ``query`` (``workflow``, ``branch``, ``commit``, ``status`` …) —
+        ``data`` a list."""
+
+    def run(self, slug: str, run_id, **kw):
+        """One run — ``data`` a dict."""
+
+    def runs_for_sha(self, slug: str, sha: str, **kw):
+        """The runs on commit ``sha`` — ``data`` the host's listing."""
+
+    def run_log(self, slug: str, run_id, *, failed: bool = True, **kw):
+        """A run's log (only its failed jobs by default) — ``data`` text."""
+
+    def rerun(self, slug: str, run_id, failed: bool = True, **kw):
+        """Re-run ``run_id`` (only its failed jobs by default)."""
+
+    def cancel(self, slug: str, run_id, **kw):
+        """Cancel ``run_id``."""
+
+    def call(self, args: Sequence[str], **kw):
+        """A call in the CI client's own argv dialect, for an operation no named method covers
+        yet; a CI without such a client returns Unknown."""
+
+    def source(self, product, run=None):
+        """What the CI start queue reads and does (:class:`asf.ci_queue.Source`)."""
+
+    def backend(self, product, run=None):
+        """The self-hosted runner pool's host (:class:`asf.ci_pool.Backend`)."""
+
+
+@runtime_checkable
 class Quota(Protocol):
     """``quota``: an account's usage, read for the quota guard."""
 
