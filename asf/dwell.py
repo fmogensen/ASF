@@ -262,8 +262,8 @@ class Facts:
         def read():
             if not self.product.repo_slug:
                 return None
-            from asf import github
-            r = github.open_prs(self.product.repo_slug, limit=100,
+            from asf import connectors
+            r = connectors.forge().open_prs(self.product.repo_slug, limit=100,
                                 fields=('number', 'headRefName', 'headRefOid', 'isDraft',
                                         'statusCheckRollup'))
             return r.data if r.ok and isinstance(r.data, list) else None
@@ -288,8 +288,8 @@ class Facts:
         """The check runs on ``sha``, or None when unreadable."""
         if not self.product.repo_slug:
             return None
-        from asf import github
-        r = github.checks(self.product.repo_slug, sha)
+        from asf import connectors
+        r = connectors.forge().checks(self.product.repo_slug, sha)
         return r.data if r.ok else None
 
     def trunk_sha(self):

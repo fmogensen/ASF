@@ -253,5 +253,18 @@ capacity:
 # operator:
 #   path_prefix: /usr/local/bin
 
+# connectors: which implementation each external concern uses (docs/guide/writing-a-connector.md).
+# Unset, each kind keeps today's behaviour. A value is a name — in-tree, or a Python entry point
+# published under `asf.connectors.<kind>` — or a block map with `command:` (the command form: a
+# shell command with a JSON contract). An older key that already chose still counts:
+# worker_pool.quota_command is the quota command form.
+# connectors:
+#   forge: github                  # github (default) | fake | command | <entry point>
+#   quota: none                    # none (default: every account available) | command | fake
+#   secrets: file                  # file (default: auth_env names files) | command
+#   # secrets:                     # the command form: {ref} is the auth_env reference
+#   #   command: my-vault read {ref}
+#   #   timeout_s: 30
+
 # Everything ASF reads and writes lives under ~/.ASF: products/, state/<product>/ (the session
 # ledger, the worktrees, the tick's record clone), logs/. Set $ASF_HOME to move all of it.

@@ -13,7 +13,7 @@ kept for the pass whether it worked or not, so a refused read is not retried wit
 decider reads it with :func:`open_prs`, which never calls the host: a miss is Unknown (S-M13 —
 shadow must not add gh load).
 """
-from asf import gh_limit, github
+from asf import connectors, gh_limit
 from asf.facts.types import AsOf, OpenPrs, Unknown
 
 #: What :func:`get` returns for a key the pass has not read (``None`` is a legitimate value).
@@ -56,7 +56,7 @@ def prime(product, *, run=None):
     if not slug:
         return put(product, OPEN_PRS, '', '', Unknown('no repo_slug', AsOf.now()))
     try:
-        r = github.open_prs(slug, fields=FIELDS, run=run)
+        r = connectors.forge().open_prs(slug, fields=FIELDS, run=run)
     except gh_limit.RateLimited:
         return put(product, OPEN_PRS, '', '', Unknown('rate limited', AsOf.now()))
     at = AsOf('', github_stamp(r.as_of))
@@ -89,7 +89,7 @@ def item_prs(product, item, *, run=None):
         return put(product, ITEM_PRS, key, '', Unknown('no repo_slug' if key else 'no item',
                                                         AsOf.now()))
     try:
-        r = github.prs(slug, state='all', search=key, limit=ITEM_PR_LIMIT, fields=ITEM_FIELDS,
+        r = connectors.forge().prs(slug, state='all', search=key, limit=ITEM_PR_LIMIT, fields=ITEM_FIELDS,
                        run=run)
     except gh_limit.RateLimited:
         return put(product, ITEM_PRS, key, '', Unknown('rate limited', AsOf.now()))

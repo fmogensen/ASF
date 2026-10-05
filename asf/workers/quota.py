@@ -234,5 +234,7 @@ class NoQuotaSource(QuotaSource):
 
 
 def source_from_config(cfg):
-    cmd = ((cfg or {}).get('worker_pool') or {}).get('quota_command')
-    return CommandQuotaSource(cmd) if cmd else NoQuotaSource()
+    """The active ``quota`` connector for ``cfg`` (:mod:`asf.connectors.quota`): the command
+    form when ``connectors.quota`` or ``worker_pool.quota_command`` names one, else none."""
+    from asf import connectors
+    return connectors.get('quota', cfg or {})

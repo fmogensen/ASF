@@ -147,7 +147,7 @@ import shutil
 import tempfile
 import time
 
-from asf import (attestation, ci_queue, env, flake, gh_limit, github, gitops, gitpush,
+from asf import (attestation, ci_queue, connectors, env, flake, gh_limit, github, gitops, gitpush,
                  refguard, run_cancel, stale_ref)
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
@@ -1916,7 +1916,7 @@ def _drafts(lane, batches):
                 if p.get('draft') and str(p.get('state') or 'OPEN').upper() == 'OPEN'}
     if not batches or not lane.slug:
         return set()
-    got = github.open_prs(lane.slug, fields=('headRefName', 'isDraft'))
+    got = connectors.forge().open_prs(lane.slug, fields=('headRefName', 'isDraft'))
     return {p.get('headRefName') for p in (got.data or []) if isinstance(p, dict)
             and p.get('isDraft')} if got.ok and isinstance(got.data, list) else set()
 
@@ -2617,7 +2617,7 @@ def cmd_land(args):
     if args.withdraw:
         # whoever queued it: a factory PR in a batch leaves it too, and stays out until asked
         # again or its head moves
-        got = github.pr(slug, n, ('headRefOid',)) if slug else None
+        got = connectors.forge().pr(slug, n, ('headRefOid',)) if slug else None
         head = got.data.get('headRefOid') if got is not None and got.ok \
             and isinstance(got.data, dict) else None
         try:
