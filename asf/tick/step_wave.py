@@ -65,6 +65,7 @@ import re
 import subprocess
 
 from asf import approvals, env
+from asf import tune as tune_mod
 from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
 from asf.record import plan_order
@@ -1063,6 +1064,8 @@ def launch(ctx, out=print):
     starting = [s for s in screened if s.starts]
     bypassed = any(s.bypass for s in starting)
     worker_rows = [s.wrow for s in starting]
+    # the self-tuning loop (asf.tune): its pass, then the tuned model and seat share per kind
+    worker_rows = tune_mod.wave_hook(product, worker_rows, running, out=out, event=ctx.event)
     texts = {s.wrow.job: s.brief.text for s in starting}
     kinds = {s.wrow.job: s.brief.kind for s in starting}
     ctx.event('capacity', sessions=r.sessions, sessions_inflight=len(running),

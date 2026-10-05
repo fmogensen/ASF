@@ -305,13 +305,15 @@ class GatherTest(unittest.TestCase):
             met = {c['key']: c['met'] for c in out['criteria']}
             self.assertFalse(out['ready'])
             self.assertEqual(met, {'stability': True, 'repair': False, 'ci': True, 'install': False,
-                                   'upgrade': False, 'generic': False, 'docs': False, 'blocking': False})
+                                   'upgrade': False, 'generic': False, 'docs': False, 'blocking': False,
+                                   'tune': False})
             ev = {c['key']: c['evidence'] for c in out['criteria']}
             self.assertIn('1 auto-upgrade(s)', ev['upgrade'])       # dated 2026-09-24 12:00 UTC: in the window
             self.assertIn('F-0002 card', ev['blocking'])
             self.assertIn('CHANGELOG has v0.1.0 notes', ev['docs'])
             text = release.render(out)
-            self.assertIn('NOT READY — 2/8 met', text)
+            self.assertIn('NOT READY — 2/9 met', text)
+            self.assertEqual(ev['tune'], 'tune.enabled is off')
             self.assertIn('| 1 | Stability (no hand hotfix for 7 d) | yes |', text)
 
 

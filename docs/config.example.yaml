@@ -177,6 +177,33 @@ capacity:
     local: 1
     cloud: 1
 
+# tune: the self-tuning loop (asf.tune). Per session kind named under `bounds`, the wave tries one
+# step at a time — the next cheaper model of `models` (labels of worker_pool.models, most capable
+# first), or one seat more or fewer within `seats: [min, max]` — measured off the session
+# registry: repair rounds per landed item, failure rate, landed share, spend per landed item.
+# After `trial_samples` runs it keeps the step when landed items per unit of spend rose by
+# `min_gain` at repair no worse than before, and reverts it when repair or the failure rate
+# worsened by more than `max_regress` (or the gain did not come). Never outside the bounds, one
+# live trial per kind, S1 rows untouched. `asf tune freeze` reverts every live trial and starts
+# none; `asf tune history` lists every change with its reason and numbers. Off by default; a
+# product turns it on under `products.<name>`. ASF's own install tunes itself like this:
+# tune:
+#   enabled: false            # the default for every product
+#   window_days: 7            # the rolling window the signal is read over
+#   min_samples: 10           # a kind's runs since its last change before a trial starts
+#   trial_samples: 10         # a trial's runs before it is judged
+#   min_gain: 0.10            # the objective's rise a trial must show to be kept
+#   max_regress: 0.10         # the rise in repair or failure rate that reverts it
+#   bounds:
+#     review:
+#       models: [heavy, light]
+#       seats: [1, 3]
+#     coder:
+#       models: [light, cheap]
+#   products:
+#     asf:
+#       enabled: true
+
 # tick: a command step (a product's `steps: {<step>: "<command>"}`) is killed after this many
 # seconds and exits 124 (default 900).
 # tick:
