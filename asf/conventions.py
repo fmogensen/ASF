@@ -638,6 +638,11 @@ def validate_mapping(data):
             problems.append(('feeder.max_specs_in_flight',
                              f'must be a whole number >= 0, not {cap!r}'))
         if isinstance(feeder, dict):
+            rcap = feeder.get('max_replans_in_flight')
+            if rcap is not None and (isinstance(rcap, bool) or not isinstance(rcap, int)
+                                     or rcap < 0):
+                problems.append(('feeder.max_replans_in_flight',
+                                 f'must be a whole number >= 0, not {rcap!r}'))
             wip = feeder.get('max_features_in_build')
             if wip is not None and wip != 'auto' and (
                     isinstance(wip, bool) or not isinstance(wip, int) or wip < 1):

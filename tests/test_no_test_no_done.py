@@ -421,6 +421,35 @@ class AuditProofs(RecordCase):
         self.assertNotIn(self.state('features/F-0001.md'), ('Resolved', 'Closed'))
         self.assertIn('S-0001: reopened — state Closed → Active', text)
 
+    def test_apply_records_a_pending_replan_on_each_reopened_feature(self):
+        """A product's audit (2026-10-05): --apply reopened Stories and created no work — a
+        Feature replan starts only from the Feature card's ``reshape:``, and groom only asks for
+        a Story no Task lists. Each Feature it reopened gets one pending replan naming the
+        reopened Stories and their unproved lines; the next tick queues it."""
+        from asf.record import replan
+        self.fixture()
+        rc, text, _before = self.run_audit(apply=True)
+        self.assertEqual(rc, 0)
+        meta = self.read('features/F-0001.md')[0]
+        how = meta.get('reshape') or ''
+        self.assertIn('S-0001 line 2', how)
+        self.assertIn('S-0004 line 1', how)
+        self.assertNotIn('S-0002', how)
+        self.assertTrue(replan.pending(dict(meta, id='F-0001', type='feature')))
+        self.assertIn('F-0001: replan pending', text)
+        # a second audit with nothing new to reopen leaves the decision as it stands
+        rc, _text, before = self.run_audit(apply=True)
+        self.assertEqual(self.read('features/F-0001.md')[0].get('reshape'), how)
+
+    def test_apply_keeps_a_pending_reshape_and_adds_the_audit_to_it(self):
+        self.fixture()
+        frontmatter.write_typed(os.path.join(self.root, 'features/F-0001.md'),
+                                {'reshape': 'split the billing Task'})
+        self.run_audit(apply=True)
+        how = self.read('features/F-0001.md')[0].get('reshape') or ''
+        self.assertTrue(how.startswith('split the billing Task'))
+        self.assertIn('S-0001 line 2', how)
+
 
 class InlineProvenBy(unittest.TestCase):
     """A ticked bullet that says ``— proven by <path>`` is proved when the path is a file in the

@@ -243,7 +243,7 @@ class RulingLiftsParkTest(unittest.TestCase):
 
     RUN = '2026-10-03T10:00:00Z'
 
-    def _check(self, *history):
+    def _check(self, *history, later=(), kind=None):
         from unittest import mock
         from asf.evidence import rulings
         root = tempfile.mkdtemp()
@@ -255,13 +255,17 @@ class RulingLiftsParkTest(unittest.TestCase):
             f.write('---\nid: T-0338\n---\n\n## Description\nx\n\n## History\n'
                     + ''.join(h + '\n' for h in history))
         runs = {'adjudicate-t-0338': [{'item': 'T-0338', 'kind': 'adjudicate',
-                                       'started': self.RUN, 'ended': 'x', 'card_digest': 'd'}]}
+                                       'started': self.RUN, 'ended': 'x', 'card_digest': 'd'}],
+                'correct-t-0338': [{'item': 'T-0338', 'kind': 'correct', 'started': at,
+                                    'ended': 'x'} for at in later]}
         with mock.patch.object(step_wave.lifecycle, 'runs', return_value=runs), \
                 mock.patch.object(step_wave.pool_mod, 'sessions_path', return_value='/x'), \
                 mock.patch('asf.briefs.build.card_digest', return_value='d'):
             adj = step_wave.adjudications(p, {'items': {}}, {'T-0338': 51})
-        row = rows.Row(tier=2, kind=rows.FIX_CORRECT, item_id='T-0338', feature_id='',
-                       action=rows.LAUNCH, brief_kind='correct', branch='', reason='')
+        row = rows.Row(tier=2, kind=kind or rows.FIX_CORRECT, item_id='T-0338', feature_id='',
+                       action=rows.LAUNCH,
+                       brief_kind='plan' if kind == rows.STARVED_PLAN else 'correct',
+                       branch='', reason='')
         return rows._capped(row, {'T-0338': 51}, 3, p, adj)
 
     def test_no_ruling_stays_parked(self):
@@ -278,8 +282,26 @@ class RulingLiftsParkTest(unittest.TestCase):
                           '- 2026-10-03 12:31 operator park: parked by the tick')
         self.assertTrue(got.action.startswith(rows.PARKED))
 
-    def test_the_sessions_own_ruling_stays_parked(self):
-        got = self._check('- 2026-10-03 11:00 adjudicate (adjudicate-t-0338): C1 upheld')
+    def test_the_sessions_own_ruling_is_carried_out_once(self):
+        """F-0109, F-0035, F-0003 (2026-10-05): parked "adjudicated, card unchanged" with the
+        adjudicate session's ruling on the card and nothing acting on it. A ruling newer than
+        the stalemate goes to one session, its text the brief's correction; once a session has
+        started since, the row parks again."""
+        ruling = '- 2026-10-03 11:00 adjudicate (adjudicate-t-0338): C1 upheld; fix a.py:3'
+        got = self._check(ruling)
+        self.assertEqual((got.action, got.brief_kind, got.ruling), (rows.LAUNCH, 'correct', True))
+        self.assertIn('C1 upheld; fix a.py:3', got.correction)
+        self.assertIn('adjudicate-t-0338', got.correction)
+        doc = self._check(ruling, kind=rows.STARVED_PLAN)
+        self.assertEqual((doc.action, doc.brief_kind, doc.kind),
+                         (rows.LAUNCH, 'plan', rows.STARVED_PLAN))
+        carried = self._check(ruling, later=('2026-10-03T11:20:00Z',))
+        self.assertTrue(carried.action.startswith(rows.PARKED))
+        before = self._check(ruling, later=('2026-10-03T10:30:00Z',))  # older than the ruling
+        self.assertEqual(before.action, rows.LAUNCH)
+
+    def test_a_ruling_older_than_the_stalemate_stays_parked(self):
+        got = self._check('- 2026-10-03 09:00 adjudicate (adjudicate-t-0338): an older round')
         self.assertTrue(got.action.startswith(rows.PARKED))
 
     def test_an_operator_ruling_before_the_park_stays_parked(self):

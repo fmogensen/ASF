@@ -109,6 +109,24 @@ class Transitions(unittest.TestCase):
             review_required=True, review=CHANGES, review_answered='correct-t-0001'))[0],
             lane.REVIEW)
 
+    def test_t5n_an_approval_asking_nothing_a_correction_answered_goes_to_the_gate(self):
+        """A product's T-0652 (2026-10-05): the review said ``verdict: approved`` with an empty C
+        list, yet read changes; the correct session reported "nothing to correct" and the row
+        parked. A review that asks nothing, answered on this head by a correction, lands."""
+        rv = dict(CHANGES, text='approved', asks_nothing=True)
+        state, reason = lane.next_state(rec(lane.REVIEW), facts(
+            review_required=True, review=rv, nothing_to_correct='correct-t-0001',
+            review_answered='correct-t-0001'))
+        self.assertEqual(state, lane.GATE)
+        self.assertIn('nothing to correct', reason)
+        # a review that asks for something still goes back, answered or not
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), facts(
+            review_required=True, review=dict(CHANGES, asks_nothing=False),
+            nothing_to_correct='correct-t-0001')), (lane.BACK, 'kind=review'))
+        # and one no correction has looked at yet goes back for one
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), facts(
+            review_required=True, review=rv)), (lane.BACK, 'kind=review'))
+
     def test_t5a_changes_a_ruling_overruled_on_this_head_go_to_the_gate(self):
         state, reason = lane.next_state(rec(lane.PR_OPEN), facts(
             review_required=True, review=CHANGES, overruled='adjudicate-t-0001'))
