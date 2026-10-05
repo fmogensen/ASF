@@ -576,6 +576,38 @@ def inbox_origin_ids(canonical):
     return {iid for iid, rec in canonical.items() if 'created (inbox)' in (rec.get('body') or '')}
 
 
+def _bare_id(v):
+    return str(v or '').strip().strip('[]').strip()
+
+
+def deferred_story(story_id, canonical):
+    """True when ``story_id`` is a Story whose acceptance lines are all deferred by a decision
+    (``… — deferred by [[D-nnnn]]``, :func:`asf.proves.deferred_lines`): at least one line, and
+    no line left to build."""
+    from asf import proves
+    rec = canonical.get(story_id)
+    if not rec or rec['meta'].get('type') != 'story':
+        return False
+    body = rec.get('body') or ''
+    lines = proves.bullets(body)
+    return bool(lines) and len(proves.deferred_lines(body)) == len(lines)
+
+
+def deferred_by_decision(item_id, canonical):
+    """True for a Task whose Stories — its ``parent:`` Story, and every Story its ``stories:``
+    names — are all :func:`deferred_story`: a decision already settled what it would build, so
+    its ``decided: false`` is no question for the groom to ask again."""
+    rec = canonical.get(item_id)
+    if not rec or rec['meta'].get('type') != 'task':
+        return False
+    meta = rec['meta']
+    stories = {_bare_id(s) for s in as_list(meta.get('stories')) if _bare_id(s)}
+    parent = _bare_id(meta.get('parent'))
+    if (canonical.get(parent) or {}).get('meta', {}).get('type') == 'story':
+        stories.add(parent)
+    return bool(stories) and all(deferred_story(s, canonical) for s in stories)
+
+
 def groom_inbox_section(canonical, origin_ids):
     lines = []
     for iid in sorted(origin_ids):
@@ -583,7 +615,8 @@ def groom_inbox_section(canonical, origin_ids):
         if rec is None:
             continue
         typed, _machine = frontmatter.split_machine(rec['meta'])
-        if typed.get('decided') is True or typed.get('removed'):
+        if typed.get('decided') is True or typed.get('removed') \
+                or deferred_by_decision(iid, canonical):
             continue
         why = 'from inbox, awaiting a decision'
         m = SHAPE_LINE_RE.search(rec.get('body') or '')
@@ -600,7 +633,7 @@ def groom_undecided_section(canonical, now, days, exclude=()):
         if iid in exclude:
             continue
         typed, machine = frontmatter.split_machine(rec['meta'])
-        if typed.get('decided') is True:
+        if typed.get('decided') is True or deferred_by_decision(iid, canonical):
             continue
         since = parse_iso(machine.get('stage_since'))
         if since is None:
@@ -628,7 +661,8 @@ def groom_undecided_rest_section(canonical, sections):
         if iid in asked:
             continue
         typed, machine = frontmatter.split_machine(rec['meta'])
-        if typed.get('decided') is True or typed.get('removed') or typed.get('moved_to'):
+        if typed.get('decided') is True or typed.get('removed') or typed.get('moved_to') \
+                or deferred_by_decision(iid, canonical):
             continue
         since = parse_iso(machine.get('stage_since'))
         age = (f"undecided {format_age((datetime.datetime.now(datetime.timezone.utc) - since).total_seconds())}"

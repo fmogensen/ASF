@@ -97,6 +97,25 @@ def parse_inbox_file(text):
     return Card(title, headers, description, features, acceptance)
 
 
+def header_list(value):
+    """A list header's entries: ``a, b``, ``[a, b]``, ``['a', "b"]`` and ``[[S-0001]]`` wiki links
+    all read as the bare entries — the brackets and quotes are the list's syntax, never part of an
+    entry (an inbox Task's ``writes: [a, b]`` was filed as the one glob ``"[a, b]"``)."""
+    text = str(value or '').strip()
+    if text.startswith('[') and text.endswith(']') and not (
+            text.startswith('[[') and text.endswith(']]') and text.count('[[') == 1):
+        text = text[1:-1].strip()
+    out = []
+    for part in text.split(','):
+        part = part.strip().strip('\'"').strip()
+        m = re.fullmatch(r'\[\[([^\]]+)\]\]', part)
+        if m:
+            part = m.group(1).strip()
+        if part:
+            out.append(part)
+    return out
+
+
 def title_signature(title):
     """The signature an operator's ``type: bug`` card gets when it names none: its title,
     whitespace folded — a Bug is keyed on its signature, and a title is the one line it has."""
@@ -211,8 +230,8 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             typed['found_in'] = 'dev'
             typed['signature'] = card.headers.get('signature')
         elif type_ == 'task':
-            typed['writes'] = [w.strip() for w in card.headers.get('writes', '').split(',') if w.strip()]
-            typed['stories'] = [s.strip() for s in card.headers.get('stories', '').split(',') if s.strip()]
+            typed['writes'] = header_list(card.headers.get('writes'))
+            typed['stories'] = header_list(card.headers.get('stories'))
         write_new_item(root, canonical, type_, new_id, typed, card.description, date, 'inbox',
                         acceptance=card.acceptance, sections={'Features': card.features},
                         shape=(rule, type_))
