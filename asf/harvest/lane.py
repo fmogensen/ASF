@@ -221,9 +221,13 @@ def correction_turns_back(rec, corr):
     after the lane first saw the current head (:func:`head_since`) — a correction the head moved
     past is answered. Health's own hold at the round cap (``at_cap``) is not: it goes to
     adjudication, and the gate may still land the branch as it stands (a product's T-0026,
-    2026-09-27: a ``redact`` stamped on PR #707 at GATE never reached a session)."""
+    2026-09-27: a ``redact`` stamped on PR #707 at GATE never reached a session). An operator
+    ruling (``asf correct`` at the cap) always does — a CI wait on a head the ruling is there to
+    change is no reason to hold it (a product's T-0594: the ruling waited on CI for a known-red
+    head and launched nothing)."""
     rec, corr = rec or {}, corr or {}
-    if rec.get('state') not in LANDING_WAITS or not corr.get('text') or corr.get('at_cap'):
+    if rec.get('state') not in LANDING_WAITS or not corr.get('text') \
+            or (corr.get('at_cap') and not corr.get('operator_ruling')):
         return False
     since = rec.get('head_at') or rec.get('at') or ''
     return (corr.get('at') or '') >= since
@@ -968,9 +972,12 @@ def feature_delivery(items, item):
 
 def item_footprint(items, item):
     """The globs the branch of ``item`` may touch: its card's ``writes:``, plus every member's
-    when it leads a delivery — the union the foreign-red rule measures a delivery against."""
+    when it leads a delivery (its ``delivers:``, and every card naming it ``delivered_by:``) —
+    the union the foreign-red rule measures a delivery against."""
     out = []
-    for i in (item, *delivery_members(items, item)):
+    by = [iid for iid, c in sorted((items or {}).items())
+          if (c or {}).get('delivered_by') == item and not c.get('removed')]
+    for i in dict.fromkeys((item, *delivery_members(items, item), *by)):
         out.extend(g for g in ((items or {}).get(i) or {}).get('writes') or () if g not in out)
     return out
 

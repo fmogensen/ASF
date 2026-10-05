@@ -111,7 +111,7 @@ class CorrectTests(unittest.TestCase):
                     '## History\n- 2026-09-01 09:00 created\n')
         return path
 
-    def test_at_the_round_cap_the_instruction_goes_to_adjudication_as_a_ruling(self):
+    def test_at_the_round_cap_the_ruling_launches_one_code_session_on_the_task_branch(self):
         import importlib
         build = importlib.import_module("asf.briefs.build")
         from asf.evidence import rulings
@@ -122,10 +122,12 @@ class CorrectTests(unittest.TestCase):
         self.assertIn('operator ruling', out)
         self.assertEqual(lifecycle.rounds_of(self.path, 'T-0017'), lifecycle.ROUND_CAP)
         [row] = self.rows()
-        self.assertEqual((row.kind, row.brief_kind), (rows.STALEMATE, 'adjudicate'))
+        self.assertEqual((row.kind, row.brief_kind, row.branch, row.action),
+                         (rows.FIX_CORRECT, 'correct', 'cloud/T-0017', rows.LAUNCH))
+        self.assertTrue(row.ruling)
         self.assertIn('OPERATOR RULING', row.correction)
         self.assertIn('D12 stands: remove the provider entry', row.correction)
-        brief = build.correction_text(row, 'adjudicate')
+        brief = build.correction_text(row, 'correct')
         self.assertIn('OPERATOR RULING', brief)
         self.assertIn('D12 stands', brief)
         with open(card) as f:
@@ -133,7 +135,60 @@ class CorrectTests(unittest.TestCase):
         [ruling] = rulings.standing(env.load_product('sample'), 'T-0017')
         self.assertEqual(ruling['job'], 'operator')
         self.assertIn('D12 stands', rulings.brief_section([ruling]))
-        self.assertIn('adjudicate', build.RULINGS_KINDS)
+        # the attempt cap never turns the ruling's row into another adjudication
+        [capped] = [rows._capped(row, {'T-0017': 99}, 3, env.load_product('sample'), {})]
+        self.assertEqual((capped.kind, capped.brief_kind, capped.action),
+                         (rows.FIX_CORRECT, 'correct', rows.LAUNCH))
+
+    def test_a_ruling_skips_an_adjudicate_run_on_a_plan_branch(self):
+        """A product's T-0614: the newest run was the item's adjudication on a plan branch; the
+        ruling asked for code on the Task's branch."""
+        self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP),
+                    {'job': 'adjudicate-t-0017', 'item': 'T-0017', 'kind': 'adjudicate',
+                     'pid': 2, 'branch': 'plan/F-0001', 'started': '2026-09-01T10:00:00Z',
+                     'ended': '2026-09-01T10:30:00Z', 'end_reason': 'finished'})
+        rc, out = self.run_cmd(why='write the guard in the parser')
+        self.assertEqual(rc, 0, out)
+        [row] = self.rows()
+        self.assertEqual((row.kind, row.brief_kind, row.branch),
+                         (rows.FIX_CORRECT, 'correct', 'cloud/T-0017'))
+
+    def test_a_ruling_with_no_code_run_names_the_tasks_own_branch(self):
+        self.ledger({'job': 'adjudicate-t-0017', 'item': 'T-0017', 'kind': 'adjudicate',
+                     'pid': 2, 'branch': 'plan/F-0001', 'started': '2026-09-01T10:00:00Z',
+                     'ended': '2026-09-01T10:30:00Z', 'end_reason': 'finished',
+                     'rounds': lifecycle.ROUND_CAP})
+        rc, out = self.run_cmd(why='write the guard in the parser')
+        self.assertEqual(rc, 0, out)
+        [row] = self.rows()
+        product = env.load_product('sample')
+        self.assertEqual((row.kind, row.branch),
+                         (rows.FIX_CORRECT, product.conventions.branch('code', 'T-0017')))
+
+    def test_a_ruling_turns_a_ci_wait_back_ahead_of_the_known_red_head(self):
+        """A product's T-0594: the lane waited on CI for a head known red, and the ruling
+        launched nothing."""
+        from asf.harvest import lane
+        rec = {'state': lane.WAITING_CI, 'head': 'a' * 40, 'head_at': '2026-09-01T09:30:00Z',
+               'branch': 'cloud/T-0017'}
+        self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP, lane=rec))
+        rc, out = self.run_cmd(why='fix the red test in the parser')
+        self.assertEqual(rc, 0, out)
+        corr = lifecycle.corrections(self.path)['T-0017']
+        self.assertTrue(lane.correction_turns_back(rec, corr))
+        occ = lifecycle.occupancy(self.path, lanes={'cloud/T-0017': rec}, alive=lambda pid: False)
+        self.assertNotIn('T-0017', occ['busy'])
+        self.assertNotIn('T-0017', occ['landing'])
+
+    def test_the_ruling_is_answered_by_one_session(self):
+        self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP))
+        self.run_cmd(why='write the guard in the parser')
+        with open(self.path, 'a') as f:
+            f.write(json.dumps({'job': 'correct-t-0017', 'item': 'T-0017', 'kind': 'correct',
+                                'pid': 3, 'branch': 'cloud/T-0017',
+                                'started': '2099-01-01T00:00:00Z',
+                                'ended': '2099-01-01T00:30:00Z', 'end_reason': 'finished'}) + '\n')
+        self.assertEqual(self.rows(), [])
 
     def test_at_the_cap_a_from_pr_is_refused(self):
         self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP))

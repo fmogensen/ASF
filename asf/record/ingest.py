@@ -1016,7 +1016,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         settle(iid, 'task', ev_obj, lines, sha=ev_obj.landed or '')
 
     # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
-    story_tasks = _story_tasks(canonical)
+    ancestors = _ancestors(canonical)
+    story_tasks = _story_tasks(canonical, ancestors)
     review_claims = review_proven(canonical, task_ev)
     register = decisions.register(canonical, product)
     repo = decisions.repo_dir(product)
@@ -1142,8 +1143,10 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             kid_ids = [cid for cid, crec in canonical.items()
                        if crec['meta'].get('parent') == iid
                        and crec['meta'].get('type') in LANDING_CHILD_TYPES]
-            kid_ids += [t for t in _story_descendants(canonical, iid, story_tasks)
+            kid_ids += [t for t in _story_descendants(canonical, iid, story_tasks, ancestors)
                         if t not in kid_ids]
+            kid_ids += [s for s in _descendant_stories(canonical, iid, ancestors)
+                        if s not in kid_ids]
             kids = [new_state[cid] for cid in kid_ids]
             kids_closed = bool(kids) and all(s == closing.CLOSED for s in kids)
             # …and it is Closed, not merely Resolved, when the product deploys nothing (B-0078):
@@ -1177,7 +1180,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         # its Stories' Tasks are its Tasks too: a Task filed under a Story (or naming it) is
         # work of this Feature, and a New one keeps the Feature building (F-0106/F-0108)
         direct_n = len(child_ids)
-        child_ids += [t for t in _story_descendants(canonical, iid, story_tasks)
+        child_ids += [t for t in _story_descendants(canonical, iid, story_tasks, ancestors)
                       if t not in child_ids]
         child_states = [new_state[cid] for cid in child_ids]
         # the ladder of a Feature already held Closed reads its own Tasks only, as before: the
@@ -1185,9 +1188,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         # move again on the next pass because of it
         stage_states = child_states[:direct_n] if new_state[iid] == closing.CLOSED else child_states
         # …and its Stories are children of the Feature's rule: an open Story keeps it open
-        story_ids = [cid for cid, crec in canonical.items()
-                     if crec['meta'].get('type') == 'story' and crec['meta'].get('parent') == iid
-                     and not crec['meta'].get('removed')]
+        # every Story beneath it, a Story under a Story included
+        story_ids = _descendant_stories(canonical, iid, ancestors)
         story_states = [new_state[cid] for cid in story_ids]
         all_closed = bool(child_ids) and all(s == closing.CLOSED for s in child_states)
         merged_in_prod = in_prod = False
@@ -1266,15 +1268,56 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     return new_state, closings, derived, stage_val, task_ev, evs
 
 
-def _story_tasks(canonical):
-    """``{story_id: [task_id, ...]}`` — the Tasks whose ``stories:`` name each Story, in canonical
-    order (a removed Task covers nothing)."""
+def _ups(meta):
+    """The items ``meta`` hangs under: its ``parent:`` and, for a Task, the Stories its
+    ``stories:`` name."""
+    ups = [meta['parent']] if isinstance(meta.get('parent'), str) and meta.get('parent') else []
+    if meta.get('type') == 'task':
+        named = meta.get('stories') or []
+        ups += [s for s in ([named] if isinstance(named, str) else named)
+                if isinstance(s, str) and s and s not in ups]
+    return ups
+
+
+def _ancestors(canonical):
+    """``{id: set of ids}`` — every item each one reaches through its parent chain or a Task's
+    ``stories:``, at any depth (a Task under a Task under a Story reaches the Story and its
+    Feature). A removed item reaches nothing and is reached through by nothing; a cycle stops."""
+    memo = {}
+
+    def walk(iid, stack):
+        if iid in memo:
+            return memo[iid]
+        rec = canonical.get(iid)
+        if rec is None or iid in stack or rec['meta'].get('removed'):
+            return set()
+        stack.add(iid)
+        out = set()
+        for up in _ups(rec['meta']):
+            if up in canonical and not canonical[up]['meta'].get('removed'):
+                out.add(up)
+                out |= walk(up, stack)
+        stack.discard(iid)
+        memo[iid] = out
+        return out
+
+    for iid in canonical:
+        walk(iid, set())
+    return memo
+
+
+def _story_tasks(canonical, ancestors=None):
+    """``{story_id: [task_id, ...]}`` — every Task whose ``stories:`` or parent chain reaches each
+    Story (:func:`_ancestors`: ``stories: [S]``, ``parent: S``, or ``parent:`` a Task under S), in
+    canonical order. A removed Task covers nothing."""
+    anc = ancestors if ancestors is not None else _ancestors(canonical)
     out = collections.defaultdict(list)
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'task' or rec['meta'].get('removed'):
             continue
-        for sid in rec['meta'].get('stories') or []:
-            out[sid].append(iid)
+        for up in sorted(anc.get(iid) or ()):
+            if (canonical[up]['meta'].get('type') == 'story') and iid not in out[up]:
+                out[up].append(iid)
     return out
 
 
@@ -1341,23 +1384,35 @@ def _newest_review_path(claims, task_ev):
     return best['path']
 
 
-def _story_descendants(canonical, fid, story_tasks):
-    """The Tasks of ``fid``'s Stories, in canonical order, deduplicated: the ones whose
-    ``stories:`` name a Story of it (:func:`_story_tasks`) and the ones filed under one
-    (``parent:`` the Story, :func:`asf.proves.stories_of_task`). A removed Task is none."""
-    stories = [sid for sid, srec in canonical.items()
-               if srec['meta'].get('type') == 'story' and srec['meta'].get('parent') == fid]
+def _story_descendants(canonical, fid, story_tasks, ancestors=None):
+    """Every Task beneath ``fid``, in canonical order: the ones whose parent chain or
+    ``stories:`` reach it at any depth (:func:`_ancestors`) — under a Story (``parent: S`` or
+    ``stories: [S]``), under a Task under one, under a Story under a Story — and the Tasks of its
+    Stories (:func:`_story_tasks`). A removed Task is none (a product's F-1139: its unbuilt Tasks
+    hung under a Story and the Feature derived Resolved over them)."""
+    anc = ancestors if ancestors is not None else _ancestors(canonical)
+    stories = _descendant_stories(canonical, fid, anc)
     out = []
+    for tid, trec in canonical.items():
+        meta = trec['meta']
+        if meta.get('type') != 'task' or meta.get('removed'):
+            continue
+        if fid in (anc.get(tid) or ()) or any(sid in (anc.get(tid) or ()) for sid in stories):
+            out.append(tid)
     for sid in stories:
         for tid in story_tasks.get(sid, []):
             if tid not in out:
                 out.append(tid)
-    for tid, trec in canonical.items():
-        meta = trec['meta']
-        if (meta.get('type') == 'task' and not meta.get('removed') and meta.get('parent') in stories
-                and tid not in out):
-            out.append(tid)
     return out
+
+
+def _descendant_stories(canonical, fid, ancestors=None):
+    """Every Story beneath ``fid`` — a direct child or one under a Story under it — not removed,
+    in canonical order."""
+    anc = ancestors if ancestors is not None else _ancestors(canonical)
+    return [sid for sid, srec in canonical.items()
+            if srec['meta'].get('type') == 'story' and not srec['meta'].get('removed')
+            and fid in (anc.get(sid) or ())]
 
 
 def tick_proven(canonical, ev, stamp, task_ev=None):

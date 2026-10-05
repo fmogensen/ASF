@@ -515,6 +515,46 @@ class FeatureFootprintTests(WidenStepBase):
         self.assertEqual(self.rows(), [])
 
 
+class DeliveryLeadFootprintTests(WidenStepBase):
+    """A delivery lead's branch carries its members' work: the footprint gate measures it
+    against the union of the lead's and its delivered members' ``writes:``, not the lead's own
+    alone (a lead held every tick for a member's path)."""
+
+    def lead(self):
+        with open(os.path.join(self.root, 'tasks', 'T-0001.md'), 'w') as f:
+            f.write(TASK.format(id='T-0001', writes='src/a.py, tests/test_a.py')
+                    .replace('decided: true\n', 'decided: true\ndelivers: [T-0001, T-0002]\n'))
+        with open(os.path.join(self.root, 'tasks', 'T-0002.md'), 'w') as f:
+            f.write(TASK.format(id='T-0002', writes='lib/shared.py')
+                    .replace('decided: true\n', 'decided: true\ndelivered_by: T-0001\n'))
+        _git(['add', '-A'], self.root)
+        _git(['commit', '-q', '-m', 'delivery'], self.root)
+
+    def test_reach_is_the_union_of_the_lead_and_its_members(self):
+        self.lead()
+        items = self.items()
+        got = widen_footprint.reach(self.product, items['T-0001'], items)
+        for w in ('src/a.py', 'tests/test_a.py', 'lib/shared.py'):
+            self.assertIn(w, got)
+        # a member alone reaches its own writes only
+        self.assertNotIn('src/a.py', widen_footprint.reach(self.product, items['T-0002'], items))
+
+    def test_the_lane_gate_counts_a_member_named_only_by_delivered_by(self):
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'writes': ['src/a.py'],
+                            'delivers': ['T-0001']},
+                 'T-0002': {'id': 'T-0002', 'type': 'task', 'writes': ['lib/shared.py'],
+                            'delivered_by': 'T-0001'}}
+        self.assertEqual(lane.item_footprint(items, 'T-0001'), ['src/a.py', 'lib/shared.py'])
+        self.assertIn('lib/shared.py', widen_footprint.reach(self.product, items['T-0001'], items))
+
+    def test_a_lead_claiming_a_members_path_is_not_held(self):
+        self.lead()
+        self.finished('coder-t-0001', 'lib/shared.py')
+        held, verdicts = self.tick()
+        self.assertEqual((held, verdicts), ([], {}), self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+
+
 class SharedPathWidenTests(WidenStepBase):
     """S-37301: a shared path widens freely, through the whole tick — the widen rule's exemption
     and I3's have to hold together, or the write the rule allows is refused before it lands

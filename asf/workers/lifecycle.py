@@ -1048,6 +1048,8 @@ def ruled(path, item, corr):
     (a product's F-0035 ``redact``). Health's next hold on that session's work is at the cap
     again (``at_cap``), so the loop guard stands: one instruction per adjudication."""
     corr = corr or {}
+    if corr.get('operator_ruling'):
+        return True  # ``asf correct`` at the cap: the operator's ruling is the instruction itself
     at = corr.get('at') or ''
     if not at or corr.get('at_cap'):
         return False
@@ -1241,7 +1243,8 @@ def correction_of(path, item):
     if not held:
         return None
     run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
-    return dict(corr, rounds=rounds_of(path, item), same=repeats(corr), branch=run.get('branch'),
+    return dict(corr, rounds=rounds_of(path, item), same=repeats(corr),
+                branch=corr.get('branch') or run.get('branch'),
                 job=run.get('job'), ruled=ruled(path, item, corr),
                 settled=settled(path, item, corr.get('at')),
                 prs=settled_prs(path, item, corr.get('at')))
