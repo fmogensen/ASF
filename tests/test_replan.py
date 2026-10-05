@@ -217,22 +217,29 @@ class TheReplanRowRespectsTheCaps(unittest.TestCase):
                                   'state': 'New', 'writes': ['lib/other2.py']}
         return idx
 
-    def test_max_specs_in_flight_holds_the_replan(self):
+    def test_max_specs_in_flight_does_not_hold_the_replan_while_seats_are_free(self):
+        """2026-10-05: 18 pending replans hid behind a spec/plan cap of 2 with seats idle. A
+        replan has its own ceiling, feeder.max_replans_in_flight; the doc cap no longer holds it
+        while seats are free."""
         idx = self.ready_elsewhere(f0090_index())
         prod = product(feeder={'max_specs_in_flight': 1})
         out = rows.plan_rows(idx, prod, [{'item': 'F-0077', 'kind': 'plan'}], 10)
         (r,) = [r for r in out if r.item_id == 'F-0090']
+        self.assertTrue(r.launches, r)
+        prod = product(feeder={'max_specs_in_flight': 1, 'max_replans_in_flight': 0})
+        out = rows.plan_rows(idx, prod, [{'item': 'F-0077', 'kind': 'plan'}], 10)
+        (r,) = [r for r in out if r.item_id == 'F-0090']
         self.assertEqual(r.waits_on, 'finish')
-        self.assertIn('cap 1 (feeder.max_specs_in_flight)', r.action)
+        self.assertIn('cap 0 (feeder.max_replans_in_flight)', r.action)
 
-    def test_a_running_replan_counts_against_max_specs_in_flight(self):
+    def test_a_running_replan_counts_against_its_own_ceiling_not_the_spec_cap(self):
         idx = self.ready_elsewhere(f0090_index())
         idx['items']['F-0003'] = {'id': 'F-0003', 'type': 'feature', 'parent': 'E-0014',
                                   'rank': 3, 'state': 'New', 'decided': True, 'stage': 'card'}
         prod = product(feeder={'max_specs_in_flight': 1})
         out = rows.plan_rows(idx, prod, [{'item': 'F-0090', 'kind': 'replan'}], 10)
         (r,) = [r for r in out if r.item_id == 'F-0003']
-        self.assertEqual(r.waits_on, 'finish')
+        self.assertTrue(r.launches, r)
 
     def test_the_in_build_cap_holds_a_replan_of_a_feature_not_yet_in_build(self):
         idx = self.ready_elsewhere(f0090_index())
