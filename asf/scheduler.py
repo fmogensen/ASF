@@ -937,18 +937,23 @@ def resume_hint(label, cfg=None):
     return f'`asf scheduler resume --product {parts[0]} --clock {parts[1]}`'
 
 
-def pause(product_name, clock_names, reason, by, cfg=None, now=None, bootout=True):
+def pause(product_name, clock_names, reason, by, cfg=None, now=None, bootout=True, pid=None):
     """Record the pause of each clock, then boot it out. The record is written first, so an
     upgrade or install racing this call finds it before it could load the clock again.
 
     ``bootout=False`` writes the record only: ``launchctl bootout`` kills the job's running
     process, so a move records the pause, drains the running ticks, and only then calls
-    :func:`bootout_clocks` (2026-10-04: a move's pause killed a tick mid-wave)."""
+    :func:`bootout_clocks` (2026-10-04: a move's pause killed a tick mid-wave).
+
+    ``pid``: the pausing process, recorded so a pause it never lifted — killed before its
+    resume — is found stale once that process is gone (:func:`asf.upgrade.lift_stale_pauses`)."""
     import datetime
     at = (now or datetime.datetime.now()).astimezone().isoformat(timespec='seconds')
     pauses = read_pauses(product_name)
     for clock in clock_names:
         pauses[clock] = {'reason': reason, 'by': by, 'at': at}
+        if pid is not None:
+            pauses[clock]['pid'] = pid
     _write_pauses(product_name, pauses)
     if not bootout:
         return [f'scheduler: paused {label_for(product_name, clock, cfg)} (recorded; still '
@@ -1383,6 +1388,13 @@ def cmd_scheduler(args, root=None):
         return _cmd_host(args, command, cfg)
 
     product_name = args.product or env.default_product_name()
+
+    if command == 'status':
+        # a move killed before it resumed the clocks it paused: its pause outlives it, and the
+        # factory sits idle until someone looks — the look lifts it
+        from asf import upgrade
+        for line in upgrade.lift_stale_pauses(product_name):
+            print(line)
 
     if command in ('pause', 'resume'):
         return _cmd_pause_resume(args, command, product_name, cfg)

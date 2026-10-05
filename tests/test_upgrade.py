@@ -416,6 +416,163 @@ class QuiesceTest(MoveCase):
         self.assertIsNone(installs.read('alpha'))
 
 
+class DrainFirstTest(MoveCase):
+    """A batch in flight is landed by the product's own clocks (the tick's background harvest
+    judges it, the ci queue admits its run): the move drains it with those clocks running and
+    only new cuts and launches stopped, and pauses the clocks only once no batch is in flight."""
+
+    def write_batch(self, ref='batch/1'):
+        os.makedirs(self.state(), exist_ok=True)
+        with open(self.state('merge-queue.json'), 'w', encoding='utf-8') as f:
+            json.dump({'batches': [{'ref': ref, 'sha': 'c' * 40, 'members': []}] if ref else []}, f)
+
+    def test_a_batch_in_flight_drains_with_the_clocks_running_then_the_move_goes(self):
+        self.write_batch()
+        ops = FakeOps()
+        seen = []
+
+        def sleep(s):
+            # while the batch is in flight: no pause, no hold marker, the drain marker is up
+            seen.append((list(ops.log), upgrade.waiting('alpha', out=lambda _l: None,
+                                                        installed='c' * 40),
+                         bool(upgrade.draining('alpha'))))
+            self.slept.append(s)
+            self.write_batch(None)   # the batch landed
+        rc = upgrade.move('alpha', to=SHA, run=FakeRun(self.venvs), out=(lines := []).append,
+                               sleep=sleep, ops=ops, wait_s=30)
+        self.assertEqual(rc, 0, lines)
+        self.assertEqual(seen, [([], False, True)])
+        self.assertEqual([e[0] for e in ops.log][:2], ['pause', 'bootout'])
+        self.assertIsNone(upgrade.draining('alpha'))
+        self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
+        self.assertIn('batch/1', '\n'.join(lines))
+
+    def test_a_batch_that_never_lands_refuses_and_never_paused_a_clock(self):
+        self.write_batch()
+        ops = FakeOps()
+        rc, out = self.move(FakeRun(self.venvs), ops, to=SHA, wait_s=10)
+        self.assertEqual(rc, upgrade.MOVE_DEFERRED)
+        self.assertEqual(ops.log, [])   # nothing paused, so nothing to resume
+        self.assertIn('merge-queue batch in flight (batch/1)', '\n'.join(out))
+        self.assertIsNone(installs.read('alpha'))
+        self.assertIsNone(upgrade.draining('alpha'))
+        self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
+
+    def test_a_batch_cut_while_the_floor_quiets_resumes_the_clocks_until_it_lands(self):
+        """A pass already running when the hold went up (an older build ignores the drain
+        marker) may cut one more batch: the hold is lifted so the clocks land it."""
+        run = FakeRun(self.venvs, procs=['73\n', '73\n', '', ''])
+        run.listing = lambda: [(73, 'tick --product alpha --steps harvest')]
+        ops = FakeOps()
+        calls = []
+
+        def sleep(s):
+            calls.append(s)
+            self.slept.append(s)
+            if len(calls) == 1:
+                self.write_batch()        # the running pass cut a batch
+            elif len(calls) == 2:
+                self.write_batch(None)    # the resumed clocks landed it
+        rc = upgrade.move('alpha', to=SHA, run=run, out=(lines := []).append, sleep=sleep,
+                               ops=ops, wait_s=60)
+        self.assertEqual(rc, 0, lines)
+        names = [e[0] for e in ops.log]
+        self.assertEqual(names[:4], ['pause', 'resume', 'pause', 'bootout'], ops.log)
+
+    def test_a_refusal_resumes_exactly_the_clocks_the_attempt_paused(self):
+        run = FakeRun(self.venvs, procs=['73\n'])
+        run.listing = lambda: [(73, 'tick --product alpha --steps record,wave')]
+        ops = FakeOps(clocks=('tick', 'ci-queue', 'daily'), paused=('daily',))
+        rc, _out = self.move(run, ops, to=SHA, wait_s=10)
+        self.assertEqual(rc, upgrade.MOVE_DEFERRED)
+        self.assertEqual(ops.log, [('pause', 'alpha', ('tick', 'ci-queue')),
+                                   ('resume', 'alpha', ('tick', 'ci-queue'))])
+
+    def test_a_signal_mid_drain_resumes_the_clocks(self):
+        run = FakeRun(self.venvs, procs=['73\n'])
+        run.listing = lambda: [(73, 'tick --product alpha --steps record,wave')]
+        ops = FakeOps()
+
+        def sleep(_s):
+            raise SystemExit(143)   # what the move's SIGTERM handler raises
+        with self.assertRaises(SystemExit):
+            upgrade.move('alpha', to=SHA, run=run, out=lambda _l: None, sleep=sleep, ops=ops,
+                         wait_s=10)
+        self.assertEqual([e[0] for e in ops.log], ['pause', 'resume'])
+        self.assertFalse(os.path.exists(upgrade.pending_path('alpha')))
+        self.assertIsNone(upgrade.draining('alpha'))
+
+    def test_a_dead_movers_drain_marker_is_dropped(self):
+        upgrade._write_json(upgrade.draining_path('alpha'), {'sha': SHA, 'pid': 999999, 'at': 1})
+        self.assertIsNone(upgrade.draining('alpha'))
+        self.assertFalse(os.path.exists(upgrade.draining_path('alpha')))
+
+
+class StalePauseTest(MoveCase):
+    """A move killed outright (SIGKILL) never ran its resume: its pause records stay. The next
+    move and ``asf scheduler status`` find them by the dead pid and lift them."""
+
+    def write_pauses(self, pauses):
+        from asf import scheduler
+        scheduler._write_pauses('alpha', pauses)
+
+    def test_the_next_move_lifts_a_killed_moves_pauses_and_keeps_the_operators(self):
+        from asf import scheduler
+        self.write_pauses({'tick': {'reason': 'upgrade', 'by': 'x', 'at': 'a', 'pid': 999999},
+                           'ci-queue': {'reason': 'upgrade', 'by': 'x', 'at': 'a'},
+                           'daily': {'reason': 'operator hold', 'by': 'x', 'at': 'a'}})
+
+        class Ops(FakeOps):
+            def paused(inner, product):
+                return set(scheduler.read_pauses(product))
+
+            def resume(inner, product, clocks):
+                scheduler._write_pauses(product, {k: v for k, v in scheduler.read_pauses(
+                    product).items() if k not in clocks})
+                return super().resume(product, clocks)
+        ops = Ops(clocks=('tick', 'ci-queue', 'daily'))
+        rc, out = self.move(FakeRun(self.venvs), ops, to=SHA)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(ops.log[0], ('resume', 'alpha', ('ci-queue', 'tick')))
+        self.assertIn(('pause', 'alpha', ('tick', 'ci-queue')), ops.log)
+        self.assertEqual(set(scheduler.read_pauses('alpha')), {'daily'})
+        self.assertIn('stale', '\n'.join(out))
+
+    def test_a_live_moves_pause_is_not_stale(self):
+        self.write_pauses({'tick': {'reason': 'upgrade', 'by': 'x', 'at': 'a',
+                                    'pid': os.getppid()}})
+        upgrade._write_json(upgrade.pending_path('alpha'),
+                            {'sha': SHA, 'owner': None, 'pid': os.getppid(), 'move': True, 'at': 1})
+        self.assertEqual(upgrade.stale_pauses('alpha'), [])
+
+    def test_a_pidless_upgrade_pause_with_no_move_running_is_stale(self):
+        self.write_pauses({'tick': {'reason': 'upgrade', 'by': 'x', 'at': 'a'}})
+        self.assertEqual(upgrade.stale_pauses('alpha'), ['tick'])
+        upgrade._write_json(upgrade.pending_path('alpha'),
+                            {'sha': SHA, 'owner': None, 'pid': os.getppid(), 'move': True, 'at': 1})
+        self.assertEqual(upgrade.stale_pauses('alpha'), [])
+
+    def test_scheduler_status_lifts_a_stale_upgrade_pause(self):
+        from asf import scheduler
+        self.write_pauses({'tick': {'reason': 'upgrade', 'by': 'x', 'at': 'a', 'pid': 999999}})
+        with open(env.product_path('alpha'), 'w', encoding='utf-8') as f:
+            f.write('product: alpha\nrepo_slug: o/alpha\nmain: main\n'
+                    'clocks:\n  tick:\n    steps: [record]\n    every: 5m\n')
+        agents = os.path.join(self.tmp, 'LaunchAgents')
+        os.makedirs(agents)
+        args = argparse.Namespace(scheduler_command='status', product='alpha', clock=None,
+                                  json=False, label=None, host=False)
+        with mock.patch.object(scheduler, '_launchctl', return_value=(0, '', '')), \
+                mock.patch.object(scheduler, 'launch_agents_dir', return_value=agents), \
+                mock.patch.object(scheduler, 'kind', return_value='launchd'), \
+                mock.patch.object(scheduler, 'status',
+                                  side_effect=lambda label: {'loaded': True, 'label': label}), \
+                contextlib.redirect_stdout(io.StringIO()) as buf:
+            scheduler.cmd_scheduler(args)
+        self.assertEqual(scheduler.read_pauses('alpha'), {})
+        self.assertIn('stale', buf.getvalue())
+
+
 class CliTest(MoveCase):
     def parse(self, argv):
         p = argparse.ArgumentParser()

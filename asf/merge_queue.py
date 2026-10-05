@@ -711,7 +711,16 @@ def run(lane, ready):
             continue
         fresh.append(f)
     halves = len(groups)
+    from asf import upgrade
+    drain = upgrade.draining(lane.product.name)   # a move drains: the chain lands, nothing is cut
     for i, group in enumerate(groups + _pack(fresh, st['batch_size'])):
+        if drain:
+            for f in group:
+                lane.out(f"waiting {f['branch']}: PR #{_pr(f)} green — a move of "
+                         f"{lane.product.name} drains (asf upgrade --product); no new batch")
+                _wait(lane, f, 'merge queue: a move drains — no new batch is cut',
+                      green=f.get('green'))
+            continue
         if len(chain) >= st['inflight']:
             for f in group:
                 lane.out(f"waiting {f['branch']}: PR #{_pr(f)} green — merge queue full "
