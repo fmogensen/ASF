@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.132 — 2026-10-06
+
+### Bugs fixed
+
+- Pre-cut check, row blame, leftover-run reap, priority runs, cut-short checks, tip-on-main evidence, groom no on a delivery lead (#768)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.132"`
+
 ## v0.1.131 — 2026-10-06
 
 ### Features landed
