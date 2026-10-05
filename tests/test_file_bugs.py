@@ -10,7 +10,7 @@ import unittest
 
 from asf.conventions import Conventions
 from asf.record import frontmatter
-from asf.record.core import today
+from asf.record.core import canonicalize, load_items, today
 from asf.schema import SCHEMA_VERSION
 from asf.tick import file_bugs
 
@@ -352,6 +352,99 @@ class RecordErrorSignatureTests(unittest.TestCase):
                          ['record error: bare decision reference …; write it as [[D-nnnn]]'])
         second = run(['file-bugs'], self.root)
         self.assertIn('0 filed', second.stdout)
+
+
+class RefileWindowTests(unittest.TestCase):
+    def test_too_soon_matrix(self):
+        base = datetime.date(2026, 9, 30)
+        cases = [
+            (0, 1, True), (0, 7, True),
+            (1, 1, False), (1, 7, True),
+            (6, 7, True), (7, 7, False), (7, 1, False),
+        ]
+        for back, refile_days, expected in cases:
+            last_filed = (base - datetime.timedelta(days=back)).isoformat()
+            with self.subTest(back=back, refile_days=refile_days):
+                self.assertIs(
+                    file_bugs._too_soon(last_filed, base.isoformat(), refile_days), expected)
+
+    def test_missing_last_filed_is_never_too_soon(self):
+        self.assertFalse(file_bugs._too_soon(None, today(), 1))
+        self.assertFalse(file_bugs._too_soon('', today(), 7))
+
+    def test_unparseable_dates_fall_back_to_string_equality(self):
+        self.assertTrue(file_bugs._too_soon('not-a-date', 'not-a-date', 1))
+        self.assertFalse(file_bugs._too_soon('not-a-date', 'today', 1))
+        self.assertFalse(file_bugs._too_soon('2026-09-29', 'not-a-date', 1))
+
+    def test_default_refile_days_is_the_old_same_day_guard(self):
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        write_item(root, 'B-1000', 'bug', 'CI red: gate: flaky', typed_lines=[
+            'severity: S2', 'found_in: ci', 'signature: gate: flaky', 'count: 1',
+            'last_filed: 2026-09-29',
+        ])
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+        info = {'title': 'CI red: gate: flaky', 'severity': 'S2', 'evidence': ['seen again'],
+                'runs': []}
+        # a CI-failure Bug filed yesterday still bumps today under the default refile_days of 1
+        self.assertEqual(
+            file_bugs._file_or_bump_bug(root, canonical, 'gate: flaky', info, '2026-09-30'),
+            'bumped')
+        rec = canonical['B-1000']
+        with open(rec['path'], encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read(), path=rec['relpath'])
+        self.assertEqual(meta['count'], 2)
+        self.assertEqual(meta['last_filed'], '2026-09-30')
+        self.assertEqual(meta['title'], 'CI red: gate: flaky')
+
+        # one filed today is still unchanged
+        write_item(root, 'B-1001', 'bug', 'CI red: gate: other', typed_lines=[
+            'severity: S2', 'found_in: ci', 'signature: gate: other', 'count: 1',
+            'last_filed: 2026-09-30',
+        ])
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+        self.assertEqual(
+            file_bugs._file_or_bump_bug(root, canonical, 'gate: other', info, '2026-09-30'),
+            'skipped')
+
+    def test_refile_days_seven_skips_through_the_week_then_bumps(self):
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        write_item(root, 'B-2000', 'bug', 'ci waste: red rate', typed_lines=[
+            'severity: S3', 'found_in: ci', 'signature: ci waste: red rate', 'count: 1',
+            'last_filed: 2026-09-24',
+        ])
+        info = {'title': 'ci waste: red rate', 'severity': 'S3',
+                'evidence': ['window over target'], 'runs': [], 'refile_days': 7}
+
+        # six days back (2026-09-24 -> 2026-09-30): still inside the window
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+        self.assertEqual(
+            file_bugs._file_or_bump_bug(root, canonical, 'ci waste: red rate', info,
+                                        '2026-09-30'),
+            'skipped')
+
+        # seven days back (2026-09-24 -> 2026-10-01): the window has passed
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+        outcome = file_bugs._file_or_bump_bug(root, canonical, 'ci waste: red rate', info,
+                                              '2026-10-01')
+        self.assertEqual(outcome, 'bumped')
+        rec = canonical['B-2000']
+        with open(rec['path'], encoding='utf-8') as f:
+            text = f.read()
+        meta, body = frontmatter.parse(text, path=rec['relpath'])
+        self.assertEqual(meta['count'], 2)
+        self.assertEqual(meta['last_filed'], '2026-10-01')
+        self.assertEqual(meta['title'], 'ci waste: red rate')
+        history = body.split('## History\n', 1)[1].split('\n## ', 1)[0]
+        history_lines = [l for l in history.splitlines() if l.strip()]
+        self.assertEqual(len(history_lines), 2)
+        self.assertIn('count 1 → 2', history_lines[-1])
 
 
 class FileBugsIntegrationTests(unittest.TestCase):
