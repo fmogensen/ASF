@@ -221,6 +221,11 @@ behind it waits for those runners meanwhile, and neither the head guard nor the 
 guard lets one past (2026-10-02: a batch needing 5 heavy waited ``heavy 1–3 free, needs 5`` for
 hours behind a steady stream of PR runs while a priority ``asf land`` request sat uncut).
 
+**Priority request.** A PR an ``asf land --priority`` request names (the merge queue's
+``land-requests.json``, :func:`land_priority`) is S1 for its own PR run: first in the start queue,
+served by the S1 relief, and never a relief candidate (``relief: exempt <branch> — asf land
+--priority request, never cancelled``).
+
 **Every hold is one line**: ``ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)``.
 
 **CI-config exemption.** A run whose PR changed a file under ``.github/workflows/**`` or
@@ -859,6 +864,8 @@ def priority(item_id, items=None, branch='', files=(), product=None, kind=None):
     sev = card.get('severity')
     if 'hotfix' in (branch or '').lower() or 'hotfix' in str(card.get('type') or '').lower():
         return S1, 'hotfix'
+    if product is not None and land_priority(product, branch):
+        return S1, LAND_PRIORITY
     if sev == 'S1':
         return S1, 'S1'
     if kind == 'trunk':
@@ -868,6 +875,25 @@ def priority(item_id, items=None, branch='', files=(), product=None, kind=None):
     if card.get('id'):
         return RANKED, record_rank(item_id, items)[1]
     return OTHER, 'other'
+
+
+#: the label of a start whose branch an ``asf land --priority`` request names (:func:`land_priority`)
+LAND_PRIORITY = 'asf land --priority'
+
+
+def land_priority(product, branch):
+    """True when an ``asf land --priority`` request (the merge queue's ``land-requests.json``)
+    names ``branch``: the operator asked that PR in first, so its own PR run goes at S1 — ahead in
+    the start queue and never a relief candidate (2026-10-05: S1 relief cancelled a priority
+    request's PR run three times). Off the state file only; never raises."""
+    if not branch or product is None or not getattr(product, 'name', None):
+        return False
+    try:
+        from asf import merge_queue
+        reqs = merge_queue.load_requests(env.state_dir(product.name))
+    except Exception:  # noqa: BLE001 — a priority read never breaks the queue
+        return False
+    return any(r.get('priority') and r.get('branch') == branch for r in reqs.values())
 
 
 def record_rank(item_id, items):
@@ -3899,7 +3925,9 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
             item = _item_of_run(branch, r.get('displayTitle'), items)
             prio, label = priority(item, items, branch, product=product)
             if prio == S1:
-                continue                        # an S1 or hotfix run is never cancelled
+                if label == LAND_PRIORITY:
+                    out(f'relief: exempt {branch} — {LAND_PRIORITY} request, never cancelled')
+                continue                        # an S1, hotfix or priority run is never cancelled
             if kind == 'pr' and first_pr_run(r, listed(wf)):
                 out(f"relief: exempt {branch} — its PR's first run on "
                     f"{str(r.get('headSha') or '?')[:9]}: held before its start, never cut")

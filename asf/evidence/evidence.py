@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -1155,6 +1156,7 @@ def merge_facts(product, path=None):
         except Exception:
             return out
     prefixes = branch_prefixes(product)
+    on_main = None
     for rs in lifecycle.runs(path).values():
         for run in rs:
             sha, branch = _merge_sha(run), run.get("branch") or ""
@@ -1164,6 +1166,11 @@ def merge_facts(product, path=None):
             if lifecycle.voided_run(path, run, sha):
                 continue  # `asf reset` voided this claim: the host's merge is not the item's
             lane = run.get("lane") if isinstance(run.get("lane"), dict) else {}
+            if _needs_tip(run, lane):
+                if on_main is None:
+                    on_main = _tip_on_main(product)
+                if not on_main(lane.get("head"), branch):
+                    continue  # the trunk's sha, not the branch's: no landing of this item
             # a run closed on verified trunk evidence (asf.workers.trunkclose) lands its item
             # whatever lane its branch was: the sha is the item's work, not a document's merge
             kind = None if run.get("trunk_closed") else lane_kind(branch, prefixes)
@@ -1178,6 +1185,38 @@ def merge_facts(product, path=None):
                     out["code"][item].update(trunk_closed=str(run["trunk_closed"]),
                                              trunk_arm=str(run.get("trunk_arm") or ""))
     return out
+
+
+def _needs_tip(run, lane):
+    """True when a run's merge fact names no merge of its own to trust: a lane record that says
+    the branch is ``on-trunk`` (its sha is the trunk tip at the time, not a merge of the branch),
+    or one with neither a PR nor a head behind it. Such a fact stands only when the branch's tip
+    is really on the trunk (:func:`_tip_on_main`) — a PR merged by the host (its ``pr`` and the
+    merge sha the host gave) and a run closed on verified trunk evidence stand as they are.
+    2026-10-05: a Task was closed on "merge 062ad27 of <its branch>", where 062ad27 was another
+    PR's merge and the branch tip was on no trunk commit."""
+    if not lane or run.get("trunk_closed"):
+        return False
+    return lane.get("method") == "on-trunk" or not (lane.get("pr") or lane.get("head"))
+
+
+def _tip_on_main(product):
+    """``(head, branch) -> bool``: is the branch's tip — the lane's ``head``, else the branch as
+    origin has it now — an ancestor of (or the) trunk tip. False when neither is known: a merge
+    fact with no tip behind it proves nothing."""
+    main = f"origin/{getattr(product, 'main', None) or 'main'}"
+    try:
+        reach = ancestry(product, [main])
+    except Exception:  # noqa: BLE001 — no repo: nothing can be shown on the trunk
+        return lambda head, branch: False
+
+    def check(head, branch):
+        tip = head
+        if not tip and branch:
+            tip = sh("git rev-parse --verify -q " + shlex.quote(f"origin/{branch}^{{commit}}"),
+                     product=product).strip()
+        return bool(tip) and reach(tip)
+    return check
 
 
 #: A revert's own message: ``git revert`` writes ``This reverts commit <sha>.`` into the body.
