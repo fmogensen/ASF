@@ -372,3 +372,82 @@ class SecretsTest(RegistryCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _check_clients():
+    import importlib.util
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    spec = importlib.util.spec_from_file_location(
+        'check_clients', os.path.join(root, 'tools', 'check_clients.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return root, mod
+
+
+class ConnectorLintTest(unittest.TestCase):
+    """tools/check_clients.py: each connector's executable only in its connector module."""
+
+    def tree(self, files):
+        _root, cc = _check_clients()
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__('shutil').rmtree(root, ignore_errors=True))
+        for rel, text in files.items():
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(text)
+        os.makedirs(os.path.join(root, 'tools'), exist_ok=True)
+        open(os.path.join(root, cc.BASELINE), 'w').close()
+        lines = []
+        return cc.check(root, out=lines.append), lines
+
+    def test_an_executable_outside_its_connector_fails(self):
+        for text, kind in (("subprocess.run(['launchctl', 'list'])\n", 'launchctl'),
+                           ("run(['systemctl', '--user', 'daemon-reload'])\n", 'systemctl'),
+                           ("subprocess.run(['claude', '-p'])\n", 'claude'),
+                           ("cli = shutil.which('claude')\n", 'claude'),
+                           ("DEFAULT_BINARY = 'claude'\n", 'claude')):
+            rc, lines = self.tree({'asf/elsewhere.py': text})
+            self.assertEqual(rc, 1, text)
+            self.assertIn(f'raw {kind} call site', lines[0])
+
+    def test_inside_its_connector_module_passes_and_pipx_is_allowed(self):
+        rc, _lines = self.tree({
+            'asf/connectors/launchd.py': "run(['launchctl', 'list'])\n",
+            'asf/connectors/systemd.py': "SYSTEMCTL = 'systemctl'\n",
+            'asf/connectors/claude_code.py': "DEFAULT_BINARY = 'claude'\n",
+            'asf/upgrade.py': "run(['pipx', 'list', '--json'])\n",
+            'asf/cuxlock.py': "any('claude' in n for n in names)\n"})
+        self.assertEqual(rc, 0)
+
+    def test_the_tree_holds_every_connector_executable_in_its_module(self):
+        root, cc = _check_clients()
+        counts = cc.count_tree(root)
+        stray = {k: n for k, n in counts.items() if k[0] in ('claude', 'launchctl', 'systemctl')}
+        self.assertEqual(stray, {})
+
+
+class DoctorRowTest(RegistryCase):
+    def test_one_row_lists_the_active_connector_per_kind(self):
+        from asf import doctor
+        rows = doctor.check_connectors({'connectors': {'forge': 'fake'},
+                                        'worker_pool': {'quota_command': 'q {account}'}})
+        self.assertEqual(len(rows), 1)
+        required, ok, detail = rows[0]
+        self.assertTrue(ok)
+        for kind in connectors.KINDS:
+            self.assertIn(kind, detail)
+        self.assertIn('forge fake (connectors.forge)', detail)
+        self.assertIn('quota command (worker_pool.quota_command)', detail)
+        self.assertIn('ci github-actions', detail)
+
+    def test_an_unresolvable_connector_is_red(self):
+        from asf import doctor
+        rows = doctor.check_connectors({'connectors': {'ci': 'nowhere'}})
+        self.assertEqual([(r, ok) for r, ok, _d in rows[1:]], [(True, False)])
+        self.assertIn('nowhere', rows[1][2])
+
+    def test_the_doctor_table_carries_the_row(self):
+        import inspect
+        from asf import doctor
+        self.assertIn("('connectors', required, ok, detail)", inspect.getsource(doctor))

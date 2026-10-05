@@ -1,9 +1,11 @@
 # Connectors (planned)
 
-> **Not yet available.** Nothing on this page is in the current release: there is no
-> `connectors:` key, no `asf connect` and no `asf connectors` command. This page describes the
-> design recorded in the factory's backlog so you can plan for it. Until it lands, use what
-> exists today, listed at the end.
+> **Not yet available.** The service catalogue on this page is not in the current release: there
+> is no `asf connect` and no `asf connectors` command. This page describes the design recorded in
+> the factory's backlog so you can plan for it. Until it lands, use what exists today, listed at
+> the end. What *is* available is the `connectors:` block that picks the implementation of each
+> external concern (forge, CI, agent runtime, scheduler, quota, secrets). See
+> [Writing a connector](writing-a-connector.md).
 
 ## The problem it solves
 

@@ -748,6 +748,19 @@ def check_plan_headings(product):
     return rows or [(True, f'{n} plan(s): every Task-like heading parses')]
 
 
+def check_connectors(cfg):
+    """[(required, ok, detail)] — the ``connectors`` row: the active implementation of each
+    connector kind (:func:`asf.connectors.active`) and where that choice came from, on one line;
+    one RED row per configured kind whose implementation cannot be found (an unknown name, a
+    command form without its command, a third-party package that fails to import)."""
+    from asf import connectors
+    rows = [(False, True, ', '.join(f'{kind} {name}' + ('' if source == 'default' else f' ({source})')
+                                    for kind, name, source in connectors.active(cfg)))]
+    for _kind, message in connectors.problems(cfg):
+        rows.append((True, False, message))
+    return rows
+
+
 def check_config_keys(cfg):
     """[('warn', detail)] — the ``config keys`` row: the keys of ``config.yaml`` no code reads
     (:func:`asf.config_keys.unknown_keys`), one row naming them all; none when there are none.
@@ -1359,6 +1372,8 @@ def run(product_name):
         rows.append(('product', False, ok, detail))
     for ok, detail in check_plan_headings(product):
         rows.append(('plans', False, ok, detail))
+    for required, ok, detail in check_connectors(cfg):
+        rows.append(('connectors', required, ok, detail))
     for level, detail in check_config_keys(cfg):
         rows.append(('config keys', False, level, detail))
     net = check_network(cfg)
