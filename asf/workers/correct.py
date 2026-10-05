@@ -20,6 +20,7 @@ reference fix instead of re-deriving it; that PR is a reference, never landed.
 import datetime
 import os
 import re
+import subprocess
 
 from asf import env
 from asf.workers import lifecycle
@@ -177,7 +178,12 @@ def file_history(product, item, line, message, step='correct'):
                                           only=[rel])
     if findings:
         return 'refused: ' + '; '.join(f'{f.invariant}: {f.message}' for f in findings)
-    if not publish.publish(root, card, message):
+    try:
+        pushed = publish.publish(root, card, message)
+    except (subprocess.CalledProcessError, publish.ConcurrentCommit, OSError) as e:
+        # never a traceback with the card edited and nothing committed: say what is left
+        return f'filed in {rel}, but the record commit failed ({str(e)[:160]}) — it is uncommitted'
+    if not pushed:
         return 'filed, but the record push was refused'
     return ''
 

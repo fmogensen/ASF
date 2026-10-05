@@ -212,6 +212,11 @@ DEFAULT_LANE_REVIEW = {'docs': 'none', 'code': 'required'}
 #: ``lane: {stale_after: …}``: an open lane state (not MERGED/STALE/REAPED) whose head has not
 #: moved and that no session holds for longer than this is STALE (T12), ``<n>s|m|h|d``.
 DEFAULT_LANE_STALE_AFTER = '2d'
+#: ``lane: {shared_path_aging: …}``: a branch held WAITING on a shared path (one branch per tick
+#: takes a ``shared_paths``/``shared_writes`` file) for at least this long goes first among the
+#: branches touching one, oldest wait first — a green code PR never starves behind a stream of
+#: document PRs on the same shared file. ``<n>s|m|h|d``; ``0s`` is a plain first-come queue.
+DEFAULT_LANE_SHARED_PATH_AGING = '30m'
 #: A shell command run in every fresh worker worktree before its session starts (dependency
 #: install, codegen). None → nothing runs.
 DEFAULT_WORKTREE_SETUP = None
@@ -234,6 +239,16 @@ MERGE_MANUAL = 'manual'
 MERGE_QUEUE = 'queue'
 MERGE_MODES = (MERGE_AUTO, MERGE_MANUAL, MERGE_QUEUE)
 DEFAULT_MERGE = MERGE_MANUAL
+#: ``conventions.merge`` as a map — ``{mode: auto|manual|queue, factory_only: bool, bot_paths:
+#: [globs]}`` — adds the opt-in factory-only rule (:mod:`asf.factory_only`): with
+#: ``factory_only: true`` a CI check refuses a PR into the trunk whose head branch is under none
+#: of the product's factory prefixes (``branch_prefixes``, legacy ones too). The escapes: a
+#: release tag, and a PR that touches nothing but ``bot_paths`` (default: the changelog the
+#: release bot writes). Off by default; ``merge: auto`` (a word) is ``{mode: auto}``.
+DEFAULT_MERGE_FACTORY_ONLY = False
+DEFAULT_MERGE_BOT_PATHS = ('CHANGELOG.md',)
+#: The keys of the ``merge:`` map.
+MERGE_MAP_KEYS = ('mode', 'factory_only', 'bot_paths')
 #: ``conventions.merge_queue: {ref_prefix, batch_size, inflight, timeout_min, stuck_min,
 #: start_kind, precut_check, precut_check_timeout_s}`` — the queue's shape under ``merge: queue``
 #: (:data:`asf.merge_queue.DEFAULTS`); ``ref_prefix`` is what the product's CI triggers its full
@@ -332,7 +347,8 @@ DEFAULT_DELIVERY = DELIVERY_TASK
 DEFAULT_SLICE_MAX_TASKS = 6
 
 #: The keys of the yaml's ``lane:`` block and the field each one is.
-LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
+LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after',
+             'shared_path_aging': 'lane_shared_path_aging'}
 
 #: The conventions whose value is a map. A value of any other shape — a string the reader kept,
 #: a scalar written by hand — is read as the default (:meth:`Conventions.map_of`) so no reader
@@ -462,6 +478,13 @@ def forbidden_patterns():
         suffix = r'\b' if value[-1].isalnum() or value[-1] == '_' else ''
         patterns.append("['\"]" + re.escape(value) + suffix)
     return patterns
+
+
+def _truthy(value):
+    """A yaml boolean, or its usual spellings as a string (``true``/``yes``/``on``/``1``)."""
+    if isinstance(value, str):
+        return value.strip().lower() in ('true', 'yes', 'on', '1')
+    return bool(value)
 
 
 def duration_seconds(value):
@@ -659,10 +682,10 @@ def validate_mapping(data):
     if lane is None:
         return problems
     if not isinstance(lane, dict):
-        return problems + [('lane', f'must be a map (review, stale_after), not {lane!r}')]
+        return problems + [('lane', f'must be a map ({", ".join(LANE_KEYS)}), not {lane!r}')]
     for key in lane:
         if key not in LANE_KEYS:
-            problems.append((f'lane.{key}', 'is not a lane key (review, stale_after)'))
+            problems.append((f'lane.{key}', f'is not a lane key ({", ".join(LANE_KEYS)})'))
     review = lane.get('review')
     if review is not None:
         if not isinstance(review, dict):
@@ -682,6 +705,13 @@ def validate_mapping(data):
                 problems.append(('lane.stale_after', f'must be longer than zero, not {stale!r}'))
         except ValueError:
             problems.append(('lane.stale_after', f'must be a duration <n>s|m|h|d, not {stale!r}'))
+    aging = lane.get('shared_path_aging')
+    if aging is not None:
+        try:
+            duration_seconds(aging)
+        except ValueError:
+            problems.append(('lane.shared_path_aging',
+                             f'must be a duration <n>s|m|h|d, not {aging!r}'))
     return problems
 
 
@@ -792,6 +822,8 @@ class Conventions:
     lane_review: dict = field(default_factory=lambda: dict(DEFAULT_LANE_REVIEW))
     #: ``lane.stale_after``: ``<n>s|m|h|d`` (:data:`DEFAULT_LANE_STALE_AFTER`).
     lane_stale_after: str = DEFAULT_LANE_STALE_AFTER
+    #: ``lane.shared_path_aging``: ``<n>s|m|h|d`` (:data:`DEFAULT_LANE_SHARED_PATH_AGING`).
+    lane_shared_path_aging: str = DEFAULT_LANE_SHARED_PATH_AGING
     #: The command run in every fresh worker worktree (:data:`DEFAULT_WORKTREE_SETUP`).
     worktree_setup: str = DEFAULT_WORKTREE_SETUP
     #: The command a code brief must run and see pass before any push
@@ -800,6 +832,12 @@ class Conventions:
     #: ``merge``: ``auto`` | ``manual`` (:data:`DEFAULT_MERGE`); any other value is a red doctor
     #: finding and reads as the default.
     merge: str = DEFAULT_MERGE
+    #: ``merge.factory_only`` (:data:`DEFAULT_MERGE_FACTORY_ONLY`): the CI check of
+    #: :mod:`asf.factory_only` refuses a non-factory PR into the trunk.
+    merge_factory_only: bool = DEFAULT_MERGE_FACTORY_ONLY
+    #: ``merge.bot_paths`` (:data:`DEFAULT_MERGE_BOT_PATHS`): the paths a PR may touch alone
+    #: and pass that check whatever its branch.
+    merge_bot_paths: list = field(default_factory=lambda: list(DEFAULT_MERGE_BOT_PATHS))
     #: ``delivery``: ``task`` | ``feature`` (:data:`DEFAULT_DELIVERY`) — the unit a Feature is
     #: built and landed in; any other value is a red doctor finding and reads as the default.
     delivery: str = DEFAULT_DELIVERY
@@ -839,6 +877,19 @@ class Conventions:
             if value is not None and any(str(v).strip().lower() not in words for v in values):
                 misshapen[key] = value
         merge = data.get('merge')
+        if isinstance(merge, dict):  # ``merge: {mode, factory_only, bot_paths}``
+            rest = {k: v for k, v in merge.items() if k not in MERGE_MAP_KEYS}
+            if 'factory_only' in merge:
+                kwargs['merge_factory_only'] = _truthy(merge['factory_only'])
+            if isinstance(merge.get('bot_paths'), list):
+                kwargs['merge_bot_paths'] = [str(p) for p in merge['bot_paths']]
+            if rest or not isinstance(merge.get('bot_paths', []), list):
+                misshapen['merge'] = merge
+            merge = merge.get('mode')
+            if merge is None:
+                data.pop('merge')
+            else:
+                data['merge'] = merge
         if merge is not None and str(merge).strip().lower() not in MERGE_MODES:
             misshapen['merge'] = data.pop('merge')
         elif merge is not None:
@@ -872,7 +923,7 @@ class Conventions:
             kwargs['branch_retention'] = {**DEFAULT_BRANCH_RETENTION,
                                           **{k: v for k, v in retention.items() if v is not None}}
         lane = data.pop('lane', None)
-        if isinstance(lane, dict):  # ``lane: {review, stale_after}`` → lane_review/lane_stale_after
+        if isinstance(lane, dict):  # ``lane: {review, stale_after, …}`` → the lane_* fields
             rest = {}
             for key, value in lane.items():
                 name = LANE_KEYS.get(key)
@@ -935,6 +986,13 @@ class Conventions:
     def lane_stale_after_s(self):
         """``lane.stale_after`` in seconds."""
         return duration_seconds(self.lane_stale_after)
+
+    def lane_shared_path_aging_s(self):
+        """``lane.shared_path_aging`` in seconds; a malformed value is the default."""
+        try:
+            return duration_seconds(self.lane_shared_path_aging)
+        except ValueError:
+            return duration_seconds(DEFAULT_LANE_SHARED_PATH_AGING)
 
     def merge_auto(self):
         """True under ``merge: auto`` or ``queue`` — the lane merges a green, reviewed PR

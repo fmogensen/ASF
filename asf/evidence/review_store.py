@@ -139,6 +139,19 @@ def prefer(stored, branch_round):
 
 # ---- the writer's side: filing a finished session's review -------------------------------------
 
+class NotACheckout(ValueError):
+    """The worktree a review is filed from is no git checkout of its own: nothing it holds can
+    be read against a head, so the filing is refused out loud, never an empty ``[]``."""
+
+
+def is_checkout(wt):
+    """True when ``wt`` is the top of a git checkout — not a plain directory, and not a
+    directory inside some other checkout (whose HEAD would be read as the worktree's)."""
+    p = _git(wt, 'rev-parse', '--show-toplevel')
+    return p.returncode == 0 and bool(p.stdout.strip()) \
+        and os.path.realpath(p.stdout.strip()) == os.path.realpath(wt)
+
+
 def _git(wt, *args):
     return subprocess.run(['git', '-C', wt, *args], capture_output=True, text=True, timeout=120)
 
@@ -164,9 +177,17 @@ def take(store, conv, wt, branch, item, remote_sha=''):
       reviews directory — a session that committed its review out of habit — are filed under
       ``remote_sha`` (the code they sit on) and dropped (``git reset --keep``), never pushed.
       A commit touching anything else leaves the commits alone: that is work, not a review.
+
+    A ``wt`` that is a directory but no git checkout raises :class:`NotACheckout` (a
+    ``ValueError``): the health pass logs ``review not filed: …``, never a silent nothing.
     """
     if not store or not wt or not os.path.isdir(wt) or not branch or not item:
         return []
+    if not is_checkout(wt):
+        # a leftover directory with no checkout in it (a product's T-0091): the review the
+        # session wrote cannot be bound to a head — say so, the run is not "no review"
+        raise NotACheckout(f'{wt} is not a git checkout: the review of {item} on {branch} '
+                           f'cannot be filed from it')
     slug = str(item).lower()
     rdir = _reviews_dir(conv) + '/'
     filed = []

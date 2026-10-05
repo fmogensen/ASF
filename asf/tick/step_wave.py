@@ -108,7 +108,25 @@ def occupancy(product):
     lane record naming a PR the evidence pass saw merged or closed held over by nothing
     (:func:`asf.workers.lifecycle.ended_prs`)."""
     path = pool_mod.sessions_path(product)
-    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path)))
+    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path)),
+                               on_origin=lambda branches: on_origin(product, branches))
+
+
+def on_origin(product, branches):
+    """The ``branches`` origin has a head for — one ``git ls-remote --heads`` for exactly
+    those refs — or None when it cannot be asked (no repo, a git error): unknown is never
+    "not pushed"."""
+    from asf import gitops
+    repo = getattr(product, 'repo_dir', None)
+    if not branches:
+        return set()
+    if not repo or not os.path.isdir(repo):
+        return None
+    p = gitops.git(['ls-remote', '--heads', 'origin', *[gitops.head_ref(b) for b in branches]],
+                   repo, timeout=30)
+    if not p.ok:
+        return None
+    return {b for b in branches if gitops.head_sha(p.stdout, b)}
 
 
 def corrections(product):

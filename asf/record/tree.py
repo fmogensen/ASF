@@ -20,12 +20,12 @@ def has_head(repo):
     return _run_git(repo, ['rev-parse', '--verify', '-q', 'HEAD']).returncode == 0
 
 
-def head_index(repo, index_file):
-    """Write ``HEAD``'s tree into the scratch index ``index_file`` (an empty one when HEAD is
-    unborn). Returns the ``git_env`` that points git at it."""
+def head_index(repo, index_file, rev=None):
+    """Write ``HEAD``'s tree (``rev``'s, when given) into the scratch index ``index_file`` (an
+    empty one when HEAD is unborn). Returns the ``git_env`` that points git at it."""
     git_env = {'GIT_INDEX_FILE': index_file}
-    if has_head(repo):
-        _run_git(repo, ['read-tree', 'HEAD'], git_env=git_env).check_returncode()
+    if rev or has_head(repo):
+        _run_git(repo, ['read-tree', rev or 'HEAD'], git_env=git_env).check_returncode()
     else:
         _run_git(repo, ['read-tree', '--empty'], git_env=git_env).check_returncode()
     return git_env

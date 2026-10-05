@@ -948,6 +948,16 @@ def landed(run):
     return facts_landing.shadow_run(run, old)
 
 
+def lands_nothing(run):
+    """True for a run whose kind never lands through the lane (:data:`asf.workers.cloud.
+    LOCAL_KINDS`: groom, groom-clerk, close — they write the record, not a branch to merge). Such
+    a run may carry an ``item`` (a groom row names the first card it files), and it never puts
+    that item in a wait to land: a product's T-0654 read "pushed, waiting to land" off a finished
+    groom run, with no code branch, PR or session ever made for it."""
+    from asf.workers.cloud import LOCAL_KINDS
+    return (run or {}).get('kind') in LOCAL_KINDS
+
+
 def eligible(run):
     """What harvest may gate: finished (hence pushed), not landed, not handed to the PR lane."""
     return finished(run) and not landed(run) and run.get('harvest') != 'pr'
@@ -1152,7 +1162,8 @@ def awaiting_harvest(path, alive=None, result=None):
     pid is gone, but its session is done, not missing."""
     out = set()
     for run in by_branch(path).values():
-        if not run.get('item') or before_reset(path, run) or pending_correction(run, path):
+        if not run.get('item') or before_reset(path, run) or pending_correction(run, path) \
+                or lands_nothing(run):
             continue
         if eligible(run) or finished_unrecorded(run, alive, result):
             out.add(run['item'])
@@ -1174,7 +1185,7 @@ def unlanded(path, alive=None, result=None):
     for run in by_branch(path).values():
         item, kind = run.get('item'), run.get('kind')
         if not item or not kind or landed(run) or before_reset(path, run) \
-                or pending_correction(run, path):
+                or pending_correction(run, path) or lands_nothing(run):
             continue
         if run.get('harvest') == 'pr':
             why = PR_WAIT
@@ -1292,7 +1303,7 @@ def pr_ended(rec, ended):
     return 'CLOSED' if None in heads or heads[0] == heads[1] else None
 
 
-def occupancy(path, lanes=None, alive=None, result=None, ended=None):
+def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=None):
     """The one answer to "is this item busy?" (the contract; W3 implements it). The feeder reads
     this and nothing else.
 
@@ -1319,15 +1330,24 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
     ``ended`` (:func:`ended_prs`): PRs the host says are merged or closed — a lane record still
     naming one holds nothing and asks for nothing, and a correction on its branch is dropped.
     A merged PR's item counts as ``landed`` (``{item: sha}``), and ``landed_on`` names the
-    branch that landing was recorded on (:func:`asf.workers.landing.verify_landings`)."""
+    branch that landing was recorded on (:func:`asf.workers.landing.verify_landings`).
+    A correction on a dead branch moves to the item's open code branch (:func:`open_code_branch`)
+    and carries ``moved_from``. ``back`` (``{item: {branch, pr, reason}}``): a branch the lane
+    sent BACK with no correction pending on it — a label, never a launch.
+
+    ``on_origin``: ``callable(branches) -> set`` of those branches origin has a head for, or
+    None when it cannot say. A branch that is only "finished, pushed" by its run line (no lane
+    record, no PR) waits to land only when origin has it: a run that names an item but never
+    pushed its branch (a product's T-0654: a groom run naming the Task it filed) leaves the item
+    free for its coder, never a PUSHED → LAND row that launches nothing. None: not checked."""
     from asf.harvest import lane as lane_mod  # the lane's states, no cycle at import
     by = by_branch(path)
     live_items = {s['item']: f"session {s['job']} running" for s in inflight(path, alive)
                   if s.get('item')}
     out = {'busy': dict(live_items), 'waiting_landing': {}, 'corrections': corrections(path),
            'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}, 'landed': {},
-           'landed_on': {}, 'parks': parks(path)}
-    dead_branches = set()
+           'landed_on': {}, 'parks': parks(path), 'back': {}}
+    dead_branches, waits = set(), []
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
         rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
@@ -1350,6 +1370,11 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
         why = None
         if rec and rec.get('state'):
             state = rec['state']
+            if state == lane_mod.BACK and not landed(run) and not pending_correction(run, path):
+                # sent back, and no correction on it waits for a session: the feeder says so,
+                # never "no run holds it" (:func:`asf.feeder.rows.pushed_rows`)
+                out['back'][item] = {'branch': branch, 'pr': rec.get('pr'),
+                                     'reason': rec.get('reason') or ''}
             if state not in lane_mod.BUSY_STATES or landed(run) and state != lane_mod.MERGING:
                 continue
             # a correction written on a landing wait is the lane's BACK already (T9c): the
@@ -1365,7 +1390,7 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
             else:
                 out['landing'][item] = {'branch': branch, 'state': state, 'pr': rec.get('pr'),
                                         'why': why}
-        elif landed(run) or pending_correction(run, path):
+        elif landed(run) or pending_correction(run, path) or lands_nothing(run):
             continue
         elif run.get('harvest') == 'pr':
             why = PR_WAIT
@@ -1375,15 +1400,68 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
             why = FINISHED_WAIT
         if not why:
             continue
+        waits.append((item, branch, kind, why))
+    unpushed = set()
+    if on_origin is not None:
+        claimed = sorted({b for _i, b, _k, why in waits if why == PUSHED_WAIT})
+        present = on_origin(claimed) if claimed else set()
+        if present is not None:
+            unpushed = set(claimed) - set(present)
+    for item, branch, kind, why in waits:
+        if branch in unpushed:
+            continue
         out['waiting_landing'].setdefault(item, why)
         out['branches'][branch] = why
         if kind:
             out['docs'].setdefault(item, {})[kind] = why
     # a park outlives its PR: a closed PR left the row that looped on it (a product's
-    # delivery-code-t-0042, its PR closed, launched 69 times) — only an unpark or a release lifts it
-    out['corrections'] = {i: c for i, c in out['corrections'].items()
-                          if c.get('branch') not in dead_branches or c.get('parked')}
+    # delivery-code-t-0042, its PR closed, launched 69 times) — only an unpark or a release lifts it.
+    # Any other correction on a dead branch moves to the item's open code branch when it has one
+    # (an operator ruling written on a plan branch whose PR then merged was dropped, and the
+    # Task's own branch, sent back, waited with no row: a product's T-0488, T-0353); with none
+    # open, it is dropped — no session is relaunched on a PR that is over
+    kept = {}
+    for i, c in out['corrections'].items():
+        if c.get('branch') not in dead_branches or c.get('parked'):
+            kept[i] = c
+            continue
+        moved = open_code_branch(path, i, by, dead_branches, lanes, lane_mod)
+        if moved:
+            kept[i] = dict(c, branch=moved, moved_from=c.get('branch'))
+    out['corrections'] = kept
     return out
+
+
+#: run kinds that write a document or the record, never the item's code: a branch any of them
+#: ran on is not the item's code branch (:func:`open_code_branch`)
+NON_CODE_KINDS = ('spec', 'spec-amend', 'plan', 'replan', 'reshape', 'groom', 'groom-clerk')
+
+
+def open_code_branch(path, item, by=None, dead=(), lanes=None, lane_mod=None):
+    """The branch of ``item``'s code still open — the latest run on it is the item's, it has not
+    landed, its lane record is not over (MERGED, STALE, REAPED) and its PR is not one of ``dead``'s
+    branches — and no run on it wrote a document or the record (:data:`NON_CODE_KINDS`). The
+    newest such branch by its run's start, or None."""
+    if lane_mod is None:
+        from asf.harvest import lane as lane_mod
+    by = by_branch(path) if by is None else by
+    kinds = {}
+    for rs in runs(path).values():
+        for r in rs:
+            if r.get('branch'):
+                kinds.setdefault(r['branch'], set()).add(r.get('kind'))
+    best = None
+    for branch, run in by.items():
+        if run.get('item') != item or branch in dead or landed(run) or before_reset(path, run):
+            continue
+        if kinds.get(branch, set()) & set(NON_CODE_KINDS):
+            continue
+        rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
+        if (rec or {}).get('state') in lane_mod.TERMINAL_STATES:
+            continue
+        if best is None or (run.get('started') or '') > (best[1].get('started') or ''):
+            best = (branch, run)
+    return best[0] if best else None
 
 
 #: A card in one of these states has no work left for a session (the feeder's ``DONE_STATES``).
