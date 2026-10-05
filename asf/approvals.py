@@ -197,24 +197,29 @@ def matrix(product):
 
 
 def signals(product):
-    """``{class: {'paths': [...], 'commands': [...]}}`` from ``product.approval_signals``.
+    """``{class: {'paths': [...], 'commands': [...], 'areas': [...]}}`` from
+    ``product.approval_signals``.
 
     Raises :class:`env.ConfigError` for a class not in the catalogue, or a key other than
-    ``paths``/``commands``. A class the product does not name is simply absent — its built-ins
-    are unaffected (signals only ever add)."""
+    ``paths``/``commands``/``areas``. A class the product does not name is simply absent — its
+    built-ins are unaffected (signals only ever add)."""
     raw = dict(getattr(product, 'approval_signals', None) or {})
     out = {}
     for cls, spec in raw.items():
         if cls not in CLASSES_BY_NAME:
             raise env.ConfigError(f'approval_signals: unknown class {cls!r}')
         spec = spec or {}
-        bad_keys = sorted(set(spec) - {'paths', 'commands'}) if isinstance(spec, dict) else None
+        bad_keys = (
+            sorted(set(spec) - {'paths', 'commands', 'areas'}) if isinstance(spec, dict) else None
+        )
         if not isinstance(spec, dict) or bad_keys:
             raise env.ConfigError(
-                f"approval_signals.{cls}: keys must be 'paths'/'commands', not {bad_keys!r}")
+                f"approval_signals.{cls}: keys must be 'paths'/'commands'/'areas', not"
+                f' {bad_keys!r}')
         out[cls] = {
             'paths': list(spec.get('paths') or []),
             'commands': list(spec.get('commands') or []),
+            'areas': list(spec.get('areas') or []),
         }
     return out
 
@@ -650,8 +655,37 @@ def path_class(product, relpath):
     return None
 
 
+def area_class(product, area):
+    """``(class, level)`` of the first class in catalogue order whose declared
+    ``approval_signals.<class>.areas`` matches ``area`` (case-insensitive fnmatch) and whose level
+    is not ``auto``, or ``None``. The two classes the groom itself reads (``decide_feature``,
+    ``decide_bug``) are skipped: an area declared under them would bar the card from the policy
+    those classes switch on (D5)."""
+    area = (area or '').strip().lower()
+    if not area:
+        return None
+    try:
+        sig = signals(product)
+    except env.ConfigError:
+        sig = {}
+    for c in CLASSES:
+        if c.name in GROOM_CLASSES:
+            continue
+        globs = sig.get(c.name, {}).get('areas', [])
+        if any(fnmatch.fnmatch(area, g.strip().lower()) for g in globs):
+            level = level_of(product, c.name)
+            if level != 'auto':
+                return c.name, level
+    return None
+
+
 #: The classes decided at merge time — read by the harvest only.
 MERGE_CLASSES = tuple(c.name for c in CLASSES if c.read_by == ('harvest',))
+
+#: The classes the groom itself reads — `decide_feature`, `decide_bug` — skipped by
+#: :func:`area_class` (D5): an area declared under one would bar the very cards the class
+#: switches on.
+GROOM_CLASSES = tuple(c.name for c in CLASSES if c.read_by == ('groom',))
 
 
 def merge_auto(product):
@@ -1408,6 +1442,7 @@ def recognisers(product):
         spec = sig.get(c.name) or {}
         words += [f'signal path: {p}' for p in spec.get('paths') or []]
         words += [f'signal command: {p}' for p in spec.get('commands') or []]
+        words += [f'signal area: {a}' for a in spec.get('areas') or []]
         out[c.name] = words
     return out
 
