@@ -243,6 +243,9 @@ class Row:
     open_questions: tuple = ()
     #: a CONSOLE → AMEND row only: the ``writes:`` entry that reaches the amendable set
     amend: str = ''
+    #: a FIX → CORRECT row an operator ruling raised (``asf correct`` at the cap): one code
+    #: session carries it out — the attempt cap never turns it into an adjudication
+    ruling: bool = False
 
     @property
     def launches(self):
@@ -900,6 +903,17 @@ def correction_rows(items, product, busy, corrections):
         amend = console_amend_row(product, iid, fid, item.get('writes'), branch, 'correct', tier)
         if amend:
             out.append(amend)
+            continue
+        if c.get('operator_ruling'):
+            # ``asf correct`` at the cap: ONE code session on the Task's own branch carries the
+            # ruling out — never an adjudication, never a reshape on a spec or plan branch
+            if _conventions(product).branch_kind(branch) in ('spec', 'plan'):
+                branch = branch_for(product, 'fix' if kind == 'fix' else 'code', iid)
+            out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
+                           action=LAUNCH, brief_kind='correct', branch=branch,
+                           correction=c['text'], ruling=True,
+                           reason="operator ruling at the round cap: one code session "
+                                  "carries it out"))
             continue
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
         if doc in ('spec', 'plan') and same < CORRECTION_ROUNDS:  # a document the gate refused
@@ -2001,7 +2015,7 @@ def _capped(row, attempts, limit, product, adjudicated=None):
     'same_card'}}``, :func:`asf.tick.step_wave.adjudications`) says an adjudicate session already
     ended on this same card: then a non-launching ``PARKED`` row with the reason."""
     n = attempts.get(row.item_id, 0)
-    if n < limit:
+    if n < limit or row.ruling:  # an operator ruling is carried out, not adjudicated again
         return row
     if n == limit:
         return dataclasses.replace(

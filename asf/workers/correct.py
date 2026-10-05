@@ -5,12 +5,11 @@ The correction is written the way the harvest writes its own: a pending correcti
 newest run (kind :data:`OPERATOR`), so the feeder turns it into the item's FIX → CORRECT row and
 the brief quotes the text under the usual correction head. Nothing here bypasses a rule:
 
-* the round counts (:data:`asf.workers.lifecycle.ROUND_CAP`): an item that has used its rounds
-  goes to adjudication, not to another correction — and the instruction goes with it as an
+* the round counts (:data:`asf.workers.lifecycle.ROUND_CAP`): at the cap the instruction is an
   operator ruling (:func:`attach_ruling`): filed on the card's ``## History`` as an
   ``adjudicate (operator)`` line, so it binds every later review (:mod:`asf.evidence.rulings`),
-  and written as the held run's correction at the cap, so the feeder's STALEMATE → ADJUDICATE
-  row carries it and the adjudicate brief quotes it;
+  and written as the correction of the run on the Task's own code branch, so the feeder gives
+  it ONE code session there with the ruling as its brief — ahead of any CI wait;
 * the row is a ``correct`` row, so the one-push rule (:mod:`asf.workers.pushlog`) and the
   relaunch cap (:mod:`asf.workers.relaunch`) apply to its session as to any other;
 * an item parked by hand, or with a session still running, is refused — ``asf unpark`` first.
@@ -96,7 +95,7 @@ def cmd_correct(args, fetch=None, alive=None):
             print(f'asf correct: {item} has used its {lifecycle.ROUND_CAP} correction rounds — '
                   f'at the cap the instruction is an operator ruling; give it without --from-pr')
             return 1
-        return attach_ruling(product, item, run, why)
+        return attach_ruling(product, item, ruling_run(product, item, runs), why)
     number = getattr(args, 'from_pr', None)
     base, shas = (None, [])
     if number:
@@ -115,11 +114,37 @@ def cmd_correct(args, fetch=None, alive=None):
     return 0
 
 
-#: The head an operator ruling's correction text opens with: the adjudicate brief quotes it.
+#: The head an operator ruling's correction text opens with: the correct brief quotes it.
 RULING_HEAD = ('OPERATOR RULING (asf correct, {at}) — binding. The operator has ruled on this item '
                'at the correction-round cap; it is filed on the card\'s History as '
-               '`adjudicate (operator)`. Rule every open finding by it, carry it out on {branch}, '
-               'and give it as your report\'s `ruling:`:\n\n')
+               '`adjudicate (operator)`. Carry it out in code on {branch} — this is no '
+               'adjudication and no reshape: make the change the ruling names, run the pre-push '
+               'check, push once, and give the ruling as your report\'s `ruling:`:\n\n')
+
+#: Branch kinds that are never a Task's own code branch: a ruling never lands on them.
+DOC_BRANCH_KINDS = ('spec', 'plan')
+
+
+def own_branch(product, item):
+    """The branch ``item``'s code is cut on when no run of it names one: ``fix/`` for a Bug,
+    the code prefix otherwise."""
+    conv = product.conventions
+    return conv.branch('fix' if item.startswith('B-') else 'code', item)
+
+
+def ruling_run(product, item, runs):
+    """The run an operator ruling is written on: the newest run on the item's own code branch —
+    never an adjudicate run, never a spec or plan branch (a product's T-0614: the newest run was
+    the item's adjudication on a plan branch, and the ruling, which asked for code, was carried
+    out there as a reshape). When no run is on a code branch, the newest run carries it with
+    ``branch`` naming the item's own (:func:`own_branch`)."""
+    conv = product.conventions
+    code = [r for r in runs if r.get('kind') != 'adjudicate'
+            and conv.branch_kind(r.get('branch') or '') not in DOC_BRANCH_KINDS]
+    if code:
+        return max(code, key=lambda r: r.get('started') or '')
+    newest = max(runs, key=lambda r: r.get('started') or '')
+    return dict(newest, branch=own_branch(product, item), _foreign=True)
 
 
 def file_ruling(product, item, text, stamp):
@@ -159,17 +184,22 @@ def file_history(product, item, line, message, step='correct'):
 
 def attach_ruling(product, item, run, why):
     """At the round cap: ``why`` becomes an operator ruling — filed on the card's History
-    (:func:`file_ruling`) and written as ``run``'s correction at the cap (``same`` =
-    :data:`~asf.workers.lifecycle.ROUND_CAP`, ``at_cap``), so the feeder's ADJUDICATE row takes
-    it with its text. No round is spent."""
+    (:func:`file_ruling`) and written as ``run``'s correction (``operator_ruling``), which the
+    feeder turns into ONE code session on the Task's own branch (a FIX → CORRECT row, the ruling
+    as its brief) — never an adjudication — and which turns a landing wait (CI included) BACK
+    on the next tick (:func:`asf.harvest.lane.correction_turns_back`). It is not marked
+    ``at_cap``: that is health's hold, which goes to adjudication. No round is spent."""
     now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     filed = file_ruling(product, item, why, now[:16].replace('T', ' '))
     text = RULING_HEAD.format(at=now, branch=run['branch']) + why
     corr = {'kind': OPERATOR, 'text': text, 'at': now, 'same': lifecycle.ROUND_CAP,
-            'at_cap': True, 'operator_ruling': True}
+            'operator_ruling': True}
+    if run.get('_foreign'):
+        corr['branch'] = run['branch']  # no run on a code branch: the row names the Task's own
     pool_mod.update_session(product, run['job'], correction=corr)
-    print(f'{item} has used its {lifecycle.ROUND_CAP} correction rounds: the instruction goes to '
-          f'its adjudication as an operator ruling (job {run["job"]}, {run["branch"]})'
+    print(f'{item} has used its {lifecycle.ROUND_CAP} correction rounds: the instruction is an '
+          f'operator ruling — one code session on {run["branch"]} carries it out next tick '
+          f'(job {run["job"]})'
           + (f'; card History: {filed}' if filed else '; filed on the card\'s History'))
     return 0
 

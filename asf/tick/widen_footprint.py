@@ -97,10 +97,27 @@ def _task(items, item_id):
     return item if item.get('type') == 'task' and not lifecycle.closed_state(items, item_id) else None
 
 
-def reach(product, task):
-    """What ``task`` may write without a widening: its ``writes:`` and the product's
-    ``conventions.shared_writes`` — the append-only files every Task may add to."""
+def delivered(items, task):
+    """The ids ``task`` delivers on its branch as a delivery lead: its ``delivers:`` list and
+    every open card naming it ``delivered_by:`` — never itself."""
+    task = task or {}
+    lid = task.get('id')
+    ids = [i for i in (task.get('delivers') or ()) if isinstance(i, str)]
+    if lid:
+        ids += [iid for iid, t in sorted((items or {}).items())
+                if (t or {}).get('delivered_by') == lid and not t.get('removed')]
+    return [i for i in dict.fromkeys(ids) if i != lid]
+
+
+def reach(product, task, items=None):
+    """What ``task`` may write without a widening: its ``writes:`` — for a delivery lead, the
+    union of its own and its delivered members' (:func:`delivered`: the branch carries their
+    work too) — and the product's ``conventions.shared_writes``, the append-only files every
+    Task may add to."""
     writes = widen.norm_writes((task or {}).get('writes'))
+    for mid in delivered(items, task):
+        writes += [w for w in widen.norm_writes(((items or {}).get(mid) or {}).get('writes'))
+                   if w not in writes]
     return writes + [w for w in footprint.shared_writes(product) if w not in writes]
 
 
@@ -138,7 +155,7 @@ def report_facts(ctx, items, out=print, tracked_fn=tracked_paths):
         needs = []
         if tokens:
             needs = widen.outside(widen.resolve(tokens, tracked_fn(product, run.get('branch'))),
-                                  reach(product, task))
+                                  reach(product, task, items))
         if not needs:
             if tokens:  # a claim read and found inside the footprint: not read again
                 pool_mod.update_session(product, job, footprint_read=1)
@@ -182,7 +199,7 @@ def diff_facts(ctx, items, out=print, diff_fn=branch_diff):
             pool_mod.update_session(product, job, diff_read=1)
             continue
         writes = widen.norm_writes(task.get('writes'))
-        extra = widen.outside(files, reach(product, task))
+        extra = widen.outside(files, reach(product, task, items))
         feature = widen.delivery_footprint(items, item_id)
         if not extra or not widen.inside_feature(extra, feature):
             pool_mod.update_session(product, job, diff_read=1)
@@ -265,7 +282,7 @@ def refusal_facts(ctx, items, out=print, tracked_fn=tracked_paths):
             continue
         tokens = widen.path_tokens(corr.get('text'))
         needs = widen.outside(widen.resolve(tokens, tracked_fn(product, run.get('branch'))),
-                              reach(product, task)) if tokens else []
+                              reach(product, task, items)) if tokens else []
         if not needs:  # the hook names the session's own files: the plain correction stands
             pool_mod.update_session(product, job, correction=dict(corr, footprint_read=1))
             continue
@@ -428,7 +445,7 @@ def apply(ctx, items, out=print, diff_fn=branch_diff):
             done[job] = DROPPED
             continue
         writes = widen.norm_writes(task.get('writes'))
-        needs = widen.outside(corr.get('needs'), reach(product, task))
+        needs = widen.outside(corr.get('needs'), reach(product, task, items))
         if not needs:  # the record already carries every path (or the product shares it with
             # every Task, conventions.shared_writes): a plain correction on the wider footprint
             text = correction_text(writes, corr.get('needs') or (), fact, corr.get('tests') or (),
