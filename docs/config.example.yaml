@@ -133,6 +133,22 @@ host_guards:
 #
 # The runtime `claude-cloud` is refused at config check: the runtime CLI cannot create a cloud
 # session non-interactively (`-p --cloud` is interactive only), so a lane on it could never launch.
+# workers: the heartbeat every worker session keeps, whatever runs it (local, actions,
+# claude-remote). The brief starts a background loop that pushes the session's work in progress
+# and its NOTES.asf.md to refs/asf/hb/<job> every heartbeat_min minutes; each tick reads every
+# run's branch and beat ref with one `git ls-remote`. A run that has not moved for
+# heartbeat_min x heartbeat_missed minutes (after heartbeat_grace_min of setup) is stalled: it is
+# stopped, ended dead, and continued in the same tick by a new session from its branch head,
+# its notes and a summary of its last events. heartbeat_resumes caps the continuations of one
+# chain (0: end it dead, no continuation). The lane's own limit (cloud.timeout_min) stays the
+# backstop. A product file's `workers:` overrides these; the `cloud:` block's heartbeat_* keys
+# override them for cloud-lane runs.
+workers:
+  heartbeat_min: 5
+  heartbeat_missed: 2
+  heartbeat_grace_min: 10
+  heartbeat_resumes: 2
+
 cloud:
   enabled: false
   runtime: actions
@@ -142,6 +158,8 @@ cloud:
   rows: cloud-ok               # or `any`: which rows may go to the lane
   # accounts: [acct-a]         # whose quota they spend; unset = the role: cloud accounts
   timeout_min: 240             # a run still working after this is cancelled, and ends dead
+                               # (the backstop: the heartbeat above ends a stalled run sooner)
+  # heartbeat_min: 5           # the lane's own heartbeat_* keys override workers: for cloud runs
   # mode: overflow (default; alias local) — local first; primary — the cloud first (below);
   # off — no new cloud launch, live runs drain. `default: true` is the older spelling of primary.
   # In primary a row goes local only when it must (local_only) or as the fallback: the lane full,

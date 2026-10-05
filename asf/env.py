@@ -274,7 +274,9 @@ def load_config():
     cfg = load_file(config_path())
     from asf.workers import cloud  # local: the cloud lane's module imports this one
     from asf.tick import network
+    from asf.workers import heartbeat
     problems = (validate_worker_pool(cfg) + cloud.config_problems((cfg or {}).get('cloud'))
+                + heartbeat.config_problems((cfg or {}).get('workers'))
                 + network.config_problems(cfg))
     if problems:
         raise ConfigError(f"{config_path()}: {'; '.join(f'{k} {why}' for k, why in problems)}")
@@ -520,7 +522,7 @@ PRODUCT_FIELDS = {
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
-    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST,
+    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST, 'workers': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -698,6 +700,9 @@ def product_problems(text):
     from asf.workers import cloud  # `cloud:`: a refused runtime refuses the file (asf.workers.cloud)
     for dotted, why in cloud.config_problems(data.get('cloud')):
         problems.append((lines.get('cloud', 0), dotted, why))
+    from asf.workers import heartbeat  # `workers:`: the heartbeat's keys (asf.workers.heartbeat)
+    for dotted, why in heartbeat.config_problems(data.get('workers')):
+        problems.append((lines.get('workers', 0), dotted, why))
     for dotted, why in _capacity_problems(data.get('capacity')):
         problems.append((lines.get(dotted, lines.get('capacity', 0)), dotted, why))
     for dotted, why in _deploy_problems(data.get('deploy_sha')):

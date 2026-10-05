@@ -142,6 +142,11 @@ fi
 if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
         && { [ -n "$ASF_PUSH_LOG" ] || [ -n "$ASF_PUSH_ALLOW" ]; }; then
     input=$(cat)
+    # a heartbeat (asf.workers.heartbeat) pushes only refs/asf/hb/<job>: no work, no CI, no count
+    if [ -n "$input" ] && ! printf '%s\n' "$input" | awk '
+            NF >= 4 && $3 !~ /^refs\/asf\/hb\// { work = 1 } END { exit work ? 0 : 1 }'; then
+        exit 0
+    fi
     if [ -n "$ASF_PUSH_ALLOW" ] && [ -n "$input" ]; then
         bad=$(printf '%s\n' "$input" | awk -v allow="$ASF_PUSH_ALLOW" '
             NF >= 4 && $3 ~ /^refs\/heads\// {

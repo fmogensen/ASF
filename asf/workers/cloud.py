@@ -23,7 +23,8 @@ name, its URL and the brief ref. :func:`sync` (run first by every health pass) r
 run's status, the branch on origin and the clock, and maps them onto the session states
 (:func:`classify`): **working**, **finished** (the report commit on the branch — whose body
 becomes the log's result line) or **dead** (the run ended without the report commit, it never
-appeared, or it passed ``cloud.timeout_min`` — then it is cancelled, :func:`stop`). A finished or
+appeared, it stopped beating — :mod:`asf.workers.heartbeat`, then it is continued in the same
+pass — or it passed ``cloud.timeout_min``, the backstop — then it is cancelled, :func:`stop`). A finished or
 dead run's worktree is brought up to ``origin/<branch>``, its brief ref is deleted, and the state
 lands in the status file every liveness check reads — from then on health judges it like any run:
 pushed or not, empty or not.
@@ -224,7 +225,8 @@ def config_problems(block):
         v = block.get(key)
         if v is not None and (isinstance(v, bool) or _float(v, -1) <= 0):
             out.append((f'cloud.{key}', f'must be a number above 0, not {v!r}'))
-    return out
+    from asf.workers import heartbeat  # the lane's override of workers.heartbeat_*
+    return out + heartbeat.config_problems(block, 'cloud')
 
 
 def parse_mode(v):
@@ -417,6 +419,10 @@ def cloud_brief(text, job, setting=None):
              f'block as the body, then the trailers `{SESSION_TRAILER}: {sid}` and '
              f'`{REPORT_TRAILER}: {job.name}`; push `{job.branch}`. The factory reads that commit '
              'as the end of this session; without it the session counts as failed.', '']
+    beat = getattr(job, 'heartbeat', None)
+    if beat is not None:  # asf.workers.heartbeat: the run's proof of movement, every runtime
+        from asf.workers import heartbeat
+        lines[-1:] = heartbeat.brief_lines(job.name, sid, beat) + ['']
     return str(text or '').rstrip('\n') + '\n'.join(lines)
 
 
@@ -538,10 +544,18 @@ def _load_cfg():
         return {}
 
 
-def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_client=None):
+def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_client=None,
+         beats=None, relaunch_runtime=None):
     """Every live cloud run of ``product`` brought up to date — see the module doc. Returns
-    ``[(job, status, why)]`` for each run looked at."""
+    ``[(job, status, why)]`` for each run looked at.
+
+    A working run launched with the heartbeat (:mod:`asf.workers.heartbeat`) is also judged by
+    its beats — ``beats``: the pass's one ``ls-remote`` — and a STALLED one ends ``dead``
+    (``stalled: no beat <n>m``, with the routine's ``worker_status`` from one ``list_runs``), is
+    stopped, and is continued in this same pass on ``relaunch_runtime`` (default: the run's own
+    runtime)."""
     from asf.workers import actions
+    from asf.workers import heartbeat
     from asf.workers import pool as pool_mod
     from asf.workers import remote
     cfg = cfg if cfg is not None else _load_cfg()
@@ -550,6 +564,9 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
     gh = gh or actions.Gh(product)
     stop_fn = stop_fn or (lambda run: stop(run, product, gh))
     known = cloudpid.load()
+    beats = beats or heartbeat.Beats(product)
+    hb_state = heartbeat.load_state(product)
+    hb_before = json.dumps(hb_state, sort_keys=True)
     found = []
     for job, run in pool_mod.load_sessions(product).items():
         if run.get('ended') or not is_cloud(run):
@@ -582,16 +599,38 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
             view = gh.view(run_id) if run_id else None  # before the report: no race with its end
             report = report_commit(run.get('worktree'), run.get('branch'), run.get('session'))
             status, why = classify(view, report, elapsed, s.timeout_min, run_id)
+        beat = heartbeat.for_run(run, cfg, product) if status == WORKING else None
+        stalled = False
+        if beat is not None:
+            stalled, quiet, _line = heartbeat.observe(product, run, beats, now, beat, out=out,
+                                                      state=hb_state)
+            if stalled:
+                status, why = DEAD, f'{heartbeat.STALLED}: no beat {int(quiet)}m'
+                if remote.is_remote(run):  # diagnostic only: the heartbeat decided
+                    diag = remote.diagnose(run, s, remote_client)
+                    if diag:
+                        why += '; ' + ', '.join(f'{k}={v}' for k, v in diag.items() if v)
+                        cloudpid.record(tok, DEAD, why, **diag)
         if status == FINISHED and report and run.get('log'):
             _append(run['log'], {'type': 'result', 'subtype': 'success', 'is_error': False,
                                  'result': report['body'],
                                  'asf': {'cloud': {'report_commit': report['sha'],
                                                    'run': run_id}}})
         if status == DEAD:
-            if why.startswith('timed out'):
+            if stalled and remote.is_remote(run):
+                remote.retire(run, remote_client)  # once: stop's own retire is then a no-op
+            if why.startswith(('timed out', heartbeat.STALLED)):
                 stop_fn(run)
             if run.get('log'):
                 _append(run['log'], {'type': 'asf', 'subtype': 'cloud', 'status': DEAD, 'why': why})
+        head = notes = None
+        if stalled:  # the last beat's snapshot onto the branch, its notes kept, its ref gone
+            wt = run.get('worktree')
+            last = heartbeat.last_beat(wt, job)
+            notes = (last or {}).get('notes') or ''
+            head, _what = heartbeat.land_snapshot(wt, run.get('branch'), last)
+            heartbeat.delete_ref(wt, job)
+            hb_state.pop(job, None)
         if status != WORKING:
             catch_up(run.get('worktree'), run.get('branch'))
             if run.get('brief_ref'):
@@ -602,6 +641,18 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
         if status != before and status != WORKING:
             out(f'cloud    {job:<24} {status}: {why}')
         found.append((job, status, why))
+        if stalled and heartbeat.resumable(run, beat):
+            if remote.is_remote(run):
+                summary = remote.run_log_summary(run, s, remote_client)
+                rt = relaunch_runtime or remote.RemoteRuntime(s, product, client=remote_client)
+            else:
+                summary = heartbeat.summarize_events(heartbeat.log_records(run.get('log')))
+                rt = relaunch_runtime or actions.ActionsRuntime(s, product, gh=gh)
+            new = heartbeat.launch(product, run, why, rt, cfg, notes=notes, summary=summary,
+                                   head=head, out=out)
+            heartbeat.seed(hb_state, new, head)
+    if json.dumps(hb_state, sort_keys=True) != hb_before:
+        heartbeat._save_state(product, hb_state)
     return found
 
 

@@ -38,6 +38,7 @@ from asf import env, refguard
 from asf import hooks
 from asf import progress
 from asf.workers import githooks
+from asf.workers import heartbeat
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import pushlog
@@ -1113,6 +1114,14 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     brief_text = brief_text + judged.launch_section(pool_mod.sessions_path(product),
                                                     product.repo_dir, product.main, row.kind,
                                                     row.item, branch)
+    started = pool_mod.now_iso()
+    sid = lifecycle.session_id(product.name, row.job, started)
+    # every runtime beats (asf.workers.heartbeat): a local brief carries the rule here, a cloud
+    # one in its CLOUD block (asf.workers.cloud.cloud_brief, from job.heartbeat)
+    beat = heartbeat.settings(cfg, product, 'cloud' if cloud else 'local')
+    if not cloud:
+        brief_text = brief_text.rstrip('\n') + '\n' + '\n'.join(
+            heartbeat.brief_lines(row.job, sid, beat)) + '\n'
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)
@@ -1122,8 +1131,6 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
         os.makedirs(d, exist_ok=True)
         if d not in add_dirs:
             add_dirs.append(d)
-    started = pool_mod.now_iso()
-    sid = lifecycle.session_id(product.name, row.job, started)
     with _STATE_LOCK:
         hooks_dir = githooks.ensure(product)
         from asf import hooks as hooks_mod  # local: hooks imports pool, the launch's side
@@ -1142,6 +1149,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           passthrough=passthrough, product_auth_env=product_auth_env,
                           branch=branch, base=product.main,
                           setup=getattr(product.conventions, 'worktree_setup', None))
+    job.heartbeat = beat
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,
@@ -1149,7 +1157,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'started': started, 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
               'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or '',
-              'cause': getattr(row, 'cause', '') or ''}
+              'cause': getattr(row, 'cause', '') or '',
+              'heartbeat_min': beat.interval_min}
     launch_head = _launch_head(product.repo_dir, branch)
     if launch_head:
         # the head a held branch was handed back on: the loop guard counts launches on one sha

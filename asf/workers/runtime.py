@@ -64,6 +64,9 @@ class Job:
         self.branch = branch
         self.base = base
         self.setup = setup
+        # the heartbeat a session off this host is told to keep (asf.workers.heartbeat.Settings),
+        # or None: asf.workers.cloud.cloud_brief writes its rule into the CLOUD block
+        self.heartbeat = None
 
     @property
     def session(self):

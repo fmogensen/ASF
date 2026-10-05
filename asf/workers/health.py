@@ -57,6 +57,7 @@ from asf.record import replan as replan_mod
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import headroom
+from asf.workers import heartbeat
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 from asf.workers import pushlog
@@ -668,12 +669,17 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
     sent back to a card nobody wants work on has nothing to do, and its row only waits."""
     found = []
     registry = pool_mod.sessions_path(product)
+    beats = heartbeat.Beats(product)  # every run's beat and branch: one ls-remote for the pass
     if any(cloud.is_cloud(s) and not s.get('ended')
            for s in pool_mod.load_sessions(product).values()):
         try:  # the cloud lane's runs first: their state is what every check below reads
-            cloud.sync(product, out=out)
+            cloud.sync(product, out=out, beats=beats)
         except Exception as e:  # noqa: BLE001 — a failed sync leaves the runs working
             out(f'cloud: sync failed — {(str(e) or type(e).__name__).splitlines()[0]}')
+    try:  # a local run that stopped beating: ended and continued before anything judges it
+        heartbeat.sweep(product, beats=beats, alive=alive, out=out)
+    except Exception as e:  # noqa: BLE001 — a failed sweep leaves the runs as they are
+        out(f'heartbeat: sweep failed — {(str(e) or type(e).__name__).splitlines()[0]}')
     sessions = pool_mod.load_sessions(product)
     if items is None:
         items = record_items(product)
