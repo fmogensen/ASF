@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 
+from asf import ci_flight
 from asf import env, refguard
 from asf import hooks
 from asf import progress
@@ -47,6 +48,10 @@ from asf.workers import stopgate
 DEFAULT_ID_PREFIXES = ['S', 'T', 'B']
 DEFAULT_ID_START = 5000
 DEFAULT_ID_SIZE = 50
+
+#: :func:`trunk_rebase_needed`'s third return value — the card's exception (a), named so the
+#: launch gate and the docstring cannot drift from each other (F-0203 PD4).
+CONFLICT_REASON = 'does not merge cleanly into the trunk'
 
 
 class SpawnError(Exception):
@@ -598,7 +603,7 @@ def _branch_exists_on_origin(repo, branch):
         _git(['ls-remote', '--heads', 'origin', gitops.head_ref(branch)], repo), branch))
 
 
-def make_worktree(product, job, branch, kind=None):
+def make_worktree(product, job, branch, kind=None, severity=None, flight=None):
     """The worktree a run starts in — :func:`asf.workers.lifecycle.may_launch` decides whether
     one that already exists may be taken over.
 
@@ -609,6 +614,9 @@ def make_worktree(product, job, branch, kind=None):
     already on origin with no worktree left (any row kind: a held branch sent back for another
     round, B-0046, B-0048) gets a worktree on it, rebased the same way. Otherwise a fresh branch
     off ``origin/<main>``. Returns the worktree path.
+
+    A branch already on origin whose PR has a CI run in flight is **not** rebased or published —
+    the run finishes first (F-0203, C6) — and the session starts on the branch as origin holds it.
 
     Before any of that, :func:`asf.hooks.ensure_git_hooks` confirms the product repo's push gate
     is in place — missing hooks are written, a foreign one refuses the whole launch (F-0075,
@@ -628,7 +636,8 @@ def make_worktree(product, job, branch, kind=None):
     if checkout:
         _checkout_branch(path, branch, product.main)
     if rebase:
-        _rebase_onto_trunk(path, branch, product.main, kind)
+        _rebase_onto_trunk(path, branch, product.main, kind, severity=severity, product=product,
+                           flight=flight)
     _settle(product, repo, path, branch)
     if _in_progress(path):
         raise SpawnError(f'worktree {path} is still mid-rebase or mid-merge after an abort; '
@@ -834,11 +843,11 @@ def trunk_rebase_needed(path, main):
         return 'copies of trunk commits above the trunk'
     mt = git('merge-tree', '--write-tree', '--quiet', trunk, 'HEAD')
     if mt.returncode != 0:
-        return 'does not merge cleanly into the trunk'
+        return CONFLICT_REASON
     return ''
 
 
-def _rebase_onto_trunk(path, branch, main, kind=None):
+def _rebase_onto_trunk(path, branch, main, kind=None, severity=None, product=None, flight=None):
     """Rebase the worktree onto the fetched trunk — for a branch already on origin only when
     :func:`trunk_rebase_needed` says so (a fresh, unpublished branch always: rebasing it pushes
     nothing). A conflict is aborted, never left in place. A rebase that completes and moves a
@@ -846,14 +855,28 @@ def _rebase_onto_trunk(path, branch, main, kind=None):
     (:func:`asf.workers.lifecycle.publish`, B-0056): the session then starts on a branch that
     origin holds, and its own pushes are fast-forwards — it never faces the non-fast-forward
     that made sessions merge their stale remote. A head the rebase is skipped for is origin's
-    own (or a fast-forward of it), so the session's pushes are fast-forwards too."""
+    own (or a fast-forward of it), so the session's pushes are fast-forwards too.
+
+    A branch already on origin with a ``ci.workflow`` run in flight is deferred instead
+    (:func:`asf.ci_flight.verdict`, F-0203): the head is left exactly as origin holds it, so the
+    deferral preserves the same fast-forward property the immediate publish existed to buy,
+    because nothing moved. The one exception the launch site can claim is ``CONFLICT`` — a head
+    that does not merge cleanly into the trunk is rebased at once regardless, S1 or not."""
     from asf import gitops  # the exact ref: ``archive/<branch>`` is not ``<branch>``
     ls = subprocess.run(['git', 'ls-remote', '--heads', 'origin', gitops.head_ref(branch)],
                         cwd=path, capture_output=True, text=True)
     remote_sha = gitops.head_sha(ls.stdout, branch) if ls.returncode == 0 else ''
     if remote_sha and not _catch_up(path, branch, remote_sha, kind, main):
         return  # behind origin and not caught up: never rebased or published from here
-    if not remote_sha or trunk_rebase_needed(path, main):
+    why = trunk_rebase_needed(path, main) if remote_sha else 'a fresh branch'
+    if remote_sha and why:
+        needed = ci_flight.CONFLICT if why == CONFLICT_REASON else None
+        line = ci_flight.verdict(product, branch, 'rebase', needed=needed, severity=severity,
+                                 flight=flight)
+        if line:
+            print(line, file=sys.stderr)   # the launch's own channel, as its other lines
+            return                          # the session starts on the branch origin holds (C6)
+    if not remote_sha or why:
         r = subprocess.run(['git', 'rebase', '-q', f'origin/{main}'], cwd=path,
                            capture_output=True, text=True)
         if r.returncode != 0:
@@ -1091,7 +1114,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     refusal = spawn_refusal(product, row, branch)
     if refusal:  # before anything is made: a refused launch leaves nothing behind
         raise SpawnError(refusal)
-    worktree = make_worktree(product, row.job, branch, kind=row.kind)
+    worktree = make_worktree(product, row.job, branch, kind=row.kind, severity=row.severity)
     cloud = getattr(runtime, 'lane', 'local') == 'cloud'
     setup_s = None
     if cloud:
