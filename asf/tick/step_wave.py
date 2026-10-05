@@ -346,23 +346,29 @@ def unverified_on_trunk(product, occ, unverified):
 
 
 def adjudications(product, index, tries):
-    """``{item: {'runs', 'at', 'same_card'}}`` for the items past the attempt limit
+    """``{item: {'runs', 'at', 'same_card'[, 'ruling', 'carried']}}`` for the items past the attempt limit
     (:func:`asf.feeder.rows.attempt_limit`) an adjudicate session has ended on: how many, the
     newest's start, and whether it was handed the card as it stands now (its ``card_digest`` is
     :func:`asf.briefs.build.card_digest` today; a run that recorded none counts as the same
     card). The feeder's over-limit row reads it (:func:`asf.feeder.rows._capped`): adjudicated on
     this card already is a PARKED row, never a silent drop and never the same session again.
-    An operator ruling filed since that run (:func:`ruled_since`) is a card change."""
+    An operator ruling filed since that run (:func:`ruled_since`) is a card change. On the same
+    card, the ruling that run filed (:func:`session_ruling`) is ``ruling``, and ``carried`` says
+    whether a session has started on the item since it: the feeder hands an uncarried ruling to
+    one session instead of parking (F-0109, F-0035, F-0003 on 2026-10-05)."""
     from asf.feeder import rows as feeder_rows
     limit = feeder_rows.attempt_limit(product)
     over = {i for i, n in (tries or {}).items() if n > limit}
     if not over:
         return {}
     digest = importlib.import_module('asf.briefs.build').card_digest
-    out = {}
+    out, starts = {}, {}
     for rs in lifecycle.runs(pool_mod.sessions_path(product)).values():
         for run in rs:
             item = run.get('item')
+            if item in over and run.get('kind') not in ('adjudicate', 'park') \
+                    and run.get('started') and not lifecycle.quota_exhausted(run):
+                starts.setdefault(item, []).append(run['started'])
             if item not in over or run.get('kind') != 'adjudicate' or not run.get('ended') \
                     or lifecycle.quota_exhausted(run):
                 continue
@@ -379,7 +385,39 @@ def adjudications(product, index, tries):
         cur.pop('digest', None)
         if cur['same_card'] and ruled_since(product, item, cur['at']):
             cur['same_card'] = False
+        if cur['same_card']:
+            ruling = session_ruling(product, item, cur['at'])
+            if ruling:
+                cur['ruling'] = ruling
+                cur['carried'] = carried_after(starts.get(item, ()), ruling['at'])
     return out
+
+
+def _stamp(at):
+    """``2026-10-03T12:30:00Z`` and ``2026-10-03 12:30`` alike, to the minute."""
+    return str(at or '')[:16].replace('T', ' ')
+
+
+def session_ruling(product, item, at):
+    """The newest ruling an adjudicate session filed on ``item``'s card (``adjudicate
+    (adjudicate-…)``, :func:`asf.tick.step_health.file_rulings`) stamped at or after ``at`` — the
+    start of the newest adjudicate run, so the ruling that run produced — as ``{at, job, text}``,
+    or None. An operator ruling is :func:`ruled_since`'s: it lifts the park itself."""
+    from asf.evidence import rulings
+    from asf.workers.correct import OPERATOR
+    since = _stamp(at)
+    if not since:
+        return None
+    mine = [r for r in rulings.standing(product, item)
+            if r.get('job') != OPERATOR and _stamp(r.get('at')) >= since]
+    return max(mine, key=lambda r: _stamp(r.get('at'))) if mine else None
+
+
+def carried_after(starts, at):
+    """True when a session other than an adjudicate one started on the item at or after the
+    ruling's stamp ``at`` — the ruling has been handed to a session once already."""
+    since = _stamp(at)
+    return any(_stamp(s) >= since for s in starts)
 
 
 def ruled_since(product, item, at):

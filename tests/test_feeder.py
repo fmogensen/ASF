@@ -2170,6 +2170,48 @@ class FinishBeforeYouStart(unittest.TestCase):
                              '(feeder.max_specs_in_flight) while 1 planned Feature has Tasks '
                              'to build: F-0099')
 
+    @staticmethod
+    def replans(n):
+        return [rows.Row(tier=2, kind=rows.REPLAN, item_id=f'F-01{i:02d}', feature_id=f'F-01{i:02d}',
+                         action=rows.LAUNCH, brief_kind=rows.REPLAN_KIND, branch='', reason='')
+                for i in range(1, n + 1)]
+
+    def test_replans_are_not_held_by_the_doc_cap_while_seats_are_free(self):
+        """A product (2026-10-05): 18 pending RESHAPE → REPLAN rows hid behind
+        ``max_specs_in_flight`` 2 while local seats sat idle. A replan re-cuts a planned Feature
+        so its Tasks can build: with free seats it launches, up to its own ceiling
+        (``feeder.max_replans_in_flight``), and the spec/plan cap still holds new documents."""
+        idx = finish_index(cards=4)
+        base = rows.candidates(idx, product(), [])
+        out = rows.finish_first(base + self.replans(5), idx['items'], product(), [], free=10)
+        by = {r.item_id: r for r in out}
+        self.assertTrue(all(by[f'F-01{i:02d}'].launches for i in range(1, 6)))
+        self.assertEqual([f for f in ('F-0001', 'F-0002', 'F-0003', 'F-0004')
+                          if by[f].launches], ['F-0001', 'F-0002'])
+        # the ceiling bounds them, and counts the replans already running
+        p = product(conventions={'feeder': {'max_replans_in_flight': 3}})
+        out = rows.finish_first(base + self.replans(5), idx['items'], p, [{'kind': 'replan'}],
+                                free=10)
+        held = [r for r in out if r.kind == rows.REPLAN and not r.launches]
+        self.assertEqual(len(held), 3)
+        self.assertIn('feeder.max_replans_in_flight', held[0].action)
+        # no free seat: a replan waits under the doc cap as before
+        out = rows.finish_first(base + self.replans(2), idx['items'], product(), [], free=0)
+        self.assertFalse([r for r in out if r.kind == rows.REPLAN and r.launches])
+
+    def test_plan_rows_hands_the_free_seats_to_finish_first(self):
+        idx = finish_index(cards=0)
+        for i in (1, 2, 3):
+            fid = f'F-01{i:02d}'
+            idx['items'][fid] = {'id': fid, 'type': 'feature', 'parent': 'E-0001', 'rank': 10 + i,
+                                 'stage': 'plan-approved', 'state': 'Active', 'decided': True,
+                                 'reshape': 're-cut it', 'children': [f'T-01{i:02d}']}
+            idx['items'][f'T-01{i:02d}'] = {'id': f'T-01{i:02d}', 'type': 'task', 'parent': fid,
+                                            'rank': 1, 'state': 'New', 'writes': [f'r{i}.py']}
+        out = rows.plan_rows(idx, product(), [], 8)
+        self.assertEqual(sorted(r.item_id for r in out if r.kind == rows.REPLAN and r.launches),
+                         ['F-0101', 'F-0102', 'F-0103'])
+
     def test_a_feature_in_a_lane_experiment_is_never_held_by_the_cap(self):
         idx = finish_index(cards=4)
         idx['items']['F-0004']['ab_pair'] = 'p1'
@@ -2270,6 +2312,9 @@ class FinishBeforeYouStart(unittest.TestCase):
         self.assertEqual([k for k, _ in conventions.validate_mapping(
             {'feeder': {'max_specs_in_flight': -1}})], ['feeder.max_specs_in_flight'])
         self.assertEqual([k for k, _ in conventions.validate_mapping({'feeder': 3})], ['feeder'])
+        self.assertEqual(conventions.validate_mapping({'feeder': {'max_replans_in_flight': 0}}), [])
+        self.assertEqual([k for k, _ in conventions.validate_mapping(
+            {'feeder': {'max_replans_in_flight': 'many'}})], ['feeder.max_replans_in_flight'])
 
 
 def build_index(started=3, unstarted=1, cards=2, landed=None, tasks=2):

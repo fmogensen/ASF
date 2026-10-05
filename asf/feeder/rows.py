@@ -163,6 +163,7 @@ STALEMATE_ROUND = 4
 ATTEMPT_LIMIT = 3
 DECISION_ROWS = 5  #: `conventions.decision_rows` — rows minted, and ids named in the wave's line
 MAX_SPECS_IN_FLIGHT = 2  #: `conventions.feeder.max_specs_in_flight` (:func:`finish_first`)
+MAX_REPLANS_IN_FLIGHT = 6  #: `conventions.feeder.max_replans_in_flight` (:func:`finish_first`)
 #: `conventions.feeder.max_features_in_build` (:func:`build_cap`): a whole number, or ``auto``
 AUTO = 'auto'
 MAX_FEATURES_IN_BUILD = AUTO
@@ -373,6 +374,15 @@ def max_specs_in_flight(product):
     feeder = _conventions(product).get('feeder')
     v = feeder.get('max_specs_in_flight') if isinstance(feeder, dict) else None
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else MAX_SPECS_IN_FLIGHT
+
+
+def max_replans_in_flight(product):
+    """``conventions.feeder.max_replans_in_flight`` (default 6): the most replan sessions a
+    product runs at once outside the spec/plan cap, while seats are free (:func:`finish_first`)."""
+    feeder = _conventions(product).get('feeder')
+    v = feeder.get('max_replans_in_flight') if isinstance(feeder, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 \
+        else MAX_REPLANS_IN_FLIGHT
 
 
 def max_features_in_build(product):
@@ -2022,6 +2032,8 @@ def _capped(row, attempts, limit, product, adjudicated=None):
             row, kind=STALEMATE, brief_kind='adjudicate', action=LAUNCH,
             reason=f"{row.kind} after {n} sessions: adjudicate, not another attempt")
     adj = (adjudicated or {}).get(row.item_id) or {}
+    if adj.get('same_card') and adj.get('ruling') and not adj.get('carried'):
+        return ruling_row(row, adj['ruling'], n, limit)
     if adj.get('same_card'):
         why = (f"{row.kind} after {n} sessions (limit {limit}); adjudicated "
                f"{adj.get('runs') or 1} time(s), last {str(adj.get('at') or '?')[:16]}, on this "
@@ -2033,6 +2045,26 @@ def _capped(row, attempts, limit, product, adjudicated=None):
         row, kind=STALEMATE, brief_kind='adjudicate', action=LAUNCH,
         reason=f"{row.kind} after {n} sessions (limit {limit}): adjudicate this card state, not "
                f"another attempt")
+
+
+#: the over-limit kinds whose ruling a document session carries out, not a code correction
+DOC_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN})
+
+
+def ruling_row(row, ruling, n, limit):
+    """The over-limit ``row`` an adjudicate session already ruled on, its ruling handed to one
+    session (``ruling=True``: the cap never sends it to adjudication again): a Feature's document
+    row (:data:`DOC_KINDS`) keeps its own ``spec`` or ``plan`` brief, on its branch, so the stage
+    it stands at moves on; any other row becomes a ``correct`` brief on its branch. The ruling's text is the brief's correction. Once a session has started since
+    the ruling, :func:`_capped` parks the row again (F-0109, F-0035, F-0003, 2026-10-05: PARKED
+    "adjudicated, card unchanged" with the ruling on the card and nothing acting on it)."""
+    brief = row.brief_kind if row.kind in DOC_KINDS else 'correct'
+    text = (f"Carry out the adjudication ruling {ruling.get('job') or ''} "
+            f"({ruling.get('at') or ''}), binding: {ruling.get('text') or ''}")
+    return dataclasses.replace(
+        row, brief_kind=brief, action=LAUNCH, correction=text, ruling=True,
+        reason=f"{row.kind} after {n} sessions (limit {limit}): adjudicated — "
+               f"{ruling.get('job') or 'the'} ruling carried out by one {brief} session")
 
 
 #: the action of a stale park :func:`surface_stale_parks` puts in front of its tier
@@ -2608,19 +2640,28 @@ def plan_ahead_cap(rows, items, product, inflight, capacity, held=(), occupancy=
     return out
 
 
-def finish_first(rows, items, product, inflight, held=()):
+def finish_first(rows, items, product, inflight, held=(), free=None):
     """``feeder.max_specs_in_flight`` (default 2): while a planned Feature has Tasks ready to
     build (:func:`buildable_features`), new spec and plan sessions (:data:`NEW_DOC_KINDS`) are
     capped — the ones already running count, and so does a correction of a document the lane
     refused (never held itself) — and each launching row past the cap becomes ``WAITS ON
     finish: …`` with the numbers. No buildable Feature: no cap, the documents are the only work
-    there is."""
+    there is.
+
+    A RESHAPE → REPLAN row is no new document: it re-cuts a planned Feature so its Tasks build.
+    While ``free`` seats remain (None: unknown, read as free) it is outside that cap, bounded by
+    its own ceiling ``feeder.max_replans_in_flight`` (default 6; the replans running count) — 18
+    pending replans once hid behind a cap of 2 with local seats idle (2026-10-05). With no free
+    seat it waits under the spec/plan cap as before."""
     held = set(held or ())
     ready = buildable_features(items, rows, held)
     if not ready:
         return rows
     cap = max_specs_in_flight(product)
-    running = sum(1 for s in inflight or () if s.get('kind') in NEW_DOC_SESSIONS)
+    replan_cap = max_replans_in_flight(product)
+    replans = sum(1 for s in inflight or () if s.get('kind') == REPLAN_KIND)
+    running = sum(1 for s in inflight or () if s.get('kind') in NEW_DOC_SESSIONS) - replans
+    free = None if free is None else max(int(free), 0)
     # a correction of a document the lane refused is never held, but it is a document session
     # this wave: it counts against the cap before any new one is admitted
     admitted = sum(1 for r in rows if r.kind in NEW_DOC_KINDS and r.launches and r.correction
@@ -2633,6 +2674,17 @@ def finish_first(rows, items, product, inflight, held=()):
         paired = (items.get(r.feature_id) or items.get(r.item_id) or {}).get('ab_pair')
         if (r.kind in NEW_DOC_KINDS and r.launches and not r.correction and r.item_id not in held
                 and not paired):
+            if r.kind == REPLAN and (free is None or free > 0):
+                if replans < replan_cap:
+                    replans += 1
+                    free = None if free is None else free - 1
+                else:
+                    why = (f"{replans} replan(s) in flight or admitted, cap {replan_cap} "
+                           f"(feeder.max_replans_in_flight)")
+                    r = dataclasses.replace(r, action=f'{FINISH}: {why}', waits_on='finish',
+                                            reason=f'finish before you start — {why}')
+                out.append(r)
+                continue
             if running + admitted < cap:
                 admitted += 1
             else:
@@ -2698,7 +2750,8 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
                      occupancy=occupancy, landed_shas=landed_shas, bandwidth=bandwidth)
     rows = plan_ahead_cap(rows, items_of(index), product, inflight, capacity, held,
                           occupancy=occupancy, landed_shas=landed_shas, bandwidth=bandwidth)
-    rows = finish_first(rows, items_of(index), product, inflight, held)
+    free = None if capacity is None else capacity - len(inflight or ())
+    rows = finish_first(rows, items_of(index), product, inflight, held, free=free)
     keep = pushed_ids(items_of(index), occupancy)
     return failing_to_spawn(tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first,
                                          keep=keep),

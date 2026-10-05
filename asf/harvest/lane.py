@@ -1411,6 +1411,11 @@ def next_state(prev, facts):
             if f.get('ruled'):  # T5a': it only re-raises ruled points — no BACK, no round
                 return GATE, (f"{rv.get('path')} only re-raises points ruled by "
                               f"{', '.join(f['ruled'])}")
+            if rv.get('asks_nothing') and f.get('nothing_to_correct'):
+                # T5n: the reviewer approved and asked for nothing, a correction on this head
+                # found nothing to correct — land it, never park it (T-0652, 2026-10-05)
+                return GATE, (f"{rv.get('path')} approved with an empty C list: nothing to "
+                              f"correct ({f['nothing_to_correct']})")
             if f.get('review_answered'):  # T5b: answered without a commit — review it again
                 reason = (f"round {int(rv.get('round') or 0) + 1} wanted: {rv.get('path')} was "
                           f"answered by {f['review_answered']} without a commit")
@@ -1684,6 +1689,9 @@ class Lane:
             if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
                 f['review_answered'] = lifecycle.review_answered(self.path, item, rv.get('path'),
                                                                  head)
+                rv['asks_nothing'] = review_mod.asks_nothing(body)
+                if rv['asks_nothing']:
+                    f['nothing_to_correct'] = lifecycle.corrected_on(self.path, item, head)
                 # the review's C list an adjudicate ruling already answered on the code this
                 # head carries
                 f['overruled'] = lifecycle.overruling(

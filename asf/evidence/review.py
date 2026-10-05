@@ -255,6 +255,10 @@ def verdict_of(text, required=(), block=False):
     if v == reviews.CHANGES and asks_nothing(text):
         # a fail row the reviewer weighed and approved over: nothing for a correction to answer
         return APPROVED
+    if v == reviews.BOUNCE and only_malformed(text, required) and asks_nothing(text):
+        # every required row there and filled, one result cell worded oddly (``n/a→pass``):
+        # the approval stands — a correction would have nothing to answer (T-0652, 2026-10-05)
+        return APPROVED
     if v in (reviews.CHANGES, reviews.BOUNCE):
         return CHANGES
     for m in VERDICT_LINE_RE.finditer(text):
@@ -405,6 +409,24 @@ NO_C_RE = re.compile(r'^[\s>*_`(\[-]*(?:c(?:\s+list)?\s*[:\u2014-]\s*[*_`(]*)?'
 C_LABEL_RE = re.compile(r'^\s*(?:[-*]\s*)?(?:\*\*)?(?:#{3,4}\s*)?C\d+\b', re.M)
 #: A C list on one line, with no heading: ``C: none.``, ``**C list:** …``.
 C_LINE_RE = re.compile(r'^[\s*_]*C(?:\s+list)?[\s*_]*:.*$', re.M)
+
+
+def only_malformed(text, required=()):
+    """True when a table's bounce is only result cells worded outside the vocabulary (``invalid
+    result``): no structural fault, no unfilled row, no required check missing. An unfilled or
+    missing row is a check not done; an odd word in a filled cell is not."""
+    checks, faults = reviews.parse(text)
+    lines = (text or '').splitlines()
+    names = [c.name for c in checks]
+    for f in faults:
+        m = re.match(r'line (\d+): invalid result ', f)
+        if not m:
+            return False
+        row = reviews.cells(lines[int(m.group(1)) - 1])
+        names.append(row[0] if row else '')
+    need = [n for n in required if not any(reviews.covers(x, n) for x in names)]
+    return (bool(faults) and not need
+            and not any(c.result == reviews._UNFILLED for c in checks))
 
 
 def asks_nothing(text):

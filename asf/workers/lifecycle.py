@@ -2825,6 +2825,20 @@ def review_answered(path, item, review_path, head):
     return None
 
 
+def corrected_on(path, item, head):
+    """The job of the newest ``correct`` run on ``item`` launched on ``head`` that ended (not on
+    an exhausted quota), or None — a correction that has looked at the branch as it stands. The
+    lane reads it beside a review that approved and asked for nothing (T5n): that correction
+    had nothing to correct, and the branch lands instead of parking."""
+    if not path or not item or not head:
+        return None
+    for r in sorted(item_runs(path, item), key=lambda r: r.get('started') or '', reverse=True):
+        if r.get('kind') == CORRECT and r.get('ended') and not quota_exhausted(r) \
+                and (r.get('launch_head') or '').lower() == head.lower():
+            return r.get('job')
+    return None
+
+
 def delivered_off_branch(path, run, text):
     """Why ``run``'s empty branch is not a failure — the deliverable it produced somewhere its
     branch cannot show — or None. Pure: the ledger and the REPORT text, no git and no clock.

@@ -285,8 +285,65 @@ def cmd_audit_proofs(args, root):
         return 0
     ev = evidence.load(fresh=True, product=product)
     rc = 0
-    for sid, _state, _fid, lines in found:
+    reopened = collections.defaultdict(list)
+    for sid, _state, fid, lines in found:
         r = reopen(root, product, ev, sid,
                    f"audit-proofs: line(s) {', '.join(str(n) for n, _t, _w in lines)} unproved")
         rc = max(rc, r)
+        if r == 0 and fid:
+            reopened[fid].append((sid, lines))
+    for fid, stories in sorted(reopened.items()):
+        rc = max(rc, record_replan(root, product, fid, stories))
     return rc
+
+
+def audit_reshape(stories, date):
+    """The Feature-level reshape intent for the Stories an audit reopened: each Story with its
+    unproved lines and why, and what the replan is to plan."""
+    named = '; '.join(f"{sid} line {n} ({why})" for sid, lines in stories for n, _t, why in lines)
+    return (f"plan proof/build Tasks for the reopened Stories {', '.join(s for s, _l in stories)} "
+            f"(audit-proofs {date}: unproved lines — {named}); reuse an existing test where it "
+            f"already proves a line (a Proves trailer only); one Task per Story; build the lines "
+            f"that are not built.")
+
+
+def record_replan(root, product, fid, stories, out=print):
+    """Record a pending replan on Feature ``fid`` for the ``stories`` (``[(sid, lines)]``) an
+    audit reopened: its ``reshape:`` (:func:`asf.record.replan.pending`) names them and their
+    unproved lines, so the next tick queues the Feature's RESHAPE → REPLAN row. Reopening a Story
+    alone creates no work — a replan starts only from the Feature's ``reshape:``, and groom asks
+    only for a Story no Task lists (2026-10-05). A reshape still pending keeps its text, the
+    audit's added after it: one replan answers both. Returns 0, or 2 when the write is refused."""
+    from asf.record import replan
+    from asf.record import stage as stage_mod
+    canonical = _canonical(root)
+    rec = (canonical or {}).get(fid)
+    if rec is None or rec['meta'].get('type') != 'feature' or is_retired(rec['meta']):
+        return 0
+    meta = rec['meta']
+    how = audit_reshape(stories, today())
+    current = str(meta.get('reshape') or '').strip()
+    if current and replan.pending(dict(meta, id=fid)):
+        if how in current:
+            return 0
+        how = f"{current} — and {how}"
+    stamp = now_iso()[:16].replace('T', ' ')
+    hist = (f"- {stamp} audit-proofs: replan pending — reopened "
+            f"{', '.join(s for s, _l in stories)}")
+
+    def _write(_root):
+        frontmatter.write_typed(rec['path'], {'reshape': how})
+        with open(rec['path'], encoding='utf-8') as f:
+            meta2, body2 = frontmatter.parse(f.read(), path=rec['relpath'])
+        new_body = append_history_lines(body2, [hist])
+        if new_body != body2:
+            writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
+
+    _r, _staged, findings = stage_mod.guarded(root, 'audit-proofs', _write, (), product=product,
+                                              only=[rec['relpath']])
+    if findings:
+        print(f"error: {fid} replan refused — "
+              + '; '.join(f'{f.invariant}: {f.message}' for f in findings), file=sys.stderr)
+        return 2
+    out(f"{fid}: replan pending — {', '.join(s for s, _l in stories)}")
+    return 0

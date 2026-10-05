@@ -80,6 +80,20 @@ class TableVerdictOf(unittest.TestCase):
                 text = self.table(fail=self.MECH[0]) + '\nverdict: approved\n\n' + c
                 self.assertEqual(review.verdict_of(text, self.REQUIRED), review.APPROVED)
 
+    def test_a_malformed_filled_cell_under_an_approval_asking_nothing_is_approved(self):
+        """A product's T-0652 (2026-10-05): a round-2 review wrote ``n/a→pass`` in a result cell,
+        ``verdict: approved``, ``## C list`` "(none)". The malformed cell bounced the table, the
+        bounce read as changes, and a correction with nothing to correct parked the row instead
+        of landing it. Every required row is there and filled: the approval stands."""
+        text = self.table().replace(f'| {self.MECH[0]} | pass |', f'| {self.MECH[0]} | n/a→pass |')
+        self.assertEqual(reviews.verdict(text, self.REQUIRED), reviews.BOUNCE)
+        self.assertEqual(review.verdict_of(text + '\nverdict: approved\n\n## C list\n\n(none)\n',
+                                           self.REQUIRED), review.APPROVED)
+        self.assertEqual(review.verdict_of(text + '\nverdict: changes requested\n\n## C\n\nNone.\n',
+                                           self.REQUIRED), review.CHANGES)
+        self.assertEqual(review.verdict_of(text + '\nverdict: approved\n\n## C\n\n- `a.py:3` fix\n',
+                                           self.REQUIRED), review.CHANGES)
+
     def test_a_fail_row_under_a_changes_line_or_a_missing_row_stays_changes(self):
         empty = '\n## C\n\nNone.\n'
         self.assertEqual(review.verdict_of(self.table(fail=self.MECH[0]) +

@@ -195,6 +195,18 @@ class RegistryFoldInvariants(unittest.TestCase):
         path = self._write(lines + [run, failed])
         self.assertIsNone(lc.review_answered(path, 'T-1', 'rv/4-t-1.md', H))
 
+    def test_corrected_on_a_head_is_a_correct_run_that_ended_there(self):
+        """T5n: a correct run launched on the head, ended — with no commit, as one with nothing
+        to correct ends — has looked at the branch as it stands."""
+        H = 'd' * 40
+        run = {'job': 'correct-t-1', 'pid': 2, 'started': '2026-01-01T07:18:39Z',
+               'branch': 'cloud/T-1', 'item': 'T-1', 'kind': 'correct', 'launch_head': H}
+        self.assertIsNone(lc.corrected_on(self._write([run]), 'T-1', H))  # still running
+        path = self._write([run, {'job': 'correct-t-1', 'ended': 't2', 'end_reason': 'failed'}])
+        self.assertEqual(lc.corrected_on(path, 'T-1', H), 'correct-t-1')
+        self.assertIsNone(lc.corrected_on(path, 'T-1', 'e' * 40))  # another head
+        self.assertIsNone(lc.corrected_on(path, 'T-2', H))
+
     def test_by_worktree_is_the_last_run_that_recorded_the_directory(self):
         lines = [{'job': 'fix-b-0001', 'pid': 1, 'started': 't1', 'worktree': '/wt/fix-b-0001'},
                  {'job': 'fix-b-0001', 'ended': 't2', 'end_reason': 'failed: not pushed: 2 uncommitted file(s), 0 unpushed commit(s)'},
