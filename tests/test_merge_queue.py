@@ -1131,7 +1131,7 @@ class NoVerdict(QueueRepo):
         batch = self.cut_one()
         self.cancel(batch)
         self.queue_pass(self.lane(), [])
-        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '500001', '-R', SLUG, '--failed']])
+        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '--job', '500002', '-R', SLUG]])
         self.assertTrue(any('cancelled — rerun once' in l and 'gate' in l for l in self.lines),
                         self.lines)
         self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])   # still in flight

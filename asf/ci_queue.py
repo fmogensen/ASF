@@ -208,6 +208,10 @@ sunk, until the starved jobs fit; never S1, hotfix, the trunk or a CI-changing P
 as above: ``cancelled in-progress pr run 121 (T-0341) — main's reserved runners r1, r2 held by a
 pr job; it holds a runner main's gate-tests (queued 4m) can take; sunk 30 min``.
 
+**Batches are the landing path.** Relief never cancels a merge-queue batch run (a run on a
+``merge_queue.ref_prefix`` ref), priority or not: the batch is the trunk's next sha, and a cancel
+costs the whole chain a re-cut (``relief: exempt <ref> — merge-queue batch``).
+
 **Priority batch.** A merge-queue batch that holds an ``asf land --priority`` request — or any
 batch once the trunk has stood still past half ``ci.trunk_stall_hours`` while landings wait
 (:func:`urgent_batch`) — gets runner priority: its start (and the re-run of its cancelled run) goes
@@ -3879,6 +3883,13 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                     f"{str(r.get('headSha') or '?')[:9]}: held before its start, never cut")
                 continue
             if kind == 'batch':
+                if _batch_ref(product, branch):
+                    # a merge-queue batch is the landing path: relief never cancels its run,
+                    # priority or not (2026-10-05: an all-green batch run was cancelled for a
+                    # PR run, and the trunk stood still while it was cut again)
+                    out(f'relief: exempt {branch} — merge-queue batch: the landing path, '
+                        'never cancelled')
+                    continue
                 why = urgent_batch(product, branch)
                 if why:                         # a priority batch's run is never cancelled
                     out(f'relief: exempt {branch} — priority batch ({why})')

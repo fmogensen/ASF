@@ -53,7 +53,21 @@ sha drops the batch and cuts its members again, with an ``ALARM`` line and a ``q
 doctor row. A batch pending past ``merge_queue.stuck_min`` (default 90) with a required check
 never started and no run queued or in progress on its sha is handled the same (2026-10-04: a
 batch whose ``gate`` was cancelled sat "pending" 3 h, the green batch behind it held by a full
-chain). A cancel the CI start queue made itself (its ``relief`` record) is its own to re-run.
+chain). A cancel the CI start queue made itself (its ``relief`` record) is its own to re-run. A required
+job lost with its runner — a kill or an OOM the host reports as ``failure`` with ``The operation
+was canceled.`` (:func:`asf.flake.infra_red`) — is the same non-verdict (:func:`_runner_lost`).
+Only the required jobs are re-run (``gh run rerun --job``), never the whole run's red jobs: a
+red job the product does not require never judges a batch and is never re-run by the queue.
+The verdict reads every attempt on the sha (:func:`batch_runs`): per check, the newest attempt
+that completed and judged code — a cancelled re-run never hides an earlier green attempt.
+
+**A drop cancels its run.** Whenever a batch is dropped or replaced (moved, stale, red, timed
+out, re-cut), its ref's runs still queued or in progress at its sha are cancelled in the same
+step (:func:`_cancel_live`, claimed as :data:`MQ_DROPPED`): nothing will land that sha.
+
+**A landed member is pruned.** A member whose head the trunk already contains is taken off its
+batch (:func:`_prune_landed`) — its branch leaving origin never drops the batch — and a head
+already on the base is never cut into a batch.
 
 **Stacking.** Up to ``merge_queue.inflight`` batches form a chain: each is cut on the sha of the
 one before it, not the trunk, so two batches overlap in CI instead of queueing. The chain's
@@ -142,6 +156,9 @@ NONVERDICT = ('cancelled', 'timed_out', 'stale', 'startup_failure')
 #: the one re-run per (batch sha, job), a re-run the host refused, and the re-cut that follows a
 #: second one — the ALARM the doctor's ``queue cancels`` row reads
 MQ_RERUN, MQ_REFUSED, MQ_ALARM = 'mq-cancel-rerun', 'mq-cancel-refused', 'mq-cancel-alarm'
+#: the claim of a live run the queue cancelled because it dropped or replaced its batch ref
+#: (:func:`_cancel_live`): a run judging a sha nobody will land holds runners for nothing
+MQ_DROPPED = 'mq-dropped'
 #: how long a re-run asked of the host may show nothing new before its claim counts as spent
 RERUN_GRACE_S = 600
 #: how long an ALARM stays a red doctor row
@@ -324,6 +341,56 @@ def check_runs(slug, sha):
     return [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else None
 
 
+def batch_runs(slug, sha):
+    """The check runs on batch ``sha`` as the verdict reads them, or None when unreadable: every
+    attempt (``filter=all``), one per check name — the newest that *completed* with a conclusion
+    other than :data:`NONVERDICT`, else the newest of all. The host's default (``latest``) shows
+    only the newest attempt, so a re-run cancelled under a runner kill hid an earlier attempt
+    that was already green on the very same sha (2026-10-05)."""
+    data = H.gh_json(['api', f'repos/{slug}/commits/{sha}/check-runs?per_page=100&filter=all'],
+                     None)
+    runs = data.get('check_runs') if isinstance(data, dict) else None
+    if not isinstance(runs, list):
+        return None
+    return settled_runs([r for r in runs if isinstance(r, dict)])
+
+
+def settled_runs(runs):
+    """One check run per name out of every attempt in ``runs``: the newest completed one whose
+    conclusion judged code (not :data:`NONVERDICT`), else the newest. Newest is the higher
+    check-run id (ids grow with each attempt), then the later in the list; a newer attempt still
+    running over a judged red is taken instead (pending). Order kept."""
+    def newer(i):
+        r = runs[i]
+        try:
+            rid = int(r.get('id') or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        return rid, i
+    best = {}
+    for i, r in enumerate(runs):
+        k = r.get('name')
+        judged = r.get('status') == 'completed' and r.get('conclusion') not in NONVERDICT
+        have = best.get(k)
+        if have is None:
+            best[k] = (judged, i)
+            continue
+        hj, hi = have
+        if (judged, newer(i)) > (hj, newer(hi)):
+            best[k] = (judged, i)
+    # a re-run in flight on top of a judged red is pending (its answer is coming), never the
+    # old red; on top of a green it is green already — the same sha was judged
+    for k, (judged, i) in list(best.items()):
+        if not judged or runs[i].get('conclusion') == 'success':
+            continue
+        live = [j for j, r in enumerate(runs) if r.get('name') == k
+                and r.get('status') != 'completed' and newer(j) > newer(i)]
+        if live:
+            best[k] = (False, max(live, key=newer))
+    keep = {i for _j, i in best.values()}
+    return [r for i, r in enumerate(runs) if i in keep]
+
+
 def verdict(runs, required, nonverdict=('cancelled',)):
     """``('green'|'pending'|'red', why)`` for check ``runs`` against the ``required`` names. A
     required check is green only when a run of it (its job name up to the first space: a matrix
@@ -495,6 +562,12 @@ def run(lane, ready):
         if batch.get('base_ref') in dropped:
             _drop(lane, batch, f"its base batch {batch['base_ref']} was dropped")
             loose.extend(members)
+            dropped.add(ref)
+            continue
+        members, landed = _prune_landed(lane, batch, members, trunk_sha)
+        settled |= {f['branch'] for f in landed}
+        if not members:
+            _drop(lane, batch, f'every member is on {trunk} already')
             dropped.add(ref)
             continue
         state, why, detail = judge(lane, batch, members, heads, trunk_sha, st)
@@ -716,10 +789,22 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     required, why = required_set(lane, sha, trunk_sha)
     if required is None:
         return 'pending', f'required checks unknown — {why}', None
-    runs = check_runs(lane.slug, sha)
+    runs = batch_runs(lane.slug, sha)
     if runs is None:
         return 'pending', 'check runs unreadable', None
     state, why = verdict(runs, required, NONVERDICT)
+    if state == 'red':
+        # a required job lost with its runner (a kill, an OOM: "The operation was canceled.")
+        # concluded failure on the host but judged no code: a non-verdict like a cancel — its
+        # jobs re-run once on the sha, then the batch is cut again; never red, never held
+        lost = _runner_lost(lane, runs, required, why)
+        wf = _workflow_runs(lane.slug, sha) if lost is not None else None
+        if wf is not None:     # unreadable: the flake triage below re-runs it, as before
+            marked, jobs, names = lost
+            got = _nonverdict(lane, batch, marked, required, st, rerun_jobs=jobs, wf=wf)
+            if got:
+                return got
+            return 'pending', f"{', '.join(names)} lost its runner — no verdict", None
     checks = flake.batch_checks(runs)
     flake.settle(lane.product, lane.state_dir, lane.slug, sha, checks, out=lane.out)
     if state == 'green':
@@ -799,7 +884,46 @@ def _ci_queue_holds(lane, ref):
     return any(isinstance(r, dict) and r.get('branch') == ref for r in relief)
 
 
-def _nonverdict(lane, batch, runs, required, st):
+def _runner_lost(lane, runs, required, why):
+    """``(runs, job ids, names)`` when every red required check of ``why`` is a job lost with
+    its runner (:func:`asf.flake.infra_red`: its failure annotations all name runner loss) or a
+    required job skipped behind one — ``runs`` with those checks marked ``cancelled`` (the
+    non-verdict they are), the lost jobs' ids to re-run; None when any red is a real one."""
+    from asf.harvest import deploy
+    checks = flake.batch_checks(runs)
+    failed = root_failures(checks, why)
+    if not failed:
+        return None
+    red = {n.split(' ', 1)[0] for n in (why or '').split(', ') if n}
+    skipped = _skipped(why)
+    lost, jobs = set(), []
+    for c in failed:
+        job = flake._ids(c.get('link'))[1]
+        if not job or not flake.infra_red(lane.slug, job, H._gh):
+            return None
+        lost.add(c.get('name'))
+        jobs.append(job)
+    keys = {flake.job_key(n) for n in lost}
+    if not red <= (keys | skipped):
+        return None
+    marked = [dict(r, conclusion='cancelled')
+              if r.get('name') in lost or (deploy.job_key(r.get('name')) in skipped
+                                           and r.get('conclusion') == 'skipped'
+                                           and deploy.job_key(r.get('name')) in required)
+              else r for r in runs]
+    return marked, sorted(set(jobs)), sorted(lost)
+
+
+def _job_id(r):
+    """The job id of check run ``r`` (its ``/job/<id>`` link: a job id is its check run id)."""
+    for link in (r.get('html_url'), r.get('details_url')):
+        got = flake._ids(link)[1]
+        if got:
+            return got
+    return None
+
+
+def _nonverdict(lane, batch, runs, required, st, rerun_jobs=None, wf=None):
     """A pending batch whose required checks judged no code, with nothing queued or running on
     its sha to replace them — a cancelled (or ``timed_out``/``stale``/``startup_failure``,
     :data:`NONVERDICT`) required check, or a batch pending past ``merge_queue.stuck_min`` with
@@ -830,7 +954,7 @@ def _nonverdict(lane, batch, runs, required, st):
         return None
     if _ci_queue_holds(lane, ref):
         return None                          # the CI start queue cancelled it: its re-run
-    wf = _workflow_runs(lane.slug, sha)
+    wf = _workflow_runs(lane.slug, sha) if wf is None else wf
     if wf is None:
         return None                          # unreadable: asked again next pass
     if any(r.get('status') != 'completed' for r in wf):
@@ -880,10 +1004,24 @@ def _nonverdict(lane, batch, runs, required, st):
     if not all((held.get(rid) or {}).get('cause') == MQ_RERUN for rid in ids):
         lane.out(f'merge queue: {ref} {what} — ci-cancels.json not written, no re-run asked')
         return None
+    # only the required jobs that judged no code are re-run (``--job``): a whole-run
+    # ``--failed`` would re-run every red job beside them, the ones the product does not
+    # require included. A job's re-run re-runs the jobs that need it.
+    jobs_of = {}
+    for rid in ids:
+        jobs_of[rid] = sorted({j for n in gone for r in gone[n] if _run_id(r) == rid
+                               for j in [_job_id(r)] if j}) if gone else []
+    if rerun_jobs:
+        jobs_of = {rid: list(rerun_jobs) if i == 0 else [] for i, rid in enumerate(ids)}
     refused = []
     for rid in ids:
-        args = ['run', 'rerun', rid, '-R', lane.slug] + (['--failed'] if gone else [])
-        if H._gh(args)[0] != 0:
+        if jobs_of.get(rid):
+            calls = [['run', 'rerun', '--job', j, '-R', lane.slug] for j in jobs_of[rid]]
+        elif rerun_jobs:
+            continue
+        else:
+            calls = [['run', 'rerun', rid, '-R', lane.slug] + (['--failed'] if gone else [])]
+        if [args for args in calls if H._gh(args)[0] != 0]:
             refused.append(rid)
     for rid in refused:
         ci_queue.claim_cancel(state_dir, rid, MQ_REFUSED, now, sha=sha, ref=ref, jobs=jobs)
@@ -1127,6 +1265,13 @@ def cut(lane, group, base_sha, base_ref, st, base_members=(), inherit=None):
         members = []
         for f in group:
             b, head = f['branch'], f['head']
+            if head and gitops.is_ancestor(lane.repo, head, base_sha) is True:
+                # landed already: a merge of it is empty, and its branch leaves origin next
+                out(f"merge queue: {b} (PR #{_pr(f)}) is on {base_ref or trunk} already "
+                    f"({head[:12]}) — not cut again")
+                if f.get('requested'):
+                    drop_request(lane.state_dir, _pr(f), _owner(lane), out=out)
+                continue
             subject = MERGE_SUBJECT.format(pr=_pr(f), branch=b, head=head)
             merge = H.sh(['git', 'merge', '--no-ff', '--no-edit', '-m', subject, '-m', TRAILER, head],
                          cwd=tmp, env=ident)
@@ -1491,7 +1636,59 @@ def _admits(lane, key, kind, f, sha, run_branch=None, urgent=''):
 def _drop(lane, batch, why):
     lane.out(f"merge queue: batch {batch['ref']} dropped — {why}")
     _clear_rebuild(lane.state_dir, batch['ref'], _owner(lane))
+    _cancel_live(lane, batch, why)
     _delete_ref(lane, batch)
+
+
+def _cancel_live(lane, batch, why):
+    """Cancel the batch ref's CI runs still queued or in progress — in the step that drops or
+    replaces it: nothing will land that sha, and its run held heavy runners 10–80 min after the
+    drop (2026-10-05). Each cancel is claimed first (:data:`MQ_DROPPED`, ``ci-cancels.json``) so
+    the CI start queue never re-runs it. Only runs on this ref (or with no branch named) at the
+    batch sha; an unreadable list or a refused cancel is a line, never a failure of the drop."""
+    if batch.get('inherited') or not lane.slug:
+        return 0
+    ref, sha = batch['ref'], batch['sha']
+    wf = _workflow_runs(lane.slug, sha)
+    if not wf:
+        return 0
+    n = 0
+    for r in wf:
+        rid = r.get('id')
+        if not rid or r.get('status') == 'completed' \
+                or (r.get('head_branch') or ref) != ref:
+            continue
+        ci_queue.claim_cancel(lane.state_dir, rid, MQ_DROPPED, sha=sha, ref=ref, why=why[:200])
+        if H._gh(['run', 'cancel', str(rid), '-R', lane.slug])[0] != 0:
+            lane.out(f'merge queue: cancel of run {rid} on dropped {ref} refused')
+            continue
+        lane.out(f"merge queue: cancelled run {rid} on {ref} at {sha[:9]} "
+                 f"({r.get('status') or 'live'}) — the batch was dropped, nothing lands that sha")
+        n += 1
+    return n
+
+
+def _prune_landed(lane, batch, members, trunk_sha):
+    """The ``members`` still to land: a member whose head the trunk already contains (an
+    earlier batch landed it) is taken off the batch record — its branch deleted or its record
+    moved on is no reason to drop the batch (2026-10-05: a batch dropped as "head moved" for a
+    member merged minutes before). Its ``asf land`` request is consumed."""
+    keep, gone = [], []
+    for f in members:
+        head = f.get('head')
+        if head and trunk_sha and gitops.is_ancestor(lane.repo, head, trunk_sha) is True:
+            gone.append(f)
+        else:
+            keep.append(f)
+    if not gone:
+        return members, []
+    names = {f['branch'] for f in gone}
+    batch['members'] = [m for m in batch['members'] if m.get('branch') not in names]
+    for f in gone:
+        lane.out(f"merge queue: {f['branch']} (PR #{_pr(f)}) pruned from {batch['ref']} — its "
+                 f"head {str(f.get('head'))[:9]} is on {lane.trunk} already")
+        drop_request(lane.state_dir, _pr(f), _owner(lane), out=lane.out)
+    return keep, gone
 
 
 def _delete_ref(lane, batch):
