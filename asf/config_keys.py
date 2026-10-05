@@ -14,6 +14,7 @@ KNOWN_CONFIG_KEYS = frozenset({
     'connectors.*',             # asf.connectors: connectors.<kind> per kind
     'scheduler.kind', 'scheduler.provider', 'scheduler.label_prefix', 'scheduler.legacy_labels',
     'scheduler.legacy_cron', 'scheduler.launchd_label', 'scheduler.occupancy',
+    'scheduler.systemd_unit_dir',
     'scheduler.interval_s',     # no longer read; doctor's scheduler row says so
     'worker_pool.backend', 'worker_pool.binary', 'worker_pool.models.*',
     'worker_pool.quota_command', 'worker_pool.settings_file', 'worker_pool.permission_mode',

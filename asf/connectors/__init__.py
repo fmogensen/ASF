@@ -30,7 +30,7 @@ import importlib
 import os
 
 #: The kinds, in the order ``asf doctor`` lists them.
-KINDS = ('forge', 'ci', 'runtime', 'quota', 'secrets')
+KINDS = ('forge', 'ci', 'runtime', 'scheduler', 'quota', 'secrets')
 
 #: The entry-point group a third-party implementation of ``kind`` is published under.
 ENTRY_POINT_GROUP = 'asf.connectors.{kind}'
@@ -44,6 +44,7 @@ DEFAULTS = {
     'ci': 'github-actions',
     'runtime': 'claude-code',
     'quota': 'none',
+    'scheduler': 'launchd',
     'secrets': 'file',
 }
 
@@ -70,11 +71,18 @@ BUILTIN = {
         'file': 'asf.connectors.secrets:file',
         'command': 'asf.connectors.secrets:command',
     },
+    'scheduler': {
+        'launchd': 'asf.connectors.launchd:LaunchdScheduler',
+        'cron': 'asf.connectors.launchd:CronScheduler',
+        'none': 'asf.connectors.launchd:NoScheduler',
+        'systemd': 'asf.connectors.systemd:SystemdScheduler',
+        'fake': 'asf.connectors.fakes:FakeScheduler',
+    },
 }
 
 #: The kinds whose command form is the generic JSON contract of :mod:`asf.connectors.command`
 #: (``quota`` and ``secrets`` keep their own one-line contracts; see their modules).
-GENERIC_COMMAND_KINDS = ('forge', 'ci', 'runtime')
+GENERIC_COMMAND_KINDS = ('forge', 'ci', 'runtime', 'scheduler')
 
 _registered = {}
 _instances = {}

@@ -7,8 +7,10 @@
 default_product: sample
 
 # scheduler.kind: launchd (the default: `asf scheduler install` writes and loads one job per
-# clock) | cron (the lines are printed for `crontab -e`, and the install exits 3) | anything
-# else (no adapter: the command each job must run is printed). `provider` is read as a synonym.
+# clock) | systemd (Linux: one user .service + .timer per clock, enabled with `systemctl --user`)
+# | cron (the lines are printed for `crontab -e`, and the install exits 3) | anything
+# else (no adapter: the command each job must run is printed). `provider` is read as a synonym;
+# `connectors.scheduler` (below), when set, wins over both.
 # What runs, and when, is not here — it's each product's own clocks: block
 # (products/<name>.yaml, see docs/products.example.yaml).
 scheduler:
@@ -17,6 +19,7 @@ scheduler:
   # launchd_label: old.job.label   # a pre-ASF job the doctor reports until it is retired
   # legacy_labels: [old.job.*]     # pre-ASF jobs listed in the doctor's SCHEDULER section
   # legacy_cron: /opt/old/tick      # a pre-ASF crontab line (substring); doctor is red while present
+  # systemd_unit_dir: ~/.config/systemd/user   # where kind systemd writes its units (this default)
 
 # legacy_paths: directories of pre-ASF tools, for the doctor's one-factory check and cutover.
 # legacy_paths: [~/old-factory/bin]
@@ -274,6 +277,7 @@ capacity:
 #   forge: github                  # github (default) | fake | command | <entry point>
 #   quota: none                    # none (default: every account available) | command | fake
 #   secrets: file                  # file (default: auth_env names files) | command
+#   scheduler: launchd             # launchd (default) | systemd | cron | none | fake | command
 #   # secrets:                     # the command form: {ref} is the auth_env reference
 #   #   command: my-vault read {ref}
 #   #   timeout_s: 30

@@ -324,10 +324,10 @@ class RenderTest(SchedulerTestCase):
         self.assertIn('tick-sample-record.log', job['line'])
 
     def test_unknown_kind_needs_an_operator(self):
-        cfg = {'scheduler': {'kind': 'systemd'}}
+        cfg = {'scheduler': {'kind': 'no-such-scheduler'}}
         job = scheduler.render('sample', self.RECORD, cfg=cfg)
         self.assertTrue(job['needs_operator'].startswith('NEEDS OPERATOR:'))
-        self.assertIn('systemd', job['needs_operator'])
+        self.assertIn('no-such-scheduler', job['needs_operator'])
         self.assertEqual(scheduler.install(job), [job['needs_operator']])
 
 

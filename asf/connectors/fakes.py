@@ -81,3 +81,53 @@ class FakeCI(FakeConnector):
     def backend(self, product, run=None):
         from asf import ci_pool
         return ci_pool.Backend()
+
+
+class FakeScheduler(FakeConnector):
+    """A scheduler that holds its jobs in memory (``jobs``: ``{label: job}``)."""
+
+    def __init__(self, cfg=None, answers=None):
+        super().__init__(cfg, answers)
+        self.jobs = {}
+
+    def render(self, job, workdir, env_vars):
+        self.calls.append(('render', (job['label'],), {}))
+        return dict(job, path=self.definition_path(job['label']), workdir=workdir)
+
+    def definition_path(self, label):
+        return f'/fake-scheduler/{label}'
+
+    def installed_labels(self, pattern):
+        import fnmatch
+        return sorted(lb for lb in self.jobs if fnmatch.fnmatch(lb, pattern))
+
+    def install(self, job):
+        self.calls.append(('install', (job['label'],), {}))
+        self.jobs[job['label']] = job
+        return [f"scheduler: installed {job['label']}"]
+
+    def uninstall(self, label, remove_definition=True):
+        self.calls.append(('uninstall', (label,), {}))
+        self.jobs.pop(label, None)
+        return [f'scheduler: uninstalled {label}']
+
+    def load(self, path):
+        self.calls.append(('load', (path,), {}))
+        return True, ''
+
+    def stop(self, label):
+        self.calls.append(('stop', (label,), {}))
+        return label in self.jobs
+
+    def status(self, label):
+        return {'label': label, 'loaded': label in self.jobs}
+
+    def loaded_labels(self):
+        return sorted(self.jobs)
+
+    def locate(self, label):
+        job = self.jobs.get(label)
+        if job is None:
+            return None, None
+        return self.definition_path(label), {'ProgramArguments': job.get('argv') or [],
+                                             'WorkingDirectory': job.get('workdir')}
