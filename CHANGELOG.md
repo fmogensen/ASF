@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.133 — 2026-10-06
+
+### Features landed
+
+- ASF can now tune itself — per session kind it tries a cheaper model or a different seat count within your bounds, keeps what measurably helps, reverts what hurts, and shows every change in `asf tune history` and `asf status` (off until you set `tune.enabled`) (#771)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.133"`
+
 ## v0.1.132 — 2026-10-06
 
 ### Bugs fixed
