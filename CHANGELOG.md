@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.131 — 2026-10-06
+
+### Features landed
+
+- Every ASF update now has a version number (this one is 0.1.131) with readable release notes in CHANGELOG.md, and ASF shows that number wherever it says what a product runs (#767)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.131"`
+
 ## v0.1.130 — 2026-10-06
 
 ### Bugs fixed
