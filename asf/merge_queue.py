@@ -133,7 +133,8 @@ import shutil
 import tempfile
 import time
 
-from asf import attestation, ci_queue, flake, github, gitops, gitpush, refguard, stale_ref
+from asf import (attestation, ci_queue, flake, github, gitops, gitpush, refguard, run_cancel,
+                 stale_ref)
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.state import store
@@ -814,6 +815,28 @@ def judge(lane, batch, members, heads, trunk_sha, st):
             if got:
                 return got
             return 'pending', f"{', '.join(names)} lost its runner — no verdict", None
+    # a required job skipped behind a ``needs:`` upstream the product does not require: the
+    # upstream is the cause, read off the workflow's own graph — cut short (a cancel, a
+    # timeout) it judged no code: a non-verdict, re-run once then cut again; failed, it is the
+    # real cause, said, and the only failure the triage and the blame below read
+    behind = skipped_behind(lane, runs, required, why, sha) if state == 'red' else None
+    causes = {}
+    if behind:
+        from asf.harvest import deploy
+        causes = {r.get('name'): r.get('conclusion') for rs in behind.values() for r in rs}
+        said = (f"{', '.join(sorted(behind))} skipped behind "
+                + ' '.join(f'{n} ({c})' for n, c in sorted(causes.items())))
+        if all(c in NONVERDICT for c in causes.values()):
+            marked = [dict(r, conclusion='cancelled')
+                      if deploy.job_key(r.get('name')) in behind
+                      and r.get('conclusion') == 'skipped' else r for r in runs]
+            jobs = sorted({_job_id(r) for rs in behind.values() for r in rs} - {None})
+            got = _nonverdict(lane, batch, marked, required, st, rerun_jobs=jobs or None)
+            if got:
+                return got
+            return 'pending', f'{said} — not required, cut short: no verdict', None
+        lane.out(f"merge queue: {ref} {said} — the real cause, a job the product does not "
+                 f"require; {', '.join(sorted(behind))} judged no code")
     checks = flake.batch_checks(runs)
     flake.settle(lane.product, lane.state_dir, lane.slug, sha, checks, out=lane.out)
     if state == 'green':
@@ -824,6 +847,8 @@ def judge(lane, batch, members, heads, trunk_sha, st):
         # the batch is split or a member sent back — a failed required job, and a failed job a
         # required one was skipped behind (a ``needs:`` upstream: its re-run re-runs them)
         failed = root_failures(checks, why)
+        if causes:      # the needs: graph named the upstream: no unrelated red rides along
+            failed = [c for c in failed if c.get('name') in causes]
         defects, held = flake.triage(lane.product, lane.state_dir, lane.slug, sha, failed,
                                      where=f'batch {ref}', out=lane.out)
         explained = {flake.job_key(c['name']) for c in failed} | (
@@ -1059,6 +1084,132 @@ def doctor_rows(product, now=None):
                                       f"{str(c.get('sha'))[:9]}: {c.get('why')} — no verdict "
                                       f"after one re-run, cut again ({prs})"))
     return rows
+
+
+#: a ``${{ … }}`` expression in a workflow value (a matrix suffix in a job's ``name:``)
+_EXPR_RE = re.compile(r'\$\{\{.*?\}\}')
+_JOB_KEY_RE = re.compile(r'^([A-Za-z0-9_-]+)\s*:\s*(?:#.*)?$')
+_FIELD_RE = re.compile(r'^(name|needs)\s*:\s*(.*)$')
+
+
+def _scalar(v):
+    v = v.strip()
+    if ' #' in v and not v.startswith(('"', "'")):
+        v = v.split(' #', 1)[0].strip()
+    return v.strip('\'"')
+
+
+def workflow_jobs(text):
+    """``{job id: {name, needs}}`` from a workflow file's top-level ``jobs:`` block, read line by
+    line (no YAML library): each job's key at the first indent under ``jobs:``, its ``name:``
+    (else its id) and ``needs:`` — a scalar, a ``[flow, list]`` or a block ``- list`` — at the
+    indent under that. ``{}`` when there is no ``jobs:`` block."""
+    jobs, in_jobs, job_ind, key_ind, cur, in_needs = {}, False, None, None, None, False
+    for raw in str(text or '').splitlines():
+        s = raw.strip()
+        if not s or s.startswith('#'):
+            continue
+        ind = len(raw) - len(raw.lstrip(' '))
+        if ind == 0:
+            in_jobs, cur = s.split('#', 1)[0].strip() == 'jobs:', None
+            continue
+        if not in_jobs:
+            continue
+        if job_ind is None:
+            job_ind = ind
+        if ind <= job_ind:
+            m = _JOB_KEY_RE.match(s) if ind == job_ind else None
+            cur = m.group(1) if m else None
+            if cur:
+                jobs[cur] = {'name': cur, 'needs': []}
+            key_ind, in_needs = None, False
+            continue
+        if cur is None:
+            continue
+        if key_ind is None:
+            key_ind = ind
+        if in_needs and ind >= key_ind and s.startswith('- '):
+            jobs[cur]['needs'].append(_scalar(s[2:]))
+            continue
+        if ind != key_ind:
+            continue
+        in_needs = False
+        m = _FIELD_RE.match(s)
+        if not m:
+            continue
+        v = m.group(2).strip()
+        if m.group(1) == 'name':
+            jobs[cur]['name'] = _scalar(v) or cur
+        elif v.startswith('['):
+            jobs[cur]['needs'] = [_scalar(x) for x in v.split(']', 1)[0].strip('[').split(',')
+                                  if x.strip()]
+        elif _scalar(v):
+            jobs[cur]['needs'] = [_scalar(v)]
+        else:
+            in_needs = True
+    return jobs
+
+
+def job_of(jobs, check_name):
+    """The job id of :func:`workflow_jobs` a check run named ``check_name`` is a run of: its
+    ``name:`` (expressions dropped) or its id, up to the first space (a matrix leg is its job);
+    None when no job answers."""
+    from asf.harvest import deploy
+    key = deploy.job_key(check_name)
+    for jid, j in jobs.items():
+        label = _EXPR_RE.sub('', j.get('name') or '').strip() or jid
+        if deploy.job_key(label) == key:
+            return jid
+    return key if key in jobs else None
+
+
+def upstream_jobs(jobs, jid):
+    """Every job ``jid`` needs, directly or through the jobs it needs."""
+    seen, todo = set(), list((jobs.get(jid) or {}).get('needs') or ())
+    while todo:
+        j = todo.pop()
+        if j not in seen:
+            seen.add(j)
+            todo.extend((jobs.get(j) or {}).get('needs') or ())
+    return seen
+
+
+def skipped_behind(lane, runs, required, why, sha, wf=None):
+    """``{required name: [upstream check runs]}`` for a red verdict ``why`` whose every red is a
+    required check ``skipped``: per skipped job, the jobs its ``needs:`` reach (the workflow file
+    at ``sha``, :func:`workflow_jobs`) that completed neither green nor skipped — the cause of
+    the skip. None when a red is no skip, a workflow or its graph does not read, or a skipped
+    job has no such upstream (skipped on its own ``if:``): judged as before."""
+    skipped = _skipped(why)
+    red = {n.split(' ', 1)[0] for n in (why or '').split(', ') if n}
+    if not skipped or red - skipped:
+        return None
+    from asf.harvest import deploy
+    wf = _workflow_runs(lane.slug, sha) if wf is None else wf
+    paths = {str(r.get('id')): r.get('path') for r in wf or () if r.get('path')}
+    graphs, out = {}, {}
+    for name in sorted(skipped):
+        mine = [r for r in runs or () if deploy.job_key(r.get('name')) == name
+                and r.get('conclusion') == 'skipped']
+        rid = next((_run_id(r) for r in mine if _run_id(r)), None)
+        path = paths.get(rid)
+        if not path:
+            return None
+        if path not in graphs:
+            got = gitops.git(['show', f'{sha}:{path}'], lane.repo)
+            graphs[path] = workflow_jobs(got.stdout) if got.ok else {}
+        jobs = graphs[path]
+        jid = job_of(jobs, name) if jobs else None
+        if not jid:
+            return None
+        ups = upstream_jobs(jobs, jid)
+        bad = [r for r in runs or () if _run_id(r) == rid and r.get('status') == 'completed'
+               and r.get('conclusion') not in ('success', 'skipped', 'neutral')
+               and job_of(jobs, r.get('name')) in ups]
+        if not bad:
+            return None
+        out[name] = bad
+    return out
 
 
 def _skipped(why):
@@ -1649,6 +1800,13 @@ def _drop(lane, batch, why):
     _delete_ref(lane, batch)
 
 
+def _ok_call(args):
+    """:func:`asf.harvest.harvest._gh` as ``(ok, stdout)`` — the shape :mod:`asf.run_cancel`
+    takes."""
+    rc, out, _err = H._gh(args)
+    return rc == 0, out or ''
+
+
 def _cancel_live(lane, batch, why):
     """Cancel the batch ref's CI runs still queued or in progress — in the step that drops or
     replaces it: nothing will land that sha, and its run held heavy runners 10–80 min after the
@@ -1668,9 +1826,12 @@ def _cancel_live(lane, batch, why):
                 or (r.get('head_branch') or ref) != ref:
             continue
         ci_queue.claim_cancel(lane.state_dir, rid, MQ_DROPPED, sha=sha, ref=ref, why=why[:200])
-        if H._gh(['run', 'cancel', str(rid), '-R', lane.slug])[0] != 0:
+        done = run_cancel.cancel(_ok_call, lane.slug, rid, status=r.get('status'))
+        if not done:
             lane.out(f'merge queue: cancel of run {rid} on dropped {ref} refused')
             continue
+        if run_cancel.unconfirmed(done):
+            lane.out(f'merge queue: {run_cancel.unconfirmed(done)}')
         lane.out(f"merge queue: cancelled run {rid} on {ref} at {sha[:9]} "
                  f"({r.get('status') or 'live'}) — the batch was dropped, nothing lands that sha")
         n += 1

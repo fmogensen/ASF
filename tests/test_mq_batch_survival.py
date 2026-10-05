@@ -125,6 +125,20 @@ class DropCancelsTheRun(Survival):
                          (merge_queue.MQ_DROPPED, batch['ref'], batch['sha']))
         self.assertTrue(any('cancelled run 600001' in l for l in self.lines), self.lines)
 
+    def test_a_queued_run_of_a_dropped_batch_is_force_cancelled(self):
+        # a plain cancel on a queued run is accepted and does nothing: the run started later
+        # and held its runners anyway (2026-10-05)
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        (batch,) = self.batches()
+        self.live(batch, 600021)
+        self.gh.wf[batch['sha']][0]['status'] = 'queued'
+        self.push_lane('worker/T-0001', {'a.txt': 'a2\n'}, 'feat: a again')   # head moves
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.cancels(), [])
+        self.assertIn(['api', '-X', 'POST', f'repos/{SLUG}/actions/runs/600021/force-cancel'],
+                      self.gh.calls)
+        self.assertTrue(any('cancelled run 600021' in l for l in self.lines), self.lines)
+
     def test_a_replaced_batch_has_its_live_run_cancelled(self):
         self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
         (batch,) = self.batches()
@@ -301,3 +315,103 @@ class OnlyRequiredChecksJudge(Survival):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+WORKFLOW = """name: ci
+on: [push]
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    steps: [{run: 'true'}]
+  site:
+    runs-on: ubuntu-latest
+    steps: [{run: 'true'}]
+  gate:
+    needs: [rules]
+    if: "!cancelled() && needs.rules.result == 'success'"
+    runs-on: ubuntu-latest
+    steps: [{run: 'true'}]
+  gate-tests:
+    name: gate-tests${{ matrix.suffix }}
+    needs:
+      - gate
+    runs-on: ubuntu-latest
+    steps: [{run: 'true'}]
+"""
+
+
+def job_check(name, conclusion, job, run=600001, completed=None):
+    return {'name': name, 'status': 'completed', 'conclusion': conclusion, 'id': job,
+            'details_url': f'https://github.com/o/p/actions/runs/{run}/job/{job}',
+            'html_url': f'https://github.com/o/p/actions/runs/{run}/job/{job}',
+            'completed_at': completed or stamp(-3600)}
+
+
+class SkippedBehindUnrequired(Survival):
+    """2026-10-05: a required job skipped because a job it ``needs:`` (one the product does not
+    require) was cut short read as red, and the batch was blamed. The workflow's ``needs:`` graph
+    names the cause: a cancelled upstream is a non-verdict (re-run once, then cut again); a failed
+    one is the real cause — said, and the only failure the triage and the blame read."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(self.repo, '.github/workflows/ci.yml', WORKFLOW)
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'ci'], cwd=self.repo, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+
+    def cut_one(self):
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1),
+                                      self.entry('worker/T-0002', 2, 'T-0002')])
+        (batch,) = self.batches()
+        return batch
+
+    def upstream(self, batch, conclusion, completed=None, extra=()):
+        self.gh.checks[batch['sha']] = [
+            job_check('rules', conclusion, 600002, completed=completed),
+            job_check('gate', 'skipped', 600003, completed=completed),
+            job_check('gate-tests (a)', 'skipped', 600004, completed=completed), *extra]
+        self.gh.wf[batch['sha']] = [{'id': 600001, 'status': 'completed',
+                                     'conclusion': 'cancelled' if conclusion == 'cancelled'
+                                     else 'failure', 'head_branch': batch['ref'],
+                                     'path': '.github/workflows/ci.yml'}]
+
+    def test_a_cancelled_unrequired_upstream_is_rerun_once_then_recut_never_red(self):
+        batch = self.cut_one()
+        self.upstream(batch, 'cancelled')
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '--job', '600002', '-R', SLUG]])
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        self.assertEqual((self.backs, self.dropped_lines()), ([], []))
+        self.assertTrue(any('skipped behind rules (cancelled)' in l for l in self.lines),
+                        self.lines)
+        # its re-run cut short again: no verdict twice — cut again, nobody blamed
+        self.upstream(batch, 'cancelled', completed=stamp(120))
+        _next_second()
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.gh.reruns()), 1)
+        self.assertEqual(self.backs, [])
+        self.assertTrue(any('ALARM' in l and batch['ref'] in l for l in self.lines), self.lines)
+        (recut,) = self.batches()
+        self.assertNotEqual(recut['sha'], batch['sha'])
+
+    def test_a_failed_unrequired_upstream_is_named_and_is_the_only_failure_read(self):
+        batch = self.cut_one()
+        self.upstream(batch, 'failure', extra=[job_check('site', 'failure', 600005)])
+        self.queue_pass(self.lane(), [])
+        self.assertTrue(any('skipped behind rules (failure)' in l for l in self.lines),
+                        self.lines)
+        reruns = [c for c in self.gh.calls if c[:3] == ['run', 'rerun', '--job']]
+        self.assertIn(['run', 'rerun', '--job', '600002', '-R', SLUG], reruns)
+        # site is not upstream of any required job: its red is no cause, never re-run here
+        self.assertNotIn(['run', 'rerun', '--job', '600005', '-R', SLUG], reruns)
+
+    def test_needs_graph_reads_scalar_flow_and_block_lists_transitively(self):
+        jobs = merge_queue.workflow_jobs(WORKFLOW)
+        self.assertEqual(jobs['gate']['needs'], ['rules'])
+        self.assertEqual(jobs['gate-tests']['needs'], ['gate'])
+        self.assertEqual(merge_queue.upstream_jobs(jobs, 'gate-tests'), {'gate', 'rules'})
+        self.assertEqual(merge_queue.job_of(jobs, 'gate-tests (a)'), 'gate-tests')
+        self.assertEqual(merge_queue.job_of(jobs, 'rules'), 'rules')
+        scalar = merge_queue.workflow_jobs('jobs:\n  a:\n    x: 1\n  b:\n    needs: a\n')
+        self.assertEqual(scalar['b']['needs'], ['a'])

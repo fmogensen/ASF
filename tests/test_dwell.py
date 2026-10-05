@@ -67,6 +67,9 @@ class FakeFacts(dwell.Facts):
     def holds(self):
         return self.kw.get('holds', []) if 'holds' in self.kw else super().holds()
 
+    def live_refs(self):
+        return self.kw.get('live')
+
 
 class DwellTestCase(unittest.TestCase):
     def setUp(self):
@@ -196,21 +199,72 @@ class ProbeTests(DwellTestCase):
                             'green_batch_blocked')
         self.assertEqual(got, [])
 
+    GREEN = [{'name': 'tests', 'status': 'completed', 'conclusion': 'success'}]
+
     def test_green_prs_waiting_and_no_cut(self):
         lane = {'worker/t-1': {'state': 'WAITING', 'head': 'a', 'green': {'head': 'a'}}}
         batches = [{'ref': 'batch/1', 'sha': 's', 'cut_at': iso(NOW - 3600), 'members': []}]
         reqs = {'5': {'pr': 5, 'branch': 'ci/fix'}, '6': {'pr': 6, 'branch': 'x', 'red': {'head': 'h'}}}
-        self.found(FakeFacts(self.product, lane=lane, batches=batches, requests=reqs))
+        prs = [{'number': 5, 'headRefName': 'ci/fix', 'headRefOid': 'c'},
+               {'number': 6, 'headRefName': 'x', 'headRefOid': 'h'}]
+        checks = {'a': self.GREEN, 'c': self.GREEN}
+        self.found(FakeFacts(self.product, lane=lane, batches=batches, requests=reqs, prs=prs,
+                             checks=checks))
         got = self.by_state(self.found(FakeFacts(self.product, now=NOW + 21 * 60, lane=lane,
-                                                 batches=batches, requests=reqs)), 'chain_no_cut')
+                                                 batches=batches, requests=reqs, prs=prs,
+                                                 checks=checks)), 'chain_no_cut')
         self.assertTrue(got[0].breach)
         self.assertIn('2 green PR(s) wait (ci/fix, worker/t-1)', got[0].detail)
         # a new cut is a new wait: it starts from zero
         batches2 = batches + [{'ref': 'batch/2', 'sha': 't', 'cut_at': iso(NOW + 21 * 60),
                                'members': []}]
         again = self.by_state(self.found(FakeFacts(self.product, now=NOW + 22 * 60, lane=lane,
-                                                   batches=batches2)), 'chain_no_cut')
+                                                   batches=batches2, checks=checks)),
+                              'chain_no_cut')
         self.assertFalse(again[0].breach)
+
+    def test_chain_no_cut_counts_only_prs_green_on_their_head_now(self):
+        # 2026-10-05: four asf land requests counted "green waiting" — one had a red site and a
+        # cancelled gate, others were pending
+        reqs = {'7': {'pr': 7, 'branch': 'cloud/a'}, '8': {'pr': 8, 'branch': 'cloud/b'},
+                '9': {'pr': 9, 'branch': 'cloud/c'}}
+        prs = [{'number': 7, 'headRefName': 'cloud/a', 'headRefOid': 'h7'},
+               {'number': 8, 'headRefName': 'cloud/b', 'headRefOid': 'h8'},
+               {'number': 9, 'headRefName': 'cloud/c', 'headRefOid': 'h9'}]
+        cancelled = [{'name': 'site', 'status': 'completed', 'conclusion': 'failure'},
+                     {'name': 'tests', 'status': 'completed', 'conclusion': 'cancelled'}]
+        pending = [{'name': 'tests', 'status': 'in_progress', 'conclusion': None}]
+        # a lane record once green, its head's run since cancelled
+        lane = {'worker/t-2': {'state': 'WAITING', 'head': 'l2', 'green': {'head': 'l2'}}}
+        got = self.by_state(self.found(FakeFacts(
+            self.product, requests=reqs, prs=prs, lane=lane,
+            checks={'h7': cancelled, 'h8': pending, 'l2': cancelled})), 'chain_no_cut')
+        self.assertEqual(got, [])       # h9's checks do not read: not known green either
+        got = self.by_state(self.found(FakeFacts(
+            self.product, requests=reqs, prs=prs, lane=lane,
+            checks={'h7': cancelled, 'h8': pending, 'h9': self.GREEN})), 'chain_no_cut')
+        self.assertIn('1 green PR(s) wait (cloud/c)', got[0].detail)
+
+    def test_chain_no_cut_names_only_a_live_chain_and_skips_its_members(self):
+        reqs = {'7': {'pr': 7, 'branch': 'cloud/a'}, '8': {'pr': 8, 'branch': 'cloud/b'}}
+        prs = [{'number': 7, 'headRefName': 'cloud/a', 'headRefOid': 'h7'},
+               {'number': 8, 'headRefName': 'cloud/b', 'headRefOid': 'h8'}]
+        checks = {'h7': self.GREEN, 'h8': self.GREEN}
+        batches = [{'ref': 'batch/live', 'sha': 's1', 'cut_at': iso(NOW - 3600),
+                    'members': [{'branch': 'cloud/b', 'pr': 8}]},
+                   {'ref': 'batch/gone', 'sha': 's2', 'cut_at': iso(NOW - 60), 'members': []}]
+        got = self.by_state(self.found(FakeFacts(
+            self.product, requests=reqs, prs=prs, checks=checks, batches=batches,
+            live={'batch/live'})), 'chain_no_cut')
+        self.assertEqual(got[0].key, 'after batch/live')
+        self.assertNotIn('batch/gone', got[0].detail)
+        self.assertIn('1 green PR(s) wait (cloud/a)', got[0].detail)
+        # no batch of the chain is on origin any more: the chain is empty, none is named
+        got = self.by_state(self.found(FakeFacts(
+            self.product, requests=reqs, prs=prs, checks=checks, batches=batches,
+            live=set())), 'chain_no_cut')
+        self.assertEqual(got[0].key, 'empty chain')
+        self.assertNotIn('batch/', got[0].detail)
 
     def test_the_merge_queue_states_need_the_queue(self):
         product = env.Product('p', {'main': 'main'})

@@ -269,6 +269,21 @@ class Facts:
             return r.data if r.ok and isinstance(r.data, list) else None
         return self._once('prs', read)
 
+    def live_refs(self):
+        """The branch names on origin (one ``git ls-remote --heads``), or None when unreadable
+        — a batch the merge queue still lists but origin no longer has is no chain."""
+        def read():
+            from asf import gitops
+            if not self.product.repo_dir:
+                return None
+            r = gitops.git(['ls-remote', '--heads', 'origin'], self.product.repo_dir,
+                           timeout=60)
+            if not r.ok:
+                return None
+            return {ln.split('\trefs/heads/', 1)[1] for ln in (r.data or '').splitlines()
+                    if '\trefs/heads/' in ln}
+        return self._once('live_refs', read)
+
     def checks_at(self, sha):
         """The check runs on ``sha``, or None when unreadable."""
         if not self.product.repo_slug:
@@ -432,15 +447,35 @@ def green_batch_blocked(facts):
 
 
 def chain_no_cut(facts):
+    """Green PRs wait and the queue cuts no batch. Only a PR whose required checks read green on
+    its exact head *now* counts (a lane record's once-green, or an ``asf land`` request that is
+    merely not red, may since have a cancelled gate or a red one — 2026-10-05: four such were
+    counted "green waiting"); a PR already in a batch of the chain does not wait. Only a batch
+    still on origin is the chain: a dropped or landed one is never named."""
     if not facts.queue_on():
         return []
+    from asf import merge_queue
     from asf.harvest import lane as lane_mod
-    waiting = [b for b, rec in facts.lane().items()
-               if rec.get('state') in (lane_mod.WAITING, lane_mod.WAITING_CI) and _green_now(rec)]
-    waiting += [str(r.get('branch')) for r in facts.requests().values() if not r.get('red')]
+    live = facts.live_refs()
+    batches = [b for b in facts.batches() if live is None or b.get('ref') in live]
+    in_chain = {str(m.get('branch')) for b in batches for m in b.get('members') or ()}
+    required = facts.required()
+
+    def green(head):
+        runs = facts.checks_at(head) if head else None
+        return runs is not None and merge_queue.verdict(runs, required)[0] == 'green'
+    heads = {}
+    for b, rec in facts.lane().items():
+        if rec.get('state') in (lane_mod.WAITING, lane_mod.WAITING_CI) and _green_now(rec):
+            heads[b] = rec.get('head')
+    reqs = [r for r in facts.requests().values() if not r.get('red')]
+    if reqs:
+        by_pr = {str(p.get('number')): p.get('headRefOid') for p in facts.open_prs() or ()}
+        for r in reqs:
+            heads.setdefault(str(r.get('branch')), by_pr.get(str(r.get('pr'))))
+    waiting = [b for b, head in heads.items() if b not in in_chain and green(head)]
     if not waiting:
         return []
-    batches = facts.batches()
     newest = max(batches, key=lambda b: str(b.get('cut_at') or ''), default=None)
     after = f"after {newest['ref']}" if newest else 'empty chain'
     return [Finding('chain_no_cut', after,

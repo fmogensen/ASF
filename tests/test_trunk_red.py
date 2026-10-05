@@ -501,8 +501,13 @@ class RunsGH(FakeGH):
     def __init__(self):
         super().__init__()
         self.wf_runs = {}     # run id -> {event, created_at}
+        self.head_runs = None  # the runs on a head sha (actions/runs?head_sha=); None: unreadable
 
     def __call__(self, args):
+        if args[0] == 'api' and 'actions/runs?head_sha=' in args[1]:
+            self.calls.append(list(args))
+            return ((0, json.dumps({'workflow_runs': self.head_runs}), '')
+                    if self.head_runs is not None else (1, '', '404'))
         if args[0] == 'api' and '/actions/runs/' in args[1] and '/job' not in args[1]:
             self.calls.append(list(args))
             rid = args[1].rsplit('/', 1)[1]
@@ -708,6 +713,22 @@ class StaleFactoryHead(unittest.TestCase):
         self.assertEqual(len(self.gh.of('close')), 1)
         self.assertEqual(len(self.gh.of('reopen')), 1)
         self.assertTrue(any('stale' in l or 'merge ref' in l for l in lines), lines)
+
+    def test_a_run_still_in_flight_on_the_head_holds_the_reopen(self):
+        # 2026-10-05: a reopen for a fresh run superseded the head's first run while it was still
+        # going (concurrency group) — that run never reached a verdict. The reopen waits for it.
+        self.gh.head_runs = [{'id': 8, 'status': 'in_progress', 'event': 'pull_request'},
+                             {'id': 7, 'status': 'completed', 'event': 'pull_request'}]
+        red, lines, triage = self.head_red(self.moved - 3600)
+        self.assertIsNone(red)
+        triage.assert_not_called()
+        self.assertEqual((self.gh.of('close'), self.gh.of('reopen')), ([], []))
+        self.assertTrue(any('run 8' in l and 'in_progress' in l for l in lines), lines)
+        # the run finished: the reopen goes ahead
+        self.gh.head_runs[0]['status'] = 'completed'
+        facts_cache.clear()
+        self.head_red(self.moved - 3600)
+        self.assertEqual(len(self.gh.of('reopen')), 1)
 
     def test_a_run_on_todays_trunk_is_judged_as_before(self):
         red, _lines, triage = self.head_red(int(time.time()) + 60)   # after the tip arrived

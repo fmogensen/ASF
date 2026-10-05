@@ -128,10 +128,24 @@ def save(state_dir, data):
     os.replace(tmp, path(state_dir))
 
 
+def in_flight_run(slug, head):
+    """``(run id, status)`` of a workflow run on commit ``head`` the host has not completed, or
+    None (none, or the list does not read — judged as before). A reopen starts the head's runs
+    again and the concurrency group cancels the one still going: a first run cut that way never
+    reaches a verdict (2026-10-05), so the reopen waits for it."""
+    r = github.api(f'repos/{slug}/actions/runs?head_sha={head}&per_page=100')
+    runs = r.data.get('workflow_runs') if r.ok and isinstance(r.data, dict) else None
+    for run in runs if isinstance(runs, list) else ():
+        if isinstance(run, dict) and run.get('status') not in (None, 'completed'):
+            return run.get('id'), run.get('status')
+    return None
+
+
 def refresh(product, slug, number, head, tip, names, out=print, now=None):
     """A fresh run on a new merge ref for PR ``number`` red at ``head`` on ``names`` judged
     against an older trunk: ``'fresh'`` (closed and reopened now), ``'waiting'`` (reopened for
-    this head and tip already, its run not shown yet), or None — not refreshed (the reopen was
+    this head and tip already, its run not shown yet — or a run on the head is still going,
+    :func:`in_flight_run`, and the reopen waits for its verdict), or None — not refreshed (the reopen was
     refused, or its run never showed within :data:`WAIT_S`): the caller judges the red as it
     stands. Never raises."""
     now = time.time() if now is None else now
@@ -151,6 +165,11 @@ def refresh(product, slug, number, head, tip, names, out=print, now=None):
             return None
         if getattr(product, 'conventions', None) is None:
             return None
+        live = in_flight_run(slug, head)
+        if live:
+            out(f'stale merge ref: PR #{number} waits — run {live[0]} on {head[:9]} is still '
+                f'{live[1]}; a reopen now would supersede it before its verdict')
+            return 'waiting'
         trunk = product.conventions.main
         why = (f'ASF: the red {", ".join(names)} ran on a merge ref of {trunk} from before '
                f'{trunk} moved to {tip[:9]}; a re-run would replay it. Closed and reopened for a '

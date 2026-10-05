@@ -140,7 +140,9 @@ class Host:
         return ok('')
 
     def cancels(self):
-        return [c[3] for c in self.calls if c[:3] == ['gh', 'run', 'cancel']]
+        return [c[3] if c[:3] == ['gh', 'run', 'cancel'] else c[4].split('/runs/')[1].split('/')[0]
+                for c in self.calls if c[:3] == ['gh', 'run', 'cancel']
+                or (c[:4] == ['gh', 'api', '-X', 'POST'] and c[4].endswith('/force-cancel'))]
 
 
 class Base(unittest.TestCase):
