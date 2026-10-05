@@ -1,7 +1,12 @@
+import contextlib
+import io
+import json
 import os
+import shutil
+import tempfile
 import unittest
 
-from asf import reviews
+from asf import cli, env, reviews
 
 
 class TableTests(unittest.TestCase):
@@ -225,6 +230,135 @@ class VerdictTests(unittest.TestCase):
     def test_pass_row_with_empty_evidence_is_changes(self):
         text = self._table([('c1', 'pass', '')])
         self.assertEqual(reviews.verdict(text, ('c1',)), reviews.CHANGES)
+
+
+class PreReviewCommandTests(unittest.TestCase):
+    """§3.3, through ``cli.main`` over files written into a temp dir with ``ASF_HOME`` pinned
+    to it — no git, no network."""
+
+    STORY_LINES = ['the widget renders its three views', 'the widget updates when clicked',
+                   'the widget clears on reset']
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='review_checks_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.backlog = os.path.join(self.tmp, 'backlog')
+        os.makedirs(os.path.join(self.backlog, 'stories'))
+        with open(os.path.join(self.backlog, 'stories', 'S-19950.md'), 'w', encoding='utf-8') as f:
+            f.write('## Acceptance\n' + ''.join(f'- [ ] {line}\n' for line in self.STORY_LINES))
+        with open(os.path.join(self.backlog, 'index.json'), 'w', encoding='utf-8') as f:
+            json.dump({'generated': '', 'items': {
+                'S-19950': {'id': 'S-19950', 'type': 'story', 'folder': 'stories'},
+            }}, f)
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        with open(env.product_path('sample'), 'w', encoding='utf-8') as f:
+            f.write(f'product: sample\nrepo_slug: x/y\nbacklog_dir: {self.backlog}\n')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, name, text):
+        path = os.path.join(self.tmp, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return path
+
+    @staticmethod
+    def _table(rows):
+        lines = ['| check | result | evidence |', '| --- | --- | --- |']
+        lines += [f'| {name} | {result} | {evidence} |' for name, result, evidence in rows]
+        return '\n'.join(lines) + '\n'
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(argv + ['--product', 'sample'])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_complete_pass_table_exits_0(self):
+        rows = [(name, 'pass', 'checked') for name in reviews.CHECKLIST['spec'][0]]
+        path = self._write('r1.md', self._table(rows))
+        rc, out, err = self._run(['review-checks', path, '--kind', 'spec'])
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn('verdict: APPROVED', out)
+
+    def test_one_row_deleted_bounces_naming_the_missing_check(self):
+        names = reviews.CHECKLIST['spec'][0]
+        rows = [(name, 'pass', 'checked') for name in names[:-1]]
+        path = self._write('r2.md', self._table(rows))
+        rc, out, err = self._run(['review-checks', path, '--kind', 'spec'])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(f'required check missing: "{reviews.normalize(names[-1])}"', out)
+        self.assertIn('verdict: BOUNCE', out)
+
+    def test_prose_with_a_typed_verdict_but_no_table_bounces(self):
+        path = self._write('r3.md', 'Looks fine.\nverdict: APPROVED\n')
+        rc, out, err = self._run(['review-checks', path, '--kind', 'spec'])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn('no check table', out)
+        self.assertIn('verdict: BOUNCE', out)
+
+    def test_malformed_row_exits_1_naming_its_line(self):
+        text = '| check | result | evidence |\n| --- | --- | --- |\n| pass | ran it |\n'
+        path = self._write('r4.md', text)
+        rc, out, err = self._run(['review-checks', path, '--kind', 'spec'])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(f'{os.path.basename(path)}:3:', out)
+
+    def test_complete_table_with_one_fail_exits_0(self):
+        names = reviews.CHECKLIST['spec'][0]
+        rows = [(n, 'pass', 'checked') for n in names[:-1]] + [(names[-1], 'fail', 'broke')]
+        path = self._write('r5.md', self._table(rows))
+        rc, out, err = self._run(['review-checks', path, '--kind', 'spec'])
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn('verdict: CHANGES REQUESTED', out)
+
+    def test_card_code_review_requires_every_story_acceptance_line(self):
+        names = list(reviews.CHECKLIST['code'][0])
+        rows = [(n, 'pass', 'checked') for n in names + self.STORY_LINES[:-1]]
+        path = self._write('r6.md', self._table(rows))
+        rc, out, err = self._run(['review-checks', path, '--kind', 'code', '--card', 'S-19950'])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(f'required check missing: "{self.STORY_LINES[-1]}"', out)
+
+    def test_card_code_review_with_full_coverage_is_approved(self):
+        names = list(reviews.CHECKLIST['code'][0])
+        rows = [(n, 'pass', 'checked') for n in names + self.STORY_LINES]
+        path = self._write('r7.md', self._table(rows))
+        rc, out, err = self._run(['review-checks', path, '--kind', 'code', '--card', 'S-19950'])
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn('verdict: APPROVED', out)
+
+    def test_json_output_parses_with_sorted_keys_and_matching_check_count(self):
+        names = reviews.CHECKLIST['spec'][0]
+        rows = [(n, 'pass', 'checked') for n in names]
+        path = self._write('r8.md', self._table(rows))
+        rc, out, err = self._run(['review-checks', path, '--kind', 'spec', '--json'])
+        self.assertEqual(rc, 0, out + err)
+        data = json.loads(out)
+        self.assertEqual(list(data.keys()), sorted(data.keys()))
+        self.assertEqual(len(data['checks']), len(names))
+
+    def test_missing_path_exits_2_with_one_line_and_no_traceback(self):
+        path = os.path.join(self.tmp, 'does-not-exist.md')
+        rc, out, err = self._run(['review-checks', path, '--kind', 'spec'])
+        self.assertEqual(rc, 2)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+
+    def test_kind_omitted_exits_2(self):
+        path = self._write('r9.md', 'x\n')
+        with self.assertRaises(SystemExit) as cm:
+            self._run(['review-checks', path])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_unknown_card_exits_2(self):
+        path = self._write('r10.md', 'x\n')
+        rc, out, err = self._run(['review-checks', path, '--kind', 'code', '--card', 'S-99999'])
+        self.assertEqual(rc, 2)
+        self.assertIn('S-99999', err)
 
 
 if __name__ == '__main__':
