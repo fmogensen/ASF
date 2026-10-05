@@ -80,6 +80,12 @@ conventions:
   #                       # every runner, never held at capacity.ci) | batch (the batch step's kind).
   #                       # Which runners the run lands on is the workflow's runs-on for a push of
   #                       # the batch ref — a push, not a pull_request, so main's own class.
+  #   precut_check: make precut-check   # (unset: none, the cut is as before) the product's cheap
+  #                       # checks of the merged tree (one command or a list), run as each PR merges
+  #                       # into the batch, before the push: a PR that turns it red is dropped from
+  #                       # the cut, named, and sent back — a merge=union file merges clean in git,
+  #                       # only a check of the tree sees two rows claiming one id
+  #   precut_check_timeout_s: 120
   # harvest: one gate over every eligible branch (combined, bisecting on red) or per-branch; the
   # most branches one run gates; seconds before a gate is killed and counted red.
   # harvest:

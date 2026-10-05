@@ -536,23 +536,42 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
                      field='budget', value=' / '.join(parts), by=by)
             continue
 
+        drop_delivers = False
         if field == 'removed':
             value = f"{value} (groom {date})" if value else f"groom {date}"
+            delivers = as_list(typed.get('delivers'))
+            if delivers and not typed.get('removed'):
+                # a delivery's lead lists itself first (`delivers: [<self>, …]`): a removed
+                # lead would leave the record naming a removed item — the commit hook refuses
+                # that. With no live member besides itself, the delivery goes with it; with
+                # live members, it is refused: they would point at a removed lead
+                live = [m for m in delivers if m != iid and m in canonical
+                        and not canonical[m]['meta'].get('removed')]
+                if live:
+                    _skipped(iid, raw_answer, f"it leads the delivery of {', '.join(live)} "
+                             f"(delivers:) — re-lead or remove those first")
+                    continue
+                drop_delivers = True
         elif field == 'reconciled':
             value = date
 
         if str(typed.get(field)) == str(value) and typed.get(field) is not None:
             continue  # already applied
 
-        frontmatter.write_typed(rec['path'], {field: value})
+        fields = {field: value, **({'delivers': None} if drop_delivers else {})}
+        frontmatter.write_typed(rec['path'], fields)
         with open(rec['path'], encoding='utf-8') as f:
             text = f.read()
         meta2, body2 = frontmatter.parse(text, path=rec['relpath'])
         hist = f"- {date} groom: {field} → {_fmt_history_value(value)} {who}"
+        if drop_delivers:
+            hist += ' (its own delivery, delivers:, goes with it)'
         new_body = append_history_lines(body2, [hist])
         if new_body != body2:
             writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         rec['meta'][field] = value
+        if drop_delivers:
+            rec['meta'].pop('delivers', None)
         applied += 1
         if event:
             event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),

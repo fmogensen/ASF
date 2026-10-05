@@ -4316,6 +4316,10 @@ class GitHubHost(Host):
         # round, never a re-run (it would replay the old ref): a fresh run (asf.stale_ref)
         if self.stale_red(f, number, head, red):
             return None
+        # cut short by a cancel (relief, a superseding run, a runner kill): no verdict — re-run
+        # or waited on, never a correct round
+        if self.cut_short(f, number, red, names, hold=False):
+            return None
         # flake-vs-defect triage (asf.flake): a red job is re-run once on this head before any
         # correct round; green on its re-run is a flake (quarantined), red again a defect
         names, _held = flake.triage(self.product, self.lane.state_dir, self.slug, head, red,
@@ -4513,6 +4517,34 @@ class GitHubHost(Host):
                  f'approval — the label started nothing; dispatched {workflow} on the head')
         return head
 
+    def cut_short(self, f, number, red_checks, red, hold=True):
+        """True (and the branch waits) when every red required check in ``red_checks`` was cut
+        short, not failed: its job lost its run under a cancel — CI-queue relief, a superseding
+        run, a runner kill — and reads ``failure`` with the host's runner-loss annotation
+        (:func:`asf.flake.infra_red`: "The operation was canceled."). It judged no code: re-run
+        (:func:`asf.flake.triage`) or waited on, never a correct round — a session sent to
+        correct a head nothing is wrong with ends empty and parks the Task (2026-10-05)."""
+        from asf import flake
+        lane, b = self.lane, f['branch']
+        if not red or not red_checks:
+            return False
+        lost = [c for c in red_checks
+                if flake.infra_red(self.slug, flake._ids(c.get('link'))[1], H._gh)]
+        if {c.get('name') for c in lost} != set(red):
+            return False
+        head = exact_head(f) or f.get('head')
+        # the re-run is the triage's (once per job, the infra budget); off or refused, the
+        # branch still waits — a cut-short check is never a defect
+        _defects, held = flake.triage(self.product, lane.state_dir, self.slug, head, lost,
+                                      where=f'PR #{number}', out=lane.out, gh=H._gh)
+        names = ', '.join(red)
+        lane.out(f'waiting {b}: PR #{number} checks {names} cut short (cancelled, no verdict) — '
+                 f'{"re-run" if held else "awaiting a re-run"}, never a correct round')
+        if hold:   # ``hold`` False: the caller (:meth:`head_red`) only asks whether it is red
+            wait(lane, f, f'checks pending: {names} (cancelled, awaiting a re-run)',
+                 state=WAITING_CI)
+        return True
+
     def check_gate(self, f, number, files):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
         checks passed under ``wait``), or None when it waits or went back. Under
@@ -4562,6 +4594,9 @@ class GitHubHost(Host):
                               [c for c in checks if c.get('bucket') in RED_BUCKETS
                                and c.get('name') in red]):
                 wait(lane, f, f'checks red on a stale merge ref: {detail} — a fresh run')
+                return None
+            if self.cut_short(f, number, [c for c in checks if c.get('bucket') in RED_BUCKETS
+                                          and c.get('name') in red], red):
                 return None
             on_trunk = self.trunk_red(red)
             try:
@@ -4804,9 +4839,12 @@ def pr_checks(slug, number, required=(), rerun=(), head=None,
 
     def rerun_of(c):
         m = _RUN_RE.search(c.get('link') or '')
-        return c.get('bucket') == CANCEL_BUCKET and bool(m) and m.group(1) in held
+        return c.get('bucket') in (CANCEL_BUCKET, *RED_BUCKETS) and bool(m) and m.group(1) in held
 
-    red = [c.get('name') or '?' for c in judged if c.get('bucket') in RED_BUCKETS]
+    # a run the CI queue cancelled and holds to re-run judged no code, whatever its jobs read:
+    # a job cut mid-step reads ``failure`` ("The operation was canceled.") — never red
+    red = [c.get('name') or '?' for c in judged if c.get('bucket') in RED_BUCKETS
+           and not rerun_of(c)]
     if red:
         return 'red', ', '.join(red), checks
     pending = [c.get('name') or '?' for c in judged if c.get('bucket') == 'pending']

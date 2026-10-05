@@ -61,9 +61,23 @@ red job the product does not require never judges a batch and is never re-run by
 The verdict reads every attempt on the sha (:func:`batch_runs`): per check, the newest attempt
 that completed and judged code — a cancelled re-run never hides an earlier green attempt.
 
+**The pre-cut check.** ``merge_queue.precut_check`` (one command or a list; unset: none) runs on the
+batch tree in the cut's worktree as each member merges, before anything is pushed
+(:func:`precut_check_red`). A member whose merge turns it red is taken out of the cut again, named
+(``PR #n … dropped from the cut``) and sent back with the check's output; the batch goes on
+without it. A base already red on it judges nobody. Unset, the cut is as it always was. A file
+merged by union (``merge=union``) merges clean in git even when two members add rows claiming the
+same id: only a check over the merged tree sees that, and here it is seen before any heavy run.
+When such a red reaches CI anyway, a log line that names a file but no line is mapped by the rows
+it names to the member whose diff added them (:func:`blame`).
+
 **A drop cancels its run.** Whenever a batch is dropped or replaced (moved, stale, red, timed
 out, re-cut), its ref's runs still queued or in progress at its sha are cancelled in the same
-step (:func:`_cancel_live`, claimed as :data:`MQ_DROPPED`): nothing will land that sha.
+step (:func:`_cancel_live`, claimed as :data:`MQ_DROPPED`): nothing will land that sha. A run
+still live on a batch ref no batch holds any more — a landed batch's job the product does not
+require, a drop whose cancel did not take — is reaped every pass (:func:`reap_leftover_runs`,
+:data:`MQ_REAPED`); one whose sha is the trunk's or a live batch's only once every required check
+on that sha is success.
 
 **A landed member is pruned.** A member whose head the trunk already contains is taken off its
 batch (:func:`_prune_landed`) — its branch leaving origin never drops the batch — and a head
@@ -133,8 +147,8 @@ import shutil
 import tempfile
 import time
 
-from asf import (attestation, ci_queue, flake, github, gitops, gitpush, refguard, run_cancel,
-                 stale_ref)
+from asf import (attestation, ci_queue, flake, gh_limit, github, gitops, gitpush, refguard,
+                 run_cancel, stale_ref)
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.state import store
@@ -148,7 +162,7 @@ QUEUE_FILE = 'merge-queue.json'
 #: wait for its checks before it is dropped and cut again (a saturated runner pool is slow, not
 #: red: the default is generous).
 DEFAULTS = {'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 2, 'timeout_min': 360,
-            'stuck_min': 90, 'start_kind': 'trunk'}
+            'stuck_min': 90, 'start_kind': 'trunk', 'precut_check': (), 'precut_check_timeout_s': 120}
 #: the conclusions of a required check that judged no code (:func:`_nonverdict`): a cancel (an
 #: operator, a superseding workflow, a timeout the host turned into one), a check the host gave
 #: up on (``timed_out``/``stale``), a workflow that never started its jobs. Never red, never green.
@@ -160,6 +174,11 @@ MQ_RERUN, MQ_REFUSED, MQ_ALARM = 'mq-cancel-rerun', 'mq-cancel-refused', 'mq-can
 #: the claim of a live run the queue cancelled because it dropped or replaced its batch ref
 #: (:func:`_cancel_live`): a run judging a sha nobody will land holds runners for nothing
 MQ_DROPPED = 'mq-dropped'
+#: the claim of a leftover run the queue reaped (:func:`reap_leftover_runs`): a run on a batch ref
+#: no batch in flight holds any more (landed or dropped), still queued or in progress
+MQ_REAPED = 'mq-reaped'
+#: the reaper's file and how often it lists the live runs (two host reads each time)
+REAP_FILE, REAP_EVERY_S = 'merge-queue-reap.json', 300
 #: how long a re-run asked of the host may show nothing new before its claim counts as spent
 RERUN_GRACE_S = 600
 #: how long an ALARM stays a red doctor row
@@ -171,6 +190,8 @@ ALARM_WINDOW_S = 6 * 3600
 #: the ceiling). Which runners the run lands on is the product's workflow's to say (its
 #: ``runs-on`` for a push of the batch ref), not ASF's.
 START_KINDS = ('trunk', 'batch')
+#: how many lines of a red ``merge_queue.precut_check`` (:func:`precut_check_red`) go into the culprit's text
+PRECUT_CHECK_LINES = 30
 #: the subject of each member's merge commit on the batch ref: the trail names the members
 MERGE_SUBJECT = 'merge-queue: #{pr} ({branch} @ {head})'
 #: the trailer on each member's merge commit: what :mod:`asf.trunk_watch` reads a queue landing by
@@ -217,7 +238,36 @@ def settings(conv):
     kind = str(raw.get('start_kind') or '').strip().lower()
     if kind in START_KINDS:
         out['start_kind'] = kind
+    check = raw.get('precut_check')
+    if isinstance(check, str):
+        check = [check]
+    if isinstance(check, (list, tuple)):
+        out['precut_check'] = tuple(c.strip() for c in check if isinstance(c, str) and c.strip())
+    t = raw.get('precut_check_timeout_s')
+    if isinstance(t, int) and not isinstance(t, bool) and t >= 1:
+        out['precut_check_timeout_s'] = t
     return out
+
+
+def precut_check_red(st, cwd):
+    """``None`` when every ``merge_queue.precut_check`` command passes in ``cwd`` (or none is set);
+    else the failing command's output (its last :data:`PRECUT_CHECK_LINES` lines, the command
+    first). A command that times out or cannot start is no verdict: ``None``, never red.
+
+    The product's cheap repository checks over the batch tree, run before the batch ref is
+    pushed: a file merged by union (``merge=union``) merges clean in git, so two rows claiming
+    the same id pass the cut and only a check of the merged tree sees them — else on a heavy
+    run, red (2026-10-05: a batch red on a member's stale rows in such a file)."""
+    for cmd in st.get('precut_check') or ():
+        try:
+            rc, out, err = H.sh_timed(['bash', '-c', cmd], cwd, None, st.get('precut_check_timeout_s'))
+        except OSError:
+            continue
+        if rc is None or rc == 0:
+            continue
+        lines = [l for l in ((out or '') + '\n' + (err or '')).splitlines() if l.strip()]
+        return '\n'.join([f'$ {cmd}'] + lines[-PRECUT_CHECK_LINES:])
+    return None
 
 
 def path(state_dir):
@@ -534,6 +584,12 @@ def run(lane, ready):
         return
     st = settings(lane.conv)
     data = load(lane.state_dir)
+    try:   # a landed or dropped batch's leftover runs, whether or not anything else is to do
+        reap_leftover_runs(lane, st, data['batches'])
+    except gh_limit.RateLimited:
+        raise
+    except Exception as e:   # noqa: BLE001 — a reap is housekeeping, never the pass's failure
+        lane.out(f'merge queue: leftover-run reap skipped — {e}')
     runs = lifecycle.by_branch(lane.path)
     asked = load_requests(lane.state_dir)
     gated = any(lifecycle.lane_of(r).get('state') == lane_mod.BACK
@@ -883,6 +939,10 @@ def judge(lane, batch, members, heads, trunk_sha, st):
 
 #: ``path:line`` in a CI log line: a repo path (a dot extension) and the line it names
 _PATH_LINE_RE = re.compile(r'(?<![\w@./-])((?:[\w@.+-]+/)*[\w@.+-]+\.[A-Za-z0-9]{1,8}):(\d+)')
+#: a repo path with no ``:line`` (at least one directory: a bare word with a dot is no path)
+_BARE_PATH_RE = re.compile(r'(?<![\w@./-])((?:[\w@.+-]+/)+[\w@.+-]+\.[A-Za-z0-9]{1,8})(?!:\d)(?![\w/])')
+#: the tokens an added row and a finding line are compared by (:func:`_row_owners`)
+_ROW_TOKEN_RE = re.compile(r'[A-Za-z0-9]{3,}')
 #: how many of a failed step's output lines are read for findings
 FINDING_LINES = 400
 #: how many finding lines a culprit's correct brief names
@@ -1290,6 +1350,12 @@ def failure_findings(slug, roots):
         for text in item['lines']:
             for p, n in _PATH_LINE_RE.findall(text):
                 item['paths'].append((p[2:] if p.startswith('./') else p, int(n), text.strip()))
+        if not item['paths']:
+            # no ``path:line`` at all (a duplicate-id check names the file and the rows, never
+            # a line): the bare paths, line 0 — :func:`blame` maps them by the rows each diff adds
+            for text in item['lines']:
+                for p in _BARE_PATH_RE.findall(text):
+                    item['paths'].append((p[2:] if p.startswith('./') else p, 0, text.strip()))
     return out
 
 
@@ -1312,6 +1378,37 @@ def _owns(path, files):
     return next((x for x in files if path.endswith('/' + x)), None)
 
 
+def _added_lines(lane, batch, f, path):
+    """The lines member ``f``'s own diff (``base...head``) adds to ``path``."""
+    base, head = batch.get('base'), f.get('head')
+    if not (base and head):
+        return []
+    got = gitops.git(['diff', '--unified=0', f'{base}...{head}', '--', path], lane.repo)
+    if not got.ok:
+        return []
+    return [l[1:] for l in (got.stdout or '').splitlines()
+            if l.startswith('+') and not l.startswith('+++')]
+
+
+def _row_owners(lane, batch, owners, path, text):
+    """Of the members in ``owners`` (each changed ``path``), the ones whose added rows the
+    finding ``text`` names: a duplicate-id check says *which rows* collide (an id, an owner, a
+    number), never a line. Each member scores the tokens its added rows share with ``text`` —
+    a token every owner's rows carry (a column word) tells nobody apart and counts for none; the
+    best score above 0 is named. All of ``owners`` when no score tells them apart."""
+    if len(owners) < 2:
+        return owners
+    said = set(_ROW_TOKEN_RE.findall(text.replace(path, ' ')))
+    rows = {f['branch']: set(_ROW_TOKEN_RE.findall(' '.join(_added_lines(lane, batch, f, path))))
+            for f in owners}
+    common = set.intersection(*rows.values()) if rows else set()
+    score = {b: len((r - common) & said) for b, r in rows.items()}
+    best = max(score.values(), default=0)
+    if best <= 0:
+        return owners
+    return [f for f in owners if score[f['branch']] == best]
+
+
 def blame(lane, batch, members, found):
     """``{branch: [(path, line, text)]}``: the members the failing jobs' logs name — each one a
     finding's file is in its own diff. Empty (no verdict: the batch splits) when no finding maps
@@ -1321,11 +1418,16 @@ def blame(lane, batch, members, found):
     if not paths:
         return {}
     named = {}
-    for f in members:
-        files = _member_files(lane, batch, f)
-        mine = [x for x in paths if _owns(x[0], files)]
-        if mine:
-            named[f['branch']] = [(_owns(p, files), n, t) for p, n, t in mine]
+    files_of = {f['branch']: _member_files(lane, batch, f) for f in members}
+    for x in paths:
+        owners = [f for f in members if _owns(x[0], files_of[f['branch']])]
+        if not x[1] and len(owners) > 1:   # no line: the rows the finding names say whose
+            owners = _row_owners(lane, batch, owners,
+                                 _owns(x[0], files_of[owners[0]['branch']]), x[2])
+        for f in owners:
+            hit = (_owns(x[0], files_of[f['branch']]), x[1], x[2])
+            if hit not in named.setdefault(f['branch'], []):
+                named[f['branch']].append(hit)
     if not named or (len(members) > 1 and len(named) == len(members)):
         return {}
     return named
@@ -1423,6 +1525,15 @@ def cut(lane, group, base_sha, base_ref, st, base_members=(), inherit=None):
             return None
         ident = _ident(lane.repo)
         members = []
+        # the product's cut check (merge_queue.precut_check) judges each member as it merges — only
+        # when the base itself passes it: a base already red blames nobody (the trunk's)
+        checking = bool(st.get('precut_check'))
+        if checking:
+            base_red = precut_check_red(st, tmp)
+            if base_red:
+                checking = False
+                out(f"merge queue: pre-cut check red on {base_ref or trunk} {base_sha[:9]} itself — "
+                    f"no member is judged by it this cut ({H.tail(base_red)})")
         for f in group:
             b, head = f['branch'], f['head']
             if head and gitops.is_ancestor(lane.repo, head, base_sha) is True:
@@ -1480,6 +1591,22 @@ def cut(lane, group, base_sha, base_ref, st, base_members=(), inherit=None):
                     # a batch ahead of it is what it conflicts with: a rebase onto the trunk
                     # alone cannot clear that, so the lane does not try one
                     rebase=not base_ref)
+                continue
+            red = precut_check_red(st, tmp) if checking else None
+            if red:
+                H.sh(['git', 'reset', '-q', '--hard', 'HEAD~1'], cwd=tmp)  # client-exempt: the cut's own worktree
+                on = base_ref or trunk
+                if members:
+                    on += f" with {', '.join(f'#{_pr(m)}' for m in members)} merged"
+                out(f"merge queue: PR #{_pr(f)} ({b}) dropped from the cut — the pre-cut check is red "
+                    f"once it merges onto {on} ({H.tail(red)}); the batch goes on without it")
+                _send_back(
+                    lane, f, 'gate',
+                    f"PR #{_pr(f)} turns the product's pre-cut check red when merged onto {on} — "
+                    f"dropped from the merge queue's batch before any CI run. Rebase onto "
+                    f"origin/{trunk} (git rebase origin/{trunk}) and fix what it names (an id another PR or "
+                    f"{trunk} already claims is taken: claim a free one):\n{red}",
+                    sorted(_member_files(lane, {'base': base_sha}, f)))
                 continue
             members.append(f)
         if not members:
@@ -1834,6 +1961,87 @@ def _cancel_live(lane, batch, why):
             lane.out(f'merge queue: {run_cancel.unconfirmed(done)}')
         lane.out(f"merge queue: cancelled run {rid} on {ref} at {sha[:9]} "
                  f"({r.get('status') or 'live'}) — the batch was dropped, nothing lands that sha")
+        n += 1
+    return n
+
+
+def _reap_due(state_dir, now):
+    """True (and the stamp written) when :data:`REAP_EVERY_S` passed since the last reap."""
+    p = os.path.join(state_dir, REAP_FILE)
+    try:
+        with open(p, encoding='utf-8') as fh:
+            last = float((json.load(fh) or {}).get('at') or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        last = 0
+    if now - last < REAP_EVERY_S:
+        return False
+    try:
+        with open(p, 'w', encoding='utf-8') as fh:
+            json.dump({'at': now}, fh)
+    except OSError:
+        pass
+    return True
+
+
+def _required_done(lane, sha, trunk_sha):
+    """True when every required check on ``sha`` has its newest settled attempt ``success``
+    (:func:`required_set`, :func:`batch_runs`): no run on that sha can still add a verdict
+    anything waits for. False when unreadable."""
+    names, _why = required_set(lane, sha, trunk_sha)
+    runs = batch_runs(lane.slug, sha) if names else None
+    if not names or runs is None:
+        return False
+    return verdict(runs, names)[0] == 'green'
+
+
+def reap_leftover_runs(lane, st, batches, now=None):
+    """Cancel the runs still queued or in progress on a batch ref (``merge_queue.ref_prefix``)
+    no batch in flight holds — a landed or a dropped batch's leftovers (2026-10-05: a job the
+    product does not require held a heavy runner 4 h after its batch ref was gone). A run whose
+    head sha is the trunk's or a live batch's is cancelled only when every required check on that
+    sha already concluded success (:func:`_required_done`): a landed batch's own leftover, never
+    a run a verdict still waits on. Each cancel is claimed first (:data:`MQ_REAPED`) and made
+    through :mod:`asf.run_cancel`. At most once per :data:`REAP_EVERY_S`; the number cancelled.
+    Never raises but a rate limit."""
+    if not lane.slug or not st.get('ref_prefix'):
+        return 0
+    now = time.time() if now is None else now
+    if not _reap_due(lane.state_dir, now):
+        return 0
+    prefix, live = st['ref_prefix'], {b.get('ref'): b.get('sha') for b in batches or ()}
+    trunk_sha = getattr(lane, 'trunk_sha', None) or gitops.rev_parse(lane.repo,
+                                                                     f'origin/{lane.trunk}')
+    guarded = {trunk_sha, *live.values()} - {None, ''}
+    listed = []
+    for status in ('queued', 'in_progress'):
+        data = H.gh_json(['api', f'repos/{lane.slug}/actions/runs?status={status}&per_page=100'],
+                         None)
+        got = data.get('workflow_runs') if isinstance(data, dict) else None
+        listed += [r for r in got or () if isinstance(r, dict)]
+    n, done_on = 0, {}
+    for r in listed:
+        ref, sha, rid = r.get('head_branch') or '', r.get('head_sha') or '', r.get('id')
+        if not rid or not ref.startswith(prefix) or ref in live \
+                or r.get('status') == 'completed':
+            continue
+        if sha in guarded:
+            if sha not in done_on:
+                done_on[sha] = _required_done(lane, sha, trunk_sha)
+            if not done_on[sha]:
+                lane.out(f'merge queue: leftover run {rid} on {ref} kept — {sha[:9]} is '
+                         f'{lane.trunk}\'s or a live batch\'s, and a required check there is '
+                         f'not success yet')
+                continue
+        why = f'{ref} is no batch in flight (landed or dropped)'
+        ci_queue.claim_cancel(lane.state_dir, rid, MQ_REAPED, sha=sha, ref=ref, why=why)
+        done = run_cancel.cancel(_ok_call, lane.slug, rid, status=r.get('status'))
+        if not done:
+            lane.out(f'merge queue: cancel of leftover run {rid} on {ref} refused')
+            continue
+        if run_cancel.unconfirmed(done):
+            lane.out(f'merge queue: {run_cancel.unconfirmed(done)}')
+        lane.out(f"merge queue: reaped leftover run {rid} on {ref} at {sha[:9]} "
+                 f"({r.get('status') or 'live'}) — {why}")
         n += 1
     return n
 
