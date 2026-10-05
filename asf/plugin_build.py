@@ -12,8 +12,11 @@ import os
 import shutil
 import sys
 
-from asf import __version__
 from asf import env
+
+#: The plugin manifest's own version. The manifest is generated and committed (``asf plugin
+#: check``), so it cannot carry the per-merge package version (:mod:`asf.version`).
+PLUGIN_VERSION = '0.1.0'
 
 PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -121,7 +124,7 @@ def render_plugin_json():
         'name': 'asf',
         'description': "ASF — Autonomous Software Factory: the factory's tables in the console — "
                        + ', '.join(f'/asf:{n}' for n in skill_names()),
-        'version': __version__,
+        'version': PLUGIN_VERSION,
         'author': {'name': 'ASF contributors'},
     }, indent=2, ensure_ascii=False) + '\n'
 

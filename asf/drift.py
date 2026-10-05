@@ -15,7 +15,7 @@ import subprocess
 import time
 from importlib import metadata
 
-from asf import __version__
+from asf import version as versions
 
 PACKAGE_NAME = 'asf-factory'
 #: ``asf.upgrade.DEFERRED``: the upgrade waits for the next tick
@@ -76,12 +76,11 @@ def trunk_head(product):
     return None
 
 
-def _trunk_version(repo, head):
-    try:
-        m = re.search(r'^__version__\s*=\s*["\']([^"\']+)', _git(repo, 'show', f'{head}:asf/__init__.py'), re.M)
-    except (subprocess.SubprocessError, OSError):
-        return __version__
-    return m.group(1) if m else __version__
+def _version_of(repo, sha):
+    """``sha``'s release (``0.1.108``, ``0.1.107+15``) by the repo's tags, else the running
+    package's own version."""
+    import asf
+    return versions.of_commit(repo, sha) or asf.__version__
 
 
 @dataclasses.dataclass
@@ -99,11 +98,11 @@ class Drift:
 
     @property
     def old(self):
-        return f'{self.version}@{(self.installed or "unknown")[:7]}'
+        return versions.label(self.version, self.installed or 'unknown')
 
     @property
     def new(self):
-        return f'{self.trunk_version}@{self.head[:7]}'
+        return versions.label(self.trunk_version, self.head)
 
 
 def check(product, installed=None):
@@ -124,14 +123,45 @@ def check(product, installed=None):
             changed = any(n == p or n.startswith(p) for n in names for p in PACKAGE_PATHS)
         except (subprocess.SubprocessError, OSError, ValueError):
             behind = None
-    return Drift(__version__, installed, head, behind, changed, _trunk_version(repo, head))
+    return Drift(_version_of(repo, installed), installed, head, behind, changed, _version_of(repo, head))
 
 
 def line(d):
     """The tick's first line: the running version, the trunk's head, and how far apart."""
     tail = ('installed commit unknown' if d.behind is None
             else f'BEHIND by {d.behind} commits' if d.behind else 'current')
-    return f'factory: asf {d.version} @ {(d.installed or "?")[:7]} · trunk {d.head[:7]} · {tail}'
+    return f'factory: asf {d.old} · trunk {d.new} · {tail}'
+
+
+def pin_line(product, out=print):
+    """A pinned product's tick names the asf it runs as a version: ``asf: pinned 0.1.121
+    (267264dbe)``. Nothing for a product on the shared install."""
+    try:
+        from asf import installs
+        rec = installs.read(product.name)
+    except Exception:  # noqa: BLE001 — a pin line never stops a tick
+        return None
+    if rec is not None:
+        out(f'asf: pinned {rec.label}')
+    return rec
+
+
+def release_check(repo, out=print, health=None):
+    """The factory's own release rule, raised every tick: ``RELEASE RED: …`` when a merge to
+    main that changed the package has no version tag, or the changelog no entry for the newest
+    tag (:func:`asf.version.health`). Tags another machine pushed are fetched once before a red
+    is said. Returns ``(ok, detail)``."""
+    health = health or versions.health
+    ok, detail = health(repo)
+    if not ok:
+        try:
+            _git(repo, 'fetch', '-q', '--tags', 'origin')
+        except (subprocess.SubprocessError, OSError):
+            pass
+        ok, detail = health(repo)
+    if not ok:
+        out(f'RELEASE RED: {detail}')
+    return ok, detail
 
 
 def report(product, out=print, autonomy='human-now', upgrade=None, reachable=None):
@@ -148,8 +178,10 @@ def report(product, out=print, autonomy='human-now', upgrade=None, reachable=Non
         out(f'factory: version check failed ({str(e).strip() or type(e).__name__})')
         return None
     if d is None:
+        pin_line(product, out)
         return None
     out(line(d))
+    release_check(product.repo_dir, out)
     if d.is_behind and d.package_changed:
         out(f'UPGRADE AVAILABLE {d.old} → {d.new}')
         if autonomy == 'auto' and upgrade is not None:

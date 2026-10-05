@@ -54,7 +54,8 @@ import subprocess
 import sys
 import time
 
-from asf import __version__, env, schema
+from asf import env, schema
+from asf import version as versions
 from asf.drift import DEFERRED  # noqa: F401 — the upgrade waits for the next tick (EX_TEMPFAIL)
 
 PACKAGE_NAME = 'asf-factory'
@@ -74,6 +75,11 @@ DRAIN_POLL_S = 5
 _drain_sleep = time.sleep
 #: ``upgrade.min_interval_min`` when the operator config leaves it out
 DEFAULT_MIN_INTERVAL_MIN = 30
+
+
+def _v(sha):
+    """A commit as the operator reads it: ``0.1.121 (267264dbe)`` (the sha only as a detail)."""
+    return versions.pin_label(sha) if sha else 'unknown'
 
 
 def pending_path(product):
@@ -625,6 +631,7 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
     (PD12) — that commit is what the CI guard, the pending marker and the post-install check see
     — while ``pipx`` still receives the tag as the operator gave it, so ``direct_url.json``
     records it and :func:`asf.cli.version_string` reports the release."""
+    ref = versions.tag_of(ref) or ref       # --to 0.1.108 is the tag v0.1.108
     others = other_ticks(run)
     marked = []
     pin = ref
@@ -721,7 +728,7 @@ def _install(ref, run, out, pin=None):
     if not got or not (got.startswith(ref) or ref.startswith(got)):
         out(f'upgrade: FAILED — the install is at {(got or "unknown")[:7]}, not {ref[:7]}')
         return 1
-    out(f'upgrade: installed {ref[:7]}')
+    out(f'upgrade: installed {_v(ref)}')
     for line in reload_clocks(products(), run):
         out(line)
     return 0
@@ -1103,7 +1110,7 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
                 f'move forward with asf upgrade --product {product_name} --to <sha>')
             return 2
         local = True
-        out(f'upgrade: rollback of {product_name} to {(sha or "?")[:7]} ({venv}) — '
+        out(f'upgrade: rollback of {product_name} to {_v(sha)} ({venv}) — '
             'a local switch, no network')
     else:
         url = repo_url(run)
@@ -1135,7 +1142,7 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
             else:
                 out(f'upgrade: CI green at {sha[:7]} ({detail})')
     if rec is not None and rec.sha == sha and os.path.realpath(rec.venv) == os.path.realpath(venv):
-        out(f'upgrade: {product_name} already runs {sha[:7]} ({venv}) — nothing to move')
+        out(f'upgrade: {product_name} already runs {_v(sha)} ({venv}) — nothing to move')
         return 0
     if rollback:
         previous = {'sha': rec.sha, 'venv': rec.venv}
@@ -1173,7 +1180,7 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
               '(network.probe on)',
               f'resume clocks {", ".join(clocks) or "(none)"}']
     if dry_run:
-        out(f'upgrade: dry run — the move of {product_name} to {sha[:7]}:')
+        out(f'upgrade: dry run — the move of {product_name} to {_v(sha)}:')
         for i, step in enumerate(steps, 1):
             out(f'  {i}. {step}')
         return 0
@@ -1211,7 +1218,7 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
         for line in ops.bootout(product_name, clocks) or ():
             out(line)
         installs.write(product_name, sha, venv, previous=previous, by=by)
-        out(f'upgrade: {product_name} pinned to {sha[:7]} ({venv})')
+        out(f'upgrade: {product_name} pinned to {_v(sha)} ({venv})')
         rc = ops.install_clocks(product_name)
         if rc not in (0, None):
             if rec is None:
@@ -1249,8 +1256,8 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
             _host_clocks(ops, out)
             return 1
         _host_clocks(ops, out)
-        out(f'upgrade: moved {product_name} to {sha[:7]}'
-            + (f' (previous {(previous.get("sha") or "?")[:7]} stays on disk for --rollback)'
+        out(f'upgrade: moved {product_name} to {_v(sha)}'
+            + (f' (previous {_v(previous.get("sha"))} stays on disk for --rollback)'
                if previous else ''))
         return 0
     finally:
@@ -1376,7 +1383,7 @@ def row(name):
     try:
         product = env.load_product(name)
     except env.ConfigError as e:
-        return (name, '?', str(schema.SCHEMA_VERSION), f'fix the config: {e}')
+        return (name, pin_of(name), '?', str(schema.SCHEMA_VERSION), f'fix the config: {e}')
     versions = [schema.record_version(d) for _label, d in schema.record_dirs(product)]
     versions = [v for v in versions if v is not None]
     record = ','.join(str(v) for v in sorted(set(versions))) or 'none'
@@ -1387,11 +1394,18 @@ def row(name):
         action = 'record is newer than this package: pipx install the newer asf'
     else:
         action = f'asf schema-migrate --product {name}'
-    return (name, record, str(schema.SCHEMA_VERSION), action)
+    return (name, pin_of(name), record, str(schema.SCHEMA_VERSION), action)
+
+
+def pin_of(name):
+    """What the product runs, as a version: its pin (``0.1.121 (267264dbe)``), else ``shared``."""
+    from asf import installs
+    rec = installs.read(name)
+    return rec.label if rec else 'shared'
 
 
 def render(rows):
-    head = ('product', 'record schema', 'package', 'action')
+    head = ('product', 'runs', 'record schema', 'package', 'action')
     out = ['| ' + ' | '.join(head) + ' |', '| ' + ' | '.join('---' for _ in head) + ' |']
     out += ['| ' + ' | '.join(r) + ' |' for r in rows]
     return '\n'.join(out) + '\n'
@@ -1428,7 +1442,8 @@ def cmd_upgrade(args, run=subprocess.run):
                      sleep=getattr(args, 'sleep', None) or _drain_sleep)
         if rc != 0:
             return rc
-    print(f'upgrade: package {__version__}, schema {schema.SCHEMA_VERSION}')
+    from asf.cli import version_string
+    print(f'upgrade: package {version_string()}, schema {schema.SCHEMA_VERSION}')
     print(render([row(n) for n in products()]), end='')
     return 0
 
@@ -1438,6 +1453,7 @@ def cmd_move(args, product, run=subprocess.run):
     [--force-ci] [--prune]``."""
     rollback = bool(getattr(args, 'rollback', False))
     ref = getattr(args, 'ref', None)
+    ref = versions.tag_of(ref) or ref       # --to 0.1.108 is the tag v0.1.108
     if rollback == bool(ref):
         print('upgrade: --product takes exactly one of --to <sha> and --rollback')
         return 2
@@ -1472,7 +1488,7 @@ def register(subparsers):
                    help='--product: after the move, uninstall the oldest venvs beyond '
                         'the newest three (never the current or previous)')
     p.add_argument('--to', dest='ref', metavar='REF',
-                   help="the commit or tag to install (default: main's head)")
+                   help="the version (0.1.108), tag or commit to install (default: main's head)")
     p.add_argument('--ref', dest='ref', metavar='REF',
                    help='same as --to — the accepted older spelling')
     p.add_argument('--wait', type=int, nargs='?', const=DEFAULT_MANUAL_WAIT_S, default=None,

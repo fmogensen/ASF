@@ -150,7 +150,8 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(data['project']['scripts']['asf'], 'asf.cli:main')
         self.assertEqual(data['project']['name'], upgrade.PACKAGE_NAME)
         self.assertIn('version', data['project']['dynamic'])
-        self.assertEqual(data['tool']['setuptools']['dynamic']['version'], {'attr': 'asf.__version__'})
+        # the version comes from the git tag at build time (setup.py), never a constant
+        self.assertNotIn('dynamic', data.get('tool', {}).get('setuptools', {}))
         self.assertEqual(data['project'].get('dependencies', []), [])
 
     def test_pre_commit_hook_runs_the_suite_without_the_git_hook_environment(self):
@@ -578,10 +579,10 @@ class UpgradeTest(HomeCase):
         self.assertEqual(rc, 0)
         self.assertEqual(run.installs(), [['pipx', 'install', '--force',
                                            f'git+https://github.com/o/r.git@{FakeRun.HEAD}']])
-        self.assertIn(f'upgrade: installed {FakeRun.HEAD[:7]}', out)
-        self.assertIn('| product | record schema | package | action |', out)
-        self.assertIn('| alpha | 1 | 1 | none |', out)
-        self.assertIn('| beta | 0 | 1 | asf schema-migrate --product beta |', out)
+        self.assertIn(f'upgrade: installed {FakeRun.HEAD[:9]}', out)
+        self.assertIn('| product | runs | record schema | package | action |', out)
+        self.assertIn('| alpha | shared | 1 | 1 | none |', out)
+        self.assertIn('| beta | shared | 0 | 1 | asf schema-migrate --product beta |', out)
 
     def test_the_tick_installs_the_head_drift_read(self):
         run = FakeRun(installed='b' * 40)
@@ -1726,7 +1727,7 @@ class VersionStringTest(unittest.TestCase):
 
     def test_a_checkout_names_its_own_head(self):
         from asf import cli
-        head = _git(['rev-parse', '--short', 'HEAD'], REPO)
+        head = _git(['rev-parse', '--short=9', 'HEAD'], REPO)
         self.assertTrue(cli.version_string().endswith(f' ({head})'))
 
     def _no_checkout(self):
@@ -1743,23 +1744,25 @@ class VersionStringTest(unittest.TestCase):
         from asf import cli
         with self._no_checkout(), self._dist({'requested_revision': 'v0.1.1',
                                               'commit_id': '47bab2d' + '0' * 33}):
-            self.assertEqual(cli.version_string(), 'v0.1.1 (47bab2d)')
+            self.assertEqual(cli.version_string(), '0.1.1 (47bab2d00)')
 
     def test_a_git_install_of_a_sha_falls_to_the_static_version(self):
         from asf import cli
         sha = 'abcdef0123456789abcdef0123456789abcdef01'
         with self._no_checkout(), self._dist({'requested_revision': sha, 'commit_id': sha}), \
-                mock.patch('asf.cli._build_describe', return_value=''):
-            self.assertEqual(cli.version_string(), f'{asf.__version__} (abcdef0)')
+                mock.patch('asf.cli._build_describe', return_value=''), \
+                mock.patch('asf.version.factory_repo', return_value=None):
+            self.assertEqual(cli.version_string(), f'{asf.__version__} (abcdef012)')
 
     def test_a_git_install_of_a_sha_reads_the_describe_its_build_stamped(self):
         """``install.sh`` pins a sha, so ``asf status`` said ``running 0.1.0 (205123f)`` for
         v0.1.9-4-g205123f: the build's stamp is the release."""
         from asf import cli
         sha = '205123fb967285035c2106194884aece17071cb0'
-        with self._no_checkout(), self._dist({'requested_revision': '205123f', 'commit_id': sha}):
-            for described, want in (('v0.1.9-4-g205123f', 'v0.1.9+4 (205123f)'),
-                                    ('v0.1.9', 'v0.1.9 (205123f)')):
+        with self._no_checkout(), self._dist({'requested_revision': '205123f', 'commit_id': sha}), \
+                mock.patch('asf.version.factory_repo', return_value=None):
+            for described, want in (('v0.1.9-4-g205123f', '0.1.9+4 (205123fb9)'),
+                                    ('v0.1.9', '0.1.9 (205123fb9)')):
                 with self.subTest(described=described), \
                         mock.patch('asf.cli._build_describe', return_value=described):
                     self.assertEqual(cli.version_string(), want)
@@ -1778,7 +1781,8 @@ class VersionStringTest(unittest.TestCase):
             ns = {}
             with open(path, encoding='utf-8') as f:
                 exec(f.read(), ns)
-            self.assertEqual(cli_release(ns['DESCRIBE']), 'v0.1.1+2')
+            self.assertEqual(cli_release(ns['DESCRIBE']), '0.1.1+2')
+            self.assertEqual(ns['VERSION'], '0.1.1.post2+g' + ns['DESCRIBE'].rsplit('-g', 1)[1])
             self.assertEqual(os.listdir(src), ['.git'])     # the checkout is never written
 
     def test_a_git_install_of_a_sha_in_a_checkout_falls_to_describe(self):
@@ -1787,7 +1791,7 @@ class VersionStringTest(unittest.TestCase):
             self._repo_with_tag(tmp, past=0)
             sha = 'abcdef0123456789abcdef0123456789abcdef01'
             direct = {'vcs_info': {'requested_revision': sha, 'commit_id': sha}}
-            self.assertEqual(cli._release(tmp, direct), 'v0.1.1')
+            self.assertEqual(cli._release(tmp, direct), '0.1.1')
 
     def _repo_with_tag(self, tmp, past):
         _git(['init', '-q', '-b', 'main'], tmp)
@@ -1805,13 +1809,13 @@ class VersionStringTest(unittest.TestCase):
         from asf import cli
         with tempfile.TemporaryDirectory() as tmp:
             self._repo_with_tag(tmp, past=0)
-            self.assertEqual(cli._release(tmp, {}), 'v0.1.1')
+            self.assertEqual(cli._release(tmp, {}), '0.1.1')
 
     def test_a_checkout_past_a_tag_counts_the_commits(self):
         from asf import cli
         with tempfile.TemporaryDirectory() as tmp:
             self._repo_with_tag(tmp, past=3)
-            self.assertEqual(cli._release(tmp, {}), 'v0.1.1+3')
+            self.assertEqual(cli._release(tmp, {}), '0.1.1+3')
 
     def test_a_checkout_without_a_release_tag_has_none(self):
         from asf import cli
@@ -1847,14 +1851,14 @@ class VersionStringTest(unittest.TestCase):
         from asf import cli
         from asf.views import status
         now = datetime.datetime(2026, 9, 24, 12, 0, tzinfo=datetime.timezone.utc)
-        with mock.patch.object(cli, 'version_string', return_value='v0.1.1+42 (abc1234)'), \
+        with mock.patch.object(cli, 'version_string', return_value='0.1.1+42 (abc1234)'), \
                 mock.patch.object(cli, 'latest_release',
                                   return_value=('v0.1.2', now - datetime.timedelta(minutes=5))):
             self.assertEqual(status.version_cell(now),
-                             'running v0.1.1+42 (abc1234) · latest release v0.1.2 (5m ago)')
-        with mock.patch.object(cli, 'version_string', return_value='v0.1.2 (abc1234)'), \
+                             'running 0.1.1+42 (abc1234) · latest release 0.1.2 (5m ago)')
+        with mock.patch.object(cli, 'version_string', return_value='0.1.2 (abc1234)'), \
                 mock.patch.object(cli, 'latest_release', return_value=None):
-            self.assertEqual(status.version_cell(now), 'running v0.1.2 (abc1234) · latest release —')
+            self.assertEqual(status.version_cell(now), 'running 0.1.2 (abc1234) · latest release —')
         with mock.patch.object(status, 'version_cell', return_value='running X'), \
                 mock.patch.object(status, 'runners_cell', return_value='r'):
             table = status.render('/nonexistent', None, cfg={})
@@ -1867,7 +1871,7 @@ class VersionStringTest(unittest.TestCase):
             {'url': 'https://example.invalid/asf.git',
              'vcs_info': {'vcs': 'git', 'commit_id': 'abcdef0123456789abcdef0123456789abcdef01'}})
         with self._no_checkout(), mock.patch('importlib.metadata.distribution', return_value=dist):
-            self.assertEqual(cli.version_string(), f'{asf.__version__} (abcdef0)')
+            self.assertEqual(cli.version_string(), f'{asf.__version__} (abcdef012)')
         dist.read_text.assert_called_with('direct_url.json')
 
     def test_neither_known_is_the_bare_version(self):

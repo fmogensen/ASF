@@ -1,0 +1,63 @@
+name: release
+
+# Every merge to main that changes asf/ gets the next patch version: a v<x.y.z> tag and a
+# CHANGELOG entry (asf/version.py). It runs on the push, so a merge is versioned however it
+# landed — a direct `gh pr merge`, the factory's lane or merge queue, or the native landing.
+# The PR job shows the release-notes line the merge will get, and fails when there is none.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: tag every unversioned merge and file its changelog entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "asf-release"
+          git config user.email "asf-release@users.noreply.github.com"
+          git fetch -q --tags origin
+          python3 -m asf.version cut --ref "$GITHUB_SHA" --push
+      - name: the release rule holds on main
+        run: |
+          git fetch -q --tags origin main
+          python3 -m asf.version check --ref origin/main
+
+  notes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the release-notes line this merge will get
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s' "$BODY" > "$RUNNER_TEMP/body.md"
+          python3 -m asf.version pr --base "origin/${{ github.base_ref }}" --title "$TITLE" \
+            --body-file "$RUNNER_TEMP/body.md"

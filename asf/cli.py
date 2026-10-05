@@ -16,7 +16,6 @@ import re
 import subprocess
 import sys
 
-from asf import __version__
 
 
 def _git_sha(cwd=None):
@@ -69,11 +68,9 @@ def _direct_url():
 
 
 def _described_release(described):
-    """``v0.1.1`` / ``v0.1.1+42`` off a ``git describe --tags`` line, else ``None``."""
-    m = re.fullmatch(r'(v\d+\.\d+\.\d+)(?:-(\d+)-g[0-9a-f]+)?', (described or '').strip())
-    if m:
-        return f'{m.group(1)}+{m.group(2)}' if m.group(2) not in (None, '0') else m.group(1)
-    return None
+    """``0.1.1`` / ``0.1.1+42`` off a ``git describe --tags`` line, else ``None``."""
+    from asf import version
+    return version.from_describe(described)
 
 
 def _build_describe():
@@ -89,16 +86,22 @@ def _build_describe():
 
 
 def _release(root, direct_url):
-    """The release this ``asf`` is: a git install's requested tag (``v0.1.1``), else a checkout's
-    nearest release tag plus the commits past it (``v0.1.1+42``), else the same read off the
-    ``git describe`` the build stamped (a git install of a sha: ``install.sh`` pins one), else
-    ``None``."""
+    """The release this ``asf`` is, as ``x.y.z``: a git install's requested tag (``0.1.1``),
+    else a checkout's nearest release tag plus the commits past it (``0.1.1+42``), else the tag
+    the factory's repo puts on the install's commit (a pin made before its tag was cut), else
+    the same read off the ``git describe`` the build stamped, else ``None``."""
+    from asf import version
     requested = (direct_url.get('vcs_info') or {}).get('requested_revision') or ''
     if isinstance(requested, str) and RELEASE_TAG.fullmatch(requested):
-        return requested
+        return requested[1:]
     if root:
         found = _described_release(
             _checkout_git(root, 'describe', '--tags', '--match', 'v[0-9]*'))
+        if found:
+            return found
+    commit = (direct_url.get('vcs_info') or {}).get('commit_id')
+    if isinstance(commit, str) and commit:
+        found = version.of_commit(version.factory_repo(), commit)
         if found:
             return found
     return _described_release(_build_describe())
@@ -107,24 +110,36 @@ def _release(root, direct_url):
 def _source_commit(root, direct_url):
     """The short commit this ``asf`` was built from, or ``None``: a checkout's own HEAD, else a
     pipx git install's ``direct_url.json`` (``vcs_info.commit_id``)."""
+    from asf import version
     if root:
-        head = _checkout_git(root, 'rev-parse', '--short', 'HEAD')
+        head = _checkout_git(root, 'rev-parse', f'--short={version.SHA_LEN}', 'HEAD')
         if head:
             return head
     commit = (direct_url.get('vcs_info') or {}).get('commit_id')
-    return commit[:7] if isinstance(commit, str) and commit else None
+    return commit[:version.SHA_LEN] if isinstance(commit, str) and commit else None
 
 
 def version_string():
-    """``v0.1.1 (47bab2d)`` — the release and, when known, the commit it was built from. The
-    release is a git install's requested tag, else a checkout's nearest release tag with ``+N``
-    commits past it, else the build's stamped ``git describe`` read the same way, else the
-    static ``__version__`` (never bumped: the tag is the version).
-    ``asf --version`` and the doctor's stamp both print it."""
+    """``0.1.108 (96fa0feca)`` — the release and, when known, the commit it was built from (the
+    sha only as a detail). ``asf --version``, ``asf status`` and the doctor's stamp print it."""
+    import asf
     root, direct_url = _checkout_root(), _direct_url()
-    version = _release(root, direct_url) or __version__
+    version = _release(root, direct_url) or asf.__version__
     commit = _source_commit(root, direct_url)
     return f'{version} ({commit})' if commit else version
+
+
+class _VersionAction(argparse.Action):
+    """``--version``: :func:`version_string`, read only when asked — never on every command."""
+
+    def __init__(self, option_strings, dest, **kw):
+        kw.setdefault('nargs', 0)
+        kw.setdefault('default', argparse.SUPPRESS)
+        super().__init__(option_strings, dest, **kw)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(f'asf {version_string()}')
+        parser.exit()
 
 
 def latest_release():
@@ -170,7 +185,7 @@ def stamp(command, repo=None, version=None):
 
 def build_parser():
     p = argparse.ArgumentParser(prog='asf', description='ASF — Autonomous Software Factory')
-    p.add_argument('--version', action='version', version=f'asf {version_string()}')
+    p.add_argument('--version', action=_VersionAction, help='print the release and exit')
     sub = p.add_subparsers(dest='command', required=True)
 
     p_new = sub.add_parser('new', help='mint a new work item')
