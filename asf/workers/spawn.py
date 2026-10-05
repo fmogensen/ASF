@@ -1107,6 +1107,12 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                 prefixes=wp.get('id_range_prefixes') or DEFAULT_ID_PREFIXES,
                                 start=int(wp.get('id_range_start', DEFAULT_ID_START)),
                                 size=int(wp.get('id_range_size', DEFAULT_ID_SIZE)))
+    # a correction judged on a head the branch has since moved past: the brief names the real
+    # head and the commits since (the worktree's fetch above made origin/<branch> current)
+    from asf.workers import judged
+    brief_text = brief_text + judged.launch_section(pool_mod.sessions_path(product),
+                                                    product.repo_dir, product.main, row.kind,
+                                                    row.item, branch)
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)

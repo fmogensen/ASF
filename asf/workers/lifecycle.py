@@ -2704,6 +2704,9 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
     branch = run.get('branch') or run.get('job')
     routes_to = CORRECT if kind in MECHANICAL else run.get('kind')
     loop = same_head_loop(path, run, head, kind=routes_to, main=main)
+    # the head this hold judged: a correct round launched after the branch moved past it is
+    # briefed with the real head and the commits since (asf.workers.judged)
+    judged = head if isinstance(head, str) and re.fullmatch(r'[0-9a-fA-F]{7,40}', head) else None
     head = (text or '').split('\n', 1)[0]  # the line is one line; the correction keeps it all
     if loop:
         reason = loop_text(LOOP_CAP, routes_to, loop, item)
@@ -2717,10 +2720,13 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
                   'operator_flagged': 1}
         return fields, f'parked {branch}: {fields["correction"]["reason"]}'
     if kind in MECHANICAL:  # the lane's reword or rebuild failed: back to its session, no round
-        fields = {'correction': {'kind': kind, 'text': text, 'at': now}}
+        fields = {'correction': dict({'kind': kind, 'text': text, 'at': now},
+                                     **({'judged_head': judged} if judged else {}))}
         return fields, f'held {branch}: {head} — back to its session ({kind}, no round)'
     keys, same = next_finding(path, run, kind, text, finding)
     corr = {'kind': kind, 'text': text, 'at': now, 'finding': keys, 'same': same}
+    if judged:
+        corr['judged_head'] = judged
     if kind == INCOMPLETE and same >= INCOMPLETE_CAP:
         # a resumed delivery left the very same Tasks unbuilt: pause after the second failure
         reason = incomplete_park_text(same, keys, item)

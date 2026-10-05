@@ -580,6 +580,20 @@ def refusal_section(product, item_id):
     return '\n\n' + text if text else ''
 
 
+def answer_section(product, item_id):
+    """The operator's answers to the item's earlier questions (``asf answer``,
+    :func:`asf.workers.answer.brief_section`) — ``''`` when none were given or the file cannot
+    be read."""
+    if product is None or not item_id or item_id == 'none':
+        return ''
+    from asf.workers import answer  # local: the workers import the briefs
+    try:
+        text = answer.brief_section(product, item_id)
+    except (OSError, ValueError, KeyError):  # a brief is never lost to the answers file
+        return ''
+    return '\n\n' + text if text else ''
+
+
 #: A review of a PR no factory item made (``conventions.merge: auto``, :func:`asf.harvest.lane.
 #: pr_item`): what stands in for the card, the plan and the Gate the review table reads against.
 FOREIGN_REVIEW = (
@@ -668,6 +682,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
              render(load_template(kind), ctx).rstrip() + correction_text(row, kind)
              + customer_section(product, kind, facts['branch'])
              + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id'])
+             + answer_section(product, ctx['item_id'])
              + rulings_section(product, kind, facts['item'])
              + stored_review_section(product, kind, facts['branch'], ctx['item_id']),
              render(TAIL, ctx)]

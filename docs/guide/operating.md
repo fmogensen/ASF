@@ -313,6 +313,27 @@ Other holds you will see:
 A held branch is not a failed step. Nothing is lost: the worktree and branch stay until the item
 lands or is closed.
 
+A hold records the head it judged. When the correct session launches and `origin/<branch>` has
+moved past that head (another push, a later round), its brief gains a `BRANCH MOVED` section: the
+real head, the commits and files since, and the instruction to judge each point of the correction
+against the current head rather than redo what the new commits already answer. A rebase onto a
+newer trunk alone does not count as a move.
+
+### A session asked a question: `asf answer`, not `asf correct`
+
+A session that stops with a question shows as `INPUT <job> needs input — <question>` in the tick
+log (and a `blocked` park when it had nothing to land). Answer it with
+
+```
+asf answer <job|item> --text "<answer>" --product <p>     # or --file <path>
+```
+
+The answer is kept in `~/.ASF/state/<p>/operator-answers.jsonl`; every later brief of the item
+quotes it under `OPERATOR ANSWER`, so the next relaunch of the job that asked gets it. It is no
+correction round: no round is spent, nothing is refused while the session still runs, and the
+question's own park (`blocked`, or a relaunch cap on a question) is released so the item
+relaunches. Use `asf correct` only when the work itself needs another round.
+
 ### A wrong landing: `asf reset`, not `asf correct`
 
 `asf correct <item> --why …` asks for one more round on work that has not landed. When the ledger

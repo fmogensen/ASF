@@ -308,6 +308,8 @@ def build_parser():
     from asf.workers.correct import register as register_correct, register_reset
     register_correct(sub)
     register_reset(sub)
+    from asf.workers.answer import register as register_answer
+    register_answer(sub)
     from asf.tick.migrate_landing import register as register_migrate_landing
     register_migrate_landing(sub)
     from asf.trunk_ruleset import register as register_ruleset
