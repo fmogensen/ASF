@@ -564,6 +564,30 @@ def _add_worktree(product, repo, job, branch, args):
     _git(['worktree', 'add', *args], repo)
 
 
+def _archived_on_origin(repo, branch):
+    """True when the local ``branch``'s tip is kept on origin under an ``archive/<branch>…``
+    head (the lane's archive of a superseded branch, or a reclaim's ``-wip-`` one): dropping
+    the local branch loses nothing origin does not hold."""
+    from asf import gitops
+    tip = gitops.rev_parse(repo, f'refs/heads/{branch}')
+    ls = gitops.git(['ls-remote', '--heads', 'origin'], repo)
+    if not tip or not ls.ok:
+        return False
+    prefix = f'refs/heads/archive/{branch}'
+    for line in ls.data.splitlines():
+        sha, _, ref = line.strip().partition('\t')
+        ref = ref.strip()
+        if not sha or not (ref == prefix or ref.startswith(prefix + '-')):
+            continue
+        if sha == tip:
+            return True
+        if gitops.is_ancestor(repo, tip, sha) is None:  # its archive not fetched here yet
+            gitops.fetch(repo, 'origin', ref)
+        if gitops.is_ancestor(repo, tip, sha):
+            return True
+    return False
+
+
 def _branch_exists_on_origin(repo, branch):
     """The check a held branch is reused on: not the row's kind (B-0048 — an ADJUDICATE row's
     kind is ``adjudicate``, not ``correct``, so keying on kind alone missed it and spawned it
@@ -708,12 +732,18 @@ def _place_worktree(product, repo, job, branch):
         _git(['branch', '-D', branch], repo)
     elif _local_branch_exists(repo, branch):
         # a branch with no worktree and not on origin (a reaped one): reused when it carries
-        # nothing, refused with the count when it does (B-0025) — never silently reset
+        # nothing, refused with the count when it does (B-0025) — never silently reset. A tip
+        # origin still keeps under ``archive/<branch>`` (the lane archived and pruned it — a
+        # revived card's old branch) is not lost by cutting fresh: it is dropped too
         ahead = _git(['rev-list', '--count', f'origin/{product.main}..{branch}'], repo)
-        if ahead not in ('', '0'):
+        if ahead not in ('', '0') and not _archived_on_origin(repo, branch):
             raise SpawnError(f'branch {branch} exists locally with {ahead} commit(s) not on '
                              f'origin/{product.main} and no worktree — look before relaunching')
         _git(['branch', '-D', branch], repo)
+    # origin does not hold the branch: a tracking ref the fetches never pruned is no head of it
+    # (it would read as the launch head, and a session told to fetch it fails every tick)
+    from asf import gitops
+    gitops.git(['update-ref', '-d', f'refs/remotes/origin/{branch}'], repo)
     _add_worktree(product, repo, job, branch, ['-q', '-b', branch, path, f'origin/{product.main}'])
     return path, False, False
 

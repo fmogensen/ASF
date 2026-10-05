@@ -20,6 +20,9 @@ from asf.record.new import _parse_sets  # noqa: F401
 
 #: The list-valued fields ``asf set`` writes with ``=`` / ``+=`` / ``-=``, per type.
 LIST_FIELDS = {'task': ('writes', 'after')}
+#: Fields ``asf set`` writes on an existing card that ``asf new --set`` does not take: a card is
+#: re-parented (``parent=S-0001``) or taken off the board (``removed=true`` or a reason).
+SET_ONLY = ('parent', 'removed')
 
 
 def _as_list(value):
@@ -28,14 +31,42 @@ def _as_list(value):
     return [str(v) for v in value] if isinstance(value, list) else [str(value)]
 
 
-def parse_assignments(type_, pairs):
+def _set_only(type_, key, raw, canonical):
+    """The value of a :data:`SET_ONLY` field, validated, or raise ValueError. ``parent``: an id
+    ``canonical`` holds, of a type :data:`asf.record.core.PARENT_TYPES` lets ``type_`` hang
+    under. ``removed``: ``true`` / ``false``, or a reason (any other text)."""
+    from asf.record.core import NO_PARENT_TYPES, PARENT_TYPES
+    value = frontmatter._parse_value(raw)
+    if key == 'removed':
+        if isinstance(value, bool) or (isinstance(value, str) and value.strip()):
+            return value
+        raise ValueError(f"removed={raw!r} — true, false, or the reason it is removed")
+    pid = str(value or '').strip()
+    if type_ in NO_PARENT_TYPES:
+        raise ValueError(f"parent= — a {type_} has no parent")
+    prec = (canonical or {}).get(pid) if pid else None
+    if prec is None:
+        raise ValueError(f"parent={raw!r} — no such item in the record")
+    ptype = prec['meta'].get('type')
+    allowed = PARENT_TYPES.get(type_, set())
+    if ptype not in allowed:
+        raise ValueError(f"parent={pid} — a {type_} hangs under a {' or '.join(sorted(allowed))}, "
+                         f"not a {ptype}")
+    return pid
+
+
+def parse_assignments(type_, pairs, canonical=None):
     """``[(key, subkey|None, op, value)]`` off ``asf set``'s ``FIELD=VALUE`` pairs: ``op`` is
-    ``'='``, or ``'+'`` / ``'-'`` for a list field's add and remove forms. Raise ValueError."""
+    ``'='``, or ``'+'`` / ``'-'`` for a list field's add and remove forms. ``canonical``: the
+    record, which a ``parent=`` is checked against. Raise ValueError."""
     lists = LIST_FIELDS.get(type_, ())
     out = []
     for pair in pairs or []:
         key, eq, raw = pair.partition('=')
         op = '='
+        if eq and key in SET_ONLY:
+            out.append((key, None, op, _set_only(type_, key, raw, canonical)))
+            continue
         if key[-1:] in ('+', '-') and key[:-1] in lists:
             key, op = key[:-1], key[-1]
         if eq and key in lists:
@@ -115,19 +146,19 @@ def cmd_set(args, root):
             print(f"error: no item {item_id!r}", file=sys.stderr)
             return 2
         try:
-            parse_assignments(rec['meta'].get('type'), assignments)
+            parse_assignments(rec['meta'].get('type'), assignments, canonical)
         except ValueError as e:
             print(f"error: {e}" + (f" ({item_id})" if len(ids) > 1 else ''), file=sys.stderr)
             return 2
     for item_id in ids:
-        rc = _set_one(args, root, canonical[item_id], item_id, assignments)
+        rc = _set_one(args, root, canonical[item_id], item_id, assignments, canonical)
         if rc:
             return rc
     return 0
 
 
-def _set_one(args, root, rec, item_id, assignments):
-    sets = parse_assignments(rec['meta'].get('type'), assignments)
+def _set_one(args, root, rec, item_id, assignments, canonical=None):
+    sets = parse_assignments(rec['meta'].get('type'), assignments, canonical)
     updates = {}
     idempotent = []
     all_noop = True  # PD4: the `set` line is suppressed only when every op was a list-field no-op
