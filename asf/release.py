@@ -22,6 +22,10 @@ and printed met or unmet with its evidence. Nothing is written.
    release tag has a CHANGELOG section with notes; ``requires.docs`` landed. Structural only.
 8. **blocking Features** — every id in ``blocking`` has landed in the record.
 
+**Self-tuning live** (criterion 11, appended after the others by :func:`compute`, read whole from
+:func:`asf.tune.criterion`): the self-tuning loop is on, kept at least one change in the window
+that it has not reverted since, and leaves no regression unreverted.
+
 Every threshold is ``release: {…}`` in the product file (:data:`DEFAULTS`). The criteria read CI
 from what the forge records; nothing is installed or run on the host.
 """
@@ -432,10 +436,22 @@ def _utc(stamp):
     return d.astimezone(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def tune_criterion(product, window_days, as_of):
+    """Criterion 11, *Self-tuning live* (:func:`asf.tune.criterion`)."""
+    from asf import tune
+    try:
+        met, ev = tune.criterion(product, window_days, now=datetime.datetime.strptime(
+            as_of, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=UTC))
+    except Exception as e:  # noqa: BLE001 — an unreadable tune record is unmet, never a crash
+        met, ev = False, f'unreadable: {type(e).__name__}: {e}'
+    return Criterion('tune', 'Self-tuning live (≥ 1 kept change, 0 unreverted regressions)', met, ev)
+
+
 def compute(root, product, **kw):
     cfg = settings(product)
     f = gather(root, product, cfg, **kw)
     crit = evaluate(f, cfg)
+    crit.append(tune_criterion(product, cfg['window_days'], f['as_of']))
     return {'product': product.name, 'as_of': f['as_of'], 'window_days': cfg['window_days'],
             'ready': all(c.met for c in crit), 'criteria': [asdict(c) for c in crit]}
 

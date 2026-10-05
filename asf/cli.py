@@ -398,6 +398,9 @@ def build_parser():
     p_release.add_argument('--product')
     p_release.add_argument('--json', action='store_true')
 
+    from asf.tune import add_parser as add_tune_parser
+    add_tune_parser(sub)
+
     p_capacity = sub.add_parser('capacity', help='the CAPACITY table: sessions and CI runs per product')
     g_capacity = p_capacity.add_mutually_exclusive_group()
     g_capacity.add_argument('--product')

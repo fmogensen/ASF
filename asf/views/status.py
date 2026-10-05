@@ -11,6 +11,8 @@ Every row is filled from what exists, or says which key would fill it —
 * **Prod** — how far ``main`` is ahead of the last successful ``deploy_sha.workflow`` run, and
   what prod waits on (:func:`asf.harvest.deploy.lines`: a red trunk, a running or failed deploy,
   a green sha waiting in ``manual`` mode), then each managed dev environment's own line;
+* **Tune** — the self-tuning loop's live trials and freeze (:mod:`asf.tune`); no row while it
+  is off and has never changed anything;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
 * **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
 * **Features in build** — X / N: the Features in build against ``feeder.max_features_in_build``
@@ -595,6 +597,13 @@ def release_cell(root, product):
     return cell(root, product)
 
 
+def tune_cell(product, cfg=None):
+    """``Tune``: the self-tuning loop's live trials (:func:`asf.tune.status_cell`); no row while
+    the loop is off and has never changed anything."""
+    from asf.tune import status_cell
+    return status_cell(product, cfg)
+
+
 def i14_cell(product, now=None):
     """Invariant I14's report count over the last 24 h, with its mode; ``None`` (no row) while
     ``flags.i14`` is off and nothing was reported."""
@@ -626,6 +635,7 @@ def render(root, product, cfg=None):
                        ('Value', lambda: value_cell(root, product)),
                        ('A/B pairs', lambda: ab_pairs_cell(root, product)),
                        ('Release', lambda: release_cell(root, product)),
+                       ('Tune', lambda: tune_cell(product, cfg)),
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
