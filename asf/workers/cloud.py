@@ -561,7 +561,13 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
         if remote.is_remote(run):  # a claude-remote routine run
             run_id = run.get('remote_session_id')
         elif not run_id and run.get('actions_run_name'):
-            hit = gh.find_run(s.workflow, run['actions_run_name'])
+            look = gh.find_run(s.workflow, run['actions_run_name'])
+            if look.unknown:  # Unknown is no answer: never "not found", never LOST/DEAD from it
+                why = f'run lookup unreadable ({look.reason}): left as it is'
+                out(f'cloud    {job:<24} {why}')
+                found.append((job, (known.get(tok) or {}).get('status') or WORKING, why))
+                continue
+            hit = look.data
             if hit:
                 run_id = hit['id']
                 pool_mod.update_session(product, job, actions_run_id=run_id,
