@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 from asf import budget, env
-from asf.views import capacity as capacity_view
+from asf.views import board, capacity as capacity_view
 from asf.views import index_reader as ix
 from asf.views import prod, roadmap, sessions, status
 from asf.workers import observe
@@ -595,6 +595,105 @@ class RoadmapEpicBudgetTests(unittest.TestCase):
         text = roadmap.render(self.tmp)
         self.assertIn('| # | Epic | State | On prod | Next | Blocked | Spend / budget |', text)
         self.assertLess(text.index('E-0001'), text.index('E-0002'))
+
+
+class BoardBudgetTests(unittest.TestCase):
+    """F-0092 Task 7 (S-29058): the board's Cost cell names a subtree's over-budget items, and
+    ``--sort budget`` orders a Feature's Epic group by them, then by subtree spend."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='board_budget_test_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _write(self, items):
+        with open(os.path.join(self.tmp, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def _epic(self, eid, rank=1):
+        return {'id': eid, 'type': 'epic', 'title': eid, 'folder': 'epics',
+                'state': 'Active', 'decided': True, 'rank': rank}
+
+    def _feature(self, fid, eid, rank, children):
+        return {'id': fid, 'type': 'feature', 'title': fid, 'folder': 'features',
+                'parent': eid, 'state': 'New', 'decided': True, 'rank': rank,
+                'children': list(children)}
+
+    def _task(self, tid, fid, usd, over=None):
+        cost = {'usd': usd}
+        if over:
+            cost['over_budget'] = over
+        return {'id': tid, 'type': 'task', 'parent': fid, 'state': 'New', 'cost': cost}
+
+    def _row(self, text, fid):
+        line = next(l for l in text.splitlines() if l.startswith(f'| {fid} '))
+        return [c.strip() for c in line.strip('|').split('|')]
+
+    def _body(self, text):
+        """The table, without the generated-at stamp line that changes between two calls."""
+        return text[text.index('\n') + 1:]
+
+    def test_cost_cell_names_the_one_over_budget_item(self):
+        self._write({
+            'E-0001': self._epic('E-0001'),
+            'F-0001': self._feature('F-0001', 'E-0001', 1, ['T-0021']),
+            'T-0021': self._task('T-0021', 'F-0001', 5.0, over='usd'),
+        })
+        text = board.render(self.tmp)
+        self.assertEqual(self._row(text, 'F-0001')[-1], '$5.00 · over: T-0021')
+
+    def test_cost_cell_counts_two_or_more_over_budget_items(self):
+        self._write({
+            'E-0001': self._epic('E-0001'),
+            'F-0001': self._feature('F-0001', 'E-0001', 1, ['T-0001', 'T-0002']),
+            'T-0001': self._task('T-0001', 'F-0001', 5.0, over='usd'),
+            'T-0002': self._task('T-0002', 'F-0001', 6.0, over='sessions'),
+        })
+        text = board.render(self.tmp)
+        self.assertEqual(self._row(text, 'F-0001')[-1], '$11.00 · over: 2')
+
+    def test_cost_cell_has_no_marker_when_nothing_is_over(self):
+        self._write({
+            'E-0001': self._epic('E-0001'),
+            'F-0001': self._feature('F-0001', 'E-0001', 1, ['T-0001']),
+            'T-0001': self._task('T-0001', 'F-0001', 5.0),
+        })
+        text = board.render(self.tmp)
+        self.assertEqual(self._row(text, 'F-0001')[-1], '$5.00')
+
+    def test_sort_budget_puts_the_over_budget_feature_first_in_its_epic(self):
+        self._write({
+            'E-0001': self._epic('E-0001'),
+            'F-0001': self._feature('F-0001', 'E-0001', 1, ['T-0001']),
+            'T-0001': self._task('T-0001', 'F-0001', 100.0),
+            'F-0002': self._feature('F-0002', 'E-0001', 2, ['T-0002']),
+            'T-0002': self._task('T-0002', 'F-0002', 1.0, over='usd'),
+        })
+        text = board.render(self.tmp, sort='budget')
+        self.assertLess(text.index('F-0002'), text.index('F-0001'))
+
+    def test_sort_budget_then_orders_by_subtree_spend_descending(self):
+        self._write({
+            'E-0001': self._epic('E-0001'),
+            'F-0001': self._feature('F-0001', 'E-0001', 1, ['T-0001']),
+            'T-0001': self._task('T-0001', 'F-0001', 10.0, over='usd'),
+            'F-0002': self._feature('F-0002', 'E-0001', 2, ['T-0002']),
+            'T-0002': self._task('T-0002', 'F-0002', 20.0, over='usd'),
+        })
+        text = board.render(self.tmp, sort='budget')
+        self.assertLess(text.index('F-0002'), text.index('F-0001'))
+
+    def test_sort_rank_and_no_sort_are_byte_identical_to_each_other(self):
+        self._write({
+            'E-0001': self._epic('E-0001'),
+            'F-0001': self._feature('F-0001', 'E-0001', 1, ['T-0001']),
+            'T-0001': self._task('T-0001', 'F-0001', 10.0, over='usd'),
+            'F-0002': self._feature('F-0002', 'E-0001', 2, ['T-0002']),
+            'T-0002': self._task('T-0002', 'F-0002', 20.0),
+        })
+        self.assertEqual(self._body(board.render(self.tmp)),
+                          self._body(board.render(self.tmp, sort='rank')))
+        self.assertLess(board.render(self.tmp).index('F-0001'),
+                         board.render(self.tmp).index('F-0002'))
 
 
 class ProdViewTests(ViewsTestCase):

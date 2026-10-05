@@ -343,6 +343,7 @@ def build_parser():
 
     p_backlog_view = sub.add_parser('backlog', help='the BOARD table: one row per Feature, grouped by Epic')
     p_backlog_view.add_argument('--product')
+    p_backlog_view.add_argument('--sort', choices=('rank', 'budget'), default='rank')
 
     p_parity = sub.add_parser('parity', help='the PARITY table: one row per Story')
     p_parity.add_argument('--product')

@@ -38,7 +38,21 @@ def epic_title(e):
         else f"{e['id']} — {e['title']}"
 
 
-def render(root, product=None):
+def over_budget_ids(sub):
+    """The ids among ``sub`` (an item's subtree) whose own ``cost.over_budget`` is set."""
+    return [v['id'] for v in sub if isinstance(v.get('cost'), dict) and v['cost'].get('over_budget')]
+
+
+def cost_cell(sub, over):
+    cell = ix.money(ix.usd(sub))
+    if len(over) == 1:
+        return f"{cell} · over: {over[0]}"
+    if over:
+        return f"{cell} · over: {len(over)}"
+    return cell
+
+
+def render(root, product=None, sort=None):
     import time
     items, generated = ix.load(root)
     feats = ix.of_type(items, 'feature')
@@ -56,12 +70,14 @@ def render(root, product=None):
             if val != '—':
                 tot[kind][val.split(' ')[0]] += 1
         name = f['title'] + (f" ({f['legacy_id']})" if f.get('legacy_id') else '')
+        sub = ix.subtree(items, f)
+        over = over_budget_ids(sub)
         cells = [f"{f['id']} {name}", f.get('stage') or f['state'], spec, plan,
                  f"{done} Closed / {len(tasks)}" if tasks else '—', prs_cell or '—',
                  "; ".join(f.get('blocked_by_open') or []) or '—', ix.age(f.get('stage_since')),
-                 ix.money(ix.usd(ix.subtree(items, f)))]
+                 cost_cell(sub, over)]
         epic = ix.epic_of(items, f)
-        rows.append((epic['id'] if epic else None, f, cells))
+        rows.append((epic['id'] if epic else None, f, cells, len(over), ix.usd(sub)))
 
     epics = sorted(ix.of_type(items, 'epic'), key=lambda e: (ix.rank(e), e['id']))
     n_spec, n_plan = tot['spec'], tot['plan']
@@ -71,9 +87,13 @@ def render(root, product=None):
            f"plans: {n_plan['approved']} approved / {n_plan['review']} in review / "
            f"{n_plan['draft'] + n_plan['linked']} draft · "
            f"Tasks: {task_done} Closed / {task_n} · index.json generated {ix.local_stamp(generated)}"]
+    if sort == 'budget':
+        order = lambda r: (-r[3], -(r[4] if r[4] is not None else 0))
+    else:
+        order = lambda r: (ix.rank(r[1]), r[1]['id'])
     groups = [(epic_title(e), e['id']) for e in epics] + [("No Epic (needs a parent Epic)", None)]
     for title, eid in groups:
-        group = sorted(((f, cells) for e, f, cells in rows if e == eid), key=lambda r: (ix.rank(r[0]), r[0]['id']))
+        group = sorted((r for r in rows if r[0] == eid), key=order)
         if not group:
             continue
         out.append("")
@@ -81,7 +101,7 @@ def render(root, product=None):
         out.append("")
         out.append("| Feature | Stage | Spec | Plan | Tasks | PRs | Blocked on | Age | Cost |")
         out.append("|---|---|---|---|---|---|---|---|---|")
-        for _f, cells in group:
+        for _e, _f, cells, _over_n, _spend in group:
             out.append("| " + " | ".join(c.replace('|', '/') for c in cells) + " |")
     return "\n".join(out) + "\n"
 
@@ -89,5 +109,5 @@ def render(root, product=None):
 def cmd_backlog(args, root):
     from asf import env
     product = env.load_product(getattr(args, 'product', None))
-    print(render(root, product), end='')
+    print(render(root, product, getattr(args, 'sort', None)), end='')
     return 0
