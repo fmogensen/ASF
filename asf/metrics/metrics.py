@@ -137,6 +137,8 @@ SCHEMAS = {
         'refusals': (('int',), REQ), 'relaunches': (('int',), REQ), 'quota': (('dict',), {}),
         'refused_files': (('dict',), {}),
         'steps': (('list',), []), 'product': (('str', 'null'), None),
+        # the wave's seat reading (asf.metrics.throughput.seats_record); absent on a tick with no wave
+        'seats': (('dict', 'null'), None),
     },
     'landings': {
         'ts': (('str',), REQ),                 # the trunk commit's committer date, UTC
@@ -158,7 +160,9 @@ SCHEMAS = {
     },
 }
 JOB_SCHEMA = {'name': (('str',), REQ), 'conclusion': (('str',), REQ), 'runner': (('str', 'null'), None),
-              'minutes': (('num',), REQ), 'failed_step': (('str', 'null'), None)}
+              'minutes': (('num',), REQ), 'failed_step': (('str', 'null'), None),
+              # seconds from the job's creation to a runner picking it up (the CI queue wait)
+              'queued_s': (('num', 'null'), None)}
 HINTS_KEY = 'match_hints'   # {title, body, prs, files, pr_info}: matcher input, never stored
 
 
@@ -1762,6 +1766,12 @@ def mins(a, b):
         return 0
 
 
+def queued_s(created, started):
+    """Seconds a job waited for a runner, ``None`` when either stamp is missing."""
+    a, b = parse_ts(created), parse_ts(started)
+    return round(max(0.0, (b - a).total_seconds()), 1) if a and b else None
+
+
 def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, conv=None):
     """Finished CI runs of the last `days` days, with their jobs, as validated events (not yet appended).
     A run on a branch under the product's `batch` prefix (a merge queue's cut) carries that branch as
@@ -1777,8 +1787,8 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
 
     def jobs_of(r):
         return gh_lines(['api', f"repos/{repo_slug}/actions/runs/{r['id']}/jobs?per_page=100", '--paginate',
-                         '--jq', '.jobs[]|select(.conclusion!="skipped")|{name,conclusion,runner_name,started_at,'
-                                 'completed_at,failed:[.steps[]|select(.conclusion=="failure")|.name]}|@json'])
+                         '--jq', '.jobs[]|select(.conclusion!="skipped")|{name,conclusion,runner_name,created_at,'
+                                 'started_at,completed_at,failed:[.steps[]|select(.conclusion=="failure")|.name]}|@json'])
 
     with ThreadPoolExecutor(8) as pool:
         all_jobs = list(pool.map(jobs_of, runs))
@@ -1796,7 +1806,8 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
     for r, jobs in zip(runs, all_jobs):
         js = [{'name': j['name'], 'conclusion': j.get('conclusion') or 'unknown', 'runner': j.get('runner_name'),
                'minutes': mins(j.get('started_at'), j.get('completed_at')) if j.get('started_at') and j.get('completed_at') else 0,
-               'failed_step': (j.get('failed') or [None])[0]} for j in jobs]
+               'failed_step': (j.get('failed') or [None])[0],
+               'queued_s': queued_s(j.get('created_at'), j.get('started_at'))} for j in jobs]
         branch = r['head_branch'] or ''
         prs = r['pr'][0] if r['pr'] else None
         batch = branch if conv.branch_kind(branch) == 'batch' else None

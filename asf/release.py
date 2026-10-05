@@ -1,5 +1,5 @@
 """asf.release — ``asf release-readiness [--product p] [--json]``: is this product ready to be
-released as a framework? A computed gate, not an opinion: eight criteria, each read from facts
+released as a framework? A computed gate, not an opinion: the criteria, each read from facts
 and printed met or unmet with its evidence. Nothing is written.
 
 1. **stability** — no hand hotfix in the last ``window_days``: commits on the trunk of a
@@ -21,6 +21,20 @@ and printed met or unmet with its evidence. Nothing is written.
 7. **first-user docs** — the trunk's README has every ``readme_sections`` heading, the latest
    release tag has a CHANGELOG section with notes; ``requires.docs`` landed. Structural only.
 8. **blocking Features** — every id in ``blocking`` has landed in the record.
+9. **floor clean** — no factory leftover older than its deadline (:data:`FLOOR_DEFAULTS`,
+   ``release.floor``): a PR the lane marks STALE past ``stale_pr_days``; a CI run still queued or
+   running past ``run_min`` whose branch is gone or whose PR is closed; a live cloud run silent
+   past ``heartbeat_factor`` × its heartbeat; a Task in one stage past ``stage_factor`` × its
+   ``stage_limits``; a remote head past ``branch_retention`` awaiting delete. Each kind reads what
+   the factory already keeps (the lane registry, the forge's runs, the session ledger, the record,
+   the retention census), is ``off`` by its key, and is ``n/a`` — never red — when the product
+   has no such thing (no forge, no cloud lane, no census).
+10. **seats used** — no idle-while-launchable stretch in the window: ``release.seats.idle_min``
+   minutes or more below ``release.seats.min_pct`` % of the available seats while the wave had
+   launchable rows (:mod:`asf.metrics.throughput`, over each tick line's ``seats`` reading). A
+   quiet factory never counts against it; no reading in the window is ``n/a``.
+
+A criterion that does not apply to the product (``n/a``) is met: its evidence says why.
 
 **Self-tuning live** (criterion 11, appended after the others by :func:`compute`, read whole from
 :func:`asf.tune.criterion`): the self-tuning loop is on, kept at least one change in the window
@@ -50,7 +64,13 @@ DEFAULTS = {
     'requires': {},
     'blocking': [],
 }
-KEYS = ('stability', 'repair', 'ci', 'install', 'upgrade', 'generic', 'docs', 'blocking')
+#: ``release.floor`` — criterion 9's limits; a kind whose key is ``off`` is not checked.
+FLOOR_DEFAULTS = {'stale_pr_days': 3, 'run_min': 30, 'heartbeat_factor': 2, 'stage_factor': 3,
+                  'branches': True}
+FLOOR_KINDS = ('stale_prs', 'runs', 'cloud', 'tasks', 'branches')
+NA = 'n/a'
+KEYS = ('stability', 'repair', 'ci', 'install', 'upgrade', 'generic', 'docs', 'blocking',
+        'floor', 'seats')
 
 _UPGRADE_RE = re.compile(r'tick: ran asf upgrade \((?:\S*@)?([0-9a-f]{7,40}) → (?:\S*@)?([0-9a-f]{7,40})\), '
                          r'exit (-?\d+)')
@@ -93,6 +113,33 @@ def settings(product):
     if isinstance(block.get('requires'), dict):
         out['requires'] = {k: ([str(x) for x in v] if isinstance(v, list) else [str(v)])
                            for k, v in block['requires'].items() if v}
+    out['floor'] = floor_settings(block.get('floor'))
+    from asf.metrics import throughput
+    out['seats'] = throughput.settings(product)[0]
+    return out
+
+
+def _off(v):
+    return v is False or (isinstance(v, str) and v.strip().lower() in ('off', 'false', 'no', 'none'))
+
+
+def floor_settings(block):
+    """:data:`FLOOR_DEFAULTS` under ``release.floor``; ``off`` → ``None`` (the kind is not checked)."""
+    out = dict(FLOOR_DEFAULTS)
+    for k, v in (block.items() if isinstance(block, dict) else ()):
+        if k not in out:
+            continue
+        if _off(v):
+            out[k] = None
+        elif k == 'branches':
+            out[k] = True
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, str):
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
     return out
 
 
@@ -321,9 +368,11 @@ def evaluate(f, cfg):
 
     rp = f['repair']
     ok = rp['per_feature'] is not None and rp['per_feature'] <= cfg['max_repair_per_feature']
+    kinds = rp.get('by_kind') or {}
     out.append(Criterion('repair', f"Repair load (≤ {cfg['max_repair_per_feature']:g} per Feature)", ok,
                          f"{rp['sessions']} repair sessions / {rp['landed']} Features landed in {w:g} d = "
-                         f"{'—' if rp['per_feature'] is None else format(rp['per_feature'], 'g')}"))
+                         f"{'—' if rp['per_feature'] is None else format(rp['per_feature'], 'g')}"
+                         + (' (' + ', '.join(f'{k} {n}' for k, n in kinds.items()) + ')' if kinds else '')))
 
     runs = f['ci_runs']
     if runs is None:
@@ -384,7 +433,220 @@ def evaluate(f, cfg):
                          'no release.blocking list' if not ids else
                          f"{len(ids) - len(open_)}/{len(ids)} landed"
                          + ('; open: ' + ', '.join(f'{r[0]} {r[2]}' for r in open_) if open_ else '')))
+    out.append(floor_criterion(f.get('floor') or {}, cfg))
+    out.append(seats_criterion(f.get('seats'), f.get('since'), cfg))
     return out
+
+
+# ------------------------------------------------------------ 9. floor clean --
+
+def _age(minutes):
+    m = int(minutes or 0)
+    return f'{m // 1440} d' if m >= 1440 else f'{m // 60} h' if m >= 60 else f'{m} min'
+
+
+def floor_over(found, cfg):
+    """``{kind: None (n/a or off) | [(name, age_min)] past its limit, oldest first}`` over the
+    gathered leftovers ``found`` (see :func:`floor_facts`) and ``cfg['floor']``."""
+    lim = cfg.get('floor') or FLOOR_DEFAULTS
+    out = {}
+    limits = {'stale_prs': None if lim['stale_pr_days'] is None else lim['stale_pr_days'] * 1440,
+              'runs': lim['run_min']}
+    for kind in FLOOR_KINDS:
+        got = found.get(kind)
+        key = {'stale_prs': 'stale_pr_days', 'runs': 'run_min', 'cloud': 'heartbeat_factor',
+               'tasks': 'stage_factor', 'branches': 'branches'}[kind]
+        if got is None or lim[key] is None:
+            out[kind] = None
+            continue
+        if kind in limits:
+            over = [(n, a) for n, a in got if a > limits[kind]]
+        elif kind == 'cloud':
+            over = [(n, a) for n, a, beat in got if a > lim['heartbeat_factor'] * beat]
+        elif kind == 'tasks':
+            over = [(n, a) for n, a, limit in got if a > lim['stage_factor'] * limit]
+        else:
+            over = [(n, a) for n, a in got]
+        out[kind] = sorted(over, key=lambda x: -(x[1] or 0))
+    return out
+
+
+FLOOR_WORDS = {'stale_prs': 'stale PR(s)', 'runs': 'orphan CI run(s)', 'cloud': 'silent cloud run(s)',
+               'tasks': 'Task(s) stuck in a stage', 'branches': 'expired head(s)'}
+
+
+def floor_criterion(found, cfg):
+    over = floor_over(found, cfg)
+    parts, red = [], 0
+    for kind in FLOOR_KINDS:
+        v = over[kind]
+        if v is None:
+            parts.append(f'{FLOOR_WORDS[kind]} {NA}')
+            continue
+        red += len(v)
+        parts.append(f'{len(v)} {FLOOR_WORDS[kind]}'
+                     + (f' (oldest {v[0][0]} {_age(v[0][1])})' if v and v[0][1] is not None else ''))
+    return Criterion('floor', 'Floor clean (no leftover past its deadline)', red == 0, '; '.join(parts))
+
+
+def floor_facts(root, product, cfg, now, git=_git, gh_json=None):
+    """``{kind: None | [...]}`` — what is left on the floor now, aged in minutes. ``None`` when
+    the product has no such thing or it could not be read (n/a, never red). Each kind is read from
+    what the factory already keeps; a reader that fails is that kind's ``None``."""
+    lim = cfg.get('floor') or FLOOR_DEFAULTS
+    out = {k: None for k in FLOOR_KINDS}
+    forge = bool(getattr(product, 'repo_slug', None))
+    readers = {'stale_prs': lambda: _stale_prs(product, now) if forge else None,
+               'runs': lambda: _orphan_runs(product, now, git, gh_json) if forge else None,
+               'cloud': lambda: _silent_cloud(product, now),
+               'tasks': lambda: _stuck_tasks(root, product, now),
+               'branches': lambda: _expired_heads(product)}
+    for kind, read in readers.items():
+        key = {'stale_prs': 'stale_pr_days', 'runs': 'run_min', 'cloud': 'heartbeat_factor',
+               'tasks': 'stage_factor', 'branches': 'branches'}[kind]
+        if lim[key] is None:
+            continue
+        try:
+            out[kind] = read()
+        except Exception:  # noqa: BLE001 — an unreadable kind is n/a, not a red gate
+            out[kind] = None
+    return out
+
+
+def _minutes_since(stamp, now):
+    d = _parse(stamp)
+    return None if d is None else max(0.0, (now - d).total_seconds() / 60)
+
+
+def _parse(stamp):
+    try:
+        d = datetime.datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+    return (d if d.tzinfo else d.replace(tzinfo=UTC)).astimezone(UTC)
+
+
+def _stale_prs(product, now):
+    from asf.harvest import pr_hygiene
+    return [(f"PR #{r['pr']}" if r.get('pr') else r['branch'], _minutes_since(r.get('since'), now) or 0)
+            for r in pr_hygiene.rows(product) if r['kind'] == pr_hygiene.STALE_CLOSE]
+
+
+def _orphan_runs(product, now, git, gh_json):
+    """Runs still queued or in progress whose branch is gone, or whose PR is closed."""
+    if gh_json is None:
+        from asf.metrics.metrics import gh_json
+    slug = product.repo_slug
+    live = []
+    for status in ('in_progress', 'queued'):
+        got = gh_json(['run', 'list', '--repo', slug, '--status', status, '--limit', '100',
+                       '--json', 'databaseId,headBranch,createdAt,event'])
+        if not isinstance(got, list):
+            return None
+        live += got
+    if not live:
+        return []
+    heads_text = git(product.repo_dir, 'ls-remote', '--heads', 'origin')
+    if heads_text is None:
+        return None
+    heads = {line.split('refs/heads/', 1)[1].strip() for line in heads_text.splitlines()
+             if 'refs/heads/' in line}
+    prs = gh_json(['pr', 'list', '--repo', slug, '--state', 'open', '--limit', '200',
+                   '--json', 'headRefName'])
+    if not isinstance(prs, list):
+        return None
+    open_heads = {p.get('headRefName') for p in prs}
+    out = []
+    for r in live:
+        branch = r.get('headBranch') or ''
+        gone = branch not in heads
+        closed = r.get('event') == 'pull_request' and branch not in open_heads
+        if gone or closed:
+            out.append((f"run {r.get('databaseId')} ({branch}, {'ref gone' if gone else 'PR closed'})",
+                        _minutes_since(r.get('createdAt'), now) or 0))
+    return out
+
+
+def _silent_cloud(product, now):
+    """``[(job, silent minutes, heartbeat minutes)]`` of the live cloud runs; ``None`` with the
+    cloud lane off."""
+    from asf import env
+    from asf.workers import cloud as cloud_mod, continuation, lifecycle, pool as pool_mod
+    try:
+        cfg = env.load_config()
+    except env.ConfigError:
+        cfg = {}
+    lane = cloud_mod.settings(cfg, product)
+    if not getattr(lane, 'on', False):
+        return None
+    beat = getattr(lane, 'heartbeat_min', None) or continuation.heartbeat_min(product)
+    out = []
+    for job, runs in lifecycle.runs(pool_mod.sessions_path(product)).items():
+        run = runs[-1] if runs else None
+        if not run or not lifecycle.is_live(run) or not cloud_mod.is_cloud(run):
+            continue
+        at = run.get('heartbeat_at')
+        if at:
+            silent = _minutes_since(at, now)
+        else:
+            try:
+                silent = (now.timestamp() - os.path.getmtime(run.get('log'))) / 60
+            except (OSError, TypeError):
+                continue
+        if silent is not None:
+            out.append((job, silent, float(beat)))
+    return out
+
+
+def _stuck_tasks(root, product, now):
+    """``[(id, minutes in its stage, its limit in minutes)]`` of the Tasks over their stage limit."""
+    from asf.record.core import canonicalize, load_items
+    from asf.tick import stale
+    by_id, _errors = load_items(root)
+    canonical, _dupes = canonicalize(by_id)
+    return [(iid, age / 60, stale.limit_seconds(limit) / 60)
+            for iid, _label, age, key, limit in stale.find_stale(canonical, stale.load_limits(product), now)
+            if key == 'task_active']
+
+
+def _expired_heads(product):
+    """The retention census's heads past their retention, awaiting delete; ``None`` with no census."""
+    from asf import env
+    from asf.workers import retention
+    path = os.path.join(env.state_dir(product), retention.STATE_FILE)
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    due = data.get('due')
+    n = len(due) if isinstance(due, list) else int(due or 0)
+    return [(f"census {str(data.get('at') or '')[:16]}", None)] * n
+
+
+# ------------------------------------------------------------ 10. seats used --
+
+def seats_criterion(ticks, since, cfg):
+    from asf.metrics import throughput
+    sc = cfg.get('seats') or throughput.SEAT_DEFAULTS
+    name = (f"Seats used (no {sc['idle_min']:g} min below {sc['min_pct']:g} % "
+            'while launchable)')
+    points = throughput.seat_points(ticks or ())
+    start = _parse(since)
+    if start is not None:
+        points = [p for p in points if p[0] >= start]
+    if not points:
+        return Criterion('seats', name, True, f'{NA} — no tick carries a seat reading in the window')
+    stretches = throughput.idle_stretches(points, sc)
+    if not stretches:
+        return Criterion('seats', name, True, f'0 idle stretches over {len(points)} tick(s)')
+    longest = max(stretches, key=lambda x: x['minutes'])
+    causes = [x['cause'] for x in stretches if x['cause']]
+    top = max(set(causes), key=causes.count) if causes else ''
+    return Criterion('seats', name, False,
+                     f"{len(stretches)} idle stretch(es); longest {longest['start'][:16]} "
+                     f"{longest['minutes']:g} min at {longest['busy']:g}/{longest['available']:g}"
+                     + (f'; top cause: {top}' if top else ''))
 
 
 def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None, facts=None):
@@ -421,11 +683,21 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
         'hand_commits': hand_commits(repo, ref, since, cfg['hand_types'], git=git),
         'installs': install_log(log_dir, since),
         'repair': {'sessions': h['repair_sessions'], 'landed': h['landed'],
-                   'per_feature': h['repair_per_feature']},
+                   'per_feature': h['repair_per_feature'], 'by_kind': h.get('repair_by_kind') or {}},
+        'floor': floor_facts(root, product, cfg, now, git=git, gh_json=gh_json),
+        'seats': _ticks(root),
         'upgrade': up, 'ci_runs': runs, 'ci_steps': steps,
         'docs': {'headings': readme_headings(readme), 'tag': tag,
                  'changelog_section': section, 'changelog_notes': notes},
     }
+
+
+def _ticks(root):
+    from asf.metrics.metrics import read_stream
+    try:
+        return read_stream(root, 'ticks')
+    except (OSError, ValueError):
+        return []
 
 
 def _utc(stamp):
@@ -474,6 +746,26 @@ def render(d):
         out.append(f"| {i} | {c['name']} | {'yes' if c['met'] else 'NO'} | "
                    f"{c['evidence'].replace('|', '/')} |")
     return '\n'.join(out) + '\n'
+
+
+def doctor_rows(product, root=None, now=None, git=_git, gh_json=None):
+    """``asf doctor``'s mirror of criteria 9 and 10: ``[(row, ok, evidence)]`` — the record clone
+    (or the operator's checkout) is the root; with neither, the Task kind and the seats read n/a."""
+    if root is None:
+        from asf import dwell
+        root = dwell._record_root(product)
+    now = now or datetime.datetime.now(UTC)
+    cfg = settings(product)
+    since = (now - datetime.timedelta(days=cfg['window_days'])).strftime('%Y-%m-%dT%H:%M:%SZ')
+    if gh_json is None:
+        from asf.metrics.metrics import gh_json
+    found = floor_facts(root, product, cfg, now, git=git, gh_json=gh_json)
+    if not root:
+        found['tasks'] = None
+    out = []
+    for c in (floor_criterion(found, cfg), seats_criterion(_ticks(root) if root else [], since, cfg)):
+        out.append((f'release {c.key}', c.met, c.evidence))
+    return out
 
 
 def cell(root, product):

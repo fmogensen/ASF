@@ -146,7 +146,8 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(r['sessions'], 4)
         self.assertEqual(r['tokens'], 530)        # 30 on the spec + in_tokens 500 on the coder
         self.assertEqual(r['ci_min'], 7.0)        # half of the 10-minute run + the 2-minute gate
-        self.assertEqual(r['repair_sessions'], 3)  # correct + review + the bug's one session
+        # correct + the bug's one session; the Task's first review is planned work, not repair
+        self.assertEqual(r['repair_sessions'], 2)
         self.assertEqual(r['corrections'], 1)
         self.assertEqual(r['send_backs'], 1)
         self.assertEqual(r['reopens'], 1)         # the Task's
@@ -161,13 +162,14 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(w['usd'], 21.0)          # every session in the week
         self.assertEqual(w['usd_per_feature'], 21.0)
         self.assertEqual(w['own_usd_per_feature'], 13.0)
-        self.assertEqual(w['repair_sessions'], 2)  # correct + review (fix-bug is first-time work)
+        # correct (the first review is planned; fix-bug is first-time work)
+        self.assertEqual(w['repair_sessions'], 1)
         self.assertEqual(w['ci_min'], 12.0)
 
     def test_the_headline_names_the_four_numbers(self):
         line = score.headline_line(score.headline(facts_fixture()), {'stale_prs': 3})
         self.assertEqual(line, '1 on prod / 1 landed (7 d) · lead 2.4 d (task 1.4 d) · $21.00/feature all-in · '
-                               '2 repair sessions/feature · 3 stale PRs')
+                               '1 repair sessions/feature · 3 stale PRs')
 
     def test_a_week_that_landed_nothing_says_what_it_spent(self):
         h = score.headline(facts_fixture(as_of='2026-09-20T00:00:00Z'))
@@ -208,6 +210,69 @@ class RepairPrefixTests(unittest.TestCase):
         with mock.patch.object(score, 'REPAIR_PREFIXES', without_prefixes):
             without_precheck = diagnose.metric(f, 'kind:review', *w)
         self.assertEqual(with_precheck, without_precheck)
+
+
+class PlannedFirstReviewTests(unittest.TestCase):
+    """Decision 2026-10-06 (release gate criterion 2): a Task's first review round is planned work,
+    not repair; its second review on, and every correct / adjudicate / rebase / remerge /
+    relaunch / bounce / revise / hotfix, is."""
+
+    def s(self, ts, task, item, rnd=None):
+        return {'ts': f'2026-09-0{ts}T10:00:00Z', 'task': task, 'item': item, 'round': rnd}
+
+    def test_the_first_review_of_an_item_is_not_repair_the_second_is(self):
+        ss = [self.s(2, 'review-t-0001', 'T-0001'), self.s(3, 'correct-t-0001', 'T-0001'),
+              self.s(4, 'review-t-0001', 'T-0001'), self.s(4, 'review-t-0002', 'T-0002')]
+        self.assertEqual(score.repair_flags(ss), [False, True, True, False])
+
+    def test_order_is_by_time_not_by_position(self):
+        ss = [self.s(4, 'review-t-0001', 'T-0001'), self.s(2, 'review-t-0001', 'T-0001')]
+        self.assertEqual(score.repair_flags(ss), [True, False])
+
+    def test_a_named_round_two_review_is_repair_even_alone(self):
+        self.assertEqual(score.repair_flags([self.s(2, 'review-t-0001-r2', 'T-0001', rnd=2)]), [True])
+
+    def test_every_rework_kind_is_repair(self):
+        kinds = ('correct', 'adjudicate', 'rebase', 'remerge', 'relaunch', 'bounce', 'revise', 'hotfix')
+        ss = [self.s(2, f'{k}-t-0001', 'T-0001') for k in kinds]
+        self.assertEqual(score.repair_flags(ss), [True] * len(kinds))
+        self.assertEqual(score.repair_flags([self.s(2, 'coder-t-0001', 'T-0001')]), [False])
+
+    def test_the_window_counts_a_second_review_whose_first_fell_before_it(self):
+        sessions = sessions_fixture() + [{'ts': '2026-09-04T09:00:00Z', 'task': 'review-t-0001',
+                                          'item': 'T-0001', 'usd': 1.0, 'minutes': 10}]
+        f = facts_fixture(sessions=sessions)
+        w = score.window_row(f, facts.to_dt('2026-09-04T00:00:00Z'), facts.to_dt('2026-09-07T00:00:00Z'))
+        self.assertEqual(w['repair_sessions'], 1)
+        self.assertEqual(w['repair_by_kind'], {'review': 1})
+
+    def test_the_scorecard_and_release_readiness_agree(self):
+        from asf import env, release
+        f = facts_fixture()
+        h = score.headline(f)
+        with mock.patch.object(release, 'gather', side_effect=lambda root, product, cfg, **kw: {
+                'as_of': f.as_of, 'since': '', 'items': {}, 'hand_commits': [], 'installs': [],
+                'repair': {'sessions': h['repair_sessions'], 'landed': h['landed'],
+                           'per_feature': h['repair_per_feature'], 'by_kind': h['repair_by_kind']},
+                'upgrade': {'upgrades': [], 'failed': [], 'torn': [], 'rollbacks': [], 'chain_breaks': []},
+                'ci_runs': [], 'ci_steps': [], 'docs': {'headings': [], 'tag': None, 'changelog_section': False,
+                                                        'changelog_notes': False}}):
+            d = release.compute('/nowhere', env.Product('p', {}))
+        rep = next(c for c in d['criteria'] if c['key'] == 'repair')
+        self.assertIn(f"{h['repair_sessions']} repair sessions / {h['landed']} Features", rep['evidence'])
+        self.assertIn('(correct 1)', rep['evidence'])
+
+
+class FalseCloseTimelineTests(unittest.TestCase):
+    def test_each_landing_and_reopening_is_stamped(self):
+        body = ('## History\n'
+                '- 2026-09-01 00:00 ingest: stage building 1/1 → landed (x)\n'
+                '- 2026-09-02 00:00 ingest: stage landed → building 2/2 (y)\n'
+                '- 2026-09-03 00:00 ingest: stage building 2/2 → landed (z)\n')
+        t = facts.timeline({'state': 'Resolved', 'stage': 'landed'}, body)
+        self.assertEqual(t['closes'], ['2026-09-01T00:00:00Z', '2026-09-03T00:00:00Z'])
+        self.assertEqual(t['reopened'], ['2026-09-02T00:00:00Z'])
+        self.assertEqual(t['reopens'], 1)
 
 
 class TotalRowTests(unittest.TestCase):

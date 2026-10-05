@@ -1,8 +1,9 @@
-"""asf.release — the release-readiness gate: settings, each fact reader, the eight criteria, the
+"""asf.release — the release-readiness gate: settings, each fact reader, the criteria, the
 CLI and the status row. Every fact source is a fixture: git and the forge are fakes, the tick and
 install logs are files in a temp dir, the record is cards on disk."""
 import datetime
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -47,6 +48,13 @@ def good_facts(**over):
 
 def cfg(**block):
     return release.settings(env.Product('p', {'release': block}))
+
+
+def seat_tick(minute, busy, avail, launchable, cause='', base=datetime.datetime(2026, 9, 24, 10, 0, tzinfo=UTC)):
+    """One tick line carrying the wave's seat reading, ``minute`` minutes after ``base``."""
+    ts = (base + datetime.timedelta(minutes=minute)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return {'ts': ts, 'tick': 1, 'seats': {'local_busy': busy, 'local_seats': avail, 'cloud_busy': 0,
+                                           'cloud_seats': 0, 'launchable': launchable, 'cause': cause}}
 
 
 class SettingsTest(unittest.TestCase):
@@ -225,7 +233,9 @@ class EvaluateTest(unittest.TestCase):
             upgrade={'upgrades': [{'to': 'a'}], 'failed': [], 'torn': ['ImportError: x'], 'rollbacks': [],
                      'chain_breaks': []},
             docs={'headings': ['Install'], 'tag': 'v0.1.0', 'changelog_section': False,
-                  'changelog_notes': False})
+                  'changelog_notes': False},
+            floor={'stale_prs': [('PR #9', 5 * 1440)]},
+            seats=[seat_tick(m, 2, 8, 3) for m in range(0, 32, 5)])
         out = self.crit(f, c)
         self.assertEqual([k for k, v in out.items() if v.met], [])
         self.assertIn('1 hand fix commit(s)', out['stability'].evidence)
@@ -306,13 +316,13 @@ class GatherTest(unittest.TestCase):
             self.assertFalse(out['ready'])
             self.assertEqual(met, {'stability': True, 'repair': False, 'ci': True, 'install': False,
                                    'upgrade': False, 'generic': False, 'docs': False, 'blocking': False,
-                                   'tune': False})
+                                   'floor': True, 'seats': True, 'tune': False})
             ev = {c['key']: c['evidence'] for c in out['criteria']}
             self.assertIn('1 auto-upgrade(s)', ev['upgrade'])       # dated 2026-09-24 12:00 UTC: in the window
             self.assertIn('F-0002 card', ev['blocking'])
             self.assertIn('CHANGELOG has v0.1.0 notes', ev['docs'])
             text = release.render(out)
-            self.assertIn('NOT READY — 2/9 met', text)
+            self.assertIn('NOT READY — 4/11 met', text)
             self.assertEqual(ev['tune'], 'tune.enabled is off')
             self.assertIn('| 1 | Stability (no hand hotfix for 7 d) | yes |', text)
 
@@ -344,6 +354,167 @@ class SurfaceTest(unittest.TestCase):
             with mock.patch('asf.release.cell', return_value='NOT READY — 3/8 met') as cell:
                 self.assertEqual(status.release_cell('/r', plain), 'NOT READY — 3/8 met')
                 cell.assert_called_once()
+
+
+
+class RepairEvidenceTest(unittest.TestCase):
+    def test_the_evidence_breaks_the_repair_load_down_by_kind(self):
+        f = good_facts(repair={'sessions': 7, 'landed': 2, 'per_feature': 3.5,
+                               'by_kind': {'correct': 4, 'review': 2, 'rebase': 1}})
+        out = {x.key: x for x in release.evaluate(f, cfg())}
+        self.assertFalse(out['repair'].met)
+        self.assertIn('(correct 4, review 2, rebase 1)', out['repair'].evidence)
+
+
+class FloorTest(unittest.TestCase):
+    """Criterion 9: each leftover kind red past its limit, green under it, n/a when the product
+    has no such thing, off by its key."""
+
+    def crit(self, floor, c=None):
+        return {x.key: x for x in release.evaluate(good_facts(floor=floor), c or cfg(blocking=['F-0001']))}['floor']
+
+    def test_defaults(self):
+        self.assertEqual(cfg()['floor'], {'stale_pr_days': 3, 'run_min': 30, 'heartbeat_factor': 2,
+                                          'stage_factor': 3, 'branches': True})
+
+    def test_a_stale_pr_past_three_days_is_red_under_it_green(self):
+        self.assertFalse(self.crit({'stale_prs': [('PR #4', 3 * 1440 + 1)]}).met)
+        ok = self.crit({'stale_prs': [('PR #4', 3 * 1440 - 1)]})
+        self.assertTrue(ok.met)
+        self.assertIn('0 stale PR(s)', ok.evidence)
+
+    def test_an_orphan_run_past_thirty_minutes_is_red(self):
+        red = self.crit({'runs': [('run 7 (batch/x, ref gone)', 31)]})
+        self.assertFalse(red.met)
+        self.assertIn('1 orphan CI run(s) (oldest run 7 (batch/x, ref gone) 31 min)', red.evidence)
+        self.assertTrue(self.crit({'runs': [('run 7', 29)]}).met)
+
+    def test_a_cloud_run_silent_past_two_heartbeats_is_red(self):
+        self.assertFalse(self.crit({'cloud': [('code-t-0001', 11, 5.0)]}).met)
+        self.assertTrue(self.crit({'cloud': [('code-t-0001', 9, 5.0)]}).met)
+
+    def test_a_task_past_three_times_its_stage_limit_is_red(self):
+        self.assertFalse(self.crit({'tasks': [('T-0001', 136, 45.0)]}).met)
+        self.assertTrue(self.crit({'tasks': [('T-0001', 134, 45.0)]}).met)
+
+    def test_an_expired_head_is_red(self):
+        self.assertFalse(self.crit({'branches': [('census 2026-09-25', None)]}).met)
+        self.assertTrue(self.crit({'branches': []}).met)
+
+    def test_limits_come_from_config(self):
+        c = cfg(blocking=['F-0001'], floor={'stale_pr_days': 10, 'run_min': '60'})
+        self.assertTrue(self.crit({'stale_prs': [('PR #4', 5 * 1440)], 'runs': [('run 1', 45)]}, c).met)
+
+    def test_a_kind_set_off_is_not_checked(self):
+        c = cfg(blocking=['F-0001'], floor={'stale_pr_days': 'off', 'branches': 'off'})
+        self.assertIsNone(c['floor']['stale_pr_days'])
+        out = self.crit({'stale_prs': [('PR #4', 9 * 1440)], 'branches': [('x', None)]}, c)
+        self.assertTrue(out.met)
+        self.assertIn('stale PR(s) n/a', out.evidence)
+
+    def test_a_minimal_product_is_all_na_never_red(self):
+        out = self.crit({})
+        self.assertTrue(out.met)
+        self.assertEqual(out.evidence.count('n/a'), 5)
+
+    def test_no_forge_reads_no_pr_and_no_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            product = env.Product('p', {'repo_dir': d})       # no repo_slug: no forge
+            gh = mock.Mock(side_effect=AssertionError('no forge call'))
+            found = release.floor_facts(d, product, cfg(), NOW, git=lambda *a: '', gh_json=gh)
+        self.assertIsNone(found['stale_prs'])
+        self.assertIsNone(found['runs'])
+        gh.assert_not_called()
+
+    def test_orphan_runs_reads_gone_refs_and_closed_prs(self):
+        runs = {'in_progress': [{'databaseId': 1, 'headBranch': 'batch/gone', 'event': 'push',
+                                 'createdAt': '2026-09-25T11:00:00Z'},
+                                {'databaseId': 2, 'headBranch': 'task/T-1', 'event': 'pull_request',
+                                 'createdAt': '2026-09-25T11:00:00Z'},
+                                {'databaseId': 3, 'headBranch': 'task/T-2', 'event': 'pull_request',
+                                 'createdAt': '2026-09-25T11:00:00Z'}],
+                'queued': []}
+
+        def gh(args):
+            if args[:2] == ['run', 'list']:
+                return runs[args[args.index('--status') + 1]]
+            return [{'headRefName': 'task/T-2'}]
+        product = env.Product('p', {'repo_dir': '/x', 'repo_slug': 'o/r'})
+        heads = 'a\trefs/heads/main\nb\trefs/heads/task/T-1\nc\trefs/heads/task/T-2\n'
+        got = release._orphan_runs(product, NOW, lambda repo, *a: heads, gh)
+        self.assertEqual([n for n, _a in got], ['run 1 (batch/gone, ref gone)', 'run 2 (task/T-1, PR closed)'])
+        self.assertEqual(got[0][1], 60.0)
+
+
+class SeatsTest(unittest.TestCase):
+    """Criterion 10 over fixture tick streams."""
+
+    def crit(self, ticks, c=None):
+        return {x.key: x for x in release.evaluate(good_facts(seats=ticks), c or cfg(blocking=['F-0001']))}['seats']
+
+    def test_a_31_minute_2_of_8_stretch_with_launchable_rows_is_red(self):
+        ticks = [seat_tick(m, 2, 8, 3, cause='WAITS ON host load') for m in (0, 5, 10, 15, 20, 25, 31)]
+        out = self.crit(ticks)
+        self.assertFalse(out.met)
+        self.assertIn('1 idle stretch(es); longest 2026-09-24T10:00 31 min at 2/8', out.evidence)
+        self.assertIn('top cause: WAITS ON host load', out.evidence)
+
+    def test_the_same_with_nothing_launchable_is_green(self):
+        self.assertTrue(self.crit([seat_tick(m, 2, 8, 0) for m in (0, 5, 10, 15, 20, 25, 31)]).met)
+
+    def test_29_minutes_is_green(self):
+        self.assertTrue(self.crit([seat_tick(m, 2, 8, 3) for m in (0, 5, 10, 15, 20, 25, 29)]).met)
+
+    def test_thresholds_come_from_config(self):
+        ticks = [seat_tick(m, 2, 8, 3) for m in (0, 5, 10, 15, 20, 25, 31)]
+        self.assertTrue(self.crit(ticks, cfg(blocking=['F-0001'], seats={'idle_min': 45})).met)
+        self.assertTrue(self.crit(ticks, cfg(blocking=['F-0001'], seats={'min_pct': 20})).met)
+        five = [seat_tick(m, 5, 8, 3) for m in (0, 5, 10, 15, 20, 25, 31)]   # 62 %
+        self.assertFalse(self.crit(five, cfg(blocking=['F-0001'], seats={'min_pct': 70})).met)
+
+    def test_one_local_seat_and_no_cloud_is_a_valid_shape(self):
+        self.assertFalse(self.crit([seat_tick(m, 0, 1, 1) for m in range(0, 35, 5)]).met)
+        self.assertTrue(self.crit([seat_tick(m, 1, 1, 1) for m in range(0, 35, 5)]).met)
+
+    def test_no_reading_is_na(self):
+        out = self.crit([{'ts': '2026-09-24T10:00:00Z', 'tick': 1}])
+        self.assertTrue(out.met)
+        self.assertIn('n/a', out.evidence)
+
+    def test_a_reading_before_the_window_is_not_read(self):
+        f = good_facts(seats=[seat_tick(m, 2, 8, 3) for m in range(0, 40, 5)], since='2026-09-24T11:00:00Z')
+        out = {x.key: x for x in release.evaluate(f, cfg(blocking=['F-0001']))}['seats']
+        self.assertTrue(out.met)
+
+    def test_the_row_is_printed(self):
+        d = {'product': 'p', 'as_of': 'x', 'ready': False, 'criteria': [
+            vars(c) for c in release.evaluate(good_facts(seats=[seat_tick(m, 2, 8, 3) for m in range(0, 35, 5)]),
+                                              cfg(blocking=['F-0001']))]}
+        text = release.render(d)
+        self.assertIn('| 9 | Floor clean', text)
+        self.assertIn('| 10 | Seats used', text)
+
+
+class DoctorMirrorTest(unittest.TestCase):
+    def test_doctor_mirrors_criteria_9_and_10(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'metrics', 'ticks'))
+            with open(os.path.join(d, 'metrics', 'ticks', '2026-09-24.jsonl'), 'w') as fh:
+                for m in range(0, 35, 5):
+                    fh.write(json.dumps(seat_tick(m, 2, 8, 3)) + '\n')
+            product = env.Product('p', {'repo_dir': d})
+            rows = release.doctor_rows(product, root=d, now=NOW, git=lambda *a: '')
+        self.assertEqual([r[0] for r in rows], ['release floor', 'release seats'])
+        self.assertTrue(rows[0][1])
+        self.assertFalse(rows[1][1])
+        self.assertIn('1 idle stretch(es)', rows[1][2])
+
+    def test_doctor_runs_the_mirror(self):
+        from asf import doctor
+        with mock.patch.object(release, 'doctor_rows', return_value=[('release floor', True, 'x')]):
+            self.assertEqual(doctor.check_release_floor_seats(env.Product('p', {})), [('release floor', True, 'x')])
+        with mock.patch.object(release, 'doctor_rows', side_effect=OSError('boom')):
+            self.assertIn('not read', doctor.check_release_floor_seats(env.Product('p', {}))[0][2])
 
 
 if __name__ == '__main__':

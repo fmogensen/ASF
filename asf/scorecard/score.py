@@ -43,7 +43,45 @@ def session_kind(ev):
 
 
 def is_repair(kind):
+    """Is ``kind`` a repair kind at all? A ``review`` is one only from its item's second round on
+    (:func:`repair_flags`): the first review a Task gets is planned work, not rework."""
     return kind.startswith(REPAIR_PREFIXES)
+
+
+#: The kind whose first round per item is planned work (decision 2026-10-06, release gate
+#: criterion 2: "count rework, not the planned first review").
+PLANNED_FIRST = 'review'
+
+
+def repair_flags(sessions):
+    """``[bool]`` aligned with ``sessions``: is each one repair? Every :func:`is_repair` kind is,
+    except an item's first ``review`` session (by ``ts``, over every session given — so pass the
+    whole stream, not a window of it): a ``review`` is repair from the item's second review on,
+    or when its job names a round ``-r2`` or later (the stream's ``round``)."""
+    seen = set()
+    flags = [False] * len(sessions)
+    order = sorted(range(len(sessions)), key=lambda i: str(sessions[i].get('ts') or ''))
+    for i in order:
+        s = sessions[i]
+        kind = session_kind(s)
+        if kind != PLANNED_FIRST:
+            flags[i] = is_repair(kind)
+            continue
+        key = s.get('item') or s.get('task')
+        rnd = s.get('round')
+        flags[i] = key in seen or (isinstance(rnd, int) and rnd >= 2)
+        seen.add(key)
+    return flags
+
+
+def repair_kinds(sessions, flags):
+    """``{kind: repair sessions}`` of the flagged ones, largest first."""
+    out = {}
+    for s, f in zip(sessions, flags):
+        if f:
+            k = session_kind(s)
+            out[k] = out.get(k, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def is_correction(kind):
@@ -147,13 +185,13 @@ def per_item(facts):
     def cell(i):
         return acc.setdefault(i, {'usd': 0.0, 'sessions': 0, 'tokens': 0, 'repair': 0,
                                   'corrections': 0, 'ci_min': 0.0})
-    for s in facts.sessions:
+    for s, rep in zip(facts.sessions, repair_flags(facts.sessions)):
         c = cell(s.get('item'))
         kind = session_kind(s)
         c['usd'] += _num(s.get('usd'))
         c['sessions'] += 1
         c['tokens'] += tokens_of(s)
-        c['repair'] += 1 if is_repair(kind) else 0
+        c['repair'] += 1 if rep else 0
         c['corrections'] += 1 if is_correction(kind) else 0
     for r in facts.ci:
         ids = r.get('items') or [None]
@@ -211,9 +249,11 @@ def window_row(facts, start, end, rows=None):
     rows = feature_rows(facts) if rows is None else rows
     shipped = [r for r in rows if in_window(r['landed'], start, end)]
     on_prod = [r for r in rows if in_window(r['prod'], start, end)]
-    sessions = [s for s in facts.sessions if in_window(s.get('ts'), start, end)]
+    flags = repair_flags(facts.sessions)
+    pairs = [(s, f) for s, f in zip(facts.sessions, flags) if in_window(s.get('ts'), start, end)]
+    sessions = [s for s, _f in pairs]
     usd = sum(_num(s.get('usd')) for s in sessions)
-    repair = sum(1 for s in sessions if is_repair(session_kind(s)))
+    repair = sum(1 for _s, f in pairs if f)
     ci_min = (sum(_num(r.get('minutes')) for r in facts.ci if in_window(r.get('ts'), start, end))
               + sum(_num(g.get('seconds')) / 60 for g in facts.gates if in_window(g.get('ts'), start, end)))
     dead = [r for r in facts.runs if is_dead(r) and in_window(r.ended, start, end)]
@@ -233,6 +273,7 @@ def window_row(facts, start, end, rows=None):
         'own_usd_per_feature': round(sum(r['usd'] for r in shipped) / n, 2) if n else None,
         'repair_sessions': repair,
         'repair_per_feature': round(repair / n, 1) if n else None,
+        'repair_by_kind': repair_kinds(sessions, [f for _s, f in pairs]),
         'send_backs': sum(r['send_backs'] for r in shipped),
         'bugs': sum(r['bugs'] for r in shipped), 's1': sum(r['s1'] for r in shipped),
         'dead_sessions': len(dead),

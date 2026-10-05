@@ -223,13 +223,16 @@ def rank(facts, start, end):
         c['red'] += 1 if red else 0
 
     feats = {}
-    for s in sessions:
+    flags = score.repair_flags(facts.sessions)
+    for s, rep in zip(facts.sessions, flags):
+        if not score.in_window(s.get('ts'), start, end):
+            continue
         fid = score.feature_of(facts.items, s.get('item')) or '(none)'
         c = feats.setdefault(fid, {'name': fid, 'usd': 0.0, 'sessions': 0, 'repair': 0,
                                    'title': (facts.items.get(fid) or {}).get('title', '')})
         c['usd'] = round(c['usd'] + score._num(s.get('usd')), 2)
         c['sessions'] += 1
-        c['repair'] += 1 if score.is_repair(score.session_kind(s)) else 0
+        c['repair'] += 1 if rep else 0
 
     def desc(d, key):
         return sorted(d.values(), key=lambda c: (-c[key], c['name']))

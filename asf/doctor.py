@@ -1002,6 +1002,16 @@ def _capacity_deprecations(cfg):
     return lines
 
 
+def check_release_floor_seats(product):
+    """The release gate's criteria 9 (floor clean) and 10 (seats used), as
+    :func:`asf.release.doctor_rows` reads them; one warn row when they cannot be read."""
+    from asf import release
+    try:
+        return release.doctor_rows(product)
+    except Exception as e:  # noqa: BLE001 — an unreadable gate is a warning, never a doctor crash
+        return [('release floor/seats', False, f'not read ({type(e).__name__}: {e})')]
+
+
 def check_capacity(cfg, product):
     """[(ok, detail)] — the ``capacity`` doctor row's findings (spec f-0079 §2.5): every
     product's declared sessions summed against ``capacity.total.sessions``, that total against
@@ -1360,6 +1370,8 @@ def run(product_name):
     rows.append(('drift', True, ok, detail))
     ok, detail = check_release(product)
     rows.append(('release', True, ok, detail))
+    for name, ok, detail in check_release_floor_seats(product):
+        rows.append((name, False, ok, detail))
     ok, detail = check_rule_checks(product)
     rows.append(('rule-checks', False, ok, detail))
     ok, detail = check_briefs(product)

@@ -19,7 +19,7 @@ import datetime
 import json
 import os
 
-from asf.workers import lifecycle, pool
+from asf.workers import cloudpid, lifecycle, pool
 
 _STAMP = '%Y-%m-%dT%H:%M:%SZ'
 
@@ -40,6 +40,7 @@ class Run:
     publish_refused: str = ''  #: the registry's `publish_refused` key; read by diagnose's sub-causes and nothing else
     worktree: str = ''  #: the registry's `worktree` key; read by diagnose's sub-causes and nothing else
     attempt: int = 1        # 1-based, among this job's ended runs in ledger order
+    cloud: bool = False     #: ran on the cloud lane (its pid is a cloud token); read by asf.metrics.throughput
 
 
 class Cell(collections.namedtuple('Cell', 'sessions hours usd')):
@@ -126,7 +127,7 @@ def ended_runs(product, *, ledger=None, logs_dir=None, since=None, as_of=None):
                 minutes=m, landed=bool(r.get('harvested')), end_reason=r.get('end_reason') or '',
                 usd=None if spend is None else spend * share,
                 publish_refused=r.get('publish_refused') or '', worktree=r.get('worktree') or '',
-                attempt=attempt))
+                attempt=attempt, cloud=cloudpid.is_token(r.get('pid'))))
     if since:
         out = [r for r in out if r.ended[:10] >= since]
     if as_of:

@@ -905,6 +905,37 @@ def split_hold(cloud, ready, host_held, host_why):
     return host_held, '', extra
 
 
+def top_cause(whys):
+    """The commonest reason a launchable row waited this wave, digits folded (``''`` with none)."""
+    import collections
+    c = collections.Counter(re.sub(r'\d+', 'N', str(w)).strip()[:120] for w in whys if w)
+    return c.most_common(1)[0][0] if c else ''
+
+
+def note_seats(ctx, sessions, cloud, running, wanted_n, cause=''):
+    """The tick line's seat reading (:func:`asf.metrics.throughput.seats_record`): the local
+    share and its busy seats, the cloud lane's maximum (0 with the lane off) and its busy seats,
+    the launchable rows. Never a failure of the wave."""
+    from asf.metrics import throughput
+    try:
+        n_cloud = sum(1 for r in running if cloud_mod.is_cloud(r))
+        ctx.seats = throughput.seats_record(
+            len(running) - n_cloud, sessions or 0, n_cloud,
+            cloud.max_inflight if getattr(cloud, 'on', False) else 0, wanted_n or 0, cause)
+    except Exception:  # noqa: BLE001 — a reading lost is a gap in the series, never a wave error
+        pass
+
+
+def note_launched(ctx, launched):
+    """This wave's launches count as busy on the tick's seat reading."""
+    seats = getattr(ctx, 'seats', None)
+    if not isinstance(seats, dict) or not launched:
+        return
+    for _wrow, rec in launched:
+        lane = 'cloud_busy' if cloud_mod.is_cloud(rec or {}) else 'local_busy'
+        seats[lane] = seats.get(lane, 0) + 1
+
+
 def push_deferred(ctx, out=print):
     """The lane pass's ref pushes (branch deletes, archives), after the wave's launches: each
     push runs the product's pre-push hook, and no launch waits on one. A failure is one line."""
@@ -1044,17 +1075,22 @@ def launch(ctx, out=print):
     wider = (gated_plan(items, product, running, r.ceiling + extra, inputs, out=lambda _l: None,
                         exclude=set(dropped))[0]
              if r.ceiling is not None and r.ceiling != r.sessions else planned)
-    capacity_mod.write_demand(product.name, len(running),
-                              demand(items, product, running, inputs, extra, exclude=dropped))
+    wanted_n = demand(items, product, running, inputs, extra, exclude=dropped)
+    capacity_mod.write_demand(product.name, len(running), wanted_n)
     share_held = held_by_share(items, product, running, r, planned, inputs, wider=wider)
     counted = share_counted(running, planned, inputs.get('held')) if share_held else ''
+    waits = []
     for row in share_held:
         job = job_name(row.brief_kind, row.item_id)
+        waits.append(r.fair_share_reason)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}; {counted}')
     for row, why in left_out(items, product, running, inputs, planned, share_held, dropped,
                              r.sessions + extra):
+        waits.append(why)
         out(f'waits    {row_job(row):<24} {row.item_id:<10} — {why}')
     host_held, host_why, reading = host_hold(planned)
+    note_seats(ctx, r.sessions, cloud, running, wanted_n,
+               host_why if host_held else top_cause(waits))
     # a loaded host still starts cloud sessions: nothing of theirs runs here
     host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
     # an S1 item's row passes the LOAD half of the guard — never memory/swap pressure, and at
@@ -1120,4 +1156,5 @@ def launch(ctx, out=print):
         ctx.event('launch', item=wrow.item, job=wrow.job,
                   model=rec.get('model'), brief_kind=kinds[wrow.job])
     ctx.counts['launches'] += len(launched)
+    note_launched(ctx, launched)
     return 0

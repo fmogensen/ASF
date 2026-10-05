@@ -169,6 +169,7 @@ class Context:
         self._record = None
         self.stale_reason = None  # set when the record step failed: the index is not this tick's
         self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
+        self.seats = None         # the wave's seat reading, carried on the tick line
         from asf.facts import cache as facts_cache, landing as facts_landing
         facts_cache.clear()  # a tick reads its facts afresh (asf.facts.cache)
         # under flags.facts shadow|new: the pass's one open-PR read, the shadow's only gh fact
@@ -696,9 +697,13 @@ def run_asf_step(step, ctx):
 def tick_line(ctx, ran, now=None):
     """The ``metrics/ticks`` line for this tick (the stream's schema + ``product`` + ``steps``)."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    return dict(ctx.counts, ts=now.strftime('%Y-%m-%dT%H:%M:%SZ'), tick=int(now.strftime('%H%M')),
+    line = dict(ctx.counts, ts=now.strftime('%Y-%m-%dT%H:%M:%SZ'), tick=int(now.strftime('%H%M')),
                 duration_s=round(sum(r['seconds'] for r in ran), 1), quota={},
                 refused_files={}, product=ctx.product.name, steps=ran)
+    seats = getattr(ctx, 'seats', None)
+    if isinstance(seats, dict):   # the wave's seat reading (asf.metrics.throughput)
+        line['seats'] = seats
+    return line
 
 
 def write_tick_line(ctx, ran):
@@ -713,6 +718,26 @@ def write_tick_line(ctx, ran):
             f.write(json.dumps(line, sort_keys=True, ensure_ascii=False) + '\n')
     except (subprocess.CalledProcessError, OSError, env.ConfigError) as e:
         print(f"tick: step log not written ({(getattr(e, 'stderr', None) or str(e)).strip()})")
+        return
+    if line.get('seats'):
+        seat_alarm(ctx, os.path.dirname(path), line['ts'])
+
+
+def seat_alarm(ctx, ticks_dir, ts, out=print):
+    """One ``metrics: BREACH seats`` line while an idle-while-launchable stretch runs
+    (:func:`asf.metrics.throughput.live_breach`, over today's and yesterday's tick lines)."""
+    from asf.metrics import metrics, throughput
+    try:
+        day = datetime.date.fromisoformat(ts[:10])
+        ticks = []
+        for d in (day - datetime.timedelta(days=1), day):
+            ticks += metrics.read_file(os.path.join(ticks_dir, f'{d.isoformat()}.jsonl'))
+        line = throughput.live_breach(ticks, throughput.settings(ctx.product)[0])
+    except Exception as e:  # noqa: BLE001 — an alarm not raised never fails the tick
+        out(f'metrics: seat alarm not read ({type(e).__name__}: {e})')
+        return
+    if line:
+        out(line)
 
 
 def register(subparsers):
