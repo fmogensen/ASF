@@ -3946,6 +3946,22 @@ class TestUrgentBatch(Base):
 
 
 class TestPriorityBatchRelief(ReliefBase):
+    def test_relief_never_cancels_a_merge_queue_batch_run(self):
+        ci = {'provider': 'github-actions', 'workflow': 'ci.yml', 'pool': pool_data(),
+              'queue': {'workflows': self.WF}}
+        p = env.Product('p', {'repo_slug': 'o/r', 'ci': ci, 'conventions': {
+            'merge': 'queue', 'merge_queue': {'ref_prefix': 'batch/'}}})
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        runs['batch.yml'][0].update(event='push', headBranch='batch/20261005-0208-e81e82b')
+        gh, run = self.gh(runs)
+        with mock.patch.object(ci_queue, 'urgent_batch', return_value=''):   # not a priority one
+            self.relieve(p, run)
+        self.assertNotIn('201', self.cancels(gh))
+        self.assertTrue(any('relief: exempt batch/20261005-0208-e81e82b — merge-queue batch' in l
+                            for l in self.lines), self.lines)
+
     def test_relief_never_cancels_a_priority_batch_run(self):
         p = self.product()
         os.makedirs(env.state_dir('p'), exist_ok=True)
