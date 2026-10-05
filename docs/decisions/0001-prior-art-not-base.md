@@ -6,7 +6,7 @@
 - **Supersedes:** nothing
 - **Source:** the ASF 0.1 plan (not part of this repository; cited below as `plan:<line>`),
   decisions 1 and 4
-- **Evidence:** [`docs/research/prior-art-prototype.md`](../research/prior-art-prototype.md)
+- **Evidence:** a private reading of the prototype repository (not part of this repository; [withdrawn](../research/prior-art-prototype.md))
 
 ## Context
 
@@ -35,7 +35,7 @@ In the operator's words, from the plan:
 
 So:
 
-1. **No file, function or type crosses over.** Not the runner, not `core/gates.ts`, not the
+1. **No file, function or type crosses over.** Not the runner, not the gate module, not the
    chains, not the role prompts, not the eval harness. This repository is fresh with no
    product data and no secrets in its history (plan:26).
 2. **Ideas cross over as cards, each citing its source.** Every idea taken becomes a Feature
@@ -93,11 +93,11 @@ when it arrives as inherited code nobody chose.
 - **The old repo's language is not a precedent.** The plan leaves the implementation language
   to the spec writer, with a reason (plan:298-301); TypeScript matching the old ASF is an
   input, not an argument.
-- **Attribution is honest.** `docs/research/prior-art-prototype.md` names the source of every
-  idea, and the README credits the public upstream software-factory project the prototype credited
+- **Attribution is honest.** The private reading named the source of every idea, and the
+  README credits the public upstream software-factory project the prototype credited
   (`docs/prior-art.md:5-12`).
 - **The archive is a dependency of nothing.** Once ASF 0.1 ships, the old repo is read-only
-  history; its index source is removed from the autopilot (plan:169).
+  history (plan:169).
 
 ## Alternatives considered
 
@@ -105,5 +105,5 @@ when it arrives as inherited code nobody chose.
 |---|---|
 | **Fork the prototype and generalise it** | Inherits the runner-not-a-record shape (b76, b123), single-tenancy (E06), an operator-specific history, and a second implementation to reconcile with the one that actually ships a product |
 | **Port `core/` only, write the rest fresh** | `core/` is where the shape lives — the chain, the runner, the envelope, the gates. Porting it is forking it with extra steps |
-| **Vendor `core/gates.ts` and `evals/`** | The gates are the best artefact in the old repo, and they are also the most coupled: they read `runs/<id>/`, `RunDir`, `RunContext`, `Bun.spawn`. Their *design rules* carry; their code does not. Recorded in the research note §(c) |
+| **Vendor the old gates and evals** | The gates are the best artefact in the old repo, and they are also the most coupled to its run directory and runtime. Their *design rules* carry; their code does not. Recorded in the research note §(c) |
 | **Start fresh and ignore the old repo** | Throws away 143 findings that cost real money to discover — 28.3 % of the old factory's total spend is documented in two of them alone (b111, b112). P0.5 exists to prevent this |

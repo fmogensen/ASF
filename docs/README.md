@@ -19,5 +19,5 @@ describes what the code does today and links to the rest.
   - [0002 — CI routing labels name a capability, never a provider](decisions/0002-ci-routing-labels-are-capabilities.md)
   - [0003 — a Task's planned first review is not repair](decisions/0003-a-planned-first-review-is-not-repair.md)
 - [`research/`](research/) — prior art and measurements
-  - [Prior art — the 2026-08 prototype](research/prior-art-prototype.md) (five parts: specs and directives, findings, gates and evals, roles, what never shipped)
+  - [Prior art — the 2026-08 prototype](research/prior-art-prototype.md) (withdrawn: it read a private repository)
 - `CONSTITUTION.md` — the directives every role runs on, each mapped to the rule cards that enforce it

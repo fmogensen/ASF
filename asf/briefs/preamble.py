@@ -1,7 +1,7 @@
 """asf.briefs.preamble — the facts the runner already knows, written down instead of discovered.
 
 The prior-art reading behind this module is blunt: **93 % of a run's cost was the agent
-discovering what the runner already knew** (``docs/research/prior-art-prototype.md``, row 23) —
+discovering what the runner already knew** (a private reading of the 2026-08 prototype, row 23) —
 twelve million input tokens and ninety-six tool calls for one phase, nearly all of it a session
 reading its way to the card, the spec, the plan and the branch state that the tick had in hand
 before it launched anything. So the preamble is generated, never searched for: the card and its

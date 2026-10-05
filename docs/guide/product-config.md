@@ -650,22 +650,27 @@ when printed, else `polled_at` plus the window's length. A run that ends on a us
 429 stops its account until the reset it names — recorded by the next wave of any product, before it
 places a launch.
 
-**A wedged usage lock.** A quota command that refreshes through the cux account manager depends on
-its global lock, `~/.cux/.lock`. When a holder keeps it for 5 minutes or more, `asf status` starts
-the Quota row with `cux lock wedged N min — held by pid X (child of Y)` and `asf doctor` shows a
-`quota lock` row, so a row of `stale since` readings names its cause. The tick can reclaim it,
-opt-in (off by default):
+**A wedged usage lock.** A quota command that refreshes through an account manager may depend on
+that manager's global file lock. Name it in `config.yaml` and, when a holder keeps it for 5
+minutes or more, `asf status` starts the Quota row with `account lock wedged N min — held by pid X
+(child of Y)` and `asf doctor` shows a `quota lock` row, so a row of `stale since` readings names
+its cause. Unset (the default), nothing is probed. The tick can also reclaim it, opt-in (off by
+default):
 
 ```yaml
-quota_guards:
-  reclaim_cux_lock: true   # default false; only a YAML true turns it on
+account_lock:
+  path: ~/.<manager>/.lock          # the lock file; unset = no probe, no row, no reclaim
+  process: <manager>                # its program name; reclaim signals nothing without it
+  refresh_command: <manager> usage refresh   # run once after a reclaim; optional
+  reclaim: true                     # default false; only a YAML true turns it on
 ```
 
-On, the wave SIGTERMs (never SIGKILL) a holder only when it is a cux process, a child of a cux
-process, not a claude process, at least 15 minutes old and without children of its own; every
-other holder must be the parent of such a target, or nothing is touched. It reads the process table
+`quota_guards.reclaim_cux_lock: true` is the older spelling of `account_lock.reclaim` and is still
+honoured. On, the wave SIGTERMs (never SIGKILL) a holder only when it is the `process`, a child of
+it, not a claude process, at least 15 minutes old and without children of its own; every other
+holder must be the parent of such a target, or nothing is touched. It reads the process table
 twice and acts only when both reads agree (pid and start time), then moves the lock to
-`.lock.stale-HHMM`, runs `cux usage refresh` once and logs the pids (`cux_lock_reclaim` event).
+`.lock.stale-HHMM`, runs `refresh_command` once and logs the pids (`account_lock_reclaim` event).
 A wrapper, a claude session, or anything with a child is never signalled.
 
 **The 5h window as a budget.** Each launch carries an estimate of its share of the 5h window, per

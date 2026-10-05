@@ -27,12 +27,14 @@ KNOWN_CONFIG_KEYS = frozenset({
     'worker_pool.accounts[].config_dir', 'worker_pool.accounts[].home_seed',
     'worker_pool.accounts[].isolate_home', 'worker_pool.accounts[].auth_env',
     'worker_pool.accounts[].note',   # annotation for the operator; nothing reads it
-    'operator.tick_file', 'operator.plugin_dir', 'cutover.job_timeout_s', 'legacy_steps',
+    'operator.tick_file', 'operator.plugin_dir', 'operator.path_prefix', 'cutover.job_timeout_s', 'legacy_steps',
     'quota_guards.seven_d_cooldown',   # old name of quota_guards.cooldown.seven_d; still honoured
     'quota_guards.five_h', 'quota_guards.seven_d', 'quota_guards.seven_d_model',
     'quota_guards.stale_after_min', 'quota_guards.stop.*', 'quota_guards.cooldown.*',
     'quota_guards.running_allowance', 'quota_guards.five_h_usd',
-    'quota_guards.reclaim_cux_lock',
+    'quota_guards.reclaim_cux_lock',   # old name of account_lock.reclaim; still honoured
+    'account_lock.path', 'account_lock.process', 'account_lock.refresh_command',
+    'account_lock.reclaim',
     'host_guards.load_per_core', 'host_guards.swap_pct',
     'capacity.total.sessions', 'capacity.total.ci', 'capacity.per_product.sessions',
     'capacity.per_product.ci', 'capacity.reserve_for_s1.*',

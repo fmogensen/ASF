@@ -1,9 +1,7 @@
 # jev — a cheap judge between code and sessions
 
 Research note, 2026-09-21. Backs the inbox Epic *jev decision model in the tick* in the ASF backlog.
-The interactive version with charts is the operator's proposal doc
-(https://claude.ai/code/artifact/2564648b-4a57-4767-8f37-b6960d57f105); this file is the record
-of what was found and how it was scored, so a card can cite a line.
+This file is the record of what was found and how it was scored, so a card can cite a line.
 
 **The suggestion.** Give ASF a third way to decide — a 100 ms, ~$0.0001 calibrated judgement —
 between the code it already trusts and the sessions it already pays for. Short-term (0.1) it

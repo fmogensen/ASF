@@ -1564,7 +1564,7 @@ One entry per released version, newest first.
 
 ### Features landed
 
-- F-0222 Detect a wedged cux usage lock and (opt-in) reclaim it
+- F-0222 Detect a wedged account-manager usage lock and (opt-in) reclaim it
 
 ### Improvements and hotfixes
 

@@ -479,6 +479,36 @@ class InstallSectionTests(unittest.TestCase):
             self.assertIn(needle, text, needle)
 
 
+class ReleaseGateHeadingsTests(unittest.TestCase):
+    """The release gate's docs criterion, README half: the committed README carries a heading for
+    every ``release.readme_sections`` entry (Install, Quick start, Configuration, Upgrade) — read
+    through the gate's own ``readme_headings``, so CI proves what ``asf release-readiness`` reads."""
+
+    def _readme(self):
+        with open(os.path.join(REPO_ROOT, 'README.md'), encoding='utf-8') as f:
+            return f.read()
+
+    def test_every_readme_section_the_gate_requires_is_a_heading(self):
+        from asf import release
+        headings = release.readme_headings(self._readme())
+        for section in release.DEFAULTS['readme_sections']:
+            with self.subTest(section=section):
+                self.assertTrue(any(section.lower() in h.lower() for h in headings),
+                                f'README lacks a heading containing {section!r}: {headings}')
+
+    def test_configuration_names_both_files_and_links_the_guide(self):
+        section = self._readme().split('## Configuration', 1)[1].split('\n## ', 1)[0]
+        for needle in ('~/.ASF/config.yaml', '~/.ASF/products/<product>.yaml',
+                       'docs/guide/product-config.md'):
+            self.assertIn(needle, section)
+
+    def test_upgrade_names_the_command_the_schema_step_and_auto(self):
+        section = self._readme().split('## Upgrade', 1)[1].split('\n## ', 1)[0]
+        for needle in ('asf upgrade --to', 'asf schema-migrate', 'upgrade: auto',
+                       'docs/guide/upgrading.md'):
+            self.assertIn(needle, section)
+
+
 class ProductResolutionProseTests(unittest.TestCase):
     """F-0110/T-0426: the README and the guide describe the four-step order (S-32605), not the
     pre-#198 three steps — read from the checkout, not a fixture."""

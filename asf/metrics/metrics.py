@@ -632,7 +632,7 @@ def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None, rela
         for j in r['jobs']:
             runner_min[j.get('runner') or '?'] += j['minutes']
     rows.append(('bandwidth',
-                 'cux 5h/7d: ' + (', '.join(f"{a} {q['h5']}/{q['d7']} %" for a, q in sorted(quota.items())) or '—'),
+                 'quota 5h/7d: ' + (', '.join(f"{a} {q['h5']}/{q['d7']} %" for a, q in sorted(quota.items())) or '—'),
                  f"{len(runner_min)} runners seen, {sum(runner_min.values())} runner-minutes"))
     if events:
         rows.extend(intake_latency_rows(events, conv))
@@ -843,8 +843,17 @@ def write_costs(root, items, all_ci, all_sessions, now=None):
 
 # -------------------------------------------------------------- releases --
 
-#: Where `gh` is looked for before the inherited PATH (a launchd job's PATH is minimal).
-GH_PATH_PREFIX = '/opt/homebrew/bin:'
+def gh_path():
+    """The PATH `gh` runs under: ``operator.path_prefix`` (directories, ``:``-joined, searched
+    first — a scheduler job's PATH can be minimal) ahead of the inherited PATH. Unset (the
+    default), the inherited PATH alone."""
+    try:
+        prefix = (env.load_config().get('operator') or {}).get('path_prefix') or ''
+    except Exception:  # noqa: BLE001 — an unreadable config never takes gh away
+        prefix = ''
+    prefix = str(prefix).strip().strip(os.pathsep)
+    path = os.environ.get('PATH', '')
+    return f'{prefix}{os.pathsep}{path}' if prefix else path
 
 
 def gh(args, timeout=120, quiet=False):
@@ -858,7 +867,7 @@ def gh(args, timeout=120, quiet=False):
         if not quiet:
             print(mutation_guard.would_line('gh', args), file=sys.stderr)
         return None
-    env_vars = {**os.environ, 'PATH': GH_PATH_PREFIX + os.environ.get('PATH', '')}
+    env_vars = {**os.environ, 'PATH': gh_path()}
     try:
         p = subprocess.run(['gh'] + list(args), capture_output=True, text=True, timeout=timeout, env=env_vars)
     except (OSError, subprocess.TimeoutExpired):
@@ -1246,7 +1255,7 @@ def publish_github_release(product, tag, notes):
     slug = product.repo_slug
     if not slug or str(ci.get('provider') or '').strip().lower() == 'none':
         return False
-    if not shutil.which('gh', path=GH_PATH_PREFIX + os.environ.get('PATH', '')):
+    if not shutil.which('gh', path=gh_path()):
         print(f"release: gh not found; no GitHub release for {tag}", file=sys.stderr)
         return False
     if gh(['release', 'view', tag, '-R', slug, '--json', 'tagName'], quiet=True) is not None:
