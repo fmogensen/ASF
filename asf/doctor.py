@@ -61,13 +61,15 @@ A product with no PR host — ``ci: {provider: none}`` — needs no ``repo_slug`
 
 Exit 1 if any required row is red; optional rows that are unavailable print ``skip``, not red.
 """
+import datetime
 import os
+import re
 import shutil
 import subprocess
 import time
 
 from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
-from asf.workers import pool
+from asf.workers import lifecycle, pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
               '.venv', 'target'}
@@ -1161,17 +1163,86 @@ def check_models(cfg):
 OK, RED, YELLOW = 'ok', 'RED', 'YELLOW'
 NEVER_EXITED_INTERVALS = 2
 
+#: how much of a tick log's end the doctor reads. The log is never rotated, so reading all of it
+#: to find one line is an unbounded cost on every `asf doctor` (F-0142, D7). A step that prints
+#: more than this after its start line shows no `step:` field — the row says what it says today.
+LOG_TAIL_BYTES = 1024 * 1024
+
+#: the tick's per-step lines (`asf.tick.tick.step_start_line` / `step_end_line`). `[step:<name>]
+#: FAILED …` matches neither, and the end pattern also matches the pre-F-0142 shape, so a log
+#: written by an older install reads as "no step running" rather than as a running one.
+_STEP_START_RE = re.compile(r'^\[step:([a-z-]+)\] start owner=(\S+) pid=(\d+) at=(\S+)')
+_STEP_END_RE = re.compile(r'^\[step:([a-z-]+)\] \d+\.\ds')
+
+
+def _log_lines(path, limit=LOG_TAIL_BYTES):
+    """The log's last ``limit`` bytes as non-empty rstripped lines, oldest first; ``[]`` when there
+    is no log or it cannot be read."""
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as f:
+            f.seek(max(0, size - limit))
+            data = f.read()
+    except OSError:
+        return []
+    text = data.decode('utf-8', errors='replace')
+    parts = text.split('\n')
+    if size > limit and '\n' in text:
+        parts = parts[1:]
+    return [line.rstrip() for line in parts if line.strip()]
+
 
 def _log_tail(path):
     """The log's last non-empty line, or None when there is no log yet."""
-    if not path or not os.path.exists(path):
+    if not os.path.exists(path or ''):
         return None
-    try:
-        with open(path, encoding='utf-8', errors='replace') as f:
-            lines = [line.rstrip() for line in f if line.strip()]
-    except OSError:
-        return None
+    lines = _log_lines(path)
     return lines[-1] if lines else ''
+
+
+def _since(at, now=None):
+    """Seconds between ``at`` (`tick._stamp`'s ``%Y-%m-%dT%H:%M:%SZ``) and ``now`` (default: the
+    live clock), or ``None`` when ``at`` does not parse."""
+    try:
+        then = datetime.datetime.strptime(at, '%Y-%m-%dT%H:%M:%SZ')
+    except (ValueError, TypeError):
+        return None
+    epoch = then.replace(tzinfo=datetime.timezone.utc).timestamp()
+    return max(0.0, (now or time.time()) - epoch)
+
+
+def current_step(path, alive=None, now=None):
+    """The step a tick is inside, read off the tick log's own start line (F-0142):
+    ``{step, owner, pid, alive, seconds}``, or ``None``.
+
+    ``None`` when there is no log, when the last per-step line in the tail is an *end* line (the
+    tick is between steps, or over), and when no per-step line is in the tail at all. A start line
+    whose pid no longer answers is returned with ``alive`` false: that tick died inside that step,
+    which is the one failure launchd's own `last exit code` cannot show (D6). ``seconds`` is how
+    long ago the line's ``at`` was, or None when it cannot be parsed."""
+    for line in reversed(_log_lines(path)):
+        if _STEP_END_RE.match(line):
+            return None
+        m = _STEP_START_RE.match(line)
+        if m:
+            step, owner, pid, at = m.groups()
+            return {'step': step, 'owner': owner, 'pid': int(pid),
+                    'alive': (alive or lifecycle.pid_alive)(int(pid)),
+                    'seconds': _since(at, now)}
+    return None
+
+
+def step_detail(running):
+    """The row's ``step:`` field for a :func:`current_step` result."""
+    age = '' if running['seconds'] is None else f" {format_age(running['seconds'])}"
+    if not running['alive']:
+        started = '' if running['seconds'] is None else \
+            f", started {format_age(running['seconds'])} ago"
+        return (f"{running['step']} unfinished — its tick (pid {running['pid']}) is gone"
+                f"{started}")
+    return f"{running['step']} running{age} ({running['owner']}, pid {running['pid']})"
 
 
 def _age_s(path):
@@ -1272,6 +1343,9 @@ def scheduler_rows(cfg, product, jobs=None):
         exit_text = 'never exited' if info.get('never_exited') else str(info.get('last_exit'))
         detail = (f"state={info.get('state')}  runs={info.get('runs') or 0}  "
                   f"last-exit={exit_text}  last-run={format_age(_age_s(log))}")
+        running = current_step(log)
+        if running is not None:
+            detail += f"  step: {step_detail(running)}"
         tail = _log_tail(log)
         detail += f"  log: {tail}" if tail else "  log: (empty)"
 
@@ -1283,6 +1357,10 @@ def scheduler_rows(cfg, product, jobs=None):
                        f"{NEVER_EXITED_INTERVALS} intervals")
         elif info.get('last_exit'):
             level = RED
+        if running is not None and not running['alive'] and level == OK:
+            # a tick killed inside a step leaves `last exit code` green (F-0142, D6): a warning,
+            # never the doctor's own red, which gates an install
+            level = YELLOW
         rows.append((level, label, detail))
 
     for raw in cfg.get('legacy_paths') or []:
