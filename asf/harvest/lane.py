@@ -33,6 +33,9 @@ Transitions (plan §2 plus the §9 overrides):
 - T1  (run) → PUSHED          the run ended and ``origin/<branch>`` is ahead of the trunk; a
                                branch or PR no run holds is adopted the same way (T2 adoption)
 - T2  PUSHED → PR_OPEN         a PR was opened or one already exists; FF: at once, pr=None
+- T2n PR_OPEN → PUSHED         PR mode with a PR host and no PR number anywhere: a PR is opened
+                               again (T2 adopts the open one) — never GATE under a number
+                               nobody has
 - T2c PUSHED → BACK            PR mode: the branch conflicts with the trunk — GitHub would run
                                no ``pull_request`` workflow on its PR; rebased first
 - T3  PR_OPEN → REVIEW         ``conventions.lane.review`` requires a review for the landing
@@ -75,6 +78,9 @@ Transitions (plan §2 plus the §9 overrides):
                                (``batch`` and ``sha`` on the record), gated that exact sha on
                                the product's whole required set, and fast-forwarded the trunk
                                to it; a dropped batch → WAITING, cut again; a red one → BACK
+- T10n GATE → PUSHED           nothing knows the branch's PR number at the merge (or before the
+                               gate is spent on it): MERGING is never written without one
+                               (:func:`pr_number`)
 - T11 any open → MERGED        found merged (the PR, the pushed sha, or the diff on the trunk)
 - T12 any open → STALE         PR closed unmerged, branch gone, item superseded, PUSHED unmoved
                                past ``lane.stale_after``
@@ -1394,6 +1400,11 @@ def next_state(prev, facts):
         return PR_OPEN, 'open a PR'
     if s == PR_OPEN and f.get('mode') == 'pr' and not f.get('host'):
         return keep
+    # T2n — PR mode, a PR host, and neither the facts nor the record name a PR: the branch is
+    # gated and merged under a number nobody has (F-0229). PUSHED opens one — and adopts the
+    # open one when this pass simply could not list it.
+    if s == PR_OPEN and f.get('mode') == 'pr' and not n and not rec.get('pr'):
+        return PUSHED, 'no PR number: a PR is opened again'
     if s in (PR_OPEN, REVIEW) and f.get('checks_red'):  # T5c: its exact head failed CI
         return BACK, 'kind=gate'
     if s in (PR_OPEN, REVIEW) and f.get('mode') == 'pr' and f.get('conflict'):
@@ -3311,8 +3322,11 @@ def precheck(lane, entries):
             wait(lane, f, f'approval {cls} ({level})', 'held')
             continue
         f['how'] = 'gate'
-        number = rec.get('pr')
-        if isinstance(lane.host, GitHubHost) and number:
+        number = pr_number(lane, f)
+        if isinstance(lane.host, GitHubHost):
+            if not number:
+                back_to_pushed(lane, f, NO_PR)
+                continue
             how = lane.host.check_gate(f, number, files)
             if how is None:
                 continue
@@ -3924,13 +3938,53 @@ def redaction_recheck(lane, f):
     return 'held'
 
 
+def pr_number(lane, f):
+    """The PR number a merge of ``f``'s branch would name, or None — the one reader of it
+    (:func:`precheck`, :func:`merge_prs`). The facts' live PR first, then the lane record
+    (the order :meth:`Lane.record` and :func:`asf.merge_queue._pr` already read them in), and
+    failing both the host's own open PR for the branch (``gh pr view <branch>``:
+    :meth:`Host.status`) when its head is the head the lane holds — a PR at another head is
+    another branch's merge, and a merged or closed one is nothing to merge. A number found on
+    the host is written onto the facts, so every record this pass writes carries it. A
+    fast-forward lane has no PR by design (T2): None, and no lookup."""
+    number = (f.get('pr') or {}).get('number') or (f.get('prev') or {}).get('pr')
+    if number or isinstance(lane.host, FastForwardHost):
+        return number
+    got = lane.host.status(f['branch']) or {}
+    number, state, head = got.get('pr'), str(got.get('state') or '').upper(), got.get('head')
+    if not number or state != 'OPEN' or (head and f.get('head') and head != f['head']):
+        return None
+    f['pr'] = dict(f.get('pr') or {}, number=number, state='OPEN', head=head or f.get('head'))
+    lane.out(f"{f['branch']}: no PR number in the lane record — the host's open PR #{number} "
+             f"is at this head")
+    return number
+
+
+#: why a branch leaves a landing state without merging: nothing knows its PR number
+NO_PR = 'no PR number: nothing can merge it'
+
+
+def back_to_pushed(lane, f, why):
+    """A branch the lane cannot merge because no PR number exists for it anywhere goes back to
+    PUSHED — the one state whose transition opens a PR (T2), and one that adopts the open PR
+    when the number was merely unreadable this pass (:meth:`GitHubHost.open`). Never PR_OPEN:
+    from there the table goes straight on to GATE with the number still missing, and the branch
+    arrives at this same refusal every tick."""
+    lane.out(f"held {f['branch']}: {why} — back to PUSHED, a PR is opened for it next pass")
+    lane.set(f, PUSHED, why, result='held')
+
+
 def merge_prs(lane, ready):
     """PR mode: merge every green PR the budget has room for — MERGING first (R3), then ``gh pr
     merge`` (or ``--auto`` into a merge queue: QUEUED)."""
     host = lane.host
     room, why = host.slots()
     for i, f in enumerate(ready):
-        b, number = f['branch'], (f.get('prev') or {}).get('pr')
+        b = f['branch']
+        number = pr_number(lane, f)
+        if not number:
+            back_to_pushed(lane, f, NO_PR)
+            continue
         if room is not None and i >= room:
             lane.out(f'waiting {b}: PR #{number} green — no merge room this tick ({why})')
             wait(lane, f, 'budget', green=f.get('green'))

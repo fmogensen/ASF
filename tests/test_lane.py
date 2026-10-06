@@ -76,6 +76,16 @@ class Transitions(unittest.TestCase):
     def test_t2_adoption_a_branch_no_run_holds(self):
         self.assertEqual(lane.next_state(None, facts(adopt=True)), (lane.PUSHED, 'adopted'))
 
+    def test_t2n_pr_open_with_no_pr_number_goes_back_to_pushed(self):
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), facts(mode='pr')),
+                         (lane.PUSHED, 'no PR number: a PR is opened again'))
+        f = facts(mode='pr', pr={'number': 7, 'state': 'OPEN', 'head': HEAD})
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), f)[0], lane.GATE)
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN, pr=7), facts(mode='pr'))[0], lane.GATE)
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), facts(mode='ff'))[0], lane.GATE)
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), facts(mode='pr', host=False)),
+                         (lane.PR_OPEN, ''))
+
     def test_t3_a_required_review_is_a_state_not_a_correction(self):
         state, reason = lane.next_state(rec(lane.PR_OPEN), facts(review_required=True))
         self.assertEqual(state, lane.REVIEW)
@@ -2994,6 +3004,114 @@ class AMergeConflictGoesBack(unittest.TestCase):
         sb.assert_not_called()
         wt.assert_called_once()
         self.assertIn('merge refused', wt.call_args[0][2])
+
+
+class AMergeNeedsAPRNumber(unittest.TestCase):
+    """2026-10-06: ``plan/T-0189`` and its siblings reached GATE and `merge_prs` with ``pr:
+    null`` — ``MERGING`` was set under ``PR #None`` and the host refused ``merge`` with ``no
+    pull requests found for branch "None"`` every tick, forever (F-0229). ``pr_number`` is the
+    one reader of a branch's PR number (the facts' live PR, then the lane record, then the
+    host's own open PR for this exact head); a branch nothing can name goes back to PUSHED
+    (:func:`back_to_pushed`) instead of into a merge or a wait nothing can clear."""
+
+    def _lane(self, status=None, merge=(None, 'policy refusal — no retry needed')):
+        runner = lane.Lane.__new__(lane.Lane)
+        lines = []
+        runner.out, runner.dry_run, runner.results, runner.repo = lines.append, False, {}, None
+        runner.trunk = 'main'
+        fake = mock.Mock(in_queue=0, merged=0)
+        fake.slots.return_value = (None, '')
+        fake.recheck.return_value = None
+        fake.status.return_value = status
+        fake.merge.return_value = merge
+        fake.conflicting.return_value = False
+        runner.host = fake
+        return runner, lines
+
+    def _f(self, prev_pr=None, pr=None):
+        return {'branch': 'worker/T-0617', 'class': lane.CODE, 'kind': 'coder', 'item': 'T-0617',
+                'head': HEAD, 'pr': pr, 'prev': rec(lane.GATE, pr=prev_pr),
+                'green': {'head': HEAD, 'trunk': HEAD}}
+
+    def _merge_prs(self, runner, f):
+        with mock.patch.object(lane.Lane, 'ci_admits', return_value=True), \
+                mock.patch.object(lane.Lane, 'set') as st, \
+                mock.patch.object(lane, 'conflict_files', return_value=[]), \
+                mock.patch.object(lane, 'wait') as wt, \
+                mock.patch.object(lane, 'send_back') as sb:
+            lane.merge_prs(runner, [f])
+        return st, wt, sb
+
+    def test_a_branch_with_no_pr_number_anywhere_never_reaches_merging(self):
+        runner, lines = self._lane(status={})
+        f = self._f()
+        st, wt, sb = self._merge_prs(runner, f)
+        runner.host.merge.assert_not_called()
+        st.assert_called_once_with(f, lane.PUSHED, lane.NO_PR, result='held')
+        wt.assert_not_called()
+        sb.assert_not_called()
+        self.assertTrue(any('back to PUSHED' in ln for ln in lines))
+
+    def test_the_host_is_asked_for_the_pr_at_this_head_and_the_merge_goes_on(self):
+        runner, _lines = self._lane(status={'pr': 423, 'state': 'OPEN', 'head': HEAD},
+                                    merge=(None, 'policy refusal — base branch rule'))
+        f = self._f()
+        st, wt, sb = self._merge_prs(runner, f)
+        runner.host.merge.assert_called_once_with('worker/T-0617', 423, subject=None)
+        self.assertEqual(st.call_args_list[0],
+                         mock.call(f, lane.MERGING, 'PR #423', method='squash'))
+        self.assertEqual(f['pr']['number'], 423)
+        sb.assert_not_called()
+        wt.assert_called_once()
+
+    def test_a_pr_at_another_head_or_not_open_is_not_this_branchs_merge(self):
+        for status in ({'pr': 9, 'state': 'OPEN', 'head': NEW},
+                        {'pr': 9, 'state': 'MERGED', 'head': HEAD},
+                        {'pr': None}):
+            runner, _lines = self._lane(status=status)
+            f = self._f()
+            st, _wt, _sb = self._merge_prs(runner, f)
+            runner.host.merge.assert_not_called()
+            st.assert_called_once_with(f, lane.PUSHED, lane.NO_PR, result='held')
+        # a head the host does not report is accepted, never bounced
+        runner, _lines = self._lane(status={'pr': 9, 'state': 'OPEN', 'head': None})
+        f = self._f()
+        self._merge_prs(runner, f)
+        runner.host.merge.assert_called_once_with('worker/T-0617', 9, subject=None)
+
+    def test_a_known_number_is_never_looked_up(self):
+        runner, _lines = self._lane(merge=(None, 'policy refusal — no retry needed'))
+        f = self._f(prev_pr=842)
+        self._merge_prs(runner, f)
+        runner.host.status.assert_not_called()
+        runner.host.merge.assert_called_once_with('worker/T-0617', 842, subject=None)
+
+    def test_pr_number_prefers_the_live_pr_then_the_record_and_a_fast_forward_lane_has_none(self):
+        runner, _lines = self._lane(status={'pr': 99, 'state': 'OPEN', 'head': HEAD})
+        f = self._f(prev_pr=842, pr={'number': 7, 'state': 'OPEN', 'head': HEAD})
+        self.assertEqual(lane.pr_number(runner, f), 7)
+        runner.host.status.assert_not_called()
+
+        f = self._f(prev_pr=842)
+        self.assertEqual(lane.pr_number(runner, f), 842)
+        runner.host.status.assert_not_called()
+
+        f = self._f()
+        self.assertEqual(lane.pr_number(runner, f), 99)
+        runner.host.status.assert_called_once_with('worker/T-0617')
+
+        runner.host = lane.FastForwardHost.__new__(lane.FastForwardHost)
+        f = self._f()
+        self.assertIsNone(lane.pr_number(runner, f))
+
+    def test_the_refusal_this_card_came_from_cannot_happen_twice(self):
+        runner, _lines = self._lane(status={},
+                                    merge=(None, 'no pull requests found for branch "None"'))
+        f = self._f()
+        st, wt, _sb = self._merge_prs(runner, f)
+        runner.host.merge.assert_not_called()
+        wt.assert_not_called()
+        st.assert_called_once_with(f, lane.PUSHED, lane.NO_PR, result='held')
 
 
 if __name__ == '__main__':
