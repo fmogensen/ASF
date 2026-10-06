@@ -12,7 +12,8 @@ The scheduler runs nine steps: ``record``, ``health``, ``groom``, ``wave``, ``pr
 
 A step declared nowhere is a refusal, not a silent skip — the tick exits 2 before running anything.
 A step ``asf`` implements defaults to ``asf``; ``batch`` (a product's own merge-queue script, from
-its repo) has no ``asf`` implementation and must be declared.
+its repo) has no ``asf`` implementation, and may be left undeclared — then it is off; declared as a
+command, it runs.
 """
 import datetime
 import os
@@ -40,6 +41,12 @@ ASF_CALLABLES = {
 }
 ASF_STEPS = tuple(ASF_CALLABLES)
 
+#: Steps a product need not declare. ``batch`` is a product's *own* merge-queue script: a product
+#: that lands natively (``asf.harvest.lane.merge_prs`` merges its PRs on the approvals matrix and
+#: the required checks) has no script to name, and must not be made to write ``off`` — whose
+#: meaning is "another job still runs it" — to say so. Absent, an optional step is ``off``.
+OPTIONAL_STEPS = ('batch',)
+
 DEFAULT_LEGACY_TIMEOUT_S = 900
 
 
@@ -60,7 +67,12 @@ def resolve(product, steps=None):
     for step in (steps or STEPS):
         value = decl.get(step)
         text = str(value).strip() if value is not None else None
-        if text is None or text == 'asf':
+        if text is None and step in OPTIONAL_STEPS:
+            # an optional step nobody declared is off, not ownerless (D1, D2): a PR product that
+            # lands natively has no merge-queue script to name. `batch: asf` is still a refusal —
+            # asf has no batch implementation to ask for.
+            owner, command = 'off', None
+        elif text is None or text == 'asf':
             # undeclared falls back to asf only for a step asf has; `asf` for a step
             # with no asf implementation is as ownerless as no declaration at all
             owner, command = ('asf' if step in ASF_STEPS else 'undeclared'), None
