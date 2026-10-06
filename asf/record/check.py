@@ -246,8 +246,9 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
         return 1
 
     def _protected_field_findings(rec, pats, add, find_line):
-        """One finding per typed field whose value carries a protected name or a secret, at the
-        card that holds it, on that field's line. The value is never repeated (F-0075 D8): the
+        """One finding per typed field whose value carries a protected name, at the
+        card that holds it, on that field's line (``protected_fields`` leaves a secret to the
+        harvest redaction scan). The value is never repeated (F-0075 D8): the
         finding names the field and which source matched. The text is constant per field and per
         source on purpose — ``_report_staged`` dedupes a standing finding by ``(path, msg)``, so
         a message that varied with the line or the value would read as new the moment the card

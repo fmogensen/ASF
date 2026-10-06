@@ -821,9 +821,9 @@ class CheckCommandTests(unittest.TestCase):
 
 
 class ProtectedNameInTypedFieldTests(unittest.TestCase):
-    """F-0132 §1/§3.1: `asf check` flags a protected name or a secret in any typed field, at the
+    """F-0132 §1/§3.1: `asf check` flags a protected name in any typed field, at the
     card that holds it, on that field's line — naming the field and the pattern source, never
-    the matched text."""
+    the matched text. A secret is left to the harvest redaction scan, not duplicated here."""
 
     def setUp(self):
         self.root = make_repo()
@@ -879,6 +879,18 @@ class ProtectedNameInTypedFieldTests(unittest.TestCase):
         with mock.patch.object(redact, 'default_patterns', return_value=[]):
             findings, _warnings, _index_wrong = check_mod.record_findings(self.root)
         self.assertFalse(any('carries a' in msg for _p, _l, msg in findings), findings)
+
+    def test_a_secret_in_a_typed_field_gives_no_finding_here(self):
+        # a secret is the harvest redaction scan's own job (every line of every file, this one
+        # included) — a second, earlier finding for it over `asf check` would only race that scan
+        # and, for a record branch, report under the wrong name before it ever runs. Built from
+        # parts so this file's own text never carries the shape check_generic.sh forbids.
+        secret = 'AK' + 'IA' + 'ABCDEFGHIJKLMNOP'
+        write_item(self.root, 'E-0001', 'epic', f'Rotate {secret} now')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertNotIn('carries a', r.stdout)
+        self.assertNotIn(secret, r.stdout)
 
     def test_exits_1_with_the_line_printed_as_relpath_colon_line_colon_message(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory')
