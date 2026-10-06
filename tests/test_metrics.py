@@ -105,8 +105,11 @@ def reindex(root):
     assert rc == 0, f"asf.record.index.do_index failed with rc={rc}"
 
 
-def job(name, conclusion='success', minutes=5, runner='box1', step=None):
-    return {'name': name, 'conclusion': conclusion, 'runner': runner, 'minutes': minutes, 'failed_step': step}
+def job(name, conclusion='success', minutes=5, runner='box1', step=None, cause=None):
+    j = {'name': name, 'conclusion': conclusion, 'runner': runner, 'minutes': minutes, 'failed_step': step}
+    if cause is not None:
+        j['cause'] = cause
+    return j
 
 
 def ci_event(run, **kw):
@@ -450,7 +453,7 @@ def fixture_streams(test):
     test.put('ci', ci_event(2, ts=f'{DAY}T10:00:00Z', branch='worktree-m-batch-20260921-0900',
                             batch='worktree-m-batch-20260921-0900', conclusion='cancelled', minutes=20, cancelled_minutes=12,
                             superseded=True, items=['F-0001', 'B-0001'],
-                            jobs=[job('e2e', 'cancelled', 12, 'box2'), job('lint', minutes=8, runner='box1')]))
+                            jobs=[job('e2e', 'cancelled', 12, 'box2', cause='failure'), job('lint', minutes=8, runner='box1')]))
     test.put('ci', ci_event(3, ts=f'{DAY}T11:00:00Z', attempt=2, branch='main', minutes=10, items=None, item_reason='nothing to match on',
                             jobs=[job('lint', minutes=10)]))
     test.put('sessions', {'task': 'spec-free-plan', 'account': 'accta', 'result': 'done', 'ts': f'{DAY}T08:00:00Z', 'usd': 2.5})
@@ -477,6 +480,7 @@ generated: 2026-09-21 — from metrics/ci (3), metrics/sessions (4), metrics/tic
 | relaunch | — | no product resolved — the session registry is machine-local |
 | ci runs | 3 — 1 green, 1 red, 1 reruns | red rate 33 % |
 | runner-minutes | 40 (0 h) — useful 70 % | cancelled: batch 12 (30 %) — 30 % of the minutes |
+| cancelled: failure | 12 min in 1 job (30 %) | e2e ×1 |
 | red job: e2e | 1/2 (50 %) | |
 | red signature | 1× | e2e: Run playwright tests |
 | batches | 1 cut, 1 refused | refused on: apps/web/x.ts ×1 |
@@ -1841,6 +1845,55 @@ class ScorecardTokensTest(Base):
         fixture_streams(self)
         md = metrics.render_daily(self.root, DAY, self.items)
         self.assertIsNone(re.search(r'total tokens|tokens total', md, re.I))
+
+
+class CancelRowTests(Base):
+    def ci_row(self, jobs, minutes=40, conclusion='cancelled', attempt=1):
+        return {'conclusion': conclusion, 'attempt': attempt, 'minutes': minutes, 'jobs': jobs}
+
+    def rows(self, ci):
+        return {r[0]: r for r in metrics.scorecard_rows(ci, [], [])}
+
+    def test_one_row_per_cause_in_causes_order(self):
+        ci = [self.ci_row([job('c', 'cancelled', 3, cause='failure'),
+                           job('b', 'cancelled', 5, cause='runner-loss'),
+                           job('a', 'cancelled', 10, cause='timeout')], minutes=18)]
+        order = [k for k in self.rows(ci) if k.startswith('cancelled: ')]
+        self.assertEqual(order, ['cancelled: timeout', 'cancelled: runner-loss', 'cancelled: failure'])
+
+    def test_minutes_job_count_and_share_of_total(self):
+        ci = [self.ci_row([job('a', 'cancelled', 10, cause='timeout'),
+                           job('b', 'cancelled', 10, cause='timeout')], minutes=40)]
+        rows = self.rows(ci)
+        self.assertEqual(rows['cancelled: timeout'], ('cancelled: timeout', '20 min in 2 jobs (50 %)', 'a ×1, b ×1'))
+
+    def test_up_to_three_job_names_most_common(self):
+        jobs = ([job('a', 'cancelled', 1, cause='failure')] * 4 + [job('b', 'cancelled', 1, cause='failure')] * 3
+                + [job('c', 'cancelled', 1, cause='failure')] * 2 + [job('d', 'cancelled', 1, cause='failure')])
+        ci = [self.ci_row(jobs, minutes=100)]
+        _, detail, names = self.rows(ci)['cancelled: failure']
+        self.assertEqual(detail, '10 min in 10 jobs (10 %)')
+        self.assertEqual(names, 'a ×4, b ×3, c ×2')
+
+    def test_no_row_for_a_cause_with_nothing_in_it(self):
+        ci = [self.ci_row([job('a', 'cancelled', 10, cause='timeout')], minutes=10)]
+        rows = self.rows(ci)
+        self.assertIn('cancelled: timeout', rows)
+        self.assertNotIn('cancelled: runner-loss', rows)
+        self.assertNotIn('cancelled: failure', rows)
+
+    def test_unclassified_cancel_adds_no_row(self):
+        ci = [self.ci_row([job('a', 'cancelled', 10)], minutes=10)]
+        rows = self.rows(ci)
+        self.assertNotIn('cancelled: timeout', rows)
+        self.assertNotIn('cancelled: runner-loss', rows)
+        self.assertNotIn('cancelled: failure', rows)
+
+    def test_a_stream_imported_before_this_change_reads_as_it_reads_today(self):
+        fixture_streams(self)
+        rows = {r[0]: r for r in metrics.scorecard_rows(
+            metrics.read_stream(self.root, 'ci', [DAY]), [], [])}
+        self.assertEqual(rows['cancelled: failure'], ('cancelled: failure', '12 min in 1 job (30 %)', 'e2e ×1'))
 
 
 class CostBlockTokensTest(Base):
