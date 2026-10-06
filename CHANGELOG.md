@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.184 — 2026-10-06
+
+### Features landed
+
+- The installer now has an operator half and a session half, asks before writing hook files your repo tracks, never installs ASF clocks beside a live pre-ASF job, and a clean install with no logins ends on a green `asf doctor` ("not configured" rows, never red) (#833)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.184"`
+
 ## v0.1.183 — 2026-10-06
 
 ### Features landed
