@@ -477,13 +477,25 @@ def _git(args, cwd):
 TRAILER_RE = re.compile(r'^(?P<key>[A-Za-z0-9-]+):\s*(?P<value>.*)$')
 
 
+class ReportUnreadable(Exception):
+    """``report_commit``'s own fetch of ``origin/<branch>`` failed (a network blip, a rate
+    limit): the local view of the branch cannot be trusted, so the caller must never read a
+    not-found report off it as a definite answer (B-0293: a transient fetch failure read that
+    way wrongly ended a finished cloud or remote-routine run ``dead pid`` — permanently, since
+    neither lane revisits an ``ended`` run)."""
+
+
 def report_commit(worktree, branch, session, fetch=True):
     """``{sha, body}`` of the newest commit on ``origin/<branch>`` whose trailers carry this run's
-    ``ASF-Session`` and an ``ASF-Report`` — the cloud session's end marker — else None."""
+    ``ASF-Session`` and an ``ASF-Report`` — the cloud session's end marker — else None.
+    Raises :class:`ReportUnreadable` when ``fetch`` itself fails: a stale or absent local view of
+    ``origin/<branch>`` is never read as "no report yet"."""
     if not worktree or not os.path.isdir(worktree) or not branch or not session:
         return None
     if fetch:
-        _git(['fetch', '-q', 'origin', branch], worktree)
+        fetched = _git(['fetch', '-q', 'origin', branch], worktree)
+        if fetched.returncode != 0:
+            raise ReportUnreadable((fetched.stderr or fetched.stdout or 'git fetch failed').strip())
     p = _git(['log', '-n', '50', '--format=%H%x1f%B%x1e', f'origin/{branch}'], worktree)
     if p.returncode != 0:
         return None
@@ -620,7 +632,13 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
             status, why = DEAD, 'no workflow run (a refused runtime launched it)'
         else:
             view = gh.view(run_id) if run_id else None  # before the report: no race with its end
-            report = report_commit(run.get('worktree'), run.get('branch'), run.get('session'))
+            try:
+                report = report_commit(run.get('worktree'), run.get('branch'), run.get('session'))
+            except ReportUnreadable as e:
+                why = f'report unreadable ({e}): left as it is'
+                out(f'cloud    {job:<24} {why}')
+                found.append((job, (known.get(tok) or {}).get('status') or WORKING, why))
+                continue
             status, why = classify(view, report, elapsed, s.timeout_min, run_id)
         beat = heartbeat.for_run(run, cfg, product) if status == WORKING else None
         stalled = False
