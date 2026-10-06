@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.186 — 2026-10-06
+
+### Bugs fixed
+
+- The known-issues page keeps its hand-kept section on regeneration (#843)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.186"`
+
 ## v0.1.185 — 2026-10-06
 
 ### Features landed
