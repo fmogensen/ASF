@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.150 — 2026-10-06
+
+### Features landed
+
+- The clocks are installed through the `scheduler` connector, and Linux gets one: `connectors.scheduler: systemd` (or `scheduler.kind: systemd`) writes systemd user timers; launchd stays the default with no change in behaviour (#778)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.150"`
+
 ## v0.1.149 — 2026-10-06
 
 ### Features landed
