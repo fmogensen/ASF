@@ -514,15 +514,23 @@ def default_product_name():
 # ---- the product file's declared fields ------------------------------------
 
 _MAP, _LIST, _STR = 'a map', 'a list', 'a scalar'
+#: `ci:` and `deploy_sha:` are a map — or the bare word `none`, the documented way to say "this
+#: product has no CI" / "nothing is deployed". A list- or scalar-shaped block of either used to
+#: load and then be ignored by every reader, so the product ran with no gate, no provider and no
+#: deploy, and nothing said so (F-0129, D13).
+_MAP_OR_NONE = 'a map (or the word none)'
 # key -> the shape its value must have; a None value (`key:   # TODO`) is "not filled in yet",
 # which `asf doctor` reports separately, so it is not a schema error here.
 PRODUCT_FIELDS = {
     'product': _STR, 'repo_slug': _STR, 'repo_dir': _STR, 'main': _STR, 'backlog_dir': _STR,
-    'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
+    'app_host': _STR, 'conventions': _MAP, 'ci': _MAP_OR_NONE, 'deploy_sha': _MAP_OR_NONE,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
     'release': _MAP, 'cloud': _MAP, 'credentials': _LIST,
+    # what `asf config migrate` parks: a key with no home in the schema, kept rather than dropped
+    # (F-0129). Its contents are not checked and nothing reads them.
+    'x-unmapped': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -572,6 +580,8 @@ DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'relea
 def _shape_ok(value, shape):
     if value is None or shape is None:
         return True
+    if shape == _MAP_OR_NONE:
+        return isinstance(value, dict) or (isinstance(value, str) and value.strip() == 'none')
     if shape == _MAP:
         return isinstance(value, dict)
     if shape == _LIST:

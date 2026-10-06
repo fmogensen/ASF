@@ -637,3 +637,9 @@ clocks:
 #       cloud_dead_max: off         # the cloud lane's dead + timeout rate, a fraction
 #       quota_cap_hours_min: 1      # an account projected to reach its 5-hour stop sooner alarms
 #       quota_window_min: 60        # the quota readings the burn rate is taken over
+
+# Written by `asf config migrate`, not by hand: keys with no home in this schema, kept so that
+# nothing is lost and the rest of the file loads. Nothing reads them. `asf config check` says
+# what each one was; `asf doctor`'s `config keys` row counts them.
+# x-unmapped:
+#   secrets_store: vault

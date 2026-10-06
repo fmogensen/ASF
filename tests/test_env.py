@@ -396,6 +396,64 @@ class DeployProviderTests(unittest.TestCase):
                       "not 'heroku'"), problems)
 
 
+class ProductFieldShapes(unittest.TestCase):
+    """F-0129, D13: `ci:` and `deploy_sha:` are a map, or the bare word `none` — a list- or
+    scalar-shaped block stops loading clean and silently being ignored by every reader."""
+
+    def test_ci_and_deploy_sha_accept_a_map_or_none(self):
+        for key in ('ci', 'deploy_sha'):
+            self.assertEqual(env.validate_product_text(_dedent(f"""
+                repo_slug: a/b
+                {key}: {{}}
+                """)), [], key)
+            self.assertEqual(env.validate_product_text(_dedent(f"""
+                repo_slug: a/b
+                {key}: none
+                """)), [], key)
+
+    def test_a_list_or_scalar_ci_or_deploy_sha_is_refused(self):
+        for key in ('ci', 'deploy_sha'):
+            problems = env.validate_product_text(_dedent(f"""
+                repo_slug: a/b
+                {key}:
+                  - a
+                """))
+            self.assertEqual(problems, [(2, key, "must be a map (or the word none), not ['a']")], key)
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            ci: 3
+            """))
+        self.assertEqual(problems, [(2, 'ci', "must be a map (or the word none), not 3")])
+
+    def test_x_unmapped_holds_anything_and_nothing_checks_it(self):
+        for block in (
+            "x-unmapped:\n  secrets_store: vault\n",
+            "x-unmapped:\n  ci_budgets:\n    - a\n",
+            "x-unmapped:\n  nested:\n    key: value\n",
+        ):
+            self.assertEqual(env.validate_product_text('repo_slug: a/b\n' + block), [], block)
+
+    def test_x_unmapped_still_has_a_shape(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            x-unmapped: 3
+            """))
+        self.assertEqual(problems, [(2, 'x-unmapped', "must be a map, not 3")])
+
+
+class ProductFileTests(unittest.TestCase):
+    """The three product files this repo ships validate clean, pinned together so PD2's defect
+    (`deploy_sha: _MAP` refusing `deploy_sha: none`) cannot come back by another route."""
+
+    def test_the_shipped_product_files_validate_clean(self):
+        for rel in ('docs/products.example.yaml', 'sample/product.yaml',
+                    'tests/e2e/product/product.yaml'):
+            path = os.path.join(REPO_ROOT, rel)
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+            self.assertEqual(env.validate_product_text(text), [], rel)
+
+
 def _dedent(text):
     lines = [l for l in text.splitlines() if l.strip() != '']
     if not lines:
