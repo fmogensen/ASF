@@ -94,6 +94,7 @@ REGISTRY = {
     'scorecard-queue.jsonl': _s('asf.scorecard.loop', JSONL),
     'scorecard-causes.json': _s('asf.scorecard.loop'),
     'facts-disagree.jsonl': _s('asf.facts.disagree', JSONL),
+    '*-disagree.jsonl': _s('asf.shadow', JSONL),
     'cache-evidence.json': _s('asf.evidence.sources'),
     'cache-board-prs.json': _s('asf.evidence.sources'),
     'cache-backlog-evidence.json': _s('asf.evidence.sources'),
