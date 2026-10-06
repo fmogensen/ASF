@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.137 — 2026-10-06
+
+### Bugs fixed
+
+- Round E — moved rulings, loud review filing, race-safe record commit, shared-path aging, origin-checked waits, on-trunk heads, opt-in factory-only merge (#780)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.137"`
+
 ## v0.1.136 — 2026-10-06
 
 ### Features landed
