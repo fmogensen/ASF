@@ -216,6 +216,8 @@ def build_parser():
                        help="repeatable; a Task's list fields writes: and after: also take "
                             "FIELD+=VALUE to add and FIELD-=VALUE to remove, and VALUE may be "
                             "[a, b]")
+    p_set.add_argument('--why', help="why the severity moved — required to leave S1, and the "
+                                     "words the card's ## History line carries")
     p_set.add_argument('--product')
 
     p_retire = sub.add_parser(

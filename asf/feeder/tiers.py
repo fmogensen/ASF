@@ -24,6 +24,11 @@ from asf.feeder import rows as R
 TIER_S1, TIER_S2, TIER_REST = 0, 1, 2
 NO_SLOT = 'WAITS ON a free slot'
 
+#: The remedy for an S1 nothing is working: the downgrade, with the reason `asf set` requires for a
+#: move off S1 (F-0163) left as a placeholder — the gate's own `reason` describes the queue, not the
+#: Bug, and a machine-written defence is not one (D8).
+DOWNGRADE = 'asf set {item_id} severity=S2 --why "<why this is not S1>" --product {name}'
+
 #: a tier-0 WAITS row whose ``waits_on`` is one of these is being worked — a live session, a
 #: branch, a landing, a merge. Every other reason is a person's (F-0113, D5).
 WORKED = ('session', 'landing', 'branch', 'merge')
@@ -141,7 +146,7 @@ def _remedy(item_id, waits_on, reason, product):
         return reason.split(' — ', 1)[0], f'asf set {item_id} decided=true --product {name}'
     if waits_on == 'operator':
         text = reason.split(': ', 1)[-1].split(' (limit', 1)[0]
-        return text, f'asf set {item_id} severity=S2 --product {name}'
+        return text, DOWNGRADE.format(item_id=item_id, name=name)
     if waits_on == 'held':
         from asf import approvals
         cls = approvals.parked(product).get(item_id, ('hold', None))[0]
@@ -149,7 +154,7 @@ def _remedy(item_id, waits_on, reason, product):
     tail = reason.split(': ', 1)[-1]
     if tail.startswith('blocked by '):
         return tail, f'asf set {item_id} blockedBy= --product {name}'
-    return reason, f'asf set {item_id} severity=S2 --product {name}'
+    return reason, DOWNGRADE.format(item_id=item_id, name=name)
 
 
 def needs_operator(g, product, skip=()):

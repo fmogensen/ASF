@@ -20,13 +20,24 @@ _COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'leg
 SETTABLE = {t: set(_COMMON_SET) for t in TYPES}
 SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check', 'supersedes', 'superseded_by'}
 SETTABLE['decision'] |= {'decided_by', 'date', 'supersedes', 'superseded_by'}
+#: A Bug's severity is settable (F-0163): it is the field the fix lane is ordered by
+#: (:func:`asf.feeder.rows.bug_rows`), so a downgrade releases the S1 lane's hold on everything
+#: behind it — and before this it was the one required field of a Bug no command could write, which
+#: made every correction a hand edit of the typed block. ``asf set`` gates the S1 case behind
+#: ``--why`` and records the move in ``## History``; see :func:`asf.record.setfield.cmd_set`.
+SETTABLE['bug'] |= {'severity'}
 #: A Feature's build route (:mod:`asf.feeder.rows`): ``lane: direct`` is one session end to end
 #: (DIRECT → BUILD), else the full pipeline; ``size: s`` on the full lane merges spec and plan
 #: into one session and lets its small Tasks skip the review; ``ab_pair`` names the experiment
 #: pair the scorecard compares it in (``asf scorecard --by-lane``).
 SETTABLE['feature'] |= {'lane', 'size', 'ab_pair'}
 #: The values a word-valued settable field takes; any other is refused before the card is touched.
-FIELD_WORDS = {'lane': ('direct', 'full'), 'size': ('s', 'm', 'l')}
+FIELD_WORDS = {'lane': ('direct', 'full'), 'size': ('s', 'm', 'l'), 'severity': SEVERITIES}
+#: The word fields whose value is case-folded to the canonical form before the check and on the
+#: way in — the inbox's answer grammar reads a severity case-insensitively and uppercases it
+#: (``asf/groom/inbox.py:577``), so the console must too (D7). ``lane`` and ``size`` are
+#: deliberately not in here.
+FIELD_UPPER = frozenset({'severity'})
 #: Boolean fields: ``true`` / ``false`` (``local_only: true`` keeps a card's rows off the cloud
 #: lane, :func:`asf.workers.cloud.local_only`); anything else is refused before the card is touched.
 BOOL_FIELDS = ('local_only',)
@@ -44,6 +55,8 @@ def _parse_sets(type_, pairs):
             raise ValueError(f"{type_} has no settable field {key!r} "
                              f"(one of {', '.join(sorted(SETTABLE[type_]))})")
         value = frontmatter._parse_value(raw)
+        if top in FIELD_UPPER and isinstance(value, str):
+            value = value.upper()
         words = FIELD_WORDS.get(top)
         if words and value not in (None, '') and str(value) not in words:
             raise ValueError(f"{key}={raw!r} — one of {', '.join(words)}")
