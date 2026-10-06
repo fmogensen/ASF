@@ -241,6 +241,26 @@ def _backend_is_fake(cfg):
     return backend.replace('-', '_') == 'fake'
 
 
+#: The detail prefix of a row that waits on a login no install can make — a ``gh auth login``, a
+#: worker account's runtime token, the operator's own console allow list. Such a row is ``skip``
+#: (``ok`` None), never RED: a clean install with no login yet is not a broken one (F-0109).
+NOT_CONFIGURED = 'not configured'
+
+
+def _no_login_accounts(cfg):
+    """The isolated worker accounts whose ``auth_env`` sets none of the runtime's login
+    variables, when that is true of *every* account — a machine where no worker login was ever
+    set up. One account with a login and another without is a broken pool, not an unconfigured
+    one: then this is empty and the rows stay red."""
+    from asf.workers import runtime
+    if _backend_is_fake(cfg):
+        return []
+    accounts = pool.accounts_from_config(cfg)
+    bare = [a for a in accounts if a.isolate_home
+            and not any(v in a.auth_env for v in runtime.RUNTIME_AUTH_VARS)]
+    return bare if accounts and len(bare) == len(accounts) else []
+
+
 def check_worker_env(cfg):
     """(ok, detail) — the ``worker env`` row: what a worker session inherits. Red when an account
     runs on the operator's own HOME (``isolate_home: false``: every login on the machine is the
@@ -255,12 +275,14 @@ def check_worker_env(cfg):
     from asf.workers import runtime
     problems, notes = [], []
     fake = _backend_is_fake(cfg)
+    unset = {a.name for a in _no_login_accounts(cfg)}
     for acct in pool.accounts_from_config(cfg):
         if not acct.isolate_home:
             problems.append(f'account {acct.name} has isolate_home: false'
                             + ('' if acct.home else " (the operator's HOME)"))
             continue
-        if not fake and not any(v in acct.auth_env for v in runtime.RUNTIME_AUTH_VARS):
+        if not fake and acct.name not in unset \
+                and not any(v in acct.auth_env for v in runtime.RUNTIME_AUTH_VARS):
             var = runtime.RUNTIME_AUTH_VARS[0]
             problems.append(f'account {acct.name} is isolated but has no auth_env {var} (its '
                             f'sessions cannot log in) — run `{runtime.RUNTIME_TOKEN_COMMAND}` as '
@@ -275,6 +297,11 @@ def check_worker_env(cfg):
         problems.append(f"env_passthrough hands a credential to every session: {', '.join(creds)}")
     if problems:
         return False, '; '.join(problems) + ' — config.yaml worker_pool'
+    if unset:
+        var = runtime.RUNTIME_AUTH_VARS[0]
+        return None, (f"{NOT_CONFIGURED}: no worker login yet ({', '.join(sorted(unset))}) — run "
+                      f'`{runtime.RUNTIME_TOKEN_COMMAND}`, save the token under ~/.ASF/secrets/ '
+                      f'and set auth_env: {{{var}: <that file>}} in config.yaml worker_pool')
     passthrough = ', '.join(env.env_passthrough(cfg)) or 'none'
     return True, (f'allow-list + passthrough ({passthrough}); '
                   + ('; '.join(notes) if notes else 'no worker accounts'))
@@ -334,6 +361,9 @@ def check_worker_push_auth(cfg, product):
         return True, 'no worker accounts or product repo to probe'
     if _backend_is_fake(cfg):
         return True, 'worker_pool.backend fake runs no agent session (nothing to push)'
+    if all(not a.auth_env for a in accounts):
+        return None, (f'{NOT_CONFIGURED}: no worker account has an auth_env yet (see worker env) '
+                      '— nothing to probe')
     product_auth_env = env.product_auth_env(product)
     failures, oks = [], []
     for acct in accounts:
@@ -870,6 +900,11 @@ def _gh_auth(timeout=10):
     return False, detail[0] if detail else r.reason
 
 
+#: ``gh auth status``'s own words for "no login on this machine" — a login not yet made, as
+#: opposed to one that is broken (expired, revoked, rate limited), which stays red.
+_GH_NOT_LOGGED_IN = re.compile(r'not logged in(to any)?|gh auth login', re.I)
+
+
 def check_cli_sessions(product=None):
     """[(name, required, ok_or_None, detail)] — ``ok`` is ``None`` for an optional tool not
     installed. ``gh`` is optional for a product with no PR host."""
@@ -881,6 +916,8 @@ def check_cli_sessions(product=None):
             rows.append((name, required, None, 'not installed'))
             continue
         ok, detail = _run(argv) if argv else _gh_auth()
+        if name == 'gh' and ok is False and _GH_NOT_LOGGED_IN.search(detail or ''):
+            ok, detail = None, f'{NOT_CONFIGURED}: gh is not logged in — gh auth login'
         rows.append((name, required, ok, detail))
     return rows
 

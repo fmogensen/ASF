@@ -198,6 +198,26 @@ def _line(key, value, indent=''):
     return f'{indent}{key}: {value}'
 
 
+#: The ``steps:`` and ``clocks:`` a new product file starts with — the annotated defaults of
+#: ``docs/products.example.yaml``, without its shadow clock. Without a clock, ``asf scheduler
+#: install`` refuses ("declares no clocks") and a fresh install's clocks step fails (F-0109, found
+#: by the clean-install job): the README promises the clocks ``asf init`` writes.
+DEFAULT_STEPS_AND_CLOCKS = """\
+steps:
+  batch: off
+clocks:
+  record:
+    steps: [record]
+    every: 5m
+  dispatch:
+    steps: [health, groom, wave, prs, harvest, batch]
+    every: 10m
+  daily:
+    steps: [daily]
+    at: "06:50"
+"""
+
+
 def render_product_yaml(d):
     out = [f"# products/{d['product']}.yaml — written by `asf init` from discovery; fill every TODO.",
            _line('product', d['product']),
@@ -217,7 +237,7 @@ def render_product_yaml(d):
     out += ['ci:',
            _line('provider', d['ci_provider'], '  '),
            _line('test_command', d['test_command'], '  ')]
-    return '\n'.join(out) + '\n'
+    return '\n'.join(out) + '\n' + DEFAULT_STEPS_AND_CLOCKS
 
 
 # ---- the record -------------------------------------------------------------

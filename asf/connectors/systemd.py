@@ -84,6 +84,21 @@ def parse_exec_start(text):
     return argv, cwd
 
 
+def user_manager_ok(run=subprocess.run, which=None):
+    """Whether a systemd user manager answers here (``systemctl --user show-environment``) — what
+    a user timer needs. A container, or a CI runner with no user session, has none (F-0109: the
+    installer then defaults to no scheduler, with guidance)."""
+    import shutil
+    if (which or shutil.which)(SYSTEMCTL) is None:
+        return False
+    try:
+        p = run([SYSTEMCTL, '--user', 'show-environment'], capture_output=True, text=True,
+                timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return p.returncode == 0
+
+
 class SystemdScheduler:
     name = 'systemd'
 

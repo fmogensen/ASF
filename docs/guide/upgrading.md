@@ -39,7 +39,10 @@ it for all of them.
 
 Rerun the installer instead (`bash tools/install.sh <product> [ref] -- <asf install flags>`, or
 the `curl … | bash -s --` line in the root README) when a product's hooks or clocks also need
-re-applying — both are idempotent, so it is always safe to run again.
+re-applying — both are idempotent, so it is always safe to run again. A rerun has the same two
+halves as a first install: the operator runs `--package-only` in a terminal, and the product's
+Claude Code session can run `--no-package` (no `pipx`, no network) — see
+[getting started](getting-started.md#who-runs-which-half).
 
 Then check:
 

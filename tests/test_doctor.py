@@ -419,12 +419,12 @@ class ConsolePermissionsDoctorTests(unittest.TestCase):
             import json
             json.dump(data, f)
 
-    def test_no_settings_file_is_red_and_names_every_rule(self):
+    def test_no_settings_file_is_not_configured_and_names_the_command(self):
+        """F-0109: a clean install has no console allow list yet — the offer is shown, the
+        operator writes it. That is ``not configured`` (None), never red; a partial list still is."""
         ok, detail = console_perms.check_doctor(self.product, home=self.home)
-        self.assertFalse(ok)
-        for rule in console_perms.FIXED_ALLOW:
-            self.assertIn(rule, detail)
-        self.assertIn('Bash(git push --force* origin main)', detail)
+        self.assertIsNone(ok)
+        self.assertTrue(detail.startswith('not configured'), detail)
         self.assertIn('asf console-permissions install --product sample', detail)
 
     def test_a_partial_list_names_only_what_is_missing(self):
@@ -571,6 +571,42 @@ class GhAuth(unittest.TestCase):
         failed = subprocess.CompletedProcess(['gh'], 1, '', 'You are not logged in\n')
         with mock.patch('subprocess.run', return_value=failed):
             self.assertEqual(doctor._gh_auth(), (False, 'You are not logged in'))
+
+
+class NotConfiguredRowsTests(unittest.TestCase):
+    """F-0109 / the clean install: a row that waits on a login no install can make reads
+    ``not configured`` (skip), never RED — and a login that is there but broken stays red."""
+
+    def test_gh_not_logged_in_is_not_configured(self):
+        with mock.patch.object(doctor, '_gh_auth',
+                               return_value=(False, 'You are not logged into any GitHub hosts. '
+                                                    'To log in, run: gh auth login')):
+            rows = {r[0]: r for r in doctor.check_cli_sessions(None)}
+        _name, _required, ok, detail = rows['gh']
+        self.assertIsNone(ok)
+        self.assertTrue(detail.startswith(doctor.NOT_CONFIGURED), detail)
+        self.assertFalse(doctor.is_red([('cli:gh', True, ok, detail)]))
+
+    def test_gh_broken_otherwise_stays_red(self):
+        with mock.patch.object(doctor, '_gh_auth', return_value=(False, 'rate limited')):
+            rows = {r[0]: r for r in doctor.check_cli_sessions(None)}
+        self.assertIs(rows['gh'][2], False)
+
+    def test_a_pool_with_no_worker_login_is_not_configured(self):
+        cfg = {'worker_pool': {'backend': 'claude-code', 'accounts': [{'name': 'acct-a'}]}}
+        ok, detail = doctor.check_worker_env(cfg)
+        self.assertIsNone(ok)
+        self.assertTrue(detail.startswith(doctor.NOT_CONFIGURED), detail)
+        self.assertIn('acct-a', detail)
+
+    def test_one_account_with_a_login_and_one_without_stays_red(self):
+        cfg = {'worker_pool': {'backend': 'claude-code', 'accounts': [
+            {'name': 'acct-a'},
+            {'name': 'acct-b', 'auth_env': {'CLAUDE_CODE_OAUTH_TOKEN': '/x/b.token'}}]}}
+        ok, detail = doctor.check_worker_env(cfg)
+        self.assertIs(ok, False)
+        self.assertIn('acct-a', detail)
+        self.assertNotIn('acct-b is isolated', detail)
 
 
 class Capacity(unittest.TestCase):

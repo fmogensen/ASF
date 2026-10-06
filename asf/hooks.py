@@ -311,7 +311,7 @@ def runnable_asf(which=shutil.which):
     return asf_path, None
 
 
-def ensure_git_hooks(product, which=shutil.which):
+def ensure_git_hooks(product, which=shutil.which, withhold=()):
     """Returns ``(ok, detail)`` (D10, §2.4). Writes the redaction gate's ``pre-commit`` and
     ``pre-push`` into :func:`git_hooks_dir` of each of ``product.repo_dir`` and
     ``product.backlog_dir`` that is set. A hook file already there and already asf's
@@ -335,6 +335,8 @@ def ensure_git_hooks(product, which=shutil.which):
             continue  # one refusal never skips the other repo's hooks
         for name in GIT_HOOK_NAMES:
             path = os.path.join(hooks_dir, name)
+            if path in withhold:
+                continue  # a tracked file the approval matrix has not let through (F-0109)
             if os.path.isfile(path):
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
@@ -355,6 +357,173 @@ def ensure_git_hooks(product, which=shutil.which):
     if refusals:
         return False, '\n'.join(refusals)
     return True, f'pre-commit, pre-push in {len(repos)} repos'
+
+
+# ---- the plan and the gate (F-0109) ------------------------------------------------
+#
+# A hooks install that would write a file its repo *tracks* — a `.githooks/` directory set as
+# `core.hooksPath`, a versioned `.claude/settings.json` — is changing the product's source, and
+# the approval matrix files those paths under `touch_security`. Such a write is withheld unless
+# the matrix has that class at `auto`, or a person answered for it (`--approve`, or the hold
+# `install/touch_security` resolved `granted`). Every other hook — the approvals hook in each
+# worker account above all — is written regardless: no withheld row ever withholds another.
+
+#: The rc of a hooks install that withheld a tracked write — distinct from 2 (a foreign hook the
+#: operator merges by hand): this one is a question a person answers, then the install re-runs.
+WITHHELD_RC = 3
+
+#: The approval class and the ledger item a withheld write is asked under.
+GATE_CLASS = 'touch_security'
+GATE_ITEM = 'install'
+
+#: The actions that change a file — the only ones that can be withheld.
+CHANGING = ('write', 'upgrade')
+
+
+def is_tracked(path):
+    """Whether writing ``path`` changes the product's source: it sits in a git work tree (never
+    under ``.git/`` — the default hooks directory is machine state) and git either tracks it or
+    would show it as a new file (``check-ignore`` does not ignore it). A new hook in a versioned
+    ``.githooks/`` is the second case: the file is not tracked yet, the change still is."""
+    d = os.path.dirname(os.path.abspath(path))
+    while d and not os.path.isdir(d):
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+    from asf import hermetic
+    clean = {k: v for k, v in os.environ.items() if k not in hermetic.GIT_HOOK}
+
+    def git(*args):
+        return subprocess.run(['git', '-C', d] + list(args),  # client-exempt: read-only, a hooks env scrubbed like git_hooks_dir's
+                              capture_output=True, text=True, env=clean)
+    inside = git('rev-parse', '--is-inside-work-tree')
+    if inside.returncode != 0 or inside.stdout.strip() != 'true':
+        return False
+    target = os.path.abspath(path)
+    if git('ls-files', '--error-unmatch', '--', target).returncode == 0:
+        return True
+    return git('check-ignore', '-q', '--', target).returncode != 0
+
+
+def _settings_action(path, hooks_, asf_path, product_name):
+    current = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding='utf-8') as f:
+                current = json.load(f)
+        except (OSError, ValueError):
+            current = {}
+    return 'already ours' if merge(current, hooks_, asf_path, product_name) == current else 'write'
+
+
+def plan(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
+    """``[{kind, action, tracked, path}]`` — every target a hooks install would touch and what it
+    would do there, without writing anything: ``kind`` one of ``git-hook`` / ``repo-settings`` /
+    ``account-settings``; ``action`` one of ``write`` / ``upgrade`` / ``already ours`` /
+    ``left (not ours)`` / ``refused (not a git repo)``. The same decisions :func:`install` takes,
+    so the plan and the write cannot disagree."""
+    asf_path = runnable_asf(which)[0] or 'asf'
+    rows = []
+    try:
+        accounts = pool.accounts_from_config(cfg or env.load_config())
+    except env.ConfigError:
+        accounts = []
+    for account in accounts:
+        path = account_settings_path(account)
+        rows.append({'kind': 'account-settings', 'path': path, 'tracked': False,
+                     'action': _settings_action(path, ACCOUNT_HOOKS, asf_path, None)})
+    for repo in [r for r in (product.repo_dir, product.backlog_dir) if r]:
+        hooks_dir = git_hooks_dir(repo)
+        if hooks_dir is None:
+            rows.append({'kind': 'git-hook', 'path': repo, 'tracked': False,
+                         'action': 'refused (not a git repo)'})
+            continue
+        for name in GIT_HOOK_NAMES:
+            path = os.path.join(hooks_dir, name)
+            if not os.path.isfile(path):
+                action = 'write'
+            else:
+                with open(path, encoding='utf-8') as f:
+                    text = f.read()
+                if (init_hook_upgrade(text, name) or staged_check_upgrade(text, name)) is not None:
+                    action = 'upgrade'
+                elif is_git_hook_ours(text, name):
+                    action = 'already ours'
+                else:
+                    action = 'left (not ours)'
+            rows.append({'kind': 'git-hook', 'path': path, 'action': action,
+                         'tracked': is_tracked(path)})
+    rule_hooks = declared_hooks(rules_dir)
+    if rule_hooks and product.repo_dir:
+        path = os.path.join(product.repo_dir, '.claude', 'settings.json')
+        rows.append({'kind': 'repo-settings', 'path': path, 'tracked': is_tracked(path),
+                     'action': _settings_action(path, rule_hooks, asf_path, product.name)})
+    return rows
+
+
+def approval_bearing(rows):
+    """The rows that change a file its repo tracks — the ones the matrix gates."""
+    return [r for r in rows if r['tracked'] and r['action'] in CHANGING]
+
+
+def gate_subject(rows):
+    return ', '.join(sorted(r['path'] for r in approval_bearing(rows)))
+
+
+def gate_level(product):
+    from asf import approvals  # local: asf.approvals reads this module's globs at import
+    return approvals.level_of(product, GATE_CLASS)
+
+
+def gated(product, rows, approve=False):
+    """The approval-bearing rows this install must withhold: none when ``approve``, when the
+    matrix has ``touch_security`` at ``auto``, or when the hold ``install/touch_security`` was
+    resolved ``granted`` for this same set of paths."""
+    bearing = approval_bearing(rows)
+    if not bearing or approve or gate_level(product) == 'auto':
+        return []
+    from asf import approvals
+    hold = f'{GATE_ITEM}/{GATE_CLASS}'
+    subject, asked, granted = gate_subject(rows), None, False
+    for rec in approvals.read(product):  # the latest answer, and the question it answered
+        if rec.get('hold') != hold:
+            continue
+        if rec.get('event') == 'refused':
+            asked, granted = rec.get('subject'), False
+        elif rec.get('event') == 'resolved':
+            granted = (rec.get('resolution') == 'granted'
+                       and rec.get('subject', asked) == subject)
+    if granted:
+        return []
+    return bearing
+
+
+def format_plan(rows):
+    if not rows:
+        return 'hooks: nothing to install'
+    width = max(len(r['kind']) for r in rows)
+    act = max(len(r['action']) for r in rows)
+    return '\n'.join(f"{r['kind'].ljust(width)}  {r['action'].ljust(act)}  "
+                     f"{'tracked' if r['tracked'] else 'untracked'}  {r['path']}" for r in rows)
+
+
+def _record_gate(product, rows, withheld, approve):
+    """The ledger half of the gate: a withheld write is one ``ask`` (a person who already
+    answered ``dropped`` for these same paths is not asked again); an ``--approve`` that let an
+    approval-bearing write through appends the matching ``resolved granted`` before it writes."""
+    from asf import approvals
+    hold = f'{GATE_ITEM}/{GATE_CLASS}'
+    subject = gate_subject(rows)
+    if withheld:
+        paths = sorted(r['path'] for r in withheld)
+        approvals.ask(product, GATE_ITEM, GATE_CLASS, gate_level(product),
+                      os.environ.get('ASF_JOB') or GATE_ITEM, 'hooks install',
+                      f'{len(paths)} tracked hook file(s) would be written: ' + ', '.join(paths),
+                      subject=subject)
+    elif approve and approval_bearing(rows) and gate_level(product) != 'auto':
+        approvals.append(product, {'event': 'resolved', 'hold': hold, 'resolution': 'granted',
+                                   'subject': subject, 'ts': approvals._now_iso()})
 
 
 def declared_hooks(rules_dir=RULES_DIR):
@@ -446,7 +615,8 @@ def _write_merged(path, hooks, asf_path, product):
         f.write(json.dumps(merged, indent=2) + '\n')
 
 
-def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatcher=None):
+def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatcher=None,
+            approve=False):
     """Returns ``(rc, message)``. Rule hooks go to the product repo's own settings when any rule
     declares one (PD5); the approvals hook always goes into every worker account's settings
     (§2.3), product-less, regardless; :func:`ensure_git_hooks` writes every missing git hook.
@@ -489,10 +659,15 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
         return 2, '\n'.join([refusal] + refusals)
 
     accounts = pool.accounts_from_config(cfg or env.load_config())
-    for account in accounts:
+    for account in accounts:  # first, and never gated: no session runs without the guard
         _write_merged(account_settings_path(account), ACCOUNT_HOOKS, asf_path, None)
 
-    git_ok, git_detail = ensure_git_hooks(product, which=which)
+    rows = plan(product, rules_dir=rules_dir, which=which, cfg=cfg)
+    withheld = gated(product, rows, approve=approve)
+    withheld_paths = {r['path'] for r in withheld}
+    _record_gate(product, rows, withheld, approve)
+
+    git_ok, git_detail = ensure_git_hooks(product, which=which, withhold=withheld_paths)
     if not git_ok:
         refusals.append(git_detail)
         git_detail = 'git hooks: NEEDS OPERATOR (below)'
@@ -502,13 +677,20 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
     if rule_hooks and not product.repo_dir:
         refusals.append(f'NEEDS OPERATOR: product {product.name} has no repo_dir — '
                         f'set it in products/{product.name}.yaml')
-    elif rule_hooks:
+    elif rule_hooks and repo_settings not in withheld_paths:
         _write_merged(repo_settings, rule_hooks, asf_path, product.name)
         written = len(rule_hooks)
 
     summary = (f'hooks: {written} rule hooks in {repo_settings}; '
                f'approvals in {len(accounts)} worker accounts; {git_detail}'
                + (f'; {dispatch_detail}' if dispatch_detail else ''))
+    if withheld:
+        level = gate_level(product)
+        lines = [f"NEEDS OPERATOR: {r['path']} is tracked in its repo and the matrix has "
+                 f'{GATE_CLASS} at {level} — asf hooks install --product {product.name} --approve'
+                 for r in withheld]
+        return WITHHELD_RC, '\n'.join([summary + f'; withheld: {len(withheld)} tracked file(s)']
+                                       + refusals + lines)
     if refusals:
         return 2, '\n'.join([summary] + refusals)
     return 0, summary
@@ -556,7 +738,21 @@ def approvals_missing(accounts, repo_dir=None):
 
 def cmd_hooks(args):
     from asf import dispatch
-    rc, msg = install(env.load_product(args.product), dispatcher=dispatch.default_path())
+    product = env.load_product(args.product)
+    if getattr(args, 'dry_run', False):
+        dispatcher = dispatch.default_path()
+        which = shutil.which
+        if dispatch.is_ours(dispatcher):
+            which = lambda _name, _path=dispatcher: _path  # noqa: E731 — what install names
+        rows = plan(product, which=which)
+        print(format_plan(rows))
+        withheld = gated(product, rows)
+        if withheld:
+            print(f'hooks: {len(withheld)} tracked file(s) would be withheld ({GATE_CLASS} at '
+                  f'{gate_level(product)}) — asf hooks install --product {product.name} --approve')
+        return 0
+    rc, msg = install(product, dispatcher=dispatch.default_path(),
+                      approve=getattr(args, 'approve', False))
     print(msg, file=sys.stderr if rc else sys.stdout)
     return rc
 
@@ -598,6 +794,12 @@ def register(subparsers):
     p = subparsers.add_parser('hooks', help="write the product repo's Claude Code hook entries")
     p.add_argument('hooks_command', choices=['install'])
     p.add_argument('--product')
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true',
+                      help='print one row per target the install would touch; write nothing')
+    mode.add_argument('--approve', action='store_true',
+                      help='write hook files the repo tracks even while the approval matrix has '
+                           'touch_security above auto (a person answering for it)')
     p.set_defaults(run=cmd_hooks)
     p = subparsers.add_parser(
         'hook', help='run one hook: a built-in (approvals, unpushed), else '

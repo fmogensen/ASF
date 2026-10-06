@@ -365,6 +365,13 @@ class WorkerPushAuthDoctor(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
         self.product = env.Product('sample', {'repo_dir': self.repo})
 
+    def tok(self):
+        """A runtime token file — an account with a login set up, but no GH_TOKEN."""
+        path = os.path.join(self.repo, 'runtime.token')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('x')
+        return path
+
     def cfg(self, *accounts):
         return {'worker_pool': {'accounts': list(accounts)}}
 
@@ -384,10 +391,22 @@ class WorkerPushAuthDoctor(unittest.TestCase):
                 "Device not configured\n")
         return run
 
-    def test_an_account_with_no_credential_is_named_red(self):
+    def test_a_pool_with_no_credential_at_all_is_not_configured_not_red(self):
+        """F-0109: a clean install, before any login — no account carries an auth_env. That is a
+        login not yet made, not a broken one: ``not configured`` (None), and nothing probed."""
         calls = []
         with mock.patch.object(doctor.subprocess, 'run', side_effect=self.fake_git(calls)):
             ok, detail = doctor.check_worker_push_auth(self.cfg({'name': 'acct-a'}), self.product)
+        self.assertIsNone(ok)
+        self.assertTrue(detail.startswith(doctor.NOT_CONFIGURED), detail)
+        self.assertEqual(calls, [])
+
+    def test_an_account_with_no_credential_is_named_red(self):
+        calls = []
+        with mock.patch.object(doctor.subprocess, 'run', side_effect=self.fake_git(calls)):
+            ok, detail = doctor.check_worker_push_auth(
+                self.cfg({'name': 'acct-a', 'auth_env': {'CLAUDE_CODE_OAUTH_TOKEN': self.tok()}}),
+                self.product)
         self.assertFalse(ok)
         self.assertIn('acct-a', detail)
         self.assertIn('Device not configured', detail)
