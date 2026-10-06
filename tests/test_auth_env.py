@@ -16,7 +16,7 @@ from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 
-from tests.test_worker_isolation import IsolatedSession
+from tests.test_worker_isolation import IsolatedSession, _read_env
 
 OAUTH = 'sk-ant-oat01-' + 'Q' * 40
 GH = 'github_pat_' + 'Z' * 60
@@ -168,6 +168,29 @@ class AuthEnvSession(IsolatedSession):
         self.assertFalse(os.path.exists(os.path.join(spawn_mod.worktrees_dir(product), 'j1')))
         self.assertEqual(pool_mod.load_sessions(product), {})
         self.assertFalse(os.path.exists(self.dump))    # no session started
+
+    def test_a_correction_relaunch_gets_the_products_git_credential_too(self):
+        """2026-10-06: two correction sessions committed their work and could not push —
+        ``could not read Username for 'https://github.com'``. The first launch carried the
+        product's ``GH_TOKEN`` and git's helper; the correction relaunch
+        (:func:`asf.workers.stall.correct_once`) built its job without the product's auth_env,
+        so its session had neither and git fell back to a keychain an isolated HOME cannot
+        reach. Every launch path of a product's session carries the product's credential."""
+        from asf.workers import stall as stall_mod
+        product_gh = self.secret('product.gh', 'product-token-ABC\n')
+        product = self.product_with_auth_env(GH_TOKEN=product_gh)
+        self.spawn(self.account(CLAUDE_CODE_OAUTH_TOKEN=self.token_file), product=product)
+        os.remove(self.dump)
+        session = pool_mod.load_sessions(product)['j1']
+        rt = runtime_mod.ClaudeCodeRuntime(binary=os.path.join(self.bin, 'agent'))
+        self.assertTrue(stall_mod.correct_once(product, session, 'boom', rt))
+        seen = _read_env(self.dump)
+        self.assertEqual(seen.get('GH_TOKEN'), 'product-token-ABC')
+        p = subprocess.run(['git', 'credential', 'fill'], env=dict(seen, GIT_TERMINAL_PROMPT='0'),
+                           input='protocol=https\nhost=github.com\npath=o/r.git\n\n',
+                           capture_output=True, text=True, cwd=seen['HOME'], timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('password=product-token-ABC\n', p.stdout)
 
     def test_no_value_from_the_product_reaches_the_ledger_the_brief_or_the_setup_log(self):
         product_gh = self.secret('product.gh', 'other-owner-token-XYZ\n')
