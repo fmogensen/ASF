@@ -1,14 +1,24 @@
 #!/bin/sh
-# F-0061 — mint the twelve Stories this spec-amend derived.
+# F-0061 — DO NOT RUN. Kept as the Story derivation only; adjudicate-f-0061 (2026-10-07) ruled
+# against minting these.
 #
 # Written by the spec-amend session asf/spec-amend-f-0061@20261006T205641Z, which ran in a
-# cloud container with no record: no ~/.ASF and no backlog_dir, so `asf new` could not run
-# there (it exits `NEEDS OPERATOR: no --product, no $ASF_PRODUCT, ... and config.yaml has no
-# default_product`). The ids below are this session's own claimed block (S:53104-53153), which
-# the brief names as the other sanctioned id path and which `asf/record/ids.py` makes
-# deterministic: with the range exported, `mint_id` returns the next free number of the block,
-# so run in this order these twelve commands mint exactly S-53104..S-53115 — the ids already
-# written into the `## Stories` block and the frontmatter of docs/specs/f-0061.md.
+# cloud container with no record and so never ran this. The `expect:` ids below (S-53104.. a
+# block this session claimed but never spent) are not real — no `S-53104.md` or any of the
+# eleven after it exists anywhere in the record, confirmed at the adjudication above.
+#
+# The adjudication ran the real `asf new story` for the first two of these twelve (same titles
+# and acceptance below, no id range forced) and found: the first minted clean (S-54814, since
+# reverted so no bullet below is half-real); the second was refused `touch_amendable_set
+# (human-now)` by `asf/approvals.py`'s `write_target` — not because this story writes to an
+# amendable path (`asf new story` never does), but because its own acceptance prose names
+# `.claude/settings.json` as one contiguous word, `_WRITING_TOKENS` fired on an unrelated `>`
+# inside a `<p>` placeholder elsewhere in the same text, and `written_words` then scans the
+# *entire* command — including its own documentation prose — for a word that fnmatches an
+# amendable glob. Every Story below whose acceptance quotes an amendable path as one token
+# (`.claude/settings.json`, a `rules/<name>` run together) is exposed to the same false
+# positive; the adjudication's `NEEDS OPERATOR` line names the fix this needs in
+# `asf/approvals.py` and this script is not the way around it.
 #
 # One Story per `## Stories` bullet of the spec, in the spec's own order, which is the positional
 # mapping the plan's PD4 already records. Each title is its bullet, verbatim. No acceptance line
@@ -19,8 +29,6 @@
 #
 # Each command prints its id. Check each printed id against the comment above it.
 set -e
-export BACKLOG_ID_RANGE=S:53104-53153,T:53100-53149,B:53100-53149
-export ASF_SESSION=asf/spec-amend-f-0061@20261006T205641Z
 
 # expect: S-53104
 asf new story \
