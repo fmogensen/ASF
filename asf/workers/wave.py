@@ -218,10 +218,14 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     failed_now = []            # jobs whose spawn failed in this wave (the summary line's)
     if getattr(pool, 'unreadable', ''):
         out(f'pool: sessions unreadable ({pool.unreadable}) — counting registered sessions only')
+    if getattr(pool, 'seats_degraded', ''):
+        out(f"seats: claims are not shared ({pool.seats_degraded}) — another product's wave may "
+            f"overlap this one")
     workers = launch_concurrency(cfg)
     pending = order(rows)      # rows not decided yet, in the order they are decided
     known = {r.job for r in rows}
     branches = {}              # branch → the job launching on it in this wave
+    refused = {}                # job → how many times its take has been refused this wave (C7)
     said = []                  # [row, reason] per decided row (reason None: a launch), in order
     tentative = []             # said entries of rows that found no seat while launches ran
     outcome, timings = {}, {}
@@ -317,8 +321,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         if err is None:
             failures.clear(row.job)
             if rec.get('model') != seat['model']:  # the seat carries the launch's own model
-                pool.untake(acct, **seat)
-                pool.take(acct, **dict(seat, model=rec.get('model')))
+                seat = pool.retake(acct, seat, rec.get('model'))
             launched.append((row, rec))
             url = rec.get('cloud_url') or rec.get('actions_run_name') or 'dispatched'
             where = f'cloud {url}' if lane == 'cloud' else f"pid {rec.get('pid')}"
@@ -374,7 +377,17 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                 if acct is not None:
                     seat = dict(model=_model(row, cfg), job=row.job, product=product.name,
                                 kind=row.kind, lane=lane if lane == 'cloud' else None)
-                    pool.take(acct, **seat)     # held while the launch runs, freed if it fails
+                    if not pool.take(acct, **seat):  # another product claimed it since the pick
+                        if lane == 'cloud':
+                            cloud_tries -= 1          # decide() spent it before the take (PD4)
+                        refused[row.job] = refused.get(row.job, 0) + 1
+                        if refused[row.job] <= SEAT_RETRIES:
+                            said.remove(entry)        # decided again, as a freed seat re-decides
+                            pending.insert(0, row)     # today (P10)
+                            continue
+                        entry[1] = (f'seat claimed elsewhere — {acct.name} '
+                                    f'{pool.load(acct)}/{acct.cap:g}')
+                        continue
                     if lane != 'cloud':
                         local_taken += 1
                     running.add((product.name, row.job))
@@ -435,6 +448,10 @@ REFRESH_S = 30
 
 #: launches whose setup runs at once when ``worker_pool.launch_concurrency`` is not set
 DEFAULT_LAUNCH_CONCURRENCY = 4
+
+#: a refused take re-decides the row this many times before it waits (C7) — a fence against a
+#: flapping ledger, not the mechanism: each refusal has already narrowed the real candidates
+SEAT_RETRIES = 2
 
 
 def launch_concurrency(cfg):
