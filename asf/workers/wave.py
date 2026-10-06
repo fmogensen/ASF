@@ -176,8 +176,11 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     widens it as it widens ``n``.
 
     ``local_hold`` (host pressure's reason) keeps every row off the local lane — never off the
-    cloud lane. With ``cloud.mode: primary`` a row :func:`asf.workers.cloud.first` names goes to
-    the cloud lane first and to the local lane when the cloud cannot take it — full, unready, no
+    cloud lane — except the one row the wave step marked ``host_load_bypass`` (the S1 row that
+    passed the host guard's LOAD hold), which still takes a local seat (F-0216 C11). With
+    ``cloud.mode: primary`` (the default, :data:`asf.workers.cloud.DEFAULT_CLOUD_FIRST`) a row
+    :func:`asf.workers.cloud.first` names goes to the cloud lane first and to the local lane when
+    the cloud cannot take it — full, unready, no
     account with quota headroom, the tick's creates spent, or its launches erroring
     (:class:`asf.workers.cloud.Breaker`); that launch's line ends ``— cloud fallback: <why>``.
     Otherwise a row the local lane cannot take goes to the cloud lane when it is on and the row is
@@ -282,7 +285,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             else:
                 miss = creason
         if acct is None:
-            if local_hold:
+            if local_hold and not getattr(row, 'host_load_bypass', False):
                 acct, reason = None, f'held: {local_hold}'
             elif local_seats is not None and local_taken >= local_seats:
                 acct, reason = None, (f'no local seat — the share has {local_seats} free this '

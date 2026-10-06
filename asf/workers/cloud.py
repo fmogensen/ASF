@@ -31,11 +31,13 @@ pushed or not, empty or not.
 
 **Placement** (:func:`asf.workers.wave.wave`) follows ``cloud.mode`` (:data:`MODES`), re-read
 every tick — the tick is a fresh process that loads both files, so a one-line change applies on
-the next tick with no restart. ``overflow`` (the default; ``local`` is its alias: local first)
-and ``primary`` are below; ``off`` launches no new cloud session whatever else is configured —
-the live ones drain as usual (:func:`sync` reads them on every health pass) — and keeps the
-``role: cloud`` accounts off the local lane. ``cloud.default: true`` is the older spelling of
-``mode: primary``; a written ``mode`` wins.
+the next tick with no restart. ``primary`` (the default, :data:`DEFAULT_CLOUD_FIRST`: cloud first)
+and ``overflow`` (``local`` is its alias: local first — what a written ``default: false`` or
+``mode: overflow`` keeps) are below; ``off`` launches no new cloud session whatever else is
+configured — the live ones drain as usual (:func:`sync` reads them on every health pass) — and
+keeps the ``role: cloud`` accounts off the local lane. ``cloud.default: true`` is the older
+spelling of ``mode: primary``, and an unwritten ``default`` takes :data:`DEFAULT_CLOUD_FIRST`; a
+written ``mode`` wins over both.
 
 With ``cloud.mode: primary`` the cloud is the
 DEFAULT executor: every row goes there first except one whose kind is in :data:`LOCAL_KINDS` —
@@ -78,7 +80,7 @@ Config (``~/.ASF/config.yaml``; a product file's ``cloud:`` overrides key by key
       token_secret: CLAUDE_CODE_OAUTH_TOKEN
       max_inflight: 4
       rows: any                  # or cloud-ok (default)
-      mode: primary              # overflow (default; alias local) | primary | off
+      mode: primary              # primary (default) | overflow (alias local) | off
       local_only: [groom]        # kinds that never leave the host
       accounts: [acct-a]         # optional: default = the role: cloud accounts
       timeout_min: 240
@@ -144,6 +146,10 @@ MODE_OVERFLOW, MODE_PRIMARY, MODE_OFF = 'overflow', 'primary', 'off'
 #: ``cloud.mode``'s values: overflow (local first, the cloud takes what local cannot), primary
 #: (cloud first, local is the exception and the fallback), off (no new cloud launch)
 MODES = (MODE_OVERFLOW, MODE_PRIMARY, MODE_OFF)
+#: the cloud lane is where a row goes when neither ``mode`` nor ``default`` is written: ``mode:
+#: primary`` taken when the config writes no value for either key. A written ``default: false``
+#: (or ``mode: overflow``) still means overflow-only (F-0216 C5).
+DEFAULT_CLOUD_FIRST = True
 #: the other spellings ``cloud.mode`` accepts, and the mode each one is
 MODE_ALIASES = {'local': MODE_OVERFLOW}
 #: primary mode's launch-error fallback (:class:`Breaker`): this many failed cloud creates …
@@ -241,10 +247,14 @@ def parse_mode(v):
 
 def _mode(c):
     """The block's mode: ``mode`` when written (an unreadable one is the default — the config
-    check refuses it), else ``default: true`` → primary, else overflow."""
+    check refuses it), else ``default`` when written (``is not None``, so a key written empty
+    takes the default rather than reading as false), else :data:`DEFAULT_CLOUD_FIRST` — the cloud
+    is the default executor unless the config turns it off (F-0216 C5)."""
     if c.get('mode') is not None:
         return parse_mode(c.get('mode')) or MODE_OVERFLOW
-    return MODE_PRIMARY if truthy(c.get('default')) else MODE_OVERFLOW
+    d = c.get('default')
+    cloud_first = DEFAULT_CLOUD_FIRST if d is None else truthy(d)
+    return MODE_PRIMARY if cloud_first else MODE_OVERFLOW
 
 
 def _int(v, default):

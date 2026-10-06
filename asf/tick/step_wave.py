@@ -1093,14 +1093,18 @@ def launch(ctx, out=print):
                              r.sessions + extra):
         waits.append(why)
         out(f'waits    {row_job(row):<24} {row.item_id:<10} — {why}')
-    host_held, host_why, reading = host_hold(planned)
+    raw_held, host_why, reading = host_hold(planned)
     note_seats(ctx, r.sessions, cloud, running, wanted_n,
-               host_why if host_held else top_cause(waits))
+               host_why if raw_held else top_cause(waits))
     # a loaded host still starts cloud sessions: nothing of theirs runs here
-    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, local_hold, _extra = split_hold(cloud, ready, raw_held, host_why)
     # an S1 item's row passes the LOAD half of the guard — never memory/swap pressure, and at
-    # most one such bypass live at a time, across every product (asf.workers.host.load_only_hold)
-    s1_bypass_open = (host_held
+    # most one such bypass live at a time, across every product (asf.workers.host.load_only_hold).
+    # The bypass is the LOCAL lane's, so it is decided from the hold the host reported
+    # (``raw_held``), not from ``host_held`` after the split: reading it post-split retired the
+    # bypass for every tick the cloud lane was open (F-0216 P15) — the cloud lane runs nothing
+    # here and was never what the bypass was for.
+    s1_bypass_open = (raw_held
                       and host_mod.load_only_hold(reading, host_mod.guards_from_config(env.load_config()))
                       and not s1_bypass_live())
     # the hard cap: whatever the plan holds, this wave starts at most share - live, live being the
