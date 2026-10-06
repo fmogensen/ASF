@@ -788,6 +788,22 @@ class Convention(unittest.TestCase):
         self.assertEqual([k for k, _ in bad.shape_findings()], ['merge_queue'])
         self.assertEqual(merge_queue.settings(bad), merge_queue.DEFAULTS)
 
+    def test_inflight_0_is_a_pause_not_replaced_by_the_default(self):
+        """F-0036/F-0034: ``merge_queue.inflight: 0`` used to fail the same ``v >= 1`` test as
+        every other count and come back as the default (2) — silently, with no pause at all."""
+        paused = conventions.Conventions.from_mapping({'merge_queue': {'inflight': 0}})
+        self.assertEqual(merge_queue.settings(paused)['inflight'], 0)
+        self.assertTrue(merge_queue.paused(paused))
+        unset = conventions.Conventions.from_mapping({})
+        self.assertEqual(merge_queue.settings(unset)['inflight'], merge_queue.DEFAULTS['inflight'])
+        self.assertFalse(merge_queue.paused(unset))
+        # every other count still refuses zero and below — only `inflight` takes the pause
+        for key in ('batch_size', 'timeout_min', 'stuck_min'):
+            c = conventions.Conventions.from_mapping({'merge_queue': {key: 0}})
+            self.assertEqual(merge_queue.settings(c)[key], merge_queue.DEFAULTS[key], key)
+        negative = conventions.Conventions.from_mapping({'merge_queue': {'inflight': -1}})
+        self.assertEqual(merge_queue.settings(negative)['inflight'], merge_queue.DEFAULTS['inflight'])
+
 
 class StartKind(QueueRepo):
     """The batch push is admitted to the CI start queue as a trunk start unless the product
@@ -812,6 +828,49 @@ class StartKind(QueueRepo):
         self.assertEqual(self.admitted_as(start_kind='batch'), [('batch:worker/T-0001', 'batch')])
         self.assertEqual(merge_queue.settings(conventions.Conventions.from_mapping(
             {'merge_queue': {'start_kind': 'nonsense'}}))['start_kind'], 'trunk')
+
+
+class InflightPause(QueueRepo):
+    """F-0036/F-0034: ``merge_queue.inflight: 0`` is a first-class pause for a pin move — cut no
+    new batch, land what is already in flight, drop what is dead — so a product never needs
+    ``conventions.protected_refs: ['<batch prefix>*']`` to get the same effect (and the refusal
+    that gives refguard over a dead batch's own ref, #34)."""
+
+    def paused_product(self):
+        return self.product(merge_queue={'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 0})
+
+    def test_cuts_nothing_new_but_still_lands_what_is_in_flight(self):
+        self.push_lane('hotfix/fix-x', {'x.txt': 'x\n'}, 'hotfix: x')
+        self.queue_pass(self.lane(), [self.entry('hotfix/fix-x', 7)])
+        (batch,) = self.batches()           # cut under the default inflight, before the pause
+
+        self.push_lane('hotfix/fix-y', {'y.txt': 'y\n'}, 'hotfix: y')
+        paused = self.paused_product()
+        self.queue_pass(self.lane(paused), [self.entry('hotfix/fix-y', 8)])
+        # nothing new cut: the one already in flight is still the only batch
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        self.assertTrue(any('PR #8' in l and ('merge queue full' in l or '0 batch' in l)
+                            for l in self.lines), self.lines)
+
+        # the batch already in flight still lands — inflight: 0 never holds the chain's own judging
+        self.green(batch['sha'])
+        self.gh.pr_state = {7: 'MERGED'}
+        self.queue_pass(self.lane(paused), [])
+        self.assertEqual(self.heads()['main'], batch['sha'])
+
+    def test_a_dead_batch_in_flight_is_dropped_independent_of_the_ref_delete(self):
+        """The queue's own pass drops a red-judged batch from its state at once, whether or not
+        the ref delete that follows (:func:`asf.merge_queue._delete_ref`) is refused — a
+        protected-refs refusal (#34) never keeps a dead batch 'in flight' in merge-queue.json."""
+        self.setUpBacks()
+        self.push_lane('hotfix/fix-x', {'x.txt': 'x\n'}, 'hotfix: x')
+        self.queue_pass(self.lane(), [self.entry('hotfix/fix-x', 7)])
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('gate'), check_run('gate-tests', 'failure')]
+        paused = self.paused_product()
+        with mock.patch.object(merge_queue.refguard, 'listed', return_value=['batch/*']):
+            self.queue_pass(self.lane(paused), [])
+        self.assertEqual(self.batches(), [])   # dropped from state regardless of the ref delete
 
 
 class Verdict(unittest.TestCase):

@@ -712,6 +712,41 @@ class TestCheckSavings(unittest.TestCase):
         self.assertFalse(any(r[1] for r in savings_rows))  # never required
 
 
+class TestCheckQueuePause(unittest.TestCase):
+    """`doctor.check_queue_pause` — F-0036: the `queue pause` row while
+    `merge_queue.inflight: 0` pauses new cuts, never red (a deliberate pause is not a defect)."""
+
+    def test_no_row_by_default(self):
+        product = env.Product('a', {'conventions': {'merge': 'queue'}})
+        self.assertEqual(doctor.check_queue_pause(product), [])
+
+    def test_no_row_with_a_plain_positive_inflight(self):
+        product = env.Product('a', {'conventions': {
+            'merge': 'queue', 'merge_queue': {'inflight': 2}}})
+        self.assertEqual(doctor.check_queue_pause(product), [])
+
+    def test_a_warn_row_while_inflight_is_0(self):
+        product = env.Product('a', {'conventions': {
+            'merge': 'queue', 'merge_queue': {'inflight': 0}}})
+        rows = doctor.check_queue_pause(product)
+        self.assertEqual(len(rows), 1, rows)
+        required, ok, detail = rows[0]
+        self.assertFalse(required)
+        self.assertEqual(ok, 'warn')
+        self.assertIn('merge_queue.inflight: 0', detail)
+        self.assertFalse(doctor.is_red([('queue pause', required, ok, detail)]))
+
+    def test_the_row_appears_in_run(self):
+        product = env.Product('a', {'conventions': {
+            'merge': 'queue', 'merge_queue': {'inflight': 0}}})
+        with mock.patch.object(doctor, 'check_config', return_value=(True, '', {}, product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')):
+            rows = doctor.run('a')
+        (row,) = [r for r in rows if r[0] == 'queue pause']
+        self.assertEqual(row[1:3], (False, 'warn'))
+
+
 class CheapTierAdviceTests(unittest.TestCase):
     """`doctor.check_models` — the `models` row naming an unmapped `cheap` (plan F-0093 Task 2)."""
 
