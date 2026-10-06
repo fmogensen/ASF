@@ -1010,6 +1010,13 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines = [ln for ln in lines if not ln.startswith('no evidence found')] + [reset_line(reset)]
         # a merged PR is its own green: a plan's Task never waited on CI to close
         green = bool(iev.get('green')) if commit else bool(merged)
+        # F-0106 §2 reads a second time, here, as "read the typed `landed:` off `rec['meta']`
+        # and top up `green` through its own `_green_after`" — but `iev` already carries both:
+        # the `reconciled` map above (`:933-934`) only folds a typed `landed:` sha into
+        # `commit`/`green`/`landed` once `on_trunk(sha)` holds, through `evidence.merge_landed`.
+        # Reading the sha straight off `rec['meta']` here would skip that check, and a bare
+        # `_green_after` has none of its own — it is true outright for a product with no CI
+        # provider, so an off-trunk sha would close the Task anyway. One mechanism, not two.
         ev_obj = closing.Ev(commit=commit, green=green, merged_sha=merged, branch=branch,
                             pr_state=pr_state, open_prs=tuple(iev.get('open_prs') or ()),
                             landed=iev.get('landed') or '')
