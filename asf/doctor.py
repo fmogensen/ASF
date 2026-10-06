@@ -32,8 +32,9 @@ one is missing (its launches are refused). **worker push auth**
 ``git ls-remote`` and ``push --dry-run`` under that account's own environment — since a file
 present is not proof the token still works, or that no keychain a spawned session cannot reach is
 still in the way. An eleventh, **clock code** (:func:`check_clock_code`, informational), names
-the snapshot sha the clock last ticked from when the package runs from a checkout
-(:mod:`asf.snapshot`). **clock install** (:func:`check_clock_installs`) reads each clock's own
+the snapshot sha the clock last ticked from, how many snapshots the code dir holds, and whether
+the installed launcher is stale, when the package runs from a checkout (:mod:`asf.snapshot`).
+**clock install** (:func:`check_clock_installs`) reads each clock's own
 plist — which install will run the next tick, its sha, its distance from ``origin/main`` — and is
 red when what ticks is editable, a bare checkout, unplaceable, an unmerged sha, or a snapshot on a
 product that is not the factory's own source (:mod:`asf.clockinstall`, F-0104). Each clock's
@@ -445,17 +446,26 @@ def check_worker_push_auth(cfg, product):
 
 
 def check_clock_code(product):
-    """(ok, detail) — the code the product's clock runs: the snapshot sha it last ticked from
-    and the checkout's HEAD (the next tick takes that), or the installed package's root."""
+    """(ok, detail) — the code the product's clock runs: the snapshot sha it last ticked from,
+    the checkout's HEAD (the next tick takes that), how many snapshots the code dir holds, and
+    whether the installed launcher is stale, or the installed package's root. Always ``True``:
+    a stale launcher is a lag the next tick repairs, not a breakage, and this row never reddens
+    a product over it."""
     info = scheduler.clock_code(product.name)
     if not info.get('snapshot'):
         return True, f"installed package {info.get('root')}"
     sha, head = info.get('sha'), info.get('head')
     if not sha:
-        return True, f"snapshot of {info['root']}: no tick has run from one yet (HEAD {(head or '?')[:12]})"
-    detail = f"snapshot {sha[:12]} ({format_age(_age_s_since(info.get('at')))} ago)"
-    if head and head != sha:
-        detail += f'; checkout HEAD {head[:12]} (the next tick takes it)'
+        detail = f"snapshot of {info['root']}: no tick has run from one yet (HEAD {(head or '?')[:12]})"
+    else:
+        detail = f"snapshot {sha[:12]} ({format_age(_age_s_since(info.get('at')))} ago)"
+        if head and head != sha:
+            detail += f'; checkout HEAD {head[:12]} (the next tick takes it)'
+    detail += f' · {info.get("snapshots", 0)} snapshots'
+    stale, reason = info.get('launcher_stale', (False, ''))
+    if stale:
+        detail += (f' — launcher is stale: {reason}; the next tick refreshes it, or '
+                    f'`asf scheduler install --product {product.name}`')
     return True, detail
 
 

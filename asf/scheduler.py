@@ -386,18 +386,43 @@ def write_launcher(product_name):
     return path
 
 
+def launcher_stale(product_name):
+    """``(stale, reason)`` — whether the installed launcher (:func:`launcher_path`) still matches
+    this package's :mod:`asf.snapshot`. ``(False, '')`` when there is no launcher — the clock is
+    not a snapshot clock and there is nothing to be stale — or either file cannot be read: a
+    doctor row never raises out of a missing file. Shares :func:`write_launcher`'s compare but
+    does its own read: the writer falls through to writing on a failure, the reader answers
+    ``(False, '')``. When the running package is itself a snapshot, ``snapshot.__file__`` is the
+    sha the tick is running, which is the right comparison — the question is whether the launcher
+    matches the code that is running, not the checkout's HEAD, which the row reports separately."""
+    try:
+        with open(snapshot.__file__, encoding='utf-8') as f:
+            source = f.read()
+        with open(launcher_path(product_name), encoding='utf-8') as f:
+            installed = f.read()
+    except OSError:
+        return False, ''
+    if installed == source:
+        return False, ''
+    return True, "the installed launch.py differs from this package's asf/snapshot.py"
+
+
 def clock_code(product_name):
-    """``{snapshot, sha, at, head}`` for the doctor: whether the clock runs from a snapshot, the
-    sha it last ran (``None`` before its first tick), when, and the checkout's HEAD now."""
+    """``{snapshot, sha, at, head, snapshots, launcher_stale}`` for the doctor: whether the clock
+    runs from a snapshot, the sha it last ran (``None`` before its first tick), when, the
+    checkout's HEAD now, how many snapshots the code dir holds, and whether the installed
+    launcher is stale."""
     repo = snapshot_repo()
     if repo is None:
         return {'snapshot': False, 'root': repo_root()}
-    sha, at = snapshot.current(code_dir(product_name))
+    code = code_dir(product_name)
+    sha, at = snapshot.current(code)
     try:
         head = snapshot.head_sha(repo)
     except snapshot.SnapshotError:
         head = None
-    return {'snapshot': True, 'root': repo, 'sha': sha, 'at': at, 'head': head}
+    return {'snapshot': True, 'root': repo, 'sha': sha, 'at': at, 'head': head,
+            'snapshots': len(snapshot.snapshots(code)), 'launcher_stale': launcher_stale(product_name)}
 
 
 def tick_argv(product_name, clock, interpreter=None):

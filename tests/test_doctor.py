@@ -1621,3 +1621,64 @@ class CiMeasureRows(unittest.TestCase):
         rows = doctor.check_ci_measure(self.product, now=self.now, root=self.root)
         self.assertTrue(rows)
         self.assertTrue(all(required is False for required, _ok, _detail in rows))
+
+
+class ClockCodeRowTests(unittest.TestCase):
+    """`doctor.check_clock_code` — spec t-0755 §3.4, pure over `scheduler.clock_code`'s dict."""
+
+    def _check(self, info):
+        with mock.patch.object(doctor.scheduler, 'clock_code', return_value=info):
+            return doctor.check_clock_code(env.Product('sample', {}))
+
+    def test_installed_package_detail_is_unchanged_and_carries_no_suffix(self):
+        ok, detail = self._check({'snapshot': False, 'root': '/opt/asf'})
+        self.assertTrue(ok)
+        self.assertEqual(detail, 'installed package /opt/asf')
+
+    def test_no_tick_yet_gets_the_snapshot_count_suffix(self):
+        ok, detail = self._check({'snapshot': True, 'root': '/repo', 'sha': None, 'at': None,
+                                   'head': 'a' * 40, 'snapshots': 5,
+                                   'launcher_stale': (False, '')})
+        self.assertTrue(ok)
+        self.assertIn('no tick has run from one yet', detail)
+        self.assertTrue(detail.endswith('· 5 snapshots'))
+
+    def test_sha_detail_ends_with_the_snapshot_count(self):
+        ok, detail = self._check({'snapshot': True, 'root': '/repo', 'sha': 'b' * 40,
+                                   'at': time.time(), 'head': 'b' * 40, 'snapshots': 5,
+                                   'launcher_stale': (False, '')})
+        self.assertTrue(ok)
+        self.assertTrue(detail.endswith('· 5 snapshots'))
+
+    def test_a_stale_launcher_names_the_next_tick_and_the_install_command(self):
+        ok, detail = self._check({'snapshot': True, 'root': '/repo', 'sha': 'c' * 40,
+                                   'at': time.time(), 'head': 'c' * 40, 'snapshots': 5,
+                                   'launcher_stale': (True, 'the installed launch.py differs '
+                                                            "from this package's asf/snapshot.py")})
+        self.assertTrue(ok)
+        self.assertIn('launcher is stale', detail)
+        self.assertIn('the next tick refreshes it', detail)
+        self.assertIn('`asf scheduler install --product sample`', detail)
+        self.assertNotIn('clock install', detail)
+
+    def test_a_stale_launcher_on_the_no_tick_yet_branch_still_gets_both_suffixes(self):
+        ok, detail = self._check({'snapshot': True, 'root': '/repo', 'sha': None, 'at': None,
+                                   'head': 'd' * 40, 'snapshots': 1,
+                                   'launcher_stale': (True, 'the installed launch.py differs '
+                                                            "from this package's asf/snapshot.py")})
+        self.assertTrue(ok)
+        self.assertIn('no tick has run from one yet', detail)
+        self.assertIn('· 1 snapshots', detail)
+        self.assertIn('launcher is stale', detail)
+        self.assertIn('`asf scheduler install --product sample`', detail)
+
+    def test_ok_is_true_in_every_branch(self):
+        for info in [
+            {'snapshot': False, 'root': '/opt/asf'},
+            {'snapshot': True, 'root': '/repo', 'sha': None, 'at': None, 'head': None,
+             'snapshots': 0, 'launcher_stale': (False, '')},
+            {'snapshot': True, 'root': '/repo', 'sha': 'e' * 40, 'at': time.time(),
+             'head': 'e' * 40, 'snapshots': 3, 'launcher_stale': (True, 'stale')},
+        ]:
+            ok, _detail = self._check(info)
+            self.assertTrue(ok)
