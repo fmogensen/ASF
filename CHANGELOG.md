@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.194 — 2026-10-06
+
+### Bugs fixed
+
+- Two distinct exact paths never conflict; only a glob claims a folder (#851)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.194"`
+
 ## v0.1.193 — 2026-10-06
 
 ### Bugs fixed
