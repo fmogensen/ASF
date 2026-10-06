@@ -152,9 +152,21 @@ while True:
         time.sleep(poll_s)
 # the lock is held from here through the install itself: a tick that starts now, or is already
 # running, blocks on this same lock until the swap below is done and it is released
+#
+# a `file://` REPO_URL (ASF_REPO_URL=file://<checkout>, what a local or CI install points pipx
+# at) is a path, never a VCS url: pipx's own spec parser (not pip's — this is pipx raising
+# "Unable to parse package spec", not a git failure) rejects `git+file://<path>@<40-char sha>`
+# on a bare pipx with no bundled extras. So a local checkout is brought to <ref> in place and
+# handed to pipx as a bare path instead; anything else (https, ssh, git@ …) keeps the git+ spec
+# pipx has always taken.
 try:
-    subprocess.run(['pipx', 'install', '--force', f'git+{repo_url}@{ref}'],
-                    check=True, stdout=subprocess.DEVNULL)
+    if repo_url.startswith('file://'):
+        local_path = repo_url[len('file://'):]
+        subprocess.run(['git', '-C', local_path, 'checkout', '--quiet', ref], check=True)
+        spec = local_path
+    else:
+        spec = f'git+{repo_url}@{ref}'
+    subprocess.run(['pipx', 'install', '--force', spec], check=True, stdout=subprocess.DEVNULL)
 except subprocess.CalledProcessError as e:
     sys.exit(e.returncode or 1)
 finally:
@@ -163,7 +175,7 @@ PY
 if [ "$rc" -eq 99 ]; then
   die "a running tick of $PRODUCT still held its lock after ${INSTALL_LOCK_WAIT_S}s — wait for it to finish, then rerun"
 elif [ "$rc" -ne 0 ]; then
-  die "pipx install --force git+${REPO_URL}@${REF} failed (exit $rc) while holding $PRODUCT's tick lock"
+  die "pipx install --force (ref $REF from $REPO_URL) failed (exit $rc) while holding $PRODUCT's tick lock"
 fi
 # every run of this script is an install by hand (the tick's auto-upgrade runs pipx itself):
 # `asf release-readiness` counts these lines against the factory's stability

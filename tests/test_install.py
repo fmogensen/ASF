@@ -2686,6 +2686,78 @@ class InstallScriptTest(unittest.TestCase):
             held.close()
 
 
+class LocalFilePipxSpecTests(unittest.TestCase):
+    """F-0109 CI fix: a ``file://`` ``ASF_REPO_URL`` (what a local or CI install, including
+    ``tools/install-clean.sh``'s own ``ASF_REPO_URL=file://<checkout>``, points pipx at) is a
+    path, never a VCS url — ``git+file://<path>@<40-char sha>`` is exactly the spec a bare pipx
+    (no bundled extras, the CI run's ubuntu:24.04 container) raised ``PipxError: Unable to parse
+    package spec`` on. ``tools/install.sh`` must hand pipx the bare path instead, after bringing
+    that checkout to ``<ref>`` in place; a non-``file://`` ``REPO_URL`` (https, ssh, git@ — every
+    case :class:`InstallScriptTest` already covers) keeps the unchanged ``git+<url>@<ref>``
+    spec — this class proves the ``file://`` branch only, on its own fixture: a real local git
+    checkout plus stub ``pipx``/``asf`` (same shape as :class:`InstallScriptTest`, kept separate
+    so this class's tests run once, not atop every case that one already owns)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='install_sh_file_url_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin_dir = os.path.join(self.tmp, 'bin')
+        self.home = os.path.join(self.tmp, 'home')
+        self.asf_home = os.path.join(self.home, '.ASF')
+        self.pipx_log = os.path.join(self.tmp, 'pipx.log')
+        os.makedirs(self.bin_dir)
+        os.makedirs(self.asf_home)
+        for name, body in (
+            ('pipx', f'#!/bin/sh\necho "$*" >> "{self.pipx_log}"\nexit 0\n'),
+            ('asf', '#!/bin/sh\nexit 0\n'),
+        ):
+            path = os.path.join(self.bin_dir, name)
+            with open(path, 'w') as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+
+        self.local_repo = os.path.join(self.tmp, 'local_repo')
+        _git(['init', '-q', '-b', 'main', self.local_repo])
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', 'one'], self.local_repo)
+        self.old_sha = _git(['rev-parse', 'HEAD'], self.local_repo)
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', 'two'], self.local_repo)
+        self.new_sha = _git(['rev-parse', 'HEAD'], self.local_repo)
+
+    def _run(self, args, **extra_env):
+        env = dict(os.environ, HOME=self.home, ASF_HOME=self.asf_home,
+                   PATH=self.bin_dir + os.pathsep + os.environ.get('PATH', ''))
+        env.update(extra_env)
+        return subprocess.run(['bash', INSTALL_SH] + args, capture_output=True, text=True,
+                              **_operator_tty(), env=env, timeout=60)
+
+    def _pipx_call(self):
+        with open(self.pipx_log) as f:
+            return f.read().strip()
+
+    def test_a_file_url_is_handed_to_pipx_as_a_bare_path_not_a_git_plus_spec(self):
+        r = self._run(['demo', self.new_sha], ASF_REPO_URL=f'file://{self.local_repo}')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._pipx_call(), f'install --force {self.local_repo}')
+
+    def test_the_local_checkout_is_brought_to_ref_before_pipx_reads_it(self):
+        r = self._run(['demo', self.old_sha], ASF_REPO_URL=f'file://{self.local_repo}')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.local_repo), self.old_sha)
+        self.assertEqual(self._pipx_call(), f'install --force {self.local_repo}')
+
+    def test_a_remote_url_is_unchanged_git_plus_spec(self):
+        """Not ``file://`` — a bare local path (no scheme, what :class:`InstallScriptTest`'s own
+        ``self.remote`` already is) keeps the unchanged ``git+<path>@<ref>`` spec, proved here
+        too so the two branches of the ``file://`` check sit side by side in one class."""
+        r = self._run(['demo', 'deadbeef'], ASF_REPO_URL=self.local_repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._pipx_call(), f'install --force git+{self.local_repo}@deadbeef')
+        # never checked out: only a `file://` url is read as a local path to bring to <ref>
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.local_repo), self.new_sha)
+
+
 def _install_args(**over):
     base = dict(product='demo', repo=None, repo_url=None, record=None, record_url=None,
                scheduler=None, account=None, fake_workers=False, console_permissions=None,

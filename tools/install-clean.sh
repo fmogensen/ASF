@@ -16,6 +16,16 @@
 #    no RED row — a row that needs a login reads "not configured", never red.
 #
 # Every path it writes is under $HOME. It never removes anything outside INSTALL_CLEAN_DIR.
+#
+# The record directory doubles as its own origin: `asf init`'s adopt lays its layout
+# down uncommitted — the docs tell a real operator to "commit and push that layout yourself"
+# — and a local, non-bare origin only ever accepts a tick's push at all with
+# `receive.denyCurrentBranch=updateInstead` set. Skip either and the record clock's very first
+# tick fails to push its own state (`error: Untracked working tree file 'index.json' would be
+# overwritten by merge` — nothing to do with `gh`, which already degrades to "not configured"),
+# and `asf doctor`'s SCHEDULER row reads that clock RED. So this script plays the operator: one
+# throwaway `--package-only` install bootstraps a real `asf` early, just to adopt and commit the
+# record before the real install (and its clocks) ever runs.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,6 +56,9 @@ git -C "$WORK/product" commit -qm "a sample product"
 git -C "$WORK/product" remote add origin https://github.com/example-org/example-product.git
 git -C "$WORK/record" init -q -b main
 git -C "$WORK/record" commit -q --allow-empty -m "the record"
+# a local, non-bare origin only ever takes a push to its checked-out branch with this set —
+# true of any local backlog_dir, not just this fixture's
+git -C "$WORK/record" config receive.denyCurrentBranch updateInstead
 
 say "1/3 the default form with no terminal (a session): the package half is never attempted"
 set +e
@@ -57,6 +70,16 @@ printf '%s\n' "$OUT"
 grep -q 'NEEDS OPERATOR: step 1 installs the package and needs a terminal' <<<"$OUT" \
   || fail "no NEEDS OPERATOR line for the package half"
 command -v asf >/dev/null 2>&1 && fail "asf was installed without a terminal or --yes"
+
+say "operator step: the package alone, to adopt and commit the record before any clock can tick"
+bash "$SRC/tools/install.sh" "$PRODUCT" "$REF" --yes --package-only </dev/null \
+  || fail "install.sh --package-only exited non-zero"
+export PATH="$HOME/.local/bin:$PATH"
+asf init --product "$PRODUCT" --repo "$WORK/product" --backlog "$WORK/record"
+if [ -n "$(git -C "$WORK/record" status --porcelain)" ]; then
+  git -C "$WORK/record" add -A
+  git -C "$WORK/record" commit -q -m "adopt: lay down the record"
+fi
 
 say "2/3 the install: package half and session half (--yes: no terminal here)"
 bash "$SRC/tools/install.sh" "$PRODUCT" "$REF" --yes -- \

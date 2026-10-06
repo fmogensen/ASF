@@ -24,9 +24,11 @@ from asf import env, hermetic, init
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_install_e2e` does not
     from test_scheduler import fake_clis
     from test_sample_product import _git, _publish
+    from gitfixture import executable_asf
 except ImportError:  # pragma: no cover - import shape only
     from tests.test_scheduler import fake_clis
     from tests.test_sample_product import _git, _publish
+    from tests.gitfixture import executable_asf
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE = os.path.join(ROOT, 'sample')
@@ -185,6 +187,97 @@ class InstallFromZeroTests(unittest.TestCase):
 
     def test_second_run_record_origin_untouched(self):
         self.assertEqual(_git(['rev-parse', 'main'], cwd=self.record_origin), self.record_head)
+
+
+class RecordTickAgainstALocalNonBareOriginTests(unittest.TestCase):
+    """install-clean CI run 37429353185, both ``install-clean-*`` jobs: unlike
+    ``InstallFromZeroTests`` above, whose ``backlog_dir`` is a working copy of a *bare* origin
+    (``_publish``, the way a real hosted record is), ``tools/install-clean.sh``'s own record
+    directory IS its ``backlog_dir`` — a plain, non-bare checkout with no separate origin at
+    all. Two things are then required for the record clock's very first tick to push its own
+    state successfully: ``receive.denyCurrentBranch=updateInstead`` on it (any local, non-bare
+    origin needs this to take a push to its checked-out branch at all —
+    ``tests/test_shadow.py``'s own ``test_record_push_is_not_refused`` sets it by hand for the
+    same reason), and the record `asf init`'s adopt just laid down committed before that tick
+    runs — the docs tell a real operator "commit and push that layout yourself", and a tick's
+    own commit touches the same ``index.json`` adopt left untracked, so an uncommitted adopt
+    conflicts with the tick's own push of it. Skip either and the push is refused — nothing to
+    do with ``gh``, which already degrades to "not configured" (also proved here, directly:
+    ``gh`` is stubbed to fail the way an unconfigured one does) — and ``asf doctor``'s SCHEDULER
+    row would read that clock RED. Proved here without launchd, a tty or a scheduled clock: one
+    real ``asf init``, then one real ``asf tick --steps record`` run twice — once against the
+    adopt as it lands (uncommitted), reproducing the CI failure, and once more after the commit
+    ``tools/install-clean.sh`` now makes, showing the fix is exactly that commit."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='record_tick_local_origin_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = os.path.join(self.tmp, 'repo')
+        self.record = os.path.join(self.tmp, 'record')
+        os.makedirs(self.repo)
+        _git(['init', '-q', '-b', 'main'], cwd=self.repo)
+        with open(os.path.join(self.repo, 'README'), 'w', encoding='utf-8') as f:
+            f.write('a sample product\n')
+        _git(['add', 'README'], cwd=self.repo)
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'README'],
+            cwd=self.repo)
+        _git(['remote', 'add', 'origin', 'https://github.com/example-org/example-product.git'],
+            cwd=self.repo)
+        os.makedirs(self.record)
+        _git(['init', '-q', '-b', 'main'], cwd=self.record)
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', 'the record'], cwd=self.record)
+        _git(['config', 'receive.denyCurrentBranch', 'updateInstead'], cwd=self.record)
+
+        self.home = os.path.join(self.tmp, 'home')
+        os.makedirs(self.home)
+        self.asf_home = os.path.join(self.home, '.ASF')
+        stub_dir = os.path.join(self.tmp, 'bin')
+        # an unconfigured `gh`, exactly the CI run's own symptom — degrades, never a tick failure
+        fake_clis(stub_dir, names=('gh',), rc=1)
+        # the record's own `.githooks/pre-commit` (written by `asf init`) shells out to `asf
+        # check`/`asf redact`; this test commits by hand (as `tools/install-clean.sh`'s own
+        # operator-run `asf` does for real), and only needs that hook to exit 0, never a real
+        # check
+        executable_asf(stub_dir)
+        base = dict(os.environ, ASF_HOME=self.asf_home, PYTHONPATH=ROOT,
+                   GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                   GIT_COMMITTER_EMAIL='t@t', GH_TOKEN='', ASF_PRODUCT='sample',
+                   PATH=stub_dir + os.pathsep + os.environ.get('PATH', ''))
+        self.env = hermetic.build(base, home=self.home)
+
+    def asf(self, *argv):
+        return subprocess.run([sys.executable, '-m', 'asf.cli', *argv], cwd=self.tmp,
+                              env=self.env, capture_output=True, text=True, timeout=120)
+
+    def test_an_uncommitted_adopt_gets_its_first_tick_push_refused(self):
+        init_r = self.asf('init', '--product', 'sample', '--repo', self.repo,
+                          '--backlog', self.record)
+        self.assertEqual(init_r.returncode, 0, init_r.stdout + init_r.stderr)
+        self.assertIn('laid down a new record', init_r.stdout)
+        self.assertTrue(_git(['status', '--porcelain'], cwd=self.record),
+                        'adopt should leave the record uncommitted, as the docs say it does')
+
+        tick_r = self.asf('tick', '--product', 'sample', '--steps', 'record')
+        self.assertNotEqual(tick_r.returncode, 0, tick_r.stdout + tick_r.stderr)
+        self.assertIn('push refused', tick_r.stdout)
+
+    def test_committing_the_adopt_first_makes_the_same_tick_push_clean(self):
+        init_r = self.asf('init', '--product', 'sample', '--repo', self.repo,
+                          '--backlog', self.record)
+        self.assertEqual(init_r.returncode, 0, init_r.stdout + init_r.stderr)
+        # the record's own `.githooks/pre-commit` runs here — with `self.env`'s PATH, where the
+        # stub `asf` it shells out to lives
+        subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '-A'],
+                       cwd=self.record, env=self.env, check=True, capture_output=True, text=True)
+        subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q',
+                        '-m', 'adopt'], cwd=self.record, env=self.env, check=True,
+                       capture_output=True, text=True)
+
+        tick_r = self.asf('tick', '--product', 'sample', '--steps', 'record')
+        self.assertEqual(tick_r.returncode, 0, tick_r.stdout + tick_r.stderr)
+        self.assertIn('state committed and pushed', tick_r.stdout)
+        self.assertEqual(_git(['status', '--porcelain'], cwd=self.record), '')
 
 
 if __name__ == '__main__':
