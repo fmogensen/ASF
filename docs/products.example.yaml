@@ -341,6 +341,12 @@ conventions:
   #   relaunch_daily_cap: 6    # asf.workers.loops.DAILY_CAP (default 6): launches of one job in
   #                            # the trailing 24h since the latest unpark before the loop guard
   #                            # parks it, whatever changed between them. off: rule disabled
+  #   upgrade: notify    # auto | notify (default) | off — how this product's tick takes a new
+  #                      # ASF *release* (F-0112): auto installs it, notify says so once per tag,
+  #                      # off says nothing. A word that is none of the three reads as notify and
+  #                      # is a doctor RED. This is the *release* channel; a product whose repo is
+  #                      # ASF's own source is on the trunk channel instead, under approvals.upgrade
+  #                      # above.
   #   groom:
   #     reask_days: 7     # asf.groom.sticky (default 7): days an answered groom question's
   #                       # digest stays sticky — unchanged, it is dropped from the report
