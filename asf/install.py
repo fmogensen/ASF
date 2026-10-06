@@ -468,6 +468,12 @@ def _tail_lines(dest):
 
 # ---- the missing-flag rule (PD9) ------------------------------------------------
 
+def default_scheduler(platform=None):
+    """The clock adapter a new install gets when ``--scheduler`` is not given: launchd on macOS,
+    cron everywhere else — a Linux machine has no launchd."""
+    return 'launchd' if (platform or sys.platform) == 'darwin' else 'cron'
+
+
 def _resolve_missing(args):
     """``--repo``, ``--record`` and ``--scheduler``: a missing one is asked for once on a tty,
     with its default in the prompt, taking the default on an empty answer; with ``--yes``, or
@@ -476,7 +482,7 @@ def _resolve_missing(args):
     ``backlog_dir``. Returns False when the run must stop here."""
     interactive = sys.stdin.isatty() and not args.yes
     existing = env.load_file(env.product_path(args.product))
-    defaults = {'repo': os.getcwd(), 'record': existing.get('backlog_dir'), 'scheduler': 'launchd'}
+    defaults = {'repo': os.getcwd(), 'record': existing.get('backlog_dir'), 'scheduler': default_scheduler()}
     for name in ('repo', 'record', 'scheduler'):
         if getattr(args, name):
             continue
@@ -538,7 +544,7 @@ def register(subparsers):
                    help="the record's directory (default: the product file's backlog_dir; asked once)")
     p.add_argument('--record-url', help='cloned into --record only when that directory does not exist')
     p.add_argument('--scheduler', choices=['launchd', 'cron', 'none'],
-                   help='the clock adapter (default: launchd; asked once)')
+                   help='the clock adapter (default: launchd on macOS, cron elsewhere; asked once)')
     p.add_argument('--account', action='append', metavar='NAME[:CONFIG_DIR]',
                    help='repeatable; default: detect under <ASF_HOME>/accounts/')
     p.add_argument('--fake-workers', action='store_true', help='backend: fake, and no account')

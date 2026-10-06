@@ -1,0 +1,2 @@
+# tools/privacy-allow.txt — files the privacy sweep (tools/check_privacy.py) skips: one
+# `<path glob>` or `<path glob>:<path|email|link>` per line. Keep it short; prefer a placeholder.

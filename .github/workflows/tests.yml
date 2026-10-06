@@ -30,6 +30,9 @@ jobs:
         run: bash tools/check_conventions.sh
       - name: check generic
         run: bash tools/check_generic.sh
+      # the preview gate's privacy criterion: no operator home path, e-mail or private link
+      - name: privacy sweep (no operator paths, e-mails or private links)
+        run: bash tools/check_privacy.sh
       - name: one record writer (no card written in place)
         run: bash tools/check_record_writers.sh
       # HEAD^1 is the trunk this change lands on (a pull request's merge commit, or main before
@@ -55,6 +58,15 @@ jobs:
       # sample product's own tick.
       - name: asf install, zero to green (a temp HOME, sample/, doctor, a dry run, then again)
         run: python3 -m unittest -v tests.test_install_e2e
+      # The preview gate's first-user criterion: exactly the README's Quick start commands, from
+      # a clone to a first landed Task, on the stub runtime (sample/first_task.json).
+      - name: README-only first-user run (Quick start to a landed Task, stub runtime)
+        run: python3 -m unittest -v tests.test_readme_first_user
+      # The preview gate's minimal-product criterion: one account, no cloud, no queue, hosted CI,
+      # a full tick. Skipped (so the criterion reads red) until that test is on the trunk.
+      - name: a minimal product, end to end
+        if: hashFiles('tests/test_minimal_product.py') != ''
+        run: python3 -m unittest -v tests.test_minimal_product
       # F-0033: the whole loop — card → spec → plan → task → harvest → release notes — against
       # the sample product on the replay runtime, with the stamped tables pinned to goldens.
       - name: the whole loop, card to release notes (goldens)

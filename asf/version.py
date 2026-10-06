@@ -28,6 +28,9 @@ import tempfile
 
 #: A release tag.
 TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
+#: A pre-release tag (``v0.1.0-preview``): cut by hand through the release workflow, never by
+#: :func:`cut`, and never read as a version — every ``git describe`` here excludes ``*-*``.
+PRERELEASE_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)-([0-9A-Za-z][0-9A-Za-z.]*)$')
 #: What ``--to`` accepts as a version: ``0.1.108`` or ``v0.1.108``.
 VERSION_ARG_RE = re.compile(r'^v?(\d+\.\d+\.\d+)$')
 #: ``git describe --tags`` off a release tag: ``v0.1.9`` or ``v0.1.9-4-g205123f``.
@@ -132,7 +135,8 @@ def of_commit(repo, sha, run=subprocess.run):
     commits past it (``0.1.107+15``); ``None`` when no tag reaches it or it is unknown there."""
     if not repo or not sha:
         return None
-    return from_describe(_git(repo, 'describe', '--tags', '--match', 'v[0-9]*', sha, run=run))
+    return from_describe(_git(repo, 'describe', '--tags', '--match', 'v[0-9]*', '--exclude', '*-*', sha,
+                              run=run))
 
 
 def pin_label(sha, repo=None, recorded=None):
@@ -383,7 +387,8 @@ def health(repo, ref='origin/main', now=None, grace_s=GRACE_S, run=subprocess.ru
     head = _git(repo, 'rev-parse', '--verify', '-q', f'{ref}^{{commit}}', run=run)
     if not head:
         return True, f'{ref} unreadable (nothing to check)'
-    newest = _git(repo, 'describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*', head, run=run)
+    newest = _git(repo, 'describe', '--tags', '--abbrev=0', '--match', 'v[0-9]*', '--exclude', '*-*',
+                  head, run=run)
     problems = []
     late = []
     for sha, tag in plan(repo, head, run):
@@ -434,6 +439,27 @@ def pr_entry(repo, base, title, body='', run=subprocess.run):
 
 # ---- the command ---------------------------------------------------------------------------
 
+def prerelease(repo, tag, ref='HEAD', remote='origin', push=False, run=subprocess.run):
+    """Tag ``ref`` as the pre-release ``tag`` (annotated) and, with ``push``, push it. The
+    caller has already proved the gate green (the release workflow runs ``asf release-readiness
+    --gate preview`` first). ``(ok, detail)``; a tag already on ``ref`` is ok, on another commit
+    a refusal — a pre-release tag never moves."""
+    if not PRERELEASE_RE.match(tag or ''):
+        return False, f'{tag!r} is not a pre-release tag (v<x.y.z>-<label>)'
+    sha = _git(repo, 'rev-parse', '--verify', '-q', f'{ref}^{{commit}}', run=run)
+    if not sha:
+        return False, f'{ref} is not a commit'
+    sha = sha.strip()
+    at = (_git(repo, 'rev-parse', '--verify', '-q', f'refs/tags/{tag}^{{commit}}', run=run) or '').strip()
+    if at and at != sha:
+        return False, f'{tag} is already on {at[:9]}, not {sha[:9]}: a pre-release tag never moves'
+    if not at and _git(repo, 'tag', '-a', tag, '-m', f'{tag}: pre-release', sha, run=run) is None:
+        return False, f'could not tag {sha[:9]} as {tag}'
+    if push and _git(repo, 'push', '-q', remote, f'refs/tags/{tag}', run=run) is None:
+        return False, f'could not push {tag}'
+    return True, f'{tag} on {sha[:9]}' + (' (pushed)' if push else '')
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog='python3 -m asf.version')
     sub = p.add_subparsers(dest='cmd', required=True)
@@ -451,7 +477,16 @@ def main(argv=None):
     r.add_argument('--base', required=True)
     r.add_argument('--title', required=True)
     r.add_argument('--body-file')
+    x = sub.add_parser('prerelease', help='tag a commit as a pre-release (v<x.y.z>-<label>)')
+    x.add_argument('--repo', default='.')
+    x.add_argument('--tag', required=True)
+    x.add_argument('--ref', default='HEAD')
+    x.add_argument('--push', action='store_true')
     a = p.parse_args(argv)
+    if a.cmd == 'prerelease':
+        ok, detail = prerelease(a.repo, a.tag, a.ref, push=a.push)
+        print(('ok: ' if ok else 'RED: ') + detail)
+        return 0 if ok else 1
     if a.cmd == 'cut':
         cut(a.repo, a.ref, main=a.main, push=a.push, slug=a.slug)
         return 0

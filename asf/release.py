@@ -709,7 +709,7 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
     runs = ci_runs(slug, product.main, int(cfg['ci_runs']), gh_json) if slug else None
     steps = step_run_steps(slug, runs, list(cfg['ci_steps'].values()), gh_json) if runs else None
 
-    tag = (git(repo, 'describe', '--tags', '--abbrev=0', ref) or '').strip() or None
+    tag = (git(repo, 'describe', '--tags', '--abbrev=0', '--exclude', '*-*', ref) or '').strip() or None
     readme = git(repo, 'show', f'{ref}:README.md') or ''
     changelog = git(repo, 'show', f'{ref}:CHANGELOG.md') or ''
     section, notes = changelog_notes(changelog, tag)
@@ -772,13 +772,19 @@ def pr_ci_criterion(product, ci, as_of, claims=None):
                      + ', 0 unclassified reds)', met, ev)
 
 
-def compute(root, product, **kw):
+def compute(root, product, gate=None, **kw):
+    """The gate's verdict: ``gate`` (``--gate``), else ``release.gate``, else ``1.0`` — every
+    criterion above; ``preview`` is :mod:`asf.release_preview`'s five."""
+    from asf import release_preview
+    if release_preview.gate_of(product, gate) == 'preview':
+        return release_preview.compute(product, **{k: v for k, v in kw.items()
+                                                   if k in ('now', 'git', 'gh_json')})
     cfg = settings(product)
     f = gather(root, product, cfg, **kw)
     crit = evaluate(f, cfg)
     crit.append(tune_criterion(product, cfg['window_days'], f['as_of']))
     crit.append(pr_ci_criterion(product, f.get('pr_ci'), f['as_of']))
-    return {'product': product.name, 'as_of': f['as_of'], 'window_days': cfg['window_days'],
+    return {'product': product.name, 'as_of': f['as_of'], 'gate': '1.0', 'window_days': cfg['window_days'],
             'ready': all(c.met for c in crit), 'criteria': [asdict(c) for c in crit]}
 
 
@@ -793,7 +799,8 @@ def verdict(d):
 
 
 def render(d):
-    out = [f"**RELEASE READINESS {d['product']}** — {d['as_of']}", '',
+    gate = f" (gate {d['gate']})" if d.get('gate') else ''
+    out = [f"**RELEASE READINESS {d['product']}**{gate} — {d['as_of']}", '',
            f"Verdict: {verdict(d)}", '',
            '| # | Criterion | Met | Evidence |', '|---|---|---|---|']
     for i, c in enumerate(d['criteria'], 1):
@@ -830,7 +837,19 @@ def cell(root, product):
 def cmd_release_readiness(args, root):
     from asf import env
     product = env.load_product(getattr(args, 'product', None))
-    d = compute(root, product)
+    if getattr(args, 'known_issues', False) is True:
+        from asf import release_preview
+        d = compute(root, product, gate='1.0')
+        print(release_preview.known_issues([c for c in d['criteria'] if not c['met']],
+                                           release_preview.open_defects(
+                                               root, release_preview.defect_severities(product))), end='')
+        return 0
+    try:
+        gate = getattr(args, 'gate', None)
+        d = compute(root, product, gate=gate if isinstance(gate, str) else None)
+    except ValueError as e:
+        print(f'release-readiness: {e}')
+        return 2
     if getattr(args, 'json', False):
         print(json.dumps(d, indent=1, default=str))
     else:

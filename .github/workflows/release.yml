@@ -9,11 +9,24 @@ name: release
 # events that change one of those: opened, edited (title/body/base), synchronize (a new head).
 # A reopen of an unchanged head (the stale-merge-ref replay) changes none of them and would only
 # fire a second red beside the tests workflow's, so it does not run on one.
+#
+# A pre-release (`v<x.y.z>-<label>`, e.g. v0.1.0-preview) is cut by hand: run this workflow on
+# main with its tag. The `preview` job first runs `asf release-readiness --gate preview` against
+# this repository as a product and stops when it is not green; only then does it tag main's head
+# (`python3 -m asf.version prerelease`, never moving an existing tag) and publish a GitHub
+# pre-release whose notes are docs/RELEASE-NOTES.md. Pre-release tags never count as versions:
+# the patch tags above go on as before.
 on:
   push:
     branches: [main]
   pull_request:
     types: [opened, edited, synchronize]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "the pre-release tag to cut (v<x.y.z>-<label>)"
+        required: true
+        default: v0.1.0-preview
 
 permissions:
   contents: write
@@ -76,3 +89,37 @@ jobs:
           cd "$GITHUB_WORKSPACE/.asf-ci-base"
           python3 -m asf.version pr --repo "$GITHUB_WORKSPACE" --base "origin/$BASE_REF" \
             --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+
+  preview:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: the preview gate is green (asf release-readiness --gate preview)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -m pip install --quiet .
+          git fetch -q --tags origin main
+          name="$(printf '%s' "${GITHUB_REPOSITORY##*/}" | tr '[:upper:]' '[:lower:]')"
+          export ASF_HOME="$RUNNER_TEMP/asf-home"
+          mkdir -p "$ASF_HOME/products" "$RUNNER_TEMP/record"
+          printf 'default_product: %s\nscheduler:\n  kind: none\n' "$name" > "$ASF_HOME/config.yaml"
+          printf 'product: %s\nrepo_slug: %s\nrepo_dir: %s\nbacklog_dir: %s\nmain: main\n' \
+            "$name" "$GITHUB_REPOSITORY" "$PWD" "$RUNNER_TEMP/record" > "$ASF_HOME/products/$name.yaml"
+          asf release-readiness --gate preview --product "$name"
+      - name: cut the pre-release tag and its GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          git config user.name "asf-release"
+          git config user.email "asf-release@users.noreply.github.com"
+          python3 -m asf.version prerelease --tag "$TAG" --ref "$GITHUB_SHA" --push
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --prerelease --verify-tag --title "$TAG" --notes-file docs/RELEASE-NOTES.md
