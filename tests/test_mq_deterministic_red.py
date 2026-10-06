@@ -73,6 +73,32 @@ class DeterministicRed(RegisterRepo):
             self.cut_and_red(product)
         self.assert_blamed_without_rerun()
 
+    def test_a_culprit_is_never_batched_again_until_its_head_changes(self):
+        # 2026-10-05: the same duplicate-row collision re-batched 5× over 3 h — the same tree
+        # answers the same; only a new head is a new answer
+        product = self.product(merge_queue={'ref_prefix': 'batch/', 'batch_size': 3,
+                                            'deterministic_jobs': ['rules']})
+        self.cut_and_red(product)
+        self.lines.clear()
+        self.queue_pass(self.lane(product), [self.entry('worker/T-0002', 2, 'T-0002',
+                                                        files=(REG,))])
+        self.assertFalse(any(m['branch'] == 'worker/T-0002' for b in self.batches()
+                             for m in b['members']))
+        self.assertTrue(any('held out' in l and 'until its head changes' in l
+                            for l in self.lines), self.lines)
+        # its correct round moved the head: a new tree, a new answer — it is cut again
+        self.book('worker/T-0002', '| migration | 0400-0409 | plan-bravo | reserved |')
+        self.queue_pass(self.lane(product), [self.entry('worker/T-0002', 2, 'T-0002',
+                                                        files=(REG,))])
+        self.assertTrue(any(m['branch'] == 'worker/T-0002' for b in self.batches()
+                            for m in b['members']))
+
+    def test_the_hold_is_config(self):
+        conv = type('C', (), {'map_of': lambda self, k: {'hold_culprit': 'off'}})()
+        self.assertFalse(merge_queue.settings(conv)['hold_culprit'])
+        conv = type('C', (), {'map_of': lambda self, k: {}})()
+        self.assertTrue(merge_queue.settings(conv)['hold_culprit'])
+
     def test_an_unnamed_job_is_still_rerun_first(self):
         self.cut_and_red(self.product())
         self.assertEqual(len(reruns(self.gh)), 1)

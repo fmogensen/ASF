@@ -139,7 +139,8 @@ def known(product, key, head, names):
     return all((key, head, job(n)) in have for n in names)
 
 
-def observe(product, names, key, prs, head, base, files, fail_files=(), links=None, now=None):
+def observe(product, names, key, prs, head, base, files, fail_files=(), links=None, now=None,
+            tests=None):
     """Record that landing ``key`` (``#<pr>`` or ``batch <ref>``; its PRs ``prs``) went red at
     ``head``, cut on trunk sha ``base``, on the checks ``names`` — after triage: a real red. Its
     diff's ``files`` and the files the failing logs name (``fail_files``) are what
@@ -160,6 +161,7 @@ def observe(product, names, key, prs, head, base, files, fail_files=(), links=No
                                  'head': head, 'base': base, 'at': int(now),
                                  'files': sorted(set(files or ())),
                                  'fail_files': sorted(set(fail_files or ())),
+                                 'tests': sorted(set((tests or {}).get(n) or ())),
                                  'link': (links or {}).get(n)})
         data['seen'] = [s for s in data['seen'] if s.get('at', 0) >= now - SEEN_HOURS * 3600]
         save(sd, data)
@@ -177,8 +179,13 @@ def _touches(files, named):
 
 def unrelated(a, b):
     """True when two red landings share no PR, and neither diff touches a file the failing logs
-    name — or, with no file named in either log, the two diffs share no file."""
+    name — or, with no file named in either log, the two diffs share no file. Two landings whose
+    logs both name their failing tests and share none fail differently: each its own red, never
+    one trunk break (the same *test* on two unrelated landings is)."""
     if set(a.get('prs') or ()) & set(b.get('prs') or ()) or a.get('key') == b.get('key'):
+        return False
+    ta, tb = set(a.get('tests') or ()), set(b.get('tests') or ())
+    if ta and tb and not ta & tb:
         return False
     named = set(a.get('fail_files') or ()) | set(b.get('fail_files') or ())
     fa, fb = set(a.get('files') or ()), set(b.get('files') or ())
@@ -406,27 +413,39 @@ def read_full(product, data, now, src, out):
     full['url'] = got.get('url') or full.get('url')
     sha = full.get('sha')
     jobs = [j for j in got.get('jobs') or () if isinstance(j, dict)]
-    red = red_jobs(jobs, _required(product, sha))
-    from asf import flake
-    defects, rerun = flake.triage(product, _sd(product), slug, sha, red,
-                                  where=f'{trunk} full run', out=out) if red else ([], [])
-    if rerun and not defects:
+    verdict = judge_run(product, data, sha, full['run'], full.get('url'), jobs, now, out,
+                        'the full run')
+    if verdict == 'rerun':
         return      # re-running a red job once (flake triage): judged when it ends
-    if not defects:
-        full['state'] = 'green'
+    full['state'] = verdict
+    if verdict == 'green':
         data['green'] = {'sha': sha, 'at': int(now), 'run': full['run']}
         data['confirmed'] = {}
         out(f"trunk watch: the full run on {trunk} @ {_short(sha)} is green ({full.get('url')}) — "
             f"the landings' reds are their own; normal culprit handling resumes")
-        return
-    full['state'] = 'red'
+
+
+def judge_run(product, data, sha, run_id, url, jobs, now, out, what):
+    """Judge a completed run of the trunk's workflow on trunk sha ``sha`` (its ``jobs``): its red
+    required jobs are flake-triaged — ``'rerun'`` while one is re-run; ``'green'`` with no defect
+    left; else ``'red'``: each defect is **confirmed** trunk red (``data['confirmed']``, one
+    ``TRUNK RED`` line and one fix card), so no landing is blamed for it."""
+    trunk, slug = product.conventions.main, product.repo_slug
+    red = red_jobs(jobs, _required(product, sha))
+    from asf import flake
+    defects, rerun = flake.triage(product, _sd(product), slug, sha, red,
+                                  where=f'{trunk} {what}', out=out) if red else ([], [])
+    if rerun and not defects:
+        return 'rerun'
+    if not defects:
+        return 'green'
     by_name = {c['name']: c for c in red}
     findings = _findings(slug, [by_name[n] for n in defects if n in by_name])
     for n in defects:
         k = job(n)
         f = findings.get(n) or {}
         first = _first_red(data, k, sha)
-        rec = {'sha': sha, 'name': n, 'run': full['run'], 'url': full.get('url'),
+        rec = {'sha': sha, 'name': n, 'run': run_id, 'url': url,
                'link': (by_name.get(n) or {}).get('link'), 'at': int(now), 'first': first,
                'test': (f.get('tests') or [None])[0], 'step': f.get('step'),
                'tail': (f.get('lines') or [])[-TAIL_LINES:],
@@ -434,9 +453,57 @@ def read_full(product, data, now, src, out):
         data['confirmed'][k] = rec
         card = _file(product, data, k, rec, out)
         landings = [s for s in data['seen'] if s.get('check') == k]
-        out(f"trunk watch: TRUNK RED {n} on {trunk} @ {_short(sha)} — confirmed by the full run "
-            f"{full.get('url')}" + (f'; seen on {seen_on(landings)}' if landings else '')
+        out(f"trunk watch: TRUNK RED {n} on {trunk} @ {_short(sha)} — confirmed by {what} "
+            f"{url}" + (f'; seen on {seen_on(landings)}' if landings else '')
             + f"; no landing is blamed for it; fix card: {card or 'not filed'}")
+    return 'red'
+
+
+#: ``conventions.flags.trunk_red_trunk_runs`` (default on): a red run of the trunk's workflow on
+#: the trunk's tip that ASF did not dispatch — a manual (``workflow_dispatch``), ``schedule`` or
+#: ``push`` run — confirms trunk red on its red jobs at once
+TRUNK_RUNS_FLAG = 'trunk_red_trunk_runs'
+#: the trunk run events whose red is the trunk's own
+TRUNK_EVENTS = ('workflow_dispatch', 'schedule', 'push')
+
+
+def read_trunk_runs(product, data, tip, now, src, out):
+    """Read the completed red runs of the trunk's workflow on ``tip`` (at most every
+    :data:`LIST_EVERY_S`) that ASF did not dispatch, and judge each once (:func:`judge_run`): a
+    test the trunk itself fails is trunk red whatever landing shows it (2026-10-05: a product's
+    manual trunk run was red on a test its push CI skipped, while 15 unrelated PRs inherited it
+    and were sent to correct rounds). Off with ``trunk_red_trunk_runs: off``."""
+    flag = product.conventions.flag(TRUNK_RUNS_FLAG, 'on')
+    if flag is False or str(flag).strip().lower() in ('off', 'false', 'no', '0'):
+        return
+    if now - (data.get('trunk_runs_at') or 0) < LIST_EVERY_S:
+        return
+    trunk, wf = product.conventions.main, workflow(product)
+    runs = _read(src, ['run', 'list', '-R', product.repo_slug, '-w', wf, '-b', trunk, '-L', '10',
+                       '--json', 'databaseId,headSha,status,conclusion,event,url,createdAt'],
+                 list)
+    if runs is None:
+        return
+    data['trunk_runs_at'] = int(now)
+    read = [str(r) for r in data.get('trunk_runs_read') or () if r]
+    mine = str((data.get('full') or {}).get('run') or '')
+    for r in runs:
+        if not isinstance(r, dict) or r.get('headSha') != tip or r.get('status') != 'completed' \
+                or r.get('event') not in TRUNK_EVENTS or r.get('conclusion') not in RED:
+            continue
+        rid = str(r.get('databaseId') or '')
+        if not rid or rid in read or rid == mine:
+            continue
+        got = _read(src, ['run', 'view', rid, '-R', product.repo_slug, '--json',
+                          'status,conclusion,url,jobs'], dict)
+        if got is None:
+            continue
+        jobs = [j for j in got.get('jobs') or () if isinstance(j, dict)]
+        verdict = judge_run(product, data, tip, rid, got.get('url') or r.get('url'), jobs, now,
+                            out, f"the {r.get('event')} run")
+        if verdict != 'rerun':
+            read.append(rid)
+    data['trunk_runs_read'] = read[-50:]
 
 
 def _findings(slug, checks):
@@ -585,6 +652,7 @@ def tick(product, stall=None, out=print, now=None, src=None):
         data = load(sd)
         data['confirmed'] = {k: c for k, c in data['confirmed'].items() if c.get('sha') == tip}
         read_full(product, data, now, src, out)
+        read_trunk_runs(product, data, tip, now, src, out)
         full = data.get('full') or {}
         busy = full.get('state') in ('dispatched', 'running')
         why = None

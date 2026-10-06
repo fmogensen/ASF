@@ -4517,7 +4517,9 @@ class GitHubHost(Host):
                 found = merge_queue.failure_findings(self.slug, red)
                 trunk_red.observe(self.product, names, key, [number], head, base, files,
                                   [p for item in found for p, _n, _t in item['paths']],
-                                  {trunk_red.job(c.get('name')): c.get('link') for c in red})
+                                  {trunk_red.job(c.get('name')): c.get('link') for c in red},
+                                  tests={trunk_red.job(i['name']): i.get('tests') or ()
+                                         for i in found})
             return trunk_red.held(self.product, names)
         except Exception:  # noqa: BLE001 — no reading: the head is judged as before
             return {}

@@ -201,6 +201,17 @@ class Settings(unittest.TestCase):
         self.assertIn('ASF-Session: sid-1', text)
         self.assertIn('ASF-Report: task-t-0001', text)
 
+    def test_the_brief_runs_the_products_pre_push_check_before_every_push(self):
+        # a cloud job has no pre-push hook: the repo checks the host's hook runs must run here
+        # (2026-10-05: a forbidden name in a cloud-committed review file, six PR reds a day)
+        from asf import env
+        p = env.Product('p', {'conventions': {'pre_push_check': 'make fast'}})
+        text = cloud.cloud_brief('Do the task.\n', job(), product=p)
+        self.assertIn("No pre-push hook runs here", text)
+        self.assertIn("pre-push check `make fast`", text)
+        self.assertNotIn('No pre-push hook', cloud.cloud_brief('x', job(), product=env.Product(
+            'p', {})))
+
 
 class LocalKinds(unittest.TestCase):
     """:data:`cloud.LOCAL_KINDS` — the closed exception list, and the placement rule it seeds

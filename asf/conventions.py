@@ -396,7 +396,7 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                'head_capped', 'unknown_holds', 'models.cheap_kinds', 'roots_unverified_hours',
                'roots_park_stale_days', 'roots_min_dependants', 'queue_store', 'store_shared', 'docs_review',
                'id_claim', 'correction_rebase_behind', 'stale_ref_reopens',
-               'stale_ref_job_paths', 'flake_skip_reproduced')
+               'stale_ref_job_paths', 'flake_skip_reproduced', 'trunk_red_trunk_runs')
 
 
 

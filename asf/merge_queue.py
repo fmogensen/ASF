@@ -171,7 +171,10 @@ QUEUE_FILE = 'merge-queue.json'
 #: red: the default is generous).
 DEFAULTS = {'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 2, 'timeout_min': 360,
             'stuck_min': 90, 'start_kind': 'trunk', 'precut_check': (), 'precut_check_timeout_s': 120,
-            'deterministic_jobs': ()}
+            'deterministic_jobs': (), 'hold_culprit': True}
+#: ``state/<product>/merge-queue-culprits.json``: ``{branch: {head, checks, at}}`` — the members a
+#: deterministic red named, held out of every cut until their head moves (:func:`hold_culprits`)
+CULPRITS_FILE = 'merge-queue-culprits.json'
 #: the conclusions of a required check that judged no code (:func:`_nonverdict`): a cancel (an
 #: operator, a superseding workflow, a timeout the host turned into one), a check the host gave
 #: up on (``timed_out``/``stale``), a workflow that never started its jobs. Never red, never green.
@@ -260,7 +263,55 @@ def settings(conv):
         jobs = [jobs]
     if isinstance(jobs, (list, tuple)):
         out['deterministic_jobs'] = tuple(j.strip() for j in jobs if isinstance(j, str) and j.strip())
+    hold = raw.get('hold_culprit')
+    if hold is False or str(hold).strip().lower() in ('off', 'false', 'no', '0'):
+        out['hold_culprit'] = False
     return out
+
+
+def load_culprits(state_dir):
+    try:
+        with open(os.path.join(state_dir, CULPRITS_FILE), encoding='utf-8') as fh:
+            got = json.load(fh)
+    except (OSError, ValueError):
+        got = {}
+    return got if isinstance(got, dict) else {}
+
+
+def save_culprits(state_dir, data):
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        tmp = os.path.join(state_dir, CULPRITS_FILE + '.tmp')
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, sort_keys=True, indent=1)
+        os.replace(tmp, os.path.join(state_dir, CULPRITS_FILE))
+    except OSError:
+        pass
+
+
+def hold_culprits(lane, culprits, checks):
+    """Remember each member of ``culprits`` (facts with ``branch`` and ``head``) a deterministic
+    red (``checks``) named: the same tree answers the same, so it is never batched again at that
+    head (2026-10-05: one duplicate-row collision re-batched 5× over 3 h)."""
+    data = load_culprits(lane.state_dir)
+    for f in culprits:
+        if f.get('branch') and f.get('head'):
+            data[f['branch']] = {'head': f['head'], 'checks': sorted(checks), 'at': now_iso()}
+    save_culprits(lane.state_dir, data)
+
+
+def held_culprit(lane, f, head):
+    """The held record of member ``f`` when its ``head`` is the one a deterministic red named,
+    else None (a moved head clears the hold)."""
+    data = load_culprits(lane.state_dir)
+    rec = data.get(f.get('branch'))
+    if not rec:
+        return None
+    if head and rec.get('head') == head:
+        return rec
+    data.pop(f['branch'], None)
+    save_culprits(lane.state_dir, data)
+    return None
 
 
 def deterministic(lane, st, failed):
@@ -753,6 +804,9 @@ def run(lane, ready):
                 if len(members) == 1:
                     culprits = culprits or {members[0]['branch']: []}
                 fallback = (checks, [c.get('name') for c in roots] or red)
+                fixed = deterministic(lane, st, roots) if st.get('hold_culprit') else []
+                if fixed and culprits:
+                    hold_culprits(lane, [f for f in members if f['branch'] in culprits], fixed)
                 for f in members:
                     if f['branch'] in culprits:
                         _send_back(lane, f, 'gate',
@@ -838,6 +892,15 @@ def run(lane, ready):
             continue
         if f['branch'] in drafts:
             _wait(lane, f, 'merge queue: its PR is a draft')
+            continue
+        held = held_culprit(lane, f, heads.get(f['branch']) or f.get('head')) \
+            if st.get('hold_culprit') else None
+        if held:
+            lane.out(f"merge queue: {f['branch']} (PR #{_pr(f)}) held out — deterministic red "
+                     f"({', '.join(held.get('checks') or ())}) at {str(held['head'])[:9]}: not "
+                     f"batched again until its head changes")
+            _wait(lane, f, 'merge queue: deterministic red at this head — not batched again '
+                           'until its head changes', green=f.get('green'))
             continue
         fresh.append(f)
     halves = len(groups)
@@ -1389,7 +1452,9 @@ def _trunk_red_seen(lane, batch, members, names, found):
         trunk_red.observe(product, names, f"batch {batch['ref']}", [_pr(f) for f in members],
                           batch['sha'], batch.get('base'), files,
                           [p for item in found or () for p, _n, _t in item['paths']],
-                          {trunk_red.job(i['name']): i.get('link') for i in found or ()})
+                          {trunk_red.job(i['name']): i.get('link') for i in found or ()},
+                          tests={trunk_red.job(i['name']): i.get('tests') or ()
+                                 for i in found or ()})
         got = trunk_red.held(product, names)
     except Exception:   # noqa: BLE001 — no reading: the batch is judged as before
         return {}
@@ -2604,7 +2669,9 @@ def _land_red_seen(lane, n, head, trunk_sha, failed, required):
             found = failure_findings(lane.slug, roots)
             trunk_red.observe(product, names, key, [n], head, trunk_sha, files,
                               [p for item in found for p, _n, _t in item['paths']],
-                              {trunk_red.job(c['name']): c.get('link') for c in roots})
+                              {trunk_red.job(c['name']): c.get('link') for c in roots},
+                              tests={trunk_red.job(i['name']): i.get('tests') or ()
+                                     for i in found})
         got = trunk_red.held(product, names)
     except Exception:   # noqa: BLE001 — no reading: the request is judged as before
         return ''

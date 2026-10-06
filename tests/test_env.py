@@ -669,7 +669,7 @@ _PLANNED_FLAG_VALUES = {
     'roots_unverified_hours': '24', 'roots_park_stale_days': '3', 'roots_min_dependants': '5',
     'queue_store': 'on', 'store_shared': 'on', 'docs_review': 'skip', 'id_claim': 'push',
     'correction_rebase_behind': '300', 'stale_ref_reopens': '1', 'stale_ref_job_paths': '{}',
-    'flake_skip_reproduced': 'on',
+    'flake_skip_reproduced': 'on', 'trunk_red_trunk_runs': 'on',
 }
 PLANNED_PRODUCT = _dedent("""
     product: sample

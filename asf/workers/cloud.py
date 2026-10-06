@@ -389,9 +389,18 @@ def lane_runtime(s, product):
 
 # ---- the brief --------------------------------------------------------------------------------
 
-def cloud_brief(text, job, setting=None):
+#: The CLOUD block's push rule for a product that declares ``conventions.pre_push_check``: a cloud
+#: job has no pre-push hook, so the host's repo checks never ran there (2026-10-05: six PR reds
+#: in a day were a forbidden name in a review file a cloud session committed and pushed).
+CLOUD_PRE_PUSH = ('- No pre-push hook runs here. Before every push, the review/report push '
+                  'included, run the product\'s pre-push check `{command}` and see it pass: a '
+                  'red one is fixed and committed first, never pushed for CI to find.')
+
+
+def cloud_brief(text, job, setting=None, product=None):
     """The brief a cloud session gets: the local brief, then the CLOUD block. ``setting``: the
-    block's opening lines for a runtime that is not a CI job (:mod:`asf.workers.remote`)."""
+    block's opening lines for a runtime that is not a CI job (:mod:`asf.workers.remote`).
+    ``product``: names its ``conventions.pre_push_check`` (:data:`CLOUD_PRE_PUSH`) when set."""
     sid = job.session or ''
     setting = list(setting) if setting else [
         'You run in a CI job, not on the factory host: build and test happen here, in this '
@@ -412,6 +421,7 @@ def cloud_brief(text, job, setting=None):
              '- Run the tests the brief names here, before you push.',
              '- A review file the brief says to leave uncommitted is committed here, with the '
              'report commit: off the factory host the branch is the only way back.',
+             *_pre_push_lines(product),
              f'- Your last act: one commit — `--allow-empty` only when there is nothing else to '
              f'commit — whose message is the subject `asf: report {job.name}`, then your REPORT '
              f'block as the body, then the trailers `{SESSION_TRAILER}: {sid}` and '
@@ -422,6 +432,17 @@ def cloud_brief(text, job, setting=None):
         from asf.workers import heartbeat
         lines[-1:] = heartbeat.brief_lines(job.name, sid, beat) + ['']
     return str(text or '').rstrip('\n') + '\n'.join(lines)
+
+
+def _pre_push_lines(product):
+    if product is None:
+        return []
+    from asf import approvals
+    try:
+        command = approvals.pre_push_check(product)
+    except Exception:  # noqa: BLE001 — no check readable: no line
+        command = None
+    return [CLOUD_PRE_PUSH.format(command=command)] if command else []
 
 
 # ---- status -----------------------------------------------------------------------------------

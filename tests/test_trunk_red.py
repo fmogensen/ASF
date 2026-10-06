@@ -757,3 +757,83 @@ class StallWaitsForFreshRuns(Fixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SameTestNotSameCheck(Fixture):
+    """Suspicion is by failing test when the logs name them: two unrelated landings red on one
+    job but on different tests fail differently — each its own red; the same test is the trunk's."""
+
+    def setUp(self):
+        super().setUp()
+        self.look(product=self.make(trunk_full_every_hours=0))
+
+    def see(self, key, n, files, tests, now):
+        trunk_red.observe(self.product, ['site'], key, [n], 'h' + key, self.tip, files, (),
+                          now=now, tests={'site': tests})
+
+    def test_different_failing_tests_are_not_one_trunk_break(self):
+        self.see('#1', 1, ['a.ts'], ['audit.spec.ts:164 link height'], NOW + 1)
+        self.see('#2', 2, ['b.ts'], ['checkout.spec.ts:20 total'], NOW + 2)
+        self.assertEqual(trunk_red.held(self.product, ['site']), {})
+
+    def test_the_same_failing_test_on_two_unrelated_prs_is_trunk_red(self):
+        self.see('#1', 1, ['a.ts'], ['audit.spec.ts:164 link height'], NOW + 1)
+        self.see('#2', 2, ['b.ts'], ['audit.spec.ts:164 link height'], NOW + 2)
+        self.assertEqual(trunk_red.held(self.product, ['site']), {'site': self.tip})
+
+
+class TrunkRunConfirms(Fixture):
+    """A red manual, schedule or push run of the trunk's workflow on its tip is the trunk's own red:
+    confirmed at once, one fix card, no landing blamed — even when the trunk's push CI shows green
+    because it skips the job (2026-10-05)."""
+
+    def red_run(self, event='workflow_dispatch', rid=777):
+        self.src.runs = [{'databaseId': rid, 'headSha': self.tip, 'status': 'completed',
+                          'conclusion': 'failure', 'event': event, 'createdAt': iso(NOW - 60),
+                          'url': f'https://x/runs/{rid}'}]
+        self.src.view = {'status': 'completed', 'conclusion': 'failure',
+                         'url': f'https://x/runs/{rid}',
+                         'jobs': [{'name': 'site', 'conclusion': 'failure', 'url': 'https://x/j'},
+                                  {'name': 'gate', 'conclusion': 'success', 'url': 'https://x/k'}]}
+
+    def tick(self, product, now):
+        with mock.patch.object(trunk_red, '_required', return_value=('site', 'gate')), \
+                mock.patch.object(flake, 'triage', side_effect=lambda *a, **k: (
+                    [c['name'] for c in a[4]], [])), \
+                mock.patch.object(trunk_red, '_findings', return_value={}), \
+                mock.patch.object(trunk_red, '_file', return_value='trunk-red-site.md') as filed:
+            self.look(now=now, product=product)
+        return filed
+
+    def test_a_manual_run_red_on_the_tip_confirms_trunk_red(self):
+        product = self.make(trunk_full_every_hours=0)
+        self.look(product=product)
+        self.red_run()
+        filed = self.tick(product, NOW + trunk_red.LIST_EVERY_S + 1)
+        self.assertEqual(trunk_red.held(product, ['site', 'gate']), {'site': self.tip})
+        self.assertEqual(filed.call_count, 1)
+        self.assertTrue(any('TRUNK RED site' in l and 'workflow_dispatch run' in l
+                            for l in self.lines), self.lines)
+        self.assertEqual(self.src.dispatches(), [])
+        # read once: the next look files nothing more
+        filed = self.tick(product, NOW + 3 * trunk_red.LIST_EVERY_S)
+        self.assertEqual(filed.call_count, 0)
+
+    def test_off_by_flag(self):
+        product = env.Product('sample', {
+            'repo_dir': self.repo, 'repo_slug': 'o/p', 'main': 'main',
+            'backlog_dir': self.record, 'ci': {'workflow': 'ci.yml'},
+            'conventions': {'landing': 'pull-request', 'merge': 'queue',
+                            'ci': {'trunk_full_every_hours': 0},
+                            'flags': {'trunk_red_trunk_runs': 'off'}}})
+        self.look(product=product)
+        self.red_run()
+        self.tick(product, NOW + trunk_red.LIST_EVERY_S + 1)
+        self.assertEqual(trunk_red.held(product, ['site']), {})
+
+    def test_a_pr_run_is_not_a_trunk_run(self):
+        product = self.make(trunk_full_every_hours=0)
+        self.look(product=product)
+        self.red_run(event='pull_request')
+        self.tick(product, NOW + trunk_red.LIST_EVERY_S + 1)
+        self.assertEqual(trunk_red.held(product, ['site']), {})

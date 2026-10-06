@@ -305,3 +305,52 @@ class CommandLineTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TouchedModules(unittest.TestCase):
+    """``--touched BASE``: the pre-push gate runs every test module the change touches, whole —
+    the changed test modules and the ones importing a changed source module — never the suite."""
+
+    def setUp(self):
+        self.runner = load_runner()
+        self.tmp = tempfile.mkdtemp(prefix='touched_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.tests = os.path.join(self.tmp, 'tests')
+        os.makedirs(self.tests)
+        files = {'__init__.py': '', 'test_00_home.py': GREEN, 'test_alpha.py': 'from pkg import alpha\n' + GREEN,
+                 'test_uses_beta.py': 'from pkg.sub import beta, gamma\n' + GREEN,
+                 'test_dotted.py': 'import pkg.sub.delta\n' + GREEN,
+                 'test_other.py': GREEN}
+        for name, text in files.items():
+            with open(os.path.join(self.tests, name), 'w', encoding='utf-8') as fh:
+                fh.write(text)
+
+    def test_a_source_change_names_the_modules_importing_it(self):
+        got = self.runner.touched_modules(self.tests, ['pkg/alpha.py', 'pkg/sub/beta.py',
+                                                       'pkg/sub/delta.py', 'README.md'])
+        self.assertEqual(got, ['test_alpha', 'test_dotted', 'test_uses_beta'])
+
+    def test_a_changed_test_module_is_itself_touched(self):
+        self.assertEqual(self.runner.touched_modules(self.tests, ['tests/test_other.py']),
+                         ['test_other'])
+        self.assertEqual(self.runner.touched_modules(self.tests, ['docs/x.md']), [])
+
+    def test_the_cli_runs_only_the_touched_modules(self):
+        def git(*a):
+            subprocess.run(['git', '-C', self.tmp, *a], check=True, capture_output=True,
+                           env=dict(os.environ, GIT_AUTHOR_NAME='a', GIT_AUTHOR_EMAIL='a@x',
+                                    GIT_COMMITTER_NAME='a', GIT_COMMITTER_EMAIL='a@x'))
+        git('init', '-q', '-b', 'main')
+        os.makedirs(os.path.join(self.tmp, 'pkg'))
+        with open(os.path.join(self.tmp, 'pkg', '__init__.py'), 'w') as fh:
+            fh.write('')
+        git('add', '-A')
+        git('commit', '-qm', 'base')
+        with open(os.path.join(self.tmp, 'pkg', 'alpha.py'), 'w') as fh:
+            fh.write('X = 1\n')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.runner.main(['--touched', 'main', '-s', self.tests, '--shards', '1'])
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertIn('1 touched module(s): test_alpha', buf.getvalue())
+        self.assertIn('(1 module(s)', buf.getvalue())
