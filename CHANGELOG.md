@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.168 — 2026-10-06
+
+### Features landed
+
+- The rail — one variable, one refusal at the one resolution git owns (#804)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.168"`
+
 ## v0.1.167 — 2026-10-06
 
 ### Features landed
