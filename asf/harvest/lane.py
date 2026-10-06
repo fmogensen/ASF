@@ -251,7 +251,7 @@ ITEM_ID_RE = re.compile(r'\b([A-Za-z]+-\d{4})\b')
 PR_ITEM_RE = re.compile(r'^PR-(\d+)$')
 ADJUDICATE_SUBJECT_RE = re.compile(r'^adjudicate\(')
 #: the correction kind a docs branch the product gate refuses goes back with: the feeder turns it
-#: into a STARVED → SPEC/PLAN session on that branch (R7)
+#: into a BACK → REBASE session on that branch (R7)
 LANDING_GATE = 'landing-gate'
 #: the correction kind of a push the repo's pre-push hook refused (T9 ``kind=hook``)
 HOOK = 'hook'
@@ -3608,7 +3608,7 @@ def rebuild_waits(lane, f):
 def send_back(lane, f, kind, text, files, rebase=True):
     """Hand a branch the gate refused (the trunk alone green) back to a session. Code: its
     session, a round (:func:`hold_with_correction`). Docs: a :data:`LANDING_GATE` correction,
-    which the feeder turns into a STARVED → SPEC/PLAN session on that branch (R7).
+    which the feeder turns into a BACK → REBASE session on that branch (R7).
 
     A ``conflict`` with the trunk is git's to settle first, never a session's (``rebase``, the
     default): the lane rebases the branch itself (:meth:`Lane.rebase_onto_trunk`) and, when it
@@ -3662,6 +3662,8 @@ def send_back(lane, f, kind, text, files, rebase=True):
         job = run.get('job') or b
         fields, line = lifecycle.hold(lane.path, dict(run, branch=b, job=job), LANDING_GATE, note,
                                       now_iso(), head=f.get('head'), main=lane.trunk)
+        if fields.get('correction'):
+            fields['correction']['why'] = 'conflict' if kind == 'conflict' else 'gate red'
         H.mark_session(lane.state_dir, job, **fields, branch=b)
         lane.out(line)
         lane.results[b] = 'held'

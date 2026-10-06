@@ -28,8 +28,13 @@ The row kinds::
                            end to end on ``conventions.branch_prefixes.direct`` (brief
                            ``direct``) — never a spec or plan row; its branch lands like any code
                            PR (PUSHED → REVIEW / LAND speak for it once pushed)
-    STARVED → SPEC         a spec in draft/review that no session is moving
-    STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved
+    STARVED → SPEC         a spec in draft/review that no session is moving — the unmoved
+                           document itself, never a refused landing (that is BACK → REBASE)
+    STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved —
+                           likewise the document itself, not a refused landing
+    BACK → REBASE          a spec or plan branch the lane sent BACK (landing-gate): rebase the
+                           approved document onto the trunk and land it as written — never a new
+                           spec or plan; the refusal's own cause (LANDING_WHY) names the row
     PUSHED → REVIEW        a Task/Bug whose lane state is REVIEW: a review session on its branch
                            (a state, not a correction — no round is spent)
     PUSHED → LAND          a Task/Bug in any other open lane state, or what would have been
@@ -115,6 +120,10 @@ SPEC_PLAN_KIND = 'spec-plan'
 DIRECT = 'direct'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
+#: the landing-gate row of a spec or plan branch the lane refused (:func:`correction_rows`): the
+#: branch is in lane state BACK and the answer is a rebase, not a new document. Not
+#: ``STARVED → SPEC``, which is a document nobody is writing (F-0226).
+BACK_REBASE = 'BACK → REBASE'
 #: a Feature with no Story may not be planned (``feeder.stories_before_plan``): its next step is a
 #: ``spec-amend`` session that derives the Stories from its spec, plan and landed Tasks
 NO_STORIES = 'NO STORIES → SPEC-AMEND'
@@ -125,9 +134,14 @@ PUSHED_LAND = 'PUSHED → LAND'
 APPROVED_LAND = 'APPROVED → LAND'
 #: the correction kind the lane writes when a docs branch turns the product's gate red on the
 #: trunk, or an approved spec cannot land as it stands (:func:`asf.harvest.lane.send_back`,
-#: :mod:`asf.tick.land_spec`): a STARVED → SPEC/PLAN session changes the document on its own
+#: :mod:`asf.tick.land_spec`): a BACK → REBASE session rebases and lands the document on its own
 #: branch, with the failing line in its brief (R7) — ``asf.harvest.lane.LANDING_GATE``
 LANDING_GATE = 'landing-gate'
+#: the causes a :data:`LANDING_GATE` correction may name in its ``why`` — the refusal that stopped
+#: the document, as one word the row and the brief print (F-0226). A correction written before
+#: this vocabulary existed carries none, and the row says nothing rather than guessing (D5).
+LANDING_WHY = ('conflict', 'gate red', 'more than documents', 'not a lane branch',
+               'nothing past the trunk', 'lane refusal', 'not on origin')
 PUSHED_REVIEW = 'PUSHED → REVIEW'
 WAITS_LANDING = 'WAITS ON landing'
 #: a correction already adjudicated at this same hold (B-0128): no session, no round, until the
@@ -186,12 +200,15 @@ BUILD_STAGES = ('plan-approved', 'building')
 #: the rows that start a new document — or a whole direct Feature: what the finish-first cap
 #: counts and holds
 NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD, REPLAN,
-                 NO_STORIES)
+                 NO_STORIES, BACK_REBASE)
 #: the session kinds (a run's brief kind) the finish-first cap counts as in flight
 NEW_DOC_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND, DIRECT, REPLAN_KIND)
 FINISH = 'WAITS ON finish'
-#: the rows that write a spec or a plan: what ``flags.plan_ahead`` meters (:func:`plan_ahead_cap`)
-SPEC_PLAN_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, NO_STORIES)
+#: the rows that write a spec or a plan: what ``flags.plan_ahead`` meters (:func:`plan_ahead_cap`).
+#: ``BACK_REBASE`` writes none — it lands the existing approved document — but it carries the
+#: same ``correction`` shape a refused ``STARVED_SPEC``/``STARVED_PLAN`` used to, and the cap
+#: counts a corrected row without holding it (F-0226): dropping it here would widen the cap.
+SPEC_PLAN_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, NO_STORIES, BACK_REBASE)
 #: the session kinds :func:`plan_ahead_cap` counts as spec/plan work already in flight
 SPEC_PLAN_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND)
 #: the action of a spec/plan row :func:`plan_ahead_cap` holds
@@ -201,7 +218,7 @@ WAITS_BUILD_SLOT = 'WAITS ON build slot'
 #: ``CORRECTION_ROUNDS``, and a correction is an answer the harvest asked for, not an attempt the
 #: factory chose), ``STALEMATE`` and ``GROOM → ADJUDICATE`` (already the adjudicate row).
 CAPPED_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, CONFLICT, STALE,
-                          NO_STORIES})
+                          NO_STORIES, BACK_REBASE})
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 PR_RE = re.compile(r'\bPR #\d+\b')
@@ -255,6 +272,9 @@ class Row:
     open_questions: tuple = ()
     #: a CONSOLE → AMEND row only: the ``writes:`` entry that reaches the amendable set
     amend: str = ''
+    #: a BACK → REBASE row only: the refusal that stopped the document (:data:`LANDING_WHY`),
+    #: '' when the correction does not name one — what the Action cell and the brief print
+    hold_why: str = ''
     #: a CONSOLE → AMEND row only: the ``writes:`` entries that do *not* reach the set — the
     #: ordinary code a bundled footprint drags to the console with it (F-0232)
     amend_outside: tuple = ()
@@ -1025,11 +1045,14 @@ def correction_rows(items, product, busy, corrections):
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
         rounds_cap = config_keys.value('harvest.round_cap', CORRECTION_ROUNDS)
         if doc in ('spec', 'plan') and same < rounds_cap:  # a document the gate refused
-            out.append(Row(tier=tier, kind=STARVED_SPEC if doc == 'spec' else STARVED_PLAN,
+            why = c.get('why') if c.get('why') in LANDING_WHY else ''
+            named = f'{c["kind"]}: {why}' if why else c['kind']
+            out.append(Row(tier=tier, kind=BACK_REBASE,
                            item_id=iid, feature_id=fid or iid, action=LAUNCH, brief_kind=doc,
-                           branch=branch, correction=c['text'],
-                           reason=f"the lane held it ({c['kind']}), round {rounds}: the {doc} "
-                                  f"cannot land as it stands"))
+                           branch=branch, correction=c['text'], hold_why=why,
+                           reason=f"the lane held {branch} ({named}), round {rounds}: rebase the "
+                                  f"approved {doc} onto origin/{trunk_of(product)} and land it "
+                                  f"as written — this is not a new {doc}"))
             continue
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch, items=items))
@@ -1671,7 +1694,7 @@ def land_doc_row(feature, product, occupancy, doc):
     is landed first — as written, never rewritten. Pushed and waiting (a PR open, a run the docs
     lane has not merged yet): PUSHED → LAND; else APPROVED → LAND, which launches nothing — the
     lane adopts the branch (:mod:`asf.tick.land_spec`) and lands it once green. A branch that
-    cannot land as it stands comes back as a STARVED → SPEC/PLAN session through its
+    cannot land as it stands comes back as a BACK → REBASE session through its
     :data:`LANDING_GATE` correction (:func:`correction_rows`)."""
     fid = feature['id']
     carrier = spec_carrier(feature) if doc == 'spec' else plan_carrier(feature)
@@ -1998,7 +2021,7 @@ def hold_unlanded(rows, items, landed_shas=None, product=None, on_trunk=None):
 #: the rows ``feeder.hold`` holds, per class it names: new work only — a review, a correction,
 #: an adjudicate, the groom and landing are never held
 HELD_KINDS = {'features': (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, SPEC_PLAN,
-                          DIRECT_BUILD, REPLAN),
+                          DIRECT_BUILD, REPLAN, BACK_REBASE),
               'bugs': (BUG_FIX,)}
 HOLD = 'WAITS ON hold'
 #: the ``waits_on`` of a row an Epic's spent budget holds (F-0052)

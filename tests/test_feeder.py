@@ -2640,10 +2640,66 @@ class FinishBeforeYouStart(unittest.TestCase):
         out = rows.plan_rows(idx, product(), [], 10, occupancy=occupancy)
         by = {r.item_id: r for r in out}
         self.assertTrue(by['F-0003'].launches)
-        self.assertEqual(by['F-0003'].kind, 'STARVED → SPEC')
+        self.assertEqual(by['F-0003'].kind, rows.BACK_REBASE)
         self.assertTrue(by['F-0001'].launches)
         self.assertEqual(by['F-0002'].waits_on, 'finish')
         self.assertIn('0 spec/plan in flight + 2 this wave', by['F-0002'].action)
+
+    def test_a_landing_gate_conflict_names_the_cause_in_the_row_and_the_why_line(self):
+        idx = finish_index(cards=3)
+        idx['items']['F-0003']['stage'] = 'spec-draft'
+        occupancy = {'corrections': {'F-0003': {'kind': rows.LANDING_GATE, 'text': 'gate red',
+                                                'rounds': 1, 'branch': 'spec/F-0003',
+                                                'why': 'conflict'}}}
+        out = rows.plan_rows(idx, product(), [], 10, occupancy=occupancy)
+        row = {r.item_id: r for r in out}['F-0003']
+        self.assertEqual((row.kind, row.brief_kind, row.branch, row.launches, row.hold_why),
+                         (rows.BACK_REBASE, 'spec', 'spec/F-0003', True, 'conflict'))
+        self.assertEqual(row.reason,
+                         "the lane held spec/F-0003 (landing-gate: conflict), round 1: rebase "
+                         "the approved spec onto origin/main and land it as written — this is "
+                         "not a new spec")
+
+    def test_a_landing_gate_correction_with_no_or_unknown_why_names_no_cause(self):
+        idx = finish_index(cards=3)
+        idx['items']['F-0003']['stage'] = 'spec-draft'
+        for why in (None, 'nonsense'):
+            with self.subTest(why=why):
+                corr = {'kind': rows.LANDING_GATE, 'text': 'gate red', 'rounds': 1,
+                       'branch': 'spec/F-0003'}
+                if why is not None:
+                    corr['why'] = why
+                occupancy = {'corrections': {'F-0003': corr}}
+                out = rows.plan_rows(idx, product(), [], 10, occupancy=occupancy)
+                row = {r.item_id: r for r in out}['F-0003']
+                self.assertEqual((row.kind, row.hold_why, row.launches),
+                                 (rows.BACK_REBASE, '', True))
+                self.assertEqual(row.reason,
+                                 "the lane held spec/F-0003 (landing-gate), round 1: rebase "
+                                 "the approved spec onto origin/main and land it as written — "
+                                 "this is not a new spec")
+
+    def test_feeder_hold_features_holds_the_back_rebase_row(self):
+        idx = finish_index(cards=3)
+        idx['items']['F-0003']['stage'] = 'spec-draft'
+        occupancy = {'corrections': {'F-0003': {'kind': rows.LANDING_GATE, 'text': 'gate red',
+                                                'rounds': 1, 'branch': 'spec/F-0003',
+                                                'why': 'conflict'}}}
+        p = product(feeder={'hold': ['features']})
+        out = rows.plan_rows(idx, p, [], 10, occupancy=occupancy)
+        row = {r.item_id: r for r in out}['F-0003']
+        self.assertEqual((row.action, row.launches), ('WAITS ON hold: features', False))
+
+    def test_the_attempt_cap_still_escalates_the_back_rebase_row(self):
+        idx = finish_index(cards=3)
+        idx['items']['F-0003']['stage'] = 'spec-draft'
+        occupancy = {'corrections': {'F-0003': {'kind': rows.LANDING_GATE, 'text': 'gate red',
+                                                'rounds': 1, 'branch': 'spec/F-0003',
+                                                'why': 'conflict'}}}
+        out = rows.plan_rows(idx, product(), [], 10, occupancy=occupancy,
+                             attempts={'F-0003': 3})
+        row = {r.item_id: r for r in out}['F-0003']
+        self.assertEqual(row.kind, rows.STALEMATE)
 
     def test_the_conventions_check_names_a_bad_cap(self):
         from asf import conventions
@@ -3009,7 +3065,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
                                         'brief_kind', 'branch', 'reason', 'waits_on',
                                         'correction', 'review_round', 'groom_date', 'groom_file',
-                                        'answers_file', 'open_questions', 'amend',
+                                        'answers_file', 'open_questions', 'amend', 'hold_why',
                                         'amend_outside', 'ruling'})
 
 

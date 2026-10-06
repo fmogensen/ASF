@@ -786,7 +786,8 @@ def _feeder_only(check):
 LANE_LAUNCH_KINDS = {
     'REVIEW': ('PUSHED → REVIEW',),
     'BACK': ('FIX → CORRECT', 'STARVED → SPEC', 'STARVED → PLAN', 'STALEMATE → ADJUDICATE',
-             'RESHAPE → PLAN', 'CONFLICT → REBASE', 'STALE → CLOSE', 'DELIVERY → CODE'),
+             'RESHAPE → PLAN', 'CONFLICT → REBASE', 'BACK → REBASE', 'STALE → CLOSE',
+             'DELIVERY → CODE'),
 }
 #: The occupancy fallback for a branch the lane has no record of: a busy or pushed item takes
 #: only its review; an item with a pending correction takes the BACK kinds.

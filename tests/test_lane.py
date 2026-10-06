@@ -5,7 +5,7 @@ The pure table first: one :func:`lane.next_state` test per transition of the pac
 MERGING intent) — no git, no ``gh``. Then the pieces that carry the machine: the lane state on
 the run line (R1), the in-process pass that stops at GATE and the detached gate pass that
 decides only the gate's outcomes (R2), the docs branch the gate refuses routed to a
-STARVED → SPEC/PLAN correction (R7), the docs-only trunk move that is not gated again (R25), a
+BACK → REBASE correction (R7), the docs-only trunk move that is not gated again (R25), a
 gate timeout that is unknown, never red (§12), the feeder reading the lane through the one
 occupancy answer (R16), and the ``NAME=value`` prefix of a test command (§12).
 """
@@ -603,7 +603,7 @@ class LaneRepo(LaneFixture):
         self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.MERGED)
         self.assertEqual(self.lane_of('worker/T-0002'), {})
 
-    def test_r7_a_docs_branch_the_gate_refuses_goes_back_to_a_starved_plan_session(self):
+    def test_r7_a_docs_branch_the_gate_refuses_goes_back_to_a_back_rebase_session(self):
         self.push_lane('plan/F-0001', {'plans/f-0001.md': 'uses retired_name\n'},
                        'plan(F-0001): the plan')
         self.session('plan-f-0001', 'F-0001', 'plan/F-0001', kind='plan')
@@ -615,13 +615,39 @@ class LaneRepo(LaneFixture):
         path = os.path.join(self.state_dir, 'sessions.jsonl')
         occ = lifecycle.occupancy(path)
         self.assertEqual(occ['corrections']['F-0001']['kind'], lane.LANDING_GATE)
+        self.assertEqual(occ['corrections']['F-0001']['why'], 'gate red')
         items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True,
                             'state': 'Active', 'stage': 'plan-draft'}}
         (row,) = [r for r in feeder_rows.candidates(items, self.product(), [], occupancy=occ)
                   if r.item_id == 'F-0001']
-        self.assertEqual((row.kind, row.brief_kind, row.branch, row.launches),
-                         (feeder_rows.STARVED_PLAN, 'plan', 'plan/F-0001', True))
+        self.assertEqual((row.kind, row.brief_kind, row.branch, row.launches, row.hold_why),
+                         (feeder_rows.BACK_REBASE, 'plan', 'plan/F-0001', True, 'gate red'))
         self.assertIn('retired_name', row.correction + '\n'.join(lines) or '')
+
+    def test_r7_a_docs_branch_that_conflicts_goes_back_with_the_conflict_cause(self):
+        self.push_lane('plan/F-0001', {'plans/f-0001.md': 'a\n'}, 'plan(F-0001): the plan')
+        self.session('plan-f-0001', 'F-0001', 'plan/F-0001', kind='plan')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        head = sh(['git', 'rev-parse', 'origin/plan/F-0001'], cwd=self.repo).stdout.strip()
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None)
+        f = {'branch': 'plan/F-0001', 'class': lane.DOCS, 'item': 'F-0001', 'head': head,
+            'run': {'job': 'plan-f-0001', 'item': 'F-0001', 'branch': 'plan/F-0001',
+                    'kind': 'plan'}}
+        # rebase=False: this is the conflict-cause write alone, not git's own rebase attempt
+        # (already covered by test_a_textual_conflict_goes_to_a_session_naming_the_files)
+        got = lane.send_back(ln, f, 'conflict', 'PR #7 merge refused — not mergeable', [],
+                             rebase=False)
+        self.assertEqual(got, 'held')
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        corr = lifecycle.corrections(path)['F-0001']
+        self.assertEqual(corr['kind'], lane.LANDING_GATE)
+        self.assertEqual(corr['why'], 'conflict')
+        occ = lifecycle.occupancy(path)
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True,
+                            'state': 'Active', 'stage': 'plan-draft'}}
+        (row,) = [r for r in feeder_rows.candidates(items, self.product(), [], occupancy=occ)
+                  if r.item_id == 'F-0001']
+        self.assertEqual((row.kind, row.hold_why), (feeder_rows.BACK_REBASE, 'conflict'))
 
     def _adjudicated(self, pushed_sha, status='done', blocked_on='none', review_commit=False,
                      launch_head=None, commits='none'):

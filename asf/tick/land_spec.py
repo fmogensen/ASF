@@ -12,9 +12,9 @@ adopts every such branch no run speaks for — through the lane (:meth:`asf.harv
   no pid) and lands it like any finished spec or plan branch, under the job ``land-spec-<id>`` or
   ``land-plan-<id>``.
 * Otherwise (it conflicts, it carries more than documents, or it is no lane branch at all): the
-  adopted run is BACK with a ``landing-gate`` correction, and the feeder hands it to a
-  STARVED → SPEC or STARVED → PLAN session that lands the existing approved document — never
-  rewrites it — on the lane's own branch.
+  adopted run is BACK with a ``landing-gate`` correction naming the refusal
+  (:data:`asf.feeder.rows.LANDING_WHY`), and the feeder hands it to a BACK → REBASE session that
+  lands the existing approved document — never rewrites it — on the lane's own branch.
 
 A branch whose latest run is live, pushed and waiting, held by an open lane state or still owes
 a correction is left alone: something already speaks for it.
@@ -66,27 +66,28 @@ def _git(repo, args):
 
 
 def why_not_as_is(product, branch, item):
-    """'' when ``origin/<branch>`` can land as it stands — a spec/plan lane branch, documents
-    only, straight commits naming ``item`` (harvest's lane refusal), merging into the trunk
-    without a conflict — else why not."""
+    """``('', '')`` when ``origin/<branch>`` can land as it stands — a spec/plan lane branch,
+    documents only, straight commits naming ``item`` (harvest's lane refusal), merging into the
+    trunk without a conflict — else ``(why, text)``: the refusal's name
+    (:data:`asf.feeder.rows.LANDING_WHY`) and why, in words."""
     from asf.harvest import lane
     conv, repo, trunk = product.conventions, product.repo_dir, product.main
     if _git(repo, ['rev-parse', '--verify', '-q', f'origin/{branch}']).returncode != 0:
-        return f'{branch} is not on origin'
+        return 'not on origin', f'{branch} is not on origin'
     if conv.branch_kind(branch) not in ('spec', 'plan'):
-        return f'{branch} is no spec/plan lane branch'
+        return 'not a lane branch', f'{branch} is no spec/plan lane branch'
     files = lane.touched_files(repo, trunk, branch)
     if not files:
-        return f'{branch} carries nothing past the trunk'
+        return 'nothing past the trunk', f'{branch} carries nothing past the trunk'
     if lane.landing_class(product, files) != lane.DOCS:
-        return f'{branch} changes more than documents'
+        return 'more than documents', f'{branch} changes more than documents'
     refusal = lane.lane_refusal(repo, trunk, branch, item)
     if refusal:
-        return f'{branch} is refused by the lane ({refusal[0]})'
+        return 'lane refusal', f'{branch} is refused by the lane ({refusal[0]})'
     merged = _git(repo, ['merge-tree', '--write-tree', f'origin/{trunk}', f'origin/{branch}'])
     if merged.returncode != 0:
-        return f'{branch} conflicts with the trunk'
-    return ''
+        return 'conflict', f'{branch} conflicts with the trunk'
+    return '', ''
 
 
 def adopt(product, items, now=None, out=print):
@@ -105,7 +106,7 @@ def adopt(product, items, now=None, out=print):
         if fid in owed or spoken_for(by_branch.get(carrier), path) \
                 or spoken_for(by_branch.get(lane), path):
             continue
-        why = why_not_as_is(product, carrier, fid)
+        why, detail = why_not_as_is(product, carrier, fid)
         job = f'{JOB_PREFIX if doc == "spec" else PLAN_JOB_PREFIX}{fid}'.lower()
         if not why:
             host.adopt(carrier, fid, doc, job=job)
@@ -113,12 +114,12 @@ def adopt(product, items, now=None, out=print):
         else:
             branch = carrier if product.conventions.branch_kind(carrier) == doc else lane
             text = (f'The {doc} for {fid} is approved but not on the trunk: it is on {carrier}, '
-                    f'and {why}. Land the existing approved {doc} on the trunk from {branch} — '
+                    f'and {detail}. Land the existing approved {doc} on the trunk from {branch} — '
                     f'bring it over from {carrier} as written, resolve what stops it merging, '
                     f"and don't rewrite it.")
             host.adopt(branch, fid, doc, job=job,
-                       correction={'kind': feeder_rows.LANDING_GATE, 'text': text})
+                       correction={'kind': feeder_rows.LANDING_GATE, 'text': text, 'why': why})
             out(f'land-{doc}: {fid} — approved {doc} on {carrier} cannot land as it stands '
-                f'({why}): a session lands it on {branch}')
-        done.append((fid, carrier, why))
+                f'({detail}): a session lands it on {branch}')
+        done.append((fid, carrier, detail))
     return done

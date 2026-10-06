@@ -3,7 +3,7 @@
 The lane pass adopts the spec's branch (:mod:`asf.tick.land_spec` through
 :meth:`asf.harvest.lane.Lane.adopt`): a documents-only lane branch that merges cleanly becomes a
 finished run the lane holds PUSHED and lands, with no session; one that cannot land as it stands
-is BACK with a ``landing-gate`` correction, which the feeder hands to a STARVED → SPEC session
+is BACK with a ``landing-gate`` correction, which the feeder hands to a BACK → REBASE session
 told to land the existing spec, not rewrite it."""
 import os
 import shutil
@@ -79,7 +79,7 @@ class LandTheApprovedSpec(unittest.TestCase):
         self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n",
                                      "decisions/0007-widgets.md": "the register\n"})
         product = self.declared("decisions/**")
-        self.assertEqual(land_spec.why_not_as_is(product, self.lane, "F-0001"), "")
+        self.assertEqual(land_spec.why_not_as_is(product, self.lane, "F-0001"), ("", ""))
         self.assertEqual(land_spec.adopt(product, self.items(self.lane), out=lambda *_a: None),
                          [("F-0001", self.lane, "")])
         self.assertEqual(self.runs()[self.lane]["lane"]["state"], "PUSHED")
@@ -89,14 +89,15 @@ class LandTheApprovedSpec(unittest.TestCase):
         self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n",
                                      "decisions/0007-widgets.md": "the register\n"})
         self.assertIn("more than documents",
-                      land_spec.why_not_as_is(self.product, self.lane, "F-0001"))
+                      land_spec.why_not_as_is(self.product, self.lane, "F-0001")[1])
 
     def test_a_declared_doc_path_never_carries_code_in_with_it(self):
         self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n",
                                      "decisions/0007-widgets.md": "the register\n",
                                      "src/a.py": "x = 1\n"})
         self.assertIn("more than documents",
-                      land_spec.why_not_as_is(self.declared("decisions/**"), self.lane, "F-0001"))
+                      land_spec.why_not_as_is(self.declared("decisions/**"), self.lane,
+                                              "F-0001")[1])
 
     def test_a_clean_docs_only_lane_branch_is_handed_to_the_docs_lane(self):
         self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n"})
@@ -126,11 +127,12 @@ class LandTheApprovedSpec(unittest.TestCase):
         path = pool_mod.sessions_path(self.product)
         corr = lifecycle.corrections(path)
         self.assertEqual(corr["F-0001"]["kind"], rows.LANDING_GATE)
+        self.assertEqual(corr["F-0001"]["why"], "conflict")
         self.assertEqual(self.runs()[self.lane]["lane"]["state"], "BACK")
         (row,) = rows.candidates({"items": self.items(self.lane)}, self.product, [],
                                  occupancy=lifecycle.occupancy(path))
-        self.assertEqual((row.kind, row.branch, row.launches),
-                         (rows.STARVED_SPEC, self.lane, True))
+        self.assertEqual((row.kind, row.branch, row.launches, row.hold_why),
+                         (rows.BACK_REBASE, self.lane, True, "conflict"))
         self.assertIn("don't rewrite it", row.correction)
 
     def test_a_spec_on_a_pre_lane_branch_is_landed_by_a_session_on_the_lane_branch(self):
@@ -140,7 +142,12 @@ class LandTheApprovedSpec(unittest.TestCase):
         self.assertIn("no spec/plan lane branch", done[2])
         corr = lifecycle.corrections(pool_mod.sessions_path(self.product))
         self.assertEqual(corr["F-0001"]["branch"], self.lane)
+        self.assertEqual(corr["F-0001"]["why"], "not a lane branch")
         self.assertIn("old/widgets", corr["F-0001"]["text"])
+
+    def test_why_not_as_is_names_a_branch_not_on_origin(self):
+        self.assertEqual(land_spec.why_not_as_is(self.product, "spec/F-9999", "F-0001")[0],
+                         "not on origin")
 
     def test_only_an_approved_spec_off_the_trunk_is_adopted(self):
         self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n"})
@@ -223,13 +230,14 @@ class LandTheApprovedPlan(unittest.TestCase):
         path = pool_mod.sessions_path(self.product)
         corr = lifecycle.corrections(path)
         self.assertEqual(corr["F-0001"]["kind"], rows.LANDING_GATE)
+        self.assertEqual(corr["F-0001"]["why"], "more than documents")
         self.assertIn("plan", corr["F-0001"]["text"])
         self.assertIn(self.lane, corr["F-0001"]["text"])
         self.assertEqual(self.runs()[self.lane]["lane"]["state"], "BACK")
         (row,) = rows.candidates({"items": self.items(self.lane)}, self.product, [],
                                  occupancy=lifecycle.occupancy(path))
-        self.assertEqual((row.kind, row.branch, row.launches),
-                         (rows.STARVED_PLAN, self.lane, True))
+        self.assertEqual((row.kind, row.branch, row.launches, row.hold_why),
+                         (rows.BACK_REBASE, self.lane, True, "more than documents"))
         self.assertIn("don't rewrite it", row.correction)
 
     def test_a_conflicting_branch_goes_to_a_session_that_lands_it_unrewritten(self):
@@ -240,6 +248,8 @@ class LandTheApprovedPlan(unittest.TestCase):
         (done,) = land_spec.adopt(self.product, self.items(self.lane), out=lambda *_a: None)
         self.assertIn("conflicts", done[2])
         self.assertEqual(self.runs()[self.lane]["lane"]["state"], "BACK")
+        corr = lifecycle.corrections(pool_mod.sessions_path(self.product))
+        self.assertEqual(corr["F-0001"]["why"], "conflict")
 
     def test_a_plan_on_a_pre_lane_branch_is_landed_by_a_session_on_the_lane_branch(self):
         self.push_branch("old/widgets", {"docs/plans/widgets.md": "# widgets\n"},
@@ -248,6 +258,7 @@ class LandTheApprovedPlan(unittest.TestCase):
         self.assertIn("no spec/plan lane branch", done[2])
         corr = lifecycle.corrections(pool_mod.sessions_path(self.product))
         self.assertEqual(corr["F-0001"]["branch"], self.lane)
+        self.assertEqual(corr["F-0001"]["why"], "not a lane branch")
         self.assertIn("old/widgets", corr["F-0001"]["text"])
 
     def test_a_spec_approved_feature_with_a_plan_off_the_trunk_yields_only_the_spec_triple(self):
@@ -284,6 +295,16 @@ class LandTheApprovedPlan(unittest.TestCase):
         self.assertEqual(sorted(done), sorted([("F-0001", self.lane, ""), ("F-0002", spec_lane, "")]))
         self.assertEqual(self.runs()[spec_lane]["job"], "land-spec-f-0002")
         self.assertEqual(self.runs()[self.lane]["job"], "land-plan-f-0001")
+
+
+class LandingWhyFence(unittest.TestCase):
+    def test_every_why_a_producer_writes_is_in_the_vocabulary(self):
+        """C6's fence: every token :func:`land_spec.why_not_as_is` can return, plus
+        :func:`asf.harvest.lane.send_back`'s two literals, is in :data:`rows.LANDING_WHY` — the
+        two writers cannot drift from the reader."""
+        producer_tokens = {'not on origin', 'not a lane branch', 'nothing past the trunk',
+                           'more than documents', 'lane refusal', 'conflict', 'gate red'}
+        self.assertTrue(producer_tokens <= set(rows.LANDING_WHY))
 
 
 if __name__ == "__main__":

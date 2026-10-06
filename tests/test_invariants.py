@@ -115,6 +115,22 @@ class R10I4OneLaunchPerBranchOfItsKind(unittest.TestCase):
         self.assertEqual(ids(invariants.check_i4(feeder(rows, occupancy=occ))),
                          [('I4', 'PLAN → CODE T-0001 @worker/T-0001')])
 
+    def test_r10_a_back_rebase_row_on_a_back_branch_is_legal(self):
+        lanes = {'plan/F-0001': {'state': 'BACK'}}
+        ok = [row('BACK → REBASE', 'F-0001', 'plan/F-0001', brief='plan')]
+        bad = [row('PUSHED → REVIEW', 'F-0001', 'plan/F-0001', brief='review')]
+        self.assertEqual(invariants.check_i4(feeder(ok, lanes=lanes)), [])
+        self.assertEqual(len(invariants.check_i4(feeder(bad, lanes=lanes))), 1)
+
+    def test_r10_a_back_rebase_row_is_legal_under_the_occupancy_corrections_fallback(self):
+        occ = {'busy': {}, 'waiting_landing': {},
+               'corrections': {'F-0001': {'kind': 'landing-gate', 'text': 'x', 'rounds': 1,
+                                          'branch': 'plan/F-0001'}}}
+        ok = [row('BACK → REBASE', 'F-0001', 'plan/F-0001', brief='plan')]
+        bad = [row('PUSHED → REVIEW', 'F-0001', 'plan/F-0001', brief='review')]
+        self.assertEqual(invariants.check_i4(feeder(ok, occupancy=occ)), [])
+        self.assertEqual(len(invariants.check_i4(feeder(bad, occupancy=occ))), 1)
+
 
 class I5NoCodeWithoutTheSpecOnTheTrunk(unittest.TestCase):
     def test_i5_a_coder_row_whose_spec_is_on_a_branch_is_dropped(self):

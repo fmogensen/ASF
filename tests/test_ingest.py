@@ -1275,10 +1275,10 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
             index = json.load(f)
         text = "Land the existing approved spec — don't rewrite it."
         corr = {'F-0001': {'kind': rows.LANDING_GATE, 'text': text, 'rounds': 0,
-                           'branch': 'spec/F-0001'}}
+                           'branch': 'spec/F-0001', 'why': 'conflict'}}
         out = rows.candidates(index, Product('sample', {}), [], occupancy=occ(corrections=corr))
-        self.assertEqual([(r.kind, r.branch, r.brief_kind, r.launches) for r in out],
-                         [(rows.STARVED_SPEC, 'spec/F-0001', 'spec', True)])
+        self.assertEqual([(r.kind, r.branch, r.brief_kind, r.launches, r.hold_why) for r in out],
+                         [(rows.BACK_REBASE, 'spec/F-0001', 'spec', True, 'conflict')])
         self.assertEqual(out[0].correction, text)
 
     def test_a_spec_on_the_trunk_is_what_lets_tasks_run(self):
