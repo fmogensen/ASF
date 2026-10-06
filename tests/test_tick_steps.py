@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import capacity, env
+from asf import budget, capacity, env
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
@@ -863,6 +863,102 @@ class WaveStep(StepsTestCase):
         self.assertIsNone(evs[0]['ci'])
         self.assertIsNone(evs[0]['ci_inflight'])
         self.assertIsNone(evs[0]['ci_bound_by'])
+
+
+class EpicOverBudgetWaveTests(StepsTestCase):
+    """F-0052 §2.4/§3.3: the wave raises one ``OVER BUDGET`` line per held Epic — derived from
+    the index, never from the plan, so it cannot go quiet on the tick with no free seat — and
+    records one ``budget_hold`` event per held Epic."""
+
+    def epic_items(self, epic_id='E-0001', budget_usd=500, spend_usd=600, feature_id='F-0001'):
+        return {
+            epic_id: {'id': epic_id, 'type': 'epic', 'title': 'an Epic', 'state': 'Active',
+                      'budget_usd': budget_usd, 'children': [feature_id]},
+            feature_id: {'id': feature_id, 'type': 'feature', 'title': 'sample',
+                        'folder': 'features', 'parent': epic_id, 'state': 'New',
+                        'cost': {'usd': spend_usd}},
+        }
+
+    def seed_index(self, items):
+        _git(['pull', '-q', 'origin', 'main'], self.operator)
+        with open(os.path.join(self.operator, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+        _git(['add', '-A'], self.operator)
+        _git(['-c', 'user.email=o@example.com', '-c', 'user.name=o', 'commit', '-q', '-m',
+              'budget fixture'], self.operator)
+        _git(['push', '-q', 'origin', 'HEAD:main'], self.operator)
+
+    def held_row(self, epic_id, feature_id, items):
+        """The already-held row the real feeder would hand the wave (Task 2), over the fixture's
+        own ``items`` — never hand-typed money text, so the fixture and the assertion can never
+        drift apart."""
+        launching = feeder_rows.Row(2, feeder_rows.CARD_SPEC, feature_id, feature_id,
+                                    f'would launch spec-{feature_id.lower()} (Opus)', 'spec',
+                                    f'spec/{feature_id}', 'ready')
+        return feeder_rows.over_budget_epics([launching], items)[0]
+
+    def over_budget_line(self, epic_id, items):
+        s = feeder_rows.epic_verdicts(items)[epic_id]
+        return budget.epic_line(s)
+
+    def test_one_held_epic_raises_one_line_before_its_rows_waits(self):
+        items = self.epic_items()
+        self.seed_index(items)
+        ctx = self.ctx()
+        row = self.held_row('E-0001', 'F-0001', items)
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: [row]):
+            step_wave.run(ctx, out=self.lines.append)
+        over = [i for i, ln in enumerate(self.lines) if ln.startswith('OVER BUDGET')]
+        waits = [i for i, ln in enumerate(self.lines)
+                if ln.startswith('waits    ') and 'F-0001' in ln]
+        self.assertEqual(over, [0], self.lines)
+        self.assertTrue(waits, self.lines)
+        self.assertLess(over[0], min(waits))
+        self.assertEqual(self.lines[over[0]], self.over_budget_line('E-0001', items))
+        evs = [e for e in self.events(ctx) if e['kind'] == 'budget_hold']
+        self.assertEqual(len(evs), 1)
+        self.assertEqual((evs[0]['item'], evs[0]['spend'], evs[0]['budget']),
+                         ('E-0001', 600, 500))
+        d = os.path.join(ctx.record_root(), 'metrics', 'events')
+        for name in sorted(os.listdir(d)):
+            with open(os.path.join(d, name)) as f:
+                for ln in f:
+                    if ln.strip():
+                        json.loads(ln)      # every line parses as one JSON object
+
+    def test_the_line_survives_zero_free_seats(self):
+        items = self.epic_items()
+        self.seed_index(items)
+        ctx = self.ctx()
+        row = self.held_row('E-0001', 'F-0001', items)
+        resolved = capacity.Resolved(sessions=0, sessions_bound='product', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={})
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: [row]), \
+                mock.patch.object(capacity, 'resolve', lambda *a, **kw: resolved):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(self.lines[0], self.over_budget_line('E-0001', items))
+
+    def test_an_epic_under_its_budget_prints_no_line_and_writes_no_event(self):
+        items = self.epic_items(spend_usd=499.99)
+        self.seed_index(items)
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertFalse([ln for ln in self.lines if ln.startswith('OVER BUDGET')], self.lines)
+        self.assertFalse([e for e in self.events(ctx) if e['kind'] == 'budget_hold'])
+
+    def test_two_held_epics_print_two_lines_in_id_order_and_write_one_event_each(self):
+        items = dict(self.epic_items('E-0001', 500, 600, 'F-0001'),
+                    **self.epic_items('E-0002', 100, 150, 'F-0002'))
+        self.seed_index(items)
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
+            step_wave.run(ctx, out=self.lines.append)
+        over = [ln for ln in self.lines if ln.startswith('OVER BUDGET')]
+        self.assertEqual(over, [self.over_budget_line('E-0001', items),
+                               self.over_budget_line('E-0002', items)])
+        evs = sorted(e['item'] for e in self.events(ctx) if e['kind'] == 'budget_hold')
+        self.assertEqual(evs, ['E-0001', 'E-0002'])
 
 
 class AGatedRowGivesItsSlotBack(StepsTestCase):

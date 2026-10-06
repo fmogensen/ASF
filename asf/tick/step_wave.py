@@ -64,7 +64,7 @@ import os
 import re
 import subprocess
 
-from asf import approvals, env
+from asf import approvals, budget, env
 from asf import tune as tune_mod
 from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
@@ -1072,6 +1072,11 @@ def launch(ctx, out=print):
                                        **dict(inputs, s1_first=False)), out)
     # the feeder check point: a violating row is dropped, logged, and its slot goes to the next
     planned, dropped = gated_plan(items, product, running, r.sessions + extra, inputs, out=out)
+    # the Epic's line comes from `items`, the tick's own overlaid index, not `planned` — so it
+    # cannot go quiet on the busy tick where it matters most (F-0052, D5)
+    for s in feeder_rows.epics_over_budget(items):
+        ctx.event('budget_hold', item=s.epic_id, spend=s.usd, budget=s.budget)
+        out(budget.epic_line(s))
     wider = (gated_plan(items, product, running, r.ceiling + extra, inputs, out=lambda _l: None,
                         exclude=set(dropped))[0]
              if r.ceiling is not None and r.ceiling != r.sessions else planned)
