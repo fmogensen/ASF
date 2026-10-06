@@ -12,7 +12,7 @@ from unittest import mock
 from asf import budget, env
 from asf.views import capacity as capacity_view
 from asf.views import index_reader as ix
-from asf.views import prod, roadmap, sessions, status
+from asf.views import board, prod, roadmap, sessions, status
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 
@@ -604,6 +604,63 @@ class ProdViewTests(ViewsTestCase):
         self.assertIn('**trunk**', text)
         self.assertEqual(prod._deploy_sha(self.product, 'prod'), (None, None))
         self.assertFalse(prod.deploy_configured(env.Product('p', {})))
+
+
+class RetirementRuleTests(ViewsTestCase):
+    """F-0172: a moved card is retired to the index reader too — ``removed:`` or ``moved_to:``,
+    one rule, pinned against ``asf.record.core.is_retired`` so the two can never disagree."""
+
+    def write(self, items):
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def test_the_index_readers_retirement_is_the_records(self):
+        from asf.record.core import is_retired
+        from asf.views import index_reader as ix
+        for meta in ({}, {'removed': 'superseded'}, {'moved_to': 'other:F-0009'},
+                     {'removed': 'moved', 'moved_to': 'other:F-0009'}):
+            entry = dict(meta, id='F-0001', type='feature', state='Active')
+            self.assertEqual(ix.retired(entry), is_retired(meta), meta)
+            self.assertEqual('F-0001' in ix.live({'F-0001': entry}), not is_retired(meta), meta)
+
+    def test_a_moved_feature_is_out_of_the_board(self):
+        self.write({
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'title': 'goal', 'folder': 'epics',
+                       'state': 'New', 'decided': True, 'rank': 1},
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'superseded',
+                       'folder': 'features', 'parent': 'E-0001', 'state': 'New', 'decided': True,
+                       'rank': 1, 'stage': 'plan-approved', 'removed': 'superseded by F-0009'},
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'title': 'elsewhere',
+                       'folder': 'features', 'parent': 'E-0001', 'state': 'Active',
+                       'decided': True, 'rank': 2, 'stage': 'building 1/3',
+                       'moved_to': 'other:F-0009'},
+            'F-0003': {'id': 'F-0003', 'type': 'feature', 'title': 'still here',
+                       'folder': 'features', 'parent': 'E-0001', 'state': 'Active',
+                       'decided': True, 'rank': 3, 'stage': 'card'},
+        })
+        text = board.render(self.root)
+        self.assertIn('1 Features', text)
+        self.assertNotIn('F-0002', text)
+        self.assertNotIn('F-0001', text)
+        self.assertIn('F-0003', text)
+
+    def test_a_moved_card_lands_in_the_right_retirement_set(self):
+        from asf.views import index_reader as ix
+        raw = {
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Closed',
+                       'moved_to': 'other:T-0010'},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'Active',
+                       'moved_to': 'other:T-0011'},
+            'T-0003': {'id': 'T-0003', 'type': 'task', 'state': 'Closed',
+                       'removed': 'superseded'},
+            'T-0004': {'id': 'T-0004', 'type': 'task', 'state': 'Active',
+                       'removed': 'groomed away'},
+            'T-0005': {'id': 'T-0005', 'type': 'task', 'state': 'Active'},
+        }
+        out = ix.live(raw)
+        self.assertEqual(set(out), {'T-0005'})
+        self.assertEqual(set(out.retired_done), {'T-0001', 'T-0003'})
+        self.assertEqual(set(out.retired_open), {'T-0002', 'T-0004'})
 
 
 if __name__ == '__main__':

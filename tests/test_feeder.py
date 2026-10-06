@@ -205,6 +205,58 @@ class AnAfterOnARemovedButLandedTaskIsLanded(unittest.TestCase):
         return root
 
 
+class AMovedCardIsRetiredTooTest(unittest.TestCase):
+    """F-0172: a ``moved_to:`` card is retired to the index reader exactly as a ``removed:`` one
+    is — out of every launch path, and read right by ``after:``."""
+
+    def moved_feature(self, **extra):
+        return dict({'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                     'stage': 'plan-approved', 'moved_to': 'other:F-0009',
+                     'links': {'plan': 'plan/F-0001'}, 'evidence': ['plan on plan/F-0001']},
+                    **extra)
+
+    def rows_for(self, feature):
+        idx = {'items': {'F-0001': feature}}
+        return [r for r in rows.candidates(idx, product(), []) if r.item_id == 'F-0001']
+
+    def test_a_moved_feature_is_handed_no_row(self):
+        f = self.moved_feature()
+        self.assertEqual(self.rows_for(f), [])
+        self.assertNotIn('F-0001', rows.items_of({'items': {'F-0001': f}}))
+
+    def test_an_absent_stage_on_a_moved_feature_launches_nothing(self):
+        f = self.moved_feature()
+        f.pop('stage')
+        self.assertEqual(self.rows_for(f), [])
+        self.assertEqual(self.rows_for(dict(f, size='s')), [])
+
+    def test_a_moved_feature_on_the_direct_lane_launches_nothing(self):
+        f = self.moved_feature(lane='direct')
+        self.assertEqual(self.rows_for(f), [])
+        self.assertEqual(self.rows_for(dict(f, stage='moved → other:F-0009')), [])
+
+    def test_a_moved_closed_card_still_counts_as_landed(self):
+        idx = {'items': {
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'decided': True, 'state': 'Closed',
+                       'moved_to': 'other:T-0010'},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'decided': True, 'state': 'Active',
+                       'moved_to': 'other:T-0011'}}}
+        items = rows.items_of(idx)
+        self.assertIn('T-0001', rows.landed_ids(items))
+        self.assertNotIn('T-0002', rows.landed_ids(items))
+
+    def test_an_after_on_a_moved_open_card_is_a_dead_edge(self):
+        idx = {'items': {
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'decided': True, 'state': 'Active',
+                       'moved_to': 'other:T-0010'},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'decided': True, 'state': 'New',
+                       'after': ['T-0001'], 'blockedBy': ['T-0001']}}}
+        items = rows.items_of(idx)
+        self.assertEqual(rows.after_of(items, items['T-0002']), [])
+        dead = rows.dead_after(items, items['T-0002'])
+        self.assertEqual([a for a, _why in dead], ['T-0001'])
+
+
 class NoRowLaunchesBehindAnUnlandedPredecessor(unittest.TestCase):
     """B-0080: `after:` held the PLAN → CODE row only; a held branch's correction and adjudicate
     rows launched anyway (on Opus) for an item that was not in dispute, only waiting."""
