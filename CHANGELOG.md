@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.206 — 2026-10-07
+
+### Features landed
+
+- 18 % of sessions end "dead pid" (threshold 10 %, 74 of 407 in 24h) (#894)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.206"`
+
 ## v0.1.205 — 2026-10-07
 
 ### Features landed
