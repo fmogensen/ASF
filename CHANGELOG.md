@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.138 — 2026-10-06
+
+### Features landed
+
+- ASF now acts on stale leftovers instead of only flagging them — a PR the lane holds STALE past 3 days is archived as `archive/pr-<n>` and closed, a Task stuck far behind the trunk is re-planned from the trunk, and removed or closed items no longer show rows in `asf next`. Every action is logged to `stale-acts.jsonl`. On ASF's own repo it acts by default; any other product only prints dry-run lines until you set `conventions.stale.act: true`. Run it by hand with `asf stale --act [--dry-run]` (#781)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.138"`
+
 ## v0.1.137 — 2026-10-06
 
 ### Bugs fixed
