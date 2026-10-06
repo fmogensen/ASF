@@ -1541,6 +1541,8 @@ def run(product_name):
         rows.append(('queue bypass', required, ok, detail))
     for required, ok, detail in check_queue_cancels(product):
         rows.append(('queue cancels', required, ok, detail))
+    for required, ok, detail in check_queue_pause(product):
+        rows.append(('queue pause', required, ok, detail))
     for required, ok, detail in check_trunk_ruleset(product):
         rows.append(('trunk ruleset', required, ok, detail))
     for required, ok, detail in check_trunk_stall(product):
@@ -1758,6 +1760,25 @@ def check_queue_cancels(product):
         return merge_queue.doctor_rows(product)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(True, None, f'cannot read the merge queue cancels — {e}')]
+
+
+def check_queue_pause(product):
+    """[(required, ok, detail)] — one ``warn`` row while ``merge_queue.inflight: 0`` pauses new
+    cuts (:func:`asf.merge_queue.paused`): the first-class pause for a pin move (#36) — batches
+    already in flight still land, a dead one is still dropped, only the next cut waits. No rows
+    otherwise (never red: a deliberate pause is not a defect)."""
+    from asf import merge_queue
+    conv = getattr(product, 'conventions', None)
+    if conv is None:
+        return []
+    try:
+        on = merge_queue.paused(conv)
+    except Exception as e:  # noqa: BLE001 — an unreadable convention is one unknown row
+        return [(False, None, f'cannot read merge_queue.inflight — {e}')]
+    if not on:
+        return []
+    return [(False, 'warn', 'merge_queue.inflight: 0 — no new batch is cut; batches already in '
+                            'flight still land, a dead one is still dropped')]
 
 
 def check_trunk_stall(product):

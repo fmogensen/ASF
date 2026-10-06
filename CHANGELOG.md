@@ -92,6 +92,12 @@ One entry per released version, newest first.
 
 `pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.177"`
 
+## Unreleased
+
+### Bugs fixed
+
+- `asf upgrade --product`'s drain no longer waits on a merge-queue batch that can never land — a required check already concluded red, cancelled, timed out or startup-failed at its exact sha counts as dead, even while its ref still exists on origin, and is logged "dead, ignored by the drain"; `merge_queue.inflight: 0` is now a first-class pause (cut no new batch, land what is in flight, drop what is dead), shown by `asf doctor`'s `queue pause` row, so a pin move never needs `conventions.protected_refs` on the batch prefix — which deadlocked refguard's own cleanup of a dead batch's ref (#35, #36, #34)
+
 ## v0.1.176 — 2026-10-06
 
 ### Features landed

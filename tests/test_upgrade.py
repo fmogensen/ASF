@@ -508,6 +508,97 @@ class DrainFirstTest(MoveCase):
         self.assertFalse(os.path.exists(upgrade.draining_path('alpha')))
 
 
+class DeadBatchTest(MoveCase):
+    """F-0035: a merge-queue batch whose required check concluded red at its exact sha can
+    never land there, whatever the chain still holds — the drain must not wait on it, even
+    while its ref still exists on origin."""
+
+    BATCH_SHA = 'd' * 40
+    #: bare job names — merge_queue's own matching (:func:`asf.merge_queue.verdict`,
+    #: ``deploy.job_key``) reads a required name as a job key already, never a matrix leg's
+    #: full ``name (leg)``, so these carry no parenthetical the way :data:`CHECKS` does
+    REQUIRED = ('unit', 'lint')
+
+    def write_alpha(self, checks=REQUIRED):
+        with open(env.product_path('alpha'), 'w', encoding='utf-8') as f:
+            f.write('product: alpha\nrepo_slug: o/alpha\nmain: main\nconventions:\n'
+                    f'  landing_checks: {list(checks)!r}\n')
+
+    def write_batch(self, sha=BATCH_SHA, ref='batch/1'):
+        os.makedirs(self.state(), exist_ok=True)
+        with open(self.state('merge-queue.json'), 'w', encoding='utf-8') as f:
+            json.dump({'batches': [{'ref': ref, 'sha': sha, 'members': []}]}, f)
+
+    def gh_checks(self, conclusions):
+        """A ``subprocess.run`` stub answering ``gh api .../check-runs`` for :data:`BATCH_SHA`
+        with one run per ``{name: conclusion}`` — the global ``subprocess.run`` the merge
+        queue's own ``gh`` reads resolve through (:mod:`asf.github`), never the ``run`` kwarg
+        ``upgrade.move`` takes for its own pipx/pgrep/ps/gh calls."""
+        def run(cmd, **_kw):
+            if cmd[:2] == ['gh', 'api'] and f'/commits/{self.BATCH_SHA}/check-runs' in cmd[2]:
+                runs = [{'id': i + 1, 'name': n, 'status': 'completed', 'conclusion': c}
+                        for i, (n, c) in enumerate(conclusions.items())]
+                return mock.Mock(returncode=0, stdout=json.dumps({'check_runs': runs}), stderr='')
+            return mock.Mock(returncode=1, stdout='', stderr='unexpected call')
+        return run
+
+    def test_a_red_concluded_batch_is_not_in_flight(self):
+        self.write_alpha()
+        self.write_batch()
+        run = self.gh_checks({'unit': 'success', 'lint': 'failure'})
+        with mock.patch('subprocess.run', side_effect=run):
+            self.assertEqual(upgrade.in_flight('alpha'), [])
+
+    def test_a_cancelled_or_timed_out_concluded_batch_is_dead_too(self):
+        """Wider than the queue's own judge: :data:`merge_queue.NONVERDICT` gives a cancelled or
+        timed-out check one more re-run before it recuts — a retry that needs a tick, and the
+        drain has none left once the clocks that would are the ones it is about to pause."""
+        for conclusion in ('cancelled', 'timed_out', 'startup_failure'):
+            self.write_alpha()
+            self.write_batch()
+            run = self.gh_checks({'unit': 'success', 'lint': conclusion})
+            with mock.patch('subprocess.run', side_effect=run):
+                self.assertEqual(upgrade.in_flight('alpha'), [], conclusion)
+
+    def test_a_pending_or_green_batch_stays_in_flight(self):
+        self.write_alpha()
+        self.write_batch()
+        run = self.gh_checks({'unit': 'success', 'lint': 'success'})
+        with mock.patch('subprocess.run', side_effect=run):
+            self.assertEqual(upgrade.in_flight('alpha'), ['batch/1'])
+
+    def test_an_unreadable_batch_is_never_assumed_dead(self):
+        self.write_alpha()
+        self.write_batch()
+
+        def refused(cmd, **_kw):
+            return mock.Mock(returncode=1, stdout='', stderr='rate limited')
+        with mock.patch('subprocess.run', side_effect=refused):
+            self.assertEqual(upgrade.in_flight('alpha'), ['batch/1'])
+
+    def test_no_product_file_is_never_assumed_dead(self):
+        """Unreadable: :func:`asf.env.load_product` has nothing to read for ``alpha`` in most of
+        this module's own fixtures (:class:`MoveCase`), so every one of them keeps counting a
+        batch as in flight exactly as before this fix — never silently loosened."""
+        self.write_batch()
+        self.assertEqual(upgrade.in_flight('alpha'), ['batch/1'])
+
+    def test_the_drain_logs_it_dead_and_proceeds_at_once_never_waiting(self):
+        self.write_alpha()
+        self.write_batch()
+        run = self.gh_checks({'unit': 'success', 'lint': 'failure'})
+        ops = FakeOps()
+        with mock.patch('subprocess.run', side_effect=run):
+            rc, out = self.move(FakeRun(self.venvs), ops, to=SHA, wait_s=30)
+        self.assertEqual(rc, 0, out)
+        text = '\n'.join(out)
+        self.assertIn('batch/1', text)
+        self.assertIn('dead, ignored by the drain', text)
+        self.assertIn('lint concluded red', text)
+        self.assertEqual(self.slept, [])          # never waited: the dead batch never counted
+        self.assertEqual([e[0] for e in ops.log][:2], ['pause', 'bootout'])
+
+
 class StalePauseTest(MoveCase):
     """A move killed outright (SIGKILL) never ran its resume: its pause records stay. The next
     move and ``asf scheduler status`` find them by the dead pid and lift them."""

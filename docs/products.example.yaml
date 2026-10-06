@@ -77,7 +77,13 @@ conventions:
   # merge_queue:
   #   ref_prefix: batch/
   #   batch_size: 3
-  #   inflight: 2
+  #   inflight: 2        # 0 pauses new cuts (the first-class way to hold the queue for a pin
+  #                       # move): the chain already in flight still lands, a batch that is
+  #                       # dead — a required check concluded red on it — is still dropped; only
+  #                       # the next cut waits. `asf doctor`'s `queue pause` row says so while it
+  #                       # holds. Never pause this way by adding the ref prefix to
+  #                       # conventions.protected_refs instead — that also refuses refguard's own
+  #                       # delete of a batch ref once it is dead, and the two deadlock.
   #   timeout_min: 360
   #   stuck_min: 90       # a batch pending this long with no run queued or in progress on its
   #                       # sha is re-run once, then cut again (a cancelled required check: at once)

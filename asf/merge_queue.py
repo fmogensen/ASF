@@ -237,12 +237,21 @@ IDENT = {'GIT_AUTHOR_NAME': 'asf merge queue', 'GIT_AUTHOR_EMAIL': 'asf-merge-qu
 
 def settings(conv):
     """``conventions.merge_queue`` over :data:`DEFAULTS`: a positive int per count, a non-empty
-    string prefix; anything else keeps its default (a scalar block is the doctor's finding)."""
+    string prefix; anything else keeps its default (a scalar block is the doctor's finding).
+
+    ``inflight`` alone also takes ``0``: the first-class pause for a pin move (#36, #34) — cut
+    no new batch (:func:`run`'s ``len(chain) >= st['inflight']`` holds at once), land what is
+    already in flight (the chain's own judging never reads ``inflight``), drop what is dead
+    (:func:`judge` on a red verdict, same as ever) — instead of the old
+    ``conventions.protected_refs: ['<batch prefix>*']`` workaround, which also refused refguard's
+    own cleanup of a dropped batch's ref (:func:`paused`)."""
     raw = conv.map_of('merge_queue') if hasattr(conv, 'map_of') else {}
     out = dict(DEFAULTS)
     for key in ('batch_size', 'inflight', 'timeout_min', 'stuck_min'):
         v = raw.get(key)
-        if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+        if not isinstance(v, int) or isinstance(v, bool):
+            continue
+        if v >= 1 or (key == 'inflight' and v == 0):
             out[key] = v
     prefix = raw.get('ref_prefix')
     if isinstance(prefix, str) and prefix.strip():
@@ -267,6 +276,14 @@ def settings(conv):
     if hold is False or str(hold).strip().lower() in ('off', 'false', 'no', '0'):
         out['hold_culprit'] = False
     return out
+
+
+def paused(conv):
+    """True under ``merge_queue.inflight: 0`` (:func:`settings`) — a pin move pauses new cuts
+    this way (``asf doctor``'s ``queue pause`` row, :func:`asf.doctor.check_queue_pause`), never
+    by adding the batch ref prefix to ``conventions.protected_refs`` (that also refuses
+    refguard's own delete of a dead batch's ref, #34 — the deadlock #36 fixes)."""
+    return settings(conv)['inflight'] == 0
 
 
 def load_culprits(state_dir):

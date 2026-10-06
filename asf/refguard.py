@@ -10,6 +10,11 @@ a write aimed at a branch.
 
 ``conventions.protected_refs``: a list of branch names or globs (``release/*``); unset is
 :data:`DEFAULT_PROTECTED_REFS`. The product's trunk is always protected, listed or not.
+
+Never list a merge-queue batch prefix here to pause new cuts for a pin move: it also refuses
+this guard's own delete of a batch ref once the queue judges that batch dead, so the two
+deadlock (#34, #36). ``merge_queue.inflight: 0`` (:func:`asf.merge_queue.paused`) is the
+first-class pause instead — it stops the cut, never the cleanup.
 """
 
 import fnmatch

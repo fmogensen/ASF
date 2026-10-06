@@ -903,13 +903,68 @@ def lift_stale_pauses(product_name, resume=None):
     return lines + list(resume(product_name, clocks) or ())
 
 
-def in_flight(product_name):
-    """The refs of ``product_name``'s merge-queue batches in flight, else ``[]``."""
+def _dead_batch_why(product_name, batch):
+    """Why merge-queue batch ``batch`` is dead — a required check concluded red at its exact
+    sha (:data:`RED_CONCLUSIONS`: failure, cancelled, timed out, startup failure) — else None.
+
+    Wider than the queue's own judge (:func:`asf.merge_queue.verdict`): its
+    :data:`asf.merge_queue.NONVERDICT` gives a cancelled or timed-out check one re-run before it
+    cuts the batch again — a retry that needs a tick to run it, and a drain has none left once
+    the clocks it would pause are the only ones that still could (#35). It can never land as
+    cut, whatever runs it again: nothing here asks for a re-run, only whether this sha already
+    answered red.
+
+    Unreadable (no product, no slug, no required names, no runs) is never dead — this narrows
+    what a drain counts as in flight; it never decides what the queue's own pass does with the
+    same batch."""
+    sha = batch.get('sha')
+    if not sha:
+        return None
+    try:
+        product = env.load_product(product_name)
+    except env.ConfigError:
+        return None
+    from asf.harvest import lane as lane_mod
+    slug = lane_mod.repo_slug(product)
+    if not slug:
+        return None
+    try:
+        required, _why = lane_mod.GitHubHost(product).merge_required(
+            env.state_dir(product_name), lane_mod.CODE, sha)
+    except Exception:  # noqa: BLE001 — unreadable: never assumed dead
+        return None
+    if not required:
+        return None
+    from asf import merge_queue
+    runs = merge_queue.batch_runs(slug, sha)
+    if runs is None:
+        return None
+    from asf.harvest import deploy
+    red = [name for name in required
+           if any(r.get('status') == 'completed' and r.get('conclusion') in RED_CONCLUSIONS
+                  for r in runs if deploy.job_key(r.get('name')) == name)]
+    return f"{', '.join(red)} concluded red at {sha[:9]}" if red else None
+
+
+def in_flight(product_name, out=None):
+    """The refs of ``product_name``'s merge-queue batches in flight, else ``[]`` — a dead batch
+    (:func:`_dead_batch_why`) never counts, even while its ref still holds on origin (#35): the
+    drain (``out``, its own) logs it ``dead, ignored by the drain`` and moves on; every other
+    reader (:func:`waiting`'s #25 check among them) stays silent and just gets the same, narrower
+    list."""
     state = os.path.join(env.ASF_HOME, 'state', product_name)
     if not os.path.exists(os.path.join(state, 'merge-queue.json')):
         return []
     from asf import merge_queue
-    return [b.get('ref') for b in merge_queue.load(state)['batches']]
+    live = []
+    for b in merge_queue.load(state)['batches']:
+        why = _dead_batch_why(product_name, b)
+        if why:
+            if out:
+                out(f"upgrade: {b.get('ref')} — dead, ignored by the drain ({why})")
+            continue
+        live.append(b.get('ref'))
+    return live
 
 
 def product_processes(product_name, run=subprocess.run, me=None, deadline=None):
@@ -1387,13 +1442,13 @@ def _drain_and_hold(product_name, sha, clocks, wait_s, by, run, out, sleep, ops,
             asked += step
 
     while True:
-        refs = in_flight(product_name)
+        refs = in_flight(product_name, out=out)
         if refs:
             out(f'upgrade: draining {product_name} — no new merge-queue cut; the clocks run until '
                 f'the batch(es) in flight land ({", ".join(refs)}), up to {int(left())}s')
         while refs and left() > 0:
             nap()
-            refs = in_flight(product_name)
+            refs = in_flight(product_name, out=out)
         if refs:
             out(f'upgrade: refused — the floor of {product_name} is still busy after '
                 f'{int(spent())}s; nothing paused, nothing moved:')
