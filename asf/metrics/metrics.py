@@ -675,6 +675,20 @@ def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None, rela
     note = ', '.join(f"{k} {v} ({_pct(v, total)} %)" for k, v in sorted(cancelled.items(), key=lambda x: (-x[1], x[0])) if v)
     rows.append(('runner-minutes', f"{total} ({total // 60} h) — useful {useful} %",
                  f"cancelled: {note or 'none'}" + (f" — {_pct(canc_total, total)} % of the minutes" if canc_total else '')))
+    bycause = collections.defaultdict(lambda: [0, collections.Counter()])
+    for r in ci:
+        for j in r['jobs']:
+            if j.get('cause') in ci_jobs.CAUSES:
+                bycause[j['cause']][0] += j['minutes']
+                bycause[j['cause']][1][j['name']] += 1
+    for cause in ci_jobs.CAUSES:
+        if cause not in bycause:
+            continue
+        minutes, names = bycause[cause]
+        n = sum(names.values())
+        rows.append((f'cancelled: {cause}', f"{minutes} min in {n} job{'s' if n != 1 else ''} "
+                     f"({_pct(minutes, total)} %)",
+                     ', '.join(f'{k} ×{v}' for k, v in names.most_common(3))))
     byjob = collections.defaultdict(lambda: [0, 0])
     sig = collections.Counter()
     for r in ci:
