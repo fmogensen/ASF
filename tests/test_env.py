@@ -165,23 +165,26 @@ class TestProductConventions(unittest.TestCase):
         self.assertEqual(p.groom['policies']['close_exact_duplicate'], 'off')
 
     def test_workflow_names_fold_into_conventions(self):
-        p = self.product({'ci': {'workflow': 'ci.yml', 'dev_job': 'test'},
+        p = self.product({'ci': {'workflow': 'ci.yml', 'workflows': ['lint.yml'], 'dev_job': 'test'},
                           'deploy_sha': {'workflow': 'deploy-prod.yml'}})
         self.assertEqual(p.conventions.ci_workflow, 'ci.yml')
+        self.assertEqual(p.conventions.ci_workflows, ['lint.yml'])
         self.assertEqual(p.conventions.ci_dev_job, 'test')
         self.assertEqual(p.conventions.deploy_workflow, 'deploy-prod.yml')
 
     def test_a_conventions_key_wins_over_the_fold(self):
-        p = self.product({'ci': {'workflow': 'ci.yml'},
+        p = self.product({'ci': {'workflow': 'ci.yml', 'workflows': ['lint.yml']},
                           'deploy_sha': {'workflow': 'deploy-prod.yml'},
-                          'conventions': {'ci_workflow': 'other.yml',
+                          'conventions': {'ci_workflow': 'other.yml', 'ci_workflows': ['other2.yml'],
                                           'deploy_workflow': 'other-deploy.yml'}})
         self.assertEqual(p.conventions.ci_workflow, 'other.yml')
+        self.assertEqual(p.conventions.ci_workflows, ['other2.yml'])
         self.assertEqual(p.conventions.deploy_workflow, 'other-deploy.yml')
 
     def test_ci_none_folds_nothing(self):
         p = self.product({'ci': 'none', 'deploy_sha': 'none'})
         self.assertIsNone(p.conventions.ci_workflow)
+        self.assertEqual(p.conventions.ci_workflows, [])
         self.assertIsNone(p.conventions.ci_dev_job)
         self.assertIsNone(p.conventions.deploy_workflow)
 

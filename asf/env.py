@@ -820,10 +820,11 @@ class Product:
     def conventions(self):
         """The product's :class:`asf.conventions.Conventions`, defaults filled in.
 
-        Built from the yaml's ``conventions:`` block, plus six values that live at the top
+        Built from the yaml's ``conventions:`` block, plus seven values that live at the top
         level of a product file because more than the conventions read them: ``main``,
-        ``stage_limits``, ``ci.test_command`` (the gate harvest runs), ``ci.workflow`` and
-        ``ci.dev_job`` (``ci_workflow``/``ci_dev_job``), and ``deploy_sha.workflow``
+        ``stage_limits``, ``ci.test_command`` (the gate harvest runs), ``ci.workflow``,
+        ``ci.workflows`` and ``ci.dev_job`` (``ci_workflow``/``ci_workflows``/``ci_dev_job``),
+        and ``deploy_sha.workflow``
         (``deploy_workflow``; ``ci.deploy_workflow`` is its read-only alias, read last). A
         ``conventions:`` key of the same name wins. Still answers
         ``.get()``/``[]``, so the callers that read it as a mapping — and an operator's extra
@@ -839,7 +840,8 @@ class Product:
             if test_command:
                 data.setdefault('test_command', test_command)
             if isinstance(ci, dict):
-                for src, dst in (('workflow', 'ci_workflow'), ('dev_job', 'ci_dev_job')):
+                for src, dst in (('workflow', 'ci_workflow'), ('dev_job', 'ci_dev_job'),
+                                 ('workflows', 'ci_workflows')):
                     if ci.get(src):
                         data.setdefault(dst, ci[src])
             deploy = self._get('deploy_sha')

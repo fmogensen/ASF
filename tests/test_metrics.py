@@ -225,6 +225,84 @@ class Schema(Base):
         self.assertIn('no rule matched', ev['item_reason'])
 
 
+class CiWorkflowSelection(Base):
+    """`ci_from_api` imports every workflow a pull request or the trunk runs, and a batch/queue
+    ref's own run, never only the one `conventions.ci_workflow` (or its stand-in default)
+    happens to name; a configured workflow is kept too, matched against a run's display name or
+    its file's basename. Two real defects this fixes: a product with no `ci.workflow` set made
+    the old filter look for a workflow named 'ci', which may match none of its runs; and the old
+    filter kept only that one workflow, so a second PR workflow's reds never entered the stream."""
+
+    CONV = Conventions.from_mapping({'branch_prefixes': {'batch': 'worktree-m-batch-'}})
+
+    def make_run(self, id_, name, branch, event=None, path=None, pr=(), conclusion='success',
+                created='2026-09-21T01:00:00Z', updated='2026-09-21T01:05:00Z', attempt=1):
+        return {'id': id_, 'name': name, 'path': path or f'.github/workflows/{name}.yml',
+                'event': event, 'head_branch': branch, 'head_sha': 'a' * 40, 'conclusion': conclusion,
+                'created_at': created, 'updated_at': updated, 'run_attempt': attempt, 'pr': list(pr)}
+
+    def fetch(self, runs, workflows='unrelated', jobs=None, conv=None):
+        jobs = jobs or {}
+
+        def fake(args, timeout=300):
+            joined = ' '.join(args)
+            if '/jobs' in joined:
+                run_id = int(joined.split('/runs/')[1].split('/')[0])
+                return jobs.get(run_id, []), True
+            return runs, True
+        with mock.patch.object(metrics, 'gh_lines_answered', side_effect=fake), \
+                mock.patch.object(metrics, 'pr_info', return_value=None):
+            return {e['run']: e for e in metrics.ci_from_api(
+                7, workflows, {}, self.items, repo_slug='sample/sample', conv=conv or self.CONV)}
+
+    def test_a_pull_request_run_enters_whatever_its_workflow_is_named(self):
+        evs = self.fetch([self.make_run(1, 'lint', 'cloud/x', event='pull_request', pr=[623])])
+        self.assertEqual(set(evs), {1})
+        self.assertEqual(evs[1]['workflow'], 'lint')
+
+    def test_a_trunk_run_enters_whatever_its_workflow_is_named(self):
+        evs = self.fetch([self.make_run(2, 'docs-check', 'main', event='push')])
+        self.assertEqual(set(evs), {2})
+
+    def test_a_batch_ref_run_enters_and_is_tagged_batch(self):
+        evs = self.fetch([self.make_run(3, 'docs-check', 'worktree-m-batch-20260921-0001', event='push')])
+        self.assertEqual(evs[3]['batch'], 'worktree-m-batch-20260921-0001')
+
+    def test_an_unrelated_run_is_dropped(self):
+        evs = self.fetch([self.make_run(4, 'docs-check', 'feature/x', event='workflow_dispatch')])
+        self.assertEqual(evs, {})
+
+    def test_a_configured_workflow_is_matched_by_display_name(self):
+        evs = self.fetch([self.make_run(5, 'Tests', 'feature/x', event='workflow_dispatch',
+                                   path='.github/workflows/tests.yml')], workflows='Tests')
+        self.assertEqual(set(evs), {5})
+
+    def test_a_configured_workflow_is_matched_by_file_name_too(self):
+        # the display name differs from the configured file name — today's single-name filter
+        # (a bare `==`) discards this row; the fix matches either form
+        evs = self.fetch([self.make_run(6, 'Tests', 'feature/y', event='workflow_dispatch',
+                                   path='.github/workflows/tests.yml')], workflows='tests.yml')
+        self.assertEqual(set(evs), {6})
+
+    def test_a_configured_list_is_matched_too(self):
+        evs = self.fetch([self.make_run(7, 'release', 'feature/z', event='workflow_dispatch')],
+                         workflows=['other', 'release'])
+        self.assertEqual(set(evs), {7})
+
+    def test_every_workflow_is_recorded_on_its_own_run(self):
+        evs = self.fetch([self.make_run(8, 'lint', 'cloud/x', event='pull_request', pr=[623]),
+                          self.make_run(9, 'tests', 'cloud/x', event='pull_request', pr=[623])])
+        self.assertEqual({evs[8]['workflow'], evs[9]['workflow']}, {'lint', 'tests'})
+
+    def test_superseded_is_scoped_to_its_own_workflow(self):
+        # a later run of a DIFFERENT PR workflow on the same branch never supersedes this one
+        evs = self.fetch([self.make_run(10, 'lint', 'cloud/x', event='pull_request', pr=[623],
+                                   conclusion='cancelled', created='2026-09-21T01:00:00Z'),
+                          self.make_run(11, 'tests', 'cloud/x', event='pull_request', pr=[623],
+                                  created='2026-09-21T02:00:00Z')])
+        self.assertFalse(evs[10]['superseded'])
+
+
 class JobCauseImport(Base):
     RUNS = [{'id': 10, 'name': 'ci', 'head_branch': 'cloud/x', 'head_sha': 'a' * 40, 'conclusion': 'cancelled',
              'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:30:00Z', 'run_attempt': 1, 'pr': []},
@@ -1571,9 +1649,9 @@ class CollectingPass(Base):
         self.assertIn('created=%3E%3D2026-09-16', calls[0][1])          # 14 days back from 09-29
         self.assertIn('reached back 14d', out)
 
-    def test_an_empty_stream_asks_for_the_floor_and_calls_it_no_gap(self):
+    def test_a_true_first_run_asks_for_seven_days_not_the_catch_up_floor(self):
         _rc, out, calls = self.backfill([], self.host([]), today='2026-09-29')
-        self.assertIn('created=%3E%3D2026-09-16', calls[0][1])
+        self.assertIn('created=%3E%3D2026-09-23', calls[0][1])          # 7 days back from 09-29
         self.assertNotIn('reached back', out)
 
     def test_days_still_overrides_the_watermark(self):
@@ -1629,7 +1707,7 @@ class CollectingPass(Base):
         self.assertEqual(calls2, [])    # PD7: a falsy repo_slug never reaches gh
 
         _rc, out3, _calls3 = self.backfill(['--days', '10'], self.host([]), today='2026-09-29')
-        self.assertIn("no run of workflow 'ci' in the window", out3)
+        self.assertIn('no PR, trunk or batch run in the window', out3)
 
         lines = {self.ci_lines(out1)[0], self.ci_lines(out2)[0], self.ci_lines(out3)[0]}
         self.assertEqual(len(lines), 3)   # no two of the three print the same string

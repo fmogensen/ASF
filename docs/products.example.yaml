@@ -325,6 +325,13 @@ ci:
   # read as conventions.ci_workflow — the workflow whose runs on the trunk are the green
   # evidence.
   workflow: ci.yml
+  # read as conventions.ci_workflows — more workflows the metrics backfill always keeps,
+  # matched against a run's display name or its file's basename. Unset (the default): every
+  # workflow a pull request or the trunk itself runs, and a merge queue's own batch/cut runs,
+  # already enter the `ci` stream on their branch or trigger alone — this is only for a
+  # workflow neither of those reaches (one dispatched by hand, say) that the product still
+  # wants read for its reds and its PR-CI targets.
+  # workflows: [tests.yml, lint]
   # read as conventions.ci_dev_job — the job in that workflow whose success marks the dev sha.
   dev_job: test
   budgets:

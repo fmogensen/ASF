@@ -41,12 +41,16 @@ class DefaultsTests(unittest.TestCase):
             self.assertIsNone(getattr(c, name), name)
         for name in new_fields:
             self.assertIn(name, Conventions.field_names())
+        self.assertEqual(c.ci_workflows, [])
+        self.assertIn('ci_workflows', Conventions.field_names())
 
     def test_two_instances_do_not_share_their_mutable_defaults(self):
         a, b = Conventions(), Conventions()
         a.branch_prefixes['code'] = 'feature/'
         a.stage_limits['spec'] = 4
+        a.ci_workflows.append('lint.yml')
         self.assertEqual(b.branch_prefixes['code'], 'worker/')
+        self.assertEqual(b.ci_workflows, [])
         self.assertEqual(b.stage_limits, {})
 
 

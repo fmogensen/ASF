@@ -43,9 +43,13 @@ STREAMS = ('ci', 'sessions', 'ticks', 'landings', 'gates')
 #: The `evidence.feature_stage` token for "reached production" — the card's prose says
 #: "on-production", the record says `on-prod` (F-0044 §1.1).
 ON_PROD_STAGE = 'on-prod'
-#: How far back one collecting pass reaches when the record gives it no watermark, or when the
-#: watermark is older than that (D2). A gap longer than this is skipped — and said out loud.
+#: How far back one collecting pass reaches when the watermark it holds is older than that (D2).
+#: A gap longer than this is skipped — and said out loud.
 CI_CATCH_UP_DAYS = 14
+#: How far back the very first pass reaches when the record holds no watermark at all — shorter
+#: than the catch-up floor above, so a product's first backfill seeds a week of CI reds and
+#: PR-CI targets rather than a month.
+CI_FIRST_RUN_DAYS = 7
 #: The sessions half of `cmd_backfill`'s own window — unrelated to the CI watermark above (F-0175
 #: PD1): the tick has always asked for one day of sessions, and `--days N` overrides it exactly
 #: as it overrides the CI window, but neither is derived from the other.
@@ -2112,14 +2116,15 @@ def ci_window(root, conv, days=None, day=None):
     is the only day the stream may hold partially and `append_event`'s first-write-wins makes the
     overlap free — unless that day is more than `CI_CATCH_UP_DAYS` before `day or today()`, in
     which case the floor day is used instead and `floored` is `True`. No watermark at all is a
-    first pass, not a skipped gap: the floor day, `floored=False`."""
+    first pass, not a skipped gap: `CI_FIRST_RUN_DAYS` back, `floored=False` — short of the
+    catch-up floor, so a brand-new record does not open by fetching a month of history."""
     anchor = day or today()
     if days is not None:
         return days_back(anchor, days)[0], False
     floor_day = days_back(anchor, CI_CATCH_UP_DAYS)[0]
     watermark = ci_watermark(root, conv)
     if watermark is None:
-        return floor_day, False
+        return days_back(anchor, CI_FIRST_RUN_DAYS)[0], False
     if watermark < floor_day:
         return floor_day, True
     return watermark, False
@@ -2163,21 +2168,46 @@ def _limit_of(name, limits):
     return ci_pool.DEFAULT_JOB_TIMEOUT_MIN
 
 
-def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, conv=None,
+#: trigger events a pull request's own checks run under — the host's word for "this is a PR
+#: run", never a workflow's name (``pull_request_target`` is a fork PR's variant of the same).
+PR_EVENTS = ('pull_request', 'pull_request_target')
+
+
+def _relevant_run(r, conv, workflows):
+    """Whether a run belongs in the `ci` stream: every run of *any* workflow that fires on a
+    pull request, lands on the trunk, or is cut to a batch/queue ref (`conv.branch_kind` — the
+    merge queue's own cut) — the host's own trigger and the run's branch say so, never a
+    workflow's name, so a product with several PR workflows (lint beside the suite, say) gets
+    every one of them and a product with no `ci.workflow` configured is never read as naming a
+    workflow that happens to match none of its runs. `workflows` (`conventions.ci_workflow` and
+    `.ci_workflows`) is kept too, matched against a run's display name *or* its workflow file's
+    basename (either form the config may hold) — a way in for a workflow on neither the trunk
+    nor a pull request that the product still wants read."""
+    branch = r.get('head_branch') or ''
+    if r.get('event') in PR_EVENTS or conv.is_trunk(branch) or conv.branch_kind(branch) == 'batch':
+        return True
+    name, base = r.get('name') or '', os.path.basename(r.get('path') or '')
+    return any(w and w in (name, base) for w in workflows)
+
+
+def ci_from_api(days, workflows, batch_prs, items, repo_slug=None, product=None, conv=None,
                 since=None, held=(), report=None, limits=None):
     """Finished CI runs since `since` (or the last `days` days when `since` is None), with their
     jobs, as validated events (not yet appended) — except a run already in `held` (`(run,
     attempt)` pairs the stream already holds, D4), whose jobs and PR info are not re-fetched. A
     run on a branch under the product's `batch` prefix (a merge queue's cut) carries that branch
-    as its `batch`; a product with no such prefix has no batch runs.
+    as its `batch`; a product with no such prefix has no batch runs. `workflows` is a workflow
+    name/file (or a list of them) kept beside the generic selection (:func:`_relevant_run`); a
+    bare string is one.
 
     `report`, when a dict, is filled with `{'since', 'listed', 'held', 'fetched', 'answered'}` —
     `answered` is `None` when the product names no `repo_slug` (no `gh` call is made at all,
     PD7), `False` when the host did not answer, `True` otherwise; `listed` and `held` count the
-    listing after the workflow filter."""
+    listing after the selection."""
     repo_slug = _repo_slug(repo_slug, product)
     conv = conv or DEFAULTS
     since = since or days_back(today(), days)[0]
+    workflows = [workflows] if isinstance(workflows, str) else list(workflows or ())
     if not repo_slug:
         if report is not None:
             report.update(since=since, listed=0, held=0, fetched=0, answered=None)
@@ -2185,12 +2215,14 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
     runs, answered = gh_lines_answered(
         ['api', f'repos/{repo_slug}/actions/runs?created=%3E%3D{since}&status=completed&per_page=100',
          '--paginate', '--jq',
-         '.workflow_runs[]|{id,name,head_branch,head_sha,conclusion,created_at,updated_at,'
+         '.workflow_runs[]|{id,name,path,event,head_branch,head_sha,conclusion,created_at,updated_at,'
          'run_attempt,pr:[.pull_requests[].number]}|@json'])
-    runs = [r for r in runs if r.get('name') == workflow]
+    runs = [r for r in runs if _relevant_run(r, conv, workflows)]
+    # keyed by (branch, workflow): a later run of a *different* PR workflow on the same branch
+    # never supersedes this one — only a later run of its own workflow does
     by_branch = collections.defaultdict(list)
     for r in runs:
-        by_branch[r['head_branch']].append(r['created_at'])
+        by_branch[(r['head_branch'], r['name'])].append(r['created_at'])
     fresh = [r for r in runs if (r['id'], r.get('run_attempt') or 1) not in held]
 
     def jobs_of(r):
@@ -2218,7 +2250,8 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
         branch = r['head_branch'] or ''
         prs = r['pr'][0] if r['pr'] else None
         batch = branch if conv.branch_kind(branch) == 'batch' else None
-        superseded = r.get('conclusion') == 'cancelled' and any(c > r['created_at'] for c in by_branch[branch])
+        superseded = r.get('conclusion') == 'cancelled' and any(
+            c > r['created_at'] for c in by_branch[(branch, r['name'])])
         for j in js:                       # the cause needs every row of the run, so: a second pass
             j['cause'] = ci_jobs.cancel_cause(j, js, r.get('conclusion') or 'unknown', superseded)
         hints = {}
@@ -2271,7 +2304,9 @@ def cmd_backfill(args, root):
         held = ci_runs_held(root, days_back(today(), held_span))
         report = {}
         ci_appended = 0
-        for ev in ci_from_api(args.days, args.workflow, {}, items, product=product, conv=conv,
+        workflows = ([args.workflow] if args.workflow else []) + [
+            w for w in (getattr(conv, 'ci_workflows', None) or ()) if w != args.workflow]
+        for ev in ci_from_api(args.days, workflows, {}, items, product=product, conv=conv,
                              since=ci_since, held=held, report=report):
             if put('ci', ev) == 'appended':
                 ci_appended += 1
@@ -2283,7 +2318,7 @@ def cmd_backfill(args, root):
         elif report['answered'] is False:
             print(f"ci: {ci_since}..{today()} — the host did not answer (gh){tail}")
         elif report['listed'] == 0:
-            print(f"ci: {ci_since}..{today()} — no run of workflow '{args.workflow}' in the window{tail}")
+            print(f"ci: {ci_since}..{today()} — no PR, trunk or batch run in the window{tail}")
         else:
             print(f"ci: {ci_since}..{today()} — listed {report['listed']}, held {report['held']}, "
                   f"fetched {report['fetched']}, appended {ci_appended}{tail}")
