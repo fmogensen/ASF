@@ -74,11 +74,24 @@ ACCOUNT_HOOKS = tuple((event, name) for name, events in BUILTIN.items() for even
 GIT_HOOK_NAMES = ('pre-commit', 'pre-push')
 
 
+class HookDirOutsideConfine(RuntimeError):
+    """:func:`git_hooks_dir` resolved a hooks directory outside :data:`asf.hermetic.HOOKS_CONFINE`.
+
+    Raised only when that variable is set — the suite, never an operator install (F-0143). It is
+    raised rather than returned as None because None already means *not a git repo*: a caller would
+    report ``is not a git repo`` for a repo that plainly is, and a caller that only reads the
+    directory would not notice at all (D3)."""
+
+
 def git_hooks_dir(repo):
     """``git -C <repo> rev-parse --git-path hooks``, made absolute — the real hooks directory of
     ``repo`` whether or not ``core.hooksPath`` is set, and shared by every worktree of ``repo``
     (git resolves it against the common ``.git`` dir, not the worktree's own). ``None`` when
-    ``repo`` is not a directory, or not a git repo — a caller reports that, it never raises."""
+    ``repo`` is not a directory, or not a git repo — a caller reports that, it never raises.
+
+    Raises :class:`HookDirOutsideConfine` when :data:`asf.hermetic.HOOKS_CONFINE` is set and the
+    answer falls outside it — the suite only — except for ``os.devnull``, which is always let
+    through."""
     if not repo or not os.path.isdir(repo):
         return None
     # a GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE inherited from a git hook (a suite run from a
@@ -91,7 +104,21 @@ def git_hooks_dir(repo):
     if p.returncode != 0:
         return None
     out = p.stdout.strip()
-    return out if os.path.isabs(out) else os.path.join(repo, out)
+    out = out if os.path.isabs(out) else os.path.join(repo, out)
+    # F-0143: under the suite's confine, a hooks dir that resolves outside the temp root is the
+    # defect review-b-0111 was — a fixture's hook in a directory another session's commit runs.
+    # git answers here, not the caller: `core.hooksPath` can point anywhere, so the repo being a
+    # temp one is not enough. The offending test fails at its own line, with all three paths.
+    # os.devnull is exempt and is not a hole: a fixture sets `core.hooksPath=/dev/null` to mean
+    # "this repo runs no hooks" (tests/gitfixture.py:_disable_hooks, B-0073), git answers with it,
+    # and no hook file can ever exist under a character device — ENOTDIR, not a directory.
+    confine = hermetic.hooks_confine()
+    if confine and out != os.devnull and not os.path.realpath(out).startswith(confine + os.sep):
+        raise HookDirOutsideConfine(
+            f'{out} is outside {confine} — git resolved it for {repo}. A test installs hooks only '
+            f'into its own git-init\'d temp repo: a hook left anywhere else is run by every commit '
+            f'in that repo (review-b-0111). See tests/gitfixture.py:executable_asf.')
+    return out
 
 
 def _git_hook_body(name, asf_path, product_name):
