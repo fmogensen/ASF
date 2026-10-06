@@ -18,7 +18,7 @@ def _version():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if os.path.exists(os.path.join(root, '.git')):
         try:
-            p = subprocess.run(['git', '-C', root, 'describe', '--tags', '--match', 'v[0-9]*'],  # client-exempt: the package version, read before any client module can import
+            p = subprocess.run(['git', '-C', root, 'describe', '--tags', '--match', 'v[0-9]*', '--exclude', '*-*'],  # client-exempt: the package version, read before any client module can import
                                capture_output=True, text=True, timeout=5)
             if p.returncode == 0 and version.DESCRIBE_RE.match(p.stdout.strip()):
                 return version.pep440(p.stdout.strip())

@@ -32,6 +32,10 @@ class TemplateTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertEqual(_load(filename).get('labels'), ['feedback', label])
 
+    def test_the_three_forms_are_a_bug_an_install_problem_and_a_feature_request(self):
+        self.assertEqual(sorted(_load(f).get('name') for f in FORMS),
+                         ['Bug report', 'Feature request', 'Install problem'])
+
     def test_blank_issues_are_off(self):
         self.assertIs(_load('config.yml').get('blank_issues_enabled'), False)
 

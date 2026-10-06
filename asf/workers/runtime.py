@@ -686,13 +686,25 @@ class Runtime:
 class FakeRuntime(Runtime):
     """Replays scripted results in order: each is a dict ``{"ok": bool, "result": str,
     "pid": int, "running": bool}``. ``running`` leaves the log without a result line (a session
-    still going). Every call is kept in ``calls`` as ``(job, brief_text)``."""
+    still going). Every call is kept in ``calls`` as ``(job, brief_text)``.
+
+    The script may instead be ``{"results": [...], "jobs": {"<job glob>": step}}``: a job whose
+    name matches a glob replays that step (every time, so each tick's fresh runtime gives the
+    same session the same answer), any other job the next of ``results``. A step's ``writes``
+    (``[{"path", "text", "subject"}]``) are committed in the job's worktree and its branch pushed
+    — a stub session that does the work, so a scripted run can land a Task with no agent.
+    ``{item}`` (``{item_lower}``) in a write's path, text or subject is the card id the job's
+    name ends with."""
     name = 'fake'
 
     def __init__(self, script=None, path=None):
         if path:
             with open(path, encoding='utf-8') as f:
                 script = json.load(f)
+        self.jobs = {}
+        if isinstance(script, dict):
+            self.jobs = dict(script.get('jobs') or {})
+            script = script.get('results')
         self.script = list(script or [])
         self.calls = []
         self._next_pid = 90000
@@ -714,8 +726,17 @@ class FakeRuntime(Runtime):
         self.calls.append((job, text))
         return self._replay(job)
 
+    def _step(self, job):
+        import fnmatch
+        for pattern, step in self.jobs.items():
+            if fnmatch.fnmatchcase(job.name, pattern):
+                return dict(step)
+        return self.script.pop(0) if self.script else {'ok': True, 'result': 'done'}
+
     def _replay(self, job):
-        step = self.script.pop(0) if self.script else {'ok': True, 'result': 'done'}
+        step = self._step(job)
+        if step.get('writes') and not step.get('running'):
+            stub_writes(job, step['writes'])
         self._next_pid += 1
         pid = step.get('pid', self._next_pid)
         log_path = job.log_path or job_log_path(job.product, job.name)
@@ -733,6 +754,31 @@ class FakeRuntime(Runtime):
                                   'is_error': not ok, 'result': step.get('result', '')}) + '\n')
         return Result(ok=ok, pid=pid, returncode=0 if ok else 1, text=step.get('result', ''),
                       log_path=log_path)
+
+
+_ITEM_RE = re.compile(r'([a-z])-(\d{4})$', re.I)
+
+
+def stub_writes(job, writes):
+    """Commits each ``{"path", "text", "subject"}`` in ``job.cwd`` and pushes its branch — what a
+    scripted session's work leaves behind (see :class:`FakeRuntime`)."""
+    from asf import gitops, gitpush, refguard
+    m = _ITEM_RE.search(job.name or '')
+    item = f'{m.group(1).upper()}-{m.group(2)}' if m else ''
+    def fill(text):
+        return str(text or '').replace('{item}', item).replace('{item_lower}', item.lower())
+
+    for w in writes:
+        path = os.path.join(job.cwd, fill(w['path']))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(fill(w.get('text')))
+        gitops.git(['add', '-A'], job.cwd)
+        gitops.git(['commit', '-q', '-m', fill(w.get('subject')) or 'stub'], job.cwd)
+    got = gitops.git(['rev-parse', '--abbrev-ref', 'HEAD'], job.cwd)
+    branch = got.data if got.ok else ''
+    if branch and branch != 'HEAD':
+        gitpush.push(['-q', 'origin', branch], job.cwd, guard=refguard.Guard())
 
 
 def from_config(cfg):

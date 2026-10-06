@@ -1,0 +1,54 @@
+{
+ "results": [],
+ "jobs": {
+  "*-b-0001": {
+   "ok": true,
+   "result": "fixed B-0001: test_empty passes",
+   "writes": [
+    {
+     "path": "src/count.py",
+     "text": "def count(text):\n    if not text:\n        return 0\n    return len(text.split())\n",
+     "subject": "fix(B-0001): return 0 on empty"
+    },
+    {
+     "path": "tests/test_empty.py",
+     "text": "import unittest\n\nfrom src.count import count\n\n\nclass EmptyTests(unittest.TestCase):\n    def test_empty(self):\n        self.assertEqual(count(None), 0)\n",
+     "subject": "fix(B-0001): add test_empty"
+    }
+   ]
+  },
+  "spec-f-*": {
+   "ok": true,
+   "result": "spec drafted",
+   "writes": [
+    {
+     "path": "specs/{item_lower}.md",
+     "text": "# {item} — the spec\n\nWhat the Feature's card asks for, and the test that proves it.\n",
+     "subject": "spec({item}): draft"
+    }
+   ]
+  },
+  "plan-f-*": {
+   "ok": true,
+   "result": "plan drafted",
+   "writes": [
+    {
+     "path": "plans/{item_lower}.md",
+     "text": "# Plan {item}\n\n### Task 1: land it\nwrites: README\n\n**Steps**: land it\n\ncoverage: 1/1 stories; uncovered: none\n",
+     "subject": "plan({item}): draft"
+    }
+   ]
+  },
+  "coder-t-*": {
+   "ok": true,
+   "result": "task done",
+   "writes": [
+    {
+     "path": "notes/{item_lower}.md",
+     "text": "{item}: done by the stub session.\n",
+     "subject": "task({item}): the stub session's work"
+    }
+   ]
+  }
+ }
+}

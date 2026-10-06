@@ -4,15 +4,16 @@
 #   bash tools/quickstart.sh [<dir>]
 #
 # Materialises `sample/` into <dir> (a fresh `mktemp -d` by default), points a fresh operator
-# home at it, and runs it through `asf init`, `asf next`, one `asf tick`, `asf doctor`, `asf
-# roadmap` and `asf scorecard` — the same walk `tests/test_sample_product.py`'s `setUpClass`
+# home at it, and runs it through `asf init`, `asf next`, one `asf tick`, the ticks that land a
+# first Task (the stub runtime replaying `sample/first_task.json` does each session's work), `asf
+# doctor`, `asf roadmap` and `asf scorecard` — the same walk `tests/test_sample_product.py`'s `setUpClass`
 # takes, in the form a stranger with a clone and nothing else can run. stdlib and `git` only, no
 # account, no network beyond the loopback the script makes of itself, and no `gh` — the sample is
 # `ci: {provider: none}`, `deploy_sha: none`, and its workers are the `fake` runtime replaying
 # `sample/fake_script.json`. Every path it writes is under <dir>; it never removes <dir> itself.
 set -euo pipefail
 
-TOTAL=9
+TOTAL=10
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 STARTED="$(date +%s)"
@@ -97,6 +98,9 @@ export ASF_HOME
 # every `asf` call below runs under this temp HOME instead (PD6).
 export HOME="$DIR/home"
 mkdir -p "$HOME"
+# scratch too: a background harvest keeps its gate checkout under TMPDIR
+export TMPDIR="$DIR/tmp"
+mkdir -p "$TMPDIR"
 export GIT_AUTHOR_NAME='sample' GIT_AUTHOR_EMAIL='sample@example.com'
 export GIT_COMMITTER_NAME='sample' GIT_COMMITTER_EMAIL='sample@example.com'
 open_line "$ASF_HOME/products/sample.yaml"
@@ -123,9 +127,43 @@ step 6 'running one tick (asf tick)'
 "${ASF_BIN[@]}" tick --product sample
 open_line "$ASF_HOME/state/sample/record"
 
-# ---- Step 7 — check the install --------------------------------------------------------------
+# ---- Step 7 — tick until a first Task lands ---------------------------------------------------
 
-step 7 'checking the install (asf doctor)'
+step 7 'ticking until a first Task lands (asf tick, the stub runtime does the work)'
+# From here each session commits and pushes what `sample/first_task.json` scripts for it, so
+# the loop runs card → spec → plan → Task → landed with no agent. The stub spends nothing on this
+# host, so the host guard is off for this walk. Each tick waits for the harvest it started.
+sed -i.bak -e "s#$SAMPLE_DIR/fake_script.json#$SAMPLE_DIR/first_task.json#" "$ASF_HOME/config.yaml"
+rm -f "$ASF_HOME/config.yaml.bak"
+printf 'host_guards:\n  load_per_core: 0\n  swap_pct: 0\n' >> "$ASF_HOME/config.yaml"
+landed_task() {
+  python3 - "$BACKLOG/index.json" <<'PY'
+import json, sys
+items = json.load(open(sys.argv[1], encoding='utf-8')).get('items') or {}
+done = sorted(k for k, v in items.items() if v.get('type') == 'task' and v.get('state') == 'Closed')
+print(done[0] if done else '')
+PY
+}
+LANDED=''
+for _ in $(seq 1 "${QUICKSTART_MAX_TICKS:-16}"); do
+  OUT="$("${ASF_BIN[@]}" tick --product sample --fresh)"
+  printf '%s\n' "$OUT" | grep -E '^(launched|landed|held) ' | sed 's/^/  /' || true
+  HPID="$(printf '%s\n' "$OUT" | sed -n 's/.*harvest: started in the background (pid \([0-9][0-9]*\)).*/\1/p' | head -1)"
+  if [ -n "$HPID" ]; then
+    while kill -0 "$HPID" 2>/dev/null; do sleep 0.5; done
+  fi
+  LANDED="$(landed_task)"
+  [ -n "$LANDED" ] && break
+done
+if [ -z "$LANDED" ]; then
+  echo 'quickstart: no Task landed — read the tick lines above' >&2
+  exit 4
+fi
+echo "quickstart: first Task landed: $LANDED"
+
+# ---- Step 8 — check the install --------------------------------------------------------------
+
+step 8 'checking the install (asf doctor)'
 set +e
 DOCTOR_OUT="$("${ASF_BIN[@]}" doctor --product sample)"
 DOCTOR_RC=$?
@@ -137,18 +175,18 @@ if [ "$DOCTOR_RC" -ne 0 ]; then
   exit 3
 fi
 
-# ---- Step 8 — the record's two views ---------------------------------------------------------
+# ---- Step 9 — the record's two views ---------------------------------------------------------
 
-step 8 'reading the record (asf roadmap, asf scorecard)'
+step 9 'reading the record (asf roadmap, asf scorecard)'
 "${ASF_BIN[@]}" roadmap --product sample
 "${ASF_BIN[@]}" scorecard --product sample
 # the sample's `steps: {daily: off}` means the tick wrote no ROADMAP.md/SCORECARD.md pages — the
 # two views above are the whole of what there is to read, not a file left unpointed-at.
 echo '  the sample runs no daily step, so these two views are not also written as pages'
 
-# ---- Step 9 — what to read next ---------------------------------------------------------------
+# ---- Step 10 — what to read next --------------------------------------------------------------
 
-step 9 'what to read next'
+step 10 'what to read next'
 open_line "$SAMPLE_DIR/repo"
 open_line "$ASF_HOME/state/sample/record"
 open_line "$ASF_HOME/state/sample/worktrees"

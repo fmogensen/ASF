@@ -96,7 +96,7 @@ def _release(root, direct_url):
         return requested[1:]
     if root:
         found = _described_release(
-            _checkout_git(root, 'describe', '--tags', '--match', 'v[0-9]*'))
+            _checkout_git(root, 'describe', '--tags', '--match', 'v[0-9]*', '--exclude', '*-*'))
         if found:
             return found
     commit = (direct_url.get('vcs_info') or {}).get('commit_id')
@@ -417,6 +417,10 @@ def build_parser():
                                                           'for a framework release, met or not, with its evidence')
     p_release.add_argument('--product')
     p_release.add_argument('--json', action='store_true')
+    p_release.add_argument('--gate', choices=('preview', '1.0'), default=None,
+                           help='the gate to read (default: release.gate, else 1.0)')
+    p_release.add_argument('--known-issues', action='store_true',
+                           help='print docs/KNOWN-ISSUES.md: the open 1.0 criteria and the open Bugs')
 
     from asf.tune import add_parser as add_tune_parser
     add_tune_parser(sub)

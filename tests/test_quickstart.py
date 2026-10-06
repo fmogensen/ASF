@@ -6,6 +6,7 @@ stub, ``asf`` itself, so every ``asf`` this checkout's own git hooks and worker 
 to (never only the ones this script calls directly) resolves to *this* checkout, not whatever
 happens to be pipx-installed on the machine running the suite.
 """
+import json
 import os
 import re
 import shutil
@@ -86,10 +87,10 @@ class QuickstartTest(unittest.TestCase):
     def test_first_line_is_the_directory_it_prints_before_anything_else(self):
         self.assertEqual(self.result.stdout.splitlines()[0], self.tmp)
 
-    def test_nine_steps_run_in_order(self):
+    def test_ten_steps_run_in_order(self):
         seen = [int(m.group(1)) for m in
-                re.finditer(r'^quickstart: (\d)/9 ', self.result.stdout, re.M)]
-        self.assertEqual(seen, list(range(1, 10)), self.result.stdout)
+                re.finditer(r'^quickstart: (\d+)/10 ', self.result.stdout, re.M)]
+        self.assertEqual(seen, list(range(1, 11)), self.result.stdout)
 
     def test_last_line_reports_the_elapsed_seconds_within_the_twenty_minute_bound(self):
         last = self.result.stdout.rstrip('\n').splitlines()[-1]
@@ -111,14 +112,17 @@ class QuickstartTest(unittest.TestCase):
         subjects = _git(['log', '--format=%s', 'origin/main'], cwd=self.record()).splitlines()
         self.assertTrue([s for s in subjects if s.startswith('tick: state')], subjects)
 
-    def test_the_bug_launched_on_its_bugfix_branch(self):
-        worktrees = self.worktrees()
-        jobs = [d for d in os.listdir(worktrees) if os.path.isdir(os.path.join(worktrees, d))]
-        self.assertTrue(jobs, f'no worktree under {worktrees}')
-        branches = {_git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=os.path.join(worktrees, j))
-                   for j in jobs}
-        self.assertIn('bugfix/B-0001', branches, branches)
+    def test_the_bug_launched_first(self):
+        self.assertRegex(self.result.stdout, r'(?m)^launched fix-bug-b-0001 ', self.result.stdout)
+
+    def test_a_first_task_landed_on_the_stub_runtime(self):
+        m = re.search(r'^quickstart: first Task landed: (T-\d{4})$', self.result.stdout, re.M)
+        self.assertIsNotNone(m, self.result.stdout)
+        index = os.path.join(self.tmp, 'sample', 'backlog', 'index.json')
+        with open(index, encoding='utf-8') as f:
+            items = json.load(f)['items']
+        self.assertEqual(items[m.group(1)]['state'], 'Closed')
 
     def test_doctor_ran_clean(self):
-        self.assertIn('quickstart: 7/9 checking the install (asf doctor)', self.result.stdout)
+        self.assertIn('quickstart: 8/10 checking the install (asf doctor)', self.result.stdout)
         self.assertNotIn('quickstart: doctor is red', self.result.stderr)

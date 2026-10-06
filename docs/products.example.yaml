@@ -536,9 +536,22 @@ clocks:
 #     min_pct: 60                  # busy seats / available (local share + cloud max) below this …
 #     idle_min: 30                 # … for this many minutes while the wave had launchable rows is red
 #     max_gap_min: 15              # a gap between two tick readings longer than this ends a stretch
+#   gate: 1.0                      # the gate `asf release-readiness` prints: 1.0 (every criterion above)
+#                                  # or preview (asf.release_preview's five); `--gate` overrides it once
+#   preview:                       # the preview gate's own files and look-back
+#     notes: docs/RELEASE-NOTES.md        # release notes on the trunk
+#     known_issues: docs/KNOWN-ISSUES.md  # needs a `## ` section; `asf release-readiness --known-issues` writes it
+#     defect_severities: [S1, S2]         # the open Bugs that page lists
+#     lookback_runs: 50                   # finished trunk runs a CI step is looked for in
+#   feedback: github-issues        # or {kind: url, url: <link>}; github-issues needs a template under
+#                                  # .github/ISSUE_TEMPLATE/ and repo_slug; either needs a README "Feedback" heading
+#   # preview's CI steps, matched by name in ci_steps (defaults shown):
+#   #   install_linux: 'install from zero, linux container'   install_macos: 'install from zero, macos fresh home'
+#   #   minimal_product: 'a minimal product, end to end'      readme_first_user: 'readme-only first-user run'
+#   #   generic: 'check generic'                               privacy: 'privacy sweep'
 # A kind or a metric the product has no lane for (no forge, no cloud, no merge queue, no
-# self-hosted runner, no quota reader, no price) reads n/a, never red. `floor:` and `seats:` are
-# read, but `asf doctor`'s product row names them as unknown keys while an older pinned reader
+# self-hosted runner, no quota reader, no price) reads n/a, never red. `floor:`, `seats:`, `gate:`,
+# `preview:` and `feedback:` are read, but `asf doctor`'s product row names them as unknown keys while an older pinned reader
 # (tools/pinned-readers.txt) is still in use.
 
 # Optional: the throughput metrics' alarms (`asf scorecard`'s Throughput table, asf.metrics.throughput).

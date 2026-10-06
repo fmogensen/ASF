@@ -2401,8 +2401,12 @@ class InstallCommandTests(HomeCase):
         self.assertTrue(ok)
         self.assertEqual(fake_input.call_count, 3)
         self.assertEqual(args.repo, os.getcwd())
-        self.assertEqual(args.scheduler, 'launchd')
+        self.assertEqual(args.scheduler, install.default_scheduler())
         self.assertEqual(args.record, '/existing/backlog')
+
+    def test_the_default_scheduler_follows_the_platform(self):
+        self.assertEqual(install.default_scheduler('darwin'), 'launchd')
+        self.assertEqual(install.default_scheduler('linux'), 'cron')
 
     def test_yes_off_tty_with_no_default_is_needs_operator_and_writes_nothing(self):
         args = _install_args(repo=None, record=None, scheduler=None, yes=True)
