@@ -117,3 +117,43 @@ class Secrets(Protocol):
         """The value ``ref`` names, stripped. Raises :class:`FileNotFoundError` when nothing is
         there and :class:`OSError` (or :class:`UnicodeDecodeError`) when it cannot be read — the
         launch then refuses with NEEDS OPERATOR, naming ``ref`` and never a value."""
+
+
+@runtime_checkable
+class Scheduler(Protocol):
+    """``scheduler``: the clocks — one job per clock, labelled ``<prefix>.<product>.<clock>``.
+    :func:`asf.scheduler.render` builds the job (``label``, ``argv``, ``log``, ``every_s`` or
+    ``at``); the connector writes its definition, loads it, and reads it back. The durable
+    pause stays :mod:`asf.scheduler`'s: a connector asks it before loading a clock."""
+
+    name: str
+
+    def render(self, job: dict, workdir: str, env_vars: dict) -> dict:
+        """``job`` with this scheduler's definition added (and ``path``, where it goes)."""
+
+    def definition_path(self, label: str) -> str:
+        """Where ``label``'s definition lives on disk."""
+
+    def installed_labels(self, pattern: str) -> list:
+        """The labels matching the glob ``pattern`` whose definition is on disk."""
+
+    def install(self, job: dict) -> list:
+        """Write and load ``job``; the lines to print."""
+
+    def uninstall(self, label: str, remove_definition: bool = True) -> list:
+        """Unload ``label`` (and delete its definition); the lines to print."""
+
+    def load(self, path: str):
+        """Load the definition at ``path`` — ``(ok, error)``."""
+
+    def stop(self, label: str) -> bool:
+        """Unload ``label``, killing a running run of it; True when it was loaded."""
+
+    def status(self, label: str) -> dict:
+        """``{'label', 'loaded', 'state', 'runs', 'last_exit', 'never_exited', …}``."""
+
+    def loaded_labels(self) -> Optional[list]:
+        """Every label the scheduler holds, or None when it cannot be read."""
+
+    def locate(self, label: str):
+        """``(path, {'ProgramArguments': argv, 'WorkingDirectory': cwd})`` of a loaded label."""

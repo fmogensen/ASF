@@ -108,9 +108,66 @@ def _sched(cfg):
 
 
 def kind(cfg=None):
+    """The scheduler kind: ``connectors.scheduler``, else ``scheduler.kind`` (``provider`` a
+    synonym), else ``launchd`` (:func:`asf.connectors.configured`)."""
+    from asf import connectors
     cfg = env.load_config() if cfg is None else cfg
-    s = _sched(cfg)
-    return s.get('kind') or s.get('provider') or 'launchd'
+    try:
+        return connectors.configured('scheduler', cfg)[0]
+    except connectors.ConnectorError:
+        s = _sched(cfg)
+        return s.get('kind') or s.get('provider') or 'launchd'
+
+
+#: The kinds whose label operations are this module's own launchd code (cron and none print
+#: their install; their clocks, if any, are still read off launchd as before).
+_IN_MODULE_KINDS = ('launchd', 'cron', 'none')
+
+
+def backend_for(job_kind, cfg=None):
+    """The scheduler connector for ``job_kind`` when it is not this module's launchd code
+    (:data:`_IN_MODULE_KINDS`) and resolves (``systemd``, a fake, a command, an entry point);
+    else None — an unknown kind keeps today's NEEDS OPERATOR / launchd behaviour."""
+    from asf import connectors
+    if not job_kind or job_kind in _IN_MODULE_KINDS:
+        return None
+    if job_kind == connectors.COMMAND:
+        try:
+            return connectors.get('scheduler', cfg)
+        except connectors.ConnectorError:
+            return None
+    try:
+        return connectors.factory('scheduler', job_kind)(
+            cfg if cfg is not None else connectors._operator_config())
+    except connectors.ConnectorError:
+        return None
+
+
+def active_backend(cfg=None):
+    """The active scheduler connector for label operations (status, stop, uninstall …), or
+    None for this module's launchd code. ``cfg`` None reads the operator config, and a config
+    that cannot be read is launchd, as before."""
+    from asf import connectors
+    try:
+        name = connectors.configured('scheduler', cfg)[0]
+    except Exception:  # noqa: BLE001 — an unreadable choice keeps the launchd path
+        return None
+    return backend_for(name, cfg)
+
+
+def _unwrap(value, default):
+    """A command-form connector answers with a Result: its data when ok, else ``default``."""
+    from asf import github
+    if isinstance(value, github.Result):
+        return value.data if value.ok and value.data is not None else default
+    return value
+
+
+def definition_path(label, cfg=None):
+    """Where ``label``'s job definition lives for the active scheduler (a launchd plist by
+    default)."""
+    b = active_backend(cfg)
+    return plist_path(label) if b is None else _unwrap(b.definition_path(label), plist_path(label))
 
 
 def label_prefix(cfg=None):
@@ -544,24 +601,8 @@ def render(product, clock, cfg=None, venv=_PIN):
         job['at'] = clock.calendar
 
     if job_kind == 'launchd':
-        plist = {
-            'Label': label,
-            'ProgramArguments': argv,
-            'WorkingDirectory': root,
-            'EnvironmentVariables': env_vars,
-            'StandardOutPath': log,
-            'StandardErrorPath': log,
-        }
-        if clock.calendar:
-            # a timed clock fires only at its declared time — RunAtLoad would also run it the
-            # moment install loads the job, hours outside that window (B-0115)
-            plist['StartCalendarInterval'] = dict(clock.calendar)
-        else:
-            plist['RunAtLoad'] = True
-            plist['StartInterval'] = int(clock.interval_s)
-        job['plist'] = plist
-        job['path'] = plist_path(label)
-        return job
+        from asf.connectors import launchd
+        return launchd.LaunchdScheduler(cfg).render(job, root, env_vars)
 
     if job_kind == 'cron':
         schedule = _cron_schedule(clock)
@@ -576,6 +617,10 @@ def render(product, clock, cfg=None, venv=_PIN):
         job['line'] = f"{schedule} cd {root} && {envs} {command} >> {log} 2>&1"
         return job
 
+    backend = backend_for(job_kind, cfg)
+    if backend is not None:
+        rendered = _unwrap(backend.render(job, root, env_vars), None)
+        return rendered if isinstance(rendered, dict) else job
     job['needs_operator'] = (
         f"NEEDS OPERATOR: scheduler kind {job_kind!r} has no adapter — install a job running "
         f"`{' '.join(argv)}` {_clock_when(clock)} and log it to {log}"
@@ -612,14 +657,13 @@ def render_host(cfg=None):
                     'PYTHONPATH': repo_root(), 'ASF_HOME': env.ASF_HOME}
     job = {'kind': kind(cfg), 'label': label, 'log': log, 'argv': argv, 'product': HOST_PRODUCT,
            'clock': HOST_CLOCK, 'steps': [], 'every_s': network.PROBE_EVERY_S}
+    backend = backend_for(job['kind'], cfg)
     if job['kind'] == 'launchd':
-        job['plist'] = {
-            'Label': label, 'ProgramArguments': argv, 'WorkingDirectory': cwd,
-            'EnvironmentVariables': env_vars,
-            'StandardOutPath': log, 'StandardErrorPath': log,
-            'RunAtLoad': True, 'StartInterval': network.PROBE_EVERY_S,
-        }
-        job['path'] = plist_path(label)
+        from asf.connectors import launchd
+        launchd.LaunchdScheduler(cfg).render(job, cwd, env_vars)
+    elif backend is not None:
+        rendered = _unwrap(backend.render(job, cwd, env_vars), None)
+        job = rendered if isinstance(rendered, dict) else job
     else:
         job['needs_operator'] = (f"NEEDS OPERATOR: scheduler kind {job['kind']!r} has no adapter — "
                                  f"run `{' '.join(argv)}` every {network.PROBE_EVERY_S} s and log "
@@ -635,7 +679,7 @@ def uninstall_host(cfg=None):
     """Boot out and delete the host clock's plist and clear its pause — the inverse of
     :func:`install_host`. Nothing installed is one line, not a failure."""
     label = host_label(cfg)
-    path = plist_path(label)
+    path = definition_path(label, cfg)
     paused = bool(read_pauses(HOST_PRODUCT))
     if not os.path.exists(path) and not paused and not status(label).get('loaded'):
         return [f'scheduler: {label} is not installed']
@@ -655,7 +699,7 @@ def install_host(cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     job = render_host(cfg)
     if job is None:
-        if os.path.exists(plist_path(host_label(cfg))) or status(host_label(cfg)).get('loaded'):
+        if os.path.exists(definition_path(host_label(cfg), cfg)) or status(host_label(cfg)).get('loaded'):
             return uninstall_host(cfg)
         return ['scheduler: network.probe is off (config.yaml) — no host clock to install']
     return install(job)
@@ -790,14 +834,19 @@ def _uid():
 
 
 def _launchctl(args, timeout=30):
-    try:
-        p = subprocess.run(['launchctl'] + list(args), capture_output=True, text=True,
-                           timeout=timeout)
-        return p.returncode, (p.stdout or ''), (p.stderr or '')
-    except FileNotFoundError:
-        return 127, '', 'launchctl not found'
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return 1, '', str(e)
+    """``launchctl <args>`` through the launchd connector (:func:`asf.connectors.launchd.
+    launchctl`) → ``(rc, stdout, stderr)``."""
+    from asf.connectors import launchd
+    return launchd.launchctl(args, timeout=timeout)
+
+
+def _lines(value, what):
+    got = _unwrap(value, None)
+    if isinstance(got, list):
+        return [str(x) for x in got]
+    if hasattr(value, 'ok') and not value.ok:
+        return [f'scheduler: {what} failed ({value.reason})']
+    return [f'scheduler: {what}']
 
 
 def install(job):
@@ -805,7 +854,8 @@ def install(job):
 
     launchd: writes ``~/Library/LaunchAgents/<label>.plist``, ``bootout``s any job already
     holding the label (a failure there is the ordinary case — it was not loaded) and
-    ``bootstrap``s the new one. cron and the unadapted kinds only print; nothing on this
+    ``bootstrap``s the new one. systemd (or another scheduler connector): its own install
+    (:mod:`asf.connectors.systemd`). cron and the unadapted kinds only print; nothing on this
     machine can install them for the operator.
     """
     job_kind = job.get('kind')
@@ -814,9 +864,15 @@ def install(job):
     if job_kind == 'cron':
         return [f"cron: add this line to the operator's crontab (`crontab -e`):", job['line'],
                 f"NEEDS OPERATOR: install the cron line above — crontab -e"]
-    if job_kind != 'launchd':
-        return [job.get('needs_operator', f"NEEDS OPERATOR: scheduler kind {job_kind!r}")]
+    if job_kind == 'launchd':
+        return _launchd_install(job)
+    backend = None if job.get('needs_operator') else backend_for(job_kind)
+    if backend is not None:
+        return _lines(backend.install(job), f"installed {job.get('label')}")
+    return [job.get('needs_operator', f"NEEDS OPERATOR: scheduler kind {job_kind!r}")]
 
+
+def _launchd_install(job):
     label, path = job['label'], job['path']
     os.makedirs(os.path.dirname(path), exist_ok=True)
     os.makedirs(os.path.dirname(job['log']), exist_ok=True)
@@ -838,7 +894,15 @@ def install(job):
 
 
 def uninstall(label, remove_plist=True):
-    """``bootout`` the label and (by default) delete its plist — the inverse of :func:`install`."""
+    """``bootout`` the label and (by default) delete its plist — the inverse of :func:`install`
+    (the active scheduler connector's uninstall when it is not launchd)."""
+    backend = active_backend()
+    if backend is not None:
+        return _lines(backend.uninstall(label, remove_plist), f'uninstalled {label}')
+    return _launchd_uninstall(label, remove_plist)
+
+
+def _launchd_uninstall(label, remove_plist=True):
     lines = []
     rc, _out, err = _launchctl(['bootout', f'gui/{_uid()}/{label}'])
     lines.append(f'scheduler: booted out {label}' if rc == 0
@@ -854,10 +918,15 @@ def bootstrap(path, force=False):
     """Load an existing plist by path — what a rollback does to a job cutover booted out. A
     paused clock (:func:`pause_record`) is never loaded here: it returns ``(False, 'paused since
     …')``. Only :func:`resume` passes ``force``, after it has cleared the pause."""
-    label = os.path.basename(path)[:-len('.plist')] if path.endswith('.plist') else ''
+    base = os.path.basename(path)
+    label = next((base[:-len(s)] for s in ('.plist', '.timer') if base.endswith(s)), '')
     record = None if force else pause_record(label)
     if record is not None:
         return False, pause_text(record)
+    backend = None if path.endswith('.plist') else active_backend()
+    if backend is not None:
+        got = backend.load(path)
+        return tuple(_unwrap(got, (False, getattr(got, 'reason', ''))))
     rc, _out, err = _launchctl(['bootstrap', f'gui/{_uid()}', path])
     return rc == 0, (err.strip() if rc else '')
 
@@ -931,8 +1000,13 @@ def pause_text(record):
 
 
 def product_labels(product_name, cfg=None):
-    """Every clock label of ``product_name`` with a plist in LaunchAgents, sorted."""
+    """Every clock label of ``product_name`` with a plist in LaunchAgents (the active
+    scheduler connector's definitions when it is not launchd), sorted."""
     import glob
+    backend = active_backend(cfg)
+    if backend is not None:
+        return sorted(_unwrap(backend.installed_labels(f'{label_prefix(cfg)}.{product_name}.*'),
+                              []))
     pattern = os.path.join(launch_agents_dir(), f'{label_prefix(cfg)}.{product_name}.*.plist')
     return sorted(os.path.basename(p)[:-len('.plist')] for p in glob.glob(pattern))
 
@@ -972,6 +1046,11 @@ def pause(product_name, clock_names, reason, by, cfg=None, now=None, bootout=Tru
 def _bootout_each(product_name, clock_names, cfg=None):
     for clock in clock_names:
         label = label_for(product_name, clock, cfg)
+        backend = active_backend(cfg)
+        if backend is not None:
+            yield label, ('booted out' if _unwrap(backend.stop(label), False) is True
+                          else 'was not loaded')
+            continue
         rc, _out, _err = _launchctl(['bootout', f'gui/{_uid()}/{label}'])
         yield label, ('booted out' if rc == 0 else 'was not loaded')
 
@@ -992,7 +1071,7 @@ def resume(product_name, clock_names, cfg=None):
     lines = []
     for clock in clock_names:
         label = label_for(product_name, clock, cfg)
-        path = plist_path(label)
+        path = definition_path(label, cfg)
         if not os.path.exists(path):
             lines.append(f'scheduler: resumed {label} — no plist at {path}; '
                          f'`asf scheduler install --product {product_name}` writes it')
@@ -1055,7 +1134,16 @@ def parse_print(text):
 
 
 def status(label):
-    """The loaded job's state, or ``{'loaded': False}`` when launchd does not know the label."""
+    """The loaded job's state, or ``{'loaded': False}`` when launchd (the active scheduler)
+    does not know the label."""
+    backend = active_backend()
+    if backend is not None:
+        got = _unwrap(backend.status(label), None)
+        return got if isinstance(got, dict) else {'label': label, 'loaded': False}
+    return _launchd_status(label)
+
+
+def _launchd_status(label):
     rc, out, err = _launchctl(['print', f'gui/{_uid()}/{label}'])
     if rc != 0:
         return {'label': label, 'loaded': False, 'detail': (err or out).strip().splitlines()[:1]}
@@ -1133,15 +1221,23 @@ def loaded_jobs(pattern=None, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     patterns = [pattern] if pattern else legacy_labels(cfg)
     prefix = None if pattern else label_prefix(cfg)
-    rc, out, _err = _launchctl(['list'])
-    if rc != 0:
+    backend = active_backend(cfg)
+    if backend is not None:
+        listed = _unwrap(backend.loaded_labels(), None)
+    else:
+        rc, out, _err = _launchctl(['list'])
+        listed = parse_list(out) if rc == 0 else None
+    if listed is None:
         return []
     jobs = []
-    for label in parse_list(out):
+    for label in listed:
         if not matches(label, patterns, prefix):
             continue
-        path = _plist_for(label)
-        data = _read_plist(path) if path else None
+        if backend is not None:
+            path, data = _unwrap(backend.locate(label), (None, None))
+        else:
+            path = _plist_for(label)
+            data = _read_plist(path) if path else None
         jobs.append({
             'label': label,
             'plist': path,

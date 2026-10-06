@@ -185,10 +185,11 @@ def check_scheduler(cfg, run=None):
     cron_entries = _legacy_cron_entries(sched)
     live, retired = [], []
     if label:
-        loaded, _ = run(['launchctl', 'list', label])
+        from asf.connectors import launchd
+        loaded, _ = run(launchd.list_argv(label))
         if loaded:
             live.append(f'pre-ASF launchd job {label} still loaded — retire it: '
-                        f'launchctl bootout gui/$(id -u)/{label} (or {CUTOVER_TOOL})')
+                        f'{launchd.bootout_hint(label)} (or {CUTOVER_TOOL})')
         else:
             retired.append(f'pre-ASF job {label} retired')
     if cron_entries:
@@ -1448,7 +1449,7 @@ def check_host_clock(cfg):
     if not network.enabled(cfg):
         return None
     label = scheduler.host_label(cfg)
-    if not os.path.exists(scheduler.plist_path(label)):
+    if not os.path.exists(scheduler.definition_path(label, cfg)):
         return False, (f'{label} is not installed — `asf scheduler install --host` writes it')
     record = scheduler.pause_record(label, cfg)
     if record is not None:

@@ -594,7 +594,8 @@ def reload_clocks(names, run=subprocess.run, unloaded=()):
         prefix = scheduler.label_prefix(cfg)
     except env.ConfigError:
         return []
-    listed = _out(run, ['launchctl', 'list'])
+    from asf.connectors import launchd
+    listed = _out(run, launchd.list_argv())
     if listed is None:
         return ['upgrade: launchctl list failed — clocks not checked']
     loaded = set(scheduler.parse_list(listed))
