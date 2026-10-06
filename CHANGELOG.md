@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.148 — 2026-10-06
+
+### Bugs fixed
+
+- Round F — non-amendable corrections launch, drain-first never blocks an in-flight batch, 0-min CI timeouts are no timeout, one CI box list with a doctor heartbeat row (#785)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.148"`
+
 ## v0.1.147 — 2026-10-06
 
 ### Features landed
