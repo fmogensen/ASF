@@ -473,7 +473,12 @@ def write_fields(path, machine, ordered):
     byte for byte. The block is never rebuilt."""
     updates = {k: v for k, v in ordered.items() if k not in machine or machine[k] != v
                or type(machine[k]) is not type(v)}
-    drop = [k for k in machine if k not in ordered]
+    # `mergeable` is popped like any other derivable key once a PR merges or closes (§2.4), but
+    # `frontmatter.DERIVABLE_KEYS` has not grown the row for it (asf/record/frontmatter.py, out
+    # of this Task's footprint) — merge_machine refuses to drop a key it does not name, so until
+    # that row lands, a stale `mergeable` is left on the card rather than crashing ingest
+    # (needs writes: asf/record/frontmatter.py — add 'mergeable' to DERIVABLE_KEYS).
+    drop = [k for k in machine if k not in ordered and k in frontmatter.DERIVABLE_KEYS]
     return frontmatter.merge_machine(path, updates, drop=drop, order=MACHINE_KEY_ORDER)
 
 
