@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.152 — 2026-10-06
+
+### Features landed
+
+- `asf doctor` has a `connectors` row naming the active implementation of each kind (forge, ci, runtime, scheduler, quota, secrets) and where it was chosen, RED when a configured one cannot be found; docs/guide/writing-a-connector.md explains how to write one (#779)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.152"`
+
 ## v0.1.151 — 2026-10-06
 
 ### Features landed
