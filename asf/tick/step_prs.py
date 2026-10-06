@@ -68,9 +68,15 @@ def card_link(root, relpath):
     return f'https://{m.group(1)}/{m.group(2)}/blob/HEAD/{relpath}'
 
 
-def title_and_body(item_id, item, root, branch, items=None):
+def title_and_body(item_id, item, root, branch, items=None, repo=None, trunk=None):
     """The PR's title and body. A delivery lead's (``delivers:``) title names every item the
-    branch delivers and its body lists their cards: the one PR is the whole delivery's."""
+    branch delivers and its body lists their cards: the one PR is the whole delivery's.
+
+    ``root`` stays the record root ``card_link`` reads; the branch's own claims are read from
+    ``repo`` (the product repo, :func:`asf.proves.claims_on_branch` against ``trunk``) instead —
+    reading them from ``root`` would run git in the wrong repo (P8). With ``repo`` or ``trunk``
+    None, or the branch carrying no claim, the ``## Proves`` block is simply absent: no empty
+    heading, no placeholder."""
     title = f"{item_id} — {item.get('title') or branch}" if item_id else branch
     rel = card_relpath(item) if item else None
     lines = []
@@ -90,6 +96,10 @@ def title_and_body(item_id, item, root, branch, items=None):
             mrel = card_relpath(card) if card else None
             what = f"[{mid}]({card_link(root, mrel)})" if mrel else mid
             lines.append(f"- {what} — {card.get('title') or ''}".rstrip(' —'))
+    if repo and trunk:
+        claims = proves.claims_on_branch(lambda *a: _git(repo, list(a)), trunk, branch)
+        if claims:
+            lines += ['', '## Proves', proves.render(claims)]
     lines += ['', f'Opened by the tick from `{branch}`.']
     return title, '\n'.join(lines) + '\n'
 

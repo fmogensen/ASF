@@ -1367,6 +1367,69 @@ class PrsStepTests(StepsTestCase):
         self.assertEqual(self.lane_of('fix/B-0002')['state'], 'MERGED')
 
 
+class ProvesBlockTests(StepsTestCase):
+    """§2.4, Task 4 (F-0040): ``title_and_body``'s own ``## Proves`` block — one bullet per claim
+    the branch's commits carry, read from the product repo (``repo``) against its trunk
+    (``trunk``), never from the record root ``root`` (P8, :func:`asf.proves.claims_on_branch`)."""
+
+    def setUp(self):
+        super().setUp()
+        _git(['pull', '-q', 'origin', 'main'], self.operator)  # the seeded card, pushed after clone
+
+    def push_commits(self, branch, messages):
+        _git(['checkout', '-q', '-b', branch, 'main'], self.repo)
+        for i, msg in enumerate(messages):
+            with open(os.path.join(self.repo, f"{branch.replace('/', '_')}_{i}"), 'w') as f:
+                f.write(f'{i}\n')
+            _git(['add', '-A'], self.repo)
+            _git(['commit', '-q', '-m', msg], self.repo)
+        _git(['push', '-q', 'origin', branch], self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+
+    def test_one_bullet_per_claim_between_acceptance_and_the_closing_line(self):
+        self.push_commits('worker/B-0001', [
+            'task(B-0001): the first half\n\nProves: S-0077 line 1 — tests/test_a.py',
+            'task(B-0001): the rest\n\nProves: S-0077 line 2 — tests/test_b.py::test_b'])
+        _title, body = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], self.operator,
+                                               'worker/B-0001', repo=self.repo, trunk='main')
+        self.assertIn('## Proves\n- S-0077 line 2 — tests/test_b.py::test_b\n'
+                      '- S-0077 line 1 — tests/test_a.py\n', body)
+        self.assertIn('## Acceptance', body)
+        accept_at, proves_at = body.index('## Acceptance'), body.index('## Proves')
+        closing_at = body.index('Opened by the tick from')
+        self.assertTrue(accept_at < proves_at < closing_at, body)
+
+    def test_absent_with_no_stray_heading_when_the_branch_has_no_claim(self):
+        self.push_commits('worker/B-0001', ['task(B-0001): no claim in this one'])
+        _title, body = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], self.operator,
+                                               'worker/B-0001', repo=self.repo, trunk='main')
+        self.assertNotIn('## Proves', body)
+
+    def test_absent_when_repo_or_trunk_is_not_passed(self):
+        self.push_commits('worker/B-0001', [
+            'task(B-0001): the work\n\nProves: S-0077 line 1 — tests/test_a.py'])
+        _title, body = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], self.operator,
+                                               'worker/B-0001')
+        self.assertNotIn('## Proves', body)
+        _title, body = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], self.operator,
+                                               'worker/B-0001', repo=self.repo)  # trunk still None
+        self.assertNotIn('## Proves', body)
+
+    def test_the_git_callable_is_asked_for_exactly_the_one_log_range(self):
+        calls = []
+
+        def fake_git(repo, args):
+            calls.append((repo, args))
+            return ''
+        with mock.patch.object(step_prs, '_git', fake_git):
+            step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], self.operator,
+                                    'worker/B-0001', repo=self.repo, trunk='main')
+        # card_link's own `remote get-url origin` (against root) is not this call's concern
+        repo_calls = [c for c in calls if c[0] == self.repo]
+        self.assertEqual(repo_calls,
+                          [(self.repo, ['log', '--format=%B', 'origin/main..origin/worker/B-0001'])])
+
+
 # ---- harvest ----------------------------------------------------------------------
 
 class HarvestStepTests(StepsTestCase):
