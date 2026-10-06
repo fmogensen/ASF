@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.178 — 2026-10-06
+
+### Features landed
+
+- A header line is never a title, a refusal names the line, and I13 is measured on real mints (#819)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.178"`
+
 ## v0.1.177 — 2026-10-06
 
 ### Bugs fixed
