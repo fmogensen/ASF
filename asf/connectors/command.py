@@ -137,3 +137,49 @@ class CommandRuntime:
     def continue_run(self, job, wait=False):
         r = self.conn.call('continue_run', job, wait=wait)
         return self._result(r, job) if r.ok and r.data is not None else None
+
+
+class CommandCI(CommandConnector):
+    """The ``ci`` kind's command form. Every read and action is one command run, but the start
+    queue's :meth:`source` and the runner pool's :meth:`backend` are objects, not one answer: a
+    command-form CI gets the base adapters, which read every fact as Unknown (``None``) and have
+    no runner pool (a pool call raises :class:`asf.ci_pool.BackendError`) — the queue then admits
+    nothing on a guess, and the pool is off."""
+
+    def source(self, product, run=None):
+        return unknown_source()
+
+    def backend(self, product, run=None):
+        return _NoBackend()
+
+
+def unknown_source():
+    """A :class:`asf.ci_queue.Source` that reads every fact as Unknown (``None``) and has no
+    runners (:class:`asf.ci_pool.BackendError`, as an unreadable host does)."""
+    from asf import ci_queue
+
+    class UnknownSource(ci_queue.Source):
+        def runners(self):
+            _no_pool()
+
+        def run_ids(self, workflow, n):
+            return None
+
+        def attempt_jobs(self, run_id, attempt):
+            return None
+
+        def inflight(self):
+            return None
+    return UnknownSource()
+
+
+def _no_pool(*_a, **_kw):
+    from asf import ci_pool
+    raise ci_pool.BackendError('the ci connector is a command: no runner pool')
+
+
+class _NoBackend:
+    runners = runs_on = timeouts = add_labels = remove_label = jobs_on = staticmethod(_no_pool)
+
+    def variables(self):
+        return {}

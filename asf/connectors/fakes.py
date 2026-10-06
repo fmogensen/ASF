@@ -75,12 +75,12 @@ class FakeCI(FakeConnector):
         return self._answer('call', list(args), **kw)
 
     def source(self, product, run=None):
-        from asf import ci_queue
-        return ci_queue.Source()
+        from asf.connectors import command
+        return command.unknown_source()
 
     def backend(self, product, run=None):
-        from asf import ci_pool
-        return ci_pool.Backend()
+        from asf.connectors import command
+        return command._NoBackend()
 
 
 class FakeScheduler(FakeConnector):

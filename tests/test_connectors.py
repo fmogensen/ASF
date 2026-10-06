@@ -305,6 +305,19 @@ class CommandFormTest(RegistryCase):
         r = command_mod.CommandConnector('forge', '/nonexistent/bridge').pr('o/r', 1, ())
         self.assertIn('not runnable', r.reason)
 
+    def test_ci_command_form_has_unknown_source_and_no_pool(self):
+        from asf import ci_pool, ci_queue
+        c = connectors.ci({'connectors': {'ci': {'command': 'bridge'}}})
+        self.assertIsInstance(c, command_mod.CommandCI)
+        src = c.source('P')
+        self.assertIsInstance(src, ci_queue.Source)
+        self.assertIsNone(src.inflight())
+        self.assertIsNone(src.run_jobs('tests', 5))
+        with self.assertRaises(ci_pool.BackendError):
+            src.runners()
+        with self.assertRaises(ci_pool.BackendError):
+            c.backend('P').runners()
+
     def test_objects_are_sent_as_their_public_attributes(self):
         class Job:
             def __init__(self):

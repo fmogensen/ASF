@@ -54,7 +54,8 @@ from. A kind it cannot resolve shows as a RED row.
 The operation names and their arguments are the Protocol's methods. Answer with Unknown (exit
 non-zero) for any operation your service can't do. A `runtime` command answers `run` and
 `continue_run` with `{"ok": true|false|null, "pid": …, "result": "…"}`. `null` means the session
-is still running.
+is still running. A `ci` command has no CI start queue source and no runner pool. The queue reads
+every fact as Unknown, so it admits nothing on a guess, and the pool stays off.
 
 `quota` and `secrets` each have a one-line contract of their own:
 

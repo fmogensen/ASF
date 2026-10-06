@@ -209,6 +209,8 @@ def build(kind, cfg=None):
         from asf.connectors import command
         if kind == 'runtime':
             return command.CommandRuntime(command.CommandConnector.from_spec(kind, spec))
+        if kind == 'ci':
+            return command.CommandCI.from_spec(kind, spec)
         return command.CommandConnector.from_spec(kind, spec)
     return factory(kind, name)(cfg)
 
