@@ -165,6 +165,57 @@ class CorrectTests(unittest.TestCase):
         self.assertEqual((row.kind, row.branch),
                          (rows.FIX_CORRECT, product.conventions.branch('code', 'T-0017')))
 
+    SPEC_RUN = {'job': 'spec-f-0003', 'item': 'F-0003', 'kind': 'spec', 'pid': 2,
+                'branch': 'cloud/spec-F-0003', 'started': '2026-09-01T10:00:00Z',
+                'ended': '2026-09-01T10:30:00Z', 'end_reason': 'finished'}
+
+    def prefixed(self):
+        """The product's code, spec and plan branches under one prefix family, as a product's."""
+        with open(env.product_path('sample'), 'w') as f:
+            f.write('product: sample\nrepo_slug: x/y\nconventions:\n  branch_prefixes:\n'
+                    '    code: cloud/\n    spec: cloud/spec-\n    plan: cloud/plan-\n')
+
+    def test_a_ruling_on_a_feature_targets_its_open_spec_lane_not_a_fresh_branch(self):
+        """Round G #27: a Feature's open lane was its spec PR branch, and the ruling forked a
+        fresh code branch named after the Feature instead."""
+        self.prefixed()
+        self.ledger(dict(self.SPEC_RUN, rounds=lifecycle.ROUND_CAP,
+                         lane={'state': 'PR_OPEN', 'pr': 40, 'head': 'a' * 40, 'item': 'F-0003'}))
+        rc, out = self.run_cmd(why='keep the schema as it is', item='F-0003')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('cloud/spec-F-0003', out)
+        c = lifecycle.corrections(self.path)['F-0003']
+        self.assertIn(c.get('branch'), (None, 'cloud/spec-F-0003'))
+        self.assertIn('cloud/spec-F-0003', c['text'])
+        self.assertNotIn(env.load_product('sample').conventions.branch('code', 'F-0003'),
+                         c['text'].split())
+
+    def test_a_correction_targets_the_open_lane_over_a_newer_closed_run(self):
+        """Below the cap too: the round goes on the run whose lane is still open."""
+        self.prefixed()
+        self.ledger(dict(self.SPEC_RUN, lane={'state': 'PR_OPEN', 'pr': 40, 'head': 'a' * 40,
+                                              'item': 'F-0003'}),
+                    {'job': 'review-f-0003', 'item': 'F-0003', 'kind': 'review', 'pid': 3,
+                     'branch': 'cloud/F-0003', 'started': '2026-09-01T11:00:00Z',
+                     'ended': '2026-09-01T11:30:00Z', 'end_reason': 'finished',
+                     'lane': {'state': 'STALE', 'pr': 39, 'item': 'F-0003'}})
+        rc, out = self.run_cmd(why='name the fields', item='F-0003')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('corrected F-0003 on cloud/spec-F-0003', out)
+
+    def test_a_ruling_prefers_an_open_code_lane_over_an_open_plan_lane(self):
+        self.prefixed()
+        self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP,
+                         lane={'state': 'BACK', 'pr': 51, 'item': 'T-0017'}),
+                    {'job': 'reshape-t-0017', 'item': 'T-0017', 'kind': 'reshape', 'pid': 2,
+                     'branch': 'cloud/plan-T-0017', 'started': '2026-09-01T10:00:00Z',
+                     'ended': '2026-09-01T10:30:00Z', 'end_reason': 'finished',
+                     'lane': {'state': 'PR_OPEN', 'pr': 50, 'item': 'T-0017'}})
+        rc, out = self.run_cmd(why='write the guard in the parser')
+        self.assertEqual(rc, 0, out)
+        [row] = self.rows()
+        self.assertEqual(row.branch, 'cloud/T-0017')
+
     def test_a_ruling_turns_a_ci_wait_back_ahead_of_the_known_red_head(self):
         """A product's T-0594: the lane waited on CI for a head known red, and the ruling
         launched nothing."""
