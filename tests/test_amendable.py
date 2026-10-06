@@ -369,6 +369,26 @@ class HookTests(unittest.TestCase):
         self.assertEqual(approvals.open_holds(prod), [])
         self.assertEqual(approvals.parked(prod), {})
 
+    def test_a_bundled_console_amend_row_names_the_outside_globs_too(self):
+        """F-0232: a bundled ``writes:`` drags ordinary code to the console with the amendable
+        edit — the NEEDS OPERATOR line names it, so the console knows to split the Task first."""
+        from asf.feeder import rows
+        prod = env.load_product('demo')
+        row = rows.Row(tier=2, kind=rows.CONSOLE_AMEND, item_id='T-0304', feature_id='F-0042',
+                       action='WAITS ON console: amendable rules/README.md', brief_kind='task',
+                       branch='worker/T-0304', reason='x', waits_on='console',
+                       amend='rules/README.md', amend_outside=('asf/x.py',))
+        lines = []
+        approvals.announce_console_amends(prod, [row], lines.append)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].endswith('and pushes it; split first: asf/x.py is outside the '
+                                          'set and needs no console'), lines[0])
+        lines.clear()
+        approvals.announce_console_amends(prod, [row], lines.append)
+        self.assertEqual(lines, [])
+        self.assertEqual(approvals.open_holds(prod), [])
+        self.assertEqual(approvals.parked(prod), {})
+
 
 class PolicyTests(TickTestCase):
     """§3.3 — the policy cannot be widened or granted away: ``matrix`` refuses any level but

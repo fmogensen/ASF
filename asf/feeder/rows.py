@@ -141,6 +141,8 @@ PLAN_CODE = 'PLAN → CODE'
 #: worker session may edit that set, so none is launched to be refused — the console makes the
 #: edit on the item's branch (T-0183, T-0259, T-0288, T-0301, T-0303 on 2026-09-27).
 CONSOLE_AMEND = 'CONSOLE → AMEND'
+#: F-0232: appended to a bundled CONSOLE → AMEND row's reason and to its NEEDS OPERATOR line
+SPLIT_CLAUSE = ('; split first: {globs} {verb} outside the set and {need} no console')
 RESHAPE = 'RESHAPE → PLAN'
 #: a Feature's pending ``reshape:`` (:mod:`asf.record.replan`): one session re-plans its open Tasks
 REPLAN = 'RESHAPE → REPLAN'
@@ -246,6 +248,9 @@ class Row:
     open_questions: tuple = ()
     #: a CONSOLE → AMEND row only: the ``writes:`` entry that reaches the amendable set
     amend: str = ''
+    #: a CONSOLE → AMEND row only: the ``writes:`` entries that do *not* reach the set — the
+    #: ordinary code a bundled footprint drags to the console with it (F-0232)
+    amend_outside: tuple = ()
     #: a FIX → CORRECT row an operator ruling raised (``asf correct`` at the cap): one code
     #: session carries it out — the attempt cap never turns it into an adjudication
     ruling: bool = False
@@ -813,11 +818,16 @@ def console_amend_row(product, item_id, feature_id, writes, branch, brief_kind='
     hit = amendable.reaches(product, list(writes or ()))
     if not hit:
         return None
+    _inside, outside = amendable.partition(product, list(writes or ()))
+    reason = (f'writes: {hit} is in the amendable set — no worker session edits it; the '
+              f'console makes the edit on {branch}')
+    if outside:
+        reason += SPLIT_CLAUSE.format(globs=', '.join(outside),
+                                      verb='is' if len(outside) == 1 else 'are',
+                                      need='needs' if len(outside) == 1 else 'need')
     return Row(tier=tier, kind=CONSOLE_AMEND, item_id=item_id, feature_id=feature_id,
                action=f'WAITS ON console: amendable {hit}', brief_kind=brief_kind, branch=branch,
-               reason=f'writes: {hit} is in the amendable set — no worker session edits it; the '
-                      f'console makes the edit on {branch}',
-               waits_on='console', amend=hit)
+               reason=reason, waits_on='console', amend=hit, amend_outside=tuple(outside))
 
 
 def foreign_row(product, item, tier, feature_id, brief_kind, kind):
