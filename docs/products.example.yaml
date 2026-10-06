@@ -54,9 +54,11 @@ conventions:
   # Unset: fast-forward when steps.batch is off or unset, else pull-request.
   # landing: fast-forward
   # a PR whose CI path-filters suites: a required check the workflow itself skipped (job `if:`
-  # false) or never created counts as satisfied once every workflow run on the head completed,
-  # a required check concluded success and none is red (path-filtered, the default) | never
-  # (a skipped or missing required check never merges). PR merges only — deploys never.
+  # false) or never created by a job its own workflows declare counts as satisfied once every
+  # workflow run on the head completed, a required check concluded success and none is red
+  # (path-filtered, the default) | never (a skipped or missing required check never merges). A
+  # required check no workflow at the head declares (a third-party app, a commit status) is
+  # never satisfied. PR merges only — deploys never.
   # merge_skipped: path-filtered
   # who clicks merge on a green, reviewed PR: manual (the operator; the default) | auto (the lane,
   # by `gh pr merge`) | queue (the lane, through its own serialized merge queue: green PRs are

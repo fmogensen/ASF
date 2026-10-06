@@ -145,8 +145,8 @@ import subprocess
 import tempfile
 import time
 
-from asf import (approvals, attestation, customer_content, env, gitpush, refguard, reviews,
-                 run_cancel)
+from asf import (approvals, attestation, ci_pool, customer_content, env, gitpush, refguard,
+                 reviews, run_cancel)
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -268,10 +268,10 @@ CANCEL_BUCKET = 'cancel'
 PASS_BUCKETS = ('pass',)
 SKIP_BUCKET = 'skipping'
 #: ``conventions.merge_skipped``: a PR whose CI path-filters suites (a job's ``if:`` false, a
-#: workflow that never created a job) merges once its workflow runs on the head all completed,
-#: at least one required check concluded success and none is red (``path-filtered``, the
-#: default) — or never merges on a skipped or missing required check (``never``). PR merges
-#: only: a deploy never counts a skipped job green.
+#: workflow that never created a job **it declares**) merges once its workflow runs on the head
+#: all completed, at least one required check concluded success and none is red
+#: (``path-filtered``, the default) — or never merges on a skipped or missing required check
+#: (``never``). PR merges only: a deploy never counts a skipped job green.
 MERGE_SKIPPED_PATH = 'path-filtered'
 MERGE_SKIPPED_NEVER = 'never'
 #: A trunk check run that ended in one of these is red (:meth:`GitHubHost.trunk_red`); a
@@ -4229,6 +4229,7 @@ class GitHubHost(Host):
         self._queue = None
         self._required = None
         self._trunk_runs = {}  # sha -> that commit's check runs (None: unreadable), one pass
+        self._wf_jobs = {}     # head -> ({job name: file}, why): the workflows there, one pass
         self._attested = {}  # sha -> carries the merge queue's attestation (one read a pass)
 
     def prs(self):
@@ -4345,7 +4346,7 @@ class GitHubHost(Host):
         if state == 'red' or (state != 'green' and f.get('how') == 'ci'):
             return f'required checks {state} at merge: {detail}'
         if f.get('on_checks') and required:
-            _passed, skipped, missing, _ok, running = self.not_green(f, required, checks)
+            _passed, skipped, missing, _ok, running, _why = self.not_green(f, required, checks)
             if running:
                 return f'required checks pending at merge: {running}'
             if skipped or missing:
@@ -4353,39 +4354,74 @@ class GitHubHost(Host):
         return None
 
     def not_green(self, f, required, checks):
-        """``(passed, skipped, missing, satisfied, running)`` for a PR whose required checks
-        are none of them red or pending: the required names that concluded success, those
+        """``(passed, skipped, missing, satisfied, running, refused)`` for a PR whose required
+        checks are none of them red or pending: the required names that concluded success, those
         skipped and those missing that still hold it, ``{name: why}`` of those the workflow
-        itself skipped (:meth:`path_filtered`), and why its runs are not all done (or None)."""
+        itself skipped or declares but never created (:meth:`path_filtered`), why its runs are
+        not all done (or None), and ``{name: why}`` of those refused — not satisfied because no
+        workflow at the head vouches for the name — with ``refused`` ``{}`` unless
+        :meth:`path_filtered` ran."""
         passed = passed_names(checks, required)
         skipped = [n for n in required if n not in passed and any(
             c.get('bucket') == SKIP_BUCKET and required_name(c.get('name'), (n,))
             for c in checks)]
         missing = [n for n in required if n not in passed and n not in skipped]
-        satisfied, running = {}, None
+        satisfied, running, refused = {}, None, {}
         since, heavy = None, self.product.conventions.heavy_after_review()
         if heavy:
             rec = f.get('prev') or {}
             since = rec.get('heavy_at') if rec.get('heavy') == f.get('head') else None
         if (skipped or missing) and passed and (since or not heavy) and \
                 merge_skipped(self.product.conventions) == MERGE_SKIPPED_PATH:
-            satisfied, running = self.path_filtered(f.get('head'), skipped, missing, passed,
-                                                    since=since)
+            satisfied, running, refused = self.path_filtered(f.get('head'), skipped, missing,
+                                                              passed, since=since)
         return (passed, [n for n in skipped if n not in satisfied],
-                [n for n in missing if n not in satisfied], satisfied, running)
+                [n for n in missing if n not in satisfied], satisfied, running, refused)
+
+    def workflow_jobs(self, head):
+        """``({name: file}, why)``: every check name the workflows at ``head`` can create — each
+        job key under a workflow's ``jobs:``, and each job's literal ``name:``
+        (:func:`asf.ci_pool.parse_job_names`) — read off ``.github/workflows`` at that sha, once
+        per head per pass. ``(None, why)`` when the directory, or any one file in it, did not
+        read: a partial list is not evidence that a name is not Actions', and nothing is
+        satisfied off it (F-0204)."""
+        if head in self._wf_jobs:
+            return self._wf_jobs[head]
+        base = f'repos/{self.slug}/contents'
+        listing = H.gh_json(['api', f'{base}/{ci_pool.WORKFLOW_DIR}?ref={head}'], None)
+        got = (None, f'{ci_pool.WORKFLOW_DIR} did not read at {head[:9]}')
+        if isinstance(listing, list):
+            out = {}
+            for e in [e for e in listing if isinstance(e, dict) and e.get('type') == 'file'
+                      and str(e.get('name') or '').endswith(ci_pool.WORKFLOW_EXT)]:
+                rc, text, _err = H._gh(['api', f'{base}/{e.get("path")}?ref={head}',
+                                        '-H', 'Accept: application/vnd.github.raw'])
+                if rc != 0 or not text.strip():
+                    out, got = None, (None, f'{e.get("path")} did not read at {head[:9]}')
+                    break
+                for n in ci_pool.parse_job_names(text):
+                    out.setdefault(n, e.get('name'))
+            if out is not None:
+                got = (out, None)
+        self._wf_jobs[head] = got
+        return got
 
     def path_filtered(self, head, skipped, missing, passed, since=None):
-        """``({name: why}, running)``: the ``skipped`` and ``missing`` required checks the PR's
-        own workflow decided not to run — read off every GitHub Actions run on ``head`` (with
-        ``since``, an ISO stamp — the head's heavy-CI approval under ``ci.heavy_after_review`` —
-        only the runs created at or after it: a heavy job the workflow skipped because the head
-        was not yet approved is not a job it decided not to run). Only
-        once each run completed (``running`` names the rest, and nothing is satisfied): a skipped
-        check is satisfied when each job answering for it concluded ``skipped`` (a job ``if:``
-        false), a missing one when no completed run has a job of that name (a path filter that
-        never created it). Unreadable runs or jobs satisfy nothing — the PR holds as before."""
+        """``({name: why}, running, {name: why})``: the ``skipped`` and ``missing`` required
+        checks the PR's own workflow decided not to run — read off every GitHub Actions run on
+        ``head`` (with ``since``, an ISO stamp — the head's heavy-CI approval under
+        ``ci.heavy_after_review`` — only the runs created at or after it: a heavy job the
+        workflow skipped because the head was not yet approved is not a job it decided not to
+        run). Only once each run completed (``running`` names the rest, and nothing is
+        satisfied): a skipped check is satisfied when each job answering for it concluded
+        ``skipped`` (a job ``if:`` false); a missing one when no completed run has a job of that
+        name **and some workflow at the head declares a job that answers for it** — a path
+        filter that never created a job the CI does have. A required check no workflow at the
+        head declares is not Actions' to skip (a third-party app, a commit status from outside
+        Actions): it is never satisfied, and the third return (``refused``) says why, per name.
+        Unreadable runs or jobs satisfy nothing — the PR holds as before."""
         if not head:
-            return {}, None
+            return {}, None, {}
         data = H.gh_json(['api', f'repos/{self.slug}/actions/runs?head_sha={head}&per_page=100'],
                          None)
         runs = data.get('workflow_runs') if isinstance(data, dict) else None
@@ -4395,31 +4431,43 @@ class GitHubHost(Host):
             runs = [r for r in runs if floor is not None and (_parse_at(r.get('created_at'))
                                                               or 0) >= floor]
         if not runs:
-            return {}, None
+            return {}, None, {}
         open_ = [r for r in runs if r.get('status') != 'completed']
         if open_:
             names = ', '.join(sorted({str(r.get('name') or r.get('id')) for r in open_}))
-            return {}, f'workflow run(s) on the head not completed — {names}'
+            return {}, f'workflow run(s) on the head not completed — {names}', {}
         jobs = []
         for r in runs:
             got = H.gh_json(['api', f'repos/{self.slug}/actions/runs/{r.get("id")}/jobs'
                                     f'?per_page=100&filter=latest'], None)
             listed = got.get('jobs') if isinstance(got, dict) else None
             if not isinstance(listed, list):
-                return {}, None
+                return {}, None, {}
             jobs += [j for j in listed if isinstance(j, dict)]
         gate = ', '.join(sorted(passed))
-        out = {}
+        out, refused = {}, {}
         for n in skipped:
             mine = [j for j in jobs if required_name(j.get('name'), (n,))]
             if mine and all(j.get('conclusion') == 'skipped' for j in mine):
                 out[n] = (f'{n} skipped by the workflow — satisfied (run completed, {gate} '
                           f'success)')
+        declared, unread = self.workflow_jobs(head) if missing else ({}, None)
         for n in missing:
-            if not any(required_name(j.get('name'), (n,)) for j in jobs):
-                out[n] = (f'{n} not created by the workflow — satisfied (run completed, {gate} '
-                          f'success)')
-        return out, None
+            if any(required_name(j.get('name'), (n,)) for j in jobs):
+                continue
+            src = required_name(n, declared) if declared else None
+            if src:
+                out[n] = (f'{n} declared in {declared[src]} and not created by the workflow — '
+                          f'satisfied (run completed, {gate} success)')
+            elif unread:
+                refused[n] = (f'{n} is not green and the workflows at the head did not read '
+                              f'({unread}) — nothing vouches it is a check Actions creates: '
+                              f'it waits')
+            else:
+                refused[n] = (f'{n} is not green and no workflow at the head declares a job for '
+                              f'it — it is not a check Actions skipped (a third-party check, a '
+                              f'commit status): it waits')
+        return out, None, refused
 
     def rerun_ids(self):
         """The runs the CI queue cancelled and holds to re-run: their cancelled checks wait."""
@@ -4880,7 +4928,8 @@ class GitHubHost(Host):
             return 'gate'
         if not required:
             return 'gate'
-        _passed, skipped, missing, satisfied, running = self.not_green(f, required, checks)
+        _passed, skipped, missing, satisfied, running, refused = self.not_green(f, required,
+                                                                                checks)
         now = lane.now or time.time()
         since = rec.get('since') if rec.get('state') == WAITING_CI and rec.get('since') else now
         if running:
@@ -4899,6 +4948,8 @@ class GitHubHost(Host):
                 kick = {'heavy_kick': stalled}
         for why in satisfied.values():
             lane.out(f'harvest: {b}: PR #{number} {why}')
+        for why in refused.values():
+            lane.out(f'waiting {b}: PR #{number} {why}')
         if skipped:
             # a required check that ran nothing is not green, and no clock turns it into a local
             # gate: it holds until a run of it concludes success on the head, or (merge_skipped:
