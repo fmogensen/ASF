@@ -39,6 +39,10 @@ list is no triage — the red goes to its correct round exactly as before. A re-
 the run is still in progress waits for the next pass (the rest of the matrix is still judging) —
 read off the run's own status when the host's words are none :data:`_RUNNING` knows: a refusal on
 a live run is never a second red (2026-10-06: a batch dropped on one, its stacked chain with it).
+A caller that names its ``required`` jobs (the merge queue) narrows "still judging" to those:
+a non-required job left running alone (a product's own ``site`` job, say) never holds a required
+job's red waiting on it — that is a defect at once, no matter how long the unrelated job runs
+(B-0274).
 
 A **deterministic** red — a registers or pre-cut check (the merge queue names them:
 ``merge_queue.deterministic_jobs`` and the jobs running ``merge_queue.precut_check``) — answers the
@@ -246,11 +250,30 @@ def infra_red(slug, job_id, gh=None):
     return fails[0].strip().splitlines()[0] if is_infra(fails) else None
 
 
-def run_live(slug, run_id, gh=None):
+def run_live(slug, run_id, gh=None, required=None):
     """True when workflow run ``run_id`` is still queued or in progress (one ``gh api`` call);
-    False when it completed or cannot be read."""
+    False when it completed or cannot be read.
+
+    ``required``: judge liveness by the run's own jobs instead of its aggregate status —
+    True only when one of those jobs whose key (:func:`job_key`) is in ``required`` is itself
+    still queued or in progress, False when the jobs read clean and none is: a non-required job
+    (a ``site`` job, say) left running alone never counts, a required job already red is never
+    held waiting on a job nobody is gating on (B-0274 — the run stayed live on an unrelated job
+    alone for hours). None when the jobs themselves cannot be read — unlike every other case
+    here, never read as "not live": the caller's own aggregate answer stands instead."""
     if not slug or not run_id:
         return False
+    if required:
+        r = _call(gh, ['api', f'repos/{slug}/actions/runs/{run_id}/jobs?per_page=100'])
+        try:
+            got = json.loads(r.data) if r.ok and r.data else None
+        except (ValueError, TypeError):
+            return None
+        jobs = (got or {}).get('jobs') if isinstance(got, dict) else None
+        if not isinstance(jobs, list):
+            return None
+        return any(job_key(j.get('name')) in required for j in jobs
+                  if isinstance(j, dict) and j.get('status') != 'completed')
     r = _call(gh, ['api', f'repos/{slug}/actions/runs/{run_id}'])
     try:
         got = json.loads(r.data) if r.ok and r.data else None
@@ -298,7 +321,7 @@ def reproduced(slug, sha, name, job_id, priors, gh=None):
 
 
 def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh=None,
-           deterministic=()):
+           deterministic=(), required=None):
     """Split the red checks ``red`` (dicts with ``name`` and ``link``) on ``sha`` into
     ``(defects, rerun)``: names that go to a correct round now, and names held for a re-run
     (started this pass, or one still running). Never raises: anything unreadable is a defect
@@ -307,15 +330,18 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
     ``deterministic``: the names (or job keys) whose red is deterministic — a registers or
     pre-cut check answers the same on every run: a defect at once, never re-run. A re-run the
     host refuses while the job's workflow run is still live (:func:`run_live`) waits for the
-    next pass, whatever words the refusal used: it is never read as a second red."""
+    next pass, whatever words the refusal used: it is never read as a second red — unless
+    ``required`` is given and none of its names is among the run's own still-live jobs (B-0274):
+    a non-required job (a ``site`` job, say) left running alone never keeps a required job's red
+    waiting, it is a defect at once."""
     fixed = {str(n) for n in deterministic or ()}
     if fixed:
         hard = [c for c in red or () if (c.get('name') or '?') in fixed
                 or job_key(c.get('name')) in fixed]
         if hard:
             rest = [c for c in red or () if c not in hard]
-            d, h = triage(product, state_dir, slug, sha, rest, where, out, now, gh) if rest \
-                else ([], [])
+            d, h = triage(product, state_dir, slug, sha, rest, where, out, now, gh,
+                         required=required) if rest else ([], [])
             for c in hard:
                 out(f"flake triage: {where} {c.get('name') or '?'} @ {(sha or '')[:9]} is "
                     'deterministic — a defect at once, never re-run')
@@ -373,8 +399,18 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
         r = _call(gh, ['run', 'rerun', '--job', job_id, '-R', slug])
         if not r.ok:
             text = f'{r.stdout}\n{r.stderr}\n{r.reason}'.lower()
-            if any(w in text for w in _RUNNING) or lost or run_live(slug, run_id, gh):
-                held.append(name)   # still judging the rest, or infra: the next pass asks again
+            if lost:
+                held.append(name)   # infra: the next pass asks again
+                continue
+            live = any(w in text for w in _RUNNING) or run_live(slug, run_id, gh)
+            if live and required and run_live(slug, run_id, gh, required=required) is False:
+                # the per-job read says so positively (never on an unreadable one, which stays
+                # held as before): nothing required is why the run looks live, so waiting on it
+                # buys nothing (B-0274 — a non-required job alone kept this live for hours)
+                defects.append(name)
+                continue
+            if live:
+                held.append(name)   # a required job of its run is still judging: wait
                 continue
             defects.append(name)
             continue
