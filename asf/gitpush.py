@@ -77,7 +77,13 @@ def push(args, cwd, *, guard, refs_only=False, timeout=None, env=None, log=None)
     ``guard`` (required, :class:`asf.refguard.Guard`): each target (:func:`targets`) is asked
     :meth:`~asf.refguard.Guard.refusal` first. Under ``refuse`` the push returns
     ``CompletedProcess(cmd, 1, '', line)`` without running ``git``; under ``warn`` the line goes
-    to ``log`` and the push proceeds."""
+    to ``log`` and the push proceeds.
+
+    Empties :mod:`asf.harvest.harvest`'s pass-scoped read cache first, unconditionally — every
+    call here either moves a ref or refuses, including under a rehearsal (the refusal path just
+    below), and F-0177 D5/PD12 decided the drop is not conditioned on which of those it is."""
+    from asf.harvest import harvest as H
+    H.drop_reads()
     cmd = push_args(args, refs_only)
     for target in targets(args):
         line = guard.refusal(target)

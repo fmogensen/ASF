@@ -12,7 +12,7 @@ from unittest import mock
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNNER = os.path.join(REPO_ROOT, 'tools', 'run_tests.py')
 
-from asf import env, reviews
+from asf import env, gh_limit, github, gitpush, refguard, reviews
 from asf.conventions import Conventions
 from asf.evidence import evidence
 from asf.harvest import harvest, lane
@@ -232,6 +232,187 @@ def run_harvest(repo, state_dir, dry_run=False):
     with redirect_stdout(buf):
         rc = harvest.run_harvest(repo, state_dir, dry_run, CONV)
     return rc, buf.getvalue()
+
+
+class ReadCacheTests(unittest.TestCase):
+    """F-0177 S-36500: :func:`harvest.read_cache`/:func:`harvest.sh`/:func:`harvest._gh` — a
+    temp git repo, no :class:`lane.Lane`, no product."""
+
+    def setUp(self):
+        gh_limit.reset()
+        self.addCleanup(gh_limit.reset)
+        self.repo = tempfile.mkdtemp(prefix='readcache_')
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.addCleanup(harvest.drop_reads)
+        sh(['git', 'init', '-q', '-b', 'main', self.repo])
+        sh(['git', 'config', 'user.name', 'Test'], cwd=self.repo)
+        sh(['git', 'config', 'user.email', 'test@example.com'], cwd=self.repo)
+        sh(['git', 'config', 'commit.gpgsign', 'false'], cwd=self.repo)
+        with open(os.path.join(self.repo, 'a.txt'), 'w', encoding='utf-8') as f:
+            f.write('a\n')
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'init'], cwd=self.repo)
+        self.head = sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo).stdout.strip()
+
+    def test_a_cached_read_runs_one_process_and_both_calls_agree(self):
+        with harvest.read_cache():
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                r1 = harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+                r2 = harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(spy.call_count, 1)
+            self.assertEqual((r1.returncode, r1.stdout, r1.stderr),
+                             (r2.returncode, r2.stdout, r2.stderr))
+            self.assertEqual(harvest.read_stats()['hits'], 1)
+
+    def test_the_same_pair_outside_the_window_runs_twice(self):
+        with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+        self.assertEqual(spy.call_count, 2)  # cache=True with no window open caches nothing
+
+    def test_an_env_of_its_own_is_never_cached(self):
+        with harvest.read_cache():
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                for _ in range(3):
+                    harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True,
+                              env={'A': '1'})
+            self.assertEqual(spy.call_count, 3)
+            self.assertEqual(harvest.read_stats()['hits'], 0)
+
+    def test_cache_false_on_a_read_argv_is_never_cached(self):
+        with harvest.read_cache():
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo)
+                harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo)
+            self.assertEqual(spy.call_count, 2)
+
+    def test_a_git_fetch_between_two_reads_empties_the_cache(self):
+        with harvest.read_cache():
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(harvest.read_stats()['hits'], 0)
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(harvest.read_stats()['hits'], 1)
+            harvest.sh(['git', 'fetch', 'origin'], cwd=self.repo)  # no origin: fails; still a write
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(spy.call_count, 1)  # the drop forced a fresh process
+            self.assertEqual(harvest.read_stats()['hits'], 1)  # unchanged: this one was a miss
+
+    def test_merge_tree_write_tree_empties_the_cache_though_it_moves_no_ref(self):
+        with harvest.read_cache():
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            harvest.sh(['git', 'merge-tree', '--write-tree', self.head, self.head], cwd=self.repo)
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(spy.call_count, 1)
+
+    def test_gh_pr_view_twice_is_one_call(self):
+        calls = []
+
+        def fake_call(args, timeout=None, run=None, env=None):
+            calls.append(args)
+            return github.Result(True, 'x', 0, 'x', '', '', '')
+
+        with harvest.read_cache():
+            with mock.patch.object(github, 'call', side_effect=fake_call):
+                r1 = harvest._gh(['pr', 'view', '1'])
+                r2 = harvest._gh(['pr', 'view', '1'])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(r1, r2)
+        self.assertEqual(harvest.read_stats()['hits'], 1)
+
+    def test_gh_pr_merge_empties_the_cache_first(self):
+        with harvest.read_cache():
+            with mock.patch.object(github, 'call',
+                                   return_value=github.Result(True, 'x', 0, 'x', '', '', '')):
+                harvest._gh(['pr', 'view', '1'])
+            with mock.patch.object(github, 'call',
+                                   return_value=github.Result(True, '', 0, '', '', '', '')) as m:
+                harvest._gh(['pr', 'merge', '1'])
+            self.assertEqual(m.call_count, 1)
+            with mock.patch.object(github, 'call',
+                                   return_value=github.Result(True, 'y', 0, 'y', '', '', '')) as m2:
+                harvest._gh(['pr', 'view', '1'])
+            self.assertEqual(m2.call_count, 1)  # no longer a hit: the merge dropped it
+
+    def test_gitpush_push_empties_the_cache_unconditionally(self):
+        with harvest.read_cache():
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(harvest.read_stats()['hits'], 0)
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(harvest.read_stats()['hits'], 1)
+            guard = refguard.Guard(main=None, protected=(), mode=refguard.OFF)
+            gitpush.push(['origin', f'{self.head}:refs/heads/nope'], self.repo, guard=guard)
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(spy.call_count, 1)  # the drop forced a fresh process
+
+    def test_nested_read_cache_leaves_the_outer_store_alive(self):
+        with harvest.read_cache():
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            with harvest.read_cache():
+                pass
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(spy.call_count, 0)  # the inner exit did not close the outer window
+            self.assertEqual(harvest.read_stats()['hits'], 1)
+
+    def test_a_fresh_window_never_serves_a_stale_answer_from_an_earlier_one(self):
+        with harvest.read_cache():
+            harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+        with harvest.read_cache():
+            with mock.patch('subprocess.run', wraps=subprocess.run) as spy:
+                harvest.sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo, cache=True)
+            self.assertEqual(spy.call_count, 1)
+            self.assertEqual(harvest.read_stats()['hits'], 0)
+
+    def test_an_unmarked_diff_against_the_index_reads_the_new_answer_the_second_time(self):
+        """P3's trap, as a test: :func:`harvest.list_conflicted` (``git diff --diff-filter=U``
+        with no revs, in the gate path) called twice across a real change to the index, inside
+        one open window, returns the **new** answer the second time — because nothing marked it
+        ``cache=True``."""
+        sh(['git', 'checkout', '-qb', 'theirs'], cwd=self.repo)
+        with open(os.path.join(self.repo, 'a.txt'), 'w', encoding='utf-8') as f:
+            f.write('b\n')
+        sh(['git', 'commit', '-qam', 'theirs'], cwd=self.repo)
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.repo)
+        with open(os.path.join(self.repo, 'a.txt'), 'w', encoding='utf-8') as f:
+            f.write('c\n')
+        sh(['git', 'commit', '-qam', 'ours'], cwd=self.repo)
+        with harvest.read_cache():
+            subprocess.run(['git', 'merge', '--no-commit', 'theirs'], cwd=self.repo,
+                          capture_output=True, text=True)  # a real conflict; non-zero on purpose
+            during = harvest.list_conflicted(self.repo)
+            self.assertEqual(during, ['a.txt'])
+            with open(os.path.join(self.repo, 'a.txt'), 'w', encoding='utf-8') as f:
+                f.write('resolved\n')
+            sh(['git', 'add', '-A'], cwd=self.repo)  # not through H.sh: no drop fires
+            after = harvest.list_conflicted(self.repo)
+            self.assertEqual(after, [])  # never cached in the first place: always fresh
+
+    def test_a_refused_gh_api_retried_under_with_escapes_is_stored_by_the_original_argv(self):
+        """RD2/RD1: the retry inside :func:`asf.github.call` postdates the spec. The answer
+        stored must be the one ``_gh`` returns, keyed by the argv it was called with — not the
+        argv the retry actually ran."""
+        original = ['api', 'repos/x/y/commits/abc123/check-runs']
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if github.GH_ESCAPES not in cmd:
+                return subprocess.CompletedProcess(cmd, 1, '', f'use {github.GH_ESCAPES}')
+            return subprocess.CompletedProcess(cmd, 0, 'ok', '')
+
+        with harvest.read_cache():
+            with mock.patch('asf.github.subprocess.run', side_effect=fake_run):
+                r1 = harvest._gh(original)
+            self.assertEqual(r1, (0, 'ok', ''))
+            self.assertEqual(len(calls), 2)  # the refusal, then the escaped retry
+            with mock.patch('asf.github.subprocess.run', side_effect=fake_run) as spy:
+                r2 = harvest._gh(original)
+            self.assertEqual(spy.call_count, 0)  # served from the cache keyed by `original`
+            self.assertEqual(r2, r1)
+            self.assertEqual(harvest.read_stats()['hits'], 1)
 
 
 class HarvestTests(unittest.TestCase):

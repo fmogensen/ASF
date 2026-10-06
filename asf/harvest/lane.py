@@ -414,14 +414,16 @@ def shared_hits(conv, files):
 
 def touched_files(repo, trunk, branch):
     """The files ``origin/<branch>`` changed since it left the trunk."""
-    r = H.sh(['git', 'diff', '--name-only', f'origin/{trunk}...origin/{branch}'], cwd=repo)
+    r = H.sh(['git', 'diff', '--name-only', f'origin/{trunk}...origin/{branch}'], cwd=repo,
+             cache=True)
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
 def changed_lines(repo, trunk, branch):
     """Lines ``origin/<branch>`` adds plus removes since it left the trunk (a binary file counts
     as none); None when git cannot say."""
-    r = H.sh(['git', 'diff', '--numstat', f'origin/{trunk}...origin/{branch}'], cwd=repo)
+    r = H.sh(['git', 'diff', '--numstat', f'origin/{trunk}...origin/{branch}'], cwd=repo,
+             cache=True)
     if r.returncode != 0:
         return None
     total = 0
@@ -516,7 +518,7 @@ def commits_note(repo, trunk, branch):
 
 def _subjects(repo, trunk, branch):
     return H.sh(['git', 'log', '--no-merges', '--format=%s', f'origin/{trunk}..origin/{branch}'],
-                cwd=repo).stdout.splitlines()
+                cwd=repo, cache=True).stdout.splitlines()
 
 
 def commits_name_items(repo, trunk, branch, ids):
@@ -782,10 +784,11 @@ def trunk_history(repo, trunk, branch):
     patch is already on the trunk (``--cherry-mark`` ``=``: copies of trunk commits, from a
     session rebasing or merging the trunk in, or an old reword), and the merge commits on it."""
     r = H.sh(['git', 'log', '--no-merges', '--cherry-mark', '--right-only', '--format=%m %H',
-              f'origin/{trunk}...origin/{branch}'], cwd=repo)
+              f'origin/{trunk}...origin/{branch}'], cwd=repo, cache=True)
     copies = [l.split()[1] for l in r.stdout.splitlines()
               if r.returncode == 0 and l.startswith('= ')]
-    m = H.sh(['git', 'rev-list', '--merges', f'origin/{trunk}..origin/{branch}'], cwd=repo)
+    m = H.sh(['git', 'rev-list', '--merges', f'origin/{trunk}..origin/{branch}'], cwd=repo,
+             cache=True)
     return copies, (m.stdout.split() if m.returncode == 0 else [])
 
 
@@ -955,7 +958,7 @@ def has_adjudicate_commit(repo, trunk, branch):
 
 def merge_commits(repo, trunk, branch):
     r = H.sh(['git', 'log', '--merges', '--format=%h %s', f'origin/{trunk}..origin/{branch}'],
-             cwd=repo)
+             cwd=repo, cache=True)
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
@@ -1068,7 +1071,7 @@ def already_on_trunk(repo, trunk, branch, conv, item, files=None):
         files = touched_files(repo, trunk, branch)
     r = H.sh(['git', 'diff', '--name-only', '--no-renames', f'origin/{trunk}',
               f'origin/{branch}', '--', *[f':(literal){f}' for f in files]],
-             cwd=repo) if files else None
+             cwd=repo, cache=True) if files else None
     differ = set(r.stdout.splitlines()) if r is not None and r.returncode == 0 else set(files)
     same = [f for f in files if f not in differ]
     deliverable = deliverable_of(conv, branch, item)
@@ -1084,7 +1087,7 @@ def item_on_trunk(repo, trunk, item):
     if not item:
         return ''
     r = H.sh(['git', 'log', '--no-merges', '-F', '-i', f'--grep={item}', '--format=%H %s',
-              f'origin/{trunk}'], cwd=repo)
+              f'origin/{trunk}'], cwd=repo, cache=True)
     for line in (r.stdout.splitlines() if r.returncode == 0 else []):
         sha, _, subject = line.partition(' ')
         if githooks.names_item(subject, item):
@@ -1098,7 +1101,8 @@ def empty_branch_landed(repo, trunk, branch, item, pr):
     trunk: its PR merged, or a commit naming ``item`` reachable from the trunk with no PR still
     open. A branch reset to the trunk tip — a repair's reset, seconds before its work is pushed
     again — matches neither: it waits, never deleted, its record not advanced."""
-    own = H.sh(['git', 'rev-list', '--no-merges', f'origin/{trunk}..origin/{branch}'], cwd=repo)
+    own = H.sh(['git', 'rev-list', '--no-merges', f'origin/{trunk}..origin/{branch}'], cwd=repo,
+               cache=True)
     if own.returncode != 0 or own.stdout.split():
         return False, f'its own commits past origin/{trunk} unreadable or present'
     pr = pr or {}
@@ -1539,7 +1543,7 @@ class Lane:
 
     def is_ancestor(self, a, b):
         return bool(a) and H.sh(['git', 'merge-base', '--is-ancestor', a, b],
-                                cwd=self.repo).returncode == 0
+                                cwd=self.repo, cache=True).returncode == 0
 
     def full_sha(self, sha):
         """``sha`` (a prefix the repo knows) as its full 40 hex, else as given."""
@@ -1674,7 +1678,7 @@ class Lane:
                 f['gone_merged'], f['trunk_head'] = True, self.full_sha(gone)
             return f
         ahead = H.sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{b}'],
-                     cwd=repo).stdout.strip()
+                     cwd=repo, cache=True).stdout.strip()
         f['ahead'] = int(ahead) if ahead.isdigit() else 0
         # PD6: read now, while origin/<trunk>..origin/<b> is still the branch's own diff — once
         # it lands, the trunk catches up to it and the same read would find nothing
@@ -1887,7 +1891,7 @@ class Lane:
         if pr.get('state') == 'MERGED' and pr.get('head') in (None, '', head):
             return f  # T11: found merged (the host)
         ahead = H.sh(['git', 'rev-list', '--count', f'origin/{self.trunk}..origin/{b}'],
-                     cwd=self.repo).stdout.strip()
+                     cwd=self.repo, cache=True).stdout.strip()
         f['ahead'] = int(ahead) if ahead.isdigit() else 0
         if f['ahead'] == 0:
             landed, why = empty_branch_landed(self.repo, self.trunk, b, item, pr)
@@ -3099,27 +3103,29 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
         return {}, {}
     lane.defer_pushes = defer_pushes
     H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
-    try:
-        found = lane.gather(prs=True)
-        budget = pass_budget_s(lane)
-        started = time.monotonic()
-        order = sorted(found)
-        for i, b in enumerate(order):
-            if budget and time.monotonic() - started >= budget:
-                rest = order[i:]
-                lane.out(f'lane: pass budget {budget:g}s spent — {len(rest)} branch(es) wait for '
-                         f'the next pass ({", ".join(rest[:5])}{" …" if len(rest) > 5 else ""})')
-                break
-            lane.advance(found[b])
-    finally:
-        lane.finish_ref_pushes()
-    # the queue's pass (duplicate pushes, relief and its re-runs), under
-    # its own lock: the queue's own scheduler job runs it every minute too, and a pass running
-    # there already does this one's work (asf.ci_queue.queue_pass)
-    from asf import ci_queue
-    if ci_queue.queue_pass(product, items=lane.items, out=lane.out,
-                           dry_run=lane.dry_run) is None:
-        lane.out('ci queue: its own pass is running — the lane leaves the queue to it')
+    with H.read_cache():
+        try:
+            found = lane.gather(prs=True)
+            budget = pass_budget_s(lane)
+            started = time.monotonic()
+            order = sorted(found)
+            for i, b in enumerate(order):
+                if budget and time.monotonic() - started >= budget:
+                    rest = order[i:]
+                    lane.out(f'lane: pass budget {budget:g}s spent — {len(rest)} branch(es) '
+                             f'wait for the next pass ({", ".join(rest[:5])}'
+                             f'{" …" if len(rest) > 5 else ""})')
+                    break
+                lane.advance(found[b])
+        finally:
+            lane.finish_ref_pushes()
+        # the queue's pass (duplicate pushes, relief and its re-runs), under
+        # its own lock: the queue's own scheduler job runs it every minute too, and a pass
+        # running there already does this one's work (asf.ci_queue.queue_pass)
+        from asf import ci_queue
+        if ci_queue.queue_pass(product, items=lane.items, out=lane.out,
+                               dry_run=lane.dry_run) is None:
+            lane.out('ci queue: its own pass is running — the lane leaves the queue to it')
     return lane.results, found
 
 
@@ -3157,17 +3163,21 @@ def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lan
     gated together (:func:`gate_set`) — unless this host has no room for a suite at all
     (:func:`held_by_host`). Returns ``{branch: outcome}``."""
     lane = lane or Lane(product, state_dir, out, dry_run, items)
-    if found is None:
-        H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
-        found = lane.gather(prs=False)
-    entries = []
-    for b, f in sorted(found.items()):
-        rec = f.get('prev') or {}
-        if rec.get('state') in GATE_STATES and not f.get('live') and f.get('head') \
-                and f['head'] == rec.get('head'):
-            entries.append(f)
-    entries = take_for_tick(lane, entries, items)
-    ready = held_by_host(lane, precheck(lane, entries))
+    with H.read_cache():
+        if found is None:
+            H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
+            found = lane.gather(prs=False)
+        entries = []
+        for b, f in sorted(found.items()):
+            rec = f.get('prev') or {}
+            if rec.get('state') in GATE_STATES and not f.get('live') and f.get('head') \
+                    and f['head'] == rec.get('head'):
+                entries.append(f)
+        entries = take_for_tick(lane, entries, items)
+        ready = held_by_host(lane, precheck(lane, entries))
+    # the window closes here (RD10): `gate_set` reaches `GitHubHost.recheck`, whose pre-merge
+    # read of a PR's checks must never be served from a snapshot `check_gate` took before the
+    # suite ran.
     if ready or merge_queued(lane):
         try:
             if ready:

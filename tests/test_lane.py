@@ -9,6 +9,7 @@ STARVED → SPEC/PLAN correction (R7), the docs-only trunk move that is not gate
 gate timeout that is unknown, never red (§12), the feeder reading the lane through the one
 occupancy answer (R16), and the ``NAME=value`` prefix of a test command (§12).
 """
+import contextlib
 import json
 import os
 import shlex
@@ -839,6 +840,110 @@ class LaneRepo(LaneFixture):
         results = harvest.run_product_harvest(self.product(test_command=cmd), self.state_dir,
                                               out=lambda *_: None)
         self.assertEqual(results, {'worker/T-0001': 'landed'})
+
+
+class PassReadsTests(LaneFixture):
+    """F-0177 S-36500: :func:`lane.lane_pass`'s read cache, over a real repo — three plain lane
+    branches plus a fourth, an orphan the lane picks back up (RD8: three plain branches alone
+    read nothing twice; the orphan — read once by :meth:`lane.Lane.orphan_facts`, then again by
+    :meth:`lane.Lane.branch_facts` once it is picked up — is what does)."""
+
+    def _push_fixture(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat(T-0002): b')
+        self.session('coder-t-0002', 'T-0002', 'worker/T-0002')
+        self.push_lane('worker/T-0003', {'c.txt': 'c\n'}, 'feat(T-0003): c')
+        self.session('coder-t-0003', 'T-0003', 'worker/T-0003')
+        # its commit already names the item: no in-pass reword, so the only duplication this
+        # fixture has is the one RD8 measures — the orphan's own two-phase read
+        self.push_lane('worker/free-plan-t3', {'d.txt': 'd\n'}, 'feat(T-0009): the door')
+        return {'T-0009': {'id': 'T-0009', 'type': 'task', 'state': 'Active',
+                           'legacy_id': 'FREE-1/T3', 'parent': 'F-0001'},
+                'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active',
+                           'legacy_id': 'free-plan', 'children': ['T-0009']}}
+
+    @staticmethod
+    def _product_at(repo_dir):
+        conv = {'test_command': f'{shlex.quote(sys.executable)} -m unittest discover -s checks '
+                                '-p test_*.py',
+                'specs_dir': 'specs', 'plans_dir': 'plans', 'reviews_dir': 'reviews',
+                'lane': {'review': {'code': 'none'}},
+                'branch_prefixes': {'code': 'worker/', 'plan': 'plan/', 'spec': 'spec/'}}
+        return env.Product('sample', {'repo_dir': repo_dir, 'main': 'main',
+                                      'conventions': conv, 'steps': {'batch': 'off'}})
+
+    @staticmethod
+    def _counted_pass(repo_dir, state_dir, items, cache_active):
+        """``lane_pass`` over ``repo_dir``/``state_dir``, with ``harvest.sh`` and
+        ``harvest._gh`` wrapped by a counter: every ``(cwd, argv)`` a real process actually ran
+        for (never one a cache hit answered). ``cache_active=False`` patches
+        :func:`harvest.read_cache` to a no-op, so every ``sh(cache=True)`` call runs today's
+        plain, unpatched path — the "before" half of RD8's own measurement."""
+        spawned = []
+        real_sh, real_gh = harvest.sh, harvest._gh
+
+        def counted_sh(cmd, cwd=None, env=None, cache=False):
+            before = harvest.read_stats()['hits']
+            r = real_sh(cmd, cwd=cwd, env=env, cache=cache)
+            if harvest.read_stats()['hits'] == before:
+                spawned.append((cwd, tuple(cmd)))
+            return r
+
+        def counted_gh(args):
+            before = harvest.read_stats()['hits']
+            r = real_gh(args)
+            if harvest.read_stats()['hits'] == before:
+                spawned.append((None, ('gh', *args)))
+            return r
+
+        @contextlib.contextmanager
+        def no_cache():
+            yield
+
+        patches = [mock.patch.object(harvest, 'sh', side_effect=counted_sh),
+                   mock.patch.object(harvest, '_gh', side_effect=counted_gh)]
+        if not cache_active:
+            patches.append(mock.patch.object(harvest, 'read_cache', no_cache))
+        for p in patches:
+            p.start()
+        try:
+            results, found = lane.lane_pass(PassReadsTests._product_at(repo_dir), state_dir,
+                                             items=items, out=lambda *_: None)
+        finally:
+            for p in patches:
+                p.stop()
+        return spawned, results, found
+
+    def test_no_read_is_spawned_twice_and_touched_files_runs_once_per_branch(self):
+        items = self._push_fixture()
+        copy = tempfile.mkdtemp(prefix='lane_copy_')
+        self.addCleanup(shutil.rmtree, copy, ignore_errors=True)
+        shutil.copytree(self.origin, os.path.join(copy, 'origin.git'))
+        shutil.copytree(self.state_dir, os.path.join(copy, 'state'))
+        repo2 = os.path.join(copy, 'repo')
+        sh(['git', 'clone', '-q', os.path.join(copy, 'origin.git'), repo2])
+
+        # the "before" half (RD8, re-measured on this head): the same four branches, unpatched,
+        # over an untouched copy — today's pass spawns 34 reads, 31 of them distinct, the same
+        # 3 argvs (all the orphan's own) twice. A class that only asserted the "after" state
+        # would have passed before this card's step 2.
+        before, before_results, before_found = self._counted_pass(
+            repo2, os.path.join(copy, 'state'), items, cache_active=False)
+        self.assertEqual((len(before), len(set(before))), (34, 31), before)
+
+        # the "after" half: the real pass, cached, over the original (still untouched) fixture —
+        # 31 spawned, none twice, and `read_stats()['hits']` is 3 (RD8).
+        spawned, results, found = self._counted_pass(self.repo, self.state_dir, items,
+                                                      cache_active=True)
+        self.assertEqual((len(spawned), len(set(spawned))), (31, 31), spawned)  # (a)
+        for b in ('worker/T-0001', 'worker/T-0002', 'worker/T-0003'):
+            argv = (self.repo, ('git', 'diff', '--name-only', f'origin/main...origin/{b}'))
+            self.assertEqual(spawned.count(argv), 1, (b, spawned))  # (b)
+        self.assertEqual(harvest.read_stats()['hits'], 3)
+        self.assertEqual(results, before_results)  # (c): key for key, the same {branch: outcome}
+        self.assertEqual({b: f.get('ahead') for b, f in found.items()},
+                         {b: f.get('ahead') for b, f in before_found.items()})
 
 
 class OneJobTwoBranches(LaneFixture):

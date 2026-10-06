@@ -18,6 +18,7 @@ conventions checks, each within ``harvest.gate_timeout_s`` (B-0072). Landing on 
 fast-forward only: ``git push --force*`` is never used. Python 3 stdlib only.
 """
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -28,10 +29,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
-from asf import approvals, env, github, gitpush, hermetic, redact, refguard
+from asf import approvals, env, github, gitpush, hermetic, mutation_guard, redact, refguard
 from asf.conventions import Conventions
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -76,8 +78,82 @@ def clean_env(env=None):
     return hermetic.git_env(env)
 
 
-def sh(cmd, cwd=None, env=None):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=clean_env(env))
+#: `git` subcommands that only read. A `git` argv through `sh` whose subcommand is NOT here
+#: drops the whole read cache before it runs (F-0177 D4): the complement is listed, not the
+#: writes, so a subcommand nobody has thought of yet invalidates a cache instead of being served
+#: a stale answer. `merge-tree --write-tree` and `commit-tree` are deliberately absent — they
+#: move no ref, but they write objects, and the safe side of that line is the cheap side.
+#: `ls-remote` is absent too: it is the one read here whose answer moves with no local write, and
+#: it is the snapshot the whole pass is taken against (`Lane.remote_heads`).
+READ_SUBCOMMANDS = frozenset({'rev-parse', 'rev-list', 'log', 'diff', 'merge-base',
+                              'for-each-ref', 'cat-file', 'show', 'cherry'})
+
+_cache_lock = threading.Lock()
+_cache_state = {'depth': 0, 'store': {}, 'n_git': 0, 'n_gh': 0, 'hits': 0}
+
+
+@contextlib.contextmanager
+def read_cache():
+    """One store of read answers for the life of the `with` block — a *pass*, during which
+    `origin/<trunk>` and `origin/<branch>` do not move. A `git` read marked `cache=True` (`sh`)
+    and a non-mutating `gh` argv (`_gh`) are served from it and stored in it; anything that
+    writes empties it (`READ_SUBCOMMANDS`, `asf.gitpush.push`, `mutation_guard.is_mutating_gh`).
+    Nests: only the outermost exit closes it, so a helper opening its own block never closes its
+    caller's — and a fresh outermost entry starts from an empty store and zeroed counters, so a
+    later pass is never served a stale answer from an earlier one."""
+    with _cache_lock:
+        if _cache_state['depth'] == 0:
+            _cache_state['store'] = {}
+            _cache_state['n_git'] = 0
+            _cache_state['n_gh'] = 0
+            _cache_state['hits'] = 0
+        _cache_state['depth'] += 1
+    try:
+        yield
+    finally:
+        with _cache_lock:
+            _cache_state['depth'] -= 1
+
+
+def drop_reads():
+    """Empty the read cache's store, leaving the window (if any) open. Safe with no window
+    open."""
+    with _cache_lock:
+        _cache_state['store'] = {}
+
+
+def read_stats():
+    """`{'git': int, 'gh': int, 'hits': int}` — the read cache's counters for the current (or
+    most recently closed) pass. Safe to call with no window open."""
+    with _cache_lock:
+        return {'git': _cache_state['n_git'], 'gh': _cache_state['n_gh'],
+                'hits': _cache_state['hits']}
+
+
+def sh(cmd, cwd=None, env=None, cache=False):
+    """`cmd` in `cwd`, a `subprocess.CompletedProcess`. `cache`: this read is a function of refs
+    that do not move inside a pass, so inside `read_cache` it costs one process however many
+    callers ask for it. Never with an `env` of its own, and never for a `git diff` against the
+    index or the worktree — mark only a read that names its revs."""
+    cmd = list(cmd)
+    with _cache_lock:
+        open_ = _cache_state['depth'] > 0
+        if open_ and cache and env is None:
+            key = (cwd, tuple(cmd))
+            hit = _cache_state['store'].get(key)
+            if hit is not None:
+                _cache_state['hits'] += 1
+                rc, stdout, stderr = hit
+                return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
+        elif open_ and cmd[0] == 'git' and (len(cmd) < 2 or cmd[1] not in READ_SUBCOMMANDS):
+            _cache_state['store'] = {}
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=clean_env(env))
+    with _cache_lock:
+        if cmd and cmd[0] == 'git':
+            _cache_state['n_git'] += 1
+        if _cache_state['depth'] > 0 and cache and env is None:
+            _cache_state['store'][(cwd, tuple(cmd))] = (r.returncode, r.stdout, r.stderr)
+    return r
 
 
 def sh_timed(cmd, cwd, env, timeout):
@@ -912,8 +988,30 @@ def _gh(args):
     over :func:`asf.github.call` (no timeout, as ever): the rate-limit latch, the dry-run
     refusal of a mutating call (:mod:`asf.mutation_guard`), the escape-sequence retry and the
     hermetic env all live there now. New readers call :func:`asf.github.gh` and get a
-    :class:`asf.github.Result` whose failure is Unknown, not an rc to remember to check."""
-    return github.call(args, timeout=None).triple()
+    :class:`asf.github.Result` whose failure is Unknown, not an rc to remember to check.
+
+    Inside :func:`read_cache`, a non-mutating argv is served from / stored in the pass's read
+    cache, keyed by the argv ``_gh`` was called with — never the argv a refused ``gh api`` is
+    retried under inside :func:`asf.github.call`, which this shim never sees. A mutating argv
+    empties the cache first (:func:`drop_reads`): ``call`` decides for itself, from the same
+    argv, whether a dry run refuses it."""
+    mutating = mutation_guard.is_mutating_gh(args)
+    key = (None, ('gh', *args))
+    with _cache_lock:
+        open_ = _cache_state['depth'] > 0
+        if open_ and not mutating:
+            hit = _cache_state['store'].get(key)
+            if hit is not None:
+                _cache_state['hits'] += 1
+                return hit
+        elif open_ and mutating:
+            _cache_state['store'] = {}
+    result = github.call(args, timeout=None).triple()
+    with _cache_lock:
+        _cache_state['n_gh'] += 1
+        if _cache_state['depth'] > 0 and not mutating:
+            _cache_state['store'][key] = result
+    return result
 
 
 GH_ESCAPES = github.GH_ESCAPES

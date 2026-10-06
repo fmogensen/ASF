@@ -1063,6 +1063,8 @@ class GitHubSource(Source):
         writes = mutation_guard.is_mutating_gh(args)
         if writes:
             gh_limit.forget()  # a write can change any listing this pass read before it
+            from asf.harvest import harvest as H  # local: a module-level import here is a cycle
+            H.drop_reads()  # F-0177: a write here can change a `harvest._gh` read too
         if mutation_guard.is_active() and writes:
             return None, mutation_guard.would_line('gh', args)
         real = self._run is subprocess.run  # an injected runner (a test) is never memoised
