@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.143 — 2026-10-06
+
+### Features landed
+
+- ASF now has connectors — `connectors.<kind>` in config.yaml picks the implementation for each external service (forge, quota and secrets in this release step), with GitHub, no quota command and plain files as the unchanged defaults (#770)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.143"`
+
 ## v0.1.142 — 2026-10-06
 
 ### Features landed
