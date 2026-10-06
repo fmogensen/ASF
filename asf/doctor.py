@@ -765,14 +765,20 @@ def check_connectors(cfg):
 
 def check_config_keys(cfg):
     """[('warn', detail)] — the ``config keys`` row: the keys of ``config.yaml`` no code reads
-    (:func:`asf.config_keys.unknown_keys`), one row naming them all; none when there are none.
-    A key nothing reads does nothing, so a ``warn`` and never red."""
+    (:func:`asf.config_keys.unknown_keys`), one row naming them all, and one naming each set key
+    whose value breaks its kind or range (:func:`asf.config_keys.problems`); none when there are
+    none. Neither changes what runs (a malformed tunable keeps its default), so ``warn``, never red."""
     from asf import config_keys
+    rows = []
     unknown = config_keys.unknown_keys(cfg)
-    if not unknown:
-        return []
-    return [('warn', f'config.yaml: {", ".join(unknown)} — not read by this release (a setting '
-                     f'that silently does nothing: remove it, or see asf.config_keys)')]
+    if unknown:
+        rows.append(('warn', f'config.yaml: {", ".join(unknown)} — not read by this release (a '
+                             f'setting that silently does nothing: remove it, or see asf.config_keys)'))
+    bad = config_keys.problems(cfg)
+    if bad:
+        rows.append(('warn', 'config.yaml: ' + '; '.join(f'{k} {why}' for k, why in bad)
+                     + ' — the default is used instead (asf.config_keys.TYPED)'))
+    return rows
 
 
 def check_cli_dispatcher(product, path=None, timeout=60):

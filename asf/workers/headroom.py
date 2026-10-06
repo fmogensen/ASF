@@ -34,7 +34,7 @@ import os
 import re
 import statistics
 
-from asf import env
+from asf import config_keys, env
 
 QUOTA_EXHAUSTED = 'quota-exhausted'
 #: The CLI's texts for a spent window: the session limit, the usage limit, a rate limit (the
@@ -52,6 +52,8 @@ DEFAULT_HOLD = datetime.timedelta(hours=1)
 LATE_READ = datetime.timedelta(hours=1)
 
 #: Percent of a 5h window one launch spends, per model family and kind (``*``: any other).
+#: Config ``quota_guards.default_cost`` (the same shape) replaces it; ``model_families`` and
+#: ``min_runs`` replace :data:`FAMILIES` and :data:`MIN_RUNS`.
 DEFAULT_COST = {
     'opus': {'spec': 10, 'spec-amend': 10, 'plan': 10, 'review': 6, 'adjudicate': 6, 'groom': 6,
              'reshape': 6, '*': 8},
@@ -88,9 +90,31 @@ def parse_ts(s):
     return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
 
 
+def default_cost():
+    """Config ``quota_guards.default_cost`` — ``{family: {kind: percent}}``, each with a ``*``
+    row, and a ``*`` family — when well-formed, else :data:`DEFAULT_COST`."""
+    table = config_keys.value('quota_guards.default_cost', None)
+    if not isinstance(table, dict) or not isinstance(table.get('*'), dict):
+        return DEFAULT_COST
+    for row in table.values():
+        if not isinstance(row, dict) or '*' not in row or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0
+                for v in row.values()):
+            return DEFAULT_COST
+    return table
+
+
+def families():
+    """Config ``quota_guards.model_families`` (names a model id contains), else :data:`FAMILIES`."""
+    got = config_keys.value('quota_guards.model_families', None)
+    if got and all(isinstance(f, str) and f for f in got):
+        return tuple(f.lower() for f in got)
+    return FAMILIES
+
+
 def family(model):
     m = str(model or '').lower()
-    return next((f for f in FAMILIES if f in m), '*')
+    return next((f for f in families() if f in m), '*')
 
 
 def _num(x):
@@ -225,7 +249,8 @@ class CostTable:
         got = self.shares.get((kind, fam))
         if got is not None:
             return got
-        table = DEFAULT_COST.get(fam) or DEFAULT_COST['*']
+        cost = default_cost()
+        table = cost.get(fam) or cost['*']
         return table.get(kind, table['*'])
 
 
@@ -241,8 +266,9 @@ def estimate(runs, five_h_usd=None, allowance=RUNNING_ALLOWANCE):
             continue
         groups.setdefault((r['kind'], family(r.get('model'))), []).append(float(r['usd']))
     shares = {}
+    min_runs = config_keys.value('quota_guards.min_runs', MIN_RUNS)
     for key, usd in groups.items():
-        if len(usd) < MIN_RUNS:
+        if len(usd) < min_runs:
             continue
         pct = statistics.median(usd[-RECENT_RUNS:]) * 100.0 / five_h_usd
         shares[key] = max(1, _num(round(pct * 2) / 2))

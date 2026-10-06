@@ -357,11 +357,11 @@ def env_passthrough(cfg):
     return tuple(pool.get('env_passthrough') or ())
 
 
-#: Set in every local worker session unless the operator or the product says otherwise: a
-#: session shares the host with the others, so a test runner that sizes its pool to the core
-#: count saturates the machine and holds every product's wave on host pressure (2026-09-25:
-#: load 71 on 10 cores from one vitest run). CI never sees these; they are worker-only.
-DEFAULT_WORKER_ENV = {'VITEST_MAX_WORKERS': '2'}
+#: Set in every local worker session unless the operator or the product says otherwise: none.
+#: A test runner's own knob (a pool size that would otherwise follow the core count) belongs to
+#: the product that runs it — its ``conventions.worker_env`` — or to the operator's
+#: ``worker_pool.env``; CI never sees these, they are worker-only.
+DEFAULT_WORKER_ENV = {}
 
 
 def worker_env(cfg, product=None):

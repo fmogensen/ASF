@@ -45,9 +45,17 @@ TRUNCATED_ROWS = 1000
 MAX_RUNS_PER_PASS = 30
 #: The run links a card body lists (newest first); every run id stays in ``links.runs``.
 BODY_RUNS = 10
+#: A flaky test's card title and signature start with this (config ``flaky.title_prefix``). Changing
+#: it starts new signatures: a card filed under the old prefix is no longer matched.
 SIG_PREFIX = 'flaky e2e: '
 TITLE_MAX = 120
 GH_TIMEOUT_S = 120
+
+
+def sig_prefix():
+    """Config ``flaky.title_prefix``, else :data:`SIG_PREFIX`."""
+    from asf import config_keys
+    return config_keys.value('flaky.title_prefix', SIG_PREFIX)
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07')
 #: ``gh run view --log`` prefixes ``<job>\t<step>\t``; a job log prefixes an ISO timestamp.
@@ -200,7 +208,7 @@ def _replace_line(body, prefix, line):
 def file_or_update(root, canonical, key, entry, now, default_bug_epic=None):
     """File the Bug for one flaky test, or bring its card's count up to date. Returns
     ``filed``, ``updated`` or ``unchanged``."""
-    sig = SIG_PREFIX + key
+    sig = sig_prefix() + key
     sev = severity(entry, now)
     last_day = today()
     run_ids = sorted({r['run'] for r in entry['runs']})
@@ -455,7 +463,7 @@ def file_flaky_bugs(root, canonical, state, now, default_bug_epic=None, reload=N
     outcomes = {}
     for key in sorted(state['tests']):
         o = file_or_update(root, canonical, key, state['tests'][key], now, default_bug_epic)
-        outcomes[SIG_PREFIX + key] = o
+        outcomes[sig_prefix() + key] = o
         if o == 'filed' and reload is not None:
             canonical = reload()
     return outcomes
@@ -476,8 +484,8 @@ def run_pass(root, canonical, product, conv, now, level='auto', default_bug_epic
     if level != 'auto':
         prefix = 'NEEDS OPERATOR: ' if level == 'human-now' else ''
         for key in sorted(state['tests']):
-            if _find_card(canonical, SIG_PREFIX + key) is None:
-                out(f'{prefix}held file_bug on {SIG_PREFIX}{key} — widen approvals: file_bug '
+            if _find_card(canonical, sig_prefix() + key) is None:
+                out(f'{prefix}held file_bug on {sig_prefix()}{key} — widen approvals: file_bug '
                     f'in products/<p>.yaml')
         return {}
     outcomes = file_flaky_bugs(root, canonical, state, now, default_bug_epic, reload=reload)

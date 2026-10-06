@@ -31,12 +31,33 @@ import json as jsonlib
 import subprocess
 from dataclasses import dataclass
 
-from asf import gh_limit, hermetic, mutation_guard
+from asf import config_keys, gh_limit, hermetic, mutation_guard
 
-#: Seconds a JSON read may take (a list, a view, an ``api`` GET).
+#: Seconds a JSON read may take (a list, a view, an ``api`` GET); config ``github.json_timeout_s``.
 JSON_TIMEOUT_S = 60
-#: Seconds any other call may take — a ``run view --log`` of a long job is legitimately slow.
+#: Seconds any other call may take — a ``run view --log`` of a long job is legitimately slow;
+#: config ``github.log_timeout_s``.
 LOG_TIMEOUT_S = 300
+#: Seconds a short ``gh`` call outside this module may take; config ``github.cmd_timeout_s``.
+CMD_TIMEOUT_S = 30
+#: How many PRs one ``gh pr list`` asks for; config ``github.pr_list_limit``. ``gh`` stops at its
+#: ``--limit`` silently, so a busy repo needs more.
+PR_LIST_LIMIT = 300
+
+
+def cmd_timeout_s():
+    """Seconds for a short ``gh`` call: config ``github.cmd_timeout_s``, else :data:`CMD_TIMEOUT_S`."""
+    return config_keys.value('github.cmd_timeout_s', CMD_TIMEOUT_S)
+
+
+def json_timeout_s():
+    """Seconds a JSON read may take: config ``github.json_timeout_s``, else :data:`JSON_TIMEOUT_S`."""
+    return config_keys.value('github.json_timeout_s', JSON_TIMEOUT_S)
+
+
+def pr_list_limit(default=PR_LIST_LIMIT):
+    """``--limit`` for a ``gh pr list``: config ``github.pr_list_limit``, else ``default``."""
+    return config_keys.value('github.pr_list_limit', default)
 #: The ``timeout`` default: :data:`JSON_TIMEOUT_S` with ``json=True``, else :data:`LOG_TIMEOUT_S`.
 DEFAULT = object()
 
@@ -96,7 +117,9 @@ def with_escapes(args):
 
 def _limit(timeout, json):
     if timeout is DEFAULT:
-        return JSON_TIMEOUT_S if json else LOG_TIMEOUT_S
+        if json:
+            return json_timeout_s()
+        return config_keys.value('github.log_timeout_s', LOG_TIMEOUT_S)
     return timeout
 
 
@@ -168,8 +191,10 @@ def pr(slug, number, fields, **kw):
     return gh(['pr', 'view', str(number), '-R', slug, '--json', ','.join(fields)], json=True, **kw)
 
 
-def open_prs(slug, limit=300, fields=('number', 'headRefName', 'headRefOid'), **kw):
-    """``gh pr list --state open`` for ``slug`` — a list (an empty list is a real "none open")."""
+def open_prs(slug, limit=None, fields=('number', 'headRefName', 'headRefOid'), **kw):
+    """``gh pr list --state open`` for ``slug`` — a list (an empty list is a real "none open").
+    ``limit`` defaults to :func:`pr_list_limit`."""
+    limit = pr_list_limit() if limit is None else limit
     return gh(['pr', 'list', '-R', slug, '--state', 'open', '--limit', str(limit), '--json',
                ','.join(fields)], json=True, **kw)
 

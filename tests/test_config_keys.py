@@ -163,5 +163,178 @@ class DoctorRow(unittest.TestCase):
         self.assertEqual(doctor.check_config_keys({'default_product': 'asf'}), [])
 
 
+def _documented(key, text):
+    """``key`` is in ``docs/config.example.yaml``: by its dotted path, or each part as a key."""
+    import re
+    k = key.replace('[]', '')
+    if k.endswith('.*'):
+        k = k[:-2]
+    if k in text:
+        return True
+    return all(re.search(r'(^|[\s#{,])' + re.escape(p) + r':', text, re.M) for p in k.split('.'))
+
+
+class Documented(unittest.TestCase):
+    """C: every key the code reads is documented, and the documented ones are registered."""
+
+    def test_every_registered_key_is_in_the_example_config(self):
+        with open(os.path.join(ROOT, 'docs', 'config.example.yaml'), encoding='utf-8') as f:
+            text = f.read()
+        missing = [k for k in sorted(config_keys.KNOWN_CONFIG_KEYS) if not _documented(k, text)]
+        self.assertEqual(missing, [], 'document each in docs/config.example.yaml')
+
+    def test_the_documented_identity_key_is_registered(self):
+        self.assertEqual(config_keys.unknown_keys({'factory': {'git_identity': 'A <a@b>'}}), [])
+
+    def test_cloud_keys_are_checked_one_by_one(self):
+        cfg = {'cloud': {'enabled': True, 'poll_min': 15, 'poll_mins': 15}}
+        self.assertEqual(config_keys.unknown_keys(cfg), ['cloud.poll_mins'])
+        self.assertNotIn('cloud.*', config_keys.KNOWN_CONFIG_KEYS)
+
+
+def _value_calls():
+    """``{key: file}`` for every ``config_keys.value('<key>', ...)`` call in asf/."""
+    found = {}
+    for here, _d, files in os.walk(os.path.join(ROOT, 'asf')):
+        for fn in files:
+            if not fn.endswith('.py'):
+                continue
+            path = os.path.join(here, fn)
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), path)
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == 'value' and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == 'config_keys' and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    found[node.args[0].value] = os.path.relpath(path, ROOT)
+    return found
+
+
+class Typed(unittest.TestCase):
+    def test_every_tunable_read_is_registered_and_typed(self):
+        calls = _value_calls()
+        self.assertIn('git.timeout_s', calls)
+        self.assertEqual({k: f for k, f in calls.items() if k not in config_keys.TYPED}, {})
+
+    def test_every_typed_key_is_read_by_some_code(self):
+        text = source_text()
+        self.assertEqual([k for k in sorted(config_keys.TYPED) if f"'{k}'" not in text
+                          and f"'{k.split('.')[-1]}'" not in text and k not in text], [])
+
+    def test_unset_is_the_default_and_set_is_read(self):
+        self.assertEqual(config_keys.value('git.timeout_s', 120, cfg={}), 120)
+        self.assertEqual(config_keys.value('git.timeout_s', 120, cfg={'git': {'timeout_s': 600}}), 600)
+        self.assertEqual(config_keys.value('harvest.round_cap', 3, cfg={'harvest': {'round_cap': 5.0}}), 5)
+        self.assertIsInstance(config_keys.value('harvest.round_cap', 3,
+                                                cfg={'harvest': {'round_cap': 5.0}}), int)
+
+    def test_a_malformed_value_keeps_the_default_and_is_named(self):
+        cfg = {'git': {'timeout_s': -1}, 'harvest': {'round_cap': 'three'},
+               'tick': {'wave_first': 'yes', 'watchdog': {'factor': 2.5}},
+               'ci': {'stall': {'rerun_max': 1.5}}, 'flaky': {'title_prefix': 7}}
+        self.assertEqual(config_keys.value('git.timeout_s', 120, cfg=cfg), 120)
+        self.assertEqual(config_keys.value('harvest.round_cap', 3, cfg=cfg), 3)
+        self.assertEqual(config_keys.value('tick.watchdog.factor', 3, cfg=cfg), 2.5)
+        self.assertEqual([k for k, _ in config_keys.problems(cfg)],
+                         ['ci.stall.rerun_max', 'flaky.title_prefix', 'git.timeout_s',
+                          'harvest.round_cap', 'tick.wave_first'])
+        self.assertIn('1 or more', dict(config_keys.problems(cfg))['git.timeout_s'])
+        self.assertEqual(config_keys.problems({}), [])
+        self.assertEqual(config_keys.problems({'host_guards': {'swap_pct': 150}}),
+                         [('host_guards.swap_pct', 'must be 100 or less, not 150')])
+
+    def test_an_unregistered_tunable_is_a_bug(self):
+        with self.assertRaises(KeyError):
+            config_keys.value('no.such_key', 1, cfg={})
+
+    def test_the_operator_config_is_read_and_reread_when_it_changes(self):
+        import tempfile
+        from asf import gitops, github
+        from asf.workers import lifecycle, relaunch
+        home = tempfile.mkdtemp(prefix='asf-ck-')
+        self.addCleanup(lambda: __import__('shutil').rmtree(home, True))
+        orig = env.ASF_HOME
+        env.ASF_HOME = home
+        self.addCleanup(setattr, env, 'ASF_HOME', orig)
+        self.assertEqual(gitops.timeout_s(), gitops.TIMEOUT_S)     # no file: the defaults
+        self.assertEqual(lifecycle.round_cap(), lifecycle.ROUND_CAP)
+        with open(env.config_path(), 'w') as f:
+            f.write('git:\n  timeout_s: 600\nharvest:\n  round_cap: 5\n'
+                    'github:\n  pr_list_limit: 1000\n')
+        self.assertEqual(gitops.timeout_s(), 600)
+        self.assertEqual(lifecycle.round_cap(), 5)
+        self.assertEqual(github.pr_list_limit(), 1000)
+        with open(env.config_path(), 'w') as f:
+            f.write('worker_pool:\n  caps:\n    relaunch: 4\n')
+        self.assertEqual(gitops.timeout_s(), gitops.TIMEOUT_S)
+        self.assertEqual(relaunch.CAP, 2)
+        self.assertEqual(config_keys.value('worker_pool.caps.relaunch', relaunch.CAP), 4)
+
+
+class DoctorTypes(unittest.TestCase):
+    def test_a_malformed_value_is_a_warn_row(self):
+        rows = doctor.check_config_keys({'git': {'timeout_s': 0}})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 'warn')
+        self.assertIn('git.timeout_s must be 1 or more, not 0', rows[0][1])
+
+
+_SAMPLE = {config_keys.INT: '2', config_keys.NUM: '90', config_keys.STR: "'x: '",
+           config_keys.BOOL: 'false', config_keys.LIST: '[a, b]'}
+
+
+def every_typed_key_config():
+    """A ``config.yaml`` text setting every :data:`asf.config_keys.TYPED` key (a map kind as a
+    one-row map), nested as block maps."""
+    tree = {}
+    for key, (kind, _lo, _hi) in sorted(config_keys.TYPED.items()):
+        node = tree
+        parts = key.split('.')
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = {'k': '1'} if kind == config_keys.MAP else _SAMPLE[kind]
+    lines = []
+
+    def emit(node, depth):
+        for k, v in node.items():
+            if isinstance(v, dict):
+                lines.append('  ' * depth + f'{k}:')
+                emit(v, depth + 1)
+            else:
+                lines.append('  ' * depth + f'{k}: {v}')
+    emit(tree, 0)
+    return '\n'.join(lines) + '\n'
+
+
+_PINNED_CONFIG = r"""
+import json, os, sys
+from asf import env
+with open(env.config_path(), 'w') as f:
+    f.write(sys.stdin.read())
+cfg = env.load_config()
+print(json.dumps({'keys': sorted(cfg)}))
+"""
+
+
+class PinnedReader(unittest.TestCase):
+    """Products pinned to an older asf load the same ``config.yaml``: every new key must load
+    there (its loader checks ``worker_pool`` and ``cloud`` only, and ignores the rest)."""
+
+    def test_every_typed_key_loads_here_and_under_the_pinned_loader(self):
+        text = every_typed_key_config()
+        cfg = env.loads(text)
+        self.assertEqual(config_keys.unknown_keys(cfg), [])
+        self.assertEqual(config_keys.problems(cfg), [])
+        from tests import pinned
+        for sha in pinned.pinned_shas():
+            with self.subTest(sha=sha):
+                proc = pinned.run_pinned(sha, _PINNED_CONFIG, text)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                import json
+                out = json.loads(proc.stdout.strip().splitlines()[-1])
+                self.assertIn('git', out['keys'])
+
+
 if __name__ == '__main__':
     unittest.main()

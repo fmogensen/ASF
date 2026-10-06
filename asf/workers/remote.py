@@ -284,8 +284,11 @@ class TriggerClient:
     injectable (tests: a fake that answers with a ``stream-json`` log)."""
 
     def __init__(self, account, binary=None, model=DEFAULT_HELPER_MODEL, run=None, cwd=None,
-                 timeout=HELPER_TIMEOUT_S):
+                 timeout=None):
         self.account = account
+        if timeout is None:
+            from asf import config_keys
+            timeout = config_keys.value('cloud.helper_timeout_s', HELPER_TIMEOUT_S)
         self.timeout = timeout
         self.binary = binary or _binary()
         self.model = model or DEFAULT_HELPER_MODEL

@@ -80,7 +80,7 @@ import datetime as dt
 import math
 import re
 
-from asf import amendable, budget
+from asf import amendable, budget, config_keys
 from asf.feeder import footprint
 from asf.groom import policy as groom_policy
 from asf.record import replan as replan_mod
@@ -88,7 +88,8 @@ from asf.views import index_reader as ix
 
 BUG_FIX = 'BUG → FIX'
 FIX_CORRECT = 'FIX → CORRECT'
-#: == asf.workers.lifecycle.ROUND_CAP (the feeder imports no git module): holds in a row
+#: == asf.workers.lifecycle.ROUND_CAP (the feeder imports no git module), config
+#: ``harvest.round_cap`` over it: holds in a row
 #: on the SAME finding before a correction becomes the ADJUDICATE row (operator policy 2026-09-27)
 CORRECTION_ROUNDS = 3
 #: == asf.workers.lifecycle.NAMING: the lane rewords a naming refusal itself; one it could not
@@ -985,7 +986,8 @@ def correction_rows(items, product, busy, corrections):
                                   "carries it out"))
             continue
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
-        if doc in ('spec', 'plan') and same < CORRECTION_ROUNDS:  # a document the gate refused
+        rounds_cap = config_keys.value('harvest.round_cap', CORRECTION_ROUNDS)
+        if doc in ('spec', 'plan') and same < rounds_cap:  # a document the gate refused
             out.append(Row(tier=tier, kind=STARVED_SPEC if doc == 'spec' else STARVED_PLAN,
                            item_id=iid, feature_id=fid or iid, action=LAUNCH, brief_kind=doc,
                            branch=branch, correction=c['text'],
@@ -995,7 +997,7 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch, items=items))
             continue
-        if same >= CORRECTION_ROUNDS and c.get('kind') not in (NAMING, COPIES) \
+        if same >= rounds_cap and c.get('kind') not in (NAMING, COPIES) \
                 and not c.get('ruled'):  # an adjudication's instruction: a session carries it out
             if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
                 prs = c.get('prs') or ()

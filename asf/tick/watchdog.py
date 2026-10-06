@@ -23,9 +23,10 @@ import sys
 import threading
 import time
 
-from asf import env
+from asf import config_keys, env
 
-#: the budget is this many of the clock's own intervals
+#: the budget is this many of the clock's own intervals (the defaults of config
+#: ``tick.watchdog.factor``, ``floor_s`` and ``default_s``)
 INTERVAL_FACTOR = 3
 #: never under this (seconds): a tick on a loaded host has taken 43 min and finished fine
 FLOOR_S = 60 * 60
@@ -73,13 +74,15 @@ def clock_interval(product, steps):
 
 def seconds_for(product, steps, budget_s=None, interval_s=None):
     """The budget for a tick of ``steps``: ``budget_s`` (config) when given, else
-    :data:`INTERVAL_FACTOR` × ``interval_s`` floored at :data:`FLOOR_S`, else :data:`DEFAULT_S`.
+    :data:`INTERVAL_FACTOR` × ``interval_s`` floored at :data:`FLOOR_S`, else :data:`DEFAULT_S`
+    (config ``tick.watchdog.factor`` / ``floor_s`` / ``default_s`` over each).
     0 means no budget."""
     if budget_s is not None:
         return budget_s
     if interval_s:
-        return max(INTERVAL_FACTOR * interval_s, FLOOR_S)
-    return DEFAULT_S
+        return max(config_keys.value('tick.watchdog.factor', INTERVAL_FACTOR) * interval_s,
+                   config_keys.value('tick.watchdog.floor_s', FLOOR_S))
+    return config_keys.value('tick.watchdog.default_s', DEFAULT_S)
 
 
 def line(seconds):

@@ -48,7 +48,7 @@ import subprocess
 import sys
 import time
 
-from asf import capacity, ci_queue, env
+from asf import capacity, ci_queue, config_keys, env
 from asf.record.index import do_index
 from asf.tick import network, steps, summary, watchdog
 
@@ -324,7 +324,8 @@ def run_shadow(product, fresh=False):
 
 
 #: The daily runs once a day, so it waits out a running tick; an interval tick skips (the next
-#: one is minutes away, and a tick's harvest gate can run for half an hour).
+#: one is minutes away, and a tick's harvest gate can run for half an hour). Config
+#: ``tick.daily_lock_wait_s``, ``tick.lock_poll_s`` and ``tick.record_lock_wait_s`` over each.
 DAILY_LOCK_WAIT_S = 45 * 60
 LOCK_POLL_S = 10
 
@@ -355,7 +356,7 @@ def _flock(path, wait_s=0):
             if time.monotonic() >= deadline:
                 f.close()
                 return None
-            time.sleep(LOCK_POLL_S)
+            time.sleep(config_keys.value('tick.lock_poll_s', LOCK_POLL_S))
 
 
 def acquire_lock(product, wait_s=0):
@@ -388,7 +389,9 @@ class Locks:
         if self.held:
             yield True
             return
-        lock = acquire_lock(self.product, RECORD_LOCK_WAIT_S if wait_s is None else wait_s)
+        if wait_s is None:
+            wait_s = config_keys.value('tick.record_lock_wait_s', RECORD_LOCK_WAIT_S)
+        lock = acquire_lock(self.product, wait_s)
         if lock is None:
             print(f"tick: another tick of {self.product.name} holds the record — {what} skipped")
             yield False
@@ -455,7 +458,7 @@ def cmd_tick(args, root=None):
     if not any(owner == 'asf' for _, owner, _ in rows):
         return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=False),
                            started=started)
-    wait_s = DAILY_LOCK_WAIT_S if any(r[0] == 'daily' for r in rows) else 0
+    wait_s = config_keys.value('tick.daily_lock_wait_s', DAILY_LOCK_WAIT_S) if any(r[0] == 'daily' for r in rows) else 0
     lock = acquire_lock(product, wait_s)
     if lock is None:
         print(f"tick: another tick of {product.name} is running — skipped")

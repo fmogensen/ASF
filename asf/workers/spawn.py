@@ -1002,7 +1002,7 @@ def settings_file(wp):
 
 
 #: How long ``conventions.worktree_setup`` may run in a fresh worktree before the launch is
-#: refused.
+#: refused (config ``worker_pool.worktree_setup_timeout_s``: a large install needs longer).
 WORKTREE_SETUP_TIMEOUT_S = 900
 
 
@@ -1063,7 +1063,7 @@ def _record_setup(worktree, command, took_s):
 
 
 def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
-                       timeout=WORKTREE_SETUP_TIMEOUT_S):
+                       timeout=None):
     """Run the product's ``conventions.worktree_setup`` (a shell command) in ``worktree``, under
     the environment the session itself will have (:func:`asf.workers.runtime.build_env`, worker
     mode: the allow-list, the account's HOME). Its output goes to ``briefs/<job>.setup.log``.
@@ -1075,6 +1075,9 @@ def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
     command = getattr(product.conventions, 'worktree_setup', None)
     if not command:
         return None
+    if timeout is None:
+        from asf import config_keys
+        timeout = config_keys.value('worker_pool.worktree_setup_timeout_s', WORKTREE_SETUP_TIMEOUT_S)
     if setup_done(worktree, command):
         return None          # this tree already ran exactly this command (F-0127, D6)
     runtime_mod.seed_home(account)

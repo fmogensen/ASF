@@ -52,7 +52,7 @@ import os
 import re
 import subprocess
 
-from asf import env, gh_limit
+from asf import config_keys, env, gh_limit
 
 #: ``ci.pool: discover`` — the pool is every runner the host reports, not a declared list
 DISCOVER = 'discover'
@@ -73,7 +73,7 @@ TRIAL_HISTORY = 'ci-trials.jsonl'
 #: conclusions a trial is judged on; anything else (cancelled, skipped) waits for the next job.
 PASS = frozenset({'success'})
 FAIL = frozenset({'failure', 'timed_out', 'startup_failure'})
-GH_TIMEOUT_S = 30
+GH_TIMEOUT_S = 30   # the default of config github.cmd_timeout_s
 #: The host's own job limit when a workflow declares no ``timeout-minutes`` — six hours, which is
 #: what the host's annotation on a job that hit it names (``maximum execution time of 6h0m0s``).
 #: A job always has a limit; the workflow only chooses whether to say so (F-0131 P2).
@@ -911,7 +911,8 @@ class GitHubBackend(Backend):
             return hit
         try:
             p = self._run(['gh', 'api', *args], input=stdin, capture_output=True, text=True,
-                          timeout=GH_TIMEOUT_S, env=self._env)
+                          timeout=config_keys.value('github.cmd_timeout_s', GH_TIMEOUT_S),
+                          env=self._env)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise BackendError(f'gh api {args[0]}: {e}') from e
         gh_limit.inspect_proc(['api', *args], p)

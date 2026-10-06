@@ -266,7 +266,7 @@ class Door:
         from asf import mutation_guard
         if mutation_guard.is_mutating_gh(args):
             gh_limit.forget()   # a write can change any listing this process read before it
-        return github.gh(args, json=json, timeout=github.JSON_TIMEOUT_S,
+        return github.gh(args, json=json, timeout=github.json_timeout_s(),
                          env=_auth_env(self.product))
 
 

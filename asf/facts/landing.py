@@ -38,7 +38,7 @@ import json
 import os
 import re
 
-from asf import gh_limit, gitops
+from asf import gh_limit, github, gitops
 from asf.facts import cache, disagree
 from asf.facts.types import AsOf, Landed, NotLanded, OpenPrs, Unknown, is_unknown
 
@@ -341,8 +341,9 @@ def _open_work(product, repo, main, item, runs, branches, open_prs):
     got = open_prs if open_prs is not None else cache.open_prs(product)
     if is_unknown(got):
         return Unknown(f'open PRs: {got.reason}', got.as_of)
-    if len(got.prs) >= PR_LIMIT:
-        return Unknown(f'open PRs: {PR_LIMIT} listed, the list may be cut short', got.as_of)
+    limit = github.pr_list_limit(PR_LIMIT)
+    if len(got.prs) >= limit:
+        return Unknown(f'open PRs: {limit} listed, the list may be cut short', got.as_of)
     want = str(item).upper()
     for pr in got.prs:
         head = pr.get('headRefName') or ''

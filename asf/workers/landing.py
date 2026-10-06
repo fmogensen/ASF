@@ -19,7 +19,7 @@ import json
 import re
 import subprocess
 
-from asf import gitops
+from asf import github, gitops
 from asf.evidence import evidence as ev_mod
 from asf.workers import lifecycle
 
@@ -161,8 +161,14 @@ def run_prs(path, item):
     return list(dict.fromkeys(out))
 
 
-#: The open PRs ``gh`` is asked for: a list that comes back this long may be cut short.
+#: The open PRs ``gh`` is asked for: a list that comes back this long may be cut short (the
+#: default of config ``github.pr_list_limit``).
 PR_LIMIT = 300
+
+
+def pr_limit():
+    """Config ``github.pr_list_limit``, else :data:`PR_LIMIT`."""
+    return github.pr_list_limit(PR_LIMIT)
 
 
 def open_prs(repo, item):
@@ -171,11 +177,13 @@ def open_prs(repo, item):
     unreadable answer) or answers with :data:`PR_LIMIT` PRs (the list may be cut short). A
     rate-limit answer raises :class:`asf.gh_limit.RateLimited`: no GitHub decision this pass."""
     from asf import gh_limit
-    args = ['pr', 'list', '--state', 'open', '--limit', str(PR_LIMIT), '--json',
+    limit = pr_limit()
+    args = ['pr', 'list', '--state', 'open', '--limit', str(limit), '--json',
             'number,title,headRefName']
     gh_limit.guard(args)
     try:
-        p = subprocess.run(['gh', *args], cwd=repo, capture_output=True, text=True, timeout=60)
+        p = subprocess.run(['gh', *args], cwd=repo, capture_output=True, text=True,
+                           timeout=github.json_timeout_s())
     except Exception:  # noqa: BLE001 — gh not there or hung: unknown, never "no open PR"
         return None
     gh_limit.inspect_proc(args, p)
@@ -185,7 +193,7 @@ def open_prs(repo, item):
         prs = json.loads(p.stdout) if p.stdout.strip() else []
     except ValueError:
         return None
-    if not isinstance(prs, list) or len(prs) >= PR_LIMIT:
+    if not isinstance(prs, list) or len(prs) >= limit:
         return None
     item = (item or '').upper()
     return [pr.get('headRefName') for pr in prs
@@ -238,7 +246,7 @@ def pass_open_work(product, repo, main, item):
     from asf.facts import cache
     from asf.facts.types import is_unknown
     got = cache.prime(product)
-    if is_unknown(got) or len(got.prs) >= PR_LIMIT:
+    if is_unknown(got) or len(got.prs) >= pr_limit():
         return None
     want = str(item or '').upper()
     for pr in got.prs:

@@ -163,7 +163,7 @@ def is_eligible(record, path=None):
             # it a branch held once is skipped for ever, because the correction text never goes
             # away (my own B-0079 regression, found holding three green branches).
             and not ((pending := lifecycle.pending_correction(record, path))
-                     and lifecycle.repeats(pending) < lifecycle.ROUND_CAP)
+                     and lifecycle.repeats(pending) < lifecycle.round_cap())
             # …and a branch whose item waits on an adjudication's instruction (a ``ruled``
             # correction): its session is to come — gating the untouched branch again would hold
             # it at the cap and bury the ruling under another adjudicate row (a product's F-0035)

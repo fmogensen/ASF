@@ -27,14 +27,14 @@ import re
 import subprocess
 import time
 
-from asf import connectors, env, gh_limit, github, gitpush, refguard
+from asf import config_keys, connectors, env, gh_limit, github, gitpush, refguard
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
 
 WORKFLOW_DIR = os.path.join('.github', 'workflows')
 BRIEF_REF_PREFIX = 'refs/asf/briefs/'
-GH_TIMEOUT_S = 60
+GH_TIMEOUT_S = 60   # the default of config github.json_timeout_s
 #: labels of GitHub's own hosted runners: no runner of the product's own needs to be online
 HOSTED_RE = re.compile(r'^(ubuntu|windows|macos)-', re.I)
 _ENV_NAME_RE = re.compile(r'^[A-Z_][A-Z0-9_]*$')
@@ -204,7 +204,8 @@ class Gh:
         if self._env is None:
             from asf import ci_pool
             self._env = ci_pool._gh_env(self.product)
-        r = connectors.ci().call(list(args), timeout=GH_TIMEOUT_S, run=self._run, env=self._env)
+        limit = config_keys.value('github.json_timeout_s', GH_TIMEOUT_S)
+        r = connectors.ci().call(list(args), timeout=limit, run=self._run, env=self._env)
         if r.ok:
             return True, r.stdout or '', ''
         lines = (r.stderr or r.stdout or '').strip().splitlines()

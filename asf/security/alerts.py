@@ -16,7 +16,7 @@ from asf import env, gh_limit, github
 from asf.security import gh_env
 
 #: How long ``gh api`` gets before the call counts as failed.
-TIMEOUT_S = 30
+TIMEOUT_S = 30   # the default of config github.cmd_timeout_s
 
 _TS_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
 
@@ -62,7 +62,7 @@ class GitHubHost(Host):
         if self._env is None:
             self._env = gh_env(self.product)
         try:
-            r = github.gh(['api', f'repos/{self.slug}/{path}', '--jq', jq], timeout=TIMEOUT_S,
+            r = github.gh(['api', f'repos/{self.slug}/{path}', '--jq', jq], timeout=github.cmd_timeout_s(),
                           run=self._run, env=self._env)
         except gh_limit.RateLimited as e:
             raise HostError(f'gh api {path}: rate limited') from e

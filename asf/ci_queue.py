@@ -314,7 +314,7 @@ import re
 import subprocess
 import time
 
-from asf import attestation, ci_pool, connectors, env, gh_limit, mutation_guard, run_cancel
+from asf import attestation, ci_pool, config_keys, connectors, env, gh_limit, mutation_guard, run_cancel
 
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
@@ -368,7 +368,7 @@ EXPECT_TTL_S = 10 * 60
 EXPECT_VERSION = 7
 #: the run conclusions measured: a cancelled (or otherwise cut short) run says nothing of its size
 MEASURED_CONCLUSIONS = frozenset({'success', 'failure'})
-GH_TIMEOUT_S = 30
+GH_TIMEOUT_S = 30   # the default of config github.cmd_timeout_s
 #: the open PRs listed for the stale sweep (every one), and the latest of any state
 PR_LIST_OPEN = 500
 PR_LIST_LATEST = 100
@@ -393,6 +393,19 @@ STALL_GAP_S = 10 * 60
 #: the step wedging the same branch and sha this many times is not re-run again: the step is
 #: the defect, not the run
 MAX_STALL_RERUNS = 2
+#: The config key over each timing above (``~/.ASF/config.yaml``): GitHub-hosted runners pick up
+#: and start in other times than a self-hosted pool, and each automatic rerun costs money.
+TUNABLES = {'STUCK_RETRY_S': 'ci.stuck_retry_s', 'STALE_S': 'ci.stale_s', 'PICKUP_S': 'ci.pickup_s',
+            'URGENT_HOLD_S': 'ci.urgent_hold_s', 'EXPECT_TTL_S': 'ci.expect_ttl_s',
+            'PHANTOM_GAP_S': 'ci.phantom.gap_s', 'PHANTOM_RED_S': 'ci.phantom.red_s',
+            'STALL_GAP_S': 'ci.stall.gap_s', 'MAX_STALL_RERUNS': 'ci.stall.rerun_max'}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    return config_keys.value(TUNABLES[name], globals()[name])
+
+
 #: a stall history record joins the count this long — two days, so a backfill on either side of
 #: midnight still joins it to the ``ci`` event it belongs to
 STALL_HISTORY_TTL_S = 48 * 60 * 60
@@ -1071,10 +1084,11 @@ class GitHubSource(Source):
         if hit is not None:
             return hit, ''
         try:
-            p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
+            limit = config_keys.value('github.cmd_timeout_s', GH_TIMEOUT_S)
+            p = self._run(['gh', *args], capture_output=True, text=True, timeout=limit,
                           env=ci_pool._gh_env(self.product))
         except subprocess.TimeoutExpired:
-            return None, f'gh timed out after {GH_TIMEOUT_S}s'
+            return None, f'gh timed out after {limit}s'
         except OSError as e:
             return None, f'gh did not run: {e}'
         gh_limit.inspect_proc(args, p)  # a rate limit is never a result
@@ -1338,7 +1352,9 @@ class GitHubSource(Source):
 
     def inflight(self):
         from asf import capacity
-        return capacity.ci_runs_in_flight(self.product, run=self._run, timeout=GH_TIMEOUT_S)
+        return capacity.ci_runs_in_flight(self.product, run=self._run,
+                                           timeout=config_keys.value('github.cmd_timeout_s',
+                                                                     GH_TIMEOUT_S))
 
 
 def label_classes(pool, runners=()):
@@ -1744,10 +1760,11 @@ def rerun_ids(state_dir):
 
 
 def prune(data, now):
+    stale_s, urgent_s, pickup_s = tunable('STALE_S'), tunable('URGENT_HOLD_S'), tunable('PICKUP_S')
     data['entries'] = {k: v for k, v in data['entries'].items()
-                       if _age(v.get('seen'), now) <= STALE_S}
+                       if _age(v.get('seen'), now) <= stale_s}
     data['started'] = [s for s in data['started']
-                       if _age(s.get('at'), now) <= (URGENT_HOLD_S if s.get('urgent') else PICKUP_S)]
+                       if _age(s.get('at'), now) <= (urgent_s if s.get('urgent') else pickup_s)]
     data['stalls'] = [s for s in data.get('stalls') or ()
                       if _age(s.get('at'), now) <= STALL_HISTORY_TTL_S]
     return data
@@ -1761,7 +1778,7 @@ def _phantoms(data, now):
     out = {}
     for name, rec in ((data or {}).get('phantom') or {}).items():
         if (isinstance(rec, dict) and int(rec.get('passes') or 0) >= PHANTOM_PASSES
-                and _age(rec.get('last'), now) <= PHANTOM_GAP_S):
+                and _age(rec.get('last'), now) <= tunable('PHANTOM_GAP_S')):
             out[name] = rec
     return out
 
@@ -1799,7 +1816,7 @@ def update_phantoms(q, src):
         if not (r.online and r.busy) or r.name in busy:
             continue
         prev = seen.get(r.name)
-        if isinstance(prev, dict) and _age(prev.get('last'), now) <= PHANTOM_GAP_S:
+        if isinstance(prev, dict) and _age(prev.get('last'), now) <= tunable('PHANTOM_GAP_S'):
             rec = {'since': prev.get('since') or _iso(now), 'last': _iso(now),
                    'passes': int(prev.get('passes') or 1) + 1}
         else:
@@ -1838,7 +1855,8 @@ def runner_rows(product, now=None):
              + contention_lines(product, now)]
     if not ph:
         return [(True, True, 'no runner busy without a job'), *stuck]
-    return [(True, _age(ph[n].get('since'), now) <= PHANTOM_RED_S, phantom_text(n, ph[n], now))
+    red_s = tunable('PHANTOM_RED_S')
+    return [(True, _age(ph[n].get('since'), now) <= red_s, phantom_text(n, ph[n], now))
             for n in sorted(ph, key=lambda n: (_parse(ph[n].get('since')) or now, n))] + stuck
 
 
@@ -1905,7 +1923,7 @@ def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
             key = f"{run['id']}:{job.get('name')}"
             since_iso = _iso(since)
             p = prev.get(key)
-            if (isinstance(p, dict) and _age(p.get('last'), now) <= STALL_GAP_S
+            if (isinstance(p, dict) and _age(p.get('last'), now) <= tunable('STALL_GAP_S')
                     and p.get('step') == step and p.get('since') == since_iso):
                 passes = min(int(p.get('passes') or 1) + 1, STALL_PASSES)
             else:
@@ -1949,7 +1967,7 @@ def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
                    if s.get('branch') == branch and s.get('sha') == sha)
         data['stalls'].append({'run': rid, 'branch': branch, 'sha': sha, 'step': rec['step'],
                                'at': _iso(now), 'job': rec['job']})
-        if prior + 1 > MAX_STALL_RERUNS:
+        if prior + 1 > tunable('MAX_STALL_RERUNS'):
             out(f'ci queue: NOT re-running {kind} run {rid} ({rec["item"]}) — step '
                 f'"{rec["step"]}" has stalled {prior + 1} times on {branch} at '
                 f'{str(sha or "?")[:9]}; the step is the defect, not the run')
@@ -2458,7 +2476,7 @@ class Queue:
         cached = self.data['expect'].get(workflow)
         if not (isinstance(cached, dict) and cached.get('v') == EXPECT_VERSION):
             cached = None
-        if cached is not None and _age(cached.get('at'), self.now) <= EXPECT_TTL_S:
+        if cached is not None and _age(cached.get('at'), self.now) <= tunable('EXPECT_TTL_S'):
             return self._cached_types(cached)
         ids = self.source.run_ids(workflow, history(self.product))
         if ids is None:
@@ -3139,7 +3157,7 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
             continue
         protected, who = got
         stuck = rec.get('stuck') if isinstance(rec.get('stuck'), dict) else None
-        if stuck and _age(stuck.get('tried'), now) < STUCK_RETRY_S:
+        if stuck and _age(stuck.get('tried'), now) < tunable('STUCK_RETRY_S'):
             keep.append(rec)                # named on the status row; asked again later
             continue
         changed = _workflow_change(src, product, rid, blobs)
@@ -3310,7 +3328,7 @@ def _rerun_refused(rec, src, product, out, now, listing, blobs, keep, q=None):
     read, nothing escalated). 1 when a run started, else 0 (the record kept)."""
     rid, kind, item = rec.get('id'), rec.get('kind'), rec.get('item')
     stuck = rec.get('stuck') if isinstance(rec.get('stuck'), dict) else None
-    if stuck and _age(stuck.get('tried'), now) < STUCK_RETRY_S:
+    if stuck and _age(stuck.get('tried'), now) < tunable('STUCK_RETRY_S'):
         keep.append(rec)
         return 0
     if int(rec.get('refusals') or 0) < RERUN_REFUSALS_MAX:
@@ -3339,7 +3357,7 @@ def _rerun_refused(rec, src, product, out, now, listing, blobs, keep, q=None):
            f"fresh run refused too — {fwhy}")
     if not stuck:
         out(f"ci queue: STUCK {kind} run {rid} ({item}) on {rec.get('branch') or '?'} — {why}; "
-            f"tried again every {STUCK_RETRY_S // 60} min")
+            f"tried again every {tunable('STUCK_RETRY_S') // 60} min")
     rec['stuck'] = {'since': (stuck or {}).get('since') or _iso(now), 'tried': _iso(now),
                     'why': why}
     keep.append(rec)
@@ -3853,7 +3871,7 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
     # and too few left): the runners the trunk counts on are not there — no waiting it out
     bad = _broken_reserve(q) if run_level else {}
     if bad:
-        wait_s = min(wait_s, PICKUP_S)
+        wait_s = min(wait_s, tunable('PICKUP_S'))
     waited = (now - created).total_seconds()
     if waited <= wait_s:
         return 0
