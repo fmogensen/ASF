@@ -4488,7 +4488,7 @@ class GitHubHost(Host):
             tip = H.sh(['git', 'rev-parse', f'origin/{self.trunk}'], cwd=repo).stdout.strip()
             old = stale_ref.stale(self.product, self.slug, red, tip, repo)
             if not old or not stale_ref.refresh(self.product, self.slug, number, head, tip, old,
-                                                out=out):
+                                                out=out, red=red, repo=repo):
                 return False
         except Exception:  # noqa: BLE001 — no reading: judged as before
             return False

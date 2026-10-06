@@ -4,10 +4,16 @@ name: release
 # CHANGELOG entry (asf/version.py). It runs on the push, so a merge is versioned however it
 # landed — a direct `gh pr merge`, the factory's lane or merge queue, or the native landing.
 # The PR job shows the release-notes line the merge will get, and fails when there is none.
+#
+# The PR job's verdict depends only on the PR's title, body and diff, so it runs on exactly the
+# events that change one of those: opened, edited (title/body/base), synchronize (a new head).
+# A reopen of an unchanged head (the stale-merge-ref replay) changes none of them and would only
+# fire a second red beside the tests workflow's, so it does not run on one.
 on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, edited, synchronize]
 
 permissions:
   contents: write
@@ -50,6 +56,13 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+      # CI tooling runs from the trunk, never from the branch: a branch cut before a tool existed
+      # (or carrying an older copy of it) must not turn this check red for a reason the PR
+      # didn't cause. The head is only the data: its diff against the base.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+          path: .asf-ci-base
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -57,7 +70,9 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
           BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           printf '%s' "$BODY" > "$RUNNER_TEMP/body.md"
-          python3 -m asf.version pr --base "origin/${{ github.base_ref }}" --title "$TITLE" \
-            --body-file "$RUNNER_TEMP/body.md"
+          cd "$GITHUB_WORKSPACE/.asf-ci-base"
+          python3 -m asf.version pr --repo "$GITHUB_WORKSPACE" --base "origin/$BASE_REF" \
+            --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"

@@ -20,6 +20,12 @@ the flake budget: no quarantine entry, no attempt spent (:func:`infra_red`). Pas
 :data:`INFRA_RERUNS` runner losses on one sha it is held, still never a correct round — a session
 cannot fix a runner.
 
+A red that **reproduced on two merge refs** is never re-run (2026-10-05: 20 of 21 blind re-runs
+stayed red): the same check red on the same head in two different workflow runs — a reopen for a
+fresh merge ref (:mod:`asf.stale_ref`) or a new run — failing the same test (when both logs name
+one; :func:`reproduced`) is deterministic, and goes straight to its correct round.
+``conventions.flags.flake_skip_reproduced: off`` turns it off.
+
 A job **in quarantine** that goes red is re-run, not corrected — up to :data:`QUARANTINE_RERUNS`
 times on one sha — until its entry expires; past that cap the red is a defect even so (a real
 break in a flaky job is never hidden for a week).
@@ -44,7 +50,7 @@ twice, ~45 min of heavy runs for the same answer).
 Unknown is today's fail-open: no infra red, no step or test named.
 
 State: ``state/<product>/flake-triage.json`` — ``{reruns: {"<sha>|<check>": {...}},
-quarantine: [{job, step, test, sha, ...}]}``; expired entries and day-old re-run records are
+reds: {"<sha>|<check>": {run, job, link, test, at}}, quarantine: [{job, step, test, sha, ...}]}``; expired entries and day-old re-run records are
 pruned on every read.
 """
 import datetime
@@ -110,18 +116,31 @@ def job_key(name):
     return str(name or '').split(' ', 1)[0]
 
 
+def _flag(value):
+    return not (value is False or str(value).strip().lower() in ('off', 'false', 'no', '0'))
+
+
+def _skip_flag(product):
+    conv = getattr(product, 'conventions', None)
+    try:
+        return conv.flag('flake_skip_reproduced', True) if conv is not None else True
+    except AttributeError:
+        return True
+
+
 def settings(product):
-    """``{on, reference_class, days}`` from ``ci.flake_triage`` (default on),
-    ``ci.reference_class`` and ``ci.quarantine_days``."""
+    """``{on, reference_class, days, skip_reproduced}`` from ``ci.flake_triage`` (default on),
+    ``ci.reference_class``, ``ci.quarantine_days`` and ``conventions.flags.flake_skip_reproduced``
+    (default on)."""
     ci = getattr(product, 'ci', None)
     ci = ci if isinstance(ci, dict) else {}
-    on = ci.get('flake_triage', True)
-    on = not (on is False or str(on).strip().lower() in ('off', 'false', 'no', '0'))
+    on = _flag(ci.get('flake_triage', True))
     days = ci.get('quarantine_days')
     days = days if isinstance(days, (int, float)) and not isinstance(days, bool) and days > 0 \
         else DEFAULT_DAYS
     ref = ci.get('reference_class')
-    return {'on': on, 'reference_class': str(ref) if ref else None, 'days': days}
+    return {'on': on, 'reference_class': str(ref) if ref else None, 'days': days,
+            'skip_reproduced': _flag(_skip_flag(product))}
 
 
 def _path(state_dir):
@@ -137,16 +156,19 @@ def load(state_dir, now=None):
     except (OSError, ValueError, TypeError):
         data = {}
     data = data if isinstance(data, dict) else {}
-    reruns = data.get('reruns') if isinstance(data.get('reruns'), dict) else {}
     quarantine = data.get('quarantine') if isinstance(data.get('quarantine'), list) else []
-    keep = {}
-    for k, r in reruns.items():
-        at = _parse((r or {}).get('at')) if isinstance(r, dict) else None
-        if at is not None and (now - at).total_seconds() <= RERUN_TTL_S:
-            keep[k] = r
+
+    def fresh(name):
+        got = data.get(name) if isinstance(data.get(name), dict) else {}
+        keep = {}
+        for k, r in got.items():
+            at = _parse((r or {}).get('at')) if isinstance(r, dict) else None
+            if at is not None and (now - at).total_seconds() <= RERUN_TTL_S:
+                keep[k] = r
+        return keep
     live = [q for q in quarantine if isinstance(q, dict)
             and (_parse(q.get('expires')) or now) > now]
-    return {'reruns': keep, 'quarantine': live}
+    return {'reruns': fresh('reruns'), 'reds': fresh('reds'), 'quarantine': live}
 
 
 def save(state_dir, data):
@@ -238,6 +260,43 @@ def run_live(slug, run_id, gh=None):
     return bool(status) and status != 'completed'
 
 
+def _prior_reds(data, state_dir, sha, name, run_id):
+    """The links of check ``name`` red on ``sha`` in a workflow run other than ``run_id``: the
+    triage's own record, and the red a reopen for a fresh merge ref left (:mod:`asf.stale_ref`)."""
+    out = []
+    rec = data.get('reds', {}).get(f'{sha}|{name}')
+    if rec and rec.get('run') and rec.get('run') != run_id:
+        out.append(rec)
+    try:
+        from asf import stale_ref
+        for pr in stale_ref.load(state_dir).values():
+            if isinstance(pr, dict) and pr.get('head') == sha:
+                link = (pr.get('links') or {}).get(name)
+                rid, jid = _ids(link)
+                if rid and rid != run_id:
+                    out.append({'run': rid, 'job': jid, 'link': link})
+    except Exception:  # noqa: BLE001 — no reopen record readable: the triage's own only
+        pass
+    return out
+
+
+def reproduced(slug, sha, name, job_id, priors, gh=None):
+    """True when check ``name`` red on ``sha`` in job ``job_id`` failed the same way in one of
+    ``priors`` (earlier runs of it on other merge refs): the same failing test when both logs
+    name one, else the same check. A red that reproduced is deterministic — no re-run."""
+    if not priors:
+        return False
+    test = None
+    for prior in priors:
+        if 'test' not in prior:
+            prior['test'] = _failed_detail(slug, prior.get('job'), gh)[1]
+        if prior['test'] and test is None:
+            test = _failed_detail(slug, job_id, gh)[1] or ''
+        if not prior['test'] or not test or prior['test'] == test:
+            return True
+    return False
+
+
 def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh=None,
            deterministic=()):
     """Split the red checks ``red`` (dicts with ``name`` and ``link``) on ``sha`` into
@@ -301,6 +360,16 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
         elif rec and int(rec.get('attempts') or 0) >= limit:
             defects.append(name)    # red again on its re-run: a real defect
             continue
+        elif not q and cfg['skip_reproduced'] and reproduced(
+                slug, sha, name, job_id, _prior_reds(data, state_dir, sha, name, run_id), gh):
+            out(f'flake triage: {where} {name} @ {sha[:9]} red again on another merge ref — '
+                'deterministic: no re-run, straight to its correct round')
+            defects.append(name)
+            continue
+        if run_id and not lost:
+            data['reds'].setdefault(f'{sha}|{name}', {'name': name, 'sha': sha, 'run': run_id,
+                                                       'job': job_id, 'link': c.get('link'),
+                                                       'at': _iso(now)})
         r = _call(gh, ['run', 'rerun', '--job', job_id, '-R', slug])
         if not r.ok:
             text = f'{r.stdout}\n{r.stderr}\n{r.reason}'.lower()

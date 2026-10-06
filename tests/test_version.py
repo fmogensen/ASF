@@ -248,7 +248,77 @@ class EnforcingIt(RepoCase):
         self.assertIn('push:\n    branches: [main]', text)
         self.assertIn('pull_request:', text)
         self.assertIn('python3 -m asf.version cut --ref "$GITHUB_SHA" --push', text)
-        self.assertIn('python3 -m asf.version pr --base', text)
+        self.assertIn('python3 -m asf.version pr --repo "$GITHUB_WORKSPACE" --base', text)
+
+
+def _release_yml():
+    with open(os.path.join(ROOT, '.github', 'workflows', 'release.yml'), encoding='utf-8') as f:
+        return f.read()
+
+
+def _run_block(text, needle):
+    """The shell of the workflow step whose ``run: |`` block contains ``needle``."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != 'run: |':
+            continue
+        indent = len(line) - len(line.lstrip()) + 2
+        body = []
+        for nxt in lines[i + 1:]:
+            if nxt.strip() and len(nxt) - len(nxt.lstrip()) < indent:
+                break
+            body.append(nxt[indent:])
+        if needle in '\n'.join(body):
+            return '\n'.join(body) + '\n'
+    raise AssertionError(f'no run block with {needle!r}')
+
+
+class ReleaseNotesRunFromTheTrunk(unittest.TestCase):
+    """The PR notes job runs the trunk's tooling against the head's diff: a branch cut before
+    ``asf/version.py`` existed is never red for a reason the PR didn't cause."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='release_notes_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.origin = os.path.join(self.tmp, 'origin.git')
+        git(self.tmp, 'init', '-q', '--bare', '-b', 'main', self.origin)
+        self.ws = os.path.join(self.tmp, 'ws')
+        os.makedirs(os.path.join(self.ws, 'asf'))
+        git(self.ws, 'init', '-q', '-b', 'main')
+        git(self.ws, 'config', 'user.email', 't@example.com')
+        git(self.ws, 'config', 'user.name', 't')
+        with open(os.path.join(self.ws, 'asf', '__init__.py'), 'w') as f:
+            f.write('')
+        git(self.ws, 'add', '-A')
+        git(self.ws, 'commit', '-qm', 'base without asf/version.py')
+        git(self.ws, 'remote', 'add', 'origin', self.origin)
+        git(self.ws, 'push', '-q', 'origin', 'main')
+        git(self.ws, 'checkout', '-qb', 'old-branch')
+        with open(os.path.join(self.ws, 'asf', 'thing.py'), 'w') as f:
+            f.write('X = 1\n')
+        git(self.ws, 'add', '-A')
+        git(self.ws, 'commit', '-qm', 'fix(thing): a change to asf/')
+        git(self.ws, 'fetch', '-q', 'origin')
+        # The trunk checkout the job makes beside the head: this repo's own tooling.
+        os.symlink(ROOT, os.path.join(self.ws, '.asf-ci-base'))
+        self.runner_temp = os.path.join(self.tmp, 'runner')
+        os.makedirs(self.runner_temp)
+
+    def test_a_branch_without_the_tool_still_gets_its_notes_line(self):
+        script = _run_block(_release_yml(), 'asf.version pr')
+        self.assertNotIn('${{', script, 'the run block takes its inputs from env, not expressions')
+        envs = {'PATH': os.environ.get('PATH', ''), 'HOME': self.tmp,
+                'GITHUB_WORKSPACE': self.ws, 'RUNNER_TEMP': self.runner_temp,
+                'TITLE': 'fix(thing): a change to asf/', 'BODY': '', 'BASE_REF': 'main'}
+        out = subprocess.run(['bash', '-ec', script], cwd=self.ws, env=envs,
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn('release notes: Bugs fixed', out.stdout)
+
+    def test_a_reopen_of_an_unchanged_head_does_not_rerun_the_notes_check(self):
+        text = _release_yml()
+        self.assertIn('types: [opened, edited, synchronize]', text)
+        self.assertNotIn('reopened', text.split('jobs:')[0])
 
 
 class ShownAsAVersion(RepoCase):
