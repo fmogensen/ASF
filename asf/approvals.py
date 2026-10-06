@@ -141,10 +141,7 @@ _PATH_GLOBS = {
 #: instead, since it needs the product's own `main` and `deploy_sha.workflow`.
 _COMMAND_PATTERNS = {
     'touch_security': (
-        r'\bgh\s+secret\b', r'\bgh\s+auth\b',
-        # setting or unsetting the hooks path, not reading it (`git config core.hooksPath` prints it)
-        r'\bgit\s+config\s+(?:--(?:global|local|system|worktree|replace-all|add)\s+)*core\.hooksPath\s+[^\s;&|)]',
-        r'\bgit\s+config\s+(?:--\S+\s+)*--unset(?:-all)?\s+core\.hooksPath\b', r'--no-verify\b',
+        r'\bgh\s+secret\b', r'\bgh\s+auth\b', r'--no-verify\b',
     ),
     'new_epic': (r'\basf\s+new\s+epic\b',),
     'file_bug': (r'\basf\s+new\s+bug\b',),
@@ -502,6 +499,67 @@ def _runs_deploy_workflow(command, product):
                for w in workflows if isinstance(w, str) and w)
 
 
+#: The ``git config`` keys whose *setting* is a security write: the hooks path decides which hooks
+#: run at all, so a session that sets it turns off the checks it is meant to pass. Casefolded —
+#: git config keys are case-insensitive in section and variable name, and `git config
+#: core.hookspath <p>` is the same write as `core.hooksPath` (asf.hermetic stores them this way
+#: for the same reason). Reading one is a read: see :func:`_sets_guarded_config`.
+_GUARDED_CONFIG_KEYS = frozenset(('core.hookspath',))
+
+#: ``git config`` flags that take the next token as their own argument — never the key, never the
+#: value. `git config --file <path> <key> <value>` is a set of `<key>`, not of `<path>`.
+_CONFIG_VALUE_FLAGS = frozenset(('--file', '-f', '--blob', '--type', '-t', '--default'))
+
+#: ``git config`` flags that make it *write* the key they carry.
+_CONFIG_WRITE_FLAGS = frozenset(('--add', '--unset', '--unset-all', '--replace-all'))
+
+#: ``git config`` flags that make it *print*: git writes nothing, whatever else is on the line.
+_CONFIG_READ_FLAGS = frozenset((
+    '--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l', '--name-only',
+    '--get-color', '--get-colorbool'))
+
+
+def _sets_guarded_config(command):
+    """True when one of ``command``'s own ``git config`` invocations *sets* a key in
+    :data:`_GUARDED_CONFIG_KEYS`. Reading one writes nothing and is never
+    ``touch_security``: a bare ``git config core.hooksPath``, a ``--get``, a ``--list``/``-l``,
+    whatever redirection or compound it sits in (F-0212 — a product's Task was held on
+    ``git config core.hooksPath && ls -la $(...)``, which prints a value and lists a directory).
+    A set is a write flag, or a key with a value after it. Each simple command is split off the
+    compound (:func:`_simple_commands`), so a heredoc body quoting a set is data, and each is
+    read past ``git``'s own globals, so ``git -C <dir> config`` counts. Unbalanced quotes: True,
+    the safe side, as in :func:`_pushes_trunk`."""
+    if 'config' not in command:
+        return False
+    try:
+        argvs = _simple_commands(command)
+    except ValueError:                      # unbalanced quotes: refuse, the safe side
+        return True
+    for argv in argvs:
+        argv = _drop_redirections(argv)     # `2>/dev/null` says where output goes, not what runs
+        if not argv or os.path.basename(argv[0]) != 'git':
+            continue
+        i = 1
+        while i < len(argv) and argv[i].startswith('-'):
+            i += 2 if argv[i] in ('-C', '-c') else 1
+        if i >= len(argv) or argv[i] != 'config':
+            continue
+        flags, positional, rest, j = set(), [], argv[i + 1:], 0
+        while j < len(rest):
+            if rest[j] in _CONFIG_VALUE_FLAGS:
+                j += 2                      # the flag's own argument, never the key or the value
+                continue
+            (flags.add(rest[j]) if rest[j].startswith('-') else positional.append(rest[j]))
+            j += 1
+        if flags & _CONFIG_READ_FLAGS or not positional:
+            continue                        # git prints; it writes nothing
+        if not (flags & _CONFIG_WRITE_FLAGS or len(positional) >= 2):
+            continue                        # a key on its own: git prints its value
+        if positional[0].casefold() in _GUARDED_CONFIG_KEYS:
+            return True
+    return False
+
+
 #: Programs that only read: a simple command running one of these runs nothing else and writes
 #: no file but through a redirection (F-0042, 2026-09-27: a spec session's ``grep`` for
 #: ``asf new rule`` in the docs was refused as if it ran it). ``sed``, ``awk``, ``sort`` and
@@ -581,6 +639,8 @@ def _command_matches(cls_name, command, product, extra_patterns, run_text=None):
     ``approval_signals`` patterns read the command as written."""
     if cls_name == 'touch_production' and (
             _pushes_trunk(command, product.main) or _runs_deploy_workflow(command, product)):
+        return True
+    if cls_name == 'touch_security' and _sets_guarded_config(command):
         return True
     text = _run_text(command) if run_text is None else run_text
     return (any(re.search(p, text) for p in _COMMAND_PATTERNS.get(cls_name, ()))
@@ -1396,6 +1456,9 @@ _CODE_RECOGNISERS = {
     'touch_production': (
         "Bash: a git push whose refspec targets the product's main",
         'Bash: gh workflow run the deploy_sha.workflow, when one is set',
+    ),
+    'touch_security': (
+        "Bash: a git config that sets the hooks path, however it is written",
     ),
     'new_epic': ('Write of an epics/*.md that does not exist yet, in a record repo',),
     'touch_amendable_set': ('the amendable set — asf approvals names it',),
