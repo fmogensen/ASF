@@ -192,6 +192,9 @@ GATE_STATES = (GATE, WAITING, WAITING_CI)
 #: The states a head's heavy-CI approval (``ci.heavy_after_review``) does not survive: back to a
 #: session, a new head, or the branch's end.
 HEAVY_DROPS = (BACK, PUSHED) + TERMINAL_STATES
+#: `method` on a MERGED record whose sha is the trunk tip, not a merge of this branch: the
+#: branch's work was already there. The one landing the DONE table may not credit (F-0191).
+ON_TRUNK = 'on-trunk'
 #: The heavy-CI label's colour and description when the lane creates it in a repo.
 HEAVY_LABEL_COLOR = '5319e7'
 HEAVY_LABEL_DESCRIPTION = 'ASF: the review approved this head; heavy CI may run'
@@ -1428,12 +1431,12 @@ def next_state(prev, facts):
             return keep
         return (PR_OPEN, f'PR #{n} ready for review') if head else keep
     if f.get('on_trunk') and (s is not None or f.get('ended')):
-        return MERGED, 'method=on-trunk'
+        return MERGED, f'method={ON_TRUNK}'
     if closed and (s is not None or f.get('ended')):
         return STALE, f'{f.get("item")} is {closed} in the record'
     if not head:
         if f.get('gone_merged'):
-            return MERGED, 'method=on-trunk'
+            return MERGED, f'method={ON_TRUNK}'
         return (None, '') if s is None else (STALE, 'branch gone')
     if pr.get('state') == 'CLOSED' and (pr.get('head') in (None, '', head) or own_pr) \
             and (s is not None or f.get('ended')):
@@ -2196,6 +2199,11 @@ class Lane:
                'head_at': head_since(f.get('prev'), f.get('head'), now),
                'reason': reason, 'item': f.get('item')}
         prev = f.get('prev') or {}
+        # what the branch carried of its own, counted while origin/<trunk>..origin/<b> still shows
+        # it (PD6). A branch gone from origin cannot be counted: the last pass that could, stands.
+        own = f.get('ahead', prev.get('own'))
+        if own is not None:
+            rec['own'] = own
         if prev.get('heavy') and prev['heavy'] == f.get('head') and state not in HEAVY_DROPS:
             # ci.heavy_after_review: the head the lane approved for heavy CI stays approved
             # through its gate's waits, and only there (GitHubHost.heavy_gate)
@@ -2413,7 +2421,7 @@ class Lane:
                           head=None if f.get('head') else f.get('trunk_head'))
         self.write(f, rec, harvested=sha, correction=None)
         f['prev'] = rec
-        if f.get('head') and method in ('on-trunk', 'ff'):
+        if f.get('head') and method in (ON_TRUNK, 'ff'):
             self.close_pr(f, f'Closed by the factory lane: its change is already on '
                              f'{self.trunk} at {str(sha)[:7]}.')
             self.push_or_defer('delete', f)
