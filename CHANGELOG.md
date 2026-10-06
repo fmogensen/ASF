@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.176 — 2026-10-06
+
+### Features landed
+
+- `asf release-readiness --gate preview` prints the five-point preview gate (and `release.gate: preview | 1.0`, default 1.0, picks the gate in the product file); `bash tools/quickstart.sh` now ends with a first landed Task on the stub runtime; the release workflow can cut a `v<x.y.z>-<label>` pre-release once the preview gate is green (#832)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.176"`
+
 ## v0.1.175 — 2026-10-06
 
 ### Bugs fixed
