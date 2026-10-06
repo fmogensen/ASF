@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.151 — 2026-10-06
+
+### Features landed
+
+- The row whose seat went, and the hand launch that claims before it spawns (#784)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.151"`
+
 ## v0.1.150 — 2026-10-06
 
 ### Features landed
