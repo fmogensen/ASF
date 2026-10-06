@@ -633,12 +633,26 @@ class ConsoleAmendRowsTest(unittest.TestCase):
                           'console', False, 'worker/T-0303'))
         self.assertEqual(r.amend, 'rules/README.md')
         self.assertIn('amendable set', r.reason)
+        self.assertEqual(r.amend_outside, ('asf/x.py',))
+        self.assertIn('split first: asf/x.py is outside the set and needs no console', r.reason)
         self.assertEqual([x for x in rows.plan_rows(idx, product(), [], 5) if x.launches], [])
 
     def test_a_role_agent_template_is_in_the_set_too(self):
         idx = self.idx({'T-0301': self.task('T-0301', ['asf/briefs/templates/reshape.md'])})
         r = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'T-0301'][0]
         self.assertEqual((r.kind, r.launches), (rows.CONSOLE_AMEND, False))
+        self.assertEqual(r.reason, 'writes: asf/briefs/templates/reshape.md is in the amendable '
+                                   'set — no worker session edits it; the console makes the edit '
+                                   'on worker/T-0301')
+        self.assertEqual(r.amend_outside, ())
+
+    def test_two_dragged_globs_pin_the_plural_arm(self):
+        idx = self.idx({'T-0303': self.task('T-0303', ['asf/x.py', 'asf/y.py',
+                                                       'rules/README.md'])})
+        r = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'T-0303'][0]
+        self.assertEqual(r.amend_outside, ('asf/x.py', 'asf/y.py'))
+        self.assertIn('split first: asf/x.py, asf/y.py are outside the set and need no console',
+                      r.reason)
 
     def test_writes_outside_the_set_launch_normally(self):
         idx = self.idx({'T-0303': self.task('T-0303', ['rules/README.md']),
@@ -2714,7 +2728,8 @@ class TableTests(unittest.TestCase):
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
                                         'brief_kind', 'branch', 'reason', 'waits_on',
                                         'correction', 'review_round', 'groom_date', 'groom_file',
-                                        'answers_file', 'open_questions', 'amend', 'ruling'})
+                                        'answers_file', 'open_questions', 'amend',
+                                        'amend_outside', 'ruling'})
 
 
 class CliTest(unittest.TestCase):

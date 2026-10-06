@@ -1318,15 +1318,21 @@ def announce_console_amends(product, rows, out):
     worker session, so the console makes the edit on the Task's branch. An ``amend-announced``
     line marks it said; it carries no ``hold`` key, so it opens no hold and parks nothing, and
     however many ticks show the row, it is said once. Returns the items announced."""
-    from asf.feeder.rows import CONSOLE_AMEND        # local: the feeder imports this module
+    from asf.feeder.rows import CONSOLE_AMEND, SPLIT_CLAUSE   # local: the feeder imports this module
     said = {rec.get('item') for rec in read(product) if rec.get('event') == 'amend-announced'}
     announced = []
     for row in rows:
         if row.kind != CONSOLE_AMEND or not row.amend or row.item_id in said:
             # a member waiting on its after: (amend '') is not the console's yet
             continue
+        extra = ''
+        if row.amend_outside:
+            n = len(row.amend_outside)
+            extra = SPLIT_CLAUSE.format(globs=', '.join(row.amend_outside),
+                                        verb='is' if n == 1 else 'are',
+                                        need='needs' if n == 1 else 'need')
         out(f'NEEDS OPERATOR: {row.item_id} writes {row.amend} (amendable set) — no worker'
-            f' session edits it: the console makes the edit on {row.branch} and pushes it')
+            f' session edits it: the console makes the edit on {row.branch} and pushes it{extra}')
         append(product, {'event': 'amend-announced', 'item': row.item_id, 'detail': row.amend,
                          'ts': _now_iso()})
         said.add(row.item_id)
