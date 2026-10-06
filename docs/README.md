@@ -13,6 +13,7 @@ describes what the code does today and links to the rest.
   - [Troubleshooting](guide/troubleshooting.md) — every `NEEDS OPERATOR` line, and the common stalls
   - [The CI runner pool](guide/ci-runner-pool.md) — `ci.pool`: capability-only routing labels, the doctor's drift rows, `asf ci reconcile`, trials, the CI ceiling
   - [Connectors](guide/connectors.md) — planned, not yet available
+  - [Writing a connector](guide/writing-a-connector.md) — forge, CI, runtime, scheduler, quota and secrets as pluggable implementations
 - `specs/` — the design specs, one per release
 - [`decisions/`](decisions/) — ADRs
   - [0001 — the 2026-08 prototype is prior art, not a base](decisions/0001-prior-art-not-base.md)

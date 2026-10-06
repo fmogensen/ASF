@@ -14,6 +14,12 @@ listed has a baseline of 0). A line carrying ``# client-exempt: <reason>`` is no
 ``gh``/``git``. A count below its baseline passes and says so: lower the baseline in the PR that
 migrated the site, so the ratchet keeps the gain.
 
+The same count, with a ceiling of 0, holds each connector's executable to its connector module
+(:mod:`asf.connectors`): ``claude`` (an argv, a ``which``, or a default-binary assignment of the
+coding-agent CLI) only in asf/connectors/claude_code.py, ``launchctl`` only in
+asf/connectors/launchd.py, ``systemctl`` only in asf/connectors/systemd.py. ``pipx`` is the
+installer kind and stays allowed everywhere for now (not counted).
+
 One more rule, live once :mod:`asf.gitpush` declares ``__gitpush_door__ = True`` (the push
 door takes a ref guard): every ``gitpush.push(`` call in asf/ passes ``guard=``. The rule keys on
 that module attribute, not on a list of paths that moves.
@@ -38,8 +44,20 @@ EXEMPT = '# client-exempt:'
 PATTERNS = {
     'gh': re.compile(r"""\[\s*['"]gh['"]\s*[,\]]"""),
     'git': re.compile(r"""\[\s*['"]git['"]\s*[,\]]"""),
+    'claude': re.compile(r"""\[\s*['"]claude['"]\s*[,\]]|which\(\s*['"]claude['"]|"""
+                         r"""=\s*['"]claude['"]\s*(#.*)?$"""),
+    'launchctl': re.compile(r"""['"]launchctl['"]"""),
+    'systemctl': re.compile(r"""['"]systemctl['"]"""),
 }
 KINDS = tuple(PATTERNS)
+#: Where each kind's executable may be invoked: its client or connector module.
+OWNERS = {
+    'gh': CLIENTS,
+    'git': CLIENTS,
+    'claude': frozenset({'asf/connectors/claude_code.py'}),
+    'launchctl': frozenset({'asf/connectors/launchd.py'}),
+    'systemctl': frozenset({'asf/connectors/systemd.py'}),
+}
 
 
 def py_files(root):
@@ -55,7 +73,7 @@ def count_text(rel, text):
     counts = {}
     for line in text.splitlines():
         for kind, rx in PATTERNS.items():
-            if rel in CLIENTS or EXEMPT in line:
+            if rel in OWNERS[kind] or EXEMPT in line:
                 continue
             if rx.search(line):
                 counts[kind] = counts.get(kind, 0) + 1
@@ -175,7 +193,7 @@ def check(root, out=print, against=None):
         kind, rel = key
         n, ceiling = counts.get(key, 0), base.get(key, 0)
         if n > ceiling:
-            client = 'asf/github.py' if kind == 'gh' else 'asf/gitops.py / asf/gitpush.py'
+            client = ' / '.join(sorted(OWNERS[kind]))
             out(f'check_clients: {rel}: {n} raw {kind} call site(s), baseline {ceiling} — call '
                 f'{client}, or mark the line `{EXEMPT} <why>`')
             rc = 1
