@@ -636,6 +636,7 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
             # and the correction it wrote are this tick's to launch, as when health ran first —
             # one more wave, after the groom when it is still to run
             again = next(r for r in rows if r[0] == 'wave')
+            ctx.lane_passed = False  # the branches health just settled advance in its lane pass
             at = next((i + 1 for i, r in enumerate(queue) if r[0] == 'groom'), 0)
             queue.insert(at, again)
         if step == 'daily' and step_rc == 0:
