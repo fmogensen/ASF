@@ -104,5 +104,38 @@ class MissingTest(Case):
         self.assertTrue(any(not ok and 'box-3' in d for _r, ok, d in rows), rows)
 
 
+class SelfReportTest(Case):
+    """A box migrated off the watchdog's polling reports its own beat (:func:`ci_heartbeat.record`,
+    ``asf ci heartbeat <box>``); :func:`ci_heartbeat.ages` takes whichever of the two sources is
+    newer, box by box, so a box moving between mechanisms never reads stale while either still has
+    a recent beat."""
+
+    def test_a_self_reported_beat_is_fresh_with_no_watchdog_seen_file_at_all(self):
+        p = product()
+        for box in ('box-1', 'box-2', 'box-3'):
+            ci_heartbeat.record(p, box, when=NOW)
+        rows = ci_heartbeat.doctor_rows(p, now=NOW, cfg={})
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][1], rows)
+
+    def test_whichever_beat_is_newer_wins_per_box(self):
+        # the watchdog's own copy has box-1 stale, but box-1 has since self-reported fresh
+        self.seen({'box-1': NOW - 20 * 60, 'box-2': NOW, 'box-3': NOW})
+        p = product()
+        ci_heartbeat.record(p, 'box-1', when=NOW)
+        rows = ci_heartbeat.doctor_rows(p, now=NOW, cfg={})
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][1], rows)
+
+    def test_cmd_heartbeat_records_the_box_the_doctor_then_sees(self):
+        p = product(pool=[{'runner': 'r-1', 'box': 'box-1', 'provider': 'alpha', 'role': 'heavy'}])
+        args = SimpleNamespace(product='p', box='box-1')
+        with mock.patch.object(env, 'load_product', return_value=p):
+            self.assertEqual(ci_heartbeat.cmd_heartbeat(args), 0)
+        rows = ci_heartbeat.doctor_rows(p, now=ci_heartbeat._now(), cfg={})
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][1], rows)
+
+
 if __name__ == '__main__':
     unittest.main()
