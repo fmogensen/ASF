@@ -217,6 +217,15 @@ DEFAULT_LANE_STALE_AFTER = '2d'
 #: branches touching one, oldest wait first — a green code PR never starves behind a stream of
 #: document PRs on the same shared file. ``<n>s|m|h|d``; ``0s`` is a plain first-come queue.
 DEFAULT_LANE_SHARED_PATH_AGING = '30m'
+#: ``lane.rebuild_check``: where the product's pre-push check runs on a head the lane rebuilt —
+#: ``background`` (a detached job with its own lock; the next pass reads its result), ``session``
+#: (no check by the lane: the branch goes back to its session to rebuild and check) or ``off``
+#: (the rebuilt head is pushed unchecked; CI gates it). Never inside the tick.
+REBUILD_CHECK_MODES = ('background', 'session', 'off')
+DEFAULT_LANE_REBUILD_CHECK = 'background'
+#: ``lane.pass_budget_s``: the seconds one lane pass may spend advancing branches; the rest wait
+#: for the next pass (0: no budget).
+DEFAULT_LANE_PASS_BUDGET_S = 300
 #: A shell command run in every fresh worker worktree before its session starts (dependency
 #: install, codegen). None → nothing runs.
 DEFAULT_WORKTREE_SETUP = None
@@ -348,7 +357,8 @@ DEFAULT_SLICE_MAX_TASKS = 6
 
 #: The keys of the yaml's ``lane:`` block and the field each one is.
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after',
-             'shared_path_aging': 'lane_shared_path_aging'}
+             'shared_path_aging': 'lane_shared_path_aging', 'rebuild_check': 'lane_rebuild_check',
+             'pass_budget_s': 'lane_pass_budget_s'}
 
 #: The conventions whose value is a map. A value of any other shape — a string the reader kept,
 #: a scalar written by hand — is read as the default (:meth:`Conventions.map_of`) so no reader
@@ -705,6 +715,14 @@ def validate_mapping(data):
                 problems.append(('lane.stale_after', f'must be longer than zero, not {stale!r}'))
         except ValueError:
             problems.append(('lane.stale_after', f'must be a duration <n>s|m|h|d, not {stale!r}'))
+    check = lane.get('rebuild_check')
+    if check is not None and str(check).strip().lower() not in REBUILD_CHECK_MODES:
+        problems.append(('lane.rebuild_check',
+                         f"must be {' | '.join(REBUILD_CHECK_MODES)}, not {check!r}"))
+    budget = lane.get('pass_budget_s')
+    if budget is not None and (isinstance(budget, bool) or not isinstance(budget, (int, float))
+                               or budget < 0):
+        problems.append(('lane.pass_budget_s', f'must be seconds >= 0, not {budget!r}'))
     aging = lane.get('shared_path_aging')
     if aging is not None:
         try:
@@ -824,6 +842,10 @@ class Conventions:
     lane_stale_after: str = DEFAULT_LANE_STALE_AFTER
     #: ``lane.shared_path_aging``: ``<n>s|m|h|d`` (:data:`DEFAULT_LANE_SHARED_PATH_AGING`).
     lane_shared_path_aging: str = DEFAULT_LANE_SHARED_PATH_AGING
+    #: ``lane.rebuild_check``: ``background|session|off`` (:data:`DEFAULT_LANE_REBUILD_CHECK`).
+    lane_rebuild_check: str = DEFAULT_LANE_REBUILD_CHECK
+    #: ``lane.pass_budget_s`` (:data:`DEFAULT_LANE_PASS_BUDGET_S`; 0: none).
+    lane_pass_budget_s: object = DEFAULT_LANE_PASS_BUDGET_S
     #: The command run in every fresh worker worktree (:data:`DEFAULT_WORKTREE_SETUP`).
     worktree_setup: str = DEFAULT_WORKTREE_SETUP
     #: The command a code brief must run and see pass before any push
@@ -986,6 +1008,18 @@ class Conventions:
     def lane_stale_after_s(self):
         """``lane.stale_after`` in seconds."""
         return duration_seconds(self.lane_stale_after)
+
+    def rebuild_check(self):
+        """``lane.rebuild_check``, lowercased; an unknown value is the default."""
+        v = str(self.lane_rebuild_check or '').strip().lower()
+        return v if v in REBUILD_CHECK_MODES else DEFAULT_LANE_REBUILD_CHECK
+
+    def pass_budget_s(self):
+        """``lane.pass_budget_s`` in seconds (0: no budget); a malformed value is the default."""
+        v = self.lane_pass_budget_s
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            return DEFAULT_LANE_PASS_BUDGET_S
+        return v
 
     def lane_shared_path_aging_s(self):
         """``lane.shared_path_aging`` in seconds; a malformed value is the default."""

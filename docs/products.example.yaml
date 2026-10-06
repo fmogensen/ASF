@@ -211,6 +211,14 @@ conventions:
       code: required
     stale_after: 2d
     shared_path_aging: 30m
+    # where the pre-push check runs on a head the lane rebuilt (drop copies, rebase, transplant):
+    # background (a detached job with its own lock; the next pass reads its result), session (the
+    # branch goes back to its session to rebuild and check) or off (pushed unchecked, CI gates it).
+    # Never inside the tick.
+    rebuild_check: background
+    # the seconds one lane pass may spend advancing branches; the rest wait for the next pass
+    # (0: no budget)
+    pass_budget_s: 300
   # stale means act (asf.stale_act; `asf stale --act [--dry-run]` by hand): a leftover past its
   # deadline is acted on, every action a line in state/<product>/stale-acts.jsonl. `act`: the
   # tick acts (true) or only prints its `would …` lines (false); unset, it acts for ASF's own

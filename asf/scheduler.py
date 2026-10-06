@@ -45,8 +45,8 @@ An installed job still carrying the old ``--daily`` form reads back as the daily
 
 A product whose CI start queue is on also gets the queue's own job, never declared:
 :data:`QUEUE_CLOCK` (``asf.<product>.ci-queue``), ``asf ci queue --apply`` every
-:data:`QUEUE_EVERY_S` seconds (:func:`asf.ci_queue.apply`). ``install`` retires it once the queue
-is off.
+:data:`QUEUE_EVERY_S` seconds (:func:`asf.ci_queue.apply`: the CI start queue's pass and the merge
+queue's own, :func:`asf.merge_queue.own_pass`). ``install`` retires it once both queues are off.
 """
 import fnmatch
 import os
@@ -447,7 +447,8 @@ def clocks(product):
         raise SchedulerError('\n'.join(errors))
     if QUEUE_CLOCK not in declared and hasattr(product, '_get'):
         from asf import ci_queue
-        if ci_queue.mode(product) != 'off':
+        conv = getattr(product, 'conventions', None)
+        if ci_queue.mode(product) != 'off' or (conv is not None and conv.merge_queue()):
             built.append(Clock(QUEUE_CLOCK, [], False, QUEUE_EVERY_S, None, QUEUE_COMMAND))
     return built
 

@@ -4297,15 +4297,29 @@ def apply(product, source=None, out=print, now=None):
     while an upgrade is pending — so runners sat idle with the line full (2026-09-26 22:42: 7
     heavy + 7 light idle, 45 queued). This job holds no tick lock, never waits on the upgrade
     marker, and is no process the upgrade drain counts (:data:`asf.upgrade.TICK_PATTERN`): a
-    reinstall under it costs one pass, the next minute's runs. 0 always."""
-    if mode(product) == 'off':
-        return 0
-    from asf.facts import cache as facts_cache
-    facts_cache.clear()  # the queue's pass reads its facts afresh (asf.facts.cache)
-    got = queue_pass(product, items=_saved_items(product), source=source, out=out, now=now)
-    if got is None:
-        out(f'ci queue: a pass of {product.name} runs already — skipped')
+    reinstall under it costs one pass, the next minute's runs. The merge queue's own pass runs in
+    the same job (:func:`merge_queue_pass`), so landing never waits on a tick. 0 always."""
+    if mode(product) != 'off':
+        from asf.facts import cache as facts_cache
+        facts_cache.clear()  # the queue's pass reads its facts afresh (asf.facts.cache)
+        got = queue_pass(product, items=_saved_items(product), source=source, out=out, now=now)
+        if got is None:
+            out(f'ci queue: a pass of {product.name} runs already — skipped')
+    merge_queue_pass(product, out)
     return 0
+
+
+def merge_queue_pass(product, out=print):
+    """The merge queue's own pass in this job (:func:`asf.merge_queue.own_pass`): a green batch
+    lands within a minute, whatever the main tick is doing. A failure is one line — the next
+    minute's pass, or the harvest's, judges again."""
+    try:
+        from asf import merge_queue
+        merge_queue.own_pass(product, items=_saved_items(product), out=out)
+    except gh_limit.RateLimited:
+        out('merge queue: GitHub rate limit — the next pass judges')
+    except Exception as e:  # noqa: BLE001 — the job never dies on one pass
+        out(f'merge queue: pass failed — {type(e).__name__}: {e}')
 
 
 # ---- reading it -------------------------------------------------------------------------------
