@@ -1,11 +1,12 @@
 """asf.tick.step_daily — the tick's once-a-day step, in the record clone.
 
-``stale``, ``rollup`` for yesterday with its releases, and the value loop (``scorecard``,
-:mod:`asf.scorecard.loop`), written into the record clone — the
-tick's one commit (:func:`asf.tick.tick.finish`) carries them with the rest of the tick. One line
-per part: ``daily: <part> ok|FAILED — <its last line>``. A part that fails does not stop the
-other; the step fails (and the day is not stamped) when any did. The groom is its own step
-(:mod:`asf.tick.step_groom`). Whether it is due today is the tick's stamp
+``stale``, ``rollup`` for yesterday with its releases, the value loop (``scorecard``,
+:mod:`asf.scorecard.loop`), and ``deciders`` (:func:`asf.shadow.settle`: each due closing
+decider's shadow cases judged against what happened to their card), written into the record
+clone — the tick's one commit (:func:`asf.tick.tick.finish`) carries them with the rest of the
+tick. One line per part: ``daily: <part> ok|FAILED — <its last line>``. A part that fails does
+not stop the other; the step fails (and the day is not stamped) when any did. The groom is its
+own step (:mod:`asf.tick.step_groom`). Whether it is due today is the tick's stamp
 (:func:`asf.tick.steps.daily_due`).
 """
 import argparse
