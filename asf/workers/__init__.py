@@ -175,6 +175,17 @@ def cmd_quota(args):
     return 0
 
 
+def cmd_enable(args):
+    """``asf workers enable <account>``: put an account an auth error took out back in the pool
+    (:mod:`asf.workers.account_auth`). Exit 1 when it was not blocked."""
+    from asf.workers import account_auth
+    if account_auth.enable(args.account):
+        print(f'{args.account}: enabled — back in the pool')
+        return 0
+    print(f'{args.account}: not blocked — nothing to enable')
+    return 1
+
+
 def cmd_sessions(args):
     """``asf workers sessions [--json]`` (F-0076 S-8156): every session
     :mod:`asf.workers.observe` sees on this machine, in pid order, and whose it is. Unreadable
@@ -211,7 +222,7 @@ def cmd_sessions(args):
 def register(sub):
     from asf.env import add_product_arg
     p = sub.add_parser('workers', help='the worker pool: spawn, wave, health, stall, quota, '
-                                       'sessions, progress')
+                                       'enable, sessions, progress')
     wsub = p.add_subparsers(dest='workers_command', required=True)
 
     s = wsub.add_parser('spawn', help='launch one feeder row now')
@@ -239,6 +250,10 @@ def register(sub):
     q = wsub.add_parser('quota', help="each account's windows against the guard")
     add_product_arg(q)
     q.set_defaults(func=cmd_quota)
+
+    en = wsub.add_parser('enable', help='put an account an auth error took out back in the pool')
+    en.add_argument('account')
+    en.set_defaults(func=cmd_enable)
 
     ri = wsub.add_parser('reserve-id', help="a job's BACKLOG_ID_RANGE, for a launcher to export")
     add_product_arg(ri)

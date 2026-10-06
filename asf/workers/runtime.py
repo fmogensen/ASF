@@ -23,7 +23,7 @@ import threading
 from asf import budget, detach, env, hermetic, tokens
 from asf.connectors import claude_code
 from asf.connectors.claude_code import ClaudeCodeRuntime  # noqa: F401 — its old home
-from asf.workers import headroom, report
+from asf.workers import account_auth, headroom, report
 
 #: The session runtime's binary when ``worker_pool.binary`` names none — the runtime connector's
 #: (:mod:`asf.connectors.claude_code`).
@@ -608,7 +608,8 @@ def runtime_session(log_path):
 # the CLI's own error texts, which it reports with ``subtype: success``
 FAILURE_SIGNATURES = (
     ('unknown model', re.compile(r'issue with the selected model|model .* (?:not found|does not exist)', re.I)),
-    ('auth', re.compile(r'invalid api key|please run /login|authentication[_ ]error|oauth token', re.I)),
+    # an account the provider refused (worker_pool.auth_error_patterns, asf.workers.account_auth)
+    (account_auth.AUTH, account_auth.MATCHER),
     # a spent window — the session limit, the usage limit, a rate limit (asf.workers.headroom)
     (headroom.QUOTA_EXHAUSTED, headroom.LIMIT_RE),
     ('permission', re.compile(r'permission denied|not permitted to use', re.I)),

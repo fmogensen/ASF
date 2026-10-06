@@ -1442,6 +1442,9 @@ def run(product_name):
     lock = check_account_lock(cfg)
     if lock is not None:
         rows.append(('quota lock', False, lock[0], lock[1]))
+    auth = check_account_auth()
+    if auth is not None:
+        rows.append(('account auth', False, auth[0], auth[1]))
     pushed = check_pushed_work(product)
     if pushed is not None:
         rows.append(('pushed work', False, pushed[0], pushed[1]))
@@ -1496,6 +1499,13 @@ def check_account_lock(cfg=None):
         return False, (f'{w.label} — quota readings go stale; account_lock.reclaim: '
                        f'true lets the tick reclaim it')
     return True, w.label
+
+
+def check_account_auth():
+    """``(ok, detail)``: one red row while an auth error keeps any account out of the pool
+    (:mod:`asf.workers.account_auth`), or None when none is."""
+    from asf.workers import account_auth
+    return account_auth.doctor_row()
 
 
 def pushed_work_line(orphans):
