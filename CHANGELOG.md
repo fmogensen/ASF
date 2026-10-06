@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.190 — 2026-10-06
+
+### Features landed
+
+- `printenv` joins the approvals hook's read-only register (#828)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.190"`
+
 ## v0.1.189 — 2026-10-06
 
 ### Features landed
