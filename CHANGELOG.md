@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.147 — 2026-10-06
+
+### Features landed
+
+- Worker sessions now start through the `runtime` connector — `connectors.runtime` in config.yaml (`worker_pool.backend` still works); the Claude Code CLI stays the default, local and cloud, with no change in behaviour (#777)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.147"`
+
 ## v0.1.146 — 2026-10-06
 
 ### Features landed
