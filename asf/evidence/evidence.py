@@ -916,9 +916,9 @@ def discover(product=None, checked_file=None):
 
 
 # ---- id tokens: an item's own id in a branch name, a PR or a commit subject on main ----------
-ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b")
+ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4,})\b")
 # branch names are often lower-cased (`fix/b-0003`); titles, bodies and subjects are not read so
-BRANCH_ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b", re.IGNORECASE)
+BRANCH_ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4,})\b", re.IGNORECASE)
 
 
 #: A commit of the document lanes — a spec, a plan, a review, a ruling — names its item because
@@ -950,7 +950,7 @@ _SCOPE_SUBJECT = re.compile(r"^[A-Za-z][\w-]*\((?P<scope>[^)]*)\)!?:")
 #: A subject that leads with its item: `F-0047 — …`, `[B-0004] …`, `fix: T-0361 …`,
 #: `asf(tick): T-0002 — …` (the code lane's squash under its PR title, and a hand-written lead).
 _LEAD_SUBJECT = re.compile(r"^(?:[A-Za-z][\w-]*(?:\([^)]*\))?!?:\s*)?"
-                           r"\[?(?P<ids>[EFSTBDR]-\d{4}(?:\s*[,/&]\s*[EFSTBDR]-\d{4})*)\]?(?![\w-])")
+                           r"\[?(?P<ids>[EFSTBDR]-\d{4,}(?:\s*[,/&]\s*[EFSTBDR]-\d{4,})*)\]?(?![\w-])")
 #: A merge of a branch into the trunk: the branch merged in, never the one merged into.
 _MERGE_SUBJECT = (
     re.compile(r"^Merge pull request #\d+ from (?:[^/\s]+/)?(?P<branch>\S+)"),

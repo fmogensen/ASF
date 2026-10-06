@@ -3,7 +3,7 @@
 Reads `index.json` (never the md files) and never invents an id: every id returned
 exists in the index. The rules run in order and the first one that finds anything wins:
 
-  1. an explicit id token `\\b[EFSTBDR]-\\d{4}\\b` in the PR title/body, the branch name or the
+  1. an explicit id token `\\b[EFSTBDR]-\\d{4,}\\b` in the PR title/body, the branch name or the
      task name (tokens of Decisions/Rules only count when nothing else matches — a PR that merely
      cites [[D-0292]] belongs to the work, not to the ruling)
   2. `links.prs` contains the PR number
@@ -25,7 +25,7 @@ import json
 import os
 import re
 
-ID_TOKEN = re.compile(r'\b[EFSTBDR]-\d{4}\b')
+ID_TOKEN = re.compile(r'\b[EFSTBDR]-\d{4,}\b')
 WORK_TYPES = {'epic', 'feature', 'story', 'task', 'bug'}
 ROLE_PREFIX = re.compile(
     r'^((fix|review|prereview|rebase|remerge|bouncefix|bounce|adjudicate|diag|rr\d*|spec|plan|'
