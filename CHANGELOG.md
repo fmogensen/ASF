@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.202 — 2026-10-06
+
+### Features landed
+
+- `sev=` and `sig=` — a place's own severity, and a place as its own Bug (#838)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.202"`
+
 ## v0.1.201 — 2026-10-06
 
 ### Features landed
