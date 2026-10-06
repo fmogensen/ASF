@@ -14,6 +14,7 @@ import unittest
 from asf import env
 from asf.env import Product
 from asf.feeder import footprint, register, render, rows, tiers
+from asf.harvest import lane
 from asf.tick import step_wave
 from asf.workers import lifecycle
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
@@ -1157,6 +1158,9 @@ class NoS1S2BugIsInvisible(unittest.TestCase):
     def test_a_live_session_is_a_waits_row(self):
         r = self.only_wait(self.cand(inflight=[S1_SESSION]))
         self.assertEqual(r.waits_on, 'session')
+        self.assertIn('session', r.reason)
+        r2 = self.only_wait(self.cand(inflight=[dict(S1_SESSION, job='fix-bug-b-0001')]))
+        self.assertEqual(r2.reason, 'S1 open, decided: session fix-bug-b-0001 running')
 
     def test_work_waiting_to_land_is_a_waits_row(self):
         r = self.only_wait(self.cand(occupancy=occ(busy=['B-0001'])))
@@ -1174,6 +1178,8 @@ class NoS1S2BugIsInvisible(unittest.TestCase):
         idx['items']['B-0001']['state'] = 'Active'
         r = self.only_wait(self.cand(idx))
         self.assertEqual(r.waits_on, 'branch')
+        self.assertIn('Active', r.reason)
+        self.assertIn('fixer branch', r.reason)
 
     def test_over_the_attempt_limit_waits_on_the_operator(self):
         r = self.only_wait(self.cand(attempts={'B-0001': 4}))
@@ -1204,6 +1210,80 @@ class NoS1S2BugIsInvisible(unittest.TestCase):
                                   'state': 'New', 'stage': 'card', 'rank': 1}
         out = rows.plan_rows(idx, product(), [S1_SESSION], 3)
         self.assertIn((rows.CARD_SPEC, 'F-0001', True), [(r.kind, r.item_id, r.launches) for r in out])
+
+
+class WaitsOnWhatActuallyHoldsIt(unittest.TestCase):
+    """F-0205 §1/§2/§3: the busy branch of :func:`rows.bug_rows` classifies a hold from the fact
+    that produced it (:func:`rows.candidates`' labelled ``held_by``), never from a substring of
+    the sentence that describes it."""
+
+    def bare(self, busy=None, waiting_landing=None):
+        """An occupancy dict with only ``busy``/``waiting_landing`` filled — :func:`occfixture.occ`
+        also fills ``review``/``landing``, which makes :func:`rows.lane_rows` speak for the item
+        and drops its WAITS row before this branch is ever reached (PD9)."""
+        return {'busy': dict(busy or {}), 'waiting_landing': dict(waiting_landing or {})}
+
+    def cand(self, items=None, inflight=(), occupancy=None, attempts=None):
+        idx = items or s1_bugs('B-0001')
+        return [r for r in rows.candidates(idx, product(), list(inflight), attempts=attempts,
+                                           occupancy=occupancy) if r.item_id == 'B-0001']
+
+    def only_wait(self, rs):
+        self.assertEqual(len(rs), 1, rs)
+        self.assertFalse(rs[0].launches)
+        self.assertTrue(rs[0].action.startswith('WAITS ON'), rs[0].action)
+        return rs[0]
+
+    def test_a_finished_run_awaiting_harvest_is_not_called_a_session(self):
+        occupancy = self.bare(waiting_landing={'B-0001': lifecycle.FINISHED_WAIT})
+        r = self.only_wait(self.cand(occupancy=occupancy))
+        self.assertEqual(r.waits_on, 'harvest')
+        self.assertEqual(r.reason, 'S1 open, decided: finished, awaiting harvest')
+
+    def test_a_lane_state_under_a_partial_occupancy_is_a_landing_wait(self):
+        for state in lane.BUSY_STATES:  # none of these names carries a lowercase `land` (PD5)
+            with self.subTest(state=state):
+                sentence = f'lane {state} PR #7: round 1'
+                occupancy = self.bare(waiting_landing={'B-0001': sentence})
+                r = self.only_wait(self.cand(occupancy=occupancy))
+                self.assertEqual(r.waits_on, 'landing')
+                self.assertEqual(r.reason, f'S1 open, decided: {sentence}')
+
+    def test_a_live_session_names_its_job(self):
+        r = self.only_wait(self.cand(inflight=[dict(S1_SESSION, job='fix-bug-b-0001')]))
+        self.assertEqual(r.reason, 'S1 open, decided: session fix-bug-b-0001 running')
+
+    def test_an_inflight_record_with_no_job_still_says_session(self):
+        r = self.only_wait(self.cand(inflight=[S1_SESSION]))
+        self.assertEqual((r.waits_on, r.reason), ('session', 'S1 open, decided: session running'))
+
+    def test_a_pushed_wait_is_still_a_landing_wait(self):
+        for wait in (lifecycle.PUSHED_WAIT, lifecycle.PR_WAIT):
+            with self.subTest(wait=wait):
+                occupancy = self.bare(waiting_landing={'B-0001': wait})
+                r = self.only_wait(self.cand(occupancy=occupancy))
+                self.assertEqual(r.waits_on, 'landing')
+
+    def test_a_live_run_outranks_a_stale_landing_wait(self):
+        occupancy = self.bare(busy={'B-0001': 'session running'},
+                              waiting_landing={'B-0001': 'pushed, waiting to land'})
+        r = self.only_wait(self.cand(occupancy=occupancy))
+        self.assertEqual(r.waits_on, 'session')
+
+    def test_the_feeder_and_the_ledger_write_the_same_sentence(self):
+        self.assertEqual(rows.FINISHED_WAIT, lifecycle.FINISHED_WAIT)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 's.jsonl')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'job': 'fix-bug-b-0001', 'pid': 1, 'started': 't1',
+                                'item': 'B-0001', 'branch': 'fix/B-0001', 'kind': 'fix-bug'}) + '\n')
+        occupancy = lifecycle.occupancy(path, alive=lambda pid: True)
+        self.assertEqual(occupancy['busy'], {'B-0001': rows.session_wait({'job': 'fix-bug-b-0001'})})
+
+    def test_a_bare_string_why_reads_as_a_session(self):
+        self.assertEqual(rows.held_kind('session running'), ('session', 'session running'))
+        self.assertEqual(rows.held_kind(None), ('session', 'session running'))
 
 
 class ForeignCardRowTests(unittest.TestCase):
@@ -2158,6 +2238,25 @@ class S1GateTests(unittest.TestCase):
         self.assertEqual(g.held, 9)
         self.assertEqual(g.behind, 9)
         self.assertEqual(g.by_kind, [('CARD → SPEC', 9)])
+
+    def test_a_harvest_wait_is_worked(self):
+        # a finished run awaiting harvest is being worked, by the harvest — no unworked entry
+        # and no NEEDS OPERATOR line, while the same Bug over the attempt limit still gets both
+        occupancy = {'waiting_landing': {'B-0001': lifecycle.FINISHED_WAIT}}
+        idx = s1_bugs('B-0001')
+        cut = rows.plan_rows(idx, product(), [], 1, occupancy=occupancy)
+        uncut = rows.plan_rows(idx, product(), [], 1, occupancy=occupancy, s1_first=False)
+        g = tiers.gate(cut, uncut)
+        self.assertIsNone(g)
+        self.assertEqual(tiers.needs_operator(g, product()), [])
+
+        idx2 = s1_bugs('B-0001')
+        cut2 = rows.plan_rows(idx2, product(), [], 1, attempts={'B-0001': 4})
+        uncut2 = rows.plan_rows(idx2, product(), [], 1, attempts={'B-0001': 4}, s1_first=False)
+        g2 = tiers.gate(cut2, uncut2)
+        self.assertEqual(g2.unworked, [('B-0001', 'operator', 'S1 open, decided: adjudicated '
+                                        'after 4 sessions (limit 3): a person decides')])
+        self.assertEqual(len(tiers.needs_operator(g2, product())), 1)
 
 
 def finish_index(cards=4, build_stage='plan-approved', task_state='New'):

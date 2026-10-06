@@ -140,9 +140,9 @@ What the tick would start now, S1 first: `Tier | Row | Item | Feature | Action`.
   `PUSHED → LAND` (a spec or plan whose work is pushed and waits to land — nothing to launch).
 - **Action** is `would launch <kind> on <branch>`, or why not: `WAITS ON <item>` (an `after:`
   predecessor, or a running Task that writes the same files), `WAITS ON landing` (pushed, a PR
-  open or harvest pending), `WAITS ON a free slot`, `NEEDS
-  DECISION` (the card is not `decided: true` yet — answer it in the groom), `PARKED …`, `ON TRUNK
-  <sha>` (its work is already on the trunk).
+  open), `WAITS ON harvest` (the run finished, harvest has not got to it), `WAITS ON a free slot`,
+  `NEEDS DECISION` (the card is not `decided: true` yet — answer it in the groom), `PARKED …`,
+  `ON TRUNK <sha>` (its work is already on the trunk).
 
 `asf next --json` gives the same rows for scripts; `--capacity n` asks "what if I had n slots".
 
