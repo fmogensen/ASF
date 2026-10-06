@@ -1,4 +1,7 @@
-"""asf.groom.inbox — turn <intake_dir>/*.md into cards or one question, by shape."""
+"""asf.groom.inbox — turn <intake_dir>/*.md into cards or one question, by shape. Three of
+those reads are inferred rather than declared: a title's `S1:`/`S2:`/`S3:` prefix is a severity
+(`graded`, `severity_of`), and a body `Error:` line or a named failing spec is the signature a
+`type: bug` card was being asked for (`body_signature`, `signed`)."""
 import os
 import re
 
@@ -8,6 +11,19 @@ from asf.record.publish import publish
 from asf.conventions import DEFAULT_INTAKE_DIR
 
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
+
+#: A title may open with its severity: `S1: p1-e2e is failing on main` (C4). Case-insensitive,
+#: and the match must leave a non-empty title behind — `S3: the third option` is a title, so the
+#: `rest` group is what guards it, not a lookahead.
+_SEVERITY_PREFIX_RE = re.compile(r'^\s*(S[123])\s*:\s*(?P<rest>\S.*?)\s*$', re.IGNORECASE)
+
+SEVERITIES = ('S1', 'S2', 'S3')
+
+#: A body-inferred signature is capped at the same length a signature is already capped at
+#: elsewhere, so it is never longer than one the metrics stream will store or one a flake-filed
+#: Bug's title carries: `asf/metrics/metrics.py:1650` (`str(signature)[:120]`) and
+#: `asf.tick.flaky.TITLE_MAX`.
+SIGNATURE_MAX = 120
 
 #: Header keys intake does not (yet) read a value for — `after:` on a Task, say. Named here, not
 #: matched by shape alone (B-0111 C1): a body line that merely *looks* header-shaped (`Note: …`,
@@ -116,6 +132,88 @@ def header_list(value):
     return out
 
 
+def severity_of(card):
+    """The card's severity — its ``severity:`` header, upper-cased, when that names one of
+    :data:`SEVERITIES`; ``S3`` otherwise. The one reader of the field: the Bug intake mints and
+    the stuck-card line (:func:`stuck_s1_lines`) both come through here, so a card cannot be S1
+    in one view and S3 in the other (C5). ``severity: s1`` is S1, which it was not before."""
+    severity = (card.headers.get('severity') or '').strip().upper()
+    return severity if severity in SEVERITIES else 'S3'
+
+
+def graded(card):
+    """A card whose title opens with ``S1:``/``S2:``/``S3:`` (C4), with that prefix cut from the
+    title and — when no ``severity:`` header says otherwise (C3) — recorded as one. The prefix
+    is cut either way (C2): a severity is a field, and a title that also carries it is the same
+    fact written twice. A title with no prefix comes back unchanged (identity, not a copy)."""
+    m = _SEVERITY_PREFIX_RE.match(card.title)
+    if not m:
+        return card
+    headers = card.headers
+    if not headers.get('severity'):
+        headers = dict(headers, severity=m.group(1).upper())
+    return card._replace(title=m.group('rest'), headers=headers)
+
+
+#: An error line, taken whole: ``Error:``, ``TypeError:``, ``AssertionError:``,
+#: ``asf.env.ConfigError:`` — any dotted name ending in ``Error:``, anchored at the line start.
+_ERROR_LINE_RE = re.compile(r'^[\w.]*Error:\s*\S')
+
+
+def body_signature(description):
+    """The signature a card's body offers, or ``None``: the first line that is an error line or
+    a named failing spec, whitespace-folded.
+
+    Two grammars, in this order:
+
+    * ``<Name>Error: <text>`` — ``Error:``, ``TypeError:``, ``AssertionError:``,
+      ``asf.env.ConfigError:`` — taken whole, as the operator wrote it.
+    * a failing spec line, parsed by :data:`asf.tick.flaky._TEST_RE` and formatted by
+      :func:`asf.tick.flaky.test_key` as ``<file>:<line> › <title>``, so it reads as the
+      signature a CI-filed flake carries — without ``flaky.SIG_PREFIX``, which claims a retry
+      passed the test and is not this card's to claim (C12). The import is function-local:
+      ``asf.groom`` stays out of ``asf.tick`` (P9).
+
+    Capped at :data:`SIGNATURE_MAX` characters with a trailing ``…``."""
+    from asf.tick import flaky  # inside: asf.groom stays out of asf.tick (P9)
+    for raw in (description or '').split('\n'):
+        line = ' '.join(raw.split())
+        if not line:
+            continue
+        if _ERROR_LINE_RE.match(line):
+            sig = line
+        else:
+            m = flaky._TEST_RE.match(line)
+            if not m:
+                continue
+            sig = flaky.test_key({'file': m.group('file').strip(), 'line': int(m.group('line')),
+                                  'title': m.group('title')})
+        if len(sig) > SIGNATURE_MAX:
+            sig = sig[:SIGNATURE_MAX - 1] + '…'
+        return sig
+    return None
+
+
+def signed(card):
+    """A card with no ``signature:`` whose body names one (:func:`body_signature`) gets it —
+    the one header between a card that carries its own evidence and a Bug (C6).
+
+    Filled only when the card carries no ``signature:``, no ``writes:``, no ``## Acceptance``
+    list and no ``type:`` other than ``bug``: a card with an acceptance list is work, a card
+    with ``writes:`` is a Task, and ``type: feature`` settles the reading as it does today.
+    Deliberately *not* gated on ``shape.DEFECT_WORDS_RE`` — ``flaky`` is not one of its words
+    (P4), so a defect-word gate would miss the card this rule exists for."""
+    headers = card.headers
+    type_ = (headers.get('type') or '').strip().lower()
+    if (headers.get('signature') or headers.get('writes') or card.acceptance
+            or (type_ and type_ != 'bug')):
+        return card
+    sig = body_signature(card.description)
+    if sig is None:
+        return card
+    return card._replace(headers=dict(headers, signature=sig))
+
+
 def title_signature(title):
     """The signature an operator's ``type: bug`` card gets when it names none: its title,
     whitespace folded — a Bug is keyed on its signature, and a title is the one line it has."""
@@ -208,7 +306,7 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             text = f.read()
         body, prior = _split_question(text) if _has_question(text) else (text, '')
 
-        card = declared(scrub_title(parse_inbox_file(body), root))
+        card = declared(signed(graded(scrub_title(parse_inbox_file(body), root))))
         result = derive(card, canonical, default_bug_parent=default_bug_parent)
 
         if isinstance(result, Question):
@@ -225,8 +323,7 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
         new_id = mint_id(root, canonical, type_)
         typed = {'title': card.title, 'parent': parent, 'decided': False}
         if type_ == 'bug':
-            severity = card.headers.get('severity')
-            typed['severity'] = severity if severity in ('S1', 'S2', 'S3') else 'S3'
+            typed['severity'] = severity_of(card)
             typed['found_in'] = 'dev'
             typed['signature'] = card.headers.get('signature')
         elif type_ == 'task':

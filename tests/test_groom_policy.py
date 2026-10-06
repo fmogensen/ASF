@@ -875,7 +875,8 @@ class AnswersFileTests(unittest.TestCase):
 
 
 QUESTION = ('This reads as a defect. A Bug carries a signature — add signature: <the failing '
-            'test or error line>; or an ## Acceptance list if it is new work.')
+            'test or error line>, or paste that line into the body (an `Error:` line or a '
+            '`file:line › test` line is read as one); or an ## Acceptance list if it is new work.')
 
 
 class InboxQuestionTests(GroomAutoTestCase):
