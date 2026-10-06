@@ -61,13 +61,21 @@ def shadow(product, fact, key, old_fn, new_fn, *, decider='', same=None):
     try:
         new = new_fn()
     except (Exception, gh_limit.RateLimited) as e:  # noqa: BLE001 — shadow never raises into old
-        disagree.log(product, fact, key, old, f'error:{type(e).__name__}', decider=decider)
-        return old
+        new, agree = f'error:{type(e).__name__}', False
+    else:
+        try:
+            agree = (same or _same)(old, new)
+        except Exception as e:  # noqa: BLE001
+            agree = False
+            new = f'error:{type(e).__name__} (same)'
     try:
-        agree = (same or _same)(old, new)
-    except Exception as e:  # noqa: BLE001
-        agree = False
-        new = f'error:{type(e).__name__} (same)'
+        from asf import shadow as ledger
+        ledger.decide(product, 'facts', f'{fact}/{decider}|{key}|{disagree.render(old)!r}',
+                      code=disagree.render(new), incumbent=disagree.render(old),
+                      verdict=ledger.SAME if agree else ledger.DIFF,
+                      stratum=f'{fact}/{decider}' if decider else fact)
+    except Exception:  # noqa: BLE001 — the ledger never takes a decider down
+        pass
     if not agree:
         disagree.log(product, fact, key, old, new, decider=decider)
     return old

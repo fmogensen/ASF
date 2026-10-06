@@ -51,6 +51,10 @@ STATE = 'tune.json'
 LEDGER = 'tune.jsonl'
 DEFAULTS = {'enabled': False, 'window_days': 7, 'min_samples': 10, 'trial_samples': 10,
             'min_gain': 0.10, 'max_regress': 0.10}
+#: ``tune.lookback_days.<kind>``: a run of a kind whose repair lags (a plan's shows in the work
+#: built on it) counts toward a trial's verdict only once it ended this many days ago, so the
+#: repairs it caused have had time to happen. A kind not named judges at once.
+LOOKBACK_DAYS = {'plan': 7}
 _NUMERIC = ('window_days', 'min_samples', 'trial_samples', 'min_gain', 'max_regress')
 _STAMP = '%Y-%m-%dT%H:%M:%SZ'
 EPS = 1e-9
@@ -106,6 +110,16 @@ def settings(cfg, product=None):
     bounds = _bounds(block.get('bounds'))
     bounds.update(_bounds(per.get('bounds')))
     out['bounds'] = bounds
+    lookback = dict(LOOKBACK_DAYS)
+    for src in (block, per):
+        raw = src.get('lookback_days')
+        for kind, v in (raw.items() if isinstance(raw, dict) else ()):
+            try:
+                if not isinstance(v, bool):
+                    lookback[str(kind)] = max(0, int(v))
+            except (TypeError, ValueError):
+                pass
+    out['lookback_days'] = lookback
     return out
 
 
@@ -269,13 +283,28 @@ def _blocked(rows, kind, knob, value, since):
     return False
 
 
-def candidates(ks, product, kind, bounds, rows, since):
-    """The knob steps to try, in order: the next cheaper model, one seat fewer, one seat more."""
+def _runtime_id(label, cfg):
+    try:
+        from asf.workers import spawn
+        return spawn.model_arg(label, cfg)
+    except Exception:  # noqa: BLE001 — an unmapped label is its own
+        return label
+
+
+def candidates(ks, product, kind, bounds, rows, since, cfg=None):
+    """The knob steps to try, in order: the next cheaper model, one seat fewer, one seat more.
+    A cheaper label that runs the same model as the current one (``cheap`` with no
+    ``worker_pool.models`` entry falls back to ``light``) is skipped: that trial would measure
+    nothing."""
     out = []
     models = bounds.get('models') or []
     cur = current(ks, 'model', product, kind, bounds)
-    if cur in models and models.index(cur) + 1 < len(models):
-        out.append(('model', cur, models[models.index(cur) + 1]))
+    if cur in models:
+        here = _runtime_id(cur, cfg) if cfg is not None else cur
+        for nxt in models[models.index(cur) + 1:]:
+            if cfg is None or _runtime_id(nxt, cfg) != here:
+                out.append(('model', cur, nxt))
+                break
     if bounds.get('seats'):
         lo, hi = bounds['seats']
         s = current(ks, 'seats', product, kind, bounds)
@@ -310,9 +339,18 @@ def step(product, cfg=None, *, runs=None, now=None, out=print, event=None):
     window = _since(now, s['window_days'])
     if runs is None:
         from asf.improve import measure
-        runs = measure.ended_runs(product, since=window[:10])
+        live = [w['started'] for v in (state.get('kinds') or {}).values()
+                for w in (v.get('trial'), v.get('watch')) if isinstance(w, dict) and w.get('started')]
+        runs = measure.ended_runs(product, since=min([window] + live)[:10])
     rows = ledger(product)
     wrote = []
+
+    def matured(kind, rs):
+        days = s['lookback_days'].get(kind, 0)
+        if not days:
+            return rs
+        cut = _since(now, days)
+        return [r for r in rs if r.ended <= cut]
 
     def log(kind, ev, knob, frm, to, reason, **nums):
         rec = dict({'at': stamp, 'kind': kind, 'event': ev, 'knob': knob, 'from': frm, 'to': to,
@@ -342,7 +380,7 @@ def step(product, cfg=None, *, runs=None, now=None, out=print, event=None):
             ks['since'] = stamp
             trial = None
         if trial:
-            trs = _runs_for(runs, kind, trial['knob'], trial['to'], trial['started'], cfg)
+            trs = matured(kind, _runs_for(runs, kind, trial['knob'], trial['to'], trial['started'], cfg))
             if len(trs) < s['trial_samples']:
                 continue
             t = stats(trs, runs)
@@ -361,7 +399,7 @@ def step(product, cfg=None, *, runs=None, now=None, out=print, event=None):
             continue
         watch = ks.get('watch')
         if watch:
-            wrs = _runs_for(runs, kind, watch['knob'], watch['to'], watch['started'], cfg)
+            wrs = matured(kind, _runs_for(runs, kind, watch['knob'], watch['to'], watch['started'], cfg))
             if len(wrs) < s['trial_samples']:
                 continue
             t = stats(wrs, runs)
@@ -375,9 +413,10 @@ def step(product, cfg=None, *, runs=None, now=None, out=print, event=None):
                 continue
         since = max(ks.get('since') or '', window)
         cur_model = current(ks, 'model', product, kind, b)
-        cands = candidates(ks, product, kind, b, rows, window)
+        cands = candidates(ks, product, kind, b, rows, window, cfg)
         for knob, frm, to in cands:
-            brs = _runs_for(runs, kind, knob, cur_model if knob == 'model' else None, since, cfg)
+            brs = matured(kind, _runs_for(runs, kind, knob, cur_model if knob == 'model' else None,
+                                          since, cfg))
             if len(brs) < s['min_samples']:
                 continue
             base = stats(brs, runs)

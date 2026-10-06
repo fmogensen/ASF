@@ -424,6 +424,8 @@ def build_parser():
 
     from asf.tune import add_parser as add_tune_parser
     add_tune_parser(sub)
+    from asf.shadow import add_parser as add_deciders_parser
+    add_deciders_parser(sub)
 
     p_capacity = sub.add_parser('capacity', help='the CAPACITY table: sessions and CI runs per product')
     g_capacity = p_capacity.add_mutually_exclusive_group()
