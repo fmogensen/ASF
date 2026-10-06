@@ -2848,6 +2848,44 @@ class ABlockedRunIsParkedUntilTheCardChanges(Home):
         self.assertFalse([f for f in found if f[1] == 'parked'], found)
         self.assertFalse([f for f in found if f[1] == 'released'], found)
 
+    def test_a_correction_drops_once_a_different_branch_of_the_item_lands(self):
+        """#46: an ``asf correct`` correction (or ruling) written against one branch of an item
+        is automatically dropped once a *different* branch of the same item lands — the work it
+        asked for got done another way, so health never leaves a session waiting to redo it."""
+        items = self.card()
+        rec = self.spawn('review', {'ok': True, 'pid': 80,
+                                    'result': 'REPORT\nitem: T-0001\nkind: coder\nstatus: done\n'
+                                              'pushed: yes abc123\n'})
+        self.commit(rec['worktree'])
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        pool_mod.update_session(self.product, 'review', correction={
+            'kind': 'operator', 'text': 'answer the C list', 'at': '2026-10-01T09:00:00Z'})
+        pool_mod.update_session(self.product, 'coder-take2', item=self.ITEM,
+                                branch='coder/take2', started='2026-10-02T09:00:00Z',
+                                ended='2026-10-02T09:30:00Z', harvested='f00dface00')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertIn(('review', 'released', f'{self.ITEM}: coder/take2 landed instead — the '
+                                             'correction drops'), found)
+        s = pool_mod.load_sessions(self.product)['review']
+        self.assertNotIn('correction', s)
+
+    def test_landing_on_its_own_branch_does_not_drop_its_own_correction(self):
+        items = self.card()
+        rec = self.spawn('review', {'ok': True, 'pid': 81,
+                                    'result': 'REPORT\nitem: T-0001\nkind: coder\nstatus: done\n'
+                                              'pushed: yes abc123\n'})
+        self.commit(rec['worktree'])
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        pool_mod.update_session(self.product, 'review', correction={
+            'kind': 'operator', 'text': 'answer the C list', 'at': '2026-10-01T09:00:00Z'},
+            harvested='f00dface00', branch=rec['branch'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertFalse([f for f in found if f[0] == 'review' and f[1] == 'released'], found)
+        s = pool_mod.load_sessions(self.product)['review']
+        self.assertIn('correction', s)
+
 
 class TestStall(Home):
     def spawn(self, job, step):

@@ -2920,6 +2920,77 @@ class AConflictingBranchNeverWaitsForCI(LaneFixture):
         self.assertEqual(list(files), ['docs/a.md'])
 
 
+class AHostDirtyButGitCleanBranchIsRebasedNotParked(LaneFixture):
+    """#44: a register file's ``.gitattributes merge=union`` driver GitHub's own merge cannot
+    apply, so GitHub reads such a PR ``mergeable: CONFLICTING`` while ``git merge-tree
+    --write-tree`` (:func:`lane.conflict_files`) merges it onto the trunk clean. Reading
+    ``f['conflict']`` (git's own verdict) alone left a PR like this PUSHED or PR_OPEN forever:
+    GitHub runs no ``pull_request`` workflow on a PR it calls dirty, so it got no CI and no row.
+    ``host_dirty`` carries GitHub's verdict (off the same per-tick PR snapshot the check-run read
+    already pays for, :func:`lane.host_reads_dirty`), so the branch still goes BACK and the lane
+    rebases it with the repo's own merge drivers — never a session, never silence."""
+
+    def test_pushed_with_a_github_dirty_git_clean_pr_goes_back_too(self):
+        f = facts(mode='pr', conflict=[], host_dirty=True)
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), f), (lane.BACK, 'kind=conflict'))
+        # git-clean and GitHub-clean: opens as before
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), facts(mode='pr', conflict=[],
+                                                                  host_dirty=False)),
+                         (lane.PR_OPEN, 'open a PR'))
+
+    def test_an_open_pr_host_dirty_goes_back_before_any_review(self):
+        f = facts(mode='pr', conflict=[], host_dirty=True, review_required=True,
+                  pr={'number': 7, 'state': 'OPEN', 'head': HEAD})
+        for s in (lane.PR_OPEN, lane.REVIEW):
+            self.assertEqual(lane.next_state(rec(s, pr=7), f), (lane.BACK, 'kind=conflict'))
+
+    def test_host_reads_dirty_trusts_the_snapshot_only_at_the_exact_head(self):
+        snap = {7: {'head': HEAD, 'mergeable': 'CONFLICTING'}}
+        with mock.patch.object(lane.pr_graph, 'snapshot', return_value=snap):
+            self.assertTrue(lane.host_reads_dirty('o/p', 7, HEAD))
+            self.assertFalse(lane.host_reads_dirty('o/p', 7, NEW))     # head moved since
+        with mock.patch.object(lane.pr_graph, 'snapshot',
+                               return_value={7: {'head': HEAD, 'mergeable': 'MERGEABLE'}}):
+            self.assertFalse(lane.host_reads_dirty('o/p', 7, HEAD))
+        with mock.patch.object(lane.pr_graph, 'snapshot', return_value=None):
+            self.assertFalse(lane.host_reads_dirty('o/p', 7, HEAD))
+        self.assertFalse(lane.host_reads_dirty('o/p', None, HEAD))
+        self.assertFalse(lane.host_reads_dirty('', 7, HEAD))
+
+    def test_back_rebases_a_host_dirty_branch_with_no_file_list(self):
+        runner = lane.Lane.__new__(lane.Lane)
+        lines = []
+        runner.out, runner.dry_run, runner.results, runner.trunk = lines.append, False, {}, 'main'
+        f = {'branch': 'cloud/T-0099', 'item': 'T-0099', 'head': HEAD, 'prev': rec(lane.PUSHED),
+             'pr': {'number': 1099, 'state': 'OPEN'}, 'conflict': [], 'host_dirty': True,
+             'run': {}}
+        with mock.patch.object(lane, 'send_back') as sb:
+            runner.enter_back(f, 'kind=conflict')
+        sb.assert_called_once()
+        _ln, _f, kind, text, files = sb.call_args[0]
+        self.assertEqual(kind, 'conflict')
+        self.assertIn('#1099', text)
+        self.assertIn('mergeable: CONFLICTING', text)
+        self.assertIn('git merges it onto', text)
+        self.assertEqual(list(files), [])
+
+    def test_the_branch_facts_read_the_host_dirty_pr_when_git_is_clean(self):
+        self.push_main({'a.txt': 'trunk\n'}, 'chore: a on main')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat(T-0002): b')
+        items = {'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'Active'}}
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=items)
+        ln.mode, ln.slug = 'pr', 'o/p'
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        heads = ln.remote_heads()
+        ln.trunk_sha = heads['main']
+        snap = {42: {'head': heads['worker/T-0002'], 'mergeable': 'CONFLICTING'}}
+        with mock.patch.object(lane.pr_graph, 'snapshot', return_value=snap):
+            f = ln.branch_facts('worker/T-0002', None, heads['worker/T-0002'],
+                                {'number': 42, 'state': 'OPEN'}, True, False)
+        self.assertEqual(f['conflict'], [])
+        self.assertTrue(f.get('host_dirty'))
+
+
 class AMergeConflictGoesBack(unittest.TestCase):
     """2026-09-27: a product's two spec-lane PRs and one code PR passed GATE, and the host
     refused each merge for conflicts with a trunk that moved under them. The lane recorded

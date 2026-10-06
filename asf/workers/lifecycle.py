@@ -1096,6 +1096,21 @@ def empty_on_a_landed_lane(path, run):
     return landed_earlier(path, run)
 
 
+def correction_superseded_by_landing(path, item, branch):
+    """The branch that landed in ``branch``'s place, or None: an ``asf correct`` correction or
+    ruling written against ``branch`` of ``item``, and a *different* branch of the same item has
+    since landed (:func:`landed`) — the work it asked for got done another way (a reshape onto a
+    fresh Task, a hand-pushed fix, a second branch the operator landed directly), so carrying it
+    out on its own branch now would just redo it (#46). Never called for a park
+    (:func:`item_park` is its own correction, with no branch to supersede); when ``branch``
+    itself is the one that landed, that is simply done, read as such elsewhere
+    (:func:`closed_state`)."""
+    for r in item_runs(path, item):
+        if r.get('branch') and r.get('branch') != branch and landed(r):
+            return r['branch']
+    return None
+
+
 def pending_correction(run, path=None):
     """The correction on ``run`` still waiting for its session: none of the item's runs started
     at or after it (health and harvest write corrections before the wave launches, so a run of
