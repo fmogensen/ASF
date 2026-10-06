@@ -140,6 +140,25 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class OperatorCommandTests(unittest.TestCase):
+    """B-0042: the exact command a NEEDS OPERATOR question names, backtick-fenced."""
+
+    def test_the_backtick_command_is_extracted(self):
+        self.assertEqual(report.operator_command('rotate the key — `tools/rotate.sh`'),
+                         'tools/rotate.sh')
+
+    def test_the_last_of_several_backtick_spans_wins(self):
+        q = 'check `git log -1` against `git status --short`'
+        self.assertEqual(report.operator_command(q), 'git status --short')
+
+    def test_empty_for_a_question_with_no_command(self):
+        self.assertEqual(report.operator_command('approve the migration before it runs'), '')
+
+    def test_empty_for_none_and_empty(self):
+        self.assertEqual(report.operator_command(''), '')
+        self.assertEqual(report.operator_command(None), '')
+
+
 class RulingTests(unittest.TestCase):
     def test_b0064_the_ruling_paragraph_is_read_off_the_report(self):
         from asf.workers import report

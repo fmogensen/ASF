@@ -47,7 +47,7 @@ DEFAULT_RULES = """- Commit with `git commit -s`; the sign-off is the record tha
 - Keep a heartbeat: print a progress line as you go; a silent session is read as a dead one and
   relaunched on top of you.
 - Finish with the typed REPORT below, as the last thing you print.
-- Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`."""
+- Anything a human must decide or run: `NEEDS OPERATOR: <what you could not check or do> — ` then the exact command in backticks (read-only, harvest runs it itself — B-0042), or, with no command, the exact answer needed instead."""
 
 #: What counts as "a test the card names": a path whose name carries ``test``, with or without a
 #: ``::node`` suffix, or any ``file::node`` id. Deliberately narrow — a spec path in the prose is

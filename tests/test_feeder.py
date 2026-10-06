@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import unittest
 
-from asf import env
+from asf import env, invariants
 from asf.env import Product
 from asf.feeder import footprint, register, render, rows, tiers
 from asf.tick import step_wave
@@ -608,6 +608,109 @@ class RowsTest(unittest.TestCase):
 
     def test_takes_a_bare_item_map(self):
         self.assertEqual(kinds(rows.candidates(self.index['items'], self.p, [])), kinds(self.cand()))
+
+
+class WaitsOnTargetHasARowOrIsDoneTest(unittest.TestCase):
+    """B-0043: every ``WAITS ON <id>`` row's target must itself have a row, or be done (removed
+    or :data:`asf.invariants.DONE_STATES`) — never a row that points the operator at nothing."""
+
+    def setUp(self):
+        self.index = fixture_index()
+        self.p = product()
+
+    def test_the_fixtures_own_candidates_satisfy_the_invariant(self):
+        out = rows.candidates(self.index, self.p, [])
+        self.assertTrue(any(r.waits_on == 'T-0001' for r in out))  # the real case this guards
+        self.assertEqual(invariants.waits_on_without_a_row(out, self.index['items']), [])
+
+    def test_a_target_with_no_row_and_not_done_is_caught(self):
+        # T-0001's after: names an id the record carries nowhere — not even a removed card
+        items = {'E-0001': {'id': 'E-0001', 'type': 'epic', 'state': 'Active', 'decided': True},
+                'F-0002': {'id': 'F-0002', 'type': 'feature', 'parent': 'E-0001',
+                          'stage': 'building 0/1', 'state': 'Active', 'decided': True,
+                          'children': ['T-0001']},
+                'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0002', 'state': 'New',
+                          'decided': True, 'writes': ['a.py'], 'after': ['T-9999']}}
+        out = rows.candidates(items, self.p, [])
+        self.assertEqual(invariants.waits_on_without_a_row(out, items), [('T-0001', 'T-9999')])
+
+    def test_a_removed_target_is_not_a_violation(self):
+        idx = copy.deepcopy(self.index)
+        idx['items']['T-0001']['removed'] = 'merged into T-0002'
+        out = rows.candidates(idx['items'], self.p, [])
+        self.assertEqual(invariants.waits_on_without_a_row(out, idx['items']), [])
+
+    def test_a_done_target_is_not_a_violation(self):
+        idx = copy.deepcopy(self.index)
+        idx['items']['T-0001']['state'] = 'Closed'
+        out = rows.candidates(idx['items'], self.p, [])
+        self.assertEqual(invariants.waits_on_without_a_row(out, idx['items']), [])
+
+    def test_a_keyword_waits_on_is_never_checked(self):
+        # `waits_on='decision'`/'landing'/'budget'/... are not item ids (asf.record.core.ID_RE)
+        out = [rows.Row(tier=2, kind='X', item_id='T-0009', feature_id='', action='WAITS ON decision',
+                        brief_kind='task', branch='task/T-0009', reason='', waits_on='decision')]
+        self.assertEqual(invariants.waits_on_without_a_row(out, {}), [])
+
+
+class HeavyCiMissingLabelRowTest(unittest.TestCase):
+    """B-0043: ``ci.heavy_after_review`` on and a PR the lane already moved to merge (its
+    required checks green — heavy is not among them) whose head never had heavy CI requested
+    gets a PUSHED → LAND row that says so and names the label, never a generic one that reads
+    like nothing is wrong."""
+
+    def heavy_product(self, **conv):
+        return product(conventions={'ci': {'heavy_after_review': True, **conv}})
+
+    ITEMS = {'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                       'writes': ['a.py']}}
+
+    def test_heavy_ci_missing_true_for_a_merging_head_with_no_heavy_request(self):
+        p = self.heavy_product()
+        landing = {'state': 'MERGING', 'heavy': None, 'head': 'abc123'}
+        self.assertTrue(rows.heavy_ci_missing(p, landing))
+
+    def test_heavy_ci_missing_false_once_this_head_was_requested(self):
+        p = self.heavy_product()
+        landing = {'state': 'MERGING', 'heavy': 'abc123', 'head': 'abc123'}
+        self.assertFalse(rows.heavy_ci_missing(p, landing))
+
+    def test_heavy_ci_missing_false_off_heavy_after_review(self):
+        p = product()  # no ci.heavy_after_review at all
+        landing = {'state': 'MERGING', 'heavy': None, 'head': 'abc123'}
+        self.assertFalse(rows.heavy_ci_missing(p, landing))
+
+    def test_heavy_ci_missing_false_for_an_earlier_state(self):
+        # still gating (GATE/WAITING_CI/...): the normal row already says so; nothing to add
+        p = self.heavy_product()
+        for state in ('GATE', 'WAITING_CI', 'QUEUED', 'REVIEW'):
+            with self.subTest(state=state):
+                self.assertFalse(rows.heavy_ci_missing(
+                    p, {'state': state, 'heavy': None, 'head': 'abc123'}))
+
+    def test_heavy_ci_missing_handles_none_and_product_with_no_conventions(self):
+        self.assertFalse(rows.heavy_ci_missing(None, {'state': 'MERGING'}))
+        self.assertFalse(rows.heavy_ci_missing(object(), {'state': 'MERGING'}))
+
+    def test_lane_rows_names_the_label_and_requests_landing(self):
+        p = self.heavy_product(heavy_label='acme:heavy-ci')
+        occ = {'landing': {'T-0001': {'branch': 'task/T-0001', 'state': 'MERGING', 'pr': 9,
+                                      'why': 'lane MERGING PR #9', 'heavy': None, 'head': 'h1'}}}
+        out = rows.lane_rows(self.ITEMS, p, set(), occ)
+        self.assertEqual(len(out), 1)
+        r = out[0]
+        self.assertEqual(r.kind, rows.PUSHED_LAND)
+        self.assertIn('acme:heavy-ci', r.action)
+        self.assertIn('never requested', r.action)
+        self.assertIn('acme:heavy-ci', r.reason)
+
+    def test_lane_rows_unaffected_once_this_head_already_requested_it(self):
+        p = self.heavy_product()
+        occ = {'landing': {'T-0001': {'branch': 'task/T-0001', 'state': 'MERGING', 'pr': 9,
+                                      'why': 'lane MERGING PR #9: ok', 'heavy': 'h1', 'head': 'h1'}}}
+        out = rows.lane_rows(self.ITEMS, p, set(), occ)
+        self.assertEqual(out[0].action, f"{rows.WAITS_LANDING}: PR #9 MERGING")
+        self.assertEqual(out[0].reason, 'lane MERGING PR #9: ok')
 
 
 class FeederHoldTest(unittest.TestCase):

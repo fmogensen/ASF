@@ -611,7 +611,8 @@ def revert_overlaps(ctx, items, out=print):
 def serialize_overlaps(ctx, items, out=print):
     """Order every standing overlap the record has not ordered: for each pair of Active Tasks whose
     ``writes:`` intersect with no ``after:`` either way (:func:`asf.invariants.unordered_overlaps`),
-    the later-minted card gets ``after: <the earlier>`` and one History line
+    the ``held`` card (never the one with a pushed branch or an open PR — B-0037) gets
+    ``after: <the owner>`` and one History line
     ``serialized behind <owner>: writes: overlaps <glob>``, committed alone (:func:`write_card`).
 
     Never a cycle: an edge is proposed only where neither Task reaches the other, so the edge it

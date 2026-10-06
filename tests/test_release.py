@@ -95,6 +95,14 @@ class SettingsTest(unittest.TestCase):
         bad = 'product: p\nrelease:\n  nonsense: 1\n'
         self.assertTrue(any(k == 'release.nonsense' for _l, k, _p in env.validate_product_text(bad)))
 
+    def test_product_file_accepts_release_gate_floor_and_seats(self):
+        """B-0038: release_preview.gate_for reads release.gate, release.floor_criterion and
+        seats_criterion read release.floor / release.seats — none of the three may be reported
+        as an unknown field, the false 'is not a field of the product file' doctor warning."""
+        text = ('product: p\nrepo_dir: /tmp/x\nrelease:\n  gate: preview\n'
+                '  floor:\n    stale_pr_days: 5\n  seats:\n    min_pct: 70\n')
+        self.assertEqual(env.validate_product_text(text), [])
+
 
 class HandCommitsTest(unittest.TestCase):
     def fake_git(self, records):

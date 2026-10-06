@@ -1493,8 +1493,13 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
                 out['review'][item] = {'branch': branch, 'round': int(rec.get('round') or 1),
                                        'pr': rec.get('pr'), 'why': rec.get('reason') or ''}
             else:
+                # B-0043: `heavy`/`head` (the lane's own ci.heavy_after_review bookkeeping,
+                # :meth:`asf.harvest.lane.GitHubHost.heavy_gate`) let the feeder's PUSHED → LAND
+                # row (:func:`asf.feeder.rows.lane_rows`) tell a MERGING head whose heavy CI was
+                # never requested apart from one landing normally — never a silent gap.
                 out['landing'][item] = {'branch': branch, 'state': state, 'pr': rec.get('pr'),
-                                        'why': why}
+                                        'why': why, 'heavy': rec.get('heavy'),
+                                        'head': rec.get('head')}
         elif landed(run) or pending_correction(run, path) or lands_nothing(run):
             continue
         elif run.get('harvest') == 'pr':
@@ -2813,19 +2818,29 @@ def card_fingerprint(product, item_id, items):
     return digest(product, item_id, items)
 
 
-def blocked_park_text(question, item):
-    return (f'the session ended with nothing to land and declared: {question} — the item is '
-            f'parked, not handed to another session. Re-cut its card (a Task with no writes: '
-            f'is re-cut by its RESHAPE → PLAN session), or `asf unpark {item}` to release it')
+def blocked_park_text(question, item, probe=None):
+    out = (f'the session ended with nothing to land and declared: {question} — the item is '
+          f'parked, not handed to another session. Re-cut its card (a Task with no writes: '
+          f'is re-cut by its RESHAPE → PLAN session), or `asf unpark {item}` to release it')
+    if probe:
+        out += f' — its command ran read-only, output attached ({probe["command"]})'
+    return out
 
 
-def blocked_park(question, item, card, now):
+def blocked_park(question, item, card, now, probe=None):
     """``(fields, line)``: the pending correction that parks a run whose report declared a
     question, and the line to print. A function of its own and not a branch of :func:`hold`,
-    because ``hold`` spends a round and counts findings and this spends neither."""
-    reason = blocked_park_text(question, item)
+    because ``hold`` spends a round and counts findings and this spends neither.
+
+    ``probe``: ``{'command', 'output'}`` when ``question`` named an exact, read-only command
+    (:func:`asf.workers.report.operator_command`, :func:`asf.harvest.harvest.operator_readonly`)
+    harvest ran itself (B-0042) — attached to the correction so the park carries the answer, not
+    just the question, and the line says so."""
+    reason = blocked_park_text(question, item, probe)
     fields = {'correction': {'kind': BLOCKED, 'text': question, 'at': now, 'parked': True,
                              'reason': reason, 'card': card}, 'operator_flagged': 1}
+    if probe:
+        fields['correction']['probe'] = probe
     return fields, f'parked {item}: {reason}'
 
 

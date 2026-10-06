@@ -398,7 +398,18 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                'id_claim', 'correction_rebase_behind', 'stale_ref_reopens',
                'stale_ref_job_paths', 'flake_skip_reproduced', 'trunk_red_trunk_runs',
                'relaunch_same_report', 'relaunch_daily_cap',
-               'groom.reask_days', 'groom.rank_owner', 'groom.structural')
+               'groom.reask_days', 'groom.rank_owner', 'groom.structural',
+               # B-0039: off opts a product out of health opening/adopting a republished item's
+               # PR in the same pass (asf.workers.health.republish_steps) — default on
+               'health_opens_pr',
+               # B-0040: off opts a product out of the launch preflight's git push credential
+               # probe (asf.workers.spawn._preflight_push_auth, asf.doctor.probe_account_push_auth)
+               # — default on
+               'push_auth_preflight',
+               # B-0042: the read-only command verbs harvest may run itself and attach to a
+               # NEEDS OPERATOR park (asf.harvest.harvest.operator_readonly_verbs) — a list of
+               # '<program> <verb>' prefixes beyond the built-in describe/list/get default
+               'operator_readonly_verbs')
 
 
 

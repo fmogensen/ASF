@@ -162,6 +162,12 @@ def _set_one(args, root, rec, item_id, assignments, canonical=None):
     updates = {}
     idempotent = []
     all_noop = True  # PD4: the `set` line is suppressed only when every op was a list-field no-op
+    # `after+=<other>` naming a Task that already holds `item_id` in its own after: is the
+    # operator flipping a standing overlap hold (B-0037) — collected now, flipped once the write
+    # below lands (never on a bare after=[...] or an after-=, only a `+`-added id).
+    from asf.feeder import widen
+    after_adds = [a for top, sub, op, value in sets if top == 'after' and op == '+'
+                 for a in widen.norm_writes(value)]
     for top, sub, op, value in sets:
         if top in LIST_FIELDS.get(rec['meta'].get('type'), ()):
             base = updates[top] if top in updates else rec['meta'].get(top)
@@ -199,6 +205,8 @@ def _set_one(args, root, rec, item_id, assignments, canonical=None):
                   "footprint unchanged")
     if 'writes' in updates:
         _warn_standing_overlaps(root, item_id, product_of(args))
+    if after_adds:
+        _flip_reverse_holds(root, item_id, after_adds, product_of(args))
     lists = LIST_FIELDS.get(rec['meta'].get('type'), ())
     if not all_noop:
         print(f"{item_id}: set " + ', '.join(
@@ -224,6 +232,44 @@ def _warn_standing_overlaps(root, item_id, product):
             other = b if a == item_id else a
             print(f"warning: {item_id}: writes: still intersects Active task {other}'s writes: "
                   "(standing before this set; not refused)", file=sys.stderr)
+
+
+def _flip_reverse_holds(root, item_id, added, product):
+    """``asf set <item_id> after+=<other>`` for an ``other`` whose own ``after:`` already holds
+    ``item_id`` is the operator flipping a standing overlap hold the wrong way round (B-0037):
+    the pair's ``writes:`` still intersect, so leaving both edges would close a cycle and leaving
+    only the old one would silently keep the hold on ``item_id`` after being told the opposite.
+    Clear ``item_id`` out of ``other``'s ``after:`` so the pair ends up ordered once, in the
+    direction just asked for. A warning only: this never refuses the ``after+=`` write itself,
+    and a flip that fails to write is reported, not retried. Scoped to a standing ``writes:``
+    overlap between the two (:func:`asf.feeder.footprint.overlaps`) — an ``after:`` naming
+    something else first is a plan's own ordering, never the invariant's to undo."""
+    from asf.feeder import footprint
+    try:
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+    except Exception:  # the after+= write already landed; a flip that cannot even read is skipped
+        return
+    mine = canonical.get(item_id) or {}
+    my_writes = _as_list(mine.get('meta', {}).get('writes'))
+    shared = footprint.shared_globs(product)
+    for other in dict.fromkeys(added):
+        orec = canonical.get(other)
+        if orec is None:
+            continue
+        after = list(orec['meta'].get('after') or ())
+        if item_id not in after:
+            continue
+        if not footprint.overlaps(my_writes, _as_list(orec['meta'].get('writes')), shared):
+            continue
+        kept = [a for a in after if a != item_id]
+        err = set_typed(orec, {'after': kept}, product=product)
+        if err:
+            print(f"warning: {other}: after: -{item_id} (flipping the hold {item_id} after+="
+                 f"{other} just reversed) not written — {err}", file=sys.stderr)
+        else:
+            print(f"{other}: set after={' '.join(kept) if kept else '[]'} — flipped: "
+                 f"{item_id} now holds the overlap with {other}")
 
 
 def set_typed(rec, updates, writer='set', product=None, history=()):

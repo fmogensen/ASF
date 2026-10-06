@@ -3354,3 +3354,73 @@ class StaleBranchPushTests(unittest.TestCase):
         ok, why = harvest.push_branch(self.repo, rebased, self.branch, self.stale)
         self.assertTrue(ok, why)
         self.assertEqual(self.remote_head(), rebased)
+
+
+class OperatorReadonlyTests(unittest.TestCase):
+    """B-0042: the read-only grant a NEEDS OPERATOR command is checked against before harvest
+    ever runs it itself — the repo's own grant (asf.approvals, git included), plus gh and the
+    common cloud CLIs by their describe/list/get-shaped verb."""
+
+    def test_git_reads_are_readonly(self):
+        for cmd in ('git status', 'git log -5', 'git diff HEAD~1'):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(harvest.operator_readonly(cmd))
+
+    def test_git_writes_are_not_readonly(self):
+        for cmd in ('git push origin main', 'git commit -m x', 'git checkout -- .'):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(harvest.operator_readonly(cmd))
+
+    def test_gh_and_cloud_cli_describe_list_get_verbs_are_readonly(self):
+        for cmd in ('gh pr view 42', 'gh run list', 'gcloud compute instances describe x',
+                   'gsutil ls gs://bucket', 'aws s3 ls', 'kubectl get pods'):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(harvest.operator_readonly(cmd))
+
+    def test_gh_and_cloud_cli_mutating_verbs_are_not_readonly(self):
+        for cmd in ('gh pr merge 42', 'gcloud compute instances delete x', 'aws s3 rm x'):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(harvest.operator_readonly(cmd))
+
+    def test_a_compound_command_is_never_readonly(self):
+        for cmd in ('git status; rm -rf /', 'git status && git push', 'git log | tail'):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(harvest.operator_readonly(cmd))
+
+    def test_malformed_and_empty_commands_are_not_readonly(self):
+        self.assertFalse(harvest.operator_readonly('git log "unterminated'))
+        self.assertFalse(harvest.operator_readonly(''))
+        self.assertFalse(harvest.operator_readonly(None))
+
+    def test_a_products_own_extra_verb_is_honoured(self):
+        p = env.Product('sample', {'conventions': {'flags': {
+            'operator_readonly_verbs': ['mytool status']}}})
+        self.assertFalse(harvest.operator_readonly('mytool status'))
+        self.assertTrue(harvest.operator_readonly('mytool status', p))
+
+
+class RunOperatorCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix='operator_cmd_')
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        sh(['git', 'init', '-q', self.base])
+        git_identity(self.base)
+        with open(os.path.join(self.base, 'a.txt'), 'w') as f:
+            f.write('x\n')
+        sh(['git', 'add', 'a.txt'], cwd=self.base)
+        sh(['git', 'commit', '-q', '-m', 'seed'], cwd=self.base)
+
+    def test_a_readonly_command_runs_and_its_output_is_captured(self):
+        ran, output = harvest.run_operator_command('git log -1 --format=%s', self.base)
+        self.assertTrue(ran)
+        self.assertIn('seed', output)
+
+    def test_a_non_readonly_command_is_refused_and_never_runs(self):
+        ran, output = harvest.run_operator_command('git push origin main', self.base)
+        self.assertFalse(ran)
+        self.assertEqual(output, '')
+
+    def test_a_failing_readonly_command_still_runs_its_output_says_so(self):
+        ran, output = harvest.run_operator_command('git log --format=%s nonexistent-ref', self.base)
+        self.assertTrue(ran)
+        self.assertIn('[exit', output)

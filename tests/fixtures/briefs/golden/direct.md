@@ -48,7 +48,7 @@ left out: the retry itself, F-0001 owns it
 - Keep a heartbeat: print a progress line as you go; a silent session is read as a dead one and
   relaunched on top of you.
 - Finish with the typed REPORT below, as the last thing you print.
-- Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`.
+- Anything a human must decide or run: `NEEDS OPERATOR: <what you could not check or do> — ` then the exact command in backticks (read-only, harvest runs it itself — B-0042), or, with no command, the exact answer needed instead.
 - Every commit subject names the item: `feat(F-0001): <what>`. Harvest holds a branch whose commits do not name it; the id inside the branch name does not count.
 - Never write a worker account name or a machine path into the product; refer to a lane as `lane-N`. Run the redaction check before you push.
 - A push your pre-push hook refuses is not the end of your turn: it printed what is wrong and where — fix that, commit, and push again, then report `pushed: yes <sha>`. Only if the hook refuses the *same* thing a second time do you stop, and then the report reads `pushed: no — hook refused twice: <what it said>`.
@@ -113,9 +113,12 @@ publish, and a refused push is never a `NEEDS OPERATOR`.
 Never invent an id: a card id comes from `asf new` or the
 `BACKLOG_ID_RANGE` this session was given, and a ruling is never a commit in this repo.
 
-Anything a human must decide, answer or run is never guessed and never buried in a comment:
-print `NEEDS OPERATOR: <what> — <the command or the answer needed>` on its own line, then carry on
-with every part of the job that does not depend on it.
+Anything a human must decide, answer or run is never guessed and never buried in a comment: print
+a line of the form `NEEDS OPERATOR: <what you could not check or do> — ` then the exact command in
+backticks, copy-pasteable, never paraphrased (B-0042: a read-only one, harvest runs it itself and
+attaches the output, so the park already answers it when a person opens it) — or, when there is
+no command, only a decision, the exact answer needed instead. Then carry on with every part of
+the job that does not depend on it.
 
 Finish with this, and nothing after it:
 

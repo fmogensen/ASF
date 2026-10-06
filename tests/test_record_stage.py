@@ -378,6 +378,28 @@ class SharedPathI3Tests(StageTestCase):
         self.assertEqual(rc, 0)
         self.assertIn("warning: T-0003: writes: still intersects Active task T-0001", err.getvalue())
 
+    def test_after_plus_equals_flips_a_standing_hold_the_wrong_way_round(self):
+        # B-0037: T-0003 overlaps T-0001 (both write src/a.py) and the record already holds
+        # T-0003 after: [T-0001] — backwards, if T-0001 is the one with nothing yet to show.
+        # `asf set T-0001 after+=T-0003` (the operator correcting the direction by hand) must
+        # flip it: T-0001 waits on T-0003, and T-0003's reverse edge is cleared, never a cycle.
+        import io
+        import types
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest import mock
+        from asf.record import setfield
+        self.active_task('T-0003', 'src/a.py')
+        setfield.set_typed(self.rec('T-0003'), {'after': ['T-0001']}, writer='set',
+                           product=self.product)
+        self.assertEqual(meta(self.root, self.rec('T-0003')['relpath'])['after'], ['T-0001'])
+        args = types.SimpleNamespace(id='T-0001', assignments=['after+=T-0003'], product=None)
+        with mock.patch('asf.record.check.product_of', return_value=self.product), \
+                redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            rc = setfield.cmd_set(args, self.root)
+        self.assertEqual(rc, 0)
+        self.assertEqual(meta(self.root, self.owner)['after'], ['T-0003'])
+        self.assertFalse(meta(self.root, self.rec('T-0003')['relpath']).get('after'))
+
     def test_a_shared_writes_path_never_counts(self):
         product = env.Product('sample', {'conventions': {'shared_writes': ['docs/registry.md']}})
         self.active_task('T-0003', 'docs/registry.md')

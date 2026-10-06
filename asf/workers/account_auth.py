@@ -232,6 +232,19 @@ def note(product, run, text, accounts=None):
             f're-enable: {enable_hint(acct)}')
 
 
+def block_now(account, product, error):
+    """Block ``account`` on a reason already known — a probe that failed before any session was
+    spent (:func:`asf.doctor.probe_account_push_auth`, the launch preflight's push-credential
+    check, B-0040), never a log line to match. The line to print, the same shape as
+    :func:`note`'s: the one ``ALARM`` the first time, a plain line after."""
+    block(account, product=getattr(product, 'name', product) or '', error=error)
+    first = _alarm_once(account, error)
+    if not first:
+        return f'{account} already unusable (auth error) — no attempt spent'
+    return (f'{ALARM} account {account} unusable: git push credential failed before launch '
+            f'({error}) — no attempt spent; re-enable: {enable_hint(account)}')
+
+
 def doctor_row():
     """``(ok, detail)`` — one red row naming every blocked account, or None when none is."""
     table = blocked()

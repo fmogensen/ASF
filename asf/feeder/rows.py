@@ -1110,10 +1110,32 @@ def lane_rows(items, product, busy, occupancy):
                            reason=f"{what} has no review of its head: round {rnd} "
                                   f"({h.get('why') or 'no verdict'})"))
         else:
+            action = f"{WAITS_LANDING}: {what} {h.get('state')}"
+            reason = h.get('why') or ''
+            if not foreign and heavy_ci_missing(product, h):
+                label = product.conventions.heavy_label()
+                action = f"{WAITS_LANDING}: {what} green, heavy CI never requested ({label})"
+                reason = (f'{reason} — requests heavy CI ({label}) on the head and lands once '
+                         f'it is green'.lstrip(' —'))
             out.append(Row(tier=review_tier(item), kind=PUSHED_LAND, item_id=iid,
-                           feature_id=fid, action=f"{WAITS_LANDING}: {what} {h.get('state')}",
-                           brief_kind='review', branch=branch, reason=h.get('why') or ''))
+                           feature_id=fid, action=action,
+                           brief_kind='review', branch=branch, reason=reason))
     return out
+
+
+def heavy_ci_missing(product, landing):
+    """True when ``landing`` (an ``occupancy()['landing']`` entry) is a head the lane has
+    already moved to merge (:data:`asf.harvest.lane.MERGING` — the gate read green) while
+    ``conventions.ci.heavy_after_review`` is on and that head never had heavy CI requested on it
+    (:meth:`asf.harvest.lane.GitHubHost.heavy_gate` writes ``heavy`` only once it does) — B-0043:
+    heavy is not in the required set, so the gate reads green and says nothing is missing, but
+    the product still wants it requested before this head lands."""
+    from asf.harvest import lane as lane_mod
+    conv = getattr(product, 'conventions', None)
+    if conv is None or not conv.heavy_after_review():
+        return False
+    return (landing or {}).get('state') == lane_mod.MERGING \
+        and (landing or {}).get('heavy') != (landing or {}).get('head')
 
 
 def branch_rows(items, product, busy, held=(), landed_shas=None):

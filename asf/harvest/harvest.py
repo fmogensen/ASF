@@ -98,6 +98,72 @@ def sh_timed(cmd, cwd, env, timeout):
     return p.returncode, out, err
 
 
+#: The forge and cloud CLIs whose describe/list/get-shaped verbs this probe may run beyond git —
+#: git's own read-only subcommands are :data:`asf.approvals._GIT_READS`, the repo's one
+#: "read-only grant"; these never grew one, so B-0042 names their read-only shape itself.
+CLOUD_READONLY_PROGRAMS = frozenset(('gh', 'gcloud', 'aws', 'az', 'gsutil', 'bq', 'kubectl'))
+#: The verb one of those CLI commands must carry, anywhere in its argv, to run read-only.
+CLOUD_READONLY_VERBS = frozenset(('describe', 'list', 'get', 'view', 'show', 'ls', 'status'))
+#: The probe's own read timeout — shorter than a gate's: a NEEDS OPERATOR command is one lookup,
+#: never a suite.
+OPERATOR_PROBE_TIMEOUT_S = 20
+#: The probe's output, capped: attached to a park, not a log file.
+OPERATOR_PROBE_OUTPUT_CAP = 4000
+
+
+def operator_readonly(command, product=None):
+    """True when ``command`` (its text, a simple command — no ``;``, ``&&`` or a pipe) only
+    reads: the repo's own read-only grant (:func:`asf.approvals._read_only` — every program it
+    names, and ``git`` by its reading subcommands), or ``gh``/a cloud CLI
+    (:data:`CLOUD_READONLY_PROGRAMS`) carrying a describe/list/get-shaped verb
+    (:data:`CLOUD_READONLY_VERBS`) anywhere in its arguments. ``product``'s
+    ``conventions.flags.operator_readonly_verbs`` (a list of ``'<program> <verb>'`` entries)
+    names more beyond both — a product's own CLI, or a verb neither default covers.
+
+    A malformed command (unbalanced quotes), one with no words, or one shell operator (``;``,
+    ``|``, ``&&``, a redirect) makes it NOT read-only: B-0042 runs one command, exactly as
+    written, never a shell."""
+    try:
+        argv = shlex.split(command or '')
+    except ValueError:
+        return False
+    if not argv or any(w in (';', '&&', '||', '|', '>', '>>', '<') for w in argv):
+        return False
+    from asf import approvals
+    if approvals._read_only(argv):
+        return True
+    prog = os.path.basename(argv[0])
+    extra = set()
+    if product is not None:
+        for entry in (product.conventions.flag('operator_readonly_verbs', ()) or ()):
+            p, _sep, v = str(entry).partition(' ')
+            if p and v:
+                extra.add((p, v.strip()))
+    if any((prog, w) in extra for w in argv[1:]) or (prog, '') in extra:
+        return True
+    return prog in CLOUD_READONLY_PROGRAMS and any(w in CLOUD_READONLY_VERBS for w in argv[1:])
+
+
+def run_operator_command(command, cwd, product=None, timeout=OPERATOR_PROBE_TIMEOUT_S):
+    """``(ran, output)`` — ``command`` run and its output captured when :func:`operator_readonly`
+    allows it, else ``(False, '')``: never a command this did not itself judge safe. ``ran`` is
+    True even for a non-zero exit — the point is the output, not success; a timeout's output
+    says so."""
+    if not operator_readonly(command, product):
+        return False, ''
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False, ''
+    rc, out, err = sh_timed(argv, cwd, os.environ, timeout)
+    text = ((out or '') + (err or '')).strip()
+    if rc is None:
+        text = (text + '\n' if text else '') + f'[timed out after {timeout}s]'
+    elif rc != 0:
+        text = (text + '\n' if text else '') + f'[exit {rc}]'
+    return True, text[:OPERATOR_PROBE_OUTPUT_CAP]
+
+
 def gate_timeout(conv):
     """The seconds one gate command may take: ``conventions.harvest.gate_timeout_s``."""
     try:

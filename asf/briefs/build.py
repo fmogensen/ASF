@@ -129,9 +129,12 @@ publish, and a refused push is never a `NEEDS OPERATOR`.
 Never invent an id: a card id comes from `asf new` or the
 `BACKLOG_ID_RANGE` this session was given, and a ruling is never a commit in this repo.
 
-Anything a human must decide, answer or run is never guessed and never buried in a comment:
-print `NEEDS OPERATOR: <what> — <the command or the answer needed>` on its own line, then carry on
-with every part of the job that does not depend on it.
+Anything a human must decide, answer or run is never guessed and never buried in a comment: print
+a line of the form `NEEDS OPERATOR: <what you could not check or do> — ` then the exact command in
+backticks, copy-pasteable, never paraphrased (B-0042: a read-only one, harvest runs it itself and
+attaches the output, so the park already answers it when a person opens it) — or, when there is
+no command, only a decision, the exact answer needed instead. Then carry on with every part of
+the job that does not depend on it.
 
 Finish with this, and nothing after it:
 

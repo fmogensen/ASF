@@ -557,6 +557,48 @@ class OrderedOverlapTests(unittest.TestCase):
         self.assertEqual(self.check([p2], before={p2: before_text}), [])
 
 
+def _task(writes, evidence=()):
+    return {'type': 'task', 'state': 'Active', 'writes': writes, 'after': (), 'removed': None,
+            'evidence': evidence}
+
+
+class OverlapYieldsToProgressTests(unittest.TestCase):
+    """B-0037: the hold an unordered ``writes:`` overlap gets never falls on the Task that
+    already has a pushed branch or an open PR — the one the record shows no sign of starting
+    yields, whichever id was minted first or last."""
+
+    def test_the_lower_id_with_no_progress_yields_to_the_higher_id_with_an_open_pr(self):
+        # T-0001 is lexicographically first — the old rule always held it on T-0002. Here
+        # T-0002 is the one with a pushed branch and an open PR: it must be the owner.
+        tasks = {'T-0001': _task(['lib/x.py']),
+                 'T-0002': _task(['lib/x.py'], evidence=['branch worker/T-0002, PR #9 OPEN'])}
+        pairs = invariants.unordered_overlaps(tasks)
+        self.assertEqual(pairs, [('T-0002', 'T-0001', 'lib/x.py', 'lib/x.py')])
+
+    def test_a_branch_with_no_pr_yet_still_outranks_an_unstarted_sibling(self):
+        tasks = {'T-0001': _task(['lib/x.py']),
+                 'T-0002': _task(['lib/x.py'], evidence=['branch worker/T-0002 exists'])}
+        owner, held, *_ = invariants.unordered_overlaps(tasks)[0]
+        self.assertEqual((owner, held), ('T-0002', 'T-0001'))
+
+    def test_neither_side_has_progress_the_lower_id_stays_owner(self):
+        tasks = {'T-0001': _task(['lib/x.py']), 'T-0002': _task(['lib/x.py'])}
+        owner, held, *_ = invariants.unordered_overlaps(tasks)[0]
+        self.assertEqual((owner, held), ('T-0001', 'T-0002'))
+
+    def test_both_sides_have_progress_the_lower_id_stays_owner(self):
+        tasks = {'T-0001': _task(['lib/x.py'], evidence=['PR #1 OPEN']),
+                 'T-0002': _task(['lib/x.py'], evidence=['PR #2 OPEN'])}
+        owner, held, *_ = invariants.unordered_overlaps(tasks)[0]
+        self.assertEqual((owner, held), ('T-0001', 'T-0002'))
+
+    def test_has_pushed_work_reads_the_card_s_own_evidence_only(self):
+        self.assertFalse(invariants.has_pushed_work(_task(['x'])))
+        self.assertFalse(invariants.has_pushed_work(_task(['x'], evidence=['in plan p (1), no branch yet'])))
+        self.assertTrue(invariants.has_pushed_work(_task(['x'], evidence=['branch worker/T-1 exists'])))
+        self.assertTrue(invariants.has_pushed_work(_task(['x'], evidence=['PR #3 OPEN'])))
+
+
 def _closing(root, rel, iid, state, *, typ='task', parent='F-0001', landing=None, reopened=(),
              created='2026-09-01'):
     """Write card ``rel`` (``iid``, ``state``) with an optional ``landing:`` stamp."""

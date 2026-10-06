@@ -23,7 +23,7 @@ git asf/evidence/review.py 3
 git asf/evidence/review_store.py 1
 git asf/evidence/sources.py 2
 git asf/harvest/deploy.py 5
-git asf/harvest/harvest.py 50
+git asf/harvest/harvest.py 49
 git asf/harvest/lane.py 86
 git asf/harvest/transplant.py 5
 git asf/hooks.py 1
