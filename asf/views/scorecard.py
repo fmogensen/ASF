@@ -63,13 +63,14 @@ def render(d):
            f"Value: {score.headline_line(d['headline'], d['clutter'])}",
            score.denials_line(d['headline']), '',
            '| Week of | Landed | On prod | Lead (card→landed) | Lead (→prod) | Task lead | $ all-in | $/feature all-in '
-           '| $/feature own | Tokens | CI min | Repair sessions | Repair/feature | Bugs (S1) | Dead sessions |',
-           '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+           '| $/feature own | Tokens | CI min | Queue min | Repair sessions | Repair/feature | Bugs (S1) | Dead sessions |',
+           '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     for w in d['weeks']:
         out.append(f"| {w['week']} | {w['landed']} | {w['on_prod']} | {_n(w['median_lead_days'])} d "
                    f"| {_n(w['median_prod_days'])} d | {_n(w['median_task_days'])} d | {_m(w['usd'])} "
                    f"| {_m(w['usd_per_feature'])} "
                    f"| {_m(w['own_usd_per_feature'])} | {_tok(w['tokens'])} | {w['ci_min']:,.0f} "
+                   f"| {w['queue_min']:,.0f} "
                    f"| {w['repair_sessions']} | {_n(w['repair_per_feature'])} | {w['bugs']} ({w['s1']}) "
                    f"| {w['dead_sessions']} ({_m(w['dead_usd'])}) |")
     if d.get('throughput'):
@@ -91,17 +92,18 @@ def render(d):
                        f"| {_n(v['repair_per_feature'])} |")
         out.append('')
     out += ['**Features landed**', '',
-            '| Feature | Landed | Prod | Lead | $ own | $ on its bugs | Sessions | Tokens | CI min '
+            '| Feature | Landed | Prod | Lead | $ own | $ on its bugs | Sessions | Tokens | CI min | Queue min '
             '| Repair | Corrections | Send-backs | Reopens | Bugs (S1) |',
-            '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+            '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     for r in d['features']:
         title = r['title'][:48].replace('|', '/')
         out.append(f"| {r['id']} {title} | {(r['landed'] or '')[:10]} | {(r['prod'] or '—')[:10]} "
                    f"| {_n(r['lead_days'])} d | {_m(r['usd'])} | {_m(r['bug_usd'])} | {r['sessions']} "
-                   f"| {_tok(r['tokens'])} | {r['ci_min']:,.0f} | {r['repair_sessions']} | {r['corrections']} "
+                   f"| {_tok(r['tokens'])} | {r['ci_min']:,.0f} | {r['queue_min']:,.0f} "
+                   f"| {r['repair_sessions']} | {r['corrections']} "
                    f"| {r['send_backs']} | {r['reopens']} | {r['bugs']} ({r['s1']}) |")
     if not d['features']:
-        out.append('| (none landed in these weeks) | | | | | | | | | | | | | |')
+        out.append('| (none landed in these weeks) | | | | | | | | | | | | | | |')
     rk = d['rank']
     out += ['', f"**Where the last {d['window_days']} days went** — {_m(rk['usd'])}, {rk['hours']:g} h", '',
             '| By | Top five |', '|---|---|',
@@ -173,7 +175,7 @@ def _delta_cell(v, key):
 
 
 PAIR_HEADS = {'lead_days': 'lead', 'cost': '$', 'sessions': 'sessions',
-              'repair_sessions': 'repair', 'ci_min': 'CI min'}
+              'repair_sessions': 'repair', 'ci_min': 'CI min', 'queue_min': 'queue min'}
 
 
 def _who(side):

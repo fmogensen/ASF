@@ -1222,5 +1222,113 @@ class TargetsTests(unittest.TestCase):
         self.assertTrue(all(ok for _t, _v, ok in self.T.check(row, tg)))
 
 
+class QueueMinutes(unittest.TestCase):
+    """T-0683: ``queue_min`` accumulates beside ``ci_min``, from a ``ci`` event's ``queue_s``
+    only — ``ci_min`` itself does not move (D4, P10)."""
+
+    def test_per_item_splits_queue_s_evenly_over_the_named_items(self):
+        f = facts_fixture(sessions=[], gates=[],
+                           ci=[{'ts': '2026-09-03T09:30:00Z', 'items': ['T-0001', 'F-0002'],
+                                'minutes': 10, 'queue_s': 300}])
+        acc = score.per_item(f)
+        self.assertEqual(acc['T-0001']['queue_min'], 2.5)   # 300 s / 60 / 2 items
+        self.assertEqual(acc['F-0002']['queue_min'], 2.5)
+        self.assertEqual(acc['T-0001']['ci_min'], 5.0)      # unmoved: 10 min / 2 items
+
+    def test_a_ci_event_with_no_queue_s_adds_zero(self):
+        f = facts_fixture(sessions=[], gates=[],
+                           ci=[{'ts': '2026-09-03T09:30:00Z', 'items': ['T-0001'], 'minutes': 10}])
+        acc = score.per_item(f)
+        self.assertEqual(acc['T-0001']['queue_min'], 0.0)
+
+    def test_feature_rows_carries_queue_min_beside_ci_min(self):
+        f = facts_fixture(ci=[{'ts': '2026-09-03T09:30:00Z', 'items': ['T-0001', 'F-0002'],
+                                'minutes': 10, 'queue_s': 300}])
+        r = score.feature_rows(f)[0]
+        self.assertEqual(r['id'], 'F-0001')
+        self.assertEqual(r['queue_min'], 2.5)               # T-0001's share, in F-0001's subtree
+        self.assertEqual(r['ci_min'], 7.0)                  # unmoved from ScoreTests' own figure
+
+    def test_window_row_sums_queue_min_over_the_window_s_ci_events(self):
+        f = facts_fixture(ci=[dict(facts_fixture().ci[0], queue_s=300)])
+        w = score.weekly(f, 1)[0]
+        self.assertEqual(w['queue_min'], 5.0)               # 300 s / 60, not split by item
+        self.assertEqual(w['ci_min'], 12.0)                 # unmoved: ScoreTests' own figure
+
+    def test_by_lane_carries_queue_min_per_feature(self):
+        items = items_fixture()
+        items['F-0001']['lane'] = 'direct'
+        f = facts_fixture(items=items, ci=[{'ts': '2026-09-03T09:30:00Z', 'items': ['T-0001'],
+                                            'minutes': 10, 'queue_s': 300}])
+        start, end = datetime.datetime(2026, 9, 1, tzinfo=UTC), datetime.datetime(2026, 9, 7, tzinfo=UTC)
+        lanes = score.by_lane(f, start, end)
+        self.assertEqual(lanes['direct']['queue_min_per_feature'], 5.0)  # 300 s / 60, T-0001's own
+
+    def test_total_row_sums_queue_min_and_a_row_stored_before_this_change_reads_it_zero(self):
+        row_with = {'week': '2026-09-21', 'landed': 1, 'queue_min': 10.0, 'ci_min': 5.0}
+        row_without = {'week': '2026-09-21', 'landed': 1, 'ci_min': 3.0}   # pre-T-0683 stored row
+        t = score.total_row([row_with, row_without])
+        self.assertEqual(t['queue_min'], 10.0)
+        self.assertEqual(t['ci_min'], 8.0)                  # every other figure unchanged
+
+
+class ScorecardColumns(unittest.TestCase):
+    """T-0683: ``views.scorecard.render``'s weekly and Features tables each gain a ``queue min``
+    column, formatted like ``ci min``; PD12 — every emitted line of both tables counts the same
+    cells as its header, the no-landings filler included."""
+
+    def _d(self, weeks, features):
+        from asf.scorecard import score as _score
+        return {'product': 'p', 'as_of': '2026-09-06T23:00:00Z',
+                'headline': _score.headline(facts_fixture()), 'clutter': {}, 'weeks': weeks,
+                'features': features, 'window_days': 7, 'causes': [], 'loop': {},
+                'rank': {'usd': 0, 'hours': 0, 'by_kind': [], 'by_failure': [], 'by_ci_job': [],
+                         'by_feature': []}, 'diagnostics': []}
+
+    def test_the_queue_min_column_renders_in_both_tables(self):
+        from asf.views import scorecard as view
+        f = facts_fixture(ci=[dict(facts_fixture().ci[0], queue_s=300)])
+        weeks, features = score.weekly(f, 1), score.feature_rows(f)
+        text = view.render(self._d(weeks, features))
+        self.assertIn('| CI min | Queue min | Repair sessions |', text)
+        self.assertIn('| CI min | Queue min | Repair | Corrections |', text)
+        self.assertIn(f"| {weeks[0]['queue_min']:,.0f} |", text)
+        self.assertIn(f"| {features[0]['queue_min']:,.0f} |", text)
+
+    def test_the_golden_filler_still_renders_with_no_queue_figure(self):
+        from asf.views import scorecard as view
+        text = view.render(self._d([], []))
+        self.assertIn('| (none landed in these weeks) | | | | | | | | | | | | | | |', text)
+
+    def test_every_emitted_line_of_both_tables_matches_its_header_s_cell_count(self):
+        from asf.views import scorecard as view
+        f = facts_fixture(ci=[dict(facts_fixture().ci[0], queue_s=300)])
+        weeks, features = score.weekly(f, 2), score.feature_rows(f)
+        lines = view.render(self._d(weeks, features)).split('\n')
+
+        def block(start_marker):
+            i = next(idx for idx, l in enumerate(lines) if l.startswith(start_marker))
+            out = []
+            for l in lines[i:]:
+                if not l.startswith('|'):
+                    break
+                out.append(l)
+            return out
+
+        week_block = block('| Week of')
+        self.assertGreaterEqual(len(week_block), 2)
+        for l in week_block:
+            self.assertEqual(l.count('|'), week_block[0].count('|'), l)
+
+        feature_block = block('| Feature |')
+        self.assertGreaterEqual(len(feature_block), 2)
+        for l in feature_block:
+            self.assertEqual(l.count('|'), feature_block[0].count('|'), l)
+
+        filler = next(l for l in view.render(self._d([], [])).split('\n')
+                      if l.startswith('| (none landed'))
+        self.assertEqual(filler.count('|'), feature_block[0].count('|'))
+
+
 if __name__ == '__main__':
     unittest.main()

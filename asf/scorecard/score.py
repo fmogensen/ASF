@@ -179,13 +179,13 @@ def attributed_bugs(items, fid):
 # ------------------------------------------------------------ per item --
 
 def per_item(facts):
-    """``{item: {usd, sessions, tokens, repair, corrections, ci_min}}`` — every session, CI run and
-    gate matched to a card, the CI minutes split evenly over the cards a run names."""
+    """``{item: {usd, sessions, tokens, repair, corrections, ci_min, queue_min}}`` — every session,
+    CI run and gate matched to a card, the CI minutes split evenly over the cards a run names."""
     acc = {}
 
     def cell(i):
         return acc.setdefault(i, {'usd': 0.0, 'sessions': 0, 'tokens': 0, 'repair': 0,
-                                  'corrections': 0, 'ci_min': 0.0})
+                                  'corrections': 0, 'ci_min': 0.0, 'queue_min': 0.0})
     for s, rep in zip(facts.sessions, repair_flags(facts.sessions)):
         c = cell(s.get('item'))
         kind = session_kind(s)
@@ -198,6 +198,7 @@ def per_item(facts):
         ids = r.get('items') or [None]
         for i in ids:
             cell(i)['ci_min'] += _num(r.get('minutes')) / len(ids)
+            cell(i)['queue_min'] += _num(r.get('queue_s')) / 60 / len(ids)
     for g in facts.gates:
         ids = g.get('items') or ids_in(' '.join(g.get('branches') or ())) or [None]
         for i in ids:
@@ -231,6 +232,7 @@ def feature_rows(facts, only_landed=True):
             'sessions': sum(c['sessions'] for c in own),
             'tokens': sum(c['tokens'] for c in own),
             'ci_min': round(sum(c['ci_min'] for c in own + on_bugs), 1),
+            'queue_min': round(sum(c['queue_min'] for c in own + on_bugs), 1),
             'repair_sessions': sum(c['repair'] for c in own) + sum(c['sessions'] for c in on_bugs),
             'corrections': sum(c['corrections'] for c in own),
             'send_backs': sum(items[i].get('send_backs', 0) for i in ids if i in items),
@@ -257,6 +259,7 @@ def window_row(facts, start, end, rows=None):
     repair = sum(1 for _s, f in pairs if f)
     ci_min = (sum(_num(r.get('minutes')) for r in facts.ci if in_window(r.get('ts'), start, end))
               + sum(_num(g.get('seconds')) / 60 for g in facts.gates if in_window(g.get('ts'), start, end)))
+    queue_min = sum(_num(r.get('queue_s')) / 60 for r in facts.ci if in_window(r.get('ts'), start, end))
     dead = [r for r in facts.runs if is_dead(r) and in_window(r.ended, start, end)]
     tasks = [t for t in facts.items.values()
              if t.get('type') == 'task' and in_window(t.get('landed'), start, end)]
@@ -270,6 +273,7 @@ def window_row(facts, start, end, rows=None):
         'median_task_days': median([days_between(t.get('created'), t.get('landed')) for t in tasks]),
         'usd': round(usd, 2), 'sessions': len(sessions),
         'tokens': sum(tokens_of(s) for s in sessions), 'ci_min': round(ci_min, 1),
+        'queue_min': round(queue_min, 1),
         'usd_per_feature': round(usd / n, 2) if n else None,
         'own_usd_per_feature': round(sum(r['usd'] for r in shipped) / n, 2) if n else None,
         'repair_sessions': repair,
@@ -348,7 +352,7 @@ def headline(facts, days=7, rows=None):
 DIRECT, FULL = 'direct', 'full'
 LANES = (DIRECT, FULL)
 #: The per-Feature numbers a pair compares, in print order.
-PAIR_METRICS = ('lead_days', 'cost', 'sessions', 'repair_sessions', 'ci_min')
+PAIR_METRICS = ('lead_days', 'cost', 'sessions', 'repair_sessions', 'ci_min', 'queue_min')
 
 
 def lane_of(feature):
@@ -428,6 +432,7 @@ def by_lane(facts, start, end, rows=None):
             'sessions_per_feature': _mean([r['sessions'] for r in shipped]),
             'repair_per_feature': _mean([r['repair_sessions'] for r in shipped]),
             'ci_min_per_feature': _mean([r['ci_min'] for r in shipped]),
+            'queue_min_per_feature': _mean([r['queue_min'] for r in shipped]),
         }
     return out
 
@@ -509,7 +514,7 @@ def headline_line(h, clutter=None):
 #: A stored weekly row's keys that add across products (:func:`total_row`). A median does not
 #: add and a ratio is recomputed over the sums — see D4, D7.
 TOTAL_SUMS = ('landed', 'on_prod', 'tasks_landed', 'sessions', 'tokens', 'usd', 'ci_min',
-              'repair_sessions', 'send_backs', 'bugs', 's1', 'dead_sessions', 'dead_usd')
+              'queue_min', 'repair_sessions', 'send_backs', 'bugs', 's1', 'dead_sessions', 'dead_usd')
 #: The medians a total cannot carry: `None` on every total row, printed by no total line.
 TOTAL_MEDIANS = ('median_lead_days', 'median_prod_days', 'median_task_days')
 #: A week's clutter block, summed over the products that have a reading (`None` where none does).
