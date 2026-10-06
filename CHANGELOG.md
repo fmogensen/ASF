@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.136 — 2026-10-06
+
+### Features landed
+
+- A worker session that stops making progress is detected in about 10 minutes, not after the 240-minute cloud timeout, and is continued from its branch head and notes in the same tick (#775)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.136"`
+
 ## v0.1.135 — 2026-10-06
 
 ### Features landed
