@@ -59,6 +59,8 @@ worker_pool:
       role: local
       cap: 2
       config_dir: ~/.ASF/accounts/acct-a
+      # provider: plan-small   # the provider *kind*: accounts of one kind share one window scale.
+      #                        # Unset = the kind `default`. See quota_guards.window_usd.
       # auth_env:                          # VARIABLE: file — its content is that variable in this
       #                                    # account's sessions only; a missing file refuses the launch
       #   CLAUDE_CODE_OAUTH_TOKEN: ~/.ASF/secrets/acct-a.token   # `claude setup-token`, once
@@ -98,6 +100,11 @@ quota_guards:
     five_h: 90
     seven_d: 90
     seven_d_model: 90
+  # five_h_usd: 45        # the dollars of 100% of a 5h window, pool-wide (unchanged)
+  # window_usd:           # …and per provider kind, which overrides it. A window not named is
+  #                       # derived from that kind's five_h × the window-length ratio (7d = 33.6×).
+  #   plan-small: {five_h: 12}
+  #   plan-large: {five_h: 48, seven_d: 1200}
 
 # account_lock: an account manager's global usage lock, named so a wedged one is reported (status
 # Quota row, doctor `quota lock` row) and, opt-in, reclaimed by the tick. Unset = off: nothing is
