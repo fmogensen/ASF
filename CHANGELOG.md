@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.200 — 2026-10-06
+
+### Features landed
+
+- A Bug's severity is settable, and the record keeps the reason it moved (#858)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.200"`
+
 ## v0.1.199 — 2026-10-06
 
 ### Features landed
