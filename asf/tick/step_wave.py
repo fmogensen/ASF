@@ -1034,6 +1034,37 @@ def s1_refresher(ctx, items, held, texts, kinds, capacity, out=print, index_fn=N
     return refresh
 
 
+GATE_CAP = 10           #: New Task ids named on the tick line, most starved first
+NO_ROW = 'no row planned'
+
+
+def wave_state(planned, held, items, launching=0):
+    """What this wave did and what held it — the tick line's ``wave`` key. Pure.
+
+    ``{'idle': bool, 'new_tasks': int, 'new_task_ids': [...], 'gates': {gate: items}}``
+
+    ``idle`` is true when no row launched. ``new_tasks`` counts the record's New Tasks —
+    the work that exists and did not start. A gate is a non-launching row's ``waits_on``, else
+    the first word of its action; a row held by an approval class is ``held <class>``; when no
+    row was planned at all the single gate is ``no row planned``.
+    """
+    new_task_ids = sorted(iid for iid, item in items.items()
+                          if item.get('type') == 'task' and item.get('state', 'New') == 'New')
+    gates = {}
+    for row in planned:
+        if row.item_id in held:
+            gate = f'held {held[row.item_id][0]}'
+        elif not row.launches:
+            gate = row.waits_on or row.action.split()[0]
+        else:
+            continue
+        gates[gate] = gates.get(gate, 0) + 1
+    if not planned and new_task_ids:
+        gates = {NO_ROW: len(new_task_ids)}
+    return {'idle': not launching, 'new_tasks': len(new_task_ids),
+            'new_task_ids': new_task_ids[:GATE_CAP], 'gates': gates}
+
+
 def run(ctx, out=print):
     """The wave: plan and launch (:func:`launch`), then the lane pass's deferred pushes."""
     try:
@@ -1143,6 +1174,7 @@ def launch(ctx, out=print):
         ctx.event('host_pressure', load15=reading.get('load15'), cores=reading.get('cores'),
                   swap_pct=reading.get('swap_pct'))
         out(f'wave: local lane held: {local_hold} — the cloud lane takes what it can')
+    ctx.wave = wave_state(planned, held, items, launching=len(worker_rows))
     if not worker_rows:
         out('wave: nothing to launch')
         return 0

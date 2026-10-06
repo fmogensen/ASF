@@ -225,6 +225,27 @@ class Schema(Base):
         self.assertIn('no rule matched', ev['item_reason'])
 
 
+class TickWaveSchemaTests(Base):
+    """T5: the ticks stream's ``wave`` key — a dict, defaulted, nothing else asked of it."""
+
+    def test_a_wave_dict_round_trips(self):
+        wave = {'idle': True, 'new_tasks': 2, 'new_task_ids': ['T-0001', 'T-0002'],
+                'gates': {'T-0044': 1}}
+        tick = {'tick': 1, 'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0,
+                'wave': wave}
+        self.assertEqual(metrics.validate('ticks', tick, {})['wave'], wave)
+
+    def test_a_missing_wave_defaults_to_empty(self):
+        tick = {'tick': 1, 'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
+        self.assertEqual(metrics.validate('ticks', tick, {})['wave'], {})
+
+    def test_a_wave_that_is_not_an_object_is_refused(self):
+        tick = {'tick': 1, 'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0,
+                'wave': 'idle'}
+        with self.assertRaises(metrics.SchemaError):
+            metrics.validate('ticks', tick, {})
+
+
 class JobCauseImport(Base):
     RUNS = [{'id': 10, 'name': 'ci', 'head_branch': 'cloud/x', 'head_sha': 'a' * 40, 'conclusion': 'cancelled',
              'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:30:00Z', 'run_attempt': 1, 'pr': []},

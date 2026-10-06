@@ -222,6 +222,7 @@ class Context:
         self._record = None
         self.stale_reason = None  # set when the record step failed: the index is not this tick's
         self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
+        self.wave = {}             # the wave step's own fact — what it did and what held it
         self.seats = None         # the wave's seat reading, carried on the tick line
         self.record_tail_pending = False  # the record's fast parts ran; its tail is still due
         self.started = time.monotonic()   # the tick's start: what wave_latency_s is aged from
@@ -890,7 +891,7 @@ def tick_line(ctx, ran, now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     line = dict(ctx.counts, ts=now.strftime('%Y-%m-%dT%H:%M:%SZ'), tick=int(now.strftime('%H%M')),
                 duration_s=round(sum(r['seconds'] for r in ran), 1), quota={},
-                refused_files={}, product=ctx.product.name, steps=ran)
+                refused_files={}, wave=ctx.wave, product=ctx.product.name, steps=ran)
     seats = getattr(ctx, 'seats', None)
     if isinstance(seats, dict):   # the wave's seat reading (asf.metrics.throughput)
         line['seats'] = seats

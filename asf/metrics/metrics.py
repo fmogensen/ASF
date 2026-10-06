@@ -165,6 +165,7 @@ SCHEMAS = {
         # the wave's seat reading (asf.metrics.throughput.seats_record); absent on a tick with no wave
         'seats': (('dict', 'null'), None),
         'wave_latency_s': (('num', 'null'), None),   # the tick's start → its wave's start
+        'wave': (('dict',), {}),   # the wave step's own fact — what it did and what held it
     },
     'landings': {
         'ts': (('str',), REQ),                 # the trunk commit's committer date, UTC

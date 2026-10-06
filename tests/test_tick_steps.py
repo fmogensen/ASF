@@ -724,10 +724,78 @@ class WaveStepTests(StepsTestCase):
         self.assertEqual(state['open'], ['F-0001'])
 
     def test_nothing_to_launch(self):
+        ctx = self.ctx()
         with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
-            step_wave.run(self.ctx(), out=self.lines.append)
+            step_wave.run(ctx, out=self.lines.append)
         self.assertEqual(self.lines, ['wave: nothing to launch'])
         self.assertEqual(self.waved, [])
+        self.assertTrue(ctx.wave['idle'])
+
+    def test_a_tick_carries_the_waves_idle_fact_on_its_ticks_line(self):
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
+            self.run_tick(steps='record,wave')
+        day = metrics_mod.today()
+        line = json.loads(_git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin).splitlines()[-1])
+        self.assertTrue(line['wave']['idle'])
+
+    def test_a_tick_with_no_wave_step_writes_an_empty_wave(self):
+        self.run_tick(steps='record')
+        day = metrics_mod.today()
+        line = json.loads(_git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin).splitlines()[-1])
+        self.assertEqual(line['wave'], {})
+
+
+class WaveStateTests(unittest.TestCase):
+    """T5: ``step_wave.wave_state`` — pure, no record or git."""
+
+    ITEMS = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'New'},
+             'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'New'},
+             'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'New'},
+             'T-0003': {'id': 'T-0003', 'type': 'task', 'state': 'Resolved'}}
+
+    def rows(self):
+        return [feeder_rows.Row(2, 'PLAN → CODE', 'T-0010', 'F-0001', 'WAITS ON T-0044', 'task',
+                                'task/T-0010', 'footprint', waits_on='T-0044'),
+                feeder_rows.Row(2, 'PLAN → CODE', 'T-0011', 'F-0001', 'ON TRUNK', 'task',
+                                'task/T-0011', 'order', waits_on='trunk'),
+                feeder_rows.Row(0, 'BUG → FIX', 'B-0009', '', 'would launch fix-b-0009 (Opus)',
+                                'fix-bug', 'fix/B-0009', 'S1 open')]
+
+    def test_idle_with_the_three_gates(self):
+        planned = self.rows()
+        held = {'B-0009': ('merge_pr', 'human-now')}
+        state = step_wave.wave_state(planned, held, self.ITEMS, launching=0)
+        self.assertTrue(state['idle'])
+        self.assertEqual(state['new_tasks'], 2)
+        self.assertEqual(state['new_task_ids'], ['T-0001', 'T-0002'])
+        self.assertEqual(state['gates'], {'T-0044': 1, 'trunk': 1, 'held merge_pr': 1})
+
+    def test_a_launching_row_is_not_idle(self):
+        planned = self.rows()
+        held = {'B-0009': ('merge_pr', 'human-now')}
+        state = step_wave.wave_state(planned, held, self.ITEMS, launching=1)
+        self.assertFalse(state['idle'])
+
+    def test_no_row_planned_with_new_tasks_waiting(self):
+        state = step_wave.wave_state([], {}, self.ITEMS, launching=0)
+        self.assertEqual(state['gates'], {step_wave.NO_ROW: 2})
+
+    def test_no_row_planned_and_no_new_tasks_is_empty(self):
+        state = step_wave.wave_state([], {}, {}, launching=0)
+        self.assertEqual(state['gates'], {})
+
+    def test_new_task_ids_are_capped_at_gate_cap(self):
+        items = {f'T-{i:04d}': {'id': f'T-{i:04d}', 'type': 'task', 'state': 'New'}
+                 for i in range(15)}
+        state = step_wave.wave_state([], {}, items, launching=0)
+        self.assertEqual(state['new_tasks'], 15)
+        self.assertEqual(len(state['new_task_ids']), step_wave.GATE_CAP)
+
+    def test_a_row_with_neither_waits_on_nor_a_launching_action_gates_on_the_first_word(self):
+        row = feeder_rows.Row(2, 'PLAN → CODE', 'T-0020', 'F-0001', 'HOLD: budget', 'task',
+                              'task/T-0020', 'over budget')
+        state = step_wave.wave_state([row], {}, {}, launching=0)
+        self.assertEqual(state['gates'], {'HOLD:': 1})
 
 
 class WaveFactsTests(StepsTestCase):
