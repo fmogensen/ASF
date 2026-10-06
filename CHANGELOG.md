@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.144 — 2026-10-06
+
+### Features landed
+
+- A tick now launches sessions within seconds of starting — the wave runs right after the record's fast parts, and health, the groom and the record's bookkeeping run after it; `asf status` shows the wave latency and the watchdog alarms when it passes 2 min (#782)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.144"`
+
 ## v0.1.143 — 2026-10-06
 
 ### Features landed
