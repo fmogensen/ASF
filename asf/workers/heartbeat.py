@@ -587,6 +587,7 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
         settings_file = None
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])] \
         if hasattr(product, '_get') else []
+    job_env['ASF_READ_ROOTS'] = os.pathsep.join(add_dirs)
     job = runtime_mod.Job(product.name, job_name, run.get('worktree'), path, run.get('model'),
                           account=_account(run.get('account'), cfg), env=job_env,
                           add_dirs=add_dirs, settings_file=settings_file,

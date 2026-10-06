@@ -771,6 +771,32 @@ its plan says to run one — a plan's verification step is otherwise followed to
 A product without external CI ignores the key; a pattern that is not a regex is a red `doctor`
 finding.
 
+### `conventions.check_commands` and `read_only_allow` — read-only commands never denied
+
+`conventions.check_commands` names the product's own check and test commands, beyond
+`pre_push_check` and `ci.test_command` — a list of command strings, each run as a brief tells a
+session to (`bash tools/check_conventions.sh`, `make lint`, …):
+
+```yaml
+conventions:
+  check_commands:
+    - bash tools/check_conventions.sh
+    - make lint
+```
+
+The approvals hook grants a factory session's Bash call outright — no approval round, no
+`NEEDS OPERATOR` — when the command is provably read-only: a git read (`log`, `show`, `diff`,
+`status`, …, and the listing forms of `branch`/`tag`/`remote`/`config`), `ls`, `cat`, `head`,
+`tail`, `grep`/`rg`, `find` without an action, `wc`, `cd` into the checkout, or one of
+`check_commands`/`pre_push_check`/`ci.test_command` themselves — including compound forms
+(`&&`, `||`, `;`, `|`), a leading `cd <dir> &&`, and a trailing `; echo $?`. A command the grammar
+does not recognise, or that writes, deletes, or reads outside the checkout, is never granted and
+is governed exactly as before. `conventions.read_only_allow: false` turns the grant off for one
+product; it defaults to on.
+
+The harvest also runs every `check_commands` entry itself on the pushed head and attaches the
+output to the review brief, so a session need not re-run them to show its work.
+
 S1 reserve: while an S1 Bug is open, each lane keeps `reserve_for_s1` slots for `BUG → FIX` rows.
 
 `asf capacity --product <p>` (or `--all`, `/asf:capacity`) prints the resolved numbers and which

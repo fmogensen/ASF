@@ -2996,5 +2996,37 @@ class AMergeConflictGoesBack(unittest.TestCase):
         self.assertIn('merge refused', wt.call_args[0][2])
 
 
+class CheckCommandsFact(LaneFixture):
+    """G2 ask 3: ``branch_facts`` kicks off the product's own ``check_commands`` on the head it
+    just read (:meth:`lane.Lane.ensure_check_commands`) — a fact gathered, like any other, that
+    no transition reads; the lane never waits on it and the result reaches a brief independently,
+    by sha (:mod:`asf.harvest.product_checks`, :func:`asf.briefs.build.checks_section`)."""
+
+    def test_a_product_with_check_commands_starts_one_on_the_head(self):
+        p = self.product(check_commands=['echo ok'])
+        lane_ = lane.Lane(p, state_dir=self.state_dir, out=lambda *_a: None)
+        lane_.trunk_sha = HEAD
+        with mock.patch('asf.harvest.product_checks.ensure') as ensure:
+            lane_.branch_facts('worker/t', None, HEAD, None, True, False)
+        ensure.assert_called_once_with(p, lane_.repo, lane_.state_dir, HEAD, ['echo ok'],
+                                       None, dry_run=False)
+
+    def test_a_product_with_no_check_commands_starts_nothing(self):
+        p = self.product()
+        lane_ = lane.Lane(p, state_dir=self.state_dir, out=lambda *_a: None)
+        lane_.trunk_sha = HEAD
+        with mock.patch('asf.harvest.product_checks.ensure') as ensure:
+            lane_.branch_facts('worker/t', None, HEAD, None, True, False)
+        ensure.assert_not_called()
+
+    def test_a_branch_with_no_head_starts_nothing(self):
+        p = self.product(check_commands=['echo ok'])
+        lane_ = lane.Lane(p, state_dir=self.state_dir, out=lambda *_a: None)
+        lane_.trunk_sha = HEAD
+        with mock.patch('asf.harvest.product_checks.ensure') as ensure:
+            lane_.branch_facts('worker/t', None, None, None, True, False)
+        ensure.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

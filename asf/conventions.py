@@ -531,9 +531,10 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
-    ``worktree_setup``, ``pre_push_check``, ``auth_env``, ``full_suite_commands``, ``customer_content``,
-    ``security`` and ``feeder`` are checked — every other key is kept verbatim (see the module
-    doc), so a product file written for a newer ``asf`` still loads."""
+    ``worktree_setup``, ``pre_push_check``, ``auth_env``, ``full_suite_commands``,
+    ``check_commands``, ``read_only_allow``, ``customer_content``, ``security`` and ``feeder`` are
+    checked — every other key is kept verbatim (see the module doc), so a product file written
+    for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -578,6 +579,18 @@ def validate_mapping(data):
                     re.compile(pattern)
                 except re.error as e:
                     problems.append(('full_suite_commands', f'{pattern!r} is not a regex ({e})'))
+    checks = data.get('check_commands')
+    if checks is not None:
+        if not isinstance(checks, list):
+            problems.append(('check_commands', f'must be a list of commands, not {checks!r}'))
+        else:
+            for command in checks:
+                if not isinstance(command, str) or not command.strip():
+                    problems.append(('check_commands',
+                                     f'must be a list of commands, and {command!r} is not one'))
+    allow = data.get('read_only_allow')
+    if allow is not None and not isinstance(allow, bool):
+        problems.append(('read_only_allow', f'must be true or false, not {allow!r}'))
     auth = data.get('auth_env')
     if auth is not None:
         if not isinstance(auth, dict):

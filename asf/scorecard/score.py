@@ -14,6 +14,7 @@ A week's ``usd_per_feature`` is *all-in*: every session the week paid for, over 
 landed in it — the number the factory exists to lower. ``own_usd_per_feature`` is the mean of the
 landed Features' own subtree spend.
 """
+import collections
 import datetime
 import re
 import statistics
@@ -281,7 +282,40 @@ def window_row(facts, start, end, rows=None):
         # the facts shadow's disagreements (asf.facts.disagree) — the cutover's evidence
         'facts_disagree': sum(1 for d in getattr(facts, 'disagree', None) or ()
                               if in_window(d.get('ts'), start, end)),
+        'denials': denials_row(facts, start, end),
     }
+
+
+def denials_row(facts, start, end):
+    """G2 ask 4: the approvals hook's own refusals over ``[start, end)`` — one ``facts.denials``
+    row per ended run in the window, read from each job's own transcript
+    (:func:`asf.scorecard.facts.job_denials`). ``sessions`` is every ended run in the window,
+    whether or not it carried a denial — the denominator ``mean`` and ``share_pct`` need, so a
+    quiet window reads as 0.0, never ``None`` against no reading."""
+    rows = [d for d in getattr(facts, 'denials', None) or () if in_window(d.get('ended'), start, end)]
+    n = len(rows)
+    total = sum(d.get('count') or 0 for d in rows)
+    reasons = collections.Counter()
+    for d in rows:
+        reasons.update(d.get('reasons') or ())
+    return {
+        'sessions': n, 'total': total,
+        'mean': round(total / n, 2) if n else None,
+        'share_pct': round(100 * sum(1 for d in rows if d.get('count')) / n, 1) if n else None,
+        'top': reasons.most_common(3),
+    }
+
+
+def denials_line(row):
+    """``Denials/session: 2.3 (41% of 19 sessions ≥1) — top: requires approval: bash tools (12),
+    …`` — the scorecard's one line for :func:`denials_row`. No ended session in the window reads
+    as that, not a blank line: a quiet window is news too."""
+    d = (row or {}).get('denials') or {}
+    if not d.get('sessions'):
+        return 'Denials/session: — (no ended sessions in the window)'
+    top = '; '.join(f'{reason} ({n})' for reason, n in d['top']) or 'none'
+    return (f"Denials/session: {d['mean']:g} ({d['share_pct']:g}% of {d['sessions']} sessions "
+           f"≥1) — top: {top}")
 
 
 def week_start(d):

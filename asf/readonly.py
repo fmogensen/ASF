@@ -2,8 +2,8 @@
 
 A factory session runs headless: every command the runtime's own permission check would put to a
 person is a *denial* — a wasted turn, and often a ``NEEDS OPERATOR`` line for plumbing. The job
-logs counted about six per session, and almost none were writes: the product's own check script
-(``bash tools/check_x.sh``), ``cd <worktree> && git log``, ``git merge-base … ; echo $?``,
+logs counted about six per session, and almost none were writes: the product's own declared
+check script (``bash <its check script>``), ``cd <worktree> && git log``, ``git merge-base … ; echo $?``,
 ``diff <(git show …) <(sed -n …)``. The runtime refuses those shapes (a compound after ``cd``, a
 ``$?``, a substitution) whatever its allow rules say; a ``PreToolUse`` hook that answers
 ``allow`` is the one switch it honours for them.
@@ -50,6 +50,21 @@ GIT_READS = frozenset((
     'for-each-ref', 'whatchanged', 'count-objects', 'cherry', 'range-diff', 'diff-tree',
     'diff-index', 'diff-files', 'check-ignore', 'check-attr', 'show-branch', 'ls-remote',
 ))
+
+#: Virtualization/container tools the grant must never allow — not as a bare command, and not
+#: even when a product declares one as a check or test command: the operator's own settings deny
+#: these outright, and the grant must never widen past that.
+NEVER_GRANT = frozenset(('docker', 'colima', 'multipass', 'limactl'))
+
+
+def _is_vm_tool(words):
+    if not words:
+        return False
+    if os.path.basename(words[0]) in NEVER_GRANT:
+        return True
+    return os.path.basename(words[0]) == 'open' and any(
+        'docker' in w.lower() for w in words[1:])
+
 
 #: Leading ``VAR=value`` words a granted command may carry: display settings only. Anything else
 #: (``GIT_EXTERNAL_DIFF``, ``PATH``) can make a reading program run something.
@@ -338,8 +353,8 @@ def _strip_wrappers(words):
 
 def _canon(words, cwd, root):
     """``words`` with an interpreter before a script dropped and the script made absolute — so
-    ``bash tools/x.sh``, ``sh ./tools/x.sh``, ``tools/x.sh`` and ``<root>/tools/x.sh`` compare
-    equal. ``root`` resolves a declared command; ``cwd`` a session's."""
+    ``bash <script>``, ``sh ./<script>``, a bare relative ``<script>`` and its absolute path all
+    compare equal. ``root`` resolves a declared command; ``cwd`` a session's."""
     words = list(words)
     if len(words) >= 2 and os.path.basename(words[0]) in _INTERPRETERS \
             and not words[1].startswith('-'):
@@ -365,6 +380,8 @@ def _simple_ok(ctx, words, cwd):
         return False
     if not words:
         return True
+    if _is_vm_tool(words):
+        return False
     if not _paths_ok(ctx, cwd, words[1:]):
         return False
     if _declared(ctx, words, cwd):

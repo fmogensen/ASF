@@ -60,7 +60,8 @@ def compute(root, product, weeks=4, facts=None):
 
 def render(d):
     out = [f"**SCORECARD {d['product']}** — {d['as_of']}", '',
-           f"Value: {score.headline_line(d['headline'], d['clutter'])}", '',
+           f"Value: {score.headline_line(d['headline'], d['clutter'])}",
+           score.denials_line(d['headline']), '',
            '| Week of | Landed | On prod | Lead (card→landed) | Lead (→prod) | Task lead | $ all-in | $/feature all-in '
            '| $/feature own | Tokens | CI min | Repair sessions | Repair/feature | Bugs (S1) | Dead sessions |',
            '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']

@@ -422,6 +422,7 @@ class LocalStall(Home):
         self.assertEqual((new['pid'], new['worktree'], new['resumed_from']),
                          (4343, rec['worktree'], rec['session']))
         cont, text = rt2.calls[0]
+        self.assertEqual(cont.env['ASF_READ_ROOTS'], self.grant)
         self.assertIn(f"refs/asf/hb/spec-1 '{new['session']}'", runtime_mod.brief_text(cont))
         self.assertIn('CONTINUE', text)
         self.assertIn('next: wire the parser', text)

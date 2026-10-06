@@ -539,6 +539,7 @@ class TestSpawn(Home):
         self.assertEqual(job.add_dirs, [self.grant])
         self.assertEqual(job.cwd, wt)
         self.assertEqual(job.env['BACKLOG_ID_RANGE'], 'S:5000-5049,T:5000-5049,B:5000-5049')
+        self.assertEqual(job.env['ASF_READ_ROOTS'], self.grant)
         self.assertTrue(brief.startswith('Kind: fix-bug — B-0001 (S1)\nHarvest requires the named test:'))
         self.assertTrue(brief.endswith('fix the bug\n'))
         self.assertTrue(os.path.exists(os.path.join(env.ASF_HOME, 'state', 'sample', 'briefs',
