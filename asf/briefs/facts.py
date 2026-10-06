@@ -21,7 +21,7 @@ import os
 import re
 import subprocess
 
-from asf import env, reservations
+from asf import env, hooks, reservations
 from asf.briefs import preamble
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
@@ -350,10 +350,11 @@ def predecessor(product, item_id, branch, kind):
 
 
 def repo_facts(product, row, index, inflight=None):
-    """The ten keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all ten."""
+    """The eleven keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all eleven."""
     facts = {'head': '', 'branch_exists': False, 'files': {}, 'tests': [], 'last_report': '',
              'outlines': {}, 'commits': {'total': 0, 'lines': []}, 'progress': '', 'relaunch': {},
-             'reservations': reservations.load(env.state_dir(product))}
+             'reservations': reservations.load(env.state_dir(product)),
+             'pre_push': {'present': False, 'ours': False, 'path': ''}}
     plain = preamble.collect(product, row, index, inflight)
     item_id = getattr(row, 'item_id', '') or ''
     main = getattr(product, 'main', 'main')
@@ -362,6 +363,8 @@ def repo_facts(product, row, index, inflight=None):
     if repo and os.path.isdir(repo):
         head, exists, rev = head_of(repo, plain['branch'], main)
         facts['head'], facts['branch_exists'] = head, exists
+        present, ours, path = hooks.pre_push_hook(repo)
+        facts['pre_push'] = {'present': present, 'ours': ours, 'path': path}
         if rev:
             tree = _git_text(repo, ['ls-tree', '-r', '--name-only', rev]).splitlines()
             facts['tests'] = tests_under(tree, plain['writes'])

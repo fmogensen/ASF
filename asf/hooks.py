@@ -165,6 +165,26 @@ def is_git_hook_ours(text, name):
     return any(pat.search(line) for line in (text or '').splitlines() if not line.strip().startswith('#'))
 
 
+def pre_push_hook(repo):
+    """``(present, ours, path)`` for ``repo``'s installed ``pre-push`` hook: whether the file
+    exists, whether asf wrote it (:func:`is_git_hook_ours`), and its absolute path. Runs git
+    (:func:`git_hooks_dir`), so only a caller that already does may call it. ``(False, False, '')``
+    for a repo that is not a git repo, has no hooks dir, or has no ``pre-push``."""
+    name = GIT_HOOK_NAMES[1]
+    hooks_dir = git_hooks_dir(repo)
+    if not hooks_dir:
+        return False, False, ''
+    path = os.path.join(hooks_dir, name)
+    if not os.path.isfile(path):
+        return False, False, ''
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            text = f.read()
+    except OSError:
+        return True, False, path
+    return True, is_git_hook_ours(text, name), path
+
+
 def hook_entry(text, name):
     """The command the line :func:`is_git_hook_ours` matches for hook ``name`` names, unquoted
     (F-0111): the entry-point path for the basename form, the interpreter for either module form,

@@ -381,11 +381,12 @@ class PreambleTest(unittest.TestCase):
         self.assertNotIn('(312 lines)', text)
 
     def test_the_cap_holds_and_the_description_goes_first(self):
-        # 31, not 30: the redaction rule (REDACTION_RULE) is a fixed line of ### Standing rules,
-        # never trimmed, so the floor every kind sits on grew by one with it.
-        p = product(conventions={'preamble_max_lines': 31})
+        # 32, not 31: the redaction rule (REDACTION_RULE) and the refusal rule
+        # (HOOK_REFUSAL_RULE, F-0235) are both fixed lines of ### Standing rules, never trimmed,
+        # so the floor every kind sits on grew by one with each.
+        p = product(conventions={'preamble_max_lines': 32})
         text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
-        self.assertLessEqual(len(text.splitlines()), 31, text)
+        self.assertLessEqual(len(text.splitlines()), 32, text)
         self.assertIn('…truncated', text)
         self.assertNotIn('never inside the provider client itself', text)
         for identifier in ('T-0001', 'F-0001', 'task/T-0001', 'app/checkout/attempts.py'):
@@ -578,6 +579,50 @@ class PreambleTest(unittest.TestCase):
         self.assertEqual(conv.specs_dir, 'docs/specs')
         self.assertEqual(conv.plans_dir, 'docs/plans')
         self.assertEqual(conv.reviews_dir, 'docs/reviews')
+
+
+class PrePushGateTests(unittest.TestCase):
+    """F-0235: the brief names the exact push-free command that runs what this repo's pre-push
+    hook runs — asf's own hook's push-free twin when the hook is asf's, the hook's own path
+    (never run) when it is not — and the refusal rule, carried by every kind whatever
+    ``rules_tail`` says."""
+
+    def _facts(self, **pre_push):
+        return dict(REPO_FACTS, pre_push=pre_push)
+
+    def test_asfs_own_hook_gets_the_unpublished_command(self):
+        facts = self._facts(present=True, ours=True, path='/repo/.git/hooks/pre-push')
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], facts)
+        self.assertIn('asf redact --unpublished', text)
+
+    def test_a_foreign_hook_is_named_by_path_not_run(self):
+        facts = self._facts(present=True, ours=False, path='/repo/.git/hooks/pre-push')
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], facts)
+        self.assertIn('/repo/.git/hooks/pre-push', text)
+        self.assertNotIn('--unpublished', text)
+
+    def test_no_hook_carries_neither_but_keeps_the_redaction_rule(self):
+        facts = self._facts(present=False, ours=False, path='')
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], facts)
+        self.assertNotIn('--unpublished', text)
+        self.assertNotIn('is the hook that will judge it', text)
+        self.assertIn(preamble_mod.REDACTION_RULE, text)
+
+    def test_a_replaced_rules_tail_still_gets_the_gate_line(self):
+        facts = self._facts(present=True, ours=True, path='/repo/.git/hooks/pre-push')
+        p = product(conventions={'rules_tail': 'ONE RULE: push to {main} and nothing else.'})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], facts)
+        self.assertIn('asf redact --unpublished', text)
+        self.assertNotIn('never force-push', text)
+
+    def test_every_kind_carries_the_refusal_rule_whatever_rules_tail_says(self):
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                text = briefs.build(product(), r, index(), [], REPO_FACTS).text
+                self.assertIn(preamble_mod.HOOK_REFUSAL_RULE, text)
+        p = product(conventions={'rules_tail': 'ONE RULE: push to {main} and nothing else.'})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn(preamble_mod.HOOK_REFUSAL_RULE, text)
 
 
 class ReservedInFlightTests(unittest.TestCase):
