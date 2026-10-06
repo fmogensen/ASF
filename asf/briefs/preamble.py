@@ -95,11 +95,31 @@ def subject_rule(row, item):
 
 #: Carried by every brief of a product whose PRs its external CI gates (whatever ``rules_tail``
 #: says): the full suite is that CI's, not this host's — a host running a worker's full suite
-#: beside another is the load the tick's host guard holds launches for.
-EXTERNAL_CI_RULE = ("- Locally, run only the targeted checks for what you changed, then push: this "
-                    "product's external CI runs the full suite on the pull request, and it "
+#: beside another is the load the tick's host guard holds launches for. But a push is one CI run
+#: and, when red, one red notification: everything cheap that CI would find runs here first —
+#: the product's declared pre-push check and every touched test module, whole (2026-10-05: ~half
+#: of a day's PR reds were a session's own defect a touched module or a repo check names).
+EXTERNAL_CI_RULE = ("- Before your one push, locally: {pre_push}every test module that covers a "
+                    "file you touched, each module whole (not only the cases you changed) — "
+                    "green, or fixed before the push, never pushed for CI to find. Not the full "
+                    "suite: this product's external CI runs that on the pull request, and it "
                     "merges only once that CI is green — the gate is never skipped, just run "
                     "off this host.")
+#: How :data:`EXTERNAL_CI_RULE` names a declared ``conventions.pre_push_check``.
+EXTERNAL_CI_PRE_PUSH = "the product's pre-push check `{command}`, then "
+
+
+def external_ci_rule(product):
+    """:data:`EXTERNAL_CI_RULE` naming the product's ``conventions.pre_push_check`` when it
+    declares one."""
+    from asf import approvals
+    try:
+        command = approvals.pre_push_check(product) if product is not None else None
+    except Exception:  # noqa: BLE001 — no check readable: the rule without it
+        command = None
+    return EXTERNAL_CI_RULE.format(
+        pre_push=EXTERNAL_CI_PRE_PUSH.format(command=command) if command else '')
+
 
 #: Carried by every brief of a product that lands fast-forward, gated by harvest's own full-suite
 #: run over the combined head (whatever ``rules_tail`` says): a worker running that same suite
@@ -195,7 +215,7 @@ def ci_rules(product):
         return []
     from asf.harvest import harvest
     if harvest.external_ci(product):
-        return [EXTERNAL_CI_RULE] + [r for r in (full_suite_rule(product),) if r]
+        return [external_ci_rule(product)] + [r for r in (full_suite_rule(product),) if r]
     if harvest.local_gate(product):
         return [LOCAL_GATE_RULE]
     return []

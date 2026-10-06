@@ -358,7 +358,7 @@ class ActionsRuntime(runtime_mod.Runtime):
             raise SpawnError('cloud lane: the product has no repo_slug to dispatch on')
         log_path = job.log_path or runtime_mod.job_log_path(job.product, job.name)
         with open(job.brief_path, encoding='utf-8') as f:
-            text = cloud.cloud_brief(f.read(), job)
+            text = cloud.cloud_brief(f.read(), job, product=product)
         ok, ref = push_brief(job.cwd, job.name, text, job.env, getattr(job, 'setup', None))
         if not ok:
             raise SpawnError(f'cloud lane: {ref}')

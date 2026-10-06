@@ -94,6 +94,53 @@ def plan(tests_dir, serial=SERIAL):
     return pool, tail
 
 
+def changed_files(root, base):
+    """The files ``base...HEAD`` changes plus the working tree's own changes, or None when git
+    cannot tell (no such base)."""
+    out = []
+    for args in (['diff', '--name-only', f'{base}...HEAD'], ['diff', '--name-only', 'HEAD'],
+                 ['ls-files', '--others', '--exclude-standard']):
+        p = subprocess.run(['git', '-C', root, *args], capture_output=True, text=True)
+        if p.returncode != 0:
+            return None
+        out += [l.strip() for l in p.stdout.splitlines() if l.strip()]
+    return list(dict.fromkeys(out))
+
+
+def touched_modules(tests_dir, files, package='tests'):
+    """The test modules (names under ``tests_dir``) the changed ``files`` touch: a changed test
+    module itself, and every module that imports a changed source module (``asf/a/b.py`` →
+    ``asf.a.b``, or ``from asf.a import b``) or is named after it (``test_b*``). Sorted."""
+    names = set()
+    stems = []
+    for f in files:
+        if f.startswith(package + '/') and os.path.basename(f).startswith('test_') \
+                and f.endswith('.py') and f.count('/') == 1:
+            names.add(os.path.basename(f)[:-3])
+        elif f.endswith('.py') and '/' in f and not f.startswith(package + '/'):
+            dotted = f[:-3].replace('/', '.')
+            if dotted.endswith('.__init__'):
+                dotted = dotted[:-len('.__init__')]
+            parent, _, leaf = dotted.rpartition('.')
+            stems.append((dotted, parent, leaf))
+    for m in discover(tests_dir):
+        if m in names or m == HOME_MODULE:
+            continue
+        try:
+            with open(os.path.join(tests_dir, m + '.py'), encoding='utf-8') as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for dotted, parent, leaf in stems:
+            if (re.search(rf'\b{re.escape(dotted)}\b', text)
+                    or (parent and re.search(rf'^\s*from {re.escape(parent)} import [^\n]*\b'
+                                             rf'{re.escape(leaf)}\b', text, re.M))
+                    or m == f'test_{leaf}' or m.startswith(f'test_{leaf}_')):
+                names.add(m)
+                break
+    return sorted(n for n in names if os.path.isfile(os.path.join(tests_dir, n + '.py')))
+
+
 def child_env(root, home):
     env = hermetic.build(worktree=root)
     env['ASF_TESTS_HOME'] = home
@@ -284,12 +331,28 @@ def build_parser():
                    help='the tests package (default: this checkout\'s tests/)')
     p.add_argument('-v', '--verbose', action='store_true', help='print every module\'s verdict')
     p.add_argument('--list', action='store_true', help='print the plan and exit')
+    p.add_argument('--touched', metavar='BASE',
+                   help='only the test modules the changes since BASE touch (the pre-push gate: '
+                        'every touched module whole, never the full suite)')
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     only = parse_only(os.environ.pop(ONLY_VAR, ''))
+    if args.touched:
+        root = os.path.dirname(os.path.abspath(args.start_directory))
+        files = changed_files(root, args.touched)
+        if files is None:
+            print(f'run_tests: cannot diff against {args.touched}')
+            return 2
+        mods = touched_modules(args.start_directory, files,
+                               os.path.basename(os.path.abspath(args.start_directory)))
+        if not mods:
+            print(f'run_tests: no test module touched since {args.touched}\nOK')
+            return 0
+        print(f'run_tests: {len(mods)} touched module(s): {" ".join(mods)}')
+        only = [m for m in mods if only is None or m in only]
     if args.list:
         pool, tail = plan(args.start_directory)
         print(f'shards: {args.shards or default_shards()}')

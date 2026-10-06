@@ -271,6 +271,27 @@ trunk, by `conventions.landing`:
 Unset, `landing` is derived from `steps.batch`: `off` or unset means `fast-forward`; a command
 means `pull-request`. Set `landing: pull-request` to get PRs without a `batch` step.
 
+#### The pre-push gate under external CI (`conventions.pre_push_check`)
+
+Under `landing: pull-request` the full suite runs in the product's CI, not on this host. But every
+push is one CI run, and a red one is a red notification. So every code brief tells the worker to run
+two things before its one push: the product's declared `conventions.pre_push_check` (its cheap
+repo checks), and every test module that covers a file it touched, each module whole. The approvals
+hook allows the check. Set it for every product whose CI has fast repo-rule checks. For example, a
+Python product with check scripts under `tools/` and the module runner (this repository's own layout):
+
+```yaml
+conventions:
+  landing: pull-request
+  pre_push_check: >-
+    bash tools/check_generic.sh && bash tools/check_conventions.sh &&
+    python3 tools/run_tests.py --touched origin/main --shards 2
+```
+
+`tools/run_tests.py --touched <base>` runs only the test modules the change since `<base>` touches.
+That covers the changed test modules and the modules that import a changed source module, each one
+whole, and never the full suite. With nothing touched, it prints `OK`.
+
 #### Green checks are not a green trunk
 
 A product's CI is often path-filtered: its main gate job does not run on a docs-only PR, so a

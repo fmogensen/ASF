@@ -95,6 +95,8 @@ conventions:
   #                       # rules check answers the same on every run: flake triage never re-runs
   #                       # it, the blame sends the member whose rows it names back at once. A job
   #                       # whose failed step runs a precut_check command is deterministic too.
+  #   hold_culprit: on    # (default on) a member a deterministic red named is held out of every
+  #                       # later cut until its head changes: the same tree answers the same
   # harvest: one gate over every eligible branch (combined, bisecting on red) or per-branch; the
   # most branches one run gates; seconds before a gate is killed and counted red.
   # harvest:
@@ -304,6 +306,10 @@ conventions:
   #                            # trunk changed one; unset: the files the failing log names, else any
   #   flake_skip_reproduced: on  # a red reproduced on two merge refs (same check, same failing
   #                              # test) is a defect: no blind flake re-run (asf.flake). off: re-run
+  #   trunk_red_trunk_runs: on   # a red manual/schedule/push run of the trunk's workflow on the
+  #                              # trunk's tip confirms trunk red on its red jobs (asf.trunk_red):
+  #                              # no landing is sent to a correct round for it. off: only ASF's own
+  #                              # dispatched full run confirms
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

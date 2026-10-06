@@ -420,9 +420,24 @@ class PreambleTest(unittest.TestCase):
                                  'landing_checks_missing': {'docs': 'local-gate', 'code': 'wait'},
                                  'rules_tail': 'ONE RULE: push to {main} and nothing else.'})
         text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
-        self.assertIn('run only the targeted checks for what you changed', text)
+        self.assertIn('Before your one push', text)
+        self.assertIn('Not the full suite', text)
         self.assertIn('external CI', text)
         self.assertIn('never skipped', text)
+
+    def test_external_ci_requires_the_pre_push_check_and_touched_modules_before_the_push(self):
+        # 2026-10-05: about half a day's PR reds were a session's own defect that a touched test
+        # module or a repo check would have named on the host — the push is one CI run
+        ext = {'landing': 'pull-request', 'landing_checks': ['build'],
+               'landing_checks_missing': 'wait'}
+        text = preamble_mod.build(product(conventions={**ext, 'pre_push_check': 'make fast'}),
+                                  ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn("the product's pre-push check `make fast`", text)
+        self.assertIn('every test module that covers a file you touched, each module whole', text)
+        text = preamble_mod.build(product(conventions=ext), ROWS['coder'], index(), [],
+                                  REPO_FACTS)
+        self.assertNotIn('pre-push check', text)
+        self.assertIn('every test module that covers a file you touched', text)
 
     def test_external_ci_names_the_full_suite_commands_it_forbids(self):
         # 2026-09-27: a plan's "run the full check" step, followed on the host, was 122 test
