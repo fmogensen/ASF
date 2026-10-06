@@ -1200,7 +1200,9 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
         meta, _b = read_meta(self.root, 'features', 'F-0001')
         with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
             index = json.load(f)
-        return meta, rows.candidates(index, Product('sample', {}), [])
+        # the fixture carries no Story: the stories-first gate (tests/test_stories_first.py) is off
+        return meta, rows.candidates(index, Product('sample', {'conventions': {
+            'feeder': {'stories_before_plan': False}}}), [])
 
     def test_plan_on_trunk_and_spec_only_on_a_branch_gets_a_spec_row_not_code_rows(self):
         from asf.feeder import rows
