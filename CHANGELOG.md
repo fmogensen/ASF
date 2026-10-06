@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.160 — 2026-10-06
+
+### Features landed
+
+- An S1 card left on a question says so, every tick, naming its file (#807)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.160"`
+
 ## v0.1.159 — 2026-10-06
 
 ### Features landed
