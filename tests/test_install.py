@@ -1515,6 +1515,99 @@ class HooksTest(HomeCase):
         self.assertIsNone(hooks.check_script('../x', 'sample'))
 
 
+class ControllerHookTests(HomeCase):
+    """T-0192 (F-0035 §2.6, second half): the chores recorder goes only into the controlling
+    account's own settings, product-less, when ``controller.account`` names a declared account;
+    naming one ``worker_pool.accounts`` does not declare writes nothing there and adds a
+    ``NEEDS OPERATOR`` line carrying the exact entry as JSON, without touching ``rc``. On
+    ``HooksTest``'s shape."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.tmp, 'repo')
+        _git(['init', '-q', self.repo])  # ensure_git_hooks (F-0075) needs a real git repo
+        self.product = env.Product('sample', {'repo_dir': self.repo})
+        self.asf = executable_asf(os.path.join(self.tmp, 'bin'))
+        self.which = lambda name: self.asf
+        self.ctrl_dir = os.path.join(self.tmp, 'ctrl')
+        self.worker_dir = os.path.join(self.tmp, 'worker')
+        self.cfg = {
+            'worker_pool': {'accounts': [
+                {'name': 'ctrl', 'config_dir': self.ctrl_dir},
+                {'name': 'w1', 'config_dir': self.worker_dir},
+            ]},
+            'controller': {'account': 'ctrl'},
+        }
+
+    def _settings(self, account_dir):
+        with open(os.path.join(account_dir, 'settings.json')) as f:
+            return json.load(f)
+
+    def test_controller_account_resolves_a_declared_account(self):
+        account, why = hooks.controller_account(self.cfg)
+        self.assertIsNone(why)
+        self.assertEqual(account.name, 'ctrl')
+
+    def test_controller_account_unset_and_undeclared_are_different_whys(self):
+        account, unset_why = hooks.controller_account({'worker_pool': {'accounts': []}})
+        self.assertIsNone(account)
+        account, undeclared_why = hooks.controller_account(
+            {'worker_pool': {'accounts': []}, 'controller': {'account': 'ghost'}})
+        self.assertIsNone(account)
+        self.assertNotEqual(unset_why, undeclared_why)
+        self.assertIn('ghost', undeclared_why)
+
+    def test_install_merges_the_chores_hook_into_the_controller_account_only(self):
+        rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=self.which, cfg=self.cfg)
+        self.assertEqual(rc, 0, msg)
+        ctrl = self._settings(self.ctrl_dir)
+        self.assertEqual(ctrl['hooks']['PostToolUse'],
+                         [{'matcher': '*',
+                           'hooks': [{'type': 'command', 'command': f'{self.asf} hook chores'}]}])
+        worker = self._settings(self.worker_dir)
+        self.assertNotIn('PostToolUse', worker.get('hooks', {}))
+
+    def test_merge_is_product_less_keeps_unrelated_keys_and_is_idempotent(self):
+        self.write(os.path.join(self.ctrl_dir, 'settings.json'),
+                   json.dumps({'permissions': {'allow': ['Bash(ls)']}}))
+        rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=self.which, cfg=self.cfg)
+        self.assertEqual(rc, 0, msg)
+        ctrl_settings = os.path.join(self.ctrl_dir, 'settings.json')
+        data = self._settings(self.ctrl_dir)
+        self.assertEqual(data['permissions'], {'allow': ['Bash(ls)']})
+        self.assertNotIn('--product', data['hooks']['PostToolUse'][0]['hooks'][0]['command'])
+        with open(ctrl_settings, 'rb') as f:
+            before = f.read()
+        rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=self.which, cfg=self.cfg)
+        self.assertEqual(rc, 0, msg)
+        with open(ctrl_settings, 'rb') as f:
+            self.assertEqual(f.read(), before)
+
+    def test_undeclared_controller_account_writes_nothing_and_needs_operator(self):
+        cfg = dict(self.cfg, controller={'account': 'ghost'})
+        rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=self.which, cfg=cfg)
+        self.assertEqual(rc, 0, msg)
+        self.assertIn("NEEDS OPERATOR: add the chores recorder to the controlling account's "
+                      "settings — ", msg)
+        payload = hooks.merge({}, [('PostToolUse', 'chores')], self.asf, None)
+        self.assertIn(json.dumps(payload), msg)
+        for account_dir in (self.ctrl_dir, self.worker_dir):
+            self.assertNotIn('PostToolUse', self._settings(account_dir).get('hooks', {}))
+
+    def test_no_controller_configured_is_silent_and_unchanged(self):
+        cfg = {'worker_pool': self.cfg['worker_pool']}
+        rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=self.which, cfg=cfg)
+        self.assertEqual(rc, 0, msg)
+        self.assertNotIn('NEEDS OPERATOR', msg)
+        for account_dir in (self.ctrl_dir, self.worker_dir):
+            self.assertNotIn('PostToolUse', self._settings(account_dir).get('hooks', {}))
+
+
 class ConsolePermissionsTest(HomeCase):
     """B-0131: `asf console-permissions offer` shows exactly the documented allow/deny list, and
     `install` writes it — idempotently, into the scope the operator picked — without touching

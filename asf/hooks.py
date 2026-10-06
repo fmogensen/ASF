@@ -29,6 +29,13 @@ venv of the product it acts on rather than whichever ``asf`` was installed last.
 ``asf hook <name>`` runs a hook built into ``asf`` when :data:`BUILTIN` names it (``approvals``,
 :func:`asf.approvals.run_hook`), else ``tools/checks/<name>.sh`` (the record's, then the cwd's)
 with the hook's stdin, exiting 0 when there is no such script.
+
+``install`` also merges the built-in ``chores`` hook, product-less, into the *controlling*
+account's own settings file — the one ``controller.account`` of ``~/.ASF/config.yaml`` names
+(:func:`controller_account`), never a worker account. A ``controller.account`` naming no account
+``worker_pool.accounts`` declares writes nothing there: the message gains one ``NEEDS OPERATOR``
+line carrying the entry as JSON, for the operator to add by hand, and the install's own rc is
+unaffected — a missing recorder is a missing measurement, not a broken factory.
 """
 import json
 import os
@@ -61,13 +68,17 @@ RUNTIME_AGENT_GLOBS = ('.claude/agents/*.md',)
 #: The hooks built into ``asf`` — ``{name: the events it answers}`` — run by :func:`cmd_hook`
 #: instead of a check script (F-0031 §2.3). A built-in name shadows a script of the same name.
 #: ``unpushed`` is the session exit contract (:mod:`asf.workers.stopgate`): a factory session's
-#: ``Stop`` is refused while its branch's work is off origin.
-BUILTIN = {'approvals': ('PreToolUse',), 'unpushed': ('Stop',)}
+#: ``Stop`` is refused while its branch's work is off origin. ``chores`` is the recorder (§2.6):
+#: unlike the other two, it belongs to one account — the controller's (:func:`controller_account`)
+#: — never every worker account, so it is excluded from :data:`ACCOUNT_HOOKS` below.
+BUILTIN = {'approvals': ('PreToolUse',), 'unpushed': ('Stop',), 'chores': ('PostToolUse',)}
 
 #: The ``(event, name)`` entries every worker account's own settings carry, product-less: each
-#: built-in hook on each event it answers. Both read the session's ``ASF_JOB``/``ASF_PRODUCT``
+#: built-in hook on each event it answers, ``chores`` excepted (it is the controller account's
+#: alone). Both read the session's ``ASF_JOB``/``ASF_PRODUCT``
 #: and let anything that is not a factory session through.
-ACCOUNT_HOOKS = tuple((event, name) for name, events in BUILTIN.items() for event in events)
+ACCOUNT_HOOKS = tuple((event, name) for name, events in BUILTIN.items() for event in events
+                      if name != 'chores')
 
 #: The two git hooks the redaction gate installs (F-0075, D10). Each name doubles as the
 #: ``asf redact`` mode it execs (``--pre-commit`` / ``--pre-push``).
@@ -615,11 +626,32 @@ def _write_merged(path, hooks, asf_path, product):
         f.write(json.dumps(merged, indent=2) + '\n')
 
 
+def controller_account(cfg):
+    """``controller.account`` of ``~/.ASF/config.yaml``, matched against
+    :func:`asf.workers.pool.accounts_from_config`: ``(Account, None)`` when it names a declared
+    one, else ``(None, why)`` — ``controller.account`` left unset and one naming an account
+    ``worker_pool.accounts`` does not declare are two different ``why`` strings, so a caller (a
+    doctor check, an operator reading a log) can tell which applies. :func:`install` only turns
+    the second into a ``NEEDS OPERATOR`` line (§2.6): an unset ``controller.account`` means the
+    controller feature is simply not configured here, nothing to ask about."""
+    name = (cfg.get('controller') or {}).get('account')
+    if not name:
+        return None, 'controller.account is not set in ~/.ASF/config.yaml'
+    for account in pool.accounts_from_config(cfg):
+        if account.name == name:
+            return account, None
+    return None, f'controller.account names {name!r}, which worker_pool.accounts does not declare'
+
+
 def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatcher=None,
             approve=False):
     """Returns ``(rc, message)``. Rule hooks go to the product repo's own settings when any rule
     declares one (PD5); the approvals hook always goes into every worker account's settings
     (§2.3), product-less, regardless; :func:`ensure_git_hooks` writes every missing git hook.
+    The chores hook goes only into the controlling account's settings
+    (:func:`controller_account`), and only when ``controller.account`` is configured at all —
+    naming one ``worker_pool.accounts`` does not declare adds a ``NEEDS OPERATOR`` line to the
+    message, without touching ``rc`` (§2.6).
 
     ``dispatcher``: the path of the CLI dispatcher (:mod:`asf.dispatch`) — ``asf hooks install``
     passes the operator's ``~/.local/bin/asf``. It is written (or refreshed) first, and once it is
@@ -658,9 +690,20 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
     if refusal:
         return 2, '\n'.join([refusal] + refusals)
 
-    accounts = pool.accounts_from_config(cfg or env.load_config())
+    cfg = cfg or env.load_config()
+    accounts = pool.accounts_from_config(cfg)
     for account in accounts:  # first, and never gated: no session runs without the guard
         _write_merged(account_settings_path(account), ACCOUNT_HOOKS, asf_path, None)
+
+    chores_detail = ''
+    if (cfg.get('controller') or {}).get('account'):
+        controller, _why = controller_account(cfg)
+        if controller:
+            _write_merged(account_settings_path(controller), [('PostToolUse', 'chores')], asf_path, None)
+        else:
+            payload = merge({}, [('PostToolUse', 'chores')], asf_path, None)
+            chores_detail = ('\nNEEDS OPERATOR: add the chores recorder to the controlling '
+                             "account's settings — " + json.dumps(payload))
 
     rows = plan(product, rules_dir=rules_dir, which=which, cfg=cfg)
     withheld = gated(product, rows, approve=approve)
@@ -692,8 +735,8 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
         return WITHHELD_RC, '\n'.join([summary + f'; withheld: {len(withheld)} tracked file(s)']
                                        + refusals + lines)
     if refusals:
-        return 2, '\n'.join([summary] + refusals)
-    return 0, summary
+        return 2, '\n'.join([summary] + refusals) + chores_detail
+    return 0, summary + chores_detail
 
 
 def ensure_account_hooks(account, which=shutil.which):
@@ -777,13 +820,30 @@ def check_script(name, product_name=None, cwd=None):
     return None
 
 
+def _run_approvals(args):
+    from asf import approvals  # local: asf.approvals reads this module's runtime globs
+    return approvals.run_hook(sys.stdin.read(), os.environ, product=args.product)
+
+
+def _run_chores(args):
+    from asf import chores  # local, as approvals already is: a leaf module, imported only here
+    return chores.record(sys.stdin.read(), os.environ)
+
+
+#: ``cmd_hook``'s dispatch for every :data:`BUILTIN` name but ``unpushed`` (its own branch,
+#: below — the session exit contract, not a hook a controlling or worker session ever runs
+#: twice): ``{name: callable(args)}``, so a second built-in (``chores``, PD9) no longer forces
+#: every call through ``approvals.run_hook`` — each name runs its own hook, unchanged behaviour
+#: for ``approvals``.
+_HOOK_DISPATCH = {'approvals': _run_approvals, 'chores': _run_chores}
+
+
 def cmd_hook(args):
     if args.name == 'unpushed':
         from asf.workers import stopgate
         return stopgate.run_hook(sys.stdin.read(), os.environ, product=args.product)
     if args.name in BUILTIN:
-        from asf import approvals  # local: asf.approvals reads this module's runtime globs
-        return approvals.run_hook(sys.stdin.read(), os.environ, product=args.product)
+        return _HOOK_DISPATCH[args.name](args)
     script = check_script(args.name, args.product)
     if not script:
         return 0
