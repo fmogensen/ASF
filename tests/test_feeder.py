@@ -423,6 +423,41 @@ class FootprintTest(unittest.TestCase):
         self.assertTrue(footprint.globs_overlap('apps/**/a.ts', 'apps/**/b.ts'))
         self.assertTrue(footprint.globs_overlap('apps/[ab]*.ts', 'apps/*.md'))
 
+    def test_two_distinct_exact_paths_in_one_folder_never_conflict(self):
+        """Defect #51: two exact, distinct paths were held apart as overlapping merely for
+        sharing a folder."""
+        self.assertFalse(footprint.globs_overlap('apps/web/lib/view-models.ts',
+                                                  'apps/web/lib/avatar-image.ts'))
+        self.assertIsNone(footprint.overlaps(['apps/web/lib/view-models.ts'],
+                                             ['apps/web/lib/avatar-image.ts']))
+
+    def test_an_exact_path_conflicts_only_with_itself(self):
+        path = 'apps/web/lib/view-models.ts'
+        self.assertTrue(footprint.globs_overlap(path, path))
+
+    def test_a_bracket_directory_segment_is_still_an_exact_path_not_a_glob(self):
+        """A route folder spelled with brackets (``[id]``) is a literal path component, not an
+        fnmatch character class — defect #51's second pair."""
+        a = 'app/(app)/bots/[id]/load-bot-page.ts'
+        b = 'app/(app)/bots/[id]/details-actions.ts'
+        self.assertFalse(footprint.globs_overlap(a, b))
+        self.assertTrue(footprint.globs_overlap(a, a))
+        self.assertIsNone(footprint.overlaps([a], [b]))
+
+    def test_exact_path_vs_glob_conflicts_iff_the_glob_matches_it(self):
+        exact = 'apps/web/lib/avatar-image.ts'
+        self.assertTrue(footprint.globs_overlap(exact, 'apps/web/lib/*.ts'))
+        self.assertTrue(footprint.globs_overlap(exact, 'apps/web/**'))
+        self.assertFalse(footprint.globs_overlap(exact, 'apps/web/lib/*.css'))
+        self.assertFalse(footprint.globs_overlap(exact, 'apps/api/**'))
+
+    def test_a_directory_above_a_bracket_segment_still_claims_it(self):
+        """A bare directory or ``dir/**`` still claims an exact path under it, bracket segment
+        and all — only two bracket-bearing *exact* paths, never a glob, are exempt."""
+        exact = 'app/(app)/bots/[id]/load-bot-page.ts'
+        self.assertTrue(footprint.globs_overlap('app/(app)/bots/**', exact))
+        self.assertTrue(footprint.globs_overlap('app/(app)/bots/', exact))
+
     def test_first_conflict_names_the_running_task(self):
         running = [('T-1', ['docs/a.md']), ('T-2', ['src/**'])]
         self.assertEqual(footprint.first_conflict(['src/x.py'], running), 'T-2')

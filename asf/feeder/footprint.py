@@ -16,20 +16,29 @@ import fnmatch
 from asf.record.core import writes_intersect
 
 WILDCARDS = '*?['
+#: the subset :func:`_literal_head`/:func:`_literal_tail` stop at: only ``*`` can expand to
+#: swallow an arbitrary run of characters. ``?`` and a ``[...]`` class each match exactly one
+#: fixed character, so on their own they are not reason to call a path *open-ended*; a
+#: literal path segment that merely contains ``[``/``]`` — a Next.js route's ``[id]``, a React
+#: Router ``[slug]`` — is not, on that account, a glob (defect #51). ``writes_intersect`` still
+#: matches a genuine ``[ab]``/``?`` class exactly, by fnmatch, ahead of this heuristic.
+OPEN_ENDED = '*'
 
 
 def _literal_head(glob):
-    """The part of a glob before its first wildcard: ``apps/web/**`` → ``apps/web/``."""
+    """The part of a glob before its first open-ended wildcard: ``apps/web/**`` → ``apps/web/``."""
     for i, ch in enumerate(glob):
-        if ch in WILDCARDS:
+        if ch in OPEN_ENDED:
             return glob[:i]
     return glob
 
 
 def _literal_tail(glob):
-    """The part of a glob after its last wildcard: ``migrations/*_a.sql`` → ``_a.sql``."""
+    """The part of a glob after its last open-ended wildcard: ``migrations/*_a.sql`` →
+    ``_a.sql``. Still stops at a stray ``]`` so a character class's content is never read as
+    literal text."""
     for i in range(len(glob) - 1, -1, -1):
-        if glob[i] in WILDCARDS or glob[i] == ']':
+        if glob[i] in OPEN_ENDED or glob[i] == ']':
             return glob[i + 1:]
     return glob
 
@@ -51,9 +60,11 @@ def globs_overlap(a, b):
     # a bare directory (`apps/web/`) covers everything beneath it
     if a.endswith('/') and b.startswith(a) or b.endswith('/') and a.startswith(b):
         return True
-    # two globs, each open-ended, whose literal heads nest (`apps/web/**` vs `apps/web/*.ts`):
-    # they may name a common file — the gate errs on waiting, a false overlap costs one tick
-    # — unless their literal tails rule a common file out (`migrations/*_a.sql` vs `*_b.sql`)
+    # two globs, each open-ended (carrying a `*`), whose literal heads nest (`apps/web/**` vs
+    # `apps/web/*.ts`): they may name a common file — the gate errs on waiting, a false overlap
+    # costs one tick — unless their literal tails rule a common file out (`migrations/*_a.sql` vs
+    # `*_b.sql`). Two exact paths, or an exact path and a glob that does not match it, carry no
+    # `*` between them and never reach here: `writes_intersect` above is the whole answer for them.
     return (ha != a and hb != b and (ha.startswith(hb) or hb.startswith(ha))
             and not _tails_disjoint(a, b))
 
