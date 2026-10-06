@@ -1514,13 +1514,23 @@ class Lane:
         return gitops.rev_parse(self.repo, f'{sha}^{{commit}}') or sha
 
     @staticmethod
-    def reported_head(run):
-        """The sha the run's REPORT names on its ``pushed:`` line, or ''."""
+    def run_heads(run):
+        """The heads a finished run's facts name for its branch, gone from origin: the sha its
+        REPORT's ``pushed:`` line names, and its worktree's HEAD while the worktree stands."""
+        from asf import gitops
         from asf.workers import report as report_mod
+        out = []
         rec = lifecycle.result_of(run) or {}
         text = rec.get('result') if isinstance(rec, dict) else ''
         m = lifecycle.PUSHED_SHA_RE.search(report_mod.parse(text or '').get('pushed') or '')
-        return m.group(0).lower() if m else ''
+        if m:
+            out.append(m.group(0).lower())
+        wt = (run or {}).get('worktree')
+        if wt and os.path.isdir(wt):
+            head = gitops.rev_parse(wt, 'HEAD')
+            if head:
+                out.append(head)
+        return out
 
     def gather(self, prs=True):
         """``{branch: facts}`` for every lane branch; ``prs``: read the host's PR list (the
@@ -1624,9 +1634,10 @@ class Lane:
             # a branch gone from origin is MERGED on-trunk only on a head the trunk holds: the
             # record's, else the sha the run's REPORT says it pushed. Never on its word alone (a
             # product's lane wrote head-less on-trunk records for many items on 2026-09-28)
-            gone = rec.get('head') or (not rec and lifecycle.eligible(run)
-                                       and self.reported_head(run))
-            if gone and self.is_ancestor(gone, f'origin/{trunk}'):
+            heads = [rec['head']] if rec.get('head') else (
+                self.run_heads(run) if not rec and lifecycle.eligible(run) else [])
+            gone = next((h for h in heads if self.is_ancestor(h, f'origin/{trunk}')), None)
+            if gone:
                 f['gone_merged'], f['trunk_head'] = True, self.full_sha(gone)
             return f
         ahead = H.sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{b}'],
@@ -3306,7 +3317,9 @@ def shared_path_order(lane, entries):
     oldest wait first; every other entry after them in its own order. Only one branch a tick
     takes a shared file, and the first one to ask won it every tick — a product's green code PR
     (T-0389, #1091) starved behind a stream of document PRs on one shared registry file."""
-    aging = lane.conv.lane_shared_path_aging_s()
+    from asf.conventions import DEFAULT_LANE_SHARED_PATH_AGING, duration_seconds
+    reader = getattr(lane.conv, 'lane_shared_path_aging_s', None)
+    aging = reader() if reader else duration_seconds(DEFAULT_LANE_SHARED_PATH_AGING)
     now = getattr(lane, 'now', None) or time.time()
     aged = []
     for i, f in enumerate(entries):
