@@ -5,6 +5,8 @@ Every row is filled from what exists, or says which key would fill it —
 
 * **Stale** — B-0124: the record step's own health, or the index's age against twice the record
   clock's period when that stamp itself has gone quiet; no row when the record is current;
+* **Wave latency** — the last tick's start → its wave's start (:mod:`asf.tick.wave_latency`),
+  and ``over the N min limit`` past the dwell watchdog's ``wave_latency``; no row before a wave;
 * **Version** — the ``asf`` running (``asf --version``) and asf's newest release tag, with its age;
 * **Runners** — the CI provider's runner pool (``ci.runner_org``), busy per class of ``ci.pool``,
   from the same live read and count as the CI queue's ``free`` (:mod:`asf.ci_queue`);
@@ -259,6 +261,12 @@ def stale_cell(root, product):
     if age_s <= 2 * _record_period_s(product):
         return None
     return f"STALE since {ix.local_stamp(generated, '%H:%M')} — no fresh record in {ix.span(age_s)}"
+
+
+def wave_latency_cell(product):
+    """The last tick's start → wave start (:func:`asf.tick.wave_latency.cell`)."""
+    from asf.tick import wave_latency
+    return wave_latency.cell(product)
 
 
 def record_cell(root):
@@ -625,6 +633,7 @@ def render(root, product, cfg=None):
     out.append("| Metric | Now |")
     out.append("|---|---|")
     for name, cell in (('Stale', lambda: stale_cell(root, product)),
+                       ('Wave latency', lambda: wave_latency_cell(product)),
                        ('Version', lambda: version_cell(product=product)),
                        ('Runners', lambda: runners_cell(product)),
                        ('Prod', lambda: prod_cell(product)),

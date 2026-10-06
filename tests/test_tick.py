@@ -33,7 +33,7 @@ def _args(**kw):
 
 #: an *ended* step, a record part, or the tick's total. No longer `$`-anchored: F-0142's end line
 #: carries owner/pid/at after its seconds, and this is the one place that shape is matched.
-TIMING_RE = re.compile(r'^(\[(?:step|record):[a-z-]+\]|tick: total) \d+\.\ds')
+TIMING_RE = re.compile(r'^(\[(?:step|record):[a-z-]+\]|tick: total|tick: wave latency) \d+\.\ds')
 #: F-0142's start line — a per-step log line too, so `untimed` strips it with the rest
 STEP_START_RE = re.compile(r'^\[step:[a-z-]+\] start ')
 
@@ -103,6 +103,10 @@ class TickTestCase(unittest.TestCase):
         self.write_config('')
 
         patcher = mock.patch.object(tick, 'run_step0', _fake_step0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # the record's tail (backfill, rollup, ...) needs CI and session evidence too
+        patcher = mock.patch.object(tick, 'run_record_tail_step', lambda ctx: None)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -431,7 +435,7 @@ class GroomStepOrderTests(TickTestCase):
 
     product_yaml = 'steps:\n  batch: off\n  daily: off\n  prs: off\n  harvest: off\n'
 
-    def test_the_groom_runs_between_health_and_wave_and_is_logged(self):
+    def test_the_wave_runs_first_then_health_then_the_groom_and_is_logged(self):
         from asf.tick import step_groom, step_health, step_wave
         seen = []
 
@@ -453,7 +457,7 @@ class GroomStepOrderTests(TickTestCase):
         lines = steps_only(out).splitlines()
         order = [ln.split()[0].rstrip(':') for ln in lines
                  if ln.split() and ln.split()[0].rstrip(':') in ('health', 'groom', 'wave')]
-        self.assertEqual(order, ['health', 'groom', 'wave'])
+        self.assertEqual(order, ['wave', 'health', 'groom'])
         self.assertIn('groom 2026-01-01: applied 0, inbox 1 card(s)', out)
         self.assertEqual(seen, [(True, None, self.record_path())])
         import json
@@ -461,7 +465,7 @@ class GroomStepOrderTests(TickTestCase):
         log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
         steps_run = json.loads(log.splitlines()[-1])['steps']
         self.assertIn(('groom', True), [(s['step'], s['ok']) for s in steps_run])
-        self.assertEqual([s['step'] for s in steps_run][:4], ['record', 'health', 'groom', 'wave'])
+        self.assertEqual([s['step'] for s in steps_run][:4], ['record', 'wave', 'health', 'groom'])
 
     def test_a_failing_groom_is_a_failed_step_and_the_wave_still_runs(self):
         from asf.tick import step_health, step_wave
@@ -591,8 +595,8 @@ class LegacyStepTests(TickTestCase):
                            '  wave: python3 -c \'print("after")\'\n')
         rc, out = self.run_tick(steps='health,wave')
         self.assertEqual(rc, 1)
-        self.assertEqual(steps_only(out).splitlines(), ['[command:health] bad', 'tick: step health exited 3',
-                                            '[command:wave] after'])
+        self.assertEqual(steps_only(out).splitlines(), ['[command:wave] after', '[command:health] bad',
+                                            'tick: step health exited 3'])
 
     def test_timeout_kills_a_sleep(self):
         self.write_config('tick:\n  step_timeout_s: 1\n')
@@ -1086,7 +1090,7 @@ class Step0Tests(unittest.TestCase):
                 mock.patch.object(file_bugs, 'cmd_file_bugs', lambda a, r: 0), \
                 mock.patch.object(tick, 'do_index', lambda r: 0), \
                 mock.patch.dict(os.environ):
-            tick.run_step0('/nowhere', product)
+            tick.run_record('/nowhere', product)
         return calls
 
     def test_backfill_reads_the_products_workflow_and_no_launcher_dir(self):
@@ -1104,9 +1108,10 @@ class Step0Tests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.step0(env.Product('p', {}))
         lines = out.getvalue().splitlines()
+        # the wave's parts first (step 0), then the tail and the index again
         self.assertEqual([ln.split()[0] for ln in lines],
-                         ['[record:backfill]', '[record:ingest]', '[record:file-bugs]',
-                          '[record:rollup]', '[record:index]'])
+                         ['[record:ingest]', '[record:index]', '[record:backfill]',
+                          '[record:file-bugs]', '[record:rollup]', '[record:index]'])
         self.assertTrue(all(TIMING_RE.match(ln) for ln in lines), lines)
 
     def test_a_part_that_raises_still_prints_its_seconds(self):

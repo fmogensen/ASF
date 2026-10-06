@@ -1,8 +1,17 @@
 """asf.tick.tick — ``asf tick``: the scheduled steps (:mod:`asf.tick.steps`), in order
-``record → health → groom → wave → prs → harvest → batch → daily``.
+``record → wave → health → groom → prs → harvest → batch → daily``, then the record's tail.
 
-``record`` is step 0: metrics backfill → ingest → file-bugs → rollup → index, run in the tick's
-own clone of the product's backlog (:mod:`asf.tick.shadow`).
+``record`` is step 0: ingest → plan-tasks → replan → slice → index, the parts the wave decides
+from, run in the tick's own clone of the product's backlog (:mod:`asf.tick.shadow`). The wave runs
+right after it (``tick.wave_first``, default on: 2026-10-06 one tick spent 22 minutes on
+bookkeeping before it launched anything); the tick logs the span as ``tick: wave latency`` and
+keeps it (:mod:`asf.tick.wave_latency`, the dwell watchdog's ``wave_latency``). When health then
+ends, holds or corrects a run, the wave runs once more after the groom, so a freed seat is still
+this tick's; health spares the runs this tick's own wave launched. The record's tail — metrics
+backfill → plan-order → file-bugs → rollup → index — runs as ``record-tail`` before the harvest
+starts (the background harvest reads the record), each part on its cadence
+(:mod:`asf.tick.cadence`: ``every_n``, at least hourly); so may any step but ``record``, ``wave``
+and ``daily``. ``tick.wave_first: false`` keeps the order this replaced.
 ``health``, ``groom``, ``wave``, ``prs``, ``harvest`` and ``daily`` are :mod:`asf.tick.step_health`,
 ``step_groom``, ``step_wave``, ``step_prs``, ``step_harvest`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
 any step a product chooses to run with its own command.
@@ -76,29 +85,36 @@ def timed(part, out=None):
 
 
 def run_step0(root, product, fresh=False):
-    """metrics backfill → ingest → plan-tasks → file-bugs → rollup → index, against ``root``. Returns nothing;
-    prints what each step printed, same as running the commands one at a time would.
+    """Step 0, the record step's own work: the parts the wave decides from
+    (:func:`run_record_fast`). The record's bookkeeping — backfill, plan-order, file-bugs, rollup
+    (:func:`run_record_tail`) — runs after the wave in a tick, on its cadence
+    (:mod:`asf.tick.cadence`); ``--shadow``, ``--dry-run`` and a ``record`` run alone run it right
+    after this (:func:`run_record`). Returns nothing; prints what each part printed."""
+    run_record_fast(root, product, fresh=fresh)
 
-    The backfill reads CI runs only — sessions come from the workers' own ledger, not from a
-    launcher directory — and a product with ``ci: {provider: none}`` has none to read.
 
-    ``asf.record.ingest.cmd_ingest`` calls ``evidence.load()`` with no product (a gap the fuller
+def run_record(root, product, fresh=False):
+    """The whole record at once: step 0, then every part of its tail."""
+    run_step0(root, product, fresh=fresh)
+    run_record_tail(root, product)
+
+
+def _record_env(product):
+    """``asf.record.ingest.cmd_ingest`` calls ``evidence.load()`` with no product (a gap the fuller
     0.1 command surface is meant to close — see ``asf/cli.py``'s module docstring): it falls back
     to ``$ASF_PRODUCT``/``config.yaml``'s ``default_product``, so this sets ``$ASF_PRODUCT`` for
-    the tick's own process rather than widen ``cmd_ingest``'s signature for one caller.
-    """
+    the tick's own process rather than widen ``cmd_ingest``'s signature for one caller."""
     os.environ['ASF_PRODUCT'] = product.name
 
-    from asf import approvals
-    from asf.metrics.metrics import cmd_backfill, cmd_rollup
+
+def run_record_fast(root, product, fresh=False):
+    """What the wave decides from: ingest → plan-tasks → replan → slice → index. Every one of
+    them changes which rows may launch (an item's state, a freshly minted or re-cut Task, a
+    Feature's delivery), so they run on every tick, before the wave."""
+    _record_env(product)
     from asf.record import stage
     from asf.record.ingest import cmd_ingest
-    from asf.tick.file_bugs import cmd_file_bugs
 
-    if ci_provider(product) != 'none':
-        with timed('backfill'):
-            cmd_backfill(_ns(days=1, sessions=None, log=None, workflow=ci_workflow(product),
-                             launch_dir=None, product=product.name), root)
     with timed('ingest'):
         cmd_ingest(_ns(fresh=fresh, product=product.name), root)
     if product.repo_dir:  # B-0060: a landed plan's Tasks become cards, once
@@ -106,15 +122,11 @@ def run_step0(root, product, fresh=False):
         from asf.record.plan_tasks import mint_plan_tasks
         with timed('plan-tasks'):
             mint_plan_tasks(root, product, evidence.load(product=product))
-        # open Tasks minted before the minter wrote order: the plan's order lands as `after:`
         from asf.record import plan_order
         # a Feature's reshape: its landed replan rewrites, adds and drops its open Tasks
         from asf.record import replan
         with timed('replan'):
             replan.apply_replans(root, product, plan_order.trunk_reader(product))
-        with timed('plan-order'):
-            stage.guarded(root, 'plan-order', plan_order.backfill,
-                          (plan_order.trunk_reader(product),), product=product)
         if product.conventions.delivery_feature():
             # the Feature is the delivery unit: a planned Feature's free Tasks become one
             # delivery (or ordered slices), the freshly minted and the half-built alike
@@ -122,15 +134,56 @@ def run_step0(root, product, fresh=False):
             with timed('slice'):
                 stage.guarded(root, 'slice', slice_mod.deliveries,
                               (product, slice_mod.busy_items(product)), product=product)
-    default_bug_epic = product.conventions.get('default_bug_epic')
-    with timed('file-bugs'):
-        bug_args = _ns(default_bug_epic=default_bug_epic, product=product.name,
-                       file_bug_level=approvals.level_of(product, 'file_bug'))
-        stage.guarded(root, 'file-bugs', lambda r: cmd_file_bugs(bug_args, r), product=product)
-    with timed('rollup'):
-        cmd_rollup(_ns(day=None, no_releases=False, product=product.name), root)
     with timed('index'):
         do_index(root)
+
+
+def run_record_tail(root, product, due=None):
+    """The record's bookkeeping, which decides no launch: metrics backfill → plan-order →
+    file-bugs → rollup, then the index again when any of them ran. ``due(name)`` says whether a
+    part runs (default: all — :class:`asf.tick.cadence.Cadence` in a tick). The wave never waits
+    on these: a Task with no ``after:`` yet still waits on its plan's order through the wave's
+    own overlay (:func:`asf.record.plan_order.overlay`).
+
+    The backfill reads CI runs only — sessions come from the workers' own ledger, not from a
+    launcher directory — and a product with ``ci: {provider: none}`` has none to read. Returns
+    the parts that ran."""
+    _record_env(product)
+    due = due or (lambda name: True)
+    from asf import approvals
+    from asf.metrics.metrics import cmd_backfill, cmd_rollup
+    from asf.record import stage
+    from asf.tick.file_bugs import cmd_file_bugs
+
+    ran = []
+    if ci_provider(product) != 'none' and due('backfill'):
+        ran.append('backfill')
+        with timed('backfill'):
+            cmd_backfill(_ns(days=1, sessions=None, log=None, workflow=ci_workflow(product),
+                             launch_dir=None, product=product.name), root)
+    if product.repo_dir and due('plan-order'):
+        # open Tasks minted before the minter wrote order: the plan's order lands as `after:`
+        from asf.record import plan_order
+        ran.append('plan-order')
+        with timed('plan-order'):
+            stage.guarded(root, 'plan-order', plan_order.backfill,
+                          (plan_order.trunk_reader(product),), product=product)
+    if due('file-bugs'):
+        ran.append('file-bugs')
+        default_bug_epic = product.conventions.get('default_bug_epic')
+        with timed('file-bugs'):
+            bug_args = _ns(default_bug_epic=default_bug_epic, product=product.name,
+                           file_bug_level=approvals.level_of(product, 'file_bug'))
+            stage.guarded(root, 'file-bugs', lambda r: cmd_file_bugs(bug_args, r),
+                          product=product)
+    if due('rollup'):
+        ran.append('rollup')
+        with timed('rollup'):
+            cmd_rollup(_ns(day=None, no_releases=False, product=product.name), root)
+    if ran:
+        with timed('index'):
+            do_index(root)
+    return ran
 
 
 def render_tables(root, product):
@@ -170,6 +223,12 @@ class Context:
         self.stale_reason = None  # set when the record step failed: the index is not this tick's
         self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
         self.seats = None         # the wave's seat reading, carried on the tick line
+        self.record_tail_pending = False  # the record's fast parts ran; its tail is still due
+        self.started = time.monotonic()   # the tick's start: what wave_latency_s is aged from
+        self.wave_latency_s = None
+        self.wave_started_at = None       # UTC stamp of this tick's wave start, once it ran
+        self.health_freed = False         # health ended, held or corrected a run this tick
+        self.cadence = None               # this tick's asf.tick.cadence.Cadence, once made
         from asf.facts import cache as facts_cache, landing as facts_landing
         facts_cache.clear()  # a tick reads its facts afresh (asf.facts.cache)
         # under flags.facts shadow|new: the pass's one open-PR read, the shadow's only gh fact
@@ -217,6 +276,12 @@ def run_record_step(product, fresh=False, ctx=None):
         with timed('clone'):
             root = ctx.record_root()
         run_step0(root, product, fresh=fresh)
+        if alone:
+            run_record_tail(root, product)
+        elif not wave_first_on():  # the order before wave-first: the whole record, here
+            run_record_tail(root, product, due=ctx.cadence.due if ctx.cadence else None)
+        else:  # the tail runs after the wave (:func:`run_record_tail_step`)
+            ctx.record_tail_pending = True
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")
@@ -248,7 +313,7 @@ def commit_and_push(ctx):
 def run_shadow(product, fresh=False):
     from asf.tick.shadow import ensure_shadow_clone, commit_local
     backlog_root = ensure_shadow_clone(product)
-    run_step0(backlog_root, product, fresh=fresh)
+    run_record(backlog_root, product, fresh=fresh)
     committed = commit_local(backlog_root, f"tick: state {_stamp()}")
     tables = render_tables(backlog_root, product)
     tables_dir = write_tables(backlog_root, tables)
@@ -346,6 +411,7 @@ class Locks:
 
 
 def cmd_tick(args, root=None):
+    started = time.monotonic()  # the tick's start, for wave_latency_s
     product = env.load_product(getattr(args, 'product', None))
     fresh = getattr(args, 'fresh', False)
 
@@ -394,7 +460,8 @@ def cmd_tick(args, root=None):
             return 0
 
     if not any(owner == 'asf' for _, owner, _ in rows):
-        return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=False))
+        return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=False),
+                           started=started)
     wait_s = DAILY_LOCK_WAIT_S if any(r[0] == 'daily' for r in rows) else 0
     lock = acquire_lock(product, wait_s)
     if lock is None:
@@ -406,7 +473,8 @@ def cmd_tick(args, root=None):
     from asf import dwell
     dwell.mark_tick(product)   # what the dwell watchdog's tick_running ages
     try:
-        return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=True))
+        return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=True),
+                           started=started)
     finally:
         if timer is not None:
             timer.cancel()
@@ -421,9 +489,11 @@ def tick_budget_s(product, step_names):
     return watchdog.seconds_for(product, step_names, budget_s=configured, interval_s=interval)
 
 
-def _run_locked(args, product, fresh, rows, chosen, locks=None):
+def _run_locked(args, product, fresh, rows, chosen, locks=None, started=None):
     locks = locks or Locks(product, held=True)
     ctx = Context(product, fresh=fresh)
+    if started is not None:
+        ctx.started = started
     try:
         return _run_steps(args, product, ctx, rows, chosen, locks)
     except env.ConfigError as e:
@@ -483,6 +553,9 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         if d_owner != 'off' and steps.daily_catch_up_due(product):
             print(steps.daily_catch_up_message(product))
             rows = list(rows) + [(d_step, d_owner, d_command)]
+    rows = wave_first(rows)
+    from asf.tick import cadence as cadence_mod
+    ctx.cadence = cadence_mod.Cadence(product, chosen or [])
     # every asf step's module, imported now rather than lazily as each step runs (B-0135): an
     # install that swaps the package mid-tick can no longer land between two of this tick's own
     # step imports and mix old and new modules in one run
@@ -493,15 +566,33 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     ran = []
     resolved = None
     started = time.monotonic()
-    for step, owner, command in rows:
+    queue = list(rows)
+    while queue:
+        step, owner, command = queue.pop(0)
+        if step == 'wave' and groom_first(ctx, queue):
+            # a new inbox card: the groom mints it before this wave, as it always did
+            groom = next(r for r in queue if r[0] == 'groom')
+            queue.remove(groom)
+            queue[:0] = [groom, (step, owner, command)]
+            continue
+        if step in AFTER_TAIL and ctx.record_tail_pending and not ctx.stale_reason:
+            # the record's tail lands before the background harvest starts reading the record
+            ctx.record_tail_pending = False
+            entry = run_record_tail_step(ctx)
+            if entry:
+                ran.append(entry)
         if owner == 'off':
             print(f"tick: step {step} off (another job runs it)")
             continue
         if step == 'daily' and not steps.daily_due(product, getattr(args, 'daily', False)):
             print("tick: step daily already ran today")
             continue
+        if step in ctx.cadence.n and not ctx.cadence.due(step):
+            continue  # its every_n: the one `deferred` line is the cadence's
         t0 = time.monotonic()
         watchdog.enter(step)
+        if step == 'wave' and ctx.wave_latency_s is None:
+            note_wave_latency(ctx)
         if owner == 'asf':
             print(step_start_line(step, owner), flush=True)
             step_rc = run_asf_step(step, ctx)
@@ -540,6 +631,13 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
                         steps.write_daily_failure(product, f"exited {step_rc}")
         ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
         print(step_end_line(step, ran[-1]['seconds'], ok=not step_rc, owner=owner), flush=True)
+        if step == 'health' and ctx.wave_started_at and ctx.health_freed and not step_rc:
+            # health ended, held or corrected a run after this tick's wave: the seat it freed
+            # and the correction it wrote are this tick's to launch, as when health ran first —
+            # one more wave, after the groom when it is still to run
+            again = next(r for r in rows if r[0] == 'wave')
+            at = next((i + 1 for i, r in enumerate(queue) if r[0] == 'groom'), 0)
+            queue.insert(at, again)
         if step == 'daily' and step_rc == 0:
             steps.write_daily_stamp(product)
         rc = rc or (1 if step_rc else 0)
@@ -551,6 +649,11 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
             # act on a stale board with full confidence, so none of them runs
             print(f"tick: record failed — {ctx.stale_reason or 'see above'}; nothing else ran")
             break
+    if ctx.record_tail_pending and not ctx.stale_reason:  # a clock with no harvest
+        ctx.record_tail_pending = False
+        entry = run_record_tail_step(ctx)
+        if entry:
+            ran.append(entry)
     watchdog.enter('commit')
     if ran and ctx.has_record:
         with locks.record('state commit') as ok:
@@ -561,6 +664,88 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         print(f"RECORD STALE — {ctx.stale_reason}\n")
     summary.run(ctx, chosen, ran=ran)
     return rc
+
+
+DEFAULT_WAVE_FIRST = True
+#: the steps the record's tail runs before: the background harvest reads the record it writes
+AFTER_TAIL = ('harvest', 'batch', 'watchdog', 'daily')
+
+
+def wave_first_on():
+    """``tick.wave_first`` (default true): the wave runs right after the record's fast parts."""
+    v = (env.load_config().get('tick') or {}).get('wave_first')
+    return DEFAULT_WAVE_FIRST if v is None else bool(v)
+
+
+def wave_first(rows):
+    """``rows`` with ``wave`` moved up to right after ``record`` (to the front when the clock
+    carries no record): health, groom and the record's tail no longer stand between a tick's
+    start and its launches (2026-10-06: 22 minutes). When health then ends, holds or corrects a
+    run, the wave runs once more after it (and after the groom), so a freed seat or a correction
+    is still launched by the same tick; a new inbox card has the groom run before the first wave
+    (:func:`groom_first`). Unchanged when ``tick.wave_first`` is false or the clock carries no
+    wave."""
+    names = [r[0] for r in rows]
+    if 'wave' not in names or not wave_first_on():
+        return rows
+    wave = rows[names.index('wave')]
+    rest = [r for r in rows if r[0] != 'wave']
+    at = next((i + 1 for i, r in enumerate(rest) if r[0] == 'record'), 0)
+    return rest[:at] + [wave] + rest[at:]
+
+
+def fresh_inbox(ctx):
+    """True when the record's intake holds a card the groom has not asked about yet (no
+    ``## Question`` block): one it would mint into a card on this tick."""
+    try:
+        d = os.path.join(ctx.record_root(), ctx.product.conventions.intake_dir)
+        names = [n for n in os.listdir(d) if n.endswith('.md')]
+    except (OSError, subprocess.CalledProcessError, env.ConfigError, AttributeError):
+        return False
+    for name in names:
+        try:
+            with open(os.path.join(d, name), encoding='utf-8') as f:
+                if not any(line.strip() == '## Question' for line in f):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def groom_first(ctx, queue):
+    """Whether the groom, still queued behind the wave, runs before it on this tick: only when
+    a new inbox card waits (:func:`fresh_inbox`), so a card filed is launched by the same tick —
+    a tick with nothing new to mint never waits on the groom."""
+    return any(r[0] == 'groom' and r[1] == 'asf' for r in queue) and fresh_inbox(ctx)
+
+
+def note_wave_latency(ctx):
+    """The tick's start → this wave's start: one line, the tick's ``wave_latency_s`` and the
+    product's ``wave-latency.json`` (:mod:`asf.tick.wave_latency`)."""
+    from asf.tick import wave_latency
+    ctx.wave_started_at = _stamp()  # health spares what this wave launches (step_health)
+    ctx.wave_latency_s = round(time.monotonic() - ctx.started, 1)
+    print(f'tick: wave latency {ctx.wave_latency_s:.1f}s (tick start → wave start)', flush=True)
+    wave_latency.write(ctx.product, ctx.wave_latency_s)
+
+
+def run_record_tail_step(ctx):
+    """The record's tail (:func:`run_record_tail`) after the tick's other steps, each part on its
+    cadence; start and end lines as a step's (``record-tail``). A failure is one ``FAILED`` line
+    and ``ok: false`` on the tick line — the next due tick re-derives it; never raised."""
+    t0 = time.monotonic()
+    watchdog.enter('record-tail')
+    print(step_start_line('record-tail', 'asf'), flush=True)
+    ok = True
+    try:
+        run_record_tail(ctx.record_root(), ctx.product, due=ctx.cadence.due)
+    except Exception as e:  # noqa: BLE001 — the tail never costs the tick its commit
+        ok = False
+        detail = (getattr(e, 'stderr', None) or str(e) or type(e).__name__).strip()
+        print(f"[step:record-tail] FAILED {_first_line(detail) or type(e).__name__}")
+    entry = {'step': 'record-tail', 'ok': ok, 'seconds': round(time.monotonic() - t0, 1)}
+    print(step_end_line('record-tail', entry['seconds'], ok=ok), flush=True)
+    return entry
 
 
 def step_start_line(step, owner, pid=None, at=None):
@@ -703,6 +888,8 @@ def tick_line(ctx, ran, now=None):
     seats = getattr(ctx, 'seats', None)
     if isinstance(seats, dict):   # the wave's seat reading (asf.metrics.throughput)
         line['seats'] = seats
+    if getattr(ctx, 'wave_latency_s', None) is not None:
+        line['wave_latency_s'] = ctx.wave_latency_s
     return line
 
 

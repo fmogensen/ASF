@@ -344,6 +344,12 @@ class FailurePathsBase(unittest.TestCase):
                                      f'    refguard: {cls.REFGUARD}\n', 1))
         _fill(os.path.join(cls.sample, 'config.yaml'), os.path.join(cls.home, 'config.yaml'),
               SAMPLE=cls.sample)
+        # these ladders count one wave per tick, after health: the fake runtime's sessions are
+        # dead the moment they launch, so a wave that runs again after health (tick.wave_first)
+        # would see the seat its own first wave just filled as free — a timing a real session,
+        # alive while it works, never has. tests/test_tick_latency.py covers the wave-first order.
+        with open(os.path.join(cls.home, 'config.yaml'), 'a', encoding='utf-8') as f:
+            f.write('\ntick:\n  wave_first: false\n')
         base = dict(os.environ, ASF_HOME=cls.home, PYTHONPATH=ROOT,
                     GIT_AUTHOR_NAME='sample', GIT_AUTHOR_EMAIL='sample@example.com',
                     GIT_COMMITTER_NAME='sample', GIT_COMMITTER_EMAIL='sample@example.com',

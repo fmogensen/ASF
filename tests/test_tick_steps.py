@@ -124,7 +124,8 @@ class OrderedTickTests(StepsTestCase):
                 mock.patch.object(shadow, 'ensure_clone', wraps=shadow.ensure_clone) as clone:
             rc, out = self.run_tick()
         self.assertEqual(rc, 1)
-        self.assertEqual(ran, ['health', 'groom', 'wave', 'prs', 'harvest', 'daily'])
+        # the wave first (tick.wave_first): health and the groom no longer delay a launch
+        self.assertEqual(ran, ['wave', 'health', 'groom', 'prs', 'harvest', 'daily'])
         lines = steps_only(out).splitlines()
         self.assertEqual(lines[0], '[step:health] FAILED health blew up')
         self.assertEqual(lines[1], 'Traceback (most recent call last):')  # §12: the whole of it
@@ -144,7 +145,7 @@ class OrderedTickTests(StepsTestCase):
         tick_log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
         line = json.loads(tick_log.splitlines()[-1])
         self.assertEqual([(s['step'], s['ok']) for s in line['steps']],
-                         [('record', True), ('health', False), ('groom', True), ('wave', True), ('prs', True),
+                         [('record', True), ('wave', True), ('health', False), ('groom', True), ('prs', True),
                           ('harvest', True), ('batch', True), ('watchdog', True), ('daily', True)])
         self.assertEqual(line['product'], 'sample')
         # the line keeps the ticks stream's schema: the scorecard reads it without a KeyError

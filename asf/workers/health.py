@@ -657,7 +657,8 @@ def prune_branches(product, registry, fix=False):
     return found
 
 
-def health(product, fix=False, alive=None, session_source=None, out=print, items=None):
+def health(product, fix=False, alive=None, session_source=None, out=print, items=None,
+           spare=()):
     """Returns a list of ``(job, what, detail)`` transitions/findings. Every judgement is
     :mod:`asf.workers.lifecycle`'s: :func:`~asf.workers.lifecycle.judge` for the ``ended`` line,
     :func:`~asf.workers.lifecycle.reap_verdict` for the worktrees; this function gathers the
@@ -681,6 +682,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
     except Exception as e:  # noqa: BLE001 — a failed sweep leaves the runs as they are
         out(f'heartbeat: sweep failed — {(str(e) or type(e).__name__).splitlines()[0]}')
     sessions = pool_mod.load_sessions(product)
+    # ``spare``: the runs this tick's own wave just launched — judged by the next tick
+    sessions = {job: s for job, s in sessions.items() if job not in spare}
     if items is None:
         items = record_items(product)
     if alive is None:

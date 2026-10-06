@@ -139,6 +139,7 @@ SCHEMAS = {
         'steps': (('list',), []), 'product': (('str', 'null'), None),
         # the wave's seat reading (asf.metrics.throughput.seats_record); absent on a tick with no wave
         'seats': (('dict', 'null'), None),
+        'wave_latency_s': (('num', 'null'), None),   # the tick's start → its wave's start
     },
     'landings': {
         'ts': (('str',), REQ),                 # the trunk commit's committer date, UTC
@@ -1662,7 +1663,89 @@ def account_index(name):
     return 'a?'
 
 
-def sessions_from_registry(product, since_day=None, items=None, state_path=None, logs_dir=None):
+class MeterCache:
+    """:func:`asf.tokens.meter_runs` per job log, kept across ticks in
+    ``state/<product>/meter-cache.json`` and keyed by the log's size and mtime: a log no run has
+    written to since the last backfill is not read again. 2026-10-06: every backfill re-read every
+    job log a product ever wrote (1 GB, 1 200 logs, 650 000 JSON lines) to keep the ones that
+    ended today — most of the backfill's cost, and all of it again under a loaded host.
+
+    A run's result keeps only what :func:`session_event` reads off it (its duration, cost, turns,
+    usage and the first line of its report, capped as the event caps it). A lost or unreadable
+    cache only means every log is read once more."""
+
+    VERSION = 1
+    KEEP = ('duration_ms', 'total_cost_usd', 'num_turns', 'usage', 'type', 'subtype', 'is_error')
+
+    def __init__(self, path):
+        self.path = path
+        self.entries = {}
+        self.dirty = False
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get('version') == self.VERSION \
+                    and isinstance(data.get('logs'), dict):
+                self.entries = data['logs']
+        except (OSError, ValueError):
+            pass
+        self.seen = set()
+
+    @classmethod
+    def for_product(cls, product):
+        return cls(os.path.join(env.state_dir(product), 'meter-cache.json'))
+
+    @classmethod
+    def _slim(cls, result):
+        if not isinstance(result, dict):
+            return result
+        out = {k: result[k] for k in cls.KEEP if k in result}
+        text = result.get('result')
+        if text is not None:
+            # the report's first line as session_event cuts it, and a second line, so its own
+            # strip() leaves the cut line's trailing spaces as it would on the whole report
+            lines = str(text).strip().splitlines()
+            out['result'] = f'{lines[0][:200]}\n…' if lines else text
+        return out
+
+    def meter_runs(self, log_path):
+        self.seen.add(log_path)
+        try:
+            st = os.stat(log_path)
+        except OSError:
+            return []
+        key = [st.st_size, st.st_mtime_ns]
+        hit = self.entries.get(log_path)
+        if isinstance(hit, dict) and hit.get('key') == key:
+            return [tokens.Meter(result=r.get('result'), by_dim=dict(r.get('by_dim') or {}),
+                                 lines=r.get('lines', 0), runs=r.get('runs', 0),
+                                 turns=r.get('turns', 0)) for r in hit.get('runs') or []]
+        meters = tokens.meter_runs(log_path)
+        self.entries[log_path] = {'key': key, 'runs': [
+            {'result': self._slim(m.result), 'by_dim': m.by_dim, 'lines': m.lines,
+             'runs': m.runs, 'turns': m.turns} for m in meters]}
+        self.dirty = True
+        return meters
+
+    def save(self):
+        """Write the cache back, without the logs this pass never asked about."""
+        gone = [p for p in self.entries if p not in self.seen]
+        for p in gone:
+            del self.entries[p]
+        if not (self.dirty or gone):
+            return
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = f'{self.path}.{os.getpid()}.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({'version': self.VERSION, 'logs': self.entries}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+
+def sessions_from_registry(product, since_day=None, items=None, state_path=None, logs_dir=None,
+                           meter_cache=None):
     """Events for every ended session of a product, from its own bookkeeping — one per **run**.
 
     The spine is the registry ``state/<p>/sessions.jsonl``, folded per run
@@ -1694,7 +1777,8 @@ def sessions_from_registry(product, since_day=None, items=None, state_path=None,
         if not any(r.get('ended') for r in rs):
             continue
         log = logs.get(job) or rs[-1].get('log')
-        meters = tokens.meter_runs(log) if log else []
+        read = meter_cache.meter_runs if meter_cache is not None else tokens.meter_runs
+        meters = read(log) if log else []
         # the log's runs and the ledger's, aligned from the newest: a log that lost its oldest
         # runs (or a ledger that never had them) leaves the oldest unpaired, never shifted
         paired = len(rs)
@@ -1862,8 +1946,11 @@ def cmd_backfill(args, root):
     if product is not None:
         for ev in ci_from_api(args.days, args.workflow, {}, items, product=product, conv=conv):
             put('ci', ev)
-        for ev in sessions_from_registry(product, since_day=since, items=items):
+        meter_cache = MeterCache.for_product(product)
+        for ev in sessions_from_registry(product, since_day=since, items=items,
+                                         meter_cache=meter_cache):
             put('sessions', ev)
+        meter_cache.save()
         for stream in ('landings', 'gates'):
             os.makedirs(os.path.join(root, 'metrics', stream), exist_ok=True)
         known = {natural_key('landings', e) for e in read_stream(root, 'landings')}
