@@ -1,21 +1,23 @@
-"""asf.ci_heartbeat — the CI box list's one source, and the doctor's heartbeat row (B-0178).
+"""asf.ci_heartbeat — one source of truth for the boxes a product's ``ci.pool`` declares, and
+whether each has beaten recently (B-0178).
 
-The boxes a product's self-hosted runners live on are its ``ci.pool`` (each runner's ``box:``;
-``ci.pool: discover`` reads the census). Nothing else keeps a copy: a heartbeat watchdog and its
-fleet installer — operator tooling, outside this package — read the list from
-``asf ci boxes --product <p>`` (one ``box=target`` line per box), and ``--missing`` names only the
-boxes with no fresh heartbeat, so an installer targets exactly those. On 2026-10-06 the
-installer's hand-kept copy omitted a box rebuilt two weeks earlier: it ran with no heartbeat
-until the watchdog's alarm was read by hand.
+The CI box list used to exist in three hand-kept copies that drifted: the product's ``ci.pool``,
+the heartbeat watchdog's own BOXES map, and the heartbeat fleet installer's own BOXES line. A box
+rebuilt and re-declared in ``ci.pool`` could still be missing from the installer's copy, so it
+never got the heartbeat agent and ran for weeks with no beat before the watchdog noticed by hand.
 
-A box's ssh target is the operator config's ``ci_heartbeat.targets.<box>``, else the box name
-itself (an ssh alias) — no host or address ever lives in this package or a product file.
-
-Freshness is read off one file the watchdog writes (``ci_heartbeat.seen_file``, default
-``<ASF home>/state/ci-heartbeat/seen.json``): ``{box: epoch}`` (or ``{box: {"at": epoch}}``),
-the newest heartbeat it read from each box. The doctor's ``ci heartbeat`` section is red for a
-pool box with none newer than ``ci_heartbeat.stale_min`` (default :data:`DEFAULT_STALE_MIN`)
-minutes. No pool, or no seen file (no watchdog runs — a host-run CI, a minimal product): no row.
+Fix: :func:`boxes` is the one list — a watchdog, an installer or ``asf ci doctor`` reads it
+instead of keeping a copy; ``asf ci boxes`` is the CLI surface. A box's freshness comes from
+either of two beats, read together by :func:`ages`: an external watchdog's own seen file
+(``ci_heartbeat.seen_file``, :func:`read_seen` — the box list it already had before this fix,
+left running as-is) or ``asf ci heartbeat <box>`` (:func:`record` — a timer + read-only script on
+the box itself, run instead once a box is migrated off the watchdog's own polling; never touches
+the runner, never waits for idle), landing in ``<state dir>/ci-heartbeat.json``. Whichever beat is
+newer wins, so a box moving from one mechanism to the other never reads stale while it still has
+a recent beat from either. :func:`doctor_rows` turns a box silent for more than
+``ci_heartbeat.stale_min`` (default :data:`DEFAULT_STALE_MIN`) minutes into a red doctor row
+naming it; :func:`missing` is the same list an installer would target. No host name or IP is ever
+hand-kept or stored in this module, only what the operator's own ``ci.pool`` already declares.
 """
 import json
 import os
@@ -25,8 +27,11 @@ from asf import env
 
 #: ``ci_heartbeat.stale_min`` when the operator config leaves it out
 DEFAULT_STALE_MIN = 10
-#: the seen file under the ASF home when ``ci_heartbeat.seen_file`` is unset
+#: the seen file under the ASF home when ``ci_heartbeat.seen_file`` is unset (an external
+#: watchdog's own write — this module only reads it)
 SEEN_FILE = os.path.join('state', 'ci-heartbeat', 'seen.json')
+#: the self-report file ``asf ci heartbeat <box>`` writes, under the product's state dir
+HEARTBEAT_FILE = 'ci-heartbeat.json'
 
 
 def _now():
@@ -76,7 +81,8 @@ def seen_path(cfg=None):
 
 
 def read_seen(cfg=None):
-    """``{box: epoch}`` off the seen file, or None when there is none or it is unreadable."""
+    """``{box: epoch}`` off the watchdog's seen file, or None when there is none or it is
+    unreadable."""
     try:
         with open(seen_path(cfg), encoding='utf-8') as f:
             data = json.load(f)
@@ -92,20 +98,63 @@ def read_seen(cfg=None):
     return out
 
 
+def _heartbeat_path(product):
+    return os.path.join(env.state_dir(product), HEARTBEAT_FILE)
+
+
+def _read_heartbeats(product):
+    """``{box: epoch}`` off the self-report file ``asf ci heartbeat <box>`` writes, or ``{}``
+    — a missing file or unreadable JSON are the same "no self-reported beat yet" (never
+    raises)."""
+    try:
+        with open(_heartbeat_path(product), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for box, v in data.items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[str(box)] = float(v)
+    return out
+
+
+def record(product, box, when=None):
+    """One box's self-reported beat: a plain file write to ``<state dir>/ci-heartbeat.json``.
+    This is what ``asf ci heartbeat <box>`` runs on the box itself — timer-driven, read-only to
+    the runner (never touches it, never waits for idle)."""
+    data = _read_heartbeats(product)
+    data[box] = when if when is not None else _now()
+    path = _heartbeat_path(product)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
 def ages(product, now=None, cfg=None):
-    """``[(box, minutes since its newest heartbeat or None)]`` for every pool box; None when no
-    seen file exists (no watchdog to read)."""
+    """``[(box, minutes since its newest heartbeat or None)]`` for every pool box — the newer of
+    the watchdog's seen file and a self-reported beat, box by box. None when neither source has
+    anything to say (no watchdog runs and no box has self-reported)."""
     cfg = _cfg(cfg)
     seen = read_seen(cfg)
-    if seen is None:
+    reported = _read_heartbeats(product)
+    if seen is None and not reported:
         return None
+    seen = seen or {}
     now = now if now is not None else _now()
-    return [(b, (now - seen[b]) / 60 if b in seen else None) for b in boxes(product)]
+    out = []
+    for b in boxes(product):
+        at = max((v for v in (seen.get(b), reported.get(b)) if v is not None), default=None)
+        out.append((b, (now - at) / 60 if at is not None else None))
+    return out
 
 
 def missing(product, now=None, cfg=None):
     """The pool boxes with no heartbeat newer than :func:`stale_min` minutes — every box when
-    no seen file exists (nothing has been read from any of them)."""
+    neither heartbeat source has anything (nothing has been read from any of them)."""
     cfg = _cfg(cfg)
     got = ages(product, now, cfg)
     if got is None:
@@ -116,7 +165,7 @@ def missing(product, now=None, cfg=None):
 
 def doctor_rows(product, now=None, cfg=None):
     """``[(required, ok, detail)]``: one red row per pool box with no heartbeat for over
-    :func:`stale_min` minutes, else one ok row; ``[]`` with no pool or no seen file."""
+    :func:`stale_min` minutes, else one ok row; ``[]`` with no pool and no heartbeat source."""
     cfg = _cfg(cfg)
     got = ages(product, now, cfg)
     if not got:
@@ -151,6 +200,14 @@ def cmd_boxes(args):
     return 0
 
 
+def cmd_heartbeat(args):
+    """``asf ci heartbeat <box>``: record this box's self-reported beat now."""
+    product = env.load_product(args.product)
+    record(product, args.box)
+    print(f'ci heartbeat: {args.box} beat recorded')
+    return 0
+
+
 def register(sub):
     p = sub.add_parser('boxes', help="the CI boxes of ci.pool, one box=target line each — the "
                                      "one list a heartbeat watchdog and installer read")
@@ -159,4 +216,10 @@ def register(sub):
                    help='only the boxes with no heartbeat in the last ci_heartbeat.stale_min min')
     p.add_argument('--json', action='store_true', help='a list of {box, target, age_min}')
     p.set_defaults(run=cmd_boxes)
+    h = sub.add_parser('heartbeat', help="record a box's self-reported beat now (asf ci "
+                                        "heartbeat <box>) — the one write a box's own timer "
+                                        "makes instead of the watchdog polling it")
+    env.add_product_arg(h)
+    h.add_argument('box', help='the box name, as declared in ci.pool')
+    h.set_defaults(run=cmd_heartbeat)
     return p
