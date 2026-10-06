@@ -226,9 +226,10 @@ def _warn_standing_overlaps(root, item_id, product):
                   "(standing before this set; not refused)", file=sys.stderr)
 
 
-def set_typed(rec, updates, writer='set', product=None):
+def set_typed(rec, updates, writer='set', product=None, history=()):
     """Write ``updates`` (typed fields) onto the card ``rec`` (a ``load_items`` record) through the
     parser: rendered on a scratch copy, parsed back, written only when every field round-trips.
+    ``history``: lines appended to the card's ``## History`` in the same write (``asf retire``).
     ``product``: passed to the record stage's I3 check, so a ``writes:`` update that only adds a
     path ``product``'s ``conventions.shared_paths`` covers is never refused as intersecting
     another Active Task's footprint. Returns None on success, else the reason the card is
@@ -241,6 +242,14 @@ def set_typed(rec, updates, writer='set', product=None):
         frontmatter.write_typed(scratch, updates)
         with open(scratch, encoding='utf-8') as f:
             new_text = f.read()
+        if history:
+            from asf.record.ingest import append_history_lines
+            try:
+                meta, body = frontmatter.parse(new_text, path=rec['relpath'])
+            except frontmatter.FrontmatterError:
+                pass  # the round-trip below names the error
+            else:
+                new_text = frontmatter.render(meta, append_history_lines(body, list(history)))
         try:
             meta, _body = frontmatter.parse(new_text, path=rec['relpath'])
         except frontmatter.FrontmatterError as e:

@@ -27,6 +27,7 @@ COMMANDS = {
     'new':                ('mint a work item and print its id', RECORD, None),
     'inbox':               ('file an untyped note for the next groom to type', RECORD, None),
     'set':                  ('set typed fields on a card', RECORD, None),
+    'retire':               ('record an item as landed by hand and take it off the board, a card or an unread note', RECORD, None),
     'reopen':               ('reopen an item closed in error and re-derive its state from the evidence', RECORD, None),
     'untick':               ("clear a Story's acceptance tick so the line must be proved again", RECORD, None),
     'audit-proofs':         ('list every done Story with an acceptance line no test proved', RECORD, '--apply'),
