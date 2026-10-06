@@ -134,6 +134,13 @@ def run_check(root, rule):
     a violation of the rule: a slow or crashed check is not evidence the product broke the
     rule. A card whose script is missing everywhere stays a violation (B-0021) — that is
     the record pointing at nothing, which the product's record can fix.
+
+    A violation line may end in two optional trailing fields, ``sev=S1|S2|S3`` and
+    ``sig=<key>``. They are the filer's, not this module's: this function neither parses nor
+    strips them, and a line carrying neither is a line like any other. ``sev=`` is that
+    place's own severity; ``sig=`` gives it a stable key from outside this record — an alert
+    number, a box, a port — so the filer can make it its own Bug instead of folding it into
+    one Bug per rule (``asf.tick.file_bugs.line_fields``).
     """
     rid = rule['id']
     script = rule.get('check')
