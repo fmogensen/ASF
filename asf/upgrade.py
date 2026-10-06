@@ -391,6 +391,14 @@ def upgrade_command(url, ref):
     return ['pipx', 'install', '--force', f'git+{url}@{ref}']
 
 
+def _budget(deadline, cap=10):
+    """A subprocess's timeout: ``cap`` seconds, or what is left before ``deadline`` (a
+    ``time.monotonic`` value) when that is less — never under one second."""
+    if deadline is None:
+        return cap
+    return max(1, min(cap, deadline - time.monotonic()))
+
+
 def _out(run, cmd, timeout=60):
     """stdout of ``cmd``, or ``None`` when it fails or cannot start."""
     try:
@@ -454,13 +462,13 @@ def _real(path):
     return os.path.realpath(os.path.expanduser(path))
 
 
-def foreign_homes(pids, run=subprocess.run):
+def foreign_homes(pids, run=subprocess.run, deadline=None):
     """The pids whose environment names an ASF home other than :data:`asf.env.ASF_HOME` —
     ``ASF_HOME``, else ``HOME``/.ASF, exactly as :mod:`asf.env` resolves it. Read from
     ``ps eww`` (the command followed by its environment); a process whose environment cannot be
     read is not foreign — an unknown process still holds the floor."""
     text = _out(run, ['ps', 'eww', '-o', 'pid=,command=', '-p', ','.join(str(p) for p in pids)],
-                timeout=10) or ''
+                timeout=_budget(deadline)) or ''
     ours = _real(env.ASF_HOME)
     foreign = set()
     for ln in text.splitlines():
@@ -477,10 +485,10 @@ def foreign_homes(pids, run=subprocess.run):
     return foreign
 
 
-def describe(pids, run=subprocess.run):
+def describe(pids, run=subprocess.run, deadline=None):
     """``pid (age) command`` for each pid, for the lines that say what an upgrade waits on."""
     text = _out(run, ['ps', '-o', 'pid=,etime=,command=', '-p', ','.join(str(p) for p in pids)],
-                timeout=10) or ''
+                timeout=_budget(deadline)) or ''
     seen = {}
     for ln in text.splitlines():
         parts = ln.split(None, 2)
@@ -498,11 +506,13 @@ def drain(others, wait_s, run=subprocess.run, out=print, sleep=time.sleep):
     out(f'upgrade: waiting up to {int(wait_s)}s for {len(others)} asf process(es) to end:')
     for line in describe(others, run):
         out(f'  {line}')
-    waited = 0
+    waited, start = 0, time.monotonic()
     while others and waited < wait_s:
         step = min(DRAIN_POLL_S, wait_s - waited)
         sleep(step)
-        waited += step
+        # the wait counts what the sleeps asked or what the clock says, whichever is more: a
+        # poll's pgrep and a sleep that overslept are part of the bound
+        waited = max(waited + step, time.monotonic() - start)
         others = other_ticks(run)
     if not others:
         out(f'upgrade: the floor drained after {int(waited)}s')
@@ -753,7 +763,7 @@ def _install(ref, run, out, pin=None):
 # ``asf-factory-<p>-<sha7>``. A move installs the target venv beside the running one (or finds it
 # already on disk — then it is a local switch, no network), requires positive CI evidence on the
 # exact sha, and then quiesces the product before it re-points anything. Drain first: the
-# drain marker (:func:`draining`) stops new launches and new merge-queue cuts, while the clocks
+# drain marker (:func:`draining`) stops new merge-queue cuts (never a launch), while the clocks
 # keep running — the tick's background harvest is what lands a batch in flight, and the ci
 # queue admits its run — until no batch is in flight. Only then the hold: record every clock's
 # pause (no bootout yet — that kills a running tick) and wait until no tick, ``ci queue`` pass or
@@ -767,6 +777,12 @@ def _install(ref, run, out, pin=None):
 
 #: ``asf upgrade --product`` waits this long for the product's floor to drain before refusing
 DEFAULT_MOVE_WAIT_S = 900
+#: what a drain may overrun its ``--wait-s`` by (one last poll, the refusal's resume); a drain
+#: marker past its recorded deadline plus this is a hung move's: every reader drops it
+DRAIN_MARGIN_S = 60
+#: ``upgrade.drain_marker_max_s``: the age past which a drain marker that records no deadline
+#: (an older build's) is dropped
+DEFAULT_DRAIN_MARKER_MAX_S = DEFAULT_MOVE_WAIT_S + DRAIN_MARGIN_S
 #: the product's processes a move waits out: its ticks, its ``ci queue`` passes (the queue clock
 #: pushes and cancels runs) and its background harvest — by interpreter argv, as
 #: :data:`TICK_PATTERN`, but also the suffixed ``asf-<p>-<sha7>`` and dispatcher entry points
@@ -777,23 +793,46 @@ MOVE_DEFERRED = 3
 RED_CONCLUSIONS = ('failure', 'timed_out', 'cancelled', 'startup_failure')
 
 
-#: the tick steps that still run while a move drains: they land what is in flight (the
-#: ``harvest`` step's background run judges the merge-queue batches) and launch nothing new
-DRAIN_STEPS = ('record', 'health', 'harvest')
 #: a pause record's ``reason`` written by a move (:meth:`MoveOps.pause`)
 PAUSE_REASON = 'upgrade'
 
 
 def draining_path(product):
-    """``state/<product>/upgrade-draining.json`` — a move's drain marker: no new launch and no
-    new merge-queue cut while the batches in flight land. Its own file, not the pending marker:
-    a clock on an older build reads the pending marker as a full hold, which would stop the very
-    harvest that lands the batch."""
+    """``state/<product>/upgrade-draining.json`` — a move's drain marker: no new merge-queue cut
+    while the batches in flight land; launches go on (a drain never holds a session). Its own
+    file, not the pending marker: a clock on an older build reads the pending marker as a full
+    hold, which would stop the very harvest that lands the batch."""
     return os.path.join(env.ASF_HOME, 'state', product, 'upgrade-draining.json')
 
 
-def _mark_draining(product, sha, now=None):
-    _write_json(draining_path(product), {'sha': sha, 'pid': os.getpid(), 'at': now or time.time()})
+def _mark_draining(product, sha, now=None, wait_s=None):
+    """The drain marker; with ``wait_s`` it records its ``deadline`` (epoch seconds), past which
+    (plus :data:`DRAIN_MARGIN_S`) every reader drops it (:func:`draining`)."""
+    at = now or time.time()
+    data = {'sha': sha, 'pid': os.getpid(), 'at': at}
+    if wait_s is not None:
+        data['deadline'] = at + max(0, wait_s)
+    _write_json(draining_path(product), data)
+
+
+def drain_marker_max_s(cfg=None):
+    """``upgrade.drain_marker_max_s``: the age past which a drain marker with no ``deadline``
+    is dropped (default :data:`DEFAULT_DRAIN_MARKER_MAX_S`)."""
+    return _config_number('drain_marker_max_s', DEFAULT_DRAIN_MARKER_MAX_S, cfg)
+
+
+def _drain_expired(data, now=None):
+    """True when a drain marker outlived its move: past its ``deadline`` plus
+    :data:`DRAIN_MARGIN_S`, or — an older build's, with no deadline — older than
+    :func:`drain_marker_max_s` (or with no readable ``at``)."""
+    now = now or time.time()
+    deadline = data.get('deadline')
+    if isinstance(deadline, (int, float)) and not isinstance(deadline, bool):
+        return now > deadline + DRAIN_MARGIN_S
+    at = data.get('at')
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return True
+    return now - at > drain_marker_max_s()
 
 
 def clear_draining(product):
@@ -805,14 +844,15 @@ def clear_draining(product):
 
 def draining(product):
     """The drain marker of a move of ``product`` that is still running, else ``None`` — a
-    marker whose process is gone (the move was killed) is removed."""
+    marker whose process is gone (the move was killed) or that is past its deadline (a hung
+    move, :func:`_drain_expired`) is removed."""
     try:
         with open(draining_path(product), encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, ValueError):
         return None
     pid = data.get('pid') if isinstance(data, dict) else None
-    if not isinstance(pid, int) or pid <= 0 or not _alive(pid):
+    if not isinstance(pid, int) or pid <= 0 or not _alive(pid) or _drain_expired(data):
         clear_draining(product)
         return None
     return data
@@ -872,31 +912,32 @@ def in_flight(product_name):
     return [b.get('ref') for b in merge_queue.load(state)['batches']]
 
 
-def product_processes(product_name, run=subprocess.run, me=None):
+def product_processes(product_name, run=subprocess.run, me=None, deadline=None):
     """Pids of ``product_name``'s ticks, ``ci queue`` passes and background harvests under this
     ASF home, other than this process (and its parent)."""
     me = me if me is not None else {os.getpid(), os.getppid()}
-    text = _out(run, ['pgrep', '-f', MOVE_PATTERN], timeout=10) or ''
+    text = _out(run, ['pgrep', '-f', MOVE_PATTERN], timeout=_budget(deadline)) or ''
     pids = [int(x) for x in text.split() if x.isdigit() and int(x) not in me]
     if not pids:
         return []
     listing = _out(run, ['ps', '-ww', '-o', 'pid=,command=', '-p',
-                         ','.join(str(p) for p in pids)], timeout=10) or ''
+                         ','.join(str(p) for p in pids)], timeout=_budget(deadline)) or ''
     mine = re.compile(rf'--product[ =]{re.escape(product_name)}( |$)')
     ours = []
     for ln in listing.splitlines():
         parts = ln.strip().split(None, 1)
         if len(parts) == 2 and parts[0].isdigit() and mine.search(parts[1]):
             ours.append(int(parts[0]))
-    foreign = foreign_homes(ours, run) if ours else set()
+    foreign = foreign_homes(ours, run, deadline) if ours else set()
     return [p for p in ours if p not in foreign]
 
 
-def floor_busy(product_name, run=subprocess.run):
-    """What keeps ``product_name``'s floor from being quiet — one line each — else ``[]``."""
+def floor_busy(product_name, run=subprocess.run, deadline=None):
+    """What keeps ``product_name``'s floor from being quiet — one line each — else ``[]``.
+    Every subprocess gets at most what is left before ``deadline`` (``time.monotonic``)."""
     state = os.path.join(env.ASF_HOME, 'state', product_name)
-    pids = product_processes(product_name, run)
-    busy = [f'process {line}' for line in describe(pids, run)] if pids else []
+    pids = product_processes(product_name, run, deadline=deadline)
+    busy = [f'process {line}' for line in describe(pids, run, deadline)] if pids else []
     if os.path.exists(os.path.join(state, 'harvest.lock')):
         from asf.harvest import harvest
         if harvest.try_lock_held(state):
@@ -1174,7 +1215,7 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
         for line in lift_stale_pauses(product_name, ops.resume):
             out(line)
     clocks = [c for c in ops.clock_names(product_name) if c not in ops.paused(product_name)]
-    steps += [f'drain: no new launch or merge-queue cut; the clocks run until no batch is in '
+    steps += [f'drain: no new merge-queue cut; the clocks run until no batch is in '
               f'flight (up to {int(wait_s)}s in all; else refuse, nothing paused)',
               f'pause clocks {", ".join(clocks) or "(none)"} (the record: no new tick starts)',
               f'quiet: no tick / ci queue / harvest of {product_name}, harvest.lock free '
@@ -1314,7 +1355,7 @@ def _drain_and_hold(product_name, sha, clocks, wait_s, by, run, out, sleep, ops,
     """Drain, then hold: the seconds waited once the floor is quiet with ``clocks`` paused (each
     one appended to ``paused``), else ``None`` after the refusal's lines.
 
-    1. the drain: the drain marker stops new launches and new merge-queue cuts; the clocks run
+    1. the drain: the drain marker stops new merge-queue cuts (never a launch); the clocks run
        on, so the batches in flight land (or drop) — a paused clock never lands one.
     2. the hold: the move's marker parks the product's ticks, ci queue passes and harvests
        (:func:`waiting`, :func:`moving`), and the pause record keeps every render from loading
@@ -1323,26 +1364,39 @@ def _drain_and_hold(product_name, sha, clocks, wait_s, by, run, out, sleep, ops,
        out first, and the drain never saw the tick it had just killed mid-wave).
     3. a batch cut meanwhile — by a pass already running when the hold went up, or a clock on
        an older build that does not read the drain marker — lifts the hold: back to 1."""
-    _mark_draining(product_name, sha)
-    waited = 0
+    # one budget for every wait below — the in-flight wait, the floor's polls, each re-cut
+    # cycle's pause and resume: spent is what the sleeps asked or what the clock says, whichever
+    # is more, so a slow poll or a sleep that overslept never stretches the drain (#32)
+    wait_s = max(0, wait_s or 0)
+    start = time.monotonic()
+    deadline = start + wait_s
+    asked = 0
+    _mark_draining(product_name, sha, wait_s=wait_s)
+
+    def spent():
+        return max(asked, time.monotonic() - start)
+
+    def left():
+        return wait_s - spent()
 
     def nap():
-        nonlocal waited
-        step = min(DRAIN_POLL_S, wait_s - waited)
-        sleep(step)
-        waited += step
+        nonlocal asked
+        step = min(DRAIN_POLL_S, left())
+        if step > 0:
+            sleep(step)
+            asked += step
 
     while True:
         refs = in_flight(product_name)
         if refs:
-            out(f'upgrade: draining {product_name} — no new launch or cut; the clocks run until '
-                f'the batch(es) in flight land ({", ".join(refs)}), up to {int(wait_s - waited)}s')
-        while refs and waited < wait_s:
+            out(f'upgrade: draining {product_name} — no new merge-queue cut; the clocks run until '
+                f'the batch(es) in flight land ({", ".join(refs)}), up to {int(left())}s')
+        while refs and left() > 0:
             nap()
             refs = in_flight(product_name)
         if refs:
             out(f'upgrade: refused — the floor of {product_name} is still busy after '
-                f'{int(waited)}s; nothing paused, nothing moved:')
+                f'{int(spent())}s; nothing paused, nothing moved:')
             out(f'  merge-queue batch in flight ({", ".join(refs)})')
             return None
         _mark(product_name, sha)
@@ -1350,17 +1404,17 @@ def _drain_and_hold(product_name, sha, clocks, wait_s, by, run, out, sleep, ops,
         paused[:] = list(clocks)
         for line in lines:
             out(line)
-        busy = floor_busy(product_name, run)
+        busy = floor_busy(product_name, run, deadline)
         if busy:
-            out(f'upgrade: waiting up to {int(wait_s - waited)}s for the floor of {product_name}:')
+            out(f'upgrade: waiting up to {int(max(0, left()))}s for the floor of {product_name}:')
             for line in busy:
                 out(f'  {line}')
-        while busy and waited < wait_s:
+        while busy and left() > 0:
             nap()
-            busy = floor_busy(product_name, run)
+            busy = floor_busy(product_name, run, deadline)
             if in_flight(product_name):
                 break
-        if busy and in_flight(product_name) and waited < wait_s:
+        if busy and in_flight(product_name) and left() > 0:
             out(f'upgrade: a batch was cut while the floor of {product_name} went quiet — '
                 'the clocks resume until it lands')
             clear_pending(product_name)
@@ -1370,11 +1424,14 @@ def _drain_and_hold(product_name, sha, clocks, wait_s, by, run, out, sleep, ops,
             continue
         if busy:
             out(f'upgrade: refused — the floor of {product_name} is still busy after '
-                f'{int(waited)}s; nothing moved:')
+                f'{int(spent())}s; nothing moved:')
             for line in busy:
                 out(f'  {line}')
             return None
-        return waited
+        # the drain is over: its marker goes now, not after the switch — the move's hold and the
+        # paused clocks keep the floor quiet through it
+        clear_draining(product_name)
+        return spent()
 
 
 def _host_clocks(ops, out):

@@ -667,25 +667,22 @@ class LegacyStepTests(TickTestCase):
 
 
 class DrainingMoveTests(TickTestCase):
-    """While a move drains (``asf upgrade --product``), the tick launches nothing new: only the
-    steps that land what is in flight run — the background harvest judges the batches."""
+    """While a move drains (``asf upgrade --product``), the tick runs every step: a drain holds
+    only new merge-queue cuts, never a launch (#32)."""
     product_yaml = ('steps:\n'
                     '  health: python3 -c \'print("health ran")\'\n'
                     '  wave: python3 -c \'print("wave launched")\'\n'
                     '  prs: off\n'
                     '  batch: off\n')
 
-    def test_a_draining_move_keeps_the_landing_steps_and_drops_the_launches(self):
+    def test_a_draining_move_keeps_every_step_and_the_launches(self):
         from asf import upgrade
         upgrade._write_json(upgrade.draining_path('sample'),
                             {'sha': 'f' * 40, 'pid': os.getpid(), 'at': time.time()})
+        self.addCleanup(upgrade.clear_draining, 'sample')
         rc, out = self.run_tick(steps='health,wave')
         self.assertEqual(rc, 0, out)
         self.assertIn('health ran', out)
-        self.assertNotIn('wave launched', out)
-        self.assertIn('drain', out)
-        upgrade.clear_draining('sample')
-        rc, out = self.run_tick(steps='health,wave')
         self.assertIn('wave launched', out)
 
 
