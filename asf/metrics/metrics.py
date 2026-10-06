@@ -149,6 +149,7 @@ SCHEMAS = {
         'conclusion': (('str',), REQ), 'attempt': (('int',), REQ), 'minutes': (('num',), REQ),
         'jobs': (('list',), REQ), 'cancelled_minutes': (('num',), 0), 'superseded': (('bool',), False),
         'items': (('list', 'null'), MATCH), 'item_reason': (('str', 'null'), None),
+        'wall_minutes': (('num',), 0), 'queue_s': (('num',), 0),
     },
     'sessions': {
         'ts': (('str',), TS), 'task': (('str',), REQ), 'account': (('str',), REQ), 'model': (('str', 'null'), None),
@@ -191,6 +192,9 @@ SCHEMAS = {
 }
 JOB_SCHEMA = {'name': (('str',), REQ), 'conclusion': (('str',), REQ), 'runner': (('str', 'null'), None),
               'minutes': (('num',), REQ), 'failed_step': (('str', 'null'), None),
+              # the job's own run, in seconds — None when either stamp is absent (D5's fallback
+              # in asf.ci_measure.readings keys off exactly that)
+              'seconds': (('num', 'null'), None),
               # seconds from the job's creation to a runner picking it up (the CI queue wait)
               'queued_s': (('num', 'null'), None),
               # the job's limit in minutes — its `timeout-minutes`, else the host's default;
@@ -2062,6 +2066,14 @@ def mins(a, b):
         return 0
 
 
+def secs(a, b):
+    """Seconds between two stamps, to 1 dp — `None` on a missing one, where `mins` returns 0."""
+    try:
+        return round(max(0.0, (parse_ts(b) - parse_ts(a)).total_seconds()), 1)
+    except Exception:
+        return None
+
+
 def queued_s(created, started):
     """Seconds a job waited for a runner, ``None`` when either stamp is missing."""
     a, b = parse_ts(created), parse_ts(started)
@@ -2245,6 +2257,7 @@ def ci_from_api(days, workflows, batch_prs, items, repo_slug=None, product=None,
         js = [{'name': j['name'], 'conclusion': j.get('conclusion') or 'unknown', 'runner': j.get('runner_name'),
                'minutes': mins(j.get('started_at'), j.get('completed_at')) if j.get('started_at') and j.get('completed_at') else 0,
                'failed_step': (j.get('failed') or [None])[0],
+               'seconds': secs(j.get('started_at'), j.get('completed_at')),
                'queued_s': queued_s(j.get('created_at'), j.get('started_at')),
                'limit': _limit_of(j['name'], limits)} for j in jobs]
         branch = r['head_branch'] or ''
@@ -2267,6 +2280,8 @@ def ci_from_api(days, workflows, batch_prs, items, repo_slug=None, product=None,
             'minutes': sum(j['minutes'] for j in js), 'jobs': js,
             'cancelled_minutes': sum(j['minutes'] for j in js if j['conclusion'] == 'cancelled'),
             'superseded': superseded,
+            'wall_minutes': mins(r['created_at'], r['updated_at']),
+            'queue_s': max([j['queued_s'] for j in js if j['queued_s'] is not None], default=0),
             HINTS_KEY: hints})
     if report is not None:
         report.update(since=since, listed=len(runs), held=len(runs) - len(fresh), fetched=len(fresh),

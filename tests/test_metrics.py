@@ -174,6 +174,18 @@ class Schema(Base):
         self.assertEqual((metrics.validate('ticks', tick, self.items)['steps'],
                           metrics.validate('ticks', tick, self.items)['product']), ([], None))
 
+    def test_ci_run_and_job_figures_default_and_validate(self):
+        ev = metrics.validate('ci', ci_event(1), self.items)
+        self.assertEqual((ev['wall_minutes'], ev['queue_s']), (0, 0))
+        j = ev['jobs'][0]
+        self.assertIsNone(j['seconds'])
+        self.assertIsNone(j['queued_s'])
+        # R5: a job dict carrying both figures validates — this raised SchemaError before JOB_SCHEMA grew them
+        ev = metrics.validate('ci', ci_event(2, jobs=[dict(job('x'), seconds=12.3, queued_s=4.5)],
+                                             wall_minutes=9, queue_s=4.5), self.items)
+        self.assertEqual((ev['jobs'][0]['seconds'], ev['jobs'][0]['queued_s']), (12.3, 4.5))
+        self.assertEqual((ev['wall_minutes'], ev['queue_s']), (9, 4.5))
+
     def test_ts_must_be_utc_iso(self):
         self.bad('ci', ci_event(1, ts='2026-09-21 10:00'), "'ts' must be a UTC ISO timestamp")
         self.bad('ci', ci_event(1, ts='2026-09-21T10:00:00+02:00'), "'ts' must be a UTC ISO timestamp")
@@ -301,6 +313,74 @@ class CiWorkflowSelection(Base):
                           self.make_run(11, 'tests', 'cloud/x', event='pull_request', pr=[623],
                                   created='2026-09-21T02:00:00Z')])
         self.assertFalse(evs[10]['superseded'])
+
+
+class CiFigures(Base):
+    """`ci_from_api` carries the four figures `ci_measure` and `ci_census` already read: per job
+    the seconds it ran and the seconds it waited for a runner, per run its wall clock and the
+    worst wait any of its jobs suffered."""
+
+    RUN = {'id': 20, 'name': 'ci', 'head_branch': 'cloud/x', 'head_sha': 'a' * 40, 'conclusion': 'success',
+           'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:12:00Z', 'run_attempt': 1, 'pr': []}
+
+    def fetch_one(self, jobs, run=None):
+        run = run or self.RUN
+
+        def fake(args, timeout=300):
+            joined = ' '.join(args)
+            if '/jobs' in joined:
+                return jobs, True
+            return [run], True
+        with mock.patch.object(metrics, 'gh_lines_answered', side_effect=fake), \
+                mock.patch.object(metrics, 'pr_info', return_value=None):
+            evs = metrics.ci_from_api(2, 'ci', {}, self.items, repo_slug='sample/sample')
+        self.assertEqual(len(evs), 1)
+        return evs[0]
+
+    def test_job_seconds_and_queued_s_come_from_their_stamps(self):
+        ev = self.fetch_one([{'name': 'tests', 'conclusion': 'success', 'runner_name': 'box1',
+                              'created_at': '2026-09-21T01:00:00Z', 'started_at': '2026-09-21T01:02:00Z',
+                              'completed_at': '2026-09-21T01:07:00Z', 'failed': []}])
+        j = ev['jobs'][0]
+        self.assertEqual((j['seconds'], j['queued_s'], j['minutes']), (300.0, 120.0, 5))
+
+    def test_a_sub_minute_job_still_reads_zero_minutes(self):
+        # D4: minutes floors to whole minutes and does not move; seconds sits beside it
+        ev = self.fetch_one([{'name': 'tests', 'conclusion': 'success', 'runner_name': 'box1',
+                              'created_at': '2026-09-21T01:00:00Z', 'started_at': '2026-09-21T01:00:00Z',
+                              'completed_at': '2026-09-21T01:00:40Z', 'failed': []}])
+        j = ev['jobs'][0]
+        self.assertEqual((j['seconds'], j['minutes']), (40.0, 0))
+
+    def test_job_figures_are_none_without_their_own_stamps(self):
+        ev = self.fetch_one([{'name': 'no-completion', 'conclusion': 'cancelled', 'runner_name': 'box1',
+                              'created_at': '2026-09-21T01:00:00Z', 'started_at': '2026-09-21T01:02:00Z',
+                              'completed_at': None, 'failed': []},
+                             {'name': 'no-creation', 'conclusion': 'success', 'runner_name': 'box2',
+                              'created_at': None, 'started_at': '2026-09-21T01:02:00Z',
+                              'completed_at': '2026-09-21T01:07:00Z', 'failed': []}])
+        js = {j['name']: j for j in ev['jobs']}
+        self.assertIsNone(js['no-completion']['seconds'])
+        self.assertEqual(js['no-completion']['queued_s'], 120.0)
+        self.assertIsNone(js['no-creation']['queued_s'])
+        self.assertEqual(js['no-creation']['seconds'], 300.0)
+
+    def test_run_queue_s_is_the_max_of_its_jobs_not_their_sum(self):
+        # D21: two jobs that queued in parallel — the sum double-counts the overlap
+        ev = self.fetch_one([{'name': 'a', 'conclusion': 'success', 'runner_name': 'box1',
+                              'created_at': '2026-09-21T01:00:00Z', 'started_at': '2026-09-21T01:01:00Z',
+                              'completed_at': '2026-09-21T01:05:00Z', 'failed': []},
+                             {'name': 'b', 'conclusion': 'success', 'runner_name': 'box2',
+                              'created_at': '2026-09-21T01:00:00Z', 'started_at': '2026-09-21T01:01:30Z',
+                              'completed_at': '2026-09-21T01:05:00Z', 'failed': []}])
+        self.assertEqual(ev['queue_s'], 90.0)
+        self.assertEqual(ev['wall_minutes'], 12)   # the run's own created_at..updated_at, D4's shape
+
+    def test_run_queue_s_defaults_to_zero_with_no_job_wait(self):
+        ev = self.fetch_one([{'name': 'a', 'conclusion': 'success', 'runner_name': 'box1',
+                              'created_at': None, 'started_at': '2026-09-21T01:01:00Z',
+                              'completed_at': '2026-09-21T01:05:00Z', 'failed': []}])
+        self.assertEqual(ev['queue_s'], 0)
 
 
 class JobCauseImport(Base):
