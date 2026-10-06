@@ -33,7 +33,7 @@ import json
 import os
 import time
 
-from asf import github, gitops
+from asf import connectors, github, gitops
 from asf.facts import cache as facts_cache
 
 STATE_FILE = 'stale-ref.json'
@@ -174,14 +174,14 @@ def refresh(product, slug, number, head, tip, names, out=print, now=None):
         why = (f'ASF: the red {", ".join(names)} ran on a merge ref of {trunk} from before '
                f'{trunk} moved to {tip[:9]}; a re-run would replay it. Closed and reopened for a '
                f'fresh run on today\'s {trunk} (asf.stale_ref).')
-        r = github.gh(['pr', 'close', str(number), '-R', slug, '--comment', why])
+        r = connectors.forge().close_pr(slug, number, comment=why)
         if not r.ok:
             out(f'stale merge ref: closing PR #{number} for a fresh run refused — '
                 f'{(r.stderr or r.reason).strip()[-200:]}')
             return None
-        r = github.gh(['pr', 'reopen', str(number), '-R', slug])
+        r = connectors.forge().reopen_pr(slug, number)
         if not r.ok:
-            r = github.gh(['pr', 'reopen', str(number), '-R', slug])
+            r = connectors.forge().reopen_pr(slug, number)
         if not r.ok:
             out(f'stale merge ref: PR #{number} closed but its reopen was refused — '
                 f'{(r.stderr or r.reason).strip()[-200:]}; reopen it')

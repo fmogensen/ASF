@@ -384,12 +384,13 @@ def auth_env_values(acct, product_auth_env=None):
     product_auth_env = product_auth_env or {}
     merged = dict(getattr(acct, 'auth_env', None) or {})
     merged.update(product_auth_env)
+    from asf import connectors
+    secrets = connectors.get('secrets')
     for var, path in merged.items():
         path = os.path.expanduser(path)
         why = None
         try:
-            with open(path, encoding='utf-8') as f:
-                value = f.read().strip()
+            value = secrets.read(path)
             if not value:
                 why = 'is empty'
         except FileNotFoundError:

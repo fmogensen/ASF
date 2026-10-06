@@ -20,7 +20,7 @@ the check no verdict on that sha, the CI queue's trunk relief cancels nothing, `
 neither passes nor reds the skipped check. ``None`` is falsy, so a caller that only asks "is it
 attested?" still never counts an unreadable sha as attested.
 """
-from asf import github
+from asf import connectors
 
 #: the commit status context a landed batch sha carries (``conventions.ci.attest_status``'s
 #: default); :data:`asf.merge_queue.ATTEST_CONTEXT` is this one
@@ -56,7 +56,7 @@ def state_of(combined, context_name=CONTEXT):
 
 def _read(path):
     """The parsed JSON of ``gh api <path>`` through :mod:`asf.github`, or None when Unknown."""
-    r = github.api(path)
+    r = connectors.forge().api(path)
     return r.data if r.ok else None
 
 
@@ -64,7 +64,7 @@ def attested(slug, sha, context_name=CONTEXT, read=None):
     """True when ``sha`` carries ``context_name`` = ``success``, False when it does not (another
     state, or no such status), ``None`` when the status could not be read — Unknown, never
     False. ``read(path)`` returns the parsed JSON of a ``gh api`` path (None when unreadable);
-    the default reads through :func:`asf.github.api`. Never raises."""
+    the default reads through the active forge connector's ``api``. Never raises."""
     if not slug or not sha or not context_name:
         return False
     key = (slug, sha, context_name)

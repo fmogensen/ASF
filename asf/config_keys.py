@@ -11,6 +11,7 @@ missing here, and when a registered key no code mentions.
 
 KNOWN_CONFIG_KEYS = frozenset({
     'default_product', 'schema_version', 'legacy_paths',
+    'connectors.*',             # asf.connectors: connectors.<kind> per kind
     'scheduler.kind', 'scheduler.provider', 'scheduler.label_prefix', 'scheduler.legacy_labels',
     'scheduler.legacy_cron', 'scheduler.launchd_label', 'scheduler.occupancy',
     'scheduler.interval_s',     # no longer read; doctor's scheduler row says so

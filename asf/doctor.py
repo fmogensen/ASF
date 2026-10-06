@@ -837,9 +837,9 @@ _CLI_TOOLS = [
 def _gh_auth(timeout=10):
     """``(ok, detail)`` of ``gh auth status`` read through :func:`asf.github.gh`: ok only on a
     real answer; an Unknown (not runnable, a timeout, a rate limit) is never ok."""
-    from asf import gh_limit, github
+    from asf import connectors, gh_limit
     try:
-        r = github.gh(['auth', 'status'], timeout=timeout)
+        r = connectors.forge().auth_status(timeout=timeout)
     except gh_limit.RateLimited:
         return False, 'rate limited'
     detail = (r.stdout or r.stderr or '').strip().splitlines()
