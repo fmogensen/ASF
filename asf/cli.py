@@ -218,6 +218,17 @@ def build_parser():
                             "[a, b]")
     p_set.add_argument('--product')
 
+    p_retire = sub.add_parser(
+        'retire', help='take an item that landed by hand off the board: a card gets removed: '
+                       '(and landed: for a sha), a note nobody groomed moves to done/')
+    p_retire.add_argument('item', help='a card id, or an intake note: its file name (with or '
+                                       'without .md) or its path')
+    p_retire.add_argument('--why', required=True, help='the reason, written into the record')
+    p_retire.add_argument('--landed', action='extend', nargs='+', default=[], metavar='REF',
+                          help='what landed it: a PR number (123 or #123), a sha, or a URL; '
+                               'repeatable')
+    p_retire.add_argument('--product')
+
     p_reopen = sub.add_parser(
         'reopen', help='correct a falsely derived Resolved/Closed by re-deriving it from '
                        'current evidence, the terminal hold lifted for this one item')
@@ -560,6 +571,10 @@ def _main(argv=None):
         label = args.id if len(ids) == 1 else f"{ids[0]} +{len(ids) - 1} more"
         return _published(cmd_set, args, resolve_record(args, announce=_announce_stderr),
                           f"record: set {label}")
+    if args.command == 'retire':
+        from asf.record.retire import cmd_retire
+        return _published(cmd_retire, args, resolve_record(args, announce=_announce_stderr),
+                          f"record: retire {args.item}")
     if args.command == 'reopen':
         from asf.record.reopen import cmd_reopen
         return _published(cmd_reopen, args, resolve_record(args, announce=_announce_stderr),
