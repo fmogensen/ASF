@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.141 — 2026-10-06
+
+### Bugs fixed
+
+- The README now has Quick start, Configuration and Upgrade sections; a wedged account-manager lock is configured under `account_lock.*` (off unless `account_lock.path` is set) and the rollup's extra `gh` PATH under `operator.path_prefix` (#772)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.141"`
+
 ## v0.1.140 — 2026-10-06
 
 ### Features landed
