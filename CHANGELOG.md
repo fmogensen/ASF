@@ -2,6 +2,26 @@
 
 One entry per released version, newest first.
 
+## v0.1.162 — 2026-10-06
+
+### Features landed
+
+- The check names the card that holds the name, and no index entry copies it (#792)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.162"`
+
+## v0.1.161 — 2026-10-06
+
+### Features landed
+
+- Every cancelled job carries why it was cancelled, written at import (#808)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.161"`
+
 ## v0.1.160 — 2026-10-06
 
 ### Features landed
