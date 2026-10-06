@@ -197,13 +197,16 @@ def cmd_check(args, root):
 # a record missing one of these isn't a bad item, it's a tick waiting to fail on a missing dir
 LAYOUT = tuple(LAYOUT_FOLDERS) + tuple(STREAM_FOLDERS)
 INDEX_STALE = 'index.json is stale (run `asf index`)'
+INDEX_MISSING = 'index.json is missing (run `asf index`)'
 
 
 def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
     """Every check over the record at ``root``: ``(findings, warnings, index_wrong)`` — findings
     and warnings as ``(relpath, line, message)``; ``index_wrong`` the ``index.json`` entries that
     differ from what the cards derive, one ``(id, expected, on disk)`` key each (a card that fails
-    to parse is its own finding, never a stale entry too). ``scrub`` is the title scrub the
+    to parse is its own finding, never a stale entry too) — an absent ``index.json`` differs in
+    every entry the cards derive, and is reported as such so the pre-commit derives it instead of
+    refusing the commit that exposed its absence. ``scrub`` is the title scrub the
     derived sections are judged with (by default the record's own); ``pats`` is the patterns a
     protected name or secret in a typed field is judged with (by default the record's own,
     F-0132) — both default to the record's own because a scratch copy carries no name lists of
@@ -431,7 +434,12 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
     index_path = os.path.join(root, 'index.json')
     expected_index = build_index_data(canonical, derived, scrub)
     if not os.path.isfile(index_path):
-        findings.append(('index.json', 1, 'index.json is missing (run `asf index`)'))
+        findings.append(('index.json', 1, INDEX_MISSING))
+        # an index the record does not have is an index that gets every entry wrong: the
+        # pre-commit derives it exactly as it derives a stale one (`cmd_check_staged`), rather
+        # than refusing the commit that exposed its absence
+        for iid, entry in expected_index['items'].items():
+            index_wrong.add((iid, _key(entry), _key(None)))
     else:
         with open(index_path, encoding='utf-8') as f:
             try:
@@ -560,7 +568,7 @@ def _report_staged(now, base, staged):
     blocking, standing = [], []
     for f in sorted(findings, key=lambda f: (f[0], f[1])):
         path, _line, msg = f
-        if msg == INDEX_STALE:
+        if msg in (INDEX_STALE, INDEX_MISSING):
             new = bool(index_wrong - base_index_wrong)  # an entry this commit made (or left) wrong
         else:
             new = standing_keys[(path, msg)] == 0  # lines move; the error, by file and text, not

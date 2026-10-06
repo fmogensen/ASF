@@ -1,5 +1,6 @@
 """`asf check --staged` — the record pre-commit's mode: an error in a card nobody touched is the
 record's standing debt (a warning), never a reason to refuse `asf set` / `asf inbox` on another."""
+import json
 import os
 import shutil
 import subprocess
@@ -157,6 +158,75 @@ class StagedCheckTests(unittest.TestCase):
         self.assertIn('Paid plan', self.git(self.root, 'show', ':index.json'))
         self.assertIn('Paid plan', self.read('index.json'))   # the working tree follows
 
+    def test_a_record_with_no_index_json_has_one_derived_and_staged(self):
+        self.drop_index()
+        text = self.read('decisions/D-0001.md')
+        self.write('decisions/D-0001.md', text.replace('title: A decision', 'title: Paid plan'))
+        self.git(self.root, 'add', 'decisions/D-0001.md')
+        c = subprocess.run(['git', 'commit', '-qm', 'retitle past a missing index'],
+                           cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
+        self.assertIn('index.json: regenerated from the staged cards and staged',
+                      c.stdout + c.stderr)
+        self.assertIn('Paid plan', self.committed('index.json'))
+        self.assertEqual(self.git(self.root, 'status', '--porcelain'), '')
+
+    def test_a_backlink_left_stale_beside_a_missing_index_is_healed_not_refused(self):
+        self.drop_index()
+        feature = self.read('features/F-0001.md')
+        self.write('features/F-0001.md', feature.replace(
+            '# ---- machine ----', 'blockedBy:\n  - D-0001\n# ---- machine ----'))
+        self.git(self.root, 'add', 'features/F-0001.md')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn('blocking: ## Backlinks section is stale', r.stdout)
+        self.assertIn('decisions/D-0001.md: regenerated from the staged cards and staged', r.stdout)
+        self.assertIn('index.json: regenerated from the staged cards and staged', r.stdout)
+        self.assertIn('F-0001', self.git(self.root, 'show', ':decisions/D-0001.md'))
+
+    def test_a_staged_deletion_of_the_index_is_re_derived(self):
+        self.git(self.root, 'rm', '-q', 'index.json')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn('index.json: regenerated from the staged cards and staged', r.stdout)
+        self.assertEqual(self.git(self.root, 'ls-files', '--', 'index.json'), 'index.json')
+        # this is the one case where the fix overrides an explicit operator action — the
+        # deletion is re-derived, not honoured as a Backlinks staleness or left refused
+        self.assertNotIn('blocking: index.json is missing', r.stdout)
+
+    def test_an_index_stale_only_on_head_stays_standing_debt(self):
+        # PD4's construction, not A1's wording: the staged edit must move no index entry at
+        # all, or `refresh` rewrites the whole file and sweeps this HEAD-only drift away with
+        # it. A retitle moves an entry; only a body line, which `build_index_data` never
+        # carries and which leaves every derived section alone too, pins today's behaviour.
+        index = json.loads(self.read('index.json'))
+        index['items']['D-0001']['title'] = 'Drifted title'
+        self.write('index.json', json.dumps(index, indent=2, sort_keys=True) + '\n')
+        self.commit_past_the_hook('drift the index on HEAD')
+        before = self.read('index.json')
+        feature = self.read('features/F-0001.md')
+        self.write('features/F-0001.md',
+                   feature.replace('## Description\n', '## Description\nan extra line\n'))
+        self.git(self.root, 'add', 'features/F-0001.md')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn('index.json:1: warning: index.json is stale (run `asf index`)', r.stdout)
+        self.assertEqual(self.read('index.json'), before)
+
+    def test_an_absent_index_with_no_entry_moved_is_left_absent(self):
+        # the absent-file twin of the test above: the trigger reads what this commit leaves
+        # wrong, never what the record is missing, so an entry-neutral commit leaves the index
+        # exactly as absent as it found it
+        self.drop_index()
+        feature = self.read('features/F-0001.md')
+        self.write('features/F-0001.md',
+                   feature.replace('## Description\n', '## Description\nan extra line\n'))
+        self.git(self.root, 'add', 'features/F-0001.md')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn('index.json:1: warning: index.json is missing (run `asf index`)', r.stdout)
+        self.assertFalse(os.path.isfile(os.path.join(self.root, 'index.json')))
+
     def test_a_hand_edit_commits_with_its_index_regenerated(self):
         text = self.read('decisions/D-0001.md')
         self.write('decisions/D-0001.md', text.replace('title: A decision', 'title: Paid plan'))
@@ -206,6 +276,11 @@ class StagedCheckTests(unittest.TestCase):
     def commit_past_the_hook(self, message='seed more'):
         self.git(self.root, 'add', '-A')
         self.git(self.root, 'commit', '-q', '--no-verify', '-m', message)
+
+    def drop_index(self):
+        self.git(self.root, 'rm', '-q', 'index.json')
+        self.commit_past_the_hook('drop the index')
+        self.assertFalse(os.path.isfile(os.path.join(self.root, 'index.json')))
 
     def test_new_story_commits_its_parent_children_and_the_index(self):
         before = self.head()
