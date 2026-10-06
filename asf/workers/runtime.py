@@ -455,6 +455,63 @@ def build_env(job, base=None):
     return out
 
 
+#: The directory, under :func:`homes_dir`, of the runtime guard (:func:`guard_env`). A dot name:
+#: :func:`agent_homes` never reads it as a home.
+GUARD_DIR = '.runtime-guard'
+
+#: The session's own HOME, as the guard compares it.
+SESSION_HOME_VAR = 'ASF_SESSION_HOME'
+
+GUARD_SCRIPT = '''#!/bin/sh
+# written by asf (asf.workers.runtime.guard_env), rewritten at every launch.
+# The config dir belongs to the session's HOME: a child that moved HOME (a test's temp home)
+# runs the runtime under that home, never in the session's live config dir.
+if [ -n "${{{ccd}:-}}" ] && [ "${{HOME:-}}" != "${{{home_var}:-}}" ]; then unset {ccd}; fi
+exec {real} "$@"
+'''
+
+
+def guard_env(job_env, binary=DEFAULT_BINARY):
+    """``(env, binary)`` for a session whose ``job_env`` carries the account's config dir: the
+    runtime's own binary resolved to its real path (the session runs it directly), and a guard
+    of the same name first on ``PATH`` for everything the session starts. A child that sets its
+    own ``HOME`` and calls the runtime by name — a test's temp-home install whose code predates
+    :func:`asf.hermetic.build` dropping the config dir, run in a stale worktree — gets the
+    runtime under that HOME, never the account's live settings file. No config dir, no binary
+    to resolve, or a write that fails: ``job_env`` and ``binary`` unchanged — a launch is never
+    refused for this."""
+    if not job_env.get(hermetic.RUNTIME_CONFIG_DIR):
+        return job_env, binary
+    guard_dir = os.path.join(homes_dir(), GUARD_DIR)
+    search = os.pathsep.join(p for p in (job_env.get('PATH') or '').split(os.pathsep)
+                             if p and os.path.abspath(p) != guard_dir)
+    real = shutil.which(binary, path=search)
+    if not real:
+        return job_env, binary
+    real = os.path.abspath(real)
+    import shlex  # local: only the guard quotes a path for sh
+    text = GUARD_SCRIPT.format(ccd=hermetic.RUNTIME_CONFIG_DIR, home_var=SESSION_HOME_VAR,
+                               real=shlex.quote(real))
+    guard = os.path.join(guard_dir, os.path.basename(binary))
+    try:
+        current = None
+        if os.path.isfile(guard):
+            with open(guard, encoding='utf-8') as f:
+                current = f.read()
+        if current != text or not os.access(guard, os.X_OK):
+            os.makedirs(guard_dir, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix='.guard-', dir=guard_dir)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(text)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, guard)
+    except OSError:
+        return job_env, binary
+    out = dict(job_env, PATH=guard_dir + (os.pathsep + search if search else ''))
+    out[SESSION_HOME_VAR] = job_env.get('HOME', '')
+    return out, real
+
+
 def _session_line(job):
     """The one ``{"type": "asf", "subtype": "session", ...}`` line a run's log segment opens
     with, or None for a job with no session (F-0076). ``started`` is parsed back from the id's
@@ -629,6 +686,8 @@ class ClaudeCodeRuntime(Runtime):
     def run(self, job, wait=False):
         log_path = job.log_path or job_log_path(job.product, job.name)
         seed_home(job.account)
+        job_env, binary = guard_env(build_env(job), self.binary)
+        cmd = build_command(job, binary)
         with open(session_brief(job), 'rb') as brief, open(log_path, 'ab') as log:
             # a continued run is the writer's session: a second ``asf`` line would claim otherwise
             line = None if job.resume else _session_line(job)
@@ -636,12 +695,12 @@ class ClaudeCodeRuntime(Runtime):
                 log.write((line + '\n').encode('utf-8'))
                 log.flush()
             if not wait:  # never the caller's child: no <defunct> left in a running tick
-                pid = detach.spawn(build_command(job, self.binary), cwd=job.cwd,
-                                   env=build_env(job), stdin=brief, stdout=log,
+                pid = detach.spawn(cmd, cwd=job.cwd,
+                                   env=job_env, stdin=brief, stdout=log,
                                    stderr=subprocess.STDOUT)
                 return Result(pid=pid, log_path=log_path)
-            proc = subprocess.Popen(build_command(job, self.binary), cwd=job.cwd,
-                                    env=build_env(job), stdin=brief, stdout=log,
+            proc = subprocess.Popen(cmd, cwd=job.cwd,
+                                    env=job_env, stdin=brief, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True)
         rc = proc.wait()
         rec = read_result(log_path)

@@ -84,6 +84,28 @@ MODES = ('gate', 'worker')
 RUNTIME_CONFIG_DIR = 'CLAUDE_CONFIG_DIR'
 
 
+def runtime_config_dir_owned(environ):
+    """True when ``environ``'s :data:`RUNTIME_CONFIG_DIR` is unset or sits under its ``HOME``.
+    A config dir outside the HOME is a caller's that a child moved away from (a test's temp
+    HOME inheriting a worker session's config dir): the runtime must not write there."""
+    ccd, home = environ.get(RUNTIME_CONFIG_DIR), environ.get('HOME')
+    if not ccd:
+        return True
+    if not home:
+        return False
+    ccd, home = os.path.realpath(os.path.expanduser(ccd)), os.path.realpath(home)
+    return ccd == home or ccd.startswith(home.rstrip(os.sep) + os.sep)
+
+
+def runtime_env(environ=None):
+    """``environ`` (default ``os.environ``) for a runtime CLI child: the config dir dropped
+    unless :func:`runtime_config_dir_owned` — so the child writes under the run's own HOME."""
+    out = dict(os.environ if environ is None else environ)
+    if not runtime_config_dir_owned(out):
+        out.pop(RUNTIME_CONFIG_DIR, None)
+    return out
+
+
 def package_parent():
     """The directory the running ``asf`` package is imported from."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

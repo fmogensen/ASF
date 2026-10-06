@@ -24,7 +24,7 @@ import shutil
 import subprocess
 import sys
 
-from asf import cli, console_perms, doctor, env, hooks, init, plugin_build, scheduler
+from asf import cli, console_perms, doctor, env, hermetic, hooks, init, plugin_build, scheduler
 from asf.tick import dry_run
 from asf.workers import pool
 
@@ -466,8 +466,11 @@ def _tail_lines(dest):
     supported command — that command run instead, and which was used (D8)."""
     claude = _probe_plugin_command()
     if claude:
-        subprocess.run([claude, 'plugin', 'marketplace', 'add', dest], check=False)
-        subprocess.run([claude, 'plugin', 'install', 'asf@asf'], check=False)
+        # the runtime writes under this run's HOME: a config dir the caller left set outside it
+        # (a worker session's, under a test's temp HOME) is never the target
+        child_env = hermetic.runtime_env()
+        subprocess.run([claude, 'plugin', 'marketplace', 'add', dest], check=False, env=child_env)
+        subprocess.run([claude, 'plugin', 'install', 'asf@asf'], check=False, env=child_env)
         return [f'install: ran {claude} plugin marketplace add {dest} and '
                f'{claude} plugin install asf@asf (the runtime CLI offered a non-interactive install)']
     return [
