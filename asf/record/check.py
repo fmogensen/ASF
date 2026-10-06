@@ -6,7 +6,7 @@ import sys
 import tempfile
 from collections import Counter
 
-from asf import invariants
+from asf import invariants, redact
 from asf.conventions import DEFAULT_SPECS_DIR
 from asf.feeder import footprint
 from asf.groom import conflicts, shape
@@ -15,7 +15,7 @@ from asf.record import frontmatter, tree, writer
 from asf.record.core import (
     BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, ITEM_FOLDERS as CARD_FOLDERS, NO_PARENT_TYPES,
     PARENT_TYPES, as_list, build_index_data, canonicalize, compute_derived, expected_body,
-    is_open, load_items, parse_sections, title_scrub, today,
+    is_open, load_items, parse_sections, protected_fields, title_scrub, today,
 )
 from asf.record.index import entry_relpath
 from asf.record.new import BOOL_FIELDS
@@ -199,15 +199,18 @@ LAYOUT = tuple(LAYOUT_FOLDERS) + tuple(STREAM_FOLDERS)
 INDEX_STALE = 'index.json is stale (run `asf index`)'
 
 
-def record_findings(root, scrub=None, layout=True, shared=()):
+def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
     """Every check over the record at ``root``: ``(findings, warnings, index_wrong)`` — findings
     and warnings as ``(relpath, line, message)``; ``index_wrong`` the ``index.json`` entries that
     differ from what the cards derive, one ``(id, expected, on disk)`` key each (a card that fails
     to parse is its own finding, never a stale entry too). ``scrub`` is the title scrub the
-    derived sections are judged with (by default the record's own); ``layout`` False skips the
-    layout folders (a scratch copy of the record has only its cards). ``shared``: the product's
-    ``conventions.shared_paths``, passed to the Active-Task overlap check so a lockfile the
-    product declares never reads as two Tasks' footprints intersecting."""
+    derived sections are judged with (by default the record's own); ``pats`` is the patterns a
+    protected name or secret in a typed field is judged with (by default the record's own,
+    F-0132) — both default to the record's own because a scratch copy carries no name lists of
+    its own. ``layout`` False skips the layout folders (a scratch copy of the record has only its
+    cards). ``shared``: the product's ``conventions.shared_paths``, passed to the Active-Task
+    overlap check so a lockfile the product declares never reads as two Tasks' footprints
+    intersecting."""
     by_id, parse_errors = load_items(root)
     canonical, dupes = canonicalize(by_id)
     derived = compute_derived(canonical)
@@ -215,6 +218,8 @@ def record_findings(root, scrub=None, layout=True, shared=()):
     findings = []  # (relpath, line, message)
     if scrub is None:
         scrub = title_scrub(root)
+    if pats is None:
+        pats = redact.default_patterns(root)
 
     for folder in LAYOUT if layout else ():
         if not os.path.isdir(os.path.join(root, folder)):
@@ -239,6 +244,19 @@ def record_findings(root, scrub=None, layout=True, shared=()):
             if l.startswith(f"{key}:"):
                 return i + 1
         return 1
+
+    def _protected_field_findings(rec, pats, add, find_line):
+        """One finding per typed field whose value carries a protected name, at the
+        card that holds it, on that field's line (``protected_fields`` leaves a secret to the
+        harvest redaction scan). The value is never repeated (F-0075 D8): the
+        finding names the field and which source matched. The text is constant per field and per
+        source on purpose — ``_report_staged`` dedupes a standing finding by ``(path, msg)``, so
+        a message that varied with the line or the value would read as new the moment the card
+        was reflowed, and would refuse a commit over a name ``HEAD`` already carries."""
+        for key, kind, source in protected_fields(rec, pats):
+            add(rec, find_line(rec, key),
+                f"{key}: carries a {kind} ({source}) — rename the card; "
+                f"derived text quotes this field")
 
     for iid, rec in canonical.items():
         meta = rec['meta']
@@ -281,6 +299,8 @@ def record_findings(root, scrub=None, layout=True, shared=()):
         for b in as_list(meta.get('blockedBy')):
             if isinstance(b, str) and ID_RE.match(b) and b not in canonical:
                 add(rec, find_line(rec, 'blockedBy'), f"blockedBy references missing item {b}")
+        # a protected name or secret in a typed field (F-0132): the card that holds it, named
+        _protected_field_findings(rec, pats, add, find_line)
         # local_only is a boolean: the cloud lane's routing reads it as one
         for flag in BOOL_FIELDS:
             if flag in meta and not isinstance(meta[flag], bool):
@@ -409,7 +429,7 @@ def record_findings(root, scrub=None, layout=True, shared=()):
     # index.json staleness
     index_wrong = set()  # (id, expected entry, entry on disk) for every entry out of date
     index_path = os.path.join(root, 'index.json')
-    expected_index = build_index_data(canonical, derived)
+    expected_index = build_index_data(canonical, derived, scrub)
     if not os.path.isfile(index_path):
         findings.append(('index.json', 1, 'index.json is missing (run `asf index`)'))
     else:
@@ -463,17 +483,20 @@ def cmd_check_staged(root, shared=()):
     if not staged:
         return 0
     scrub = title_scrub(root)  # the record's own scrub: a scratch copy carries no name lists
+    pats = redact.default_patterns(root)   # … and no name lists means no findings, either
     with tempfile.TemporaryDirectory(prefix='asf-check-') as scratch:
         head_dir = os.path.join(scratch, 'head')
         staged_dir = os.path.join(scratch, 'staged')
         tree.lay_out_head(repo, head_dir, tree.record_paths(prefix), scratch)
         tree.lay_out(repo, staged_dir, tree.record_paths(prefix))
-        base = record_findings(os.path.join(head_dir, prefix), scrub, layout=False, shared=shared)
-        now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False, shared=shared)
+        base = record_findings(os.path.join(head_dir, prefix), scrub, layout=False, shared=shared,
+                               pats=pats)
+        now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False, shared=shared,
+                              pats=pats)
         if now[2] - base[2]:  # the staged change leaves derived state stale: derive it, stage it
             if stage_derived(repo, prefix, os.path.join(staged_dir, prefix), scrub):
                 now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False,
-                                      shared=shared)
+                                      shared=shared, pats=pats)
     return _report_staged(now, base, staged)
 
 

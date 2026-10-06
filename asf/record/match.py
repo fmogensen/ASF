@@ -87,12 +87,21 @@ def _links(item, key):
 
 
 def _find_legacy(items, slug):
-    """Items whose legacy_id equals slug; else Features whose slugified title does."""
+    """Items whose legacy_id equals slug; else Features whose slugified title does. A Feature's
+    title in ``index.json`` is scrubbed (F-0132), so the slug it yields is the scrubbed one; the
+    incoming slug is scrubbed the same way before it is compared, and a branch cut from the raw
+    title still resolves. ``repo=None`` is all this function has, so a name living only in a
+    record-local ``tools/forbidden-names.txt`` scrubs the entry and not the slug — accepted,
+    benign (a miss is ``[]``, the existing no-hit path, never a crash and never a wrong match)."""
     hits = [i for i, it in items.items() if it.get('legacy_id')
             and slug in (str(it['legacy_id']).lower(), slugify(str(it['legacy_id'])))]
     if hits:
         return sorted(hits)
-    return sorted(i for i, it in items.items() if it.get('type') == 'feature' and slugify(it.get('title')) == slug)
+    from asf import redact
+    scrubbed = redact.scrub(slug, redact.default_patterns(None))
+    want = {slug} if scrubbed == slug else {slug, slugify(scrubbed)}
+    return sorted(i for i, it in items.items() if it.get('type') == 'feature'
+                  and slugify(it.get('title')) in want)
 
 
 def _descendants(items, iid):

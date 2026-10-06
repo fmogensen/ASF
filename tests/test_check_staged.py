@@ -339,6 +339,83 @@ class StagedCheckTests(unittest.TestCase):
         self.assertEqual(self.asf('check', '--staged').returncode, 0)
 
 
+class ProtectedNameStagedTests(unittest.TestCase):
+    """F-0132 §1/§3.1: a protected name in a typed field is `blocking:` when the commit introduces
+    it and `warning:` when `HEAD` already carries it (P13); the scratch-copy path is handed the
+    real root's patterns, so a record whose only name list is the repo's own
+    `tools/forbidden-names.txt` still reports it (P14/PD12) — no mock crosses the subprocess
+    boundary a CLI-driven test runs across, so the pattern source here is a real file."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='staged_protected_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        bindir = os.path.join(self.tmp, 'bin')
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, 'asf'), 'w') as f:
+            f.write(f'#!/bin/sh\nexec {sys.executable} -m asf.cli "$@"\n')
+        os.chmod(os.path.join(bindir, 'asf'), 0o755)
+        self.env = hermetic.build()
+        self.env['PATH'] = bindir + os.pathsep + self.env['PATH']
+        self.env['PYTHONPATH'] = REPO_ROOT + os.pathsep + self.env.get('PYTHONPATH', '')
+        self.env['ASF_HOME'] = os.path.join(self.tmp, 'asf-home')
+        self.root = os.path.join(self.tmp, 'record')
+        os.makedirs(self.root)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', self.root], check=True, env=self.env)
+        for k, v in (('user.name', 'T'), ('user.email', 't@x')):
+            self.git('config', k, v)
+        for folder in FOLDERS + list(STREAM_FOLDERS):
+            os.makedirs(os.path.join(self.root, folder), exist_ok=True)
+            open(os.path.join(self.root, folder, '.keep'), 'w').close()
+        os.makedirs(os.path.join(self.root, 'tools'), exist_ok=True)
+        with open(os.path.join(self.root, 'tools', 'forbidden-names.txt'), 'w') as f:
+            f.write('Zorblax\n')
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        self.asf('index')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'seed')
+
+    def git(self, *a):
+        return subprocess.run(['git', *a], cwd=self.root, env=self.env, capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    def asf(self, *a):
+        return subprocess.run([sys.executable, '-m', 'asf.cli', *a], cwd=self.root, env=self.env,
+                              capture_output=True, text=True)
+
+    def test_a_name_already_on_head_warns_even_when_its_line_moves_and_a_new_one_blocks(self):
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        self.asf('index')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'F-0001')
+        # PD3: the dedupe is by (path, msg), not (path, line, msg) — shift the title's line by
+        # inserting a field above it, and the standing finding must still read as standing
+        path = os.path.join(self.root, 'features', 'F-0001.md')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('\ntitle: Pay for Zorblax account\n', text)
+        text = text.replace('\ntitle: Pay for Zorblax account\n',
+                            '\nrank: 5\ntitle: Pay for Zorblax account\n', 1)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        self.git('add', 'features/F-0001.md')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn('warning:', r.stdout)
+        self.assertIn('title: carries a name', r.stdout)
+        self.assertNotIn('Zorblax', r.stdout)
+
+        # a new card introduces the name in a different typed field — blocking, not a warning
+        write_item(self.root, 'F-0002', 'feature', 'Something', parent='E-0001',
+                   typed_lines=['areas: [Zorblax]'])
+        self.git('add', 'features/F-0002.md')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('blocking:', r.stdout)
+        self.assertIn('features/F-0002.md', r.stdout)
+        self.assertIn('areas: carries a name', r.stdout)
+        self.assertNotIn('Zorblax', r.stdout)
+
+
 class HandWrittenHookStagedCheckTests(StagedCheckTests):
     """A record whose own pre-commit ran `asf check` over the whole record, as rewritten by
     `asf hooks install`."""

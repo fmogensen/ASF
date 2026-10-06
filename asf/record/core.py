@@ -207,6 +207,34 @@ def _flatten_strings(value, out):
         out.append(str(value))
 
 
+#: The typed fields a protected name is looked for in, title first — the field an operator
+#: writes, and the one derived text quotes (F-0132).
+def protected_fields(rec, pats):
+    """``[(field, kind, source)]`` for each typed field of ``rec`` whose value carries a
+    protected name, ``title`` first, one entry per field (the first pattern that matches it).
+    Only ``name`` patterns are looked for here (never ``secret``): a secret is the harvest
+    redaction scan's own job, run over every line of every file including this one, and a typed
+    field that holds one is already caught there — a second, earlier finding for it over
+    ``asf check`` would only race that scan and report under the wrong name. The matched value is
+    never returned (F-0075 D8): the caller names the field and which source matched, so a finding
+    is safe in a tick log, in a transcript, and in the Bug the tick files off it. The machine
+    block is never scanned — it is ASF's own vocabulary, not where an operator writes a name
+    (D6)."""
+    if not pats:
+        return []
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    name_pats = [p for p in pats if p.kind == 'name']
+    out = []
+    for key in ['title'] + [k for k in typed if k != 'title']:
+        parts = []
+        _flatten_strings(typed.get(key), parts)
+        for pat in name_pats:
+            if any(pat.regex.search(p) for p in parts):
+                out.append((key, pat.kind, pat.source))
+                break
+    return out
+
+
 def scan_text(rec):
     typed, machine = frontmatter.split_machine(rec['meta'])
     parts = []
@@ -342,12 +370,18 @@ def expected_body(rec, canonical, derived, scrub=None):
     return render_sections(preamble, new_sections)
 
 
-def build_index_data(canonical, derived):
+def build_index_data(canonical, derived, scrub=None):
+    """… ``scrub``: the title scrub every reader of ``index.json`` inherits (F-0132) — the
+    release notes, the daily rollup, the roadmap, the board and the budget lines all read the
+    title from here, so this is the one place they are all covered."""
+    scrub = scrub or _plain
     items = {}
     for iid, rec in canonical.items():
         typed, machine = frontmatter.split_machine(rec['meta'])
         entry = dict(typed)
         entry.update(machine)
+        if entry.get('title'):
+            entry['title'] = scrub(entry['title'])
         entry['folder'] = rec['folder']
         entry['children'] = list(derived[iid]['children'])
         entry['backlinks'] = list(derived[iid]['backlinks'])

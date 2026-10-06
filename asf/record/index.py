@@ -41,16 +41,18 @@ def refresh(root, scrub=None, only=None, index=True, create_index=False):
             written.append(rec['relpath'])
     if index and (create_index or os.path.isfile(os.path.join(root, 'index.json'))):
         broken = {f for f, _line, _why in parse_errors}
-        if write_index_json(root, canonical, derived, keep=broken):
+        if write_index_json(root, canonical, derived, keep=broken, scrub=scrub):
             written.append('index.json')
     return written
 
 
-def write_index_json(root, canonical, derived, keep=()):
+def write_index_json(root, canonical, derived, keep=(), scrub=None):
     """Write ``index.json`` when its items differ from the record's; True when it was written.
     An entry whose card is in ``keep`` (relpaths — the cards that fail to parse) is carried over
-    as it stands: the one card that cannot be read never takes the rest of the index with it."""
-    data = build_index_data(canonical, derived)
+    as it stands: the one card that cannot be read never takes the rest of the index with it.
+    ``scrub``: the same title scrub the cards' own derived sections use (F-0132) — passed
+    straight through to :func:`build_index_data`."""
+    data = build_index_data(canonical, derived, scrub)
     index_path = os.path.join(root, 'index.json')
     old_items = None
     # a record's first index is stamped with this package's schema; an existing one keeps its own

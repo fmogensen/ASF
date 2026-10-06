@@ -10,7 +10,7 @@ from unittest import mock
 from asf.init import STREAM_FOLDERS
 from asf.record import frontmatter
 from asf.record import check as check_mod
-from asf import hermetic
+from asf import hermetic, redact
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
@@ -818,6 +818,150 @@ class CheckCommandTests(unittest.TestCase):
             json.dump(data, f)
         r = run(['check'], self.root)
         self.assertIn('index.json is stale', r.stdout)
+
+
+class ProtectedNameInTypedFieldTests(unittest.TestCase):
+    """F-0132 §1/§3.1: `asf check` flags a protected name in any typed field, at the
+    card that holds it, on that field's line — naming the field and the pattern source, never
+    the matched text. A secret is left to the harvest redaction scan, not duplicated here."""
+
+    def setUp(self):
+        self.root = make_repo()
+        for f in STREAM_FOLDERS:
+            os.makedirs(os.path.join(self.root, f))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, 'tools'), exist_ok=True)
+        with open(os.path.join(self.root, 'tools', 'forbidden-names.txt'), 'w') as f:
+            f.write('Zorblax\n')
+
+    def test_the_card_that_holds_the_name_gets_one_finding_naming_the_field_and_source(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        lines = [ln for ln in r.stdout.splitlines() if 'carries a name' in ln]
+        self.assertEqual(len(lines), 1, r.stdout)
+        self.assertTrue(lines[0].startswith('features/F-0001.md:'), lines[0])
+        self.assertIn('title:', lines[0])
+        self.assertIn('tools/forbidden-names.txt', lines[0])
+        self.assertNotIn('Zorblax', lines[0])
+
+    def test_a_name_in_another_typed_field_is_found_too_and_title_is_reported_first(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001',
+                   typed_lines=['areas: [Zorblax]'])
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        lines = [ln for ln in r.stdout.splitlines() if 'carries a name' in ln]
+        self.assertEqual(len(lines), 2, r.stdout)
+        self.assertIn('title:', lines[0])
+        self.assertIn('areas:', lines[1])
+
+    def test_the_machine_block_is_never_scanned(self):
+        # D6: the machine block is ASF's own vocabulary, not where an operator writes a name
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001',
+                   machine_lines=['schema_version: 1', 'state: Zorblax',
+                                  'stage_since: 2026-01-01T00:00:00Z',
+                                  'updated: 2026-01-01T00:00:00Z'])
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertNotIn('carries a name', r.stdout)
+
+    def test_patching_default_patterns_to_empty_is_the_only_way_to_reach_no_findings(self):
+        # PD7: default_patterns is effectively never empty (it always carries the built-in secret
+        # rules), so removing a name list proves nothing — only a patched, degraded
+        # default_patterns reaches protected_fields' `if not pats: return []` guard.
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        run(['index'], self.root)
+        with mock.patch.object(redact, 'default_patterns', return_value=[]):
+            findings, _warnings, _index_wrong = check_mod.record_findings(self.root)
+        self.assertFalse(any('carries a' in msg for _p, _l, msg in findings), findings)
+
+    def test_a_secret_in_a_typed_field_gives_no_finding_here(self):
+        # a secret is the harvest redaction scan's own job (every line of every file, this one
+        # included) — a second, earlier finding for it over `asf check` would only race that scan
+        # and, for a record branch, report under the wrong name before it ever runs. Built from
+        # parts so this file's own text never carries the shape check_generic.sh forbids.
+        secret = 'AK' + 'IA' + 'ABCDEFGHIJKLMNOP'
+        write_item(self.root, 'E-0001', 'epic', f'Rotate {secret} now')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertNotIn('carries a', r.stdout)
+        self.assertNotIn(secret, r.stdout)
+
+    def test_exits_1_with_the_line_printed_as_relpath_colon_line_colon_message(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(r.returncode, 1)
+        found = [ln for ln in r.stdout.splitlines() if 'carries a name' in ln]
+        self.assertEqual(len(found), 1, r.stdout)
+        path, line, _msg = found[0].split(':', 2)
+        self.assertEqual(path, 'features/F-0001.md')
+        self.assertTrue(line.isdigit(), found[0])
+
+
+class IndexTitleScrubTests(unittest.TestCase):
+    """F-0132 §4/§3.3: no `index.json` entry copies a protected name — the title is scrubbed
+    where the entry is built, which closes every reader of it with one seam."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, 'tools'), exist_ok=True)
+        with open(os.path.join(self.root, 'tools', 'forbidden-names.txt'), 'w') as f:
+            f.write('Zorblax\n')
+
+    def _index(self):
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            return json.load(f)
+
+    def test_the_entry_title_is_scrubbed_the_cards_own_title_is_not(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        run(['index'], self.root)
+        data = self._index()
+        self.assertEqual(data['items']['F-0001']['title'], 'Pay for [redacted] account')
+        self.assertNotIn('Zorblax', json.dumps(data))
+        card = open(os.path.join(self.root, 'features', 'F-0001.md'), encoding='utf-8').read()
+        self.assertIn('title: Pay for Zorblax account', card)
+
+    def test_a_second_index_changes_no_byte(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        run(['index'], self.root)
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            first = f.read()
+        run(['index'], self.root)
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            second = f.read()
+        self.assertEqual(first.split('"generated"')[1], second.split('"generated"')[1])
+
+    def test_check_reports_the_index_clean_not_stale_on_an_unchanged_record(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertNotIn('index.json is stale', r.stdout)
+
+    def test_with_no_patterns_matching_the_entry_title_is_byte_identical_to_todays(self):
+        # PD7: patching default_patterns to `[]` is the only way to reach the no-scrub branch —
+        # removing the name list leaves the built-in secret rules, which never match a plain name
+        from asf.record.core import (
+            build_index_data, canonicalize, compute_derived, load_items, title_scrub,
+        )
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        with mock.patch.object(redact, 'default_patterns', return_value=[]):
+            by_id, _errors = load_items(self.root)
+            canonical, _dupes = canonicalize(by_id)
+            derived = compute_derived(canonical)
+            data = build_index_data(canonical, derived, title_scrub(self.root))
+        self.assertEqual(data['items']['F-0001']['title'], 'Pay for Zorblax account')
 
 
 class CheckOverlapTests(unittest.TestCase):

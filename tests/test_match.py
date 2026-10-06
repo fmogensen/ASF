@@ -1,9 +1,12 @@
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
+from asf import redact
 from asf.record import match
 
 
@@ -102,6 +105,38 @@ class MatchRules(unittest.TestCase):
         ids, why = self.m(prs=[5, 6])
         self.assertEqual(ids, [])
         self.assertIn('2 PR', why)
+
+
+class LegacySlugScrubTests(unittest.TestCase):
+    """F-0132 §5/§3.3 (PD10): the incoming slug is scrubbed the same way the entry's title is, so
+    a branch cut from the raw title still resolves (P15, P16) — and with no pattern matching, a
+    slug that is not already slugified resolves exactly as it does today (PD10's guard)."""
+
+    PATS = [redact.Pattern('name', 'test', re.compile(r'\bzorblax\b', re.IGNORECASE))]
+
+    def scrubbed_items(self):
+        return {'F-0001': {'id': 'F-0001', 'type': 'feature',
+                           'title': 'Pay for [redacted] account'}}
+
+    def test_resolves_from_the_raw_branch_slug_and_from_the_scrubbed_slug(self):
+        items = self.scrubbed_items()
+        with mock.patch.object(redact, 'default_patterns', return_value=self.PATS):
+            self.assertEqual(match._find_legacy(items, 'pay-for-zorblax-account'), ['F-0001'])
+            self.assertEqual(match._find_legacy(items, 'pay-for-redacted-account'), ['F-0001'])
+
+    def test_legacy_id_resolution_through_match_event_either_way(self):
+        items = self.scrubbed_items()
+        with mock.patch.object(redact, 'default_patterns', return_value=self.PATS):
+            self.assertEqual(
+                match.match_event(items, branch='cloud/pay-for-zorblax-account')[0], ['F-0001'])
+            self.assertEqual(
+                match.match_event(items, branch='cloud/pay-for-redacted-account')[0], ['F-0001'])
+
+    def test_no_pattern_matching_a_non_slugified_slug_resolves_exactly_as_it_does_today(self):
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'Pay for Zorblax account'}}
+        with mock.patch.object(redact, 'default_patterns', return_value=[]):
+            self.assertEqual(match._find_legacy(items, 'pay_for_zorblax_account'), [])
+            self.assertEqual(match._find_legacy(items, 'pay.for.zorblax'), [])
 
 
 class LoadIndex(unittest.TestCase):
