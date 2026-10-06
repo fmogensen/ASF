@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from asf import hermetic, scheduler, snapshot
 
@@ -363,6 +364,34 @@ class DoctorShowsTheClocksSha(SnapshotCase):
             v2 = self.commit('v2')
             ok, detail = doctor.check_clock_code(env.Product('sample', {}))
             self.assertIn(f'checkout HEAD {v2[:12]} (the next tick takes it)', detail)
+
+    def test_launcher_stale_is_false_with_no_launcher_at_all(self):
+        empty = os.path.join(self.tmp, 'no-launcher')
+        os.makedirs(empty)
+        with mock.patch.object(scheduler, 'code_dir', return_value=empty):
+            self.assertEqual(scheduler.launcher_stale('sample'), (False, ''))
+
+    def test_launcher_stale_is_false_for_the_byte_identical_copy(self):
+        with mock.patch.object(scheduler, 'code_dir', return_value=self.code):
+            stale, reason = scheduler.launcher_stale('sample')
+            self.assertFalse(stale)
+            self.assertEqual(reason, '')
+
+    def test_launcher_stale_is_true_with_a_reason_for_a_copy_that_differs(self):
+        with open(self.launcher, 'a', encoding='utf-8') as f:
+            f.write('\n# one line appended\n')
+        with mock.patch.object(scheduler, 'code_dir', return_value=self.code):
+            stale, reason = scheduler.launcher_stale('sample')
+            self.assertTrue(stale)
+            self.assertNotEqual(reason, '')
+
+    def test_clock_code_carries_the_snapshot_count_and_launcher_staleness(self):
+        snapshot.ensure(self.repo, self.code)
+        with mock.patch.object(scheduler, 'repo_root', return_value=self.repo), \
+                mock.patch.object(scheduler, 'code_dir', return_value=self.code):
+            info = scheduler.clock_code('sample')
+            self.assertEqual(info['snapshots'], len(snapshot.snapshots(self.code)))
+            self.assertEqual(info['launcher_stale'], (False, ''))
 
 
 if __name__ == '__main__':
