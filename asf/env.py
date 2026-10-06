@@ -274,7 +274,9 @@ def load_config():
     cfg = load_file(config_path())
     from asf.workers import cloud  # local: the cloud lane's module imports this one
     from asf.tick import network
+    from asf.workers import heartbeat
     problems = (validate_worker_pool(cfg) + cloud.config_problems((cfg or {}).get('cloud'))
+                + heartbeat.config_problems((cfg or {}).get('workers'))
                 + network.config_problems(cfg))
     if problems:
         raise ConfigError(f"{config_path()}: {'; '.join(f'{k} {why}' for k, why in problems)}")

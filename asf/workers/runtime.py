@@ -64,6 +64,9 @@ class Job:
         self.branch = branch
         self.base = base
         self.setup = setup
+        # the heartbeat a session off this host is told to keep (asf.workers.heartbeat.Settings),
+        # or None: asf.workers.cloud.cloud_brief writes its rule into the CLOUD block
+        self.heartbeat = None
 
     @property
     def session(self):
@@ -579,6 +582,32 @@ def result_ok(rec):
             and failure_reason(rec) is None)
 
 
+def brief_text(job):
+    """What a local session reads on stdin: the brief file, then — for a job launched with the
+    heartbeat (``job.heartbeat``, :mod:`asf.workers.heartbeat`) — its HEARTBEAT block, under the
+    job's own ``ASF-Session``. The brief file itself stays the factory's text."""
+    with open(job.brief_path, encoding='utf-8') as f:
+        text = f.read()
+    beat = getattr(job, 'heartbeat', None)
+    if beat is None:
+        return text
+    from asf.workers import heartbeat  # local: heartbeat reads the workers lazily
+    return text.rstrip('\n') + '\n' + '\n'.join(
+        heartbeat.brief_lines(job.name, job.session or '', beat)) + '\n'
+
+
+def session_brief(job):
+    """The path the session's stdin is read from: the brief file itself, or — with the
+    heartbeat — ``<brief>.session.md`` holding :func:`brief_text`."""
+    if getattr(job, 'heartbeat', None) is None:
+        return job.brief_path
+    base = job.brief_path[:-3] if str(job.brief_path).endswith('.md') else str(job.brief_path)
+    path = f'{base}.session.md'
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(brief_text(job))
+    return path
+
+
 class Runtime:
     name = 'base'
 
@@ -600,7 +629,7 @@ class ClaudeCodeRuntime(Runtime):
     def run(self, job, wait=False):
         log_path = job.log_path or job_log_path(job.product, job.name)
         seed_home(job.account)
-        with open(job.brief_path, 'rb') as brief, open(log_path, 'ab') as log:
+        with open(session_brief(job), 'rb') as brief, open(log_path, 'ab') as log:
             # a continued run is the writer's session: a second ``asf`` line would claim otherwise
             line = None if job.resume else _session_line(job)
             if line is not None:

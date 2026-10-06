@@ -37,8 +37,12 @@ session.
 **Tracking** (:func:`evidence`, called by :func:`asf.workers.cloud.sync`): the report commit on
 the branch finishes the run, as for ``actions``; the routine's ``last_run`` (a ``get``, at most
 every ``cloud.poll_min`` minutes, cached in the cloud status file) ends it dead when the run
-finished without the report commit; ``cloud.timeout_min`` ends it dead too. A run that is no
-longer working has its routine disabled (:func:`retire`, once).
+finished without the report commit; ``cloud.timeout_min`` ends it dead too, as the backstop. A
+run that stops beating is caught by the heartbeat (:mod:`asf.workers.heartbeat`, git only —
+``poll_min`` is not on that path): on the stall one ``list_runs`` (:func:`diagnose`) records the
+run's ``worker_status`` in the reason, and its continuation is handed the run's last events
+(:func:`run_log_summary`, ``get_run_log``). A run that is no longer working has its routine
+disabled (:func:`retire`, once).
 
 Config (``cloud:``)::
 
@@ -541,6 +545,54 @@ def evidence(run, s, elapsed, now, client=None):
     if status != cloud.WORKING:
         retire(run, client)
     return status, why, report
+
+
+def _runs_in(obj):
+    """The run dicts of a ``list_runs`` answer, wherever the list sits."""
+    if isinstance(obj, list):
+        return [r for r in obj if isinstance(r, dict)]
+    if isinstance(obj, dict):
+        for k in ('data', 'sessions', 'runs', 'items'):
+            if isinstance(obj.get(k), list):
+                return [r for r in obj[k] if isinstance(r, dict)]
+    return []
+
+
+def diagnose(run, s, client=None):
+    """``{worker_status, last_event_at}`` of the routine's run, from one ``list_runs`` call —
+    the reason a stalled run records (the heartbeat decided the stall, never this). ``{}`` when
+    the answer names neither."""
+    tid = trigger_of(run)
+    if not tid:
+        return {}
+    try:
+        code, obj, _tail, _sent = (client or TriggerClient(_account(run), model=s.helper_model)) \
+            .call('list_runs', trigger_id=tid)
+    except HelperError:
+        return {}
+    runs = _runs_in(obj) if code == 200 else []
+    sid = run.get('remote_session_id')
+    hit = next((r for r in runs if sid and r.get('id') == sid), runs[0] if runs else {})
+    return {k: str(hit[k]) for k in ('worker_status', 'last_event_at') if hit.get(k)}
+
+
+def run_log_summary(run, s, client=None):
+    """The dead run's last events (``get_run_log``: tool calls, errors, its last words), cut to
+    about 2 KB for its continuation's brief; '' when unread."""
+    from asf.workers import heartbeat
+    sid = run.get('remote_session_id')
+    if not sid:
+        return ''
+    try:
+        code, obj, _tail, _sent = (client or TriggerClient(_account(run), model=s.helper_model)) \
+            .call('get_run_log', session_id=sid)
+    except HelperError:
+        return ''
+    if code != 200:
+        return ''
+    events = _runs_in(obj) or (obj.get('events') if isinstance(obj, dict)
+                               and isinstance(obj.get('events'), list) else [])
+    return heartbeat.summarize_events(events)
 
 
 def retire(run, client=None):
