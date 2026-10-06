@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.177 — 2026-10-06
+
+### Bugs fixed
+
+- Fewer red PR runs. Workers run the product's pre-push check and every touched test module before their one push, cloud sessions do the same, the merge queue stops re-batching a culprit after a deterministic red, and a test the trunk itself fails is read as trunk red instead of sending every PR to a correct round (#834)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.177"`
+
 ## v0.1.176 — 2026-10-06
 
 ### Features landed
