@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.134 — 2026-10-06
+
+### Features landed
+
+- The snapshot pool is bounded by count, not only by age (#567)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.134"`
+
 ## v0.1.133 — 2026-10-06
 
 ### Features landed
