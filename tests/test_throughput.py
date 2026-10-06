@@ -88,7 +88,8 @@ class FirstPassTest(unittest.TestCase):
     def test_green_on_the_first_head_first_attempt_over_prs_seen(self):
         self.assertEqual(tp.first_pass(self.CI, START, END), (2, 3))
         row = tp.first_pass_metric(self.CI, START, END, dict(CFG, first_pass_min=0.8))
-        self.assertEqual((row['value'], row['status']), (0.667, tp.ALARM))
+        # the day-window row reads; the alarm is the run-window target's (asf.metrics.reds)
+        self.assertEqual((row['value'], row['status']), (0.667, tp.OK))
 
     def test_no_forge_is_na(self):
         self.assertEqual(tp.first_pass_metric(self.CI, START, END, CFG, forge=False)['status'], tp.NA)

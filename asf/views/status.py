@@ -588,6 +588,13 @@ def value_cell(root, product):
     return cell(root, product)
 
 
+def reds_cell(root, product):
+    """``CI reds``: the PR runs the host shows as not green over 24 h, by class, and the last PR
+    runs' count (:func:`asf.metrics.reds.status_cell`); no row without a forge."""
+    from asf.metrics import reds
+    return reds.status_cell(root, product)
+
+
 def ab_pairs_cell(root, product):
     """``A/B pairs``: only when the two Features of a lane-experiment pair touch the same files
     (:func:`asf.scorecard.pairs.status_cell`) — the overlap spoils the comparison."""
@@ -660,6 +667,7 @@ def render(root, product, cfg=None):
                        ('Quarantine', lambda: quarantine_cell(product)),
                        ('Features in build', lambda: build_cell(root, product)),
                        ('Value', lambda: value_cell(root, product)),
+                       ('CI reds', lambda: reds_cell(root, product)),
                        ('A/B pairs', lambda: ab_pairs_cell(root, product)),
                        ('Release', lambda: release_cell(root, product)),
                        ('Tune', lambda: tune_cell(product, cfg)),

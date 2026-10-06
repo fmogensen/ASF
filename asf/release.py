@@ -10,13 +10,14 @@ and printed met or unmet with its evidence. Nothing is written.
    it in between, by hand).
 2. **repair load** — the factory's repair sessions per landed Feature over the window
    (:mod:`asf.scorecard`) at most ``max_repair_per_feature``.
-3. **main CI** — the last ``ci_runs`` finished trunk push runs are all green.
-4. **install from zero** — the latest finished trunk run has a green step matching
+3. **main CI** — the last ``ci_runs`` finished trunk push runs are all green; a cancelled run
+   is a non-verdict and is read past.
+4. **install from zero** — the newest finished trunk run that ran the named steps has a green step matching
    ``ci_steps.install_from_zero`` (the release-tag install path), and ``requires.install`` landed.
 5. **upgrade safety** — at least ``min_upgrades`` auto-upgrades in the window, none failed, no
    torn tick (an ``ImportError`` after an upgrade) and no rollback; ``requires.upgrade`` landed.
    An upgrade the tick skipped while offline (``asf.tick.network``) counts neither way.
-6. **genericity** — the latest finished trunk run has the ``ci_steps.generic`` step and the
+6. **genericity** — the newest finished trunk run that ran the named steps has the ``ci_steps.generic`` step and the
    ``ci_steps.second_product`` step green; ``requires.generic`` landed.
 7. **first-user docs** — the trunk's README has every ``readme_sections`` heading, the latest
    release tag has a CHANGELOG section with notes; ``requires.docs`` landed. Structural only.
@@ -32,13 +33,19 @@ and printed met or unmet with its evidence. Nothing is written.
 10. **seats used** — no idle-while-launchable stretch in the window: ``release.seats.idle_min``
    minutes or more below ``release.seats.min_pct`` % of the available seats while the wave had
    launchable rows (:mod:`asf.metrics.throughput`, over each tick line's ``seats`` reading). A
-   quiet factory never counts against it; no reading in the window is ``n/a``.
+   quiet factory never counts against it; no reading in the window is *pending* — not met.
 
 A criterion that does not apply to the product (``n/a``) is met: its evidence says why.
 
 **Self-tuning live** (criterion 11, appended after the others by :func:`compute`, read whole from
 :func:`asf.tune.criterion`): the self-tuning loop is on, kept at least one change in the window
 that it has not reverted since, and leaves no regression unreverted.
+
+**PR CI healthy** (criterion 12, appended after 11 by :func:`compute`, read from
+:func:`asf.metrics.reds.criterion`): the first PR run green at or above
+``improve.scorecard.throughput.first_pass_min`` over the last ``first_pass_window`` PRs, and no
+unclassified red in the last ``reds_window`` PR runs. ``n/a`` (met) with no forge or no CI;
+*pending* (not met) while no PR run is recorded.
 
 Every threshold is ``release: {…}`` in the product file (:data:`DEFAULTS`). The criteria read CI
 from what the forge records; nothing is installed or run on the host.
@@ -280,15 +287,42 @@ def install_log(log_dir, since):
     return out
 
 
+#: the run conclusions that judged no code — a cancel, a skip, a run the host let go stale: never
+#: red, never green; criterion 3 reads past them to the next run that reached a verdict
+NONVERDICT = ('cancelled', 'skipped', 'stale', 'neutral')
+#: how many of the newest verdict runs criteria 4 and 6 look through for the one that ran the
+#: named steps (the trunk's newest commit can be one that runs only a light workflow)
+STEP_RUNS = 5
+
+
 def ci_runs(slug, main, n, gh_json):
-    """The last ``n`` finished push runs on the trunk, newest first; ``None`` when the forge did
-    not answer."""
+    """The last ``n`` finished push runs on the trunk that reached a verdict, newest first — a
+    cancelled (or skipped) run is a non-verdict and is read past (:data:`NONVERDICT`); ``None``
+    when the forge did not answer."""
     runs = gh_json(['run', 'list', '--repo', slug, '--branch', main, '--event', 'push',
                     '--limit', str(max(n * 3, 20)),
                     '--json', 'databaseId,conclusion,status,headSha,createdAt,workflowName'])
     if not isinstance(runs, list):
         return None
-    return [r for r in runs if r.get('status') == 'completed'][:n]
+    return [r for r in runs if r.get('status') == 'completed'
+            and r.get('conclusion') not in NONVERDICT][:n]
+
+
+def step_run_steps(slug, runs, patterns, gh_json, limit=STEP_RUNS):
+    """The steps of the newest trunk run among ``runs`` (newest first) that ran any step matching
+    ``patterns`` — the newest commit on the trunk may be one (a release or changelog commit) whose
+    push runs no full CI, and *absent there* says nothing about the trunk. Falls back to the newest
+    run's steps when none of the first ``limit`` ran one; ``None`` when the forge did not answer."""
+    first = None
+    for r in (runs or [])[:limit]:
+        steps = ci_steps(slug, r['databaseId'], gh_json)
+        if steps is None:
+            continue
+        if first is None:
+            first = steps
+        if any(step_state(steps, p)[0] for p in patterns if p):
+            return steps
+    return first
 
 
 def ci_steps(slug, run_id, gh_json):
@@ -390,7 +424,7 @@ def evaluate(f, cfg):
     found, green = step_state(steps, pat)
     req_ok, req_ev = _requires(items, cfg, 'install')
     ev = ('the forge did not answer' if steps is None else
-          f"CI step '{pat}' " + ('green' if green else 'red' if found else 'absent') + ' on the latest main run')
+          f"CI step '{pat}' " + ('green' if green else 'red' if found else 'absent') + ' on the latest main test run')
     out.append(Criterion('install', 'Install from zero (release tag, doctor green, in CI)',
                          bool(green and req_ok), ev + req_ev))
 
@@ -635,8 +669,9 @@ def seats_criterion(ticks, since, cfg):
     start = _parse(since)
     if start is not None:
         points = [p for p in points if p[0] >= start]
-    if not points:
-        return Criterion('seats', name, True, f'{NA} — no tick carries a seat reading in the window')
+    if not points:   # no data is not yet, never met: only a product the rule cannot apply to is n/a
+        return Criterion('seats', name, False,
+                         'pending — no tick carries a seat reading in the window yet')
     stretches = throughput.idle_stretches(points, sc)
     if not stretches:
         return Criterion('seats', name, True, f'0 idle stretches over {len(points)} tick(s)')
@@ -672,7 +707,7 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
 
     slug = product.repo_slug
     runs = ci_runs(slug, product.main, int(cfg['ci_runs']), gh_json) if slug else None
-    steps = ci_steps(slug, runs[0]['databaseId'], gh_json) if runs else None
+    steps = step_run_steps(slug, runs, list(cfg['ci_steps'].values()), gh_json) if runs else None
 
     tag = (git(repo, 'describe', '--tags', '--abbrev=0', ref) or '').strip() or None
     readme = git(repo, 'show', f'{ref}:README.md') or ''
@@ -686,6 +721,7 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
                    'per_feature': h['repair_per_feature'], 'by_kind': h.get('repair_by_kind') or {}},
         'floor': floor_facts(root, product, cfg, now, git=git, gh_json=gh_json),
         'seats': _ticks(root),
+        'pr_ci': getattr(sf, 'ci', None) or [],
         'upgrade': up, 'ci_runs': runs, 'ci_steps': steps,
         'docs': {'headings': readme_headings(readme), 'tag': tag,
                  'changelog_section': section, 'changelog_notes': notes},
@@ -719,11 +755,29 @@ def tune_criterion(product, window_days, as_of):
     return Criterion('tune', 'Self-tuning live (≥ 1 kept change, 0 unreverted regressions)', met, ev)
 
 
+def pr_ci_criterion(product, ci, as_of, claims=None):
+    """Criterion 12, *PR CI healthy* (:func:`asf.metrics.reds.criterion`)."""
+    from asf.metrics import reds, throughput
+    _seats, tcfg = throughput.settings(product)
+    forge = bool(getattr(product, 'repo_slug', None)) and getattr(product, 'ci', None) != 'none'
+    d = reds.compute({'ci': ci or [], 'forge': forge, 'main': getattr(product, 'main', None),
+                      'claims': reds.load_claims(product) if claims is None else claims,
+                      'base_time': None if claims is not None else reds.git_base_time(
+                          getattr(product, 'repo_dir', None), getattr(product, 'main', None))},
+                     as_of, tcfg)
+    met, ev = reds.criterion(d, tcfg)
+    lim = tcfg.get('first_pass_min')
+    return Criterion('pr_ci', 'PR CI healthy (first pass'
+                     + (f" ≥ {lim:g} over {tcfg.get('first_pass_window'):g} PRs" if lim is not None else '')
+                     + ', 0 unclassified reds)', met, ev)
+
+
 def compute(root, product, **kw):
     cfg = settings(product)
     f = gather(root, product, cfg, **kw)
     crit = evaluate(f, cfg)
     crit.append(tune_criterion(product, cfg['window_days'], f['as_of']))
+    crit.append(pr_ci_criterion(product, f.get('pr_ci'), f['as_of']))
     return {'product': product.name, 'as_of': f['as_of'], 'window_days': cfg['window_days'],
             'ready': all(c.met for c in crit), 'criteria': [asdict(c) for c in crit]}
 

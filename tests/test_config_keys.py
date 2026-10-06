@@ -10,7 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG_NAMES = {'cfg'}
 #: modules whose ``cfg`` is a product-file block (``release:``, ``flake:`` ...), not config.yaml
 PRODUCT_BLOCK_FILES = {'release.py', 'flake.py', 'deploy.py', 'prod.py', 'loop.py', 'shadow.py',
-                       'scorecard.py', 'throughput.py'}
+                       'scorecard.py', 'throughput.py', 'reds.py'}
 
 
 def _is_cfg(node):

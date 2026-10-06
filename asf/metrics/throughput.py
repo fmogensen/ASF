@@ -26,6 +26,11 @@ lane: no forge, no self-hosted runner, no merge queue, no cloud lane, no quota r
 8. **quota** — per account, the 5-hour window's burn in %/hour and the projected time to its stop
    from successive readings (``state/quota-samples.jsonl``). ``n/a`` with no quota reader.
 
+Beside them, :mod:`asf.metrics.reds`: the red PR runs the host shows, each told apart (real,
+flaky, infra, ours, check), per day and over the last ``reds_window`` PR runs, and the run-window
+targets — first pass over the last ``first_pass_window`` PRs, runner-class reds, trunk green —
+whose breach lines join the alarms. The day-window first-pass row reads; its alarm is the target's.
+
 Thresholds: the seat ones are ``release.seats.*`` (:mod:`asf.release` reads the same series for
 its criterion 10); the rest are ``improve: {scorecard: {throughput: {…}}}`` (:data:`DEFAULTS`),
 each ``None`` (no alarm) unless named.
@@ -46,14 +51,33 @@ SEAT_DEFAULTS = {'min_pct': 60, 'idle_min': 30, 'max_gap_min': 15}
 #: ``improve.scorecard.throughput.*`` — the other alarms; ``None`` is no alarm.
 DEFAULTS = {
     'false_close_max': 0,          # reopened / landed, as a fraction: above it is an alarm
-    'first_pass_min': None,        # first-pass green rate, a fraction: below it is an alarm
+    'first_pass_min': 0.9,         # first-pass green rate over the last first_pass_window PRs
+    'first_pass_window': 50,       # … the PRs it is measured over (asf.metrics.reds)
+    'runner_reds_max': 0,          # runner-class reds (runner loss, OOM, timeout) allowed …
+    'runner_reds_window': 100,     # … in the last this many CI runs
+    'trunk_green_window': 20,      # the last this many trunk runs of the required check: all green
+    'reds_window': 100,            # visible reds are also counted over the last this many PR runs
     'detect_p90_max_min': None,    # time-to-detect p90 minutes
     'merge_wait_p90_max_min': None,  # PR green → landed p90 minutes
     'runner_queue_p90_max_min': None,  # CI queue wait p90 minutes, any class
     'cloud_dead_max': None,        # the cloud lane's dead + timeout rate, a fraction
     'quota_cap_hours_min': 1.0,    # an account projected to reach its stop sooner is an alarm
     'quota_window_min': 60,        # the readings the burn rate is taken over
+    # the classes of a visible red (asf.metrics.reds); matched case-insensitively as substrings
+    'check_patterns': ['check', 'dco', 'sign-off', 'signoff', 'rules', 'notes', 'conventions',
+                       'lint', 'format'],      # a failed job or step that is a deterministic repo check
+    'infra_steps': ['set up job', 'out of memory', 'oom', 'no space left', 'lost communication',
+                    'runner'],         # a failed step that is the runner's, not the code's
+    # the cancel-ledger causes (asf.ci_queue.claim_cancel) that are the factory's own cancels;
+    # '*' is any claim (the ledger holds only the factory's word); 'superseded' also counts a
+    # run a newer run on its branch replaced
+    'own_cancel_causes': ['*', 'superseded'],
+    'tooling_min_prs': 3,          # a failed step red on this many PRs, green on another, …
+    'tooling_window_h': 24,        # … within this many hours is tooling not on the branch
+    'tooling_max_older_share': 0.1,  # … when at most this share of the green PRs is based older
 }
+#: the :data:`DEFAULTS` keys that are lists
+LIST_KEYS = ('check_patterns', 'infra_steps', 'own_cancel_causes')
 
 METRICS = ('seats', 'first_pass', 'false_close', 'detect', 'cloud', 'merge', 'runners', 'quota')
 NAMES = {'seats': 'Seat utilisation', 'first_pass': 'First-pass PR CI green',
@@ -117,7 +141,12 @@ def settings(product):
         for k in DEFAULTS:
             if k in tp and (tp[k] is None or str(tp[k]).strip().lower() in ('off', 'none')):
                 out[k] = None
-        out.update({k: v for k, v in _numbers(tp).items() if k in DEFAULTS})
+        out.update({k: v for k, v in _numbers(tp).items() if k in DEFAULTS and k not in LIST_KEYS})
+        for k in LIST_KEYS:
+            if isinstance(tp.get(k), list):
+                out[k] = [str(x) for x in tp[k]]
+    for k in LIST_KEYS:
+        out[k] = list(out[k] or ())
     return seats, out
 
 
@@ -274,10 +303,9 @@ def first_pass_metric(ci, start, end, cfg, forge=True):
     if not opened:
         return _row('first_pass', NA, 'no PR CI run in the window')
     rate = _rate(green, opened)
-    lim = cfg.get('first_pass_min')
-    st = ALARM if lim is not None and rate < lim else OK
-    return _row('first_pass', st, f'{green}/{opened} PRs green on the first attempt', value=rate,
-                unit='rate', limit=None if lim is None else f'≥ {lim:g}')
+    # the alarm is the run-window target's (asf.metrics.reds.targets): one reading, one breach line
+    return _row('first_pass', OK, f'{green}/{opened} PRs green on the first attempt', value=rate,
+                unit='rate')
 
 
 # ------------------------------------------------------------------ 3. false close --
@@ -570,8 +598,10 @@ def compute(f, now, seat_cfg, cfg, days=TREND_DAYS):
     tr = trend(f, end, seat_cfg, cfg, days)
     for r in rows:
         r['trend'] = tr[r['key']]
-    return {'start': iso(start), 'end': iso(end), 'rows': rows,
-            'alarms': [breach_line(r) for r in rows if r['status'] == ALARM]}
+    from asf.metrics import reds
+    rd = reds.compute(f, now, cfg, days)
+    return {'start': iso(start), 'end': iso(end), 'rows': rows, 'reds': rd,
+            'alarms': [breach_line(r) for r in rows if r['status'] == ALARM] + rd['alarms']}
 
 
 def _cell(v, unit):
@@ -590,6 +620,9 @@ def render(d):
         trend_ = ' '.join(_cell(v, r['unit']) for v in r.get('trend') or ())
         out.append(f"| {r['name']} | {r['status']} | {r['detail'].replace('|', '/')} | {trend_} |")
     out += [''] + d['alarms'] if d['alarms'] else []
+    if d.get('reds'):
+        from asf.metrics import reds
+        out += [''] + reds.render(d['reds']).rstrip('\n').split('\n')
     return '\n'.join(out) + '\n'
 
 
@@ -623,7 +656,19 @@ def load(root, product, facts=None):
     return {'ticks': stream('ticks'), 'events': stream('events'), 'landings': stream('landings'),
             'ci': facts.ci, 'gates': facts.gates, 'items': facts.items, 'runs': facts.runs,
             'forge': bool(getattr(product, 'repo_slug', None)), 'pool': pool,
+            'main': getattr(product, 'main', None), 'claims': _claims(product),
+            'base_time': _base_time(product),
             'quota': samples, 'stop': stop, 'as_of': facts.as_of}
+
+
+def _claims(product):
+    from asf.metrics import reds
+    return reds.load_claims(product)
+
+
+def _base_time(product):
+    from asf.metrics import reds
+    return reds.git_base_time(getattr(product, 'repo_dir', None), getattr(product, 'main', None))
 
 
 def for_product(root, product, facts=None):
