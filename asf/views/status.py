@@ -595,6 +595,23 @@ def ab_pairs_cell(root, product):
     return pairs.status_cell(root, product)
 
 
+def intake_cell(root, product):
+    """``Intake``: the first ``NEEDS OPERATOR`` line for an S1 intake card stuck on a question
+    (:func:`asf.groom.inbox.stuck_s1_lines`), with ``+N more`` when there are others; ``None``
+    when there is none, so the row does not print (P7). One cell is one line."""
+    from asf.conventions import DEFAULT_INTAKE_DIR
+    from asf.groom import inbox
+    intake_dir = (getattr(getattr(product, 'conventions', None), 'intake_dir', None)
+                  or DEFAULT_INTAKE_DIR)
+    today = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    groom_file = f'groom/{today}.md'
+    lines = inbox.stuck_s1_lines(root, intake_dir, groom_file=groom_file, product=product)
+    if not lines:
+        return None
+    rest = f' +{len(lines) - 1} more' if len(lines) > 1 else ''
+    return lines[0] + rest
+
+
 def release_cell(root, product):
     """``Release``: the release-readiness verdict (:mod:`asf.release`; the full table is
     ``asf release-readiness``) — only for the product whose repo is the factory's own source, or
@@ -649,6 +666,7 @@ def render(root, product, cfg=None):
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
+                       ('Intake', lambda: intake_cell(root, product)),
                        ('Parked', lambda: parked_cell(product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('PAUSED', lambda: paused_cell(cfg, product)),

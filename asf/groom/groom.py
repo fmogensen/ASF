@@ -1285,6 +1285,10 @@ def cmd_groom(args, root):
     text = render_groom_file(date, sections)
     groom_dir = os.path.join(root, 'groom')
     groom_path = os.path.join(groom_dir, f"{date}.md")
+    for line in inbox_mod.stuck_s1_lines(root, intake_dir,
+                                         groom_file=os.path.relpath(groom_path, root),
+                                         product=product):
+        print(line)
     if incremental:
         return _write_incremental(root, date, groom_path, text, sections, auto, created_ids,
                                   asked, intake_dir, canonical, event)

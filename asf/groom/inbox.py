@@ -1,7 +1,9 @@
 """asf.groom.inbox — turn <intake_dir>/*.md into cards or one question, by shape. Three of
 those reads are inferred rather than declared: a title's `S1:`/`S2:`/`S3:` prefix is a severity
 (`graded`, `severity_of`), and a body `Error:` line or a named failing spec is the signature a
-`type: bug` card was being asked for (`body_signature`, `signed`)."""
+`type: bug` card was being asked for (`body_signature`, `signed`). A card still stuck on a
+question at S1 is said aloud, every tick, naming its file (`stuck_s1_lines`); `question_lines`
+carries the same severity as a token."""
 import os
 import re
 
@@ -24,6 +26,11 @@ SEVERITIES = ('S1', 'S2', 'S3')
 #: Bug's title carries: `asf/metrics/metrics.py:1650` (`str(signature)[:120]`) and
 #: `asf.tick.flaky.TITLE_MAX`.
 SIGNATURE_MAX = 120
+
+#: A `NEEDS OPERATOR` question is capped at the same length the repo's two existing caps for one
+#: line of prose quoted into a line a person reads: `asf.credentials.DETAIL_MAX` and
+#: `asf.tick.widen_footprint.REASON_MAX`.
+QUESTION_MAX = 160
 
 #: Header keys intake does not (yet) read a value for — `after:` on a Task, say. Named here, not
 #: matched by shape alone (B-0111 C1): a body line that merely *looks* header-shaped (`Note: …`,
@@ -377,7 +384,9 @@ def _split_question(text):
 def question_lines(root, intake_dir=None):
     """One open groom line per inbox card intake asked a question of, in file-name order:
     ``- [ ] inbox:<name> <title> — <question> → answer: ____``. The groom file carries them so
-    the adjudicator answers them (:func:`apply_answer`) — nobody edits a card by hand."""
+    the adjudicator answers them (:func:`apply_answer`) — nobody edits a card by hand. A severity
+    token (C11) sits between the ``inbox:<name>`` token and the title, empty at S3: a card graded
+    S1 here carries the same ``S1`` :func:`stuck_s1_lines` says aloud."""
     d = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
     if not os.path.isdir(d):
         return []
@@ -391,8 +400,54 @@ def question_lines(root, intake_dir=None):
         body, question = _split_question(text)
         if not question:
             continue
-        title = ' '.join(scrub_title(parse_inbox_file(body), root).title.split())
-        out.append(f"- [ ] {TOKEN_PREFIX}{name} {title} — {question} → answer: ____")
+        card = graded(scrub_title(parse_inbox_file(body), root))
+        title = ' '.join(card.title.split())
+        sev = severity_of(card)
+        grade = f'{sev} ' if sev != 'S3' else ''
+        out.append(f"- [ ] {TOKEN_PREFIX}{name} {grade}{title} — {question} → answer: ____")
+    return out
+
+
+def stuck_s1_lines(root, intake_dir=None, groom_file=None, product=None):
+    """One ``NEEDS OPERATOR`` line per intake card sitting on a ``## Question`` whose severity
+    reads ``S1`` (C10), in file-name order; ``[]`` when there is none. Pure over the intake
+    directory — no ledger, no marker, said again every tick until the card stops being stuck
+    (C7)::
+
+        NEEDS OPERATOR: S1 intake card inbox/p1-e2e-on-main.md is stuck on an intake question —
+        "This reads as a defect. A Bug carries a signature — …" — answer its
+        `inbox:p1-e2e-on-main.md` line in groom/2026-09-29.md (the next tick applies it)
+
+    The file is named record-relative, never by machine path (P13). With no groom file yet the
+    remedy is ``asf groom --product <name>``, which writes one. The question is folded to one
+    line and capped at :data:`QUESTION_MAX`."""
+    d = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for name in sorted(os.listdir(d)):
+        path = os.path.join(d, name)
+        if not name.endswith('.md') or not os.path.isfile(path):
+            continue
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        body, question = _split_question(text)
+        if not question:
+            continue
+        sev = severity_of(graded(parse_inbox_file(body)))
+        if sev != 'S1':
+            continue
+        q = ' '.join(question.split())
+        if len(q) > QUESTION_MAX:
+            q = q[:QUESTION_MAX - 1] + '…'
+        if groom_file and os.path.isfile(os.path.join(root, groom_file)):
+            remedy = (f"answer its `{TOKEN_PREFIX}{name}` line in {groom_file} "
+                      "(the next tick applies it)")
+        else:
+            remedy = f"asf groom --product {getattr(product, 'name', None) or '<name>'}"
+        rel = os.path.join(intake_dir or DEFAULT_INTAKE_DIR, name)
+        out.append(f'NEEDS OPERATOR: {sev} intake card {rel} is stuck on an intake question — '
+                   f'"{q}" — {remedy}')
     return out
 
 
