@@ -19,6 +19,7 @@ from asf.record import match
 from asf.record.check import cmd_check
 from asf.record.index import do_index
 from asf.conventions import Conventions
+from asf.groom import groom
 from asf.metrics import import_sessions
 from asf.metrics import metrics
 from asf.scorecard import score
@@ -1326,6 +1327,9 @@ class Backfill(Base):
                 {'id': 3, 'name': 'dco', 'head_branch': 'x', 'head_sha': 'e' * 40, 'conclusion': 'success',
                  'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:01:00Z', 'run_attempt': 1, 'pr': []}]
 
+    def fake_gh_lines_answered(self, args, timeout=300):
+        return self.fake_gh_lines(args, timeout), True
+
     def test_ci_backfill_and_idempotence(self):
         d, _res = self.write_results()
         argv = ['backfill', '--days', '2']
@@ -1340,7 +1344,7 @@ class Backfill(Base):
             'conventions': {'branch_prefixes': {'code': 'feature/', 'batch': 'worktree-m-batch-'}}})
         home = os.path.join(d, 'asf-home')
         self.write_registry(home)
-        with mock.patch.object(metrics, 'gh_lines', side_effect=self.fake_gh_lines), \
+        with mock.patch.object(metrics, 'gh_lines_answered', side_effect=self.fake_gh_lines_answered), \
                 mock.patch.object(metrics, 'pr_info', side_effect=lambda n, *a, **kw: prs.get(n)), \
                 mock.patch.object(metrics, 'today', return_value='2026-09-21'), \
                 mock.patch.object(env, 'ASF_HOME', home), \
@@ -1351,8 +1355,8 @@ class Backfill(Base):
             self.assertIn('sessions appended: 1', out)
             snap = {p: self.read(p) for p in ('metrics/ci/2026-09-21.jsonl',)}
             rc, out, _ = run_cli(self.root, *argv)
-            self.assertIn('ci exists: 2', out)
-            self.assertNotIn('appended', out)
+            self.assertIn('held 2, fetched 0, appended 0', out)
+            self.assertNotIn('ci appended', out)
             sessions = [json.loads(l) for l in self.read('metrics/sessions/2026-09-21.jsonl').splitlines()]
             self.assertEqual([(e['task'], e['result'], e['kind'], e['usd'], e['minutes']) for e in sessions],
                              [('fix-free-plan-t3-r1', 'finished', 'fix', 0.42, 4.0)])
@@ -1369,6 +1373,149 @@ class Backfill(Base):
         self.assertEqual((batch['batch'], batch['cancelled_minutes'], batch['items'], batch['item_reason']),
                          ('worktree-m-batch-20260921-0006', 3, None, 'batch run without a PR list'))
         self.assertFalse(batch['superseded'])           # no later run on that branch
+
+
+class CollectingPass(Base):
+    """`metrics.ci_facts`, `ci_watermark`, `ci_window`, `ci_runs_held` and `cmd_backfill`'s
+    incremental, cached, loud collecting pass (F-0175 S-37100)."""
+
+    PRODUCT = env.Product('sample', {'repo_slug': 'sample/sample'})
+
+    def seed(self, run, ts, branch='main', **kw):
+        self.put('ci', ci_event(run, ts=ts, branch=branch, **kw))
+
+    def api_run(self, run_id, created, branch='main', conclusion='success', attempt=1):
+        return {'id': run_id, 'name': 'ci', 'head_branch': branch, 'head_sha': 'a' * 40,
+                'conclusion': conclusion, 'created_at': created, 'updated_at': created,
+                'run_attempt': attempt, 'pr': []}
+
+    def host(self, runs, jobs=None):
+        """A `gh_lines_answered` stub answering `True`: `runs` for the listing call, and
+        `jobs.get(run_id, [])` for every `/jobs` call — the same split `fake_gh_lines` makes."""
+        jobs = jobs or {}
+
+        def answered(args):
+            joined = ' '.join(args)
+            if '/jobs' in joined:
+                run_id = int(joined.split('/runs/')[1].split('/')[0])
+                return jobs.get(run_id, []), True
+            return runs, True
+        return answered
+
+    def backfill(self, argv, answered, today='2026-09-29', product=None):
+        """Runs `backfill <argv>` against a stubbed clock and a stubbed `gh_lines_answered`
+        (`answered(args) -> (lines, answered)`); returns `(rc, out, calls)` — `calls` is every
+        `args` list `gh_lines_answered` was asked with, the listing before any `/jobs` calls."""
+        calls = []
+
+        def stub(args, timeout=300):
+            calls.append(args)
+            return answered(args)
+
+        with mock.patch.object(metrics, 'gh_lines_answered', side_effect=stub), \
+                mock.patch.object(metrics, 'today', return_value=today), \
+                mock.patch.object(env, 'load_product', return_value=product or self.PRODUCT):
+            rc, out, _err = run_cli(self.root, 'backfill', *argv)
+        return rc, out, calls
+
+    def ci_lines(self, out):
+        return [l for l in out.splitlines() if l.startswith('ci:')]
+
+    def test_the_window_starts_at_the_newest_trunk_fact(self):
+        self.seed(1, '2026-09-21T10:00:00Z')
+        _rc, _out, calls = self.backfill([], self.host([]), today='2026-09-29')
+        self.assertIn('created=%3E%3D2026-09-21', calls[0][1])
+
+    def test_a_gap_longer_than_the_catch_up_is_floored_and_said(self):
+        self.seed(1, '2026-06-01T10:00:00Z')
+        _rc, out, calls = self.backfill([], self.host([]), today='2026-09-29')
+        self.assertIn('created=%3E%3D2026-09-16', calls[0][1])          # 14 days back from 09-29
+        self.assertIn('reached back 14d', out)
+
+    def test_an_empty_stream_asks_for_the_floor_and_calls_it_no_gap(self):
+        _rc, out, calls = self.backfill([], self.host([]), today='2026-09-29')
+        self.assertIn('created=%3E%3D2026-09-16', calls[0][1])
+        self.assertNotIn('reached back', out)
+
+    def test_days_still_overrides_the_watermark(self):
+        self.seed(1, '2026-06-01T10:00:00Z')
+        _rc, out, calls = self.backfill(['--days', '2'], self.host([]), today='2026-09-29')
+        self.assertIn('created=%3E%3D2026-09-28', calls[0][1])          # 2 days back, not the watermark
+        self.assertNotIn('reached back', out)
+
+    def test_a_run_the_stream_holds_is_listed_but_not_fetched(self):
+        self.seed(1, '2026-09-20T10:00:00Z')
+        self.seed(2, '2026-09-20T11:00:00Z')
+        runs = [self.api_run(1, '2026-09-20T10:00:00Z'), self.api_run(2, '2026-09-20T11:00:00Z'),
+                self.api_run(3, '2026-09-20T12:00:00Z')]
+        jobs = {3: [{'name': 'gate', 'conclusion': 'success', 'runner_name': 'box1',
+                     'started_at': '2026-09-20T12:00:00Z', 'completed_at': '2026-09-20T12:05:00Z', 'failed': []}]}
+        _rc, out, calls = self.backfill(['--days', '10'], self.host(runs, jobs), today='2026-09-29')
+        job_calls = [c for c in calls if '/jobs' in ' '.join(c)]
+        self.assertEqual(len(job_calls), 1)
+        self.assertIn('/runs/3/jobs', ' '.join(job_calls[0]))
+        self.assertIn('ci appended: 1', out)
+        ci = [json.loads(l) for l in self.read('metrics/ci/2026-09-20.jsonl').splitlines()]
+        self.assertEqual(sorted(e['run'] for e in ci), [1, 2, 3])
+
+    def test_superseded_still_sees_the_runs_it_did_not_fetch(self):
+        self.seed(2, '2026-09-20T11:00:00Z')
+        runs = [self.api_run(1, '2026-09-20T10:00:00Z', conclusion='cancelled'),
+                self.api_run(2, '2026-09-20T11:00:00Z')]
+        jobs = {1: [{'name': 'gate', 'conclusion': 'cancelled', 'runner_name': 'box1',
+                     'started_at': '2026-09-20T10:00:00Z', 'completed_at': '2026-09-20T10:01:00Z', 'failed': []}]}
+        _rc, _out, _calls = self.backfill(['--days', '10'], self.host(runs, jobs), today='2026-09-29')
+        ci = [json.loads(l) for l in self.read('metrics/ci/2026-09-20.jsonl').splitlines()]
+        run1 = next(e for e in ci if e['run'] == 1)
+        self.assertTrue(run1['superseded'])      # run 2, on the same branch, was not re-fetched either
+
+    def test_the_pass_says_what_it_did(self):
+        runs = [self.api_run(1, '2026-09-20T10:00:00Z'), self.api_run(2, '2026-09-20T11:00:00Z')]
+        jobs = {n: [{'name': 'gate', 'conclusion': 'success', 'runner_name': 'box1',
+                     'started_at': '2026-09-20T10:00:00Z', 'completed_at': '2026-09-20T10:05:00Z', 'failed': []}]
+                for n in (1, 2)}
+        _rc, out, _calls = self.backfill(['--days', '10'], self.host(runs, jobs), today='2026-09-29')
+        self.assertIn('ci: 2026-09-20..2026-09-29 — listed 2, held 0, fetched 2, appended 2; newest '
+                      '2026-09-20T11:00:00Z (', out)
+
+    def test_the_pass_names_why_it_collected_nothing(self):
+        def no_answer(args):
+            return [], False
+        _rc, out1, _calls1 = self.backfill(['--days', '10'], no_answer, today='2026-09-29')
+        self.assertIn('the host did not answer (gh)', out1)
+
+        no_slug = env.Product('sample', {})
+        _rc, out2, calls2 = self.backfill(['--days', '10'], self.host([]), today='2026-09-29', product=no_slug)
+        self.assertIn('the product names no repo_slug', out2)
+        self.assertEqual(calls2, [])    # PD7: a falsy repo_slug never reaches gh
+
+        _rc, out3, _calls3 = self.backfill(['--days', '10'], self.host([]), today='2026-09-29')
+        self.assertIn("no run of workflow 'ci' in the window", out3)
+
+        lines = {self.ci_lines(out1)[0], self.ci_lines(out2)[0], self.ci_lines(out3)[0]}
+        self.assertEqual(len(lines), 3)   # no two of the three print the same string
+
+    def test_trunk_ci_runs_is_the_reverse_of_ci_facts(self):
+        day_dir = os.path.join(self.root, 'metrics', 'ci')
+        os.makedirs(day_dir, exist_ok=True)
+        rows = [
+            {'ts': '2026-09-22T10:00:00Z', 'branch': 'main', 'sha': 'b' * 40, 'run': 2, 'attempt': 1,
+             'jobs': [{'name': 'gate', 'conclusion': 'failure'}, {'name': 'gate', 'conclusion': 'success'}]},
+            {'ts': '2026-09-21T10:00:00Z', 'branch': 'main', 'sha': 'a' * 40, 'run': 1, 'attempt': 1,
+             'jobs': [{'name': 'gate', 'conclusion': 'failure'}]},
+            {'ts': '2026-09-21T10:00:00Z', 'branch': 'main', 'sha': 'd' * 40, 'run': 3, 'attempt': 1,
+             'jobs': [{'name': 'gate', 'conclusion': 'success'}]},
+            {'ts': '2026-09-23T10:00:00Z', 'branch': 'cloud/x', 'sha': 'c' * 40, 'run': 4, 'attempt': 1,
+             'jobs': [{'name': 'gate', 'conclusion': 'failure'}]},
+        ]
+        with open(os.path.join(day_dir, '2026-09-22.jsonl'), 'w') as f:
+            f.write('\n'.join(json.dumps(r) for r in rows) + '\n')
+        conv = Conventions()
+        product = env.Product('sample', {})
+        facts = metrics.ci_facts(self.root, conv)
+        self.assertEqual([f['sha'][0] for f in facts], ['b', 'd', 'a'])   # newest first; ties reversed per day
+        self.assertEqual(facts[0]['jobs'], {'gate': 'success'})          # run 2's twice-listed job, last wins
+        self.assertEqual(groom.trunk_ci_runs(self.root, product), tuple(reversed(facts)))
 
 
 class ReleaseHonesty(Base):

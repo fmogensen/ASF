@@ -1076,23 +1076,13 @@ def run_policy_pass(sections, canonical, derived, product, ctx):
 
 
 def trunk_ci_runs(root, product):
-    """The trunk's finished CI runs off the record's ``metrics/ci`` stream — the runs the
-    metrics import gathers from the CI provider and the Bug filer reads — oldest first, as
-    ``policy.Ctx.ci_runs`` wants them: ``{'ts', 'sha', 'jobs': {name: conclusion}}``. A run on
-    any branch but ``main`` is left out; a job listed twice in one run keeps its last
-    conclusion."""
-    from asf.tick.file_bugs import DEFAULTS, _jsonl_lines
+    """The trunk's finished CI runs, oldest first, as ``policy.Ctx.ci_runs`` wants them — the
+    reverse of :func:`asf.metrics.metrics.ci_facts`, which is the one reader of the stream's
+    trunk half (F-0175 D10)."""
+    from asf.metrics.metrics import ci_facts
+    from asf.tick.file_bugs import DEFAULTS
     conv = product.conventions if product is not None else DEFAULTS
-    runs = []
-    for run in _jsonl_lines(os.path.join(root, 'metrics', 'ci', '*.jsonl')):
-        ts = parse_iso(run.get('ts'))
-        if ts is None or not conv.is_trunk(run.get('branch') or ''):
-            continue
-        jobs = {j.get('name'): j.get('conclusion') for j in run.get('jobs') or []
-                if isinstance(j, dict) and j.get('name')}
-        runs.append({'ts': ts, 'sha': run.get('sha') or '', 'jobs': jobs})
-    runs.sort(key=lambda r: r['ts'])
-    return tuple(runs)
+    return tuple(reversed(ci_facts(root, conv)))
 
 
 def _ledger_items(product):

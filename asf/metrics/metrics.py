@@ -3,7 +3,7 @@
 
     metrics.py append <ci|sessions|ticks> '<json>' | --stdin   validate, match to items, append one line
     metrics.py rollup [<day>]                                  metrics/daily/<day>.md, item cost:, releases/, budget
-    metrics.py backfill --days N                               fill the streams from the CI API and the registry
+    metrics.py backfill [--days N]                              fill the streams from the CI API and the registry
 
 Streams are JSONL under metrics/<stream>/<YYYY-MM-DD>.jsonl: one object per line, UTC ISO timestamps,
 keys sorted, no trailing spaces. See README.md "Metrics". python3 stdlib only; `gh` and `git` by subprocess.
@@ -39,6 +39,13 @@ from asf.record import match
 from asf.record.index import do_index
 
 STREAMS = ('ci', 'sessions', 'ticks', 'landings', 'gates')
+#: How far back one collecting pass reaches when the record gives it no watermark, or when the
+#: watermark is older than that (D2). A gap longer than this is skipped — and said out loud.
+CI_CATCH_UP_DAYS = 14
+#: The sessions half of `cmd_backfill`'s own window — unrelated to the CI watermark above (F-0175
+#: PD1): the tick has always asked for one day of sessions, and `--days N` overrides it exactly
+#: as it overrides the CI window, but neither is derived from the other.
+SESSION_DAYS = 1
 KINDS = ('spec', 'review', 'fix', 'code', 'plan', 'preflight', 'probe', 'rebase', 'relaunch', 'launch',
          'tick', 'other')
 KIND_PREFIXES = (
@@ -90,6 +97,20 @@ def parse_ts(s):
         except ValueError:
             return None
     return d.astimezone() if d.tzinfo is None else d
+
+
+def ci_age(seconds):
+    """`s`/`m`/`h`/`d` — the one ladder a CI fact's age renders through (PD8): the collecting
+    pass's own `ci:` line here, and (once F-0175's second Task lands) `doctor.check_ci_facts`'s
+    row off this same function, rather than `asf.doctor.format_age` reaching back into metrics'
+    import closure for one line."""
+    if seconds < 90:
+        return f'{int(seconds)}s'
+    if seconds < 5400:
+        return f'{int(seconds // 60)}m'
+    if seconds < 172800:
+        return f'{int(seconds // 3600)}h'
+    return f'{int(seconds // 86400)}d'
 
 
 # ---------------------------------------------------------------- schema --
@@ -892,8 +913,10 @@ def gh_json(args, timeout=120):
         return None
 
 
-def gh_lines(args, timeout=300):
-    """`gh api … --jq '<expr>|@json'` → list of decoded objects, [] on failure."""
+def gh_lines_answered(args, timeout=300):
+    """`gh api … --jq '<expr>|@json'` → `(lines, answered)`: the decoded objects, and whether the
+    host answered at all. The one bit `gh_lines` throws away (D5) — "the host said nothing"
+    (`answered=False`) from "the host said there is nothing" (`answered=True`, `lines=[]`)."""
     out = gh(args, timeout)
     res = []
     for line in (out or '').splitlines():
@@ -901,7 +924,12 @@ def gh_lines(args, timeout=300):
             res.append(json.loads(line))
         except json.JSONDecodeError:
             pass
-    return res
+    return res, out is not None
+
+
+def gh_lines(args, timeout=300):
+    """`gh api … --jq '<expr>|@json'` → list of decoded objects, [] on failure."""
+    return gh_lines_answered(args, timeout)[0]
 
 
 def _resolve_product(product):
@@ -1865,18 +1893,103 @@ def queued_s(created, started):
     return round(max(0.0, (b - a).total_seconds()), 1) if a and b else None
 
 
-def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, conv=None):
-    """Finished CI runs of the last `days` days, with their jobs, as validated events (not yet appended).
-    A run on a branch under the product's `batch` prefix (a merge queue's cut) carries that branch as
-    its `batch`; a product with no such prefix has no batch runs."""
+def ci_facts(root, conv, limit=None):
+    """The trunk's finished CI runs off the record's ``metrics/ci`` stream, **newest first**, at
+    most ``limit`` of them: ``{'ts': datetime, 'sha': str, 'jobs': {name: conclusion}}``.
+
+    The one reader of the stream's trunk half (D10): :func:`asf.groom.groom.trunk_ci_runs`
+    reverses it for the policy and :func:`asf.doctor.check_ci_facts` measures its age, so neither
+    can come to hold a different idea of what a trunk CI fact is. A run on any branch but
+    ``conv.main`` is left out; a job listed twice in one run keeps its last conclusion.
+
+    Day files are read newest first and the read stops as soon as ``limit`` facts are in hand — a
+    caller that wants one timestamp does not parse the whole stream.
+    """
+    from asf.tick.stale import parse_iso
+    out = []
+    for path in reversed(sorted(glob.glob(os.path.join(root, 'metrics', 'ci', '*.jsonl')))):
+        day_facts = []
+        for run in read_file(path):
+            ts = parse_iso(run.get('ts'))
+            if ts is None or not conv.is_trunk(run.get('branch') or ''):
+                continue
+            jobs = {j.get('name'): j.get('conclusion') for j in run.get('jobs') or []
+                    if isinstance(j, dict) and j.get('name')}
+            day_facts.append({'ts': ts, 'sha': run.get('sha') or '', 'jobs': jobs})
+        day_facts.sort(key=lambda f: f['ts'])
+        day_facts.reverse()
+        out.extend(day_facts)
+        if limit is not None and len(out) >= limit:
+            break
+    return out[:limit] if limit is not None else out
+
+
+def ci_watermark(root, conv):
+    """The `YYYY-MM-DD` day of the record's own newest trunk CI fact, or `None` on an empty
+    stream — read through `limit=1` so a watermark lookup never parses a year of jsonl (D2)."""
+    facts = ci_facts(root, conv, limit=1)
+    return facts[0]['ts'].date().isoformat() if facts else None
+
+
+def ci_window(root, conv, days=None, day=None):
+    """`(since, floored)`: the day one collecting pass should ask the host for, and whether
+    `CI_CATCH_UP_DAYS` floored it short of the record's own watermark (D2).
+
+    `days` (the operator's `--days N`) overrides the watermark outright:
+    `days_back(day or today(), days)[0]`, never floored. With no override, the window starts the
+    day of the record's own newest trunk fact — re-listing that one day is deliberate, since it
+    is the only day the stream may hold partially and `append_event`'s first-write-wins makes the
+    overlap free — unless that day is more than `CI_CATCH_UP_DAYS` before `day or today()`, in
+    which case the floor day is used instead and `floored` is `True`. No watermark at all is a
+    first pass, not a skipped gap: the floor day, `floored=False`."""
+    anchor = day or today()
+    if days is not None:
+        return days_back(anchor, days)[0], False
+    floor_day = days_back(anchor, CI_CATCH_UP_DAYS)[0]
+    watermark = ci_watermark(root, conv)
+    if watermark is None:
+        return floor_day, False
+    if watermark < floor_day:
+        return floor_day, True
+    return watermark, False
+
+
+def ci_runs_held(root, days):
+    """`{(run, attempt)}` already in the stream over `days` — what the pass must not fetch again
+    (D4): a run `append_event` already holds could not have been improved by re-fetching it (P4),
+    so doing so anyway is pure waste."""
+    return {(e['run'], e['attempt']) for e in read_stream(root, 'ci', days)}
+
+
+def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, conv=None,
+                since=None, held=(), report=None):
+    """Finished CI runs since `since` (or the last `days` days when `since` is None), with their
+    jobs, as validated events (not yet appended) — except a run already in `held` (`(run,
+    attempt)` pairs the stream already holds, D4), whose jobs and PR info are not re-fetched. A
+    run on a branch under the product's `batch` prefix (a merge queue's cut) carries that branch
+    as its `batch`; a product with no such prefix has no batch runs.
+
+    `report`, when a dict, is filled with `{'since', 'listed', 'held', 'fetched', 'answered'}` —
+    `answered` is `None` when the product names no `repo_slug` (no `gh` call is made at all,
+    PD7), `False` when the host did not answer, `True` otherwise; `listed` and `held` count the
+    listing after the workflow filter."""
     repo_slug = _repo_slug(repo_slug, product)
     conv = conv or DEFAULTS
-    since = days_back(today(), days)[0]
-    runs = [r for r in gh_lines(['api', f'repos/{repo_slug}/actions/runs?created=%3E%3D{since}&status=completed&per_page=100',
-                                 '--paginate', '--jq',
-                                 '.workflow_runs[]|{id,name,head_branch,head_sha,conclusion,created_at,updated_at,'
-                                 'run_attempt,pr:[.pull_requests[].number]}|@json'])
-            if r.get('name') == workflow]
+    since = since or days_back(today(), days)[0]
+    if not repo_slug:
+        if report is not None:
+            report.update(since=since, listed=0, held=0, fetched=0, answered=None)
+        return []
+    runs, answered = gh_lines_answered(
+        ['api', f'repos/{repo_slug}/actions/runs?created=%3E%3D{since}&status=completed&per_page=100',
+         '--paginate', '--jq',
+         '.workflow_runs[]|{id,name,head_branch,head_sha,conclusion,created_at,updated_at,'
+         'run_attempt,pr:[.pull_requests[].number]}|@json'])
+    runs = [r for r in runs if r.get('name') == workflow]
+    by_branch = collections.defaultdict(list)
+    for r in runs:
+        by_branch[r['head_branch']].append(r['created_at'])
+    fresh = [r for r in runs if (r['id'], r.get('run_attempt') or 1) not in held]
 
     def jobs_of(r):
         return gh_lines(['api', f"repos/{repo_slug}/actions/runs/{r['id']}/jobs?per_page=100", '--paginate',
@@ -1884,10 +1997,7 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
                                  'started_at,completed_at,failed:[.steps[]|select(.conclusion=="failure")|.name]}|@json'])
 
     with ThreadPoolExecutor(8) as pool:
-        all_jobs = list(pool.map(jobs_of, runs))
-    by_branch = collections.defaultdict(list)
-    for r in runs:
-        by_branch[r['head_branch']].append(r['created_at'])
+        all_jobs = list(pool.map(jobs_of, fresh))
     pr_cache = {}
 
     def info(n):
@@ -1896,7 +2006,7 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
         return pr_cache[n]
 
     events = []
-    for r, jobs in zip(runs, all_jobs):
+    for r, jobs in zip(fresh, all_jobs):
         js = [{'name': j['name'], 'conclusion': j.get('conclusion') or 'unknown', 'runner': j.get('runner_name'),
                'minutes': mins(j.get('started_at'), j.get('completed_at')) if j.get('started_at') and j.get('completed_at') else 0,
                'failed_step': (j.get('failed') or [None])[0],
@@ -1918,14 +2028,18 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
             'cancelled_minutes': sum(j['minutes'] for j in js if j['conclusion'] == 'cancelled'),
             'superseded': r.get('conclusion') == 'cancelled' and any(c > r['created_at'] for c in by_branch[branch]),
             HINTS_KEY: hints})
+    if report is not None:
+        report.update(since=since, listed=len(runs), held=len(runs) - len(fresh), fetched=len(fresh),
+                      answered=answered)
     return events
 
 
 def cmd_backfill(args, root):
-    """The `ci` stream from the CI API, the `sessions` stream from the factory's own registry.
-    A previous runner's logs are a separate, one-shot import (`asf import-sessions`)."""
+    """The `ci` stream from the CI API — incremental against the record's own watermark, cached
+    against the runs it already holds, and loud about what it did every pass (F-0175) — and the
+    `sessions` stream from the factory's own registry. A previous runner's logs are a separate,
+    one-shot import (`asf import-sessions`)."""
     items = match.load_index(root)
-    since = days_back(today(), args.days)[0]
     counts = collections.Counter()
     product = None
     try:
@@ -1940,12 +2054,36 @@ def cmd_backfill(args, root):
         except SchemaError as e:
             print(f"skipped a {stream} event: {e}", file=sys.stderr)
             counts[f'{stream} rejected'] += 1
-            return
+            return None
         counts[f'{stream} {status}'] += 1
+        return status
 
     if product is not None:
-        for ev in ci_from_api(args.days, args.workflow, {}, items, product=product, conv=conv):
-            put('ci', ev)
+        ci_since, floored = ci_window(root, conv, days=args.days)
+        held_span = (dt.date.fromisoformat(today()) - dt.date.fromisoformat(ci_since)).days + 1
+        held = ci_runs_held(root, days_back(today(), held_span))
+        report = {}
+        ci_appended = 0
+        for ev in ci_from_api(args.days, args.workflow, {}, items, product=product, conv=conv,
+                             since=ci_since, held=held, report=report):
+            if put('ci', ev) == 'appended':
+                ci_appended += 1
+        newest = ci_facts(root, conv, limit=1)
+        tail = (f"; newest {iso(newest[0]['ts'])} ({ci_age((now_utc() - newest[0]['ts']).total_seconds())})"
+               if newest else '; no trunk fact in the record')
+        if report['answered'] is None:
+            print(f"ci: {ci_since}..{today()} — the product names no repo_slug{tail}")
+        elif report['answered'] is False:
+            print(f"ci: {ci_since}..{today()} — the host did not answer (gh){tail}")
+        elif report['listed'] == 0:
+            print(f"ci: {ci_since}..{today()} — no run of workflow '{args.workflow}' in the window{tail}")
+        else:
+            print(f"ci: {ci_since}..{today()} — listed {report['listed']}, held {report['held']}, "
+                  f"fetched {report['fetched']}, appended {ci_appended}{tail}")
+        if floored:
+            print(f"ci: {ci_since}..{today()} — reached back {CI_CATCH_UP_DAYS}d; "
+                  f"runs before {ci_since} are not collected")
+        since = days_back(today(), args.days or SESSION_DAYS)[0]
         meter_cache = MeterCache.for_product(product)
         for ev in sessions_from_registry(product, since_day=since, items=items,
                                          meter_cache=meter_cache):
@@ -1983,7 +2121,8 @@ def build_parser():
     r.add_argument('--no-releases', action='store_true')
     b = sub.add_parser('backfill',
                        help="fill the streams from the CI API and the product's session registry")
-    b.add_argument('--days', type=int, required=True)
+    b.add_argument('--days', type=int, default=None,
+                   help='default: from the newest trunk CI run the record holds')
     b.add_argument('--workflow', default='ci')
     return p
 
