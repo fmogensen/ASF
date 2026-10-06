@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.173 — 2026-10-06
+
+### Features landed
+
+- `asf upgrade --wait-s` now really ends within its bound and never blocks launches, and `asf retire <item> --why "…"` retires a hand-landed card or inbox note without hand-editing the record (#822)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.173"`
+
 ## v0.1.172 — 2026-10-06
 
 ### Features landed
