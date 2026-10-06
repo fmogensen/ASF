@@ -374,6 +374,18 @@ capacity:
 #     floor_s: 3600
 #     default_s: 7200
 
+# clocks.wave: the wave's own clock (asf.tick.wave_clock) — every product whose clocks carry a
+# wave step also gets a short `asf wave` job, installed beside the others, that runs the launch
+# path alone (read the record, plan, screen, spawn) under its own lock, never the product's tick
+# lock — so a long tick's health, harvest or CI-log work never makes a ready row or a free seat
+# wait for it. `every` is its interval (default 1m); `off` turns it off and leaves launches to the
+# product's own tick, as before this clock existed.
+# clocks:
+#   wave:
+#     every: 1m
+# clocks:
+#   wave: off
+
 # factory: the identity the tick's state commits are authored as (default "ASF <asf@localhost>").
 # factory:
 #   git_identity: "ASF <asf@localhost>"

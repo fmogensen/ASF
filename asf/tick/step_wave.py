@@ -1183,3 +1183,70 @@ def launch(ctx, out=print):
     ctx.counts['launches'] += len(launched)
     note_launched(ctx, launched)
     return 0
+
+
+def launch_now(ctx, out=print):
+    """The wave's own clock's call (:mod:`asf.tick.wave_clock`): the launch path alone — read the
+    record, plan, screen and spawn — without the lane pass, the hold announcements or the
+    record's demand write :func:`launch` also does. Those are the product tick's own job, still
+    run there, under its own tick lock; this runs under the wave clock's ``tick-wave.lock``
+    instead, so it is never behind whatever else that tick is doing.
+
+    The breaker, quota and seat checks are the exact ones :func:`launch` applies
+    (:func:`cloud_settings`, :func:`gated_plan`, :func:`screen`, :func:`_wave`) — none of them
+    cache config, so a cool-down or quota edit takes effect on this call, not the next long tick.
+    Every spawn goes through :func:`_wave`'s own cross-process seat claim
+    (:class:`asf.workers.pool.Pool`, under :mod:`asf.workers.seats`'s lock), and a row already on
+    the session ledger plans as ``running`` (:func:`inflight`) — so a row this call claims is one
+    the product's own tick, reading the ledger at the same moment, already sees as spoken for, and
+    the two never launch it twice."""
+    from asf.views import index_reader
+    product = ctx.product
+    root = ctx.record_root()
+    items, _generated = index_reader.load(root)
+    if product.repo_dir:
+        items = plan_order.overlay(items, plan_order.trunk_reader(product))
+    running = inflight(product)
+    r = capacity_mod.resolve(product)
+    cloud = cloud_settings(product)
+    ready = cloud_readiness(product, cloud)
+    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    inputs = plan_inputs(product, root, items)
+    planned, _dropped = gated_plan(items, product, running, r.sessions + extra, inputs, out=out)
+    held = approvals.parked(product)
+    host_held, host_why, reading = host_hold(planned)
+    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
+    s1_bypass_open = (host_held
+                      and host_mod.load_only_hold(reading, host_mod.guards_from_config(env.load_config()))
+                      and not s1_bypass_live())
+    seats = r.sessions + extra
+
+    def build(row, bypass):
+        brief = _build(product, row, items, running,
+                       repo_facts=_repo_facts(product, row, items, running))
+        return worker_row(row, brief, items, host_load_bypass=bypass), brief
+
+    screened = screen(product, planned, items, running, held, seats, (host_held, host_why),
+                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx)
+    starting = [s for s in screened if s.starts]
+    if host_held and not any(s.bypass for s in starting):
+        out(f'wave: held: {host_why} — no new session this run; running sessions go on')
+        return 0
+    if local_hold:
+        out(f'wave: local lane held: {local_hold} — the cloud lane takes what it can')
+    worker_rows = [s.wrow for s in starting]
+    if not worker_rows:
+        out('wave: nothing to launch')
+        return 0
+    texts = {s.wrow.job: s.brief.text for s in starting}
+    launched, _waits = _wave(product, worker_rows, len(worker_rows),
+                             brief_fn=lambda rr: texts[rr.job], out=out,
+                             **({'local_hold': local_hold} if local_hold else {}),
+                             **({'cloud_ready': ready} if cloud.on else {}),
+                             **({'local_seats': local_seats(r.sessions, running)}
+                                if extra else {}))
+    for wrow, rec in launched:
+        ctx.event('launch', item=wrow.item, job=wrow.job,
+                  model=rec.get('model'), brief_kind=wrow.kind)
+    ctx.counts['launches'] = ctx.counts.get('launches', 0) + len(launched)
+    return 0

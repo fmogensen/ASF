@@ -580,6 +580,10 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         if owner == 'off':
             print(f"tick: step {step} off (another job runs it)")
             continue
+        if step == 'wave' and owner == 'asf' and wave_job_recent(product):
+            print("tick: wave skipped — the wave clock (asf wave) ran within its own "
+                  "window; this tick's launches are already done")
+            continue
         if step == 'daily' and not steps.daily_due(product, getattr(args, 'daily', False)):
             print("tick: step daily already ran today")
             continue
@@ -714,6 +718,18 @@ def groom_first(ctx, queue):
     a new inbox card waits (:func:`fresh_inbox`), so a card filed is launched by the same tick —
     a tick with nothing new to mint never waits on the groom."""
     return any(r[0] == 'groom' and r[1] == 'asf' for r in queue) and fresh_inbox(ctx)
+
+
+def wave_job_recent(product):
+    """Whether the wave's own dedicated clock (:mod:`asf.tick.wave_clock`, T-defect #54) already
+    launched for ``product`` recently enough that this tick's own wave step would just repeat its
+    read of the same record: no row is launched twice either way (every spawn claims its row
+    through :func:`asf.workers.wave.wave`'s own cross-process seat, and an already-launched job
+    reads as running off the session ledger) — this only saves the tick a wasted plan-and-screen
+    pass while that job's next run is already due soon. ``clocks.wave: off``, or the job never
+    having run, reads false: the tick's own wave step then runs exactly as it always has."""
+    from asf.tick import wave_clock
+    return wave_clock.ran_recently(product)
 
 
 def run_identity(run):

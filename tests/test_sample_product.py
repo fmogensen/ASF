@@ -296,7 +296,8 @@ class SampleClocksTest(unittest.TestCase):
         with open(os.path.join(SAMPLE, 'product.yaml'), encoding='utf-8') as f:
             product = env.Product('sample', env.loads(f.read()))
         clocks = scheduler.clocks(product)
-        self.assertEqual([c.name for c in clocks], ['record', 'dispatch', 'daily', 'shadow'])
+        self.assertEqual([c.name for c in clocks],
+                         ['record', 'dispatch', 'daily', 'shadow', 'wave'])
 
 
 # ---- the failure paths, whole loop (F-0087) ----------------------------------------------
