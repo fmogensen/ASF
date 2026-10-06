@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.195 — 2026-10-06
+
+### Features landed
+
+- The wave runs on its own 1-minute clock, never behind the long tick (#852)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.195"`
+
 ## v0.1.194 — 2026-10-06
 
 ### Bugs fixed
