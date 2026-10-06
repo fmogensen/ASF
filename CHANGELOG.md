@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.199 — 2026-10-06
+
+### Features landed
+
+- The doctor says how many snapshots there are and whether the launcher is stale (#859)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.199"`
+
 ## v0.1.198 — 2026-10-06
 
 ### Features landed
