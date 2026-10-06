@@ -90,7 +90,7 @@ def cmd_correct(args, fetch=None, alive=None):
               f'{", ".join(str(r.get("job")) for r in open_runs)} — no live session behind '
               f'them (health will end them)')
     rounds = lifecycle.rounds_of(path, item)
-    run = max(runs, key=lambda r: r.get('started') or '')
+    run = open_lane_run(product, runs) or max(runs, key=lambda r: r.get('started') or '')
     if rounds >= lifecycle.ROUND_CAP:
         if getattr(args, 'from_pr', None):
             print(f'asf correct: {item} has used its {lifecycle.ROUND_CAP} correction rounds — '
@@ -133,12 +133,34 @@ def own_branch(product, item):
     return conv.branch('fix' if item.startswith('B-') else 'code', item)
 
 
+def open_lane_run(product, runs):
+    """The newest run of ``runs`` whose lane is still open (a lane record in no terminal state:
+    its PR open, sent back, waiting on CI), or None. A run on a code branch wins over one on a
+    spec, plan or replan branch; failing that, the open document lane is the item's live lane and
+    the correction goes there — a product's F-0003 (round G #27): the Feature's open lane was its
+    spec PR branch, and the ruling forked a fresh code branch named after the Feature instead."""
+    from asf.harvest.lane import OPEN_STATES
+    conv = product.conventions
+    live = [r for r in runs if r.get('branch')
+            and lifecycle.lane_of(r).get('state') in OPEN_STATES]
+    if not live:
+        return None
+    code = [r for r in live if r.get('kind') != 'adjudicate'
+            and conv.branch_kind(r.get('branch') or '') not in DOC_BRANCH_KINDS]
+    return max(code or live, key=lambda r: r.get('started') or '')
+
+
 def ruling_run(product, item, runs):
-    """The run an operator ruling is written on: the newest run on the item's own code branch —
-    never an adjudicate run, never a spec or plan branch (a product's T-0614: the newest run was
-    the item's adjudication on a plan branch, and the ruling, which asked for code, was carried
-    out there as a reshape). When no run is on a code branch, the newest run carries it with
-    ``branch`` naming the item's own (:func:`own_branch`)."""
+    """The run an operator ruling is written on: the item's open lane first
+    (:func:`open_lane_run`) — a spec or plan PR still open is the item's live branch, and no fresh
+    code branch is forked beside it. With no open lane: the newest run on the item's own code
+    branch — never an adjudicate run, never a spec or plan branch (a product's T-0614: the newest
+    run was the item's adjudication on a plan branch, and the ruling, which asked for code, was
+    carried out there as a reshape). When no run is on a code branch, the newest run carries it
+    with ``branch`` naming the item's own (:func:`own_branch`)."""
+    live = open_lane_run(product, runs)
+    if live is not None:
+        return live
     conv = product.conventions
     code = [r for r in runs if r.get('kind') != 'adjudicate'
             and conv.branch_kind(r.get('branch') or '') not in DOC_BRANCH_KINDS]
