@@ -37,7 +37,11 @@ a run, the wave runs a second time after the groom, so the seat it freed is stil
 skipped one prints `tick: <name> deferred — …` and still runs at least every
 `tick.deferred_max_age_s` (default 3600).
 
-Each step ends with `[step:<name>] <seconds>s`; the tick ends with `tick: state committed and
+Each step prints `[step:<name>] start owner=<asf|command> pid=<n> at=<time>` as it begins and
+`[step:<name>] <seconds>s ok=<yes|no> owner=… pid=… at=…` as it ends, both flushed at once — so
+`tail -f` on the log names the step the tick is inside right now, not only the ones it has
+finished. A step the tick *skipped* (`off`, already ran today, at CI capacity, already running)
+prints neither. The tick then ends with `tick: state committed and
 pushed`, `tick: total …`, then a summary: **IN FLIGHT** (the sessions running now) and **DONE
 since** the last tick on this clock (sessions that ended, with their result). A step that failed
 printed `[step:<name>] FAILED <why>`; a failed record step prints `RECORD STALE — <why>`. Last of
@@ -46,6 +50,10 @@ all, a digest of what this tick did: `TICK — record ok, health ok, …` then t
 
 `asf watch --product <p>` tails that digest as it lands, tick after tick, without running one
 itself — read the console instead of a clock's log when a clock (not you) is the one ticking.
+
+`asf doctor` reads that start line too: the SCHEDULER row for each clock shows `step: <name> running
+<age> (<owner>, pid <n>)` while its tick is in a step, so you can see which step is running
+without opening the log.
 
 ## `asf watch`
 

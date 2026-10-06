@@ -165,8 +165,10 @@ One table, then a `SCHEDULER` section. Each row is `ok`, `RED` (required and fai
 | `rule-checks` | rule checks that timed out or crashed on the last run |
 | `capacity`, `token-caps` | advisory: oversubscription, deprecated keys, uncapped token dimensions |
 
-Under `== SCHEDULER`, each loaded job has one line (`state`, `runs`, `last-exit`, `last-run`, the
-last log line). A job that exited non-zero, or never ran in two intervals, is `RED`. On launchd,
+Under `== SCHEDULER`, each loaded job has one line (`state`, `runs`, `last-exit`, `last-run`,
+`step:` — the step that job's tick is inside right now, with its age, owner and pid — and the last
+log line). A job that exited non-zero, or never ran in two intervals, is `RED`. A job whose last
+tick was killed inside a step is `YELLOW`, naming the step it did not finish. On launchd,
 no loaded job at all is `RED` — nothing ticks the product. Below it, one `NEEDS OPERATOR: step <s>
 is on no clock` line per ASF step no clock runs.
 
