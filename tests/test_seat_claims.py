@@ -2,8 +2,11 @@
 re-decides, and the two-process proof. Four classes, one per Task of the plan:
 ``SeatLedger`` (T-0573), ``PoolClaims`` (T-0574), ``WaveRefusedSeat``, ``TwoWavesOneAccount``.
 
-This module carries ``SeatLedger`` and ``PoolClaims`` so far — the other two land with the Tasks
-that make them meaningful."""
+This module carries ``SeatLedger``, ``PoolClaims`` and ``WaveRefusedSeat`` so far — the two-process
+proof lands with the Task that makes it meaningful."""
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -17,9 +20,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from test_workers import Home, feature_row  # noqa: E402,F401
 
 from asf import env  # noqa: E402
+from asf.workers import cmd_spawn  # noqa: E402
 from asf.workers import observe as observe_mod  # noqa: E402
 from asf.workers import pool as pool_mod  # noqa: E402
+from asf.workers import quota as quota_mod  # noqa: E402
 from asf.workers import seats as seats_mod  # noqa: E402
+from asf.workers import wave as wave_mod  # noqa: E402
 
 
 def dead_pid():
@@ -237,3 +243,124 @@ class PoolClaims(Home):
         self.assertEqual(a.load(a.accounts[0]), 1)
         self.assertTrue(a.take(a.accounts[0], 'opus', job='job-0', product='a', kind='task'))
         self.assertEqual(a.load(a.accounts[0]), 2)
+
+
+class WaveRefusedSeat(Home):
+    """F-0189 Task 3: the wave's — and the hand launch's — reaction to :meth:`Pool.take`
+    refusing a seat. ``PoolClaims`` already covers the real compare-and-set; here ``take`` is
+    mocked to return exactly the sequence a scenario needs, except for the one test that wants
+    the real race (two real pools over one ledger)."""
+
+    def run_wave(self, rows, n, pool, cfg=None, spawn_fn=None, **kw):
+        lines = []
+        spawn_fn = spawn_fn or (lambda product, row, acct, brief, runtime=None, cfg=None:
+                                {'job': row.job, 'model': 'opus', 'pid': 1, 'account': acct.name})
+        launched, waits = wave_mod.wave(self.product, rows, n, pool=pool, cfg=cfg or self.cfg,
+                                        out=lines.append, spawn_fn=spawn_fn, **kw)
+        return launched, waits, lines
+
+    def test_a_refused_take_redecides_and_the_row_launches_on_the_other_account(self):
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 1},
+                                            {'name': 'acct-b', 'role': 'local', 'cap': 1}],
+                              'sessions': 'fake'}}
+        holder = pool_mod.Pool.from_config(cfg, 'b')  # another product's wave claimed acct-a first
+        self.assertTrue(holder.take(holder.accounts[0], 'opus', job='holder', product='b',
+                                    kind='task'))
+        pool = pool_mod.Pool(pool_mod.accounts_from_config(cfg))  # built before the claim above
+        launched, waits, _lines = self.run_wave([feature_row('spec-0')], 1, pool)
+        self.assertEqual(waits, [])
+        self.assertEqual([(r.job, rec['account']) for r, rec in launched],
+                         [('spec-0', 'acct-b')])
+
+    def test_a_take_refused_past_seat_retries_waits_and_frees_the_branch(self):
+        acct = pool_mod.Account('acct-a', role='local', cap=4)
+        pool = pool_mod.Pool([acct])
+        calls = []
+
+        def take(account, model, job='', product=None, kind=None, lane=None):
+            calls.append(job)
+            return job != 'spec-0'  # every attempt of spec-0 is refused; spec-1 is never contested
+
+        row = feature_row('spec-0')
+        row.branch = 'shared/branch'
+        later = feature_row('spec-1', item='F-0002')
+        later.branch = 'shared/branch'
+        with mock.patch.object(pool, 'take', side_effect=take):
+            launched, waits, _lines = self.run_wave([row, later], 2, pool)
+        self.assertEqual(calls.count('spec-0'), wave_mod.SEAT_RETRIES + 1)
+        self.assertEqual([(r.job, why) for r, why in waits],
+                         [('spec-0', 'seat claimed elsewhere — acct-a 0/4')])
+        # the row that gave up its seat held no branch: the later row on the same branch launches
+        self.assertEqual([r.job for r, _ in launched], ['spec-1'])
+
+    def test_a_refused_cloud_row_rolls_back_its_cloud_try_for_a_later_row(self):
+        accounts = [pool_mod.Account('acct-a', role='local', cap=2),
+                   pool_mod.Account('acct-c', role='cloud', cap=5)]
+        pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource({}))
+        cfg = dict(self.cfg, cloud={'enabled': True, 'mode': 'overflow', 'rows': 'any',
+                                    'max_inflight': 5, 'accounts': ['acct-c'],
+                                    'max_creates_per_tick': 1})
+        calls = []
+
+        def take(account, model, job='', product=None, kind=None, lane=None):
+            calls.append(job)
+            return job != 'row-a'  # row-a is always refused; row-b is never contested
+
+        with mock.patch.object(pool, 'take', side_effect=take):
+            launched, waits, _lines = self.run_wave(
+                [feature_row('row-a'), feature_row('row-b', item='F-0002')], 2, pool, cfg=cfg,
+                local_hold='host pressure', cloud_ready=(True, ''), cloud_runtime='fake-rt')
+        self.assertEqual(calls.count('row-a'), wave_mod.SEAT_RETRIES + 1)
+        self.assertEqual([r.job for r, _ in launched], ['row-b'])  # the cap-1 tick still had room
+        self.assertEqual([(r.job, why) for r, why in waits],
+                         [('row-a', 'seat claimed elsewhere — acct-c 0/5')])
+
+    def test_seats_degraded_prints_once_before_the_first_row(self):
+        acct = pool_mod.Account('acct-a', role='local', cap=4)
+        pool = pool_mod.Pool([acct])
+        pool.seats_degraded = 'state dir is a file'
+        rows = [feature_row('spec-0'), feature_row('spec-1', item='F-0002')]
+        _launched, _waits, lines = self.run_wave(rows, 2, pool)
+        degraded = [ln for ln in lines if ln.startswith('seats:')]
+        self.assertEqual(degraded, ["seats: claims are not shared (state dir is a file) — "
+                                    "another product's wave may overlap this one"])
+        self.assertEqual(lines[0], degraded[0])  # before any row's own line
+
+    def test_a_live_claim_for_this_products_own_job_waits_already_running(self):
+        acct = pool_mod.Account('acct-a', role='local', cap=4)
+        pool = pool_mod.Pool([acct], live=[{'account': 'acct-a', 'model': 'opus', 'job': 'spec-0',
+                                           'product': 'sample', 'claim': True}])
+        launched, waits, _lines = self.run_wave([feature_row('spec-0')], 1, pool)
+        self.assertEqual(launched, [])
+        self.assertEqual([(r.job, why) for r, why in waits], [('spec-0', 'already running')])
+
+    def test_cmd_spawn_on_a_refused_seat_prints_the_wait_and_returns_1(self):
+        cfg = pool_cfg(cap=1)
+        brief_path = os.path.join(self.tmp, 'b.md')
+        with open(brief_path, 'w', encoding='utf-8') as f:
+            f.write('brief')
+        row_line = 'STARVED → SPEC F-0001 "a feature"   → launch spec-0 (Opus)'
+        args = argparse.Namespace(product='sample', row=row_line, brief=brief_path, account=None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), \
+             mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=cfg), \
+             mock.patch.object(pool_mod.Pool, 'take', return_value=False):
+            rc = cmd_spawn(args)
+        self.assertEqual(rc, 1)
+        self.assertEqual(buf.getvalue().strip(), 'waits spec-0 — seat claimed elsewhere — '
+                                                 'acct-a 0/1')
+
+    def test_cmd_spawn_untakes_the_seat_when_the_spawn_raises(self):
+        cfg = pool_cfg(cap=2)
+        brief_path = os.path.join(self.tmp, 'b.md')
+        with open(brief_path, 'w', encoding='utf-8') as f:
+            f.write('brief')
+        row_line = 'STARVED → SPEC F-0001 "a feature"   → launch spec-0 (Opus)'
+        args = argparse.Namespace(product='sample', row=row_line, brief=brief_path, account=None)
+        with mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=cfg), \
+             mock.patch('asf.workers.spawn.spawn', side_effect=RuntimeError('boom')):
+            with self.assertRaises(RuntimeError):
+                cmd_spawn(args)
+        self.assertEqual(seats_mod.read()[0], [])

@@ -40,15 +40,24 @@ def cmd_spawn(args):
             print(f'workers spawn: no account {args.account!r} in worker_pool.accounts',
                   file=sys.stderr)
             return 2
+        p = pool.Pool.from_config(cfg, product)
     else:
-        acct, reason = pool.Pool.from_config(cfg, product).pick_account(
-            row.kind, row.model, is_fix=row.is_fix, lane=row.lane)
+        p = pool.Pool.from_config(cfg, product)
+        acct, reason = p.pick_account(row.kind, row.model, is_fix=row.is_fix, lane=row.lane)
         if acct is None:
             print(f'waits {row.job} — {reason}')
             return 1
+    if not p.take(acct, row.model, job=row.job, product=product.name, kind=row.kind,
+                  lane=row.lane):
+        print(f'waits {row.job} — seat claimed elsewhere — {acct.name} {p.load(acct)}/{acct.cap:g}')
+        return 1
     with open(args.brief, encoding='utf-8') as f:
         brief = f.read()
-    rec = spawn.spawn(product, row, acct, brief, cfg=cfg)
+    try:
+        rec = spawn.spawn(product, row, acct, brief, cfg=cfg)
+    except Exception:
+        p.untake(acct, row.model, job=row.job, product=product.name, kind=row.kind, lane=row.lane)
+        raise
     print(f"launched {rec['job']} → {rec['account']} ({rec['model']}) pid {rec['pid']}")
     return 0
 
