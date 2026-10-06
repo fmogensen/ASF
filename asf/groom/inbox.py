@@ -41,6 +41,14 @@ _UNREAD_HEADER_KEYS = ('after',)
 _UNKNOWN_HEADER_RE = re.compile(r'^(' + '|'.join(_UNREAD_HEADER_KEYS) + r'):\s*.*$', re.IGNORECASE)
 
 
+#: Is `s` (already stripped) a header line, by either regex intake knows (F-0134): B-0111
+#: settled that a header is a header wherever it sits in the *last* position, this settles the
+#: *first* — one helper, so `parse_inbox_file` and `apply_answer` cannot drift on the question
+#: (PD4).
+def _is_header_line(s):
+    return bool(s) and bool(INBOX_KV_RE.match(s) or _UNKNOWN_HEADER_RE.match(s))
+
+
 def _intake_dir(args):
     """The intake directory `asf inbox` files into: the product's convention, else the
     documented default when there is no product config to read (a test, or the command run from
@@ -83,13 +91,25 @@ def _lift_section(lines, heading):
 
 
 def parse_inbox_file(text):
-    """A `shape.Card` from one inbox/*.md file's raw text."""
+    """A `shape.Card` from one inbox/*.md file's raw text.
+
+    The title is the first non-blank line with its `#` run stripped — unless that line is itself
+    a header line, in which case the card has **no** title and the header block starts there
+    (C1). A card dropped into the intake dir leading with `type: bug` used to have that line
+    eaten as its title, so `headers` never carried the type the operator declared and the card
+    was minted by shape alone (F-0134). A header is a header wherever it sits, first or last;
+    B-0111 settled the last position, this settles the first. An untitled card is never minted:
+    `shape.derive` refuses it (C2, C3).
+    """
     lines = text.split('\n')
     idx = 0
     while idx < len(lines) and not lines[idx].strip():
         idx += 1
-    title = re.sub(r'^#+\s*', '', lines[idx].strip()) if idx < len(lines) else ''
-    rest = lines[idx + 1:] if idx < len(lines) else []
+    first = lines[idx].strip() if idx < len(lines) else ''
+    if first and _is_header_line(first):
+        title, rest = '', lines[idx:]
+    else:
+        title, rest = re.sub(r'^#+\s*', '', first), lines[idx + 1:]
 
     # A line naming a key intake reads (`INBOX_KV_RE`) or one it merely knows of but does not
     # read (`_UNKNOWN_HEADER_RE`, `after:` and the like) is a header either way, so `body_start`
@@ -401,7 +421,7 @@ def question_lines(root, intake_dir=None):
         if not question:
             continue
         card = graded(scrub_title(parse_inbox_file(body), root))
-        title = ' '.join(card.title.split())
+        title = ' '.join(card.title.split()) or name
         sev = severity_of(card)
         grade = f'{sev} ' if sev != 'S3' else ''
         out.append(f"- [ ] {TOKEN_PREFIX}{name} {grade}{title} — {question} → answer: ____")
@@ -515,9 +535,10 @@ def apply_answer(root, name, answer, date, who, intake_dir=None):
         return True, None
     lines = body.split('\n')
     idx = next((i for i, l in enumerate(lines) if l.strip()), 0)
-    keep = [l for l in lines[idx + 1:]
+    head = idx if _is_header_line(lines[idx].strip() if idx < len(lines) else '') else idx + 1
+    keep = [l for l in lines[head:]
             if not ((m := INBOX_KV_RE.match(l.strip())) and m.group(1).lower() in parsed)]
-    new = lines[:idx + 1] + [f'{k}: {v}' for k, v in parsed.items()] + keep
+    new = lines[:head] + [f'{k}: {v}' for k, v in parsed.items()] + keep
     with open(path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(new))
     return True, None

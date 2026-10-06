@@ -214,7 +214,10 @@ class ShapeQuestionTest(unittest.TestCase):
         c = card('Checkout fails', headers={'type': 'feature', 'signature': 'x', 'parent': 'E-0001'})
         result = shape.derive(c, self.canonical)
         self.assertIsInstance(result, shape.Question)
-        self.assertIn("is not read — the card's shape reads as bug (signature", result.text)
+        self.assertIn('`type: feature` is read', result.text)
+        self.assertIn(shape.NEEDS['feature'], result.text)
+        self.assertIn("The card reads as bug (signature", result.text)
+        self.assertNotIn('is not read', result.text)
 
     def test_type_line_agreeing_is_filed(self):
         c = card('Checkout fails', headers={'type': 'bug', 'signature': 'x', 'parent': 'E-0001'})

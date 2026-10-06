@@ -26,6 +26,17 @@ SIZE = {  # the card's definitions, in one place; the History line and asf check
 
 RULES = ('signature', 'writes', 'features-list', 'parent-feature', 'default')
 
+#: The line or section that would make a card the type its `type:` line declares — the "fix line"
+#: F-0134 asks for, one per size, read by `_typed` (C4). Each entry completes the sentence
+#: "a <size> needs …".
+NEEDS = {
+    'bug': 'a `signature:` line, and no `writes:` line — that is a Task',
+    'task': 'a `writes:` line and a `parent:` naming a Feature or a Story, and no `signature:`',
+    'story': 'a `parent:` naming a Feature, and an `## Acceptance` list',
+    'epic': 'a `## Features` list of two or more, and no `parent:` — an Epic has none',
+    'feature': 'a `parent:` naming an Epic, and no `signature:` or `writes:` line',
+}
+
 SHAPE_LINE_RE = re.compile(r'created \(([^)]*)\) — shape: (\S+) → (\w+)')
 
 DEFECT_WORDS_RE = re.compile(r'\b(broken|red|fails?|failing)\b', re.IGNORECASE)
@@ -44,17 +55,36 @@ def infer_parent_epic(canonical, tokens):
 
 
 def _typed(card, shape):
-    """D4: a `type:` line that disagrees with the reading turns a Shape into a Question."""
-    t = card.headers.get('type')
-    if t and t.lower() != shape.type:
+    """The declared `type:` line, against the shape the card reads as (I13, C4, C5).
+
+    The line **is** read: `declared()` has already filled a `type: bug` card's missing
+    `signature:`, so a Bug is minted from it (`9230bf932`). What reaches here is a declared type
+    the shape rules could not reach, and the card is refused rather than minted as the other
+    type — with the one line that would settle it named, because "remove the line, or change the
+    shape" is what left F-0134's operator with a Feature and no idea why.
+    """
+    t = (card.headers.get('type') or '').strip()
+    if not t or t.lower() == shape.type:
+        return shape
+    if t.lower() not in SIZE:
         return Question(
-            f"`type: {t}` is not read — the card's shape reads as {shape.type} "
-            f"({shape.rule}: {SIZE[shape.type]}). Remove the line, or change the shape."
+            f"`type: {t}` is not a card size. The sizes are {', '.join(sorted(SIZE))}. "
+            f"Change the line or remove it — nothing is minted from this card until you do."
         )
-    return shape
+    return Question(
+        f"`type: {t}` is read, and this card is not shaped like one: a {t.lower()} needs "
+        f"{NEEDS[t.lower()]}. Add it, or change the `type:` line. The card reads as "
+        f"{shape.type} ({shape.rule}: {SIZE[shape.type]}) and is not minted as one."
+    )
 
 
 def derive(card, canonical, default_bug_parent=None):
+    if not (card.title or '').strip():
+        return Question(
+            'This card has no title — its first line is a header (`type:`, `parent:`, '
+            '`signature:`, …). Put a `# <title>` line first: the headers below it are read, '
+            'and nothing is minted from a card with no name.'
+        )
     headers = card.headers
     signature = headers.get('signature')
     writes = headers.get('writes')
