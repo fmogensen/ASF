@@ -947,6 +947,54 @@ def pre_push_check_at(repo, state_dir, sha, command, setup=None,
         shutil.rmtree(path, ignore_errors=True)
 
 
+#: Under the state dir: the throwaway checkouts the harvest runs the product's own
+#: ``check_commands`` in (G2 ask 3) — a directory of its own, so it never races the pre-push
+#: check's worktree of the same head.
+CHECK_COMMANDS_DIR = 'check-commands'
+
+
+def run_check_commands(repo, state_dir, sha, commands, setup=None, timeout=PRE_PUSH_CHECK_TIMEOUT_S):
+    """``(results, line)``: ``results`` is ``[{command, rc, tail}]``, one entry per ``commands``
+    in order, each run on ``sha`` in one throwaway detached checkout under
+    ``<state>/check-commands/`` — after ``setup`` (the product's ``worktree_setup``) when given.
+    Every command runs whatever the last one's exit was — the harvest reports all of them, never
+    stops at the first red one, unlike :func:`pre_push_check_at`. ``results`` is ``None`` when no
+    checkout could be made at all (``setup`` failed, or there was no worktree to make) — ``line``
+    says why; nothing was judged, so the caller should not cache it."""
+    if not commands:
+        return [], ''
+    holder = os.path.join(state_dir, CHECK_COMMANDS_DIR)
+    try:
+        os.makedirs(holder, exist_ok=True)
+        path = tempfile.mkdtemp(prefix='wt-', dir=holder)
+        os.rmdir(path)
+    except OSError as e:
+        return None, f'no checkout to run the product checks in: {e}'
+    add = H.sh(['git', 'worktree', 'add', '-q', '--detach', path, sha], cwd=repo)
+    if add.returncode != 0:
+        shutil.rmtree(path, ignore_errors=True)
+        return None, f'no checkout of {sha[:9]} to run the product checks in: {H.tail(add.stderr)}'
+    try:
+        if setup:
+            rc, out = _run_shell(setup, path, timeout)
+            if rc != 0:
+                why = f'timed out after {timeout}s' if rc is None else f'exit {rc}'
+                lines = [l for l in out.splitlines() if l.strip()][-PRE_PUSH_LINES:]
+                return None, (f'`{setup}` (worktree_setup) failed on {sha[:9]}: {why}'
+                              + (':\n' + '\n'.join(lines) if lines else ''))
+        results = []
+        for command in commands:
+            rc, out = _run_shell(command, path, timeout)
+            tail = [l for l in out.splitlines() if l.strip()][-PRE_PUSH_LINES:]
+            if rc is None:
+                tail = tail + [f'(timed out after {timeout}s)']
+            results.append({'command': command, 'rc': rc, 'tail': tail})
+        return results, ''
+    finally:
+        H.sh(['git', 'worktree', 'remove', '--force', path], cwd=repo)
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def has_adjudicate_commit(repo, trunk, branch):
     """True when a commit on the branch opens with ``adjudicate(`` — a ruling committed to the
     product repo instead of the record (B-0054)."""
@@ -1606,8 +1654,26 @@ class Lane:
         n = (pr or {}).get('number') or (rec or {}).get('pr')
         return bool(n) and str(n) in self._land_prs
 
+    def ensure_check_commands(self, head):
+        """Kick off the product's own ``conventions.check_commands`` on ``head`` in the
+        background (G2 ask 3, :func:`asf.harvest.product_checks.ensure`) — a no-op for a product
+        that names none, and a cache hit on every pass after the first that sees this tree. A
+        review or correct brief reads the result independently, by sha
+        (:mod:`asf.briefs.build`); the lane itself never waits on it and no transition reads it —
+        a fact gathered, like any other, never acted on here."""
+        if not head:
+            return
+        commands = self.conv.get('check_commands')
+        if not isinstance(commands, list) or not commands:
+            return
+        from asf.harvest import product_checks
+        setup = getattr(self.conv, 'worktree_setup', None)
+        product_checks.ensure(self.product, self.repo, self.state_dir, head, commands, setup,
+                              dry_run=self.dry_run)
+
     def branch_facts(self, b, run, head, pr, prs, running):
         conv, trunk, repo = self.conv, self.trunk, self.repo
+        self.ensure_check_commands(head)
         rec = lifecycle.lane_of(run)
         item = item_of(b, run)
         if (run is None or is_pr_item(item)) and self.land_requested(pr, rec):

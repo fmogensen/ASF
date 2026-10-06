@@ -544,6 +544,35 @@ def correction_text(row, kind):
                                               else '')
 
 
+def checks_section(product, kind, head):
+    """For a review or correct brief: the product's own ``conventions.check_commands`` results
+    for ``head``, already run by the harvest itself (G2 ask 3,
+    :mod:`asf.harvest.product_checks`) — the session reads them, it never reruns them. ``''``
+    when the kind is not review/correct, the product names no ``check_commands``, there is no
+    head, or the harvest has no result for it yet (the first pass right after a push: the check
+    still runs in the background, and the next round's brief carries it)."""
+    if kind not in ('review', 'correct') or not head or product is None:
+        return ''
+    commands = product.conventions.get('check_commands')
+    repo = getattr(product, 'repo_dir', None)
+    if not isinstance(commands, list) or not commands or not repo:
+        return ''
+    from asf import env as env_mod
+    from asf.harvest import product_checks
+    setup = getattr(product.conventions, 'worktree_setup', None)
+    k = product_checks.key(repo, head, commands, setup)
+    got = product_checks.read_result(env_mod.state_dir(product), k) if k else None
+    if got is None:
+        return ''
+    lines = [f'Checks on {head[:9]} (run by the harvest — do not re-run):']
+    for r in got['results']:
+        status = 'passed' if r['rc'] == 0 else f"failed (exit {r['rc']})"
+        lines.append(f"- `{r['command']}` — {status}")
+        for t in r.get('tail') or []:
+            lines.append(f'    {t}')
+    return '\n\n' + '\n'.join(lines)
+
+
 def delivery_checks(facts):
     """The review's per-item check blocks for a delivery lead (``delivers:``): one table per
     member — the same six checks, judged on that member's commit and its section of the plan
@@ -738,6 +767,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
     parts = [item_line(row, facts['item']),
              preamble_mod.build(product, row, index, inflight, repo_facts, facts=facts),
              render(job_template(row, kind), ctx).rstrip() + correction_text(row, kind)
+             + checks_section(product, kind, facts['head'])
              + customer_section(product, kind, facts['branch'])
              + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id'])
              + answer_section(product, ctx['item_id'])

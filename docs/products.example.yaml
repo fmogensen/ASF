@@ -279,6 +279,17 @@ conventions:
   # audit only: no hold, nothing parked. Match the unscoped forms only, so a runner given paths
   # (a targeted run) stays allowed. Ignored for any other product (default: none).
   # full_suite_commands: ['^make test$', '^make check\b']
+  # the product's own check and test commands: a code session may run any of these, the harvest
+  # also runs them itself on the pushed head and attaches their output to the review brief
+  # (default: none — asf.harvest's own gate scripts, if any, still run under ASF_GATE_SCRIPTS).
+  # check_commands:
+  #   - bash tools/check_conventions.sh
+  #   - make lint
+  # whether the approvals hook grants a factory session's Bash call outright when the command is
+  # provably read-only (git reads, ls/cat/head/tail/grep/rg/find/wc, cd, and this product's own
+  # check_commands/pre_push_check/test_command) — compound, `cd X && …` and `$?` forms included.
+  # A mutating command is always governed as today, whatever this says (default: true).
+  # read_only_allow: true
   # the savings pass's window and its six thresholds (F-0100 §2.9): a key left out keeps the
   # documented default here; `asf doctor`'s `savings` row is red over an unknown key or a value
   # that is not a positive number.

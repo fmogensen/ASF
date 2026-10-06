@@ -394,7 +394,9 @@ class HookTest(unittest.TestCase):
         call = json.dumps({
             'tool_name': tool_name, 'tool_input': tool_input, 'cwd': cwd or self.repo})
         out = io.StringIO()
-        rc = approvals.run_hook(call, environ, out=out)
+        self.last_stdout = io.StringIO()
+        rc = approvals.run_hook(call, environ, out=out, stdout=self.last_stdout)
+        self.last_stdout = self.last_stdout.getvalue()
         return rc, out.getvalue()
 
     def push(self, **kw):
@@ -572,6 +574,16 @@ class HookTest(unittest.TestCase):
         self.assertEqual(conventions.validate_mapping({'full_suite_commands': ['^ok$']}), [])
         self.assertTrue(conventions.validate_mapping({'full_suite_commands': ['(']}))
         self.assertTrue(conventions.validate_mapping({'full_suite_commands': 'pnpm test'}))
+
+    def test_check_commands_and_read_only_allow_are_validated(self):
+        from asf import conventions
+        self.assertEqual(conventions.validate_mapping(
+            {'check_commands': ['bash tools/check_x.sh', 'make lint']}), [])
+        self.assertTrue(conventions.validate_mapping({'check_commands': 'bash tools/check_x.sh'}))
+        self.assertTrue(conventions.validate_mapping({'check_commands': ['', 1]}))
+        self.assertEqual(conventions.validate_mapping({'read_only_allow': False}), [])
+        self.assertEqual(conventions.validate_mapping({'read_only_allow': True}), [])
+        self.assertTrue(conventions.validate_mapping({'read_only_allow': 'no'}))
 
     def test_a_git_config_read_is_never_a_security_write(self):
         from asf.approvals import _sets_guarded_config
@@ -754,6 +766,55 @@ class HookTest(unittest.TestCase):
             self.assertEqual(f.read(), before_a)
         with open(settings_b, 'rb') as f:
             self.assertEqual(f.read(), before_b)
+
+
+class ReadOnlyGrantHookTests(HookTest):
+    """G2: the hook answers *allow* on ``stdout`` for a read-only Bash call — proved end to end
+    through ``run_hook``, not just the predicate (``tests.test_readonly``)."""
+
+    ALLOW = '"permissionDecision": "allow"'
+
+    def test_a_read_only_command_is_granted_on_stdout(self):
+        rc, out = self.call('Bash', {'command': 'git status'})
+        self.assertEqual(rc, 0, out)
+        self.assertIn(self.ALLOW, self.last_stdout)
+
+    def test_compound_cd_and_exit_code_forms_are_granted(self):
+        for cmd in (f'cd {self.repo} && git log -1',
+                    'git merge-base --is-ancestor HEAD HEAD; echo "rc=$?"'):
+            with self.subTest(cmd=cmd):
+                rc, out = self.call('Bash', {'command': cmd})
+                self.assertEqual(rc, 0, out)
+                self.assertIn(self.ALLOW, self.last_stdout, cmd)
+
+    def test_a_declared_check_command_is_granted(self):
+        self.write_product('conventions:\n  check_commands:\n    - bash tools/check_x.sh\n')
+        rc, out = self.call(
+            'Bash', {'command': 'bash tools/check_x.sh 2>&1 | tail -3; echo $?'})
+        self.assertEqual(rc, 0, out)
+        self.assertIn(self.ALLOW, self.last_stdout)
+
+    def test_read_only_allow_false_grants_nothing(self):
+        self.write_product('conventions:\n  read_only_allow: false\n')
+        rc, out = self.call('Bash', {'command': 'git status'})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.last_stdout, '')
+
+    def test_a_mutating_command_is_not_granted_and_stays_governed(self):
+        self.write_product('approvals:\n  touch_production: human-now\n')
+        rc, out = self.push()
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(self.last_stdout, '')
+
+    def test_a_non_bash_tool_is_never_granted(self):
+        rc, out = self.call('Read', {'file_path': os.path.join(self.repo, 'x')})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.last_stdout, '')
+
+    def test_no_job_still_writes_nothing_to_stdout(self):
+        rc, out = self.call('Bash', {'command': 'git status'}, job=None)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.last_stdout, '')
 
 
 def _product_yaml(extra=''):

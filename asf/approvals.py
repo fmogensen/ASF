@@ -30,7 +30,7 @@ import re
 import sys
 import traceback
 
-from asf import amendable, env, hooks
+from asf import amendable, env, hooks, readonly
 
 LEVELS = ('auto', 'groom', 'human-now')
 
@@ -1103,9 +1103,11 @@ def _log_traceback(job, exc):
         f.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
 
 
-def run_hook(stdin_text, environ, out=sys.stderr, product=None):
+def run_hook(stdin_text, environ, out=sys.stderr, product=None, stdout=sys.stdout):
     """``asf hook approvals`` (§2.3): the rc the runtime reads — 0 lets the call through, 2 blocks
-    it and feeds ``out`` back to the model.
+    it and feeds ``out`` back to the model. A Bash call let through because it is read-only
+    (:func:`asf.readonly.grant_for`) writes the runtime's allow decision to ``stdout`` first —
+    the one output the runtime honours over its own shell-safety refusal (G2).
 
     ``product`` defaults to ``environ['ASF_PRODUCT']``. Every exception from the parse on still
     blocks the call (D7) — a boundary that opens when it breaks is not one — but says it is the
@@ -1115,14 +1117,32 @@ def run_hook(stdin_text, environ, out=sys.stderr, product=None):
     if not environ.get('ASF_JOB'):
         return 0                                    # not a factory session (D4)
     try:
-        return _enforce(stdin_text, environ, out, product)
+        return _enforce(stdin_text, environ, out, product, stdout)
     except Exception as e:                          # fail closed (D7), but never as a refusal
         record_hook_error(product or environ.get('ASF_PRODUCT'), environ['ASF_JOB'], e)
         print(HOOK_ERROR_LINE.format(why=str(e) or type(e).__name__), file=out)
         return 2
 
 
-def _enforce(stdin_text, environ, out, product):
+#: The ``PreToolUse`` response that makes the runtime honour an *allow* over its own shell-safety
+#: refusal (compound-after-``cd``, ``$?``, a substitution, …) — proved in the handbuild's probe.
+_ALLOW_DECISION = {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
+                                          'permissionDecision': 'allow',
+                                          'permissionDecisionReason': 'asf: read-only command'}}
+
+
+def _allow_if_read_only(prod, tool_name, tool_input, cwd, environ, stdout):
+    """When ``tool_name`` is ``Bash`` and its command is read-only for ``prod``
+    (:func:`asf.readonly.grant_for`), write the allow decision to ``stdout``. Returns nothing —
+    the caller still returns rc 0 either way; this only ever adds output, never a refusal."""
+    if tool_name != 'Bash':
+        return
+    command = (tool_input or {}).get('command') or ''
+    if readonly.grant_for(prod, command, cwd, environ):
+        print(json.dumps(_ALLOW_DECISION), file=stdout)
+
+
+def _enforce(stdin_text, environ, out, product, stdout=sys.stdout):
     job = environ['ASF_JOB']
     call = json.loads(stdin_text or '{}') or {}
     tool_name = call.get('tool_name') or ''
@@ -1160,6 +1180,7 @@ def _enforce(stdin_text, environ, out, product):
 
     matched = classify(prod, tool_name, tool_input, cwd)
     if not matched:
+        _allow_if_read_only(prod, tool_name, tool_input, cwd, environ, stdout)
         return 0
 
     invalid = None
@@ -1179,6 +1200,7 @@ def _enforce(stdin_text, environ, out, product):
         refuse(prod, item, cls, level, job, tool_name, detail)
         refused.append((cls, level, detail))
     if not refused:
+        _allow_if_read_only(prod, tool_name, tool_input, cwd, environ, stdout)
         return 0
     if invalid:
         print(f'approvals: the matrix is invalid ({invalid})'

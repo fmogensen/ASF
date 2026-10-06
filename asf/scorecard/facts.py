@@ -43,6 +43,7 @@ class Facts:
     gates: list                 # metrics/gates events
     runs: list                  # asf.improve.measure.Run, every ended registry run
     clutter: dict               # {'stale_prs': int|None, 'open_prs': int|None, 'branches': int|None}
+    denials: list = dataclasses.field(default_factory=list)  # one {job, ended, count, reasons} per ended run
     as_of: str = ''             # the reading's clock, ISO
     diagnostics: list = dataclasses.field(default_factory=list)  # gaps in the reading, one line each
     disagree: list = dataclasses.field(default_factory=list)  # asf.facts.disagree records
@@ -394,6 +395,88 @@ def ids_in(text):
     return seen
 
 
+# ------------------------------------------------------------- denials --
+# G2 ask 4: a job's own permission denials (``asf hook approvals``'s refusals), read from the
+# run's own transcript — ``env.log_dir()/jobs/<product>/<job>.jsonl`` — never from the record.
+
+#: The counting script's own bucket: a refusal naming a command is trimmed past it, so distinct
+#: commands of the same shape (``requires approval: bash <script one>``, ``<script two>``) count
+#: together.
+_REQUIRES_APPROVAL_RE = re.compile(r'requires approval: (\S+ \S+).*')
+
+
+def bucket_denial_reason(msg):
+    """The generic shape of one denial's reason: ``msg`` stripped, and cut past the command name
+    when it is a ``requires approval: <program> <subcommand>`` refusal."""
+    msg = ' '.join(str(msg or '').split())
+    return _REQUIRES_APPROVAL_RE.sub(r'requires approval: \1', msg) or '(no reason recorded)'
+
+
+def _tool_result_text(content):
+    """The text of one ``tool_result`` content value — a string, or a list of content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return ' '.join(str(c.get('text', '')) for c in content if isinstance(c, dict))
+    return ''
+
+
+def parse_job_denials(lines):
+    """``(count, reasons)`` for one job's raw transcript lines: every ``permission_denials``
+    entry of every ``type: result`` line, ``count`` of them, each in ``reasons`` bucketed
+    (:func:`bucket_denial_reason`) by the text of the ``type: user`` / ``tool_result`` line
+    carrying ``is_error`` that matches its ``tool_use_id`` — the denial's own ``tool_name`` alone
+    when no ``tool_result`` matches. A line that is not valid JSON, not a mapping, or whose
+    ``permission_denials`` is not a list, is skipped; the reading never raises on a malformed
+    transcript."""
+    texts_by_id = {}
+    denials = []
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(ev, dict):
+            continue
+        if ev.get('type') == 'user':
+            for item in (ev.get('message') or {}).get('content') or ():
+                if isinstance(item, dict) and item.get('type') == 'tool_result' \
+                        and item.get('is_error') and item.get('tool_use_id'):
+                    texts_by_id[item['tool_use_id']] = _tool_result_text(item.get('content'))
+        elif ev.get('type') == 'result':
+            pd = ev.get('permission_denials')
+            if isinstance(pd, list):
+                denials.extend(d for d in pd if isinstance(d, dict))
+    reasons = []
+    for d in denials:
+        text = texts_by_id.get(d.get('tool_use_id')) or d.get('tool_name') or '?'
+        reasons.append(bucket_denial_reason(text))
+    return len(denials), reasons
+
+
+def _read_job_denials(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            lines = f.readlines()
+    except OSError:
+        return 0, []
+    return parse_job_denials(lines)
+
+
+def job_denials(product, runs):
+    """``[{job, ended, count, reasons}]``, one row per ``runs`` (:class:`asf.improve.measure.Run`
+    — every ended registry run), read from that job's own transcript. A transcript that cannot
+    be read counts 0, never raises — a job log is cleaned up well after its registry row."""
+    if product is None:
+        return []
+    from asf.workers import runtime as runtime_mod
+    out = []
+    for r in runs:
+        count, reasons = _read_job_denials(runtime_mod.job_log_path(product.name, r.job))
+        out.append({'job': r.job, 'ended': r.ended, 'count': count, 'reasons': reasons})
+    return out
+
+
 # ---------------------------------------------------------------- load --
 
 def load_cards(root):
@@ -469,6 +552,7 @@ def load(root, product=None, *, registry=True, forge=True, as_of=None):
         disagree = facts_disagree.records(product)
     return Facts(items=items, sessions=_stream(root, 'sessions'), ci=_stream(root, 'ci'),
                  gates=_stream(root, 'gates'), runs=runs, clutter=clutter,
+                 denials=job_denials(product, runs) if registry else [],
                  as_of=as_of or now_iso(), diagnostics=diagnostics(items, untraced),
                  disagree=disagree)
 
