@@ -4504,7 +4504,9 @@ class GitHubHost(Host):
                             f"harvest: cancelled run {r['databaseId']} on {branch} at "
                             f"{str(r.get('headSha') or '?')[:9]} — its PR merged; replaced by "
                             f"the trunk's run of the merge")
-                        ci_queue.claim_cancel(self.lane.state_dir, r['databaseId'], 'merged-pr')
+                        src = ci_queue.GitHubSource(self.product) if self.product else None
+                        ci_queue.claim_cancel(self.lane.state_dir, r['databaseId'], 'merged-pr',
+                                              **ci_queue._sunk_kw(src, r['databaseId']))
             return n
         except OSError:
             return 0

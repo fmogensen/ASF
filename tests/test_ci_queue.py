@@ -2002,6 +2002,254 @@ class TestS1PrRelief(ReliefBase):
         self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [777])
 
 
+class ReliefReasonsGh:
+    """A fake ``gh`` built per claim site rather than :class:`FakeGh`'s shared history: the
+    runner read, the ``/actions/runs?status=`` listing :meth:`Source.busy_runners` reads (a
+    runner is only ever "busy with no job", never a phantom, when a filler run on it is in that
+    listing too), each run's jobs (the one endpoint both :meth:`Source.live_jobs` and
+    :meth:`Source.busy_runners` read, counted per run id), and the per-workflow ``gh run list``
+    :class:`TestReliefReasons` scans for candidates."""
+
+    def __init__(self):
+        self.wf_runs, self.status_runs, self.jobs = {}, {}, {}
+        self.runner_labels, self.busy_names = {}, set()
+        self.calls, self.live_calls = [], []
+
+    def __call__(self, argv, **_kw):
+        self.calls.append(argv)
+
+        def ok(out=''):
+            return subprocess.CompletedProcess(argv, 0, out, '')
+        if argv[:2] == ['gh', 'api'] and any('actions/runners' in a for a in argv):
+            rows = [{'name': n, 'id': i, 'busy': n in self.busy_names, 'status': 'online',
+                     'labels': [{'name': l, 'type': 'custom'} for l in labels]}
+                    for i, (n, labels) in enumerate(self.runner_labels.items())]
+            return ok('\n'.join(json.dumps(r) for r in rows))
+        if argv[:2] == ['gh', 'api'] and any('/status?' in a for a in argv):
+            return ok(json.dumps({'state': 'pending', 'statuses': []}))
+        if argv[:2] == ['gh', 'api'] and any('&filter=latest' in a for a in argv):
+            rid = int(next(a for a in argv if '/runs/' in a).split('/runs/')[1].split('/')[0])
+            self.live_calls.append(rid)
+            return ok('\n'.join(json.dumps(j) for j in self.jobs.get(rid, [])))
+        if argv[:2] == ['gh', 'api'] and any('actions/runs?status=' in a for a in argv):
+            status = next(a for a in argv
+                         if 'actions/runs?status=' in a).split('status=')[1].split('&')[0]
+            rows = self.status_runs.get(status, [])
+            return ok('\n'.join([str(len(rows)), *(json.dumps(r) for r in rows)]))
+        if argv[:2] == ['gh', 'api'] and any('/actions/runs/' in a for a in argv):
+            return ok('')                       # PR files / status read-back: nothing, unread
+        if argv[:3] == ['gh', 'run', 'list']:
+            wf = argv[argv.index('--workflow') + 1]
+            return ok(json.dumps(self.wf_runs.get(wf, [])))
+        return ok('')
+
+
+class TestReliefReasons(ReliefBase):
+    """T-0715 §3: every relief cancel says which of the four it was, and every claim says what
+    it cost. One small fixture per reason (:meth:`_fixture`), independent of
+    :class:`ReliefBase`'s FIFO-only :meth:`relieve` (shadowed here): the reservation break (P4's
+    shape) needs a second reserved-but-unlabelled runner and a broken-reservation config neither
+    the escalation, starvation nor run-level fixture wants."""
+    PR_RUN = 501
+    HEAVY = ['self-hosted', 'heavy']
+    LIGHT = ['self-hosted', 'light']
+    #: the two candidates :meth:`relieve_order` builds — the item id C10's ordering fence names
+    LIGHT_HEAVY = 'T-0002'
+    HEAVY_ONLY = 'T-0003'
+
+    def job(self, name, status, labels, runner=None, started=None, completed=None, created=-5):
+        at = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        return {'name': name, 'status': status, 'labels': labels, 'runner_name': runner,
+                'created_at': at(created),
+                'started_at': at(started) if started is not None else None,
+                'completed_at': at(completed) if completed is not None else None}
+
+    def run_camel(self, rid, status, branch, sha, created, event='pull_request'):
+        return {'databaseId': rid, 'status': status, 'event': event, 'headBranch': branch,
+                'headSha': sha,
+                'createdAt': self.at(self.t0 + datetime.timedelta(minutes=created))}
+
+    def run_snake(self, rid, status, branch, sha, created, path, event='pull_request'):
+        return {'id': rid, 'status': status, 'event': event, 'head_branch': branch,
+                'head_sha': sha,
+                'created_at': self.at(self.t0 + datetime.timedelta(minutes=created)),
+                'path': path}
+
+    def _product(self, reserve=None, pool=None):
+        pool = pool or [{'runner': 'h1', 'provider': 'alpha', 'role': 'heavy'},
+                        {'runner': 'h2', 'provider': 'alpha', 'role': 'heavy'},
+                        {'runner': 'l1', 'provider': 'alpha', 'role': 'light'}]
+        ci = {'provider': 'github-actions', 'workflow': 'ci.yml', 'pool': pool,
+              'queue': dict(workflows=self.WF, trunk_wait_min=2, trunk_escalate_min=5)}
+        if reserve:
+            ci['reserve'] = reserve
+        return env.Product('p', {'repo_slug': 'o/r', 'ci': ci,
+                                 'deploy_sha': {'prod': {'required_jobs': ['gate-tests']}}})
+
+    def _reset(self):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        claims = os.path.join(env.state_dir('p'), ci_queue.CANCELS_FILE)
+        if os.path.exists(claims):
+            os.remove(claims)
+        data = ci_queue.load('p')
+        data['relief'], data['stalls'], data['phantom'] = [], [], {}
+        # the trunk's measured need (run_level's own branch reads it; harmless elsewhere)
+        data['expect'] = {'ci.yml': {'at': self.at(self.t0), 'needs': {'heavy': 1},
+                                     'v': ci_queue.EXPECT_VERSION}}
+        ci_queue.save('p', data)
+
+    def _filler(self, host):
+        # h1/h2 show busy in the runner read: a filler run on each, in the status listing
+        # :meth:`Source.busy_runners` reads, keeps them a run's runners, never a phantom
+        host.status_runs['in_progress'] = [
+            self.run_snake(701, 'in_progress', 'other/a', 'd' * 40, -10,
+                           '.github/workflows/batch.yml'),
+            self.run_snake(702, 'in_progress', 'other/b', 'e' * 40, -10,
+                           '.github/workflows/batch.yml')]
+        host.jobs[701] = [self.job('x', 'in_progress', self.HEAVY, 'h1', started=-10)]
+        host.jobs[702] = [self.job('x', 'in_progress', self.HEAVY, 'h2', started=-10)]
+        host.status_runs['queued'] = []
+
+    def _fixture(self, name):
+        """``(product, gh)`` for one of the four reasons: a trunk run queued 10 min, one
+        candidate PR run (:attr:`PR_RUN`) in its way, shaped so only that branch of
+        :func:`ci_queue._relieve_for` fires."""
+        host = ReliefReasonsGh()
+        host.runner_labels = {'h1': self.HEAVY, 'h2': self.HEAVY, 'l1': self.LIGHT}
+        host.busy_names = {'h1', 'h2'}
+        self._filler(host)
+        host.wf_runs['ci.yml'] = [self.run_camel(900, 'queued', 'main', 'f' * 40, -10,
+                                                 event='push')]
+        host.wf_runs['batch.yml'] = []
+        p = self._product()
+        if name == 'run_level':
+            # gate-tests already running: never starved: the trunk's own wait is all that holds
+            host.jobs[900] = [self.job('gate-tests', 'in_progress', self.HEAVY, 'h1', started=-9)]
+            host.wf_runs['pr.yml'] = [self.run_camel(self.PR_RUN, 'queued', 'task/T-0001',
+                                                      'a' * 40, -60)]
+            host.jobs[self.PR_RUN] = [self.job('build', 'completed', self.HEAVY, 'h1',
+                                               started=-10, completed=-2)]
+        elif name == 'escalation':
+            # gate-tests queued 8 min: past trunk_escalate_min (5)
+            host.jobs[900] = [self.job('gate-tests', 'queued', self.HEAVY, created=-8)]
+            host.wf_runs['pr.yml'] = [self.run_camel(self.PR_RUN, 'queued', 'task/T-0001',
+                                                      'a' * 40, -1)]
+            host.jobs[self.PR_RUN] = [self.job('test', 'queued', self.HEAVY, created=-1)]
+        elif name == 'job_starvation':
+            # gate-tests queued 2.5 min: past trunk_wait_min (2), under trunk_escalate_min (5)
+            host.jobs[900] = [self.job('gate-tests', 'queued', self.HEAVY, created=-2.5)]
+            host.wf_runs['pr.yml'] = [self.run_camel(self.PR_RUN, 'queued', 'task/T-0001',
+                                                      'a' * 40, -1)]
+            host.jobs[self.PR_RUN] = [self.job('test', 'queued', self.HEAVY, created=-1)]
+        elif name == 'broken_reserve':
+            reserve = {'label': 'pr-ok', 'of': 'heavy', 'keep_free': 1, 'spread_by': 'none'}
+            pool = [{'runner': 'h1', 'provider': 'alpha', 'role': 'heavy'},
+                    {'runner': 'h2', 'provider': 'alpha', 'role': 'heavy'},
+                    {'runner': 'r1', 'provider': 'alpha', 'role': 'heavy'},
+                    {'runner': 'l1', 'provider': 'alpha', 'role': 'light'}]
+            p = self._product(reserve=reserve, pool=pool)
+            host.runner_labels = {'h1': self.HEAVY + ['pr-ok'], 'h2': self.HEAVY + ['pr-ok'],
+                                  'r1': self.HEAVY, 'l1': self.LIGHT}
+            host.busy_names = {'h1', 'h2', 'r1'}
+            host.status_runs['in_progress'].append(
+                self.run_snake(self.PR_RUN, 'in_progress', 'task/T-0001', 'a' * 40, -50,
+                               '.github/workflows/pr.yml'))
+            host.jobs[900] = [self.job('gate-tests', 'queued', self.HEAVY, created=-10)]
+            host.wf_runs['pr.yml'] = [self.run_camel(self.PR_RUN, 'in_progress', 'task/T-0001',
+                                                     'a' * 40, -50)]
+            # r1 (reserved, heavy) 36 min + l1 (light) 30 min = 66 min every class; 36 min
+            # class-filtered (heavy only) — the number C10's ordering key still uses
+            host.jobs[self.PR_RUN] = [
+                self.job('gate', 'in_progress', self.HEAVY, 'r1', started=-36),
+                self.job('site', 'in_progress', self.LIGHT, 'l1', started=-30)]
+        else:
+            raise ValueError(name)
+        return p, host
+
+    def relieve(self, fixture='broken_reserve', count=None):
+        self._reset()
+        p, host = self._fixture(fixture)
+        self.lines = []
+        ci_queue.relieve_trunk(p, items={}, source=ci_queue.GitHubSource(p, run=host),
+                               out=self.lines.append, now=self.t0)
+        self.product, self.state = p, env.state_dir(p.name)
+        if count == 'live_jobs':
+            return host.live_calls.count(self.PR_RUN)
+        return ci_queue.load_claims(self.state)[str(self.PR_RUN)]
+
+    def relieve_lines(self):
+        self.relieve('broken_reserve')
+        return self.lines
+
+    def golden(self, name):
+        return {
+            'relief-lines.txt': [
+                "ci queue: cancelled in-progress pr run 501 (T-0001) — main's reserved runners "
+                "r1 held by a pr job; it holds a runner main's gate-tests (queued 10m) can take; "
+                "sunk 36 min [branch task/T-0001, head aaaaaaaaa; replaced by its own re-run "
+                "once main run 900 starts]"],
+        }[name]
+
+    def relieve_order(self):
+        """Two escalation candidates competing for the same heavy runners: one with 1 min sunk
+        on heavy and 60 on light (:attr:`LIGHT_HEAVY`), one with 60 min on heavy alone
+        (:attr:`HEAVY_ONLY`) — the class-filtered ordering key (C10) sorts the first ahead."""
+        self._reset()
+        host = ReliefReasonsGh()
+        host.runner_labels = {'h1': self.HEAVY, 'h2': self.HEAVY, 'l1': self.LIGHT}
+        host.busy_names = {'h1', 'h2'}
+        self._filler(host)
+        host.wf_runs['ci.yml'] = [self.run_camel(900, 'queued', 'main', 'f' * 40, -10,
+                                                 event='push')]
+        host.jobs[900] = [self.job('gate-tests', 'queued', self.HEAVY, created=-8)]
+        host.wf_runs['pr.yml'] = [
+            self.run_camel(601, 'queued', 'task/T-0002', 'b' * 40, -1),
+            self.run_camel(602, 'queued', 'task/T-0003', 'c' * 40, -1)]
+        # the heavy job carries no runner_name: freeing it never satisfies the other candidate's
+        # want and masks it from the pass (both candidates must be seen to order them)
+        host.jobs[601] = [self.job('test', 'queued', self.HEAVY, created=-1),
+                          self.job('heavy-job', 'in_progress', self.HEAVY, None, started=-1),
+                          self.job('light-job', 'in_progress', self.LIGHT, 'l1', started=-60)]
+        host.jobs[602] = [self.job('test', 'queued', self.HEAVY, created=-1),
+                          self.job('heavy-job', 'in_progress', self.HEAVY, None, started=-60)]
+        host.wf_runs['batch.yml'] = []
+        p = self._product()
+        lines = []
+        ci_queue.relieve_trunk(p, items={}, source=ci_queue.GitHubSource(p, run=host),
+                               out=lines.append, now=self.t0, dry_run=True)
+        order = [l for l in lines if 'would cancel' in l]
+        return [next(m for m in (self.LIGHT_HEAVY, self.HEAVY_ONLY) if f'({m})' in l)
+                for l in order]
+
+    def test_a_broken_reservation_claims_reason_reserved_with_its_sunk_minutes(self):
+        self.relieve()                                  # the ReliefBase fixture of P4's shape
+        claim = ci_queue.load_claims(self.state)[str(self.PR_RUN)]
+        self.assertEqual('relief', claim['cause'])
+        self.assertEqual('reserved', claim['reason'])
+        self.assertEqual(66 * 60, claim['sunk_s'])      # every class, not only the contended one
+        rec = next(r for r in ci_queue.load(self.product.name)['relief'] if r['id'] == self.PR_RUN)
+        self.assertEqual(('reserved', 66 * 60), (rec['reason'], rec['sunk_s']))
+
+    def test_the_four_reasons_are_the_four_branches_and_nothing_else(self):
+        for fixture, reason in (('broken_reserve', 'reserved'), ('escalation', 'escalated'),
+                                ('job_starvation', 'starved'), ('run_level', 'waited')):
+            with self.subTest(fixture):
+                self.assertEqual(reason, self.relieve(fixture)['reason'])
+        self.assertEqual(set(ci_queue.RELIEF_REASONS),
+                         {'reserved', 'escalated', 'starved', 'waited'})
+
+    def test_a_run_level_cancel_reads_its_jobs_once_for_the_cost(self):
+        calls = self.relieve('run_level', count='live_jobs')
+        self.assertEqual(1, calls)                      # P8: that branch reads none today
+
+    def test_every_line_the_relief_prints_is_unchanged(self):
+        self.assertEqual(self.golden('relief-lines.txt'), self.relieve_lines())   # C16
+
+    def test_the_ordering_key_still_uses_the_contended_class_only(self):
+        # a candidate with 60 min on light runners and 1 min on heavy sorts as 1 min
+        self.assertEqual([self.LIGHT_HEAVY, self.HEAVY_ONLY], self.relieve_order())
+
+
 class NoRunnersGh(FakeGh):
     """``gh`` whose runner read fails (the in-flight count still reads): the ceiling's fallback."""
 

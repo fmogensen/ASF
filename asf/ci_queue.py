@@ -241,7 +241,9 @@ cancel. The line says why: ``relief: exempt <branch> — changes CI config``.
 branch's head once it has a PR — two runs, one sha, twice the runners.
 **Every cancelled run gets one cause.** Each cancel the factory makes (relief, stall, duplicate
 push, the lane's post-merge cancel) names run id, branch, head sha, reason and what replaces it,
-and writes a claim (:func:`claim_cancel`, ``ci-cancels.json``). :func:`explain_cancels` (each
+and writes a claim (:func:`claim_cancel`, ``ci-cancels.json``) that records what the cancel threw
+away (``sunk_s``, when the jobs could be read); a relief claim also names which of the four
+reliefs it was (``reason``, :data:`RELIEF_REASONS`). :func:`explain_cancels` (each
 pass) tells every other cancelled run apart: a job past its ``timeout-minutes`` is a verdict
 (named, never re-run) — unless the job's measured p50 (:meth:`Source.job_p50_min`) is under half
 that timeout: then the timeout measured runner contention, not the code, and the run's failed and
@@ -1962,7 +1964,8 @@ def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
         branch, sha = rec['branch'], rec['sha']
         out(f'ci queue: cancelled in-progress {what} [branch {branch}, head {_sha9(sha)}; '
             f'replaced by its own re-run]')
-        claim_cancel(env.state_dir(product.name), rid, 'stall', step=rec['step'])
+        claim_cancel(env.state_dir(product.name), rid, 'stall', step=rec['step'],
+                     **_sunk_kw(src, rid, now))
         prior = sum(1 for s in data['stalls']
                    if s.get('branch') == branch and s.get('sha') == sha)
         data['stalls'].append({'run': rid, 'branch': branch, 'sha': sha, 'step': rec['step'],
@@ -2875,6 +2878,31 @@ def claim_cancel(state_dir, run_id, cause, now=None, **extra):
         pass
 
 
+def _claim_sunk_s(src, run_id, now):
+    """``sunk_s`` for a claim: every runner-second the run spent, whatever the class
+    (:func:`_sunk_s` with no class filter), read once from :meth:`Source.live_jobs`. ``None``
+    when the jobs cannot be read, or the source has no ``live_jobs`` — an unreadable number is
+    left off the claim, never written as zero. Not the relief's own class-filtered ``sunk``,
+    which still orders the candidates (C10), and not :func:`asf.ci_cancels.cancelled_minutes`,
+    which sums only the jobs that concluded ``cancelled`` over a host listing — this is every
+    runner-second the run spent, whatever the job's class or conclusion."""
+    live_jobs = getattr(src, 'live_jobs', None)
+    if live_jobs is None:
+        return None
+    jobs = live_jobs(run_id)
+    if jobs is None:
+        return None
+    return int(_sunk_s(jobs, None, None, None, now))
+
+
+def _sunk_kw(src, run_id, now=None):
+    """``{'sunk_s': n}`` or ``{}`` — the keyword a claim adds when the jobs could be read
+    (:func:`_claim_sunk_s`); an unread number is left off rather than written as zero, so it
+    reads exactly like a claim from before this field existed."""
+    cost = _claim_sunk_s(src, run_id, now)
+    return {} if cost is None else {'sunk_s': cost}
+
+
 def _sha9(sha):
     return str(sha or '?')[:9]
 
@@ -3020,7 +3048,8 @@ def _explain(product, source, out, dry_run, listing, now):
                     f'timeout; a timeout is a verdict, not re-queued (a re-run would time out '
                     f'again), replaced by nothing')
                 if not dry_run:
-                    claim_cancel(state_dir, rid, 'job-timeout', now, job=job)
+                    claim_cancel(state_dir, rid, 'job-timeout', now, job=job,
+                                 **_sunk_kw(src, rid, now))
                 n += 1
                 continue
             later = sorted((x for x in runs if x.get('headBranch') == r.get('headBranch')
@@ -3032,7 +3061,8 @@ def _explain(product, source, out, dry_run, listing, now):
                     f'(concurrency group), replaced by run {later[0].get("databaseId")} at '
                     f'{_sha9(later[0].get("headSha"))}')
                 if not dry_run:
-                    claim_cancel(state_dir, rid, 'superseded', now, by=later[0].get('databaseId'))
+                    claim_cancel(state_dir, rid, 'superseded', now,
+                                 by=later[0].get('databaseId'), **_sunk_kw(src, rid, now))
                 n += 1
                 continue
             fresh = (now - created).total_seconds() <= ORPHAN_WINDOW_S
@@ -3051,7 +3081,8 @@ def _explain(product, source, out, dry_run, listing, now):
                     f"open PR head or the trunk's newest run within "
                     f'{ORPHAN_WINDOW_S // 60} min, replaced by nothing and left')
                 if not dry_run:
-                    claim_cancel(state_dir, rid, 'cancelled-left', now)
+                    claim_cancel(state_dir, rid, 'cancelled-left', now,
+                                 **_sunk_kw(src, rid, now))
                 n += 1
                 continue
             if dry_run:
@@ -3061,7 +3092,8 @@ def _explain(product, source, out, dry_run, listing, now):
             out(f'ci queue: {who} cancelled by the host with no later run — '
                 + ("its head's first run, no verdict yet: " if first and not fresh else '')
                 + (f're-run of run {rid} requested' if ok else 're-run refused, not asked again'))
-            claim_cancel(state_dir, rid, 'orphan-rerun' if ok else 'orphan-refused', now)
+            claim_cancel(state_dir, rid, 'orphan-rerun' if ok else 'orphan-refused', now,
+                         **_sunk_kw(src, rid, now))
             n += 1
     return n
 
@@ -3110,7 +3142,8 @@ def cancel_duplicate_pushes(product, source=None, out=print, dry_run=False, list
             if run_cancel.unconfirmed(done):
                 out(f'ci queue: {run_cancel.unconfirmed(done)}')
             out(f'ci queue: cancel {what}')
-            claim_cancel(env.state_dir(product.name), rid, 'duplicate-push', by=covers[sha])
+            claim_cancel(env.state_dir(product.name), rid, 'duplicate-push', by=covers[sha],
+                         **_sunk_kw(src, rid, None))
             r['status'], r['conclusion'] = 'completed', 'cancelled'
             n += 1
     return n
@@ -3644,13 +3677,28 @@ def _fits(need, supply):
     return True
 
 
-def _sunk_s(jobs, classes, by_name, cls_of, now):
+#: why a relief cancel was made — the four branches of :func:`_relieve_for`, in the order it
+#: tests them. ``reserved``: a runner ``ci.reserve`` keeps for the trunk was held by a PR job or
+#: busy with no job, and too few were left (:func:`_broken_reserve`) — the trunk only (the
+#: reservation is never read for an S1 PR run). ``escalated``: a required job of the protected
+#: run had waited past its escalation and this run's queued jobs competed for the same runners.
+#: ``starved``: a required job of the protected run had waited past the wait and this run held
+#: or queued the class ahead of it. ``waited``: the run-level rule — the trunk run itself had
+#: waited past ``trunk_wait_min`` and this run was created ahead of it.
+RELIEF_REASONS = ('reserved', 'escalated', 'starved', 'waited')
+
+
+def _sunk_s(jobs, classes, by_name=None, cls_of=None, now=None):
     """Seconds a run's jobs of ``classes`` have spent on runners: completed ones start to end,
-    running ones start to now — what cancelling the run throws away."""
+    running ones start to now — what cancelling the run throws away. ``classes`` None: every
+    class, whatever runner ran the job — what the cancel cost the pool, as the claim records it
+    (:data:`RELIEF_REASONS`); a class list narrows it to the contended class, which is what
+    orders the candidates."""
     total = 0.0
     for j in jobs or ():
         began = _parse(j.get('started_at'))
-        if began is None or (_job_class(j, by_name, cls_of) or 'runner') not in classes:
+        if began is None or (classes is not None
+                              and (_job_class(j, by_name, cls_of) or 'runner') not in classes):
             continue
         if j.get('status') == 'in_progress':
             end = now
@@ -4073,12 +4121,17 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                 out(f'ci queue: {run_cancel.unconfirmed(done)}')
             out(f'ci queue: cancelled {state} {what} [branch {r.get("headBranch")}, head '
                 f'{_sha9(r.get("headSha"))}; replaced by its own re-run once {owner} starts]')
-            claim_cancel(env.state_dir(product.name), rid, 'relief', now, for_run=tid)
+            reason = ('reserved' if bad else 'escalated' if escalated
+                      else 'starved' if starved else 'waited')
+            js = jobs if jobs is not None else src.live_jobs(rid)
+            cost = _sunk_s(js, None, None, None, now) if js else 0.0
+            claim_cancel(env.state_dir(product.name), rid, 'relief', now, for_run=tid,
+                         reason=reason, sunk_s=int(cost))
             rec = {'id': rid, 'kind': kind, 'item': item, 'prio': prio, 'label': label,
                    'workflow': wf, 'at': _iso(now), 'trunk_id': tid,
                    'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created),
                    'branch': r.get('headBranch'), 'sha': r.get('headSha'),
-                   'attempt': _attempt(r)}
+                   'attempt': _attempt(r), 'reason': reason, 'sunk_s': int(cost)}
             if r.get('displayTitle'):
                 rec['title'] = r.get('displayTitle')
             if prio == RANKED:

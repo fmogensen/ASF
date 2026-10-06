@@ -17,10 +17,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import ci_queue, env
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest, lane, rebuild_check
 from asf.workers import host, lifecycle
@@ -320,6 +321,43 @@ class Draft(unittest.TestCase):
         with mock.patch.object(lane.H, 'gh_json', return_value=data):
             out = h.prs()
         self.assertFalse(out['cloud/direct-F-0113']['draft'])
+
+
+class CancelCiClaim(unittest.TestCase):
+    """The post-merge cancel's claim (:meth:`lane.GitHubHost.cancel_ci`) carries ``sunk_s`` when
+    the cancelled run's jobs can be read, and is written without it when they cannot (T-0715
+    §3's seventh claim site)."""
+
+    def host(self, state_dir):
+        product = env.Product('p', {'repo_slug': 'o/p',
+                                     'conventions': {'landing': 'pull-request'}})
+        h = lane.GitHubHost(product)
+        h.lane = types.SimpleNamespace(out=lambda *_a: None, state_dir=state_dir)
+        return h
+
+    def cancel(self, state_dir, jobs):
+        h = self.host(state_dir)
+        runs = [{'databaseId': 501, 'status': 'queued', 'headSha': 'a' * 40}]
+        with mock.patch.object(lane.H, 'gh_json', return_value=runs), \
+             mock.patch.object(lane.run_cancel, 'cancel', return_value=True), \
+             mock.patch.object(ci_queue.GitHubSource, 'live_jobs', return_value=jobs):
+            n = h.cancel_ci('task/T-1')
+        self.assertEqual(1, n)
+        return ci_queue.load_claims(state_dir)['501']
+
+    def test_the_claim_carries_sunk_s_when_its_jobs_read(self):
+        jobs = [{'status': 'completed', 'started_at': '2026-01-01T00:00:00Z',
+                'completed_at': '2026-01-01T00:10:00Z', 'runner_name': 'r1'}]
+        with tempfile.TemporaryDirectory() as tmp:
+            claim = self.cancel(tmp, jobs)
+        self.assertEqual('merged-pr', claim['cause'])
+        self.assertEqual(600, claim['sunk_s'])
+
+    def test_the_claim_omits_sunk_s_when_its_jobs_do_not_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            claim = self.cancel(tmp, None)
+        self.assertEqual('merged-pr', claim['cause'])
+        self.assertNotIn('sunk_s', claim)
 
 
 class LandingClass(unittest.TestCase):
