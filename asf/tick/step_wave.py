@@ -738,6 +738,7 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
     builds each starting row's brief and worker row through ``build(row, bypass)``. The status
     cell's preview (``act`` false, :func:`would_start`) runs the same checks in the same order
     and changes nothing — so "Ready to launch N" is the N rows this wave would start."""
+    from asf.feeder import rows as feeder_rows
     host_held, host_why = tuple(host or (False, ''))[:2]
     say = out if act else _quiet
     room = max(0, seats - len(running))
@@ -749,7 +750,10 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
             ctx.event('triage', item=row.item_id, cause=cause, row=row.kind, action=row.action)
             out(f'triage   {row.item_id:<10} — {cause}: {row.reason}')
         if not row.launches:
-            say(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
+            if row.action.startswith(feeder_rows.OVER_BUDGET):  # F-0092: the whole verdict, verbatim
+                say(row.action)
+            else:
+                say(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
             result.append(Screened(row, row.action, WAITS))
             continue
         job = job_name(row.brief_kind, row.item_id)

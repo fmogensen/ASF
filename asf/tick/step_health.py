@@ -1,4 +1,9 @@
-"""asf.tick.step_health — the tick's ``health`` step: reconcile the sessions, then look for stalls.
+"""asf.tick.step_health — the tick's ``health`` step: end a run over its cap, reconcile the
+sessions, then look for stalls.
+
+A run over its wall clock or its turn cap (F-0092) is ended here first, before health reconciles:
+``stall.capped`` stops it and appends its result synchronously, so the same tick's
+``health(fix=True)`` ends the session and records the reason.
 
 ``workers.health(product, fix=True)`` ends the sessions whose log carries a result or whose pid is
 gone and reaps the worktrees that pass the reap rule; ``workers.stall(product)`` then lists the
@@ -221,6 +226,7 @@ def close_landed_parks(ctx, out=print):
 
 def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
+    stall_mod.capped(product, out=out)  # F-0092: a run over a cap is ended here, not left
     items = health_mod.record_items(product)
     found = health_mod.health(product, fix=True, out=out, items=items)
     reap_worktrees(ctx, out=out)

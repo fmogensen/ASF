@@ -193,6 +193,50 @@ class I7OneSessionPerBranchAndWorktree(unittest.TestCase):
                          [('I7', 'FIX → CORRECT T-0001 @worker/T-0001')])
 
 
+class I14Tests(unittest.TestCase):
+    """F-0092 §2.6 (T5, second half): the backstop behind :func:`asf.feeder.rows.over_budget` —
+    a row that reaches the plan over budget is dropped here. Named ``I14Tests`` for the plan's
+    acceptance command (``tests.test_invariants.I14Tests``); the invariant it exercises is
+    registered ``I15`` — the spec's own ``I14`` was already taken (record scope, "a close needs
+    a landing fact") by the time this Feature landed."""
+
+    def items(self, sessions=9, usd=1):
+        return {'T-0021': {'id': 'T-0021', 'type': 'task', 'state': 'New',
+                           'cost': {'sessions': sessions, 'usd': usd}}}
+
+    def test_a_launching_row_over_budget_gives_one_finding(self):
+        rows = [row('PLAN → CODE', 'T-0021', 'worker/T-0021')]
+        findings = invariants.check_i15(feeder(rows, items=self.items()))
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual((f.invariant, f.scope), ('I15', 'feeder'))
+        self.assertEqual(f.subject, 'PLAN → CODE T-0021 @worker/T-0021')
+        self.assertIn('budget spent: 9/3 sessions, $1/$10', f.message)
+
+    def test_feeder_gate_drops_the_row_and_prints_the_line(self):
+        rows = [row('PLAN → CODE', 'T-0021', 'worker/T-0021')]
+        out = []
+        kept = invariants.feeder_gate(env.Product('sample', {}), rows, self.items(), out=out.append)
+        self.assertEqual(kept, [])
+        self.assertTrue(any(l.startswith('INVARIANT I15: PLAN → CODE T-0021 @worker/T-0021')
+                           for l in out), out)
+
+    def test_finishing_kinds_are_not_judged(self):
+        for kind in ('PUSHED → REVIEW', 'CONFLICT → REBASE', 'STALE → CLOSE'):
+            with self.subTest(kind=kind):
+                rows = [row(kind, 'T-0021', 'worker/T-0021')]
+                self.assertEqual(invariants.check_i15(feeder(rows, items=self.items())), [])
+
+    def test_an_under_budget_item_gives_none(self):
+        rows = [row('PLAN → CODE', 'T-0021', 'worker/T-0021')]
+        self.assertEqual(invariants.check_i15(feeder(rows, items=self.items(sessions=1, usd=1))), [])
+
+    def test_an_item_with_no_cost_block_has_spent_nothing(self):
+        rows = [row('PLAN → CODE', 'T-0099', 'worker/T-0099')]
+        ctx = feeder(rows, items={'T-0099': {'id': 'T-0099', 'type': 'task', 'state': 'New'}})
+        self.assertEqual(invariants.check_i15(ctx), [])
+
+
 class I8EveryLaneBranchInOneState(unittest.TestCase):
     NOW = 1_800_000_000.0
 
@@ -365,7 +409,7 @@ class R13TestsOnlyInvariants(unittest.TestCase):
         self.assertEqual(registered & {'I6', 'I9', 'I12', 'I13'}, set())
         self.assertEqual(set(invariants.TEST_ONLY), {'I6', 'I12', 'I13'})
         self.assertEqual({i.id for i in invariants.INVARIANTS},
-                         {'I1', 'I2', 'I3', 'I4', 'I5', 'I7', 'I8', 'I10', 'I11', 'I14'})
+                         {'I1', 'I2', 'I3', 'I4', 'I5', 'I7', 'I8', 'I10', 'I11', 'I14', 'I15'})
 
     def test_r13_i13_an_explicit_type_decides_the_minted_type(self):
         self.assertEqual(invariants.check_i13('bug', 'bug'), [])

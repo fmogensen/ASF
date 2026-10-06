@@ -23,6 +23,7 @@ from asf.tick import shadow, step_daily, step_groom, step_harvest, step_health, 
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
+from asf.workers import stall as stall_mod
 from tests.test_tick import TickTestCase, _git, steps_only
 
 DEAD_PID = 999999
@@ -293,8 +294,68 @@ class HealthStepTests(StepsTestCase):
     def test_stall_dead_counts_and_clean_ledger(self):
         ctx = self.ctx()
         step_health.run(ctx, out=self.lines.append)
-        self.assertEqual(self.lines, ['health: clean', 'stall: none'])
+        self.assertEqual(self.lines, ['cap: none', 'health: clean', 'stall: none'])
         self.assertEqual(ctx.counts['stalls'], 0)
+
+
+class HealthEndsACappedRunTests(StepsTestCase):
+    """F-0092 §2.8 last clause (T8): ``step_health.run`` calls ``stall.capped`` before
+    ``health(fix=True)``, so the same tick that stops a run over its cap also ends its session
+    with the reason."""
+
+    def setUp(self):
+        super().setUp()
+        self.signals = []
+        # no real claude session runs under this test's fake account, so the real observer
+        # (`ps axeww`) never finds one; every live fixture here is this test process's own pid,
+        # genuinely alive, so the simple check stands in for it (D10's own fallback, forced)
+        for target, name, new in (
+                (stall_mod, '_signal', lambda pid, sig: self.signals.append((pid, sig))),
+                (stall_mod.time, 'sleep', lambda _s: None),
+                (stall_mod.health_mod, 'alive_for', lambda *a, **kw: stall_mod.health_mod.pid_alive)):
+            p = mock.patch.object(target, name, new)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def live_past_its_wall_clock(self, job='code-t-0021'):
+        log = os.path.join(self.tmp, f'{job}.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+        started = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 4 * 3600))
+        self.session(job=job, item='T-0021', kind='code', account=None, pid=os.getpid(),
+                    log=log, started=started)
+        return log
+
+    def test_capped_runs_before_health_fix_true(self):
+        order = []
+        with mock.patch.object(step_health.stall_mod, 'capped',
+                               side_effect=lambda *a, **kw: order.append('capped')), \
+                mock.patch.object(step_health.health_mod, 'health',
+                                  side_effect=lambda *a, **kw: order.append('health') or []):
+            step_health.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(order, ['capped', 'health'])
+
+    def test_a_tick_with_nothing_live_prints_cap_none_and_is_otherwise_unchanged(self):
+        step_health.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(self.lines, ['cap: none', 'health: clean', 'stall: none'])
+
+    def test_a_run_past_its_wall_clock_is_capped_then_ended_the_same_tick(self):
+        log = self.live_past_its_wall_clock()
+        step_health.run(self.ctx(), out=self.lines.append)
+        cap_lines = [ln for ln in self.lines if ln.startswith('CAP   ')]
+        self.assertEqual(len(cap_lines), 1, self.lines)
+        self.assertTrue(cap_lines[0].startswith('CAP   code-t-0021  run_minutes 240 over 180 (code)'),
+                        cap_lines[0])
+        ended = [ln for ln in self.lines if ln.startswith('ended ')]
+        self.assertEqual(ended, ['ended     code-t-0021              failed: run cap'])
+        self.assertLess(self.lines.index(cap_lines[0]), self.lines.index(ended[0]))
+        session = pool_mod.load_sessions(self.product)['code-t-0021']
+        self.assertEqual(session['end_reason'], 'failed: run cap')
+        self.assertTrue(session['ended'])
+        self.assertEqual(session['capped']['measure'], 'run_minutes')
+        with open(log, encoding='utf-8') as f:
+            lines = [json.loads(ln) for ln in f if ln.strip()]
+        self.assertEqual(lines[-1]['asf']['run_cap']['measure'], 'run_minutes')
 
 
 # ---- wave -------------------------------------------------------------------------
@@ -727,6 +788,45 @@ class WaveStepTests(StepsTestCase):
             step_wave.run(self.ctx(), out=self.lines.append)
         self.assertEqual(self.lines, ['wave: nothing to launch'])
         self.assertEqual(self.waved, [])
+
+
+class OverBudgetWaveTests(StepsTestCase):
+    """F-0092 §2.5 (T5, first half): the wave prints an over-budget item's whole verdict, with no
+    ``waits`` prefix, launches nothing for it, and launches its sibling."""
+
+    def setUp(self):
+        super().setUp()
+        self.push_branch('task/T-0003')
+        self.write_config('feeder:\n  capacity: 3\n')
+        self.waved = []
+
+        def build(product, row, index, inflight, repo_facts=None):
+            return _brief('task', row.item_id)
+
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
+            self.waved.append([r.item for r in rows])
+            out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1')
+            return [(rows[0], {'account': 'acct-a', 'model': 'opus', 'pid': 1})], []
+        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out, **_kw: {})):
+            p = mock.patch.object(step_wave, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_the_line_prints_whole_nothing_launches_for_it_and_its_sibling_still_launches(self):
+        over = feeder_rows.Row(2, 'PLAN → CODE', 'T-0021', 'F-0001',
+                               'OVER BUDGET T-0021 — 9/3 sessions, $13.53/$10', 'task', '',
+                               'budget spent: sessions — a ruling raises it, closes it or reshapes it',
+                               waits_on=feeder_rows.BUDGET)
+        sibling = feeder_rows.Row(2, 'PLAN → CODE', 'T-0003', 'F-0001',
+                                  'would launch task-t-0003', 'task', 'task/T-0003', 'ready')
+
+        def plan(index, product, inflight, capacity, **kw):
+            return [over, sibling]
+        with mock.patch.object(feeder_rows, 'plan_rows', plan):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(self.lines.count('OVER BUDGET T-0021 — 9/3 sessions, $13.53/$10'), 1)
+        self.assertFalse(any('T-0021' in ln and ln.startswith('waits') for ln in self.lines), self.lines)
+        self.assertEqual(self.waved, [['T-0003']])
 
 
 class WaveFactsTests(StepsTestCase):

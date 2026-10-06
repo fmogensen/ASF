@@ -1872,6 +1872,46 @@ BUDGET = 'budget'
 BUDGET_HELD_KINDS = frozenset(k for ks in HELD_KINDS.values() for k in ks)
 
 
+OVER_BUDGET = 'OVER BUDGET'
+#: The launching rows the budget (F-0092) does not hold: each ends the spending on work already
+#: done — a review is the last step before a pushed branch lands, a rebase and a close are
+#: housekeeping on a branch that exists. Everything else starts or continues work.
+FINISHING_KINDS = (PUSHED_REVIEW, CONFLICT, STALE)
+
+
+def over_budget(rows, items, product):
+    """One ``OVER BUDGET`` row per item whose budget is spent (F-0092), in place of its launching
+    rows.
+
+    Every launching row of the item but a :data:`FINISHING_KINDS` one is dropped; the first of
+    them (emit order) becomes the non-launching row that says so — no session, no slot, still
+    shown. Its non-launching rows are untouched: a branch the lane holds still lands, and the row
+    that says so must not be overwritten by this one. The ``GROOM → ADJUDICATE`` row is not
+    touched either: it speaks for a day's questions, not for the item it happens to be named
+    after — the same exception :func:`hold_unlanded` makes. Pure over the items' ``cost:``
+    blocks."""
+    conv = _conventions(product)
+    verdicts = {}
+    out, said = [], set()
+    for r in rows:
+        if not r.launches or r.kind in FINISHING_KINDS or r.kind == GROOM_ADJUDICATE:
+            out.append(r)
+            continue
+        if r.item_id not in verdicts:
+            verdicts[r.item_id] = budget.spent(conv, items.get(r.item_id) or {})
+        s = verdicts[r.item_id]
+        if not s.over:
+            out.append(r)
+            continue
+        if r.item_id in said:            # one line per item, not per row
+            continue
+        said.add(r.item_id)
+        out.append(dataclasses.replace(
+            r, action=budget.line(r.item_id, s), waits_on=BUDGET,
+            reason=f'budget spent: {s.measure} — a ruling raises it, closes it or reshapes it'))
+    return out
+
+
 def epic_verdicts(items):
     """``{epic id: EpicSpend}`` for every Epic in the map — one subtree sum per Epic per pass."""
     return {e['id']: budget.epic_spend(e['id'], ix.subtree_usd(items, e), e.get('budget_usd'))
@@ -2301,6 +2341,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     rows = hold_unlanded(rows, items, landed_shas, product)
     rows = hold_replanning(rows, items)
     rows = hold_classes(rows, product)
+    rows = over_budget(rows, items, product)       # F-0092
     rows = over_budget_epics(rows, items)          # F-0052
     rows, aside = hold_shelved(rows, items, occ.get('parks'))
     # ... and its own row ranks behind the live rows of its tier, as put-aside work does

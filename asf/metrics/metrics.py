@@ -30,7 +30,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-from asf import env, gh_limit, github, gitpush, mutation_guard, refguard
+from asf import budget, env, gh_limit, github, gitpush, mutation_guard, refguard
 from asf import tokens
 from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
                              Conventions)
@@ -609,7 +609,7 @@ def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None, rela
     tok = _no_tokens()
     for s in sessions:
         _add_tokens(tok, {d: s.get(f'tokens_{d}') for d in tokens.DIMENSIONS})
-    capped = sum(1 for s in sessions if s.get('result') == 'failed: token cap')
+    capped = sum(1 for s in sessions if s.get('result') in ('failed: token cap', 'failed: run cap'))
     rows.append(('tokens', ' · '.join(f"{label} {fmt_tokens(tok[d])}" for label, d in TOKEN_LABELS),
                  f"{len(sessions)} sessions, {capped} capped"))
     spec = collections.defaultdict(int)
@@ -801,9 +801,10 @@ def item_path(root, items, iid):
     return os.path.join(root, items[iid]['folder'], f"{iid}.md")
 
 
-def write_costs(root, items, all_ci, all_sessions, now=None):
+def write_costs(root, items, all_ci, all_sessions, now=None, conv=None):
     """Write `cost:` (own events, all time) into each touched item's machine block, and `spend_usd` into each
     Epic's. Returns (items rewritten, {epic id: (spend, budget)})."""
+    conv = conv or DEFAULTS
     costs = compute_costs(all_ci, all_sessions)
     stamp = iso(now or now_utc())
     changed = []
@@ -815,6 +816,13 @@ def write_costs(root, items, all_ci, all_sessions, now=None):
             new_cost = {'sessions': c['sessions'], 'fix_rounds': c['fix_rounds'],
                         'runner_min': int(round(c['runner_min'])), 'usd': None if c['usd'] is None else round(c['usd'], 2)}
             new_cost.update({f'tokens_{d}': n for d, n in c['tokens'].items() if n is not None})
+            s = budget.spent(conv, {**it, 'cost': new_cost})
+            if s.budget.sessions is not None:
+                new_cost['budget_sessions'] = s.budget.sessions
+            if s.budget.usd is not None:
+                new_cost['budget_usd'] = s.budget.usd
+            if s.over:
+                new_cost['over_budget'] = s.measure          # 'sessions' | 'usd'
         sub = subtree_cost(items, costs, iid) if it.get('type') == 'epic' else None
         new_spend = None if not sub or sub['usd'] is None else round(sub['usd'], 2)
         if sub is not None:
@@ -1551,7 +1559,7 @@ def cmd_rollup(args, root):
     text = render_daily(root, day, items, conv, product=getattr(args, 'product', None))
     daily = os.path.join(root, 'metrics', 'daily', f"{day}.md")
     print(f"{'wrote' if write_if_changed(daily, text) else 'unchanged'} {os.path.relpath(daily, root)}")
-    changed, spend = write_costs(root, items, read_stream(root, 'ci'), read_stream(root, 'sessions'))
+    changed, spend = write_costs(root, items, read_stream(root, 'ci'), read_stream(root, 'sessions'), conv=conv)
     print(f"cost: {len(changed)} item(s) updated")
     for eid, (sp, budget) in sorted(spend.items()):
         if sp is None and budget is None:

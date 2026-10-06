@@ -11,7 +11,7 @@ pure over the facts ``ctx`` carries. They run at three points of the tick, and e
   Bug per ``(invariant, cause)`` (:func:`asf.tick.file_bugs.cause_key`), listing the paths.
   I14 (a close needs a landing fact) runs under ``flags.i14``: ``off`` by default, ``report``
   (a line and ``invariants-report.jsonl``, the write stands) or ``refuse``.
-- ``feeder`` (I4, I5, I7): over ``plan_rows`` before the wave (:func:`feeder_gate`). A
+- ``feeder`` (I4, I5, I7, I15): over ``plan_rows`` before the wave (:func:`feeder_gate`). A
   violating row is dropped and logged as ``INVARIANT <id>: <row> — <why>``.
 - ``lane`` (I8): after harvest (:func:`lane_report`). Reported only. I9 is an event there, not a
   violation: a merge from outside the lane is logged, never refused (R12).
@@ -50,7 +50,7 @@ class Invariant:
     check: Callable
 
 
-#: The registry the tick runs: I1–I3, I10, I11, I14 (record), I4, I5, I7 (feeder), I8 (lane).
+#: The registry the tick runs: I1–I3, I10, I11, I14 (record), I4, I5, I7, I15 (feeder), I8 (lane).
 INVARIANTS = []
 
 
@@ -718,13 +718,16 @@ class FeederContext:
       a branch the lane holds no record of;
     - ``runs``: the runs that hold a seat, each ``{job, item, branch, worktree}``;
     - ``docs_on_trunk``: ``{feature id: {'spec': bool|None, 'plan': bool|None}}`` — whether each
-      document is on ``origin/<trunk>`` (None: unknown, never judged)."""
+      document is on ``origin/<trunk>`` (None: unknown, never judged);
+    - ``items``: ``{item id: index entry}`` — the map the feeder planned from, for a check that
+      judges a row against its item's own card (F-0092's I15, among them)."""
     rows: list = field(default_factory=list)
     lanes: dict = field(default_factory=dict)
     occupancy: dict = None
     runs: list = field(default_factory=list)
     docs_on_trunk: dict = field(default_factory=dict)
     product: object = None
+    items: dict = field(default_factory=dict)
 
 
 def row_key(row):
@@ -887,6 +890,32 @@ def check_i7(ctx):
     return out
 
 
+def check_i15(ctx):
+    """I15 (F-0092) — no launching row for an item whose budget is spent. The backstop behind
+    :func:`asf.feeder.rows.over_budget`: a row that reaches the plan over budget — from a caller
+    that skipped it, or from a race between the rollup and the wave — is dropped here.
+    :data:`asf.feeder.rows.FINISHING_KINDS` (a row that ends spending on work already done) and
+    ``GROOM → ADJUDICATE`` (it speaks for a day's questions, not for the item it is named after)
+    are not judged; an item with no ``cost:`` block has spent nothing."""
+    from asf import budget
+    from asf.conventions import Conventions
+    from asf.feeder import rows as feeder_rows
+    conv = getattr(ctx.product, 'conventions', None) or Conventions()
+    out = []
+    verdicts = {}
+    for row in _launching(ctx):
+        if row.kind in feeder_rows.FINISHING_KINDS or row.kind == feeder_rows.GROOM_ADJUDICATE:
+            continue
+        if row.item_id not in verdicts:
+            verdicts[row.item_id] = budget.spent(conv, ctx.items.get(row.item_id) or {})
+        s = verdicts[row.item_id]
+        if s.over:
+            prefix = f'{budget.OVER} {row.item_id} — '
+            out.append(Finding('I15', 'feeder', row_key(row),
+                               f'budget spent: {budget.line(row.item_id, s)[len(prefix):]}'))
+    return out
+
+
 # ---- the lane invariant (I8) and event (I9) -------------------------------------------------
 
 @dataclass
@@ -1028,6 +1057,7 @@ INVARIANTS.extend([
     Invariant('I4', 'feeder', _feeder_only(check_i4)),
     Invariant('I5', 'feeder', _feeder_only(check_i5)),
     Invariant('I7', 'feeder', _feeder_only(check_i7)),
+    Invariant('I15', 'feeder', _feeder_only(check_i15)),
     Invariant('I8', 'lane', _lane_only(check_i8)),
 ])
 
@@ -1145,7 +1175,7 @@ def feeder_context(product, rows, items):
         occupancy=_soft(lambda: lifecycle.occupancy(path, lanes=None), None),
         runs=_soft(lambda: live_runs(path), []),
         docs_on_trunk=_soft(lambda: docs_on_trunk(product, items, code), {}),
-        product=product)
+        product=product, items=items)
 
 
 def feeder_gate(product, rows, items, out=print):

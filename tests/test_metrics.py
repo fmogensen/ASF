@@ -614,9 +614,12 @@ class Rollup(Base):
                                              now=dt.datetime(2026, 9, 21, 12, 0, 0, tzinfo=dt.timezone.utc))
         self.assertEqual(sorted(changed), ['B-0001', 'E-0001', 'F-0001', 'T-0001'])
         idx = self.reindexed()
-        self.assertEqual(idx['T-0001']['cost'], {'sessions': 1, 'fix_rounds': 1, 'runner_min': 10, 'usd': 1.25})
-        self.assertEqual(idx['F-0001']['cost'], {'sessions': 2, 'fix_rounds': 0, 'runner_min': 10, 'usd': 2.5})
-        self.assertEqual(idx['B-0001']['cost'], {'sessions': 0, 'fix_rounds': 0, 'runner_min': 10, 'usd': None})
+        self.assertEqual(idx['T-0001']['cost'], {'sessions': 1, 'fix_rounds': 1, 'runner_min': 10, 'usd': 1.25,
+                                                 'budget_sessions': 3, 'budget_usd': 10})
+        self.assertEqual(idx['F-0001']['cost'], {'sessions': 2, 'fix_rounds': 0, 'runner_min': 10, 'usd': 2.5,
+                                                 'budget_sessions': 3, 'budget_usd': 10})
+        self.assertEqual(idx['B-0001']['cost'], {'sessions': 0, 'fix_rounds': 0, 'runner_min': 10, 'usd': None,
+                                                 'budget_sessions': 3, 'budget_usd': 10})
         self.assertEqual(idx['F-0001']['updated'], '2026-09-21T12:00:00Z')
         self.assertEqual(idx['E-0001']['spend_usd'], 3.75)
         self.assertEqual(idx['E-0001']['budget_usd'], 100)
@@ -645,7 +648,8 @@ class Rollup(Base):
             with open(p, encoding='utf-8') as f:
                 self.assertIn('cost: {sessions:', f.read())
         with open(paths['T-0001'], encoding='utf-8') as f:
-            self.assertIn('cost: {sessions: 1, fix_rounds: 1, runner_min: 10, usd: 1.25}', f.read())
+            self.assertIn('cost: {sessions: 1, fix_rounds: 1, runner_min: 10, usd: 1.25, '
+                          'budget_sessions: 3, budget_usd: 10}', f.read())
         with open(os.path.join(self.root, 'features', 'F-0002.md'), encoding='utf-8') as f:
             self.assertNotIn('cost:', f.read())
 
@@ -654,7 +658,8 @@ class Rollup(Base):
         metrics.write_costs(self.root, self.items, metrics.read_stream(self.root, 'ci'), metrics.read_stream(self.root, 'sessions'))
         with open(os.path.join(self.root, 'bugs', 'B-0001.md'), encoding='utf-8') as f:
             text = f.read()
-        self.assertIn('cost: {sessions: 0, fix_rounds: 0, runner_min: 10, usd: null}', text)
+        self.assertIn('cost: {sessions: 0, fix_rounds: 0, runner_min: 10, usd: null, '
+                      'budget_sessions: 3, budget_usd: 10}', text)
         meta, _b = frontmatter.parse(text)
         self.assertIsNone(meta['cost']['usd'])
 
@@ -683,6 +688,80 @@ class Rollup(Base):
                 with open(p, 'rb') as fh:
                     snap[os.path.relpath(p, self.root)] = fh.read()
         return snap
+
+
+def cost_session(item, usd, **kw):
+    return dict({'ts': f'{DAY}T09:00:00Z', 'task': 't', 'account': 'a1', 'kind': 'code',
+                'result': 'finished', 'item': item, 'usd': usd}, **kw)
+
+
+class ItemBudgetCostBlockTests(Base):
+    """F-0092 §2.3 (T3): `write_costs` resolves the budget and the verdict into each item's
+    `cost:` block, beside the figures it already writes."""
+
+    def nine_sessions(self, item='T-0001', usd=1.503333333333):
+        """9 sessions, $13.53 total (1.503_ each) by default — the card's own example figures."""
+        return [cost_session(item, usd) for _ in range(9)]
+
+    def test_the_default_budget_is_written_and_the_item_is_over(self):
+        metrics.write_costs(self.root, self.items, [], self.nine_sessions())
+        cost = self.reindexed()['T-0001']['cost']
+        self.assertEqual(cost['sessions'], 9)
+        self.assertEqual(cost['usd'], 13.53)
+        self.assertEqual(cost['budget_sessions'], 3)
+        self.assertEqual(cost['budget_usd'], 10)
+        self.assertEqual(cost['over_budget'], 'sessions')
+
+    def test_a_product_budget_is_read_and_over_budget_is_absent_under_it(self):
+        # under its own dollar budget too (usd $0.80 × 9 = $7.20 < $10), so raising only the
+        # session cap is enough to clear the verdict entirely (both measures now under)
+        conv = Conventions(budget={'sessions': 12})
+        metrics.write_costs(self.root, self.items, [], self.nine_sessions(usd=0.80), conv=conv)
+        cost = self.reindexed()['T-0001']['cost']
+        self.assertEqual(cost['budget_sessions'], 12)
+        self.assertEqual(cost['budget_usd'], 10)
+        self.assertNotIn('over_budget', cost)
+
+    def test_a_card_raised_by_hand_loses_the_key_on_the_next_run(self):
+        metrics.write_costs(self.root, self.items, [], self.nine_sessions())
+        self.assertIn('over_budget', self.reindexed()['T-0001']['cost'])
+        write_item(self.root, 'T-0001', 'task', 'Plan door copy', parent='F-0001',
+                  typed_lines=('legacy_id: FREE-1/T3', 'links:', '  prs: [623]',
+                               '  branches: [cloud/free-plan-t3]', 'budget_sessions: 12'))
+        reindex(self.root)
+        self.items = match.load_index(self.root)
+        metrics.write_costs(self.root, self.items, [], self.nine_sessions(usd=0.80))
+        cost = self.reindexed()['T-0001']['cost']
+        self.assertEqual(cost['budget_sessions'], 12)
+        self.assertNotIn('over_budget', cost)
+
+    def test_an_epic_gets_neither_key_and_rollup_lines_are_unchanged(self):
+        fixture_streams(self)
+        changed, spend = metrics.write_costs(self.root, self.items, metrics.read_stream(self.root, 'ci'),
+                                             metrics.read_stream(self.root, 'sessions'))
+        idx = self.reindexed()
+        self.assertNotIn('budget_sessions', idx['E-0001'])
+        self.assertNotIn('over_budget', idx['E-0001'])
+        self.assertEqual(idx['E-0001']['spend_usd'], 3.75)
+        self.assertEqual(idx['E-0001']['budget_usd'], 100)
+        self.assertEqual(spend['E-0001'], (3.75, 100))
+
+    def test_cmd_rollup_passes_the_resolved_conventions(self):
+        with mock.patch.object(metrics, 'write_costs', side_effect=metrics.write_costs) as spy:
+            with mock.patch.object(metrics, 'deploy_runs', return_value=[]):
+                run_cli(self.root, 'rollup', DAY)
+        self.assertIn('conv', spy.call_args.kwargs)
+        self.assertIsInstance(spy.call_args.kwargs['conv'], Conventions)
+
+    def test_the_capped_cell_counts_a_run_capped_session(self):
+        rows = metrics.scorecard_rows(
+            [], [cost_session('T-0001', 1), dict(cost_session('T-0001', 1), result='failed: run cap')], [])
+        tok = next(r for r in rows if r[0] == 'tokens')
+        self.assertEqual(tok[2], '2 sessions, 1 capped')
+
+    def reindexed(self):
+        reindex(self.root)
+        return match.load_index(self.root)
 
 
 DEPLOYS = [{'headSha': 'b' * 40, 'conclusion': 'success', 'updatedAt': '2026-09-21T05:00:00Z'},

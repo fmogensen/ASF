@@ -1352,8 +1352,13 @@ class EpicOverBudgetHoldTests(unittest.TestCase):
         items = idx['items']
         if spend_usd is None:
             items['F-0001'].pop('cost', None)
+            items['F-0001'].pop('budget_usd', None)
         else:
             items['F-0001']['cost'] = {'usd': spend_usd}
+            # F-0001's own item-level budget (F-0092) is not what this fixture means to spend
+            # past — only the Epic's subtree sum is — so it is raised clear of every spend_usd
+            # this file uses, and the Epic's subtree sum (ix.subtree_usd) reads cost.usd alone
+            items['F-0001']['budget_usd'] = 100000
         if budget_usd is None:
             items['E-0001'].pop('budget_usd', None)
         else:
@@ -1510,6 +1515,95 @@ class EpicOverBudgetHoldTests(unittest.TestCase):
                 'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Closed',
                             'parent': 'F-0001', 'cost': {'usd': 600}}}
         self.assertEqual(rows.epics_over_budget(items), [])
+
+
+class NoWorkRowLaunchesForASpentBudget(unittest.TestCase):
+    """F-0092 §2.4 (T4): every launching row of an item whose budget is spent (:func:`budget.spent`
+    over its ``cost:`` block) becomes one non-launching ``OVER BUDGET`` row, in place of its own
+    rows — except :data:`rows.FINISHING_KINDS` and ``GROOM → ADJUDICATE``, which still launch, and
+    a sibling under its own budget, which is untouched."""
+
+    #: what can speak for one item (§3's T4 matrix) — nine launching kinds the budget holds alike
+    MATRIX = (rows.PLAN_CODE, rows.FIX_CORRECT, rows.CARD_SPEC, rows.SPEC_PLAN,
+             rows.DIRECT_BUILD, rows.STARVED_SPEC, rows.STARVED_PLAN, rows.BUG_FIX,
+             rows.STALEMATE)
+
+    def row(self, kind, item_id='T-0021', **kw):
+        return rows.Row(tier=2, kind=kind, item_id=item_id, feature_id='', action=rows.LAUNCH,
+                        brief_kind='code', branch=f'worker/{item_id}', reason='because', **kw)
+
+    def items(self, **cost_by_id):
+        out = {}
+        for iid, extra in cost_by_id.items():
+            it = {'id': iid, 'type': 'task', 'state': 'New'}
+            it.update(extra)
+            out[iid] = it
+        return out
+
+    def test_over_sessions_no_row_launches_for_every_matrix_kind(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 9, 'usd': 1}}})
+        for kind in self.MATRIX:
+            with self.subTest(kind=kind):
+                out = rows.over_budget([self.row(kind)], items, product())
+                self.assertEqual(len(out), 1)
+                self.assertFalse(out[0].launches)
+                self.assertEqual(out[0].waits_on, rows.BUDGET)
+                self.assertTrue(out[0].action.startswith(rows.OVER_BUDGET))
+                self.assertIn('9/3 sessions', out[0].action)
+                self.assertIn('budget spent: sessions', out[0].reason)
+
+    def test_over_usd_no_row_launches_for_every_matrix_kind(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 1, 'usd': 16.59}}})
+        for kind in self.MATRIX:
+            with self.subTest(kind=kind):
+                out = rows.over_budget([self.row(kind)], items, product())
+                self.assertEqual(len(out), 1)
+                self.assertFalse(out[0].launches)
+                self.assertIn('$16.59/$10', out[0].action)
+                self.assertIn('budget spent: usd', out[0].reason)
+
+    def test_the_same_matrix_under_a_raised_budget_still_launches(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 9, 'usd': 1}, 'budget_sessions': 12}})
+        for kind in self.MATRIX:
+            with self.subTest(kind=kind):
+                row = self.row(kind)
+                self.assertEqual(rows.over_budget([row], items, product()), [row])
+
+    def test_finishing_kinds_still_launch(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 9, 'usd': 1}}})
+        for kind in rows.FINISHING_KINDS:
+            with self.subTest(kind=kind):
+                row = self.row(kind)
+                self.assertEqual(rows.over_budget([row], items, product()), [row])
+
+    def test_groom_adjudicate_still_launches(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 9, 'usd': 1}}})
+        row = self.row(rows.GROOM_ADJUDICATE)
+        self.assertEqual(rows.over_budget([row], items, product()), [row])
+
+    def test_pushed_land_and_on_trunk_rows_pass_through_unchanged(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 9, 'usd': 1}}})
+        waiting = rows.Row(tier=2, kind=rows.PUSHED_LAND, item_id='T-0021', feature_id='',
+                           action=rows.ON_TRUNK, brief_kind='code', branch='worker/T-0021',
+                           reason='landed', waits_on=rows.ON_TRUNK)
+        self.assertEqual(rows.over_budget([waiting], items, product()), [waiting])
+
+    def test_a_sibling_under_its_own_budget_is_untouched(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 9, 'usd': 1}},
+                             'T-0022': {'cost': {'sessions': 1, 'usd': 1}}})
+        over, under = self.row(rows.PLAN_CODE, 'T-0021'), self.row(rows.PLAN_CODE, 'T-0022')
+        out = rows.over_budget([over, under], items, product())
+        self.assertEqual(len(out), 2)
+        self.assertFalse(out[0].launches)
+        self.assertEqual(out[1], under)
+
+    def test_only_the_first_launching_row_of_an_item_becomes_the_line(self):
+        items = self.items(**{'T-0021': {'cost': {'sessions': 9, 'usd': 1}}})
+        a, b = self.row(rows.PLAN_CODE), self.row(rows.STALEMATE)
+        out = rows.over_budget([a, b], items, product())
+        self.assertEqual(len(out), 1)
+        self.assertFalse(out[0].launches)
+        self.assertEqual(out[0].kind, rows.PLAN_CODE)
 
 
 class TrunkNameTests(unittest.TestCase):
