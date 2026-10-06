@@ -5,9 +5,10 @@ generalized to take a backlog root instead of a hardcoded path: every ``asf view
 through here so ``asf tick --shadow`` and a plain ``asf roadmap`` see the same data shape whether
 the root is a product's real backlog or its shadow clone.
 
-Read-only, stdlib only. ``load()`` drops typed-``removed`` items: the index carries every card,
-the tables only want the live set — but it keeps the removed cards that are done aside
-(:attr:`Items.retired_done`), so an ``after:`` naming one still reads it landed.
+Read-only, stdlib only. ``load()`` drops retired items (``removed:`` or ``moved_to:``): the
+index carries every card, the tables only want the live set — but it keeps the retired cards
+that are done aside (:attr:`Items.retired_done`) and the rest in :attr:`Items.retired_open`, so
+an ``after:`` naming either still reads it right rather than waiting on it for ever.
 """
 import datetime as dt
 import json
@@ -18,11 +19,11 @@ DONE_STATES = ('Resolved', 'Closed')
 
 
 class Items(dict):
-    """The live ``{id: item}`` map, plus :attr:`retired_done`: ``{id: card}`` of the *removed*
-    cards whose state is done. A removed card is out of every row, but not out of history — groom
+    """The live ``{id: item}`` map, plus :attr:`retired_done`: ``{id: card}`` of the *retired*
+    cards whose state is done. A retired card is out of every row, but not out of history — groom
     removes a card that landed ("it landed…"), and an ``after:`` naming it must still read it
     landed (:func:`asf.feeder.rows.landed_ids`), or its successors wait on it for ever (a
-    product's T-0360). :attr:`retired_open`: ``{id: card}`` of the removed cards that are not
+    product's T-0360). :attr:`retired_open`: ``{id: card}`` of the retired cards that are not
     done — a groom merge's folded card, or work groomed away: an ``after:`` naming one must read
     its survivor (its ``merged:`` list, its ``removed: merged into …``), or drop the edge, never
     wait on it for ever (a product's T-0163 on T-0162)."""
@@ -31,18 +32,32 @@ class Items(dict):
     retired_open = {}
 
 
+def retired(entry):
+    """True for an index entry the record retires: ``removed:`` or ``moved_to:``.
+
+    The same rule as :func:`asf.record.core.is_retired`, spelled again here because this module
+    is stdlib-only by contract and imports nothing from ``asf.record``. The two are pinned equal
+    by ``tests.test_views``' fence: a card that ``is_retired`` and a card this drops must always
+    be the same card. Before F-0172 they were not — this tested ``removed:`` alone, so a *moved*
+    Feature stayed in the live set and the board and the feeder both read the stale ladder word
+    on it.
+    """
+    return bool(entry.get('removed') or entry.get('moved_to'))
+
+
 def live(raw):
-    """``raw`` (``{id: card}``, removed cards included) as an :class:`Items`: the cards not
-    removed, with the removed ones that are done kept aside in ``retired_done`` and the others
-    in ``retired_open`` (and any ``raw`` already carries)."""
-    out = Items((k, v) for k, v in raw.items() if isinstance(v, dict) and not v.get('removed'))
-    retired = dict(getattr(raw, 'retired_done', {}))
-    retired.update((k, v) for k, v in raw.items()
-                   if isinstance(v, dict) and v.get('removed') and v.get('state') in DONE_STATES)
-    out.retired_done = retired
+    """``raw`` (``{id: card}``, retired cards included) as an :class:`Items`: the cards not
+    retired (:func:`retired` — ``removed:`` or ``moved_to:``), with the retired ones that are
+    done kept aside in ``retired_done`` and the others in ``retired_open`` (and any ``raw``
+    already carries)."""
+    out = Items((k, v) for k, v in raw.items() if isinstance(v, dict) and not retired(v))
+    kept = dict(getattr(raw, 'retired_done', {}))
+    kept.update((k, v) for k, v in raw.items()
+                if isinstance(v, dict) and retired(v) and v.get('state') in DONE_STATES)
+    out.retired_done = kept
     gone = dict(getattr(raw, 'retired_open', {}))
     gone.update((k, v) for k, v in raw.items()
-                if isinstance(v, dict) and v.get('removed') and v.get('state') not in DONE_STATES)
+                if isinstance(v, dict) and retired(v) and v.get('state') not in DONE_STATES)
     out.retired_open = gone
     return out
 
