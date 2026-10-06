@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.191 — 2026-10-06
+
+### Features landed
+
+- The loop guard parks a row stuck repeating the same report or hitting a daily launch cap even while its head keeps moving, and groom stops re-asking a Feature/Story shape gap or a question a person already answered (#844)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.191"`
+
 ## v0.1.190 — 2026-10-06
 
 ### Features landed
