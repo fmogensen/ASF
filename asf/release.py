@@ -931,9 +931,16 @@ def cmd_release_readiness(args, root):
     if getattr(args, 'known_issues', False) is True:
         from asf import release_preview
         d = compute(root, product, gate='1.0')
+        page = os.path.join(getattr(product, 'repo_dir', None) or os.getcwd(), 'docs', 'KNOWN-ISSUES.md')
+        try:
+            with open(page, encoding='utf-8') as fh:
+                tail = release_preview.hand_tail(fh.read())
+        except OSError:
+            tail = ''
         print(release_preview.known_issues([c for c in d['criteria'] if not c['met']],
                                            release_preview.open_defects(
-                                               root, release_preview.defect_severities(product))), end='')
+                                               root, release_preview.defect_severities(product)),
+                                           tail=tail), end='')
         return 0
     try:
         gate = getattr(args, 'gate', None)
