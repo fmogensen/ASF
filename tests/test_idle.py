@@ -16,7 +16,9 @@ SESSION = {'item': 'T-0030', 'kind': 'task', 'account': 'w1', 'age': '12m', 'job
 
 
 def product(**conv):
-    return Product('sample', {'conventions': dict(conv)})
+    # the fixtures carry no Story: the stories-first gate (tests/test_stories_first.py) is off
+    return Product('sample', {'conventions': dict({'feeder': {'stories_before_plan': False}},
+                                                  **conv)})
 
 
 def since(days):

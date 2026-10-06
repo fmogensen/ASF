@@ -23,7 +23,9 @@ UTC = datetime.timezone.utc
 
 
 def product(**conv):
-    return Product('sample', {'conventions': dict(conv), 'main': 'main'})
+    # the fixtures carry no Story: the stories-first gate (tests/test_stories_first.py) is off
+    return Product('sample', {'conventions': dict({'feeder': {'stories_before_plan': False}},
+                                                  **conv), 'main': 'main'})
 
 
 def kinds(rs):

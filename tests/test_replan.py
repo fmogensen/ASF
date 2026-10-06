@@ -28,6 +28,8 @@ def product(**conv):
     base = {'branch_prefixes': {'spec': 'spec', 'plan': 'plan', 'task': 'task'},
             'delivery': 'feature'}
     base.update(conv)
+    # the fixtures carry no Story: the stories-first gate (tests/test_stories_first.py) is off
+    base['feeder'] = dict({'stories_before_plan': False}, **(conv.get('feeder') or {}))
     return Product('sample', {'conventions': base})
 
 

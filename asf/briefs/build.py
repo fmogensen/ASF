@@ -605,6 +605,47 @@ FOREIGN_REVIEW = (
     "push there would restart the PR's CI.")
 
 
+#: The job of a :data:`asf.feeder.rows.NO_STORIES` row — a ``spec-amend`` session in place of the
+#: spec-amend template: the Feature has no Story, and it may not be planned until it has one
+#: (``feeder.stories_before_plan``).
+STORIES_FIRST = """## Your job: derive the Stories of {item_id}
+
+{item_id} has no Story. It may not be planned — no plan, replan or delivery-plan session starts —
+until the record holds at least one Story under it with checkbox acceptance lines. Producing
+them is this session's job; work already in build keeps building beside it.
+
+DERIVE THE STORIES FROM THE SPEC, THE PLAN AND THE LANDED TASKS. Read the Feature's spec
+(`{spec_path}`), its plan (`{plan_path}`) and its landed Tasks before writing one line. The tests
+of a landed Task are proof candidates: open them and see what they already assert. The Tasks:
+{feature_tasks}
+
+MINT each Story through the record's normal id path, one command per Story:
+`asf new story --parent {item_id} --title "<title>" --acceptance "<line>" [--acceptance …]`
+Use the id that command prints, and only that id. NO INVENTED IDS: never write an S- id by hand,
+never take one from the spec's text, never reuse an id the record already carries. Stories the
+record already holds for this Feature: {stories}
+
+EACH ACCEPTANCE LINE IS TESTABLE: one observable behaviour a named test can assert, not a goal
+or a quality. A landed test that already proves a line is cited on that line as
+`<the line> — proven by <path>` (the test file's path in the repo); a line nothing proves yet
+carries no citation, and the plan that follows mints the Task that proves it.
+
+Then amend the spec's `## Stories` block in place so each line carries its minted id, and
+leave every other section as it stands. Every commit subject names the card —
+`spec({item_id}): <what>`.
+
+{pre_push_doc}Final message: the pushed sha, the minted Story ids, each with its acceptance-line
+count and the lines cited as proven."""
+
+
+def job_template(row, kind):
+    """The job text of ``row``'s brief: :data:`STORIES_FIRST` for a
+    :data:`asf.feeder.rows.NO_STORIES` row, else the kind's template."""
+    if getattr(row, 'kind', '') == feeder_rows.NO_STORIES:
+        return STORIES_FIRST
+    return load_template(kind)
+
+
 def foreign_review_text(kind, ctx):
     """:data:`FOREIGN_REVIEW` for a review of a :func:`asf.harvest.lane.pr_item` id, else ''."""
     from asf.harvest.lane import PR_ITEM_RE  # local: the lane imports the briefs
@@ -679,7 +720,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
     ctx = context(product, row, kind, facts)
     parts = [item_line(row, facts['item']),
              preamble_mod.build(product, row, index, inflight, repo_facts, facts=facts),
-             render(load_template(kind), ctx).rstrip() + correction_text(row, kind)
+             render(job_template(row, kind), ctx).rstrip() + correction_text(row, kind)
              + customer_section(product, kind, facts['branch'])
              + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id'])
              + answer_section(product, ctx['item_id'])

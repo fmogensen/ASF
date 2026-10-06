@@ -28,8 +28,10 @@ def gone_pid():
 
 
 def product():
+    # the fixture carries no Story: the stories-first gate (tests/test_stories_first.py) is off
     return Product('sample', {'conventions': {
-        'branch_prefixes': {'spec': 'spec', 'plan': 'plan', 'task': 'task'}}})
+        'branch_prefixes': {'spec': 'spec', 'plan': 'plan', 'task': 'task'},
+        'feeder': {'stories_before_plan': False}}})
 
 
 def index(stage='plan-draft'):
