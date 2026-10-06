@@ -396,6 +396,44 @@ class DeployProviderTests(unittest.TestCase):
                       "not 'heroku'"), problems)
 
 
+class UpgradeKeyTests(unittest.TestCase):
+    """F-0112/T-0431: the ``conventions.flags.upgrade`` switch — three words, a default, and a
+    typo that loads rather than refusing the whole product. A flag (not a top-level
+    PRODUCT_FIELDS key, PR #675): see PinnedReader below for why."""
+
+    def test_upgrade_auto_validates(self):
+        body = _dedent("""
+            repo_slug: a/b
+            conventions:
+              flags:
+                upgrade: auto
+            """)
+        self.assertEqual(env.validate_product_text(body), [])
+        product = env.Product('p', env.loads(body))
+        self.assertEqual(product.upgrade, 'auto')
+
+    def test_no_upgrade_key_reads_notify(self):
+        product = env.Product('p', env.loads(_dedent("""
+            repo_slug: a/b
+            """)))
+        self.assertEqual(product.upgrade, 'notify')
+        self.assertIsNone(product.upgrade_declared)
+
+    def test_empty_upgrade_value_reads_notify(self):
+        product = env.Product('p', env.loads(_dedent("""
+            repo_slug: a/b
+            conventions:
+              flags:
+                upgrade:
+            """)))
+        self.assertEqual(product.upgrade, 'notify')
+
+    def test_documented_example_names_the_key_and_still_validates(self):
+        text = open(os.path.join(REPO_ROOT, 'docs', 'products.example.yaml'), encoding='utf-8').read()
+        self.assertIn('upgrade:', text)
+        self.assertEqual(env.validate_product_text(text), [])
+
+
 def _dedent(text):
     lines = [l for l in text.splitlines() if l.strip() != '']
     if not lines:
