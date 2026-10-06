@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.163 — 2026-10-06
+
+### Features landed
+
+- What shipped, and what it cost over its whole life (#803)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.163"`
+
 ## v0.1.162 — 2026-10-06
 
 ### Features landed
