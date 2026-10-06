@@ -722,6 +722,48 @@ def _strip_comment(line):
     return line
 
 
+#: Where GitHub Actions reads a repository's workflows, and the extensions it reads there.
+WORKFLOW_DIR = '.github/workflows'
+WORKFLOW_EXT = ('.yml', '.yaml')
+
+
+_JOB_KEY = re.compile(r'^([A-Za-z_][\w.\-]*):\s*(.*?)\s*$')
+
+
+def parse_job_names(text):
+    """The check names one workflow file can put on a commit: every key of its top-level
+    ``jobs:`` block, and each of those jobs' own literal ``name:``. A line reader, not a YAML
+    parser (this package takes no dependency): the job keys are the lines at the first indent
+    under ``jobs:``, and a job's own keys are the lines at the first indent inside it — so a
+    step's ``name:`` (deeper) and a ``run: |`` body are never read as one. A name built from an
+    expression (``${{ … }}``) is not a literal and is left out; its job key still stands. Empty
+    for a file with no ``jobs:`` block. Used to tell a required check GitHub Actions can create
+    from one it never will (F-0204)."""
+    rows = [(len(l) - len(l.lstrip()), l.strip()) for l in (text or '').splitlines()
+            if l.strip() and not l.lstrip().startswith('#')]
+    at = next((k for k, (ind, c) in enumerate(rows) if ind == 0 and c == 'jobs:'), None)
+    if at is None:
+        return []
+    names, job_indent, inner = [], None, None
+    for ind, content in rows[at + 1:]:
+        if ind == 0:
+            break
+        if job_indent is None:
+            job_indent = ind
+        m = _JOB_KEY.match(content)
+        if ind == job_indent:
+            inner = None
+            if m:
+                names.append(m.group(1))
+        elif names and ind > job_indent:
+            inner = ind if inner is None else inner
+            if ind == inner and m and m.group(1) == 'name' and m.group(2):
+                value = m.group(2).strip('\'"')
+                if value and '${{' not in value:
+                    names.append(value)
+    return list(dict.fromkeys(names))
+
+
 def parse_runs_on(workflow, text, variables=None):
     """Every job's :class:`RunsOn` in one workflow file, in file order. A line reader, not a YAML
     parser: ``runs-on:`` as a scalar, a flow list, or a block list under it; the job is the
@@ -881,8 +923,6 @@ class GitHubBackend(Backend):
     """Runners of the product's ``ci.runner_org`` (an organisation's runners), else of its repo;
     workflow files from the repo's trunk. Every call is ``gh api``."""
 
-    WORKFLOW_DIR = '.github/workflows'
-
     #: the reason the last :meth:`runs_on` read no variables, or None — printed beside the
     #: unresolved rows so a token that may not read them is visible rather than inferred (C10)
     vars_error = None
@@ -948,11 +988,11 @@ class GitHubBackend(Backend):
         if not self.slug:
             raise BackendError('the product has no repo_slug')
         main = getattr(self.product, 'main', 'main')
-        files = self._lines([f'repos/{self.slug}/contents/{self.WORKFLOW_DIR}?ref={main}',
+        files = self._lines([f'repos/{self.slug}/contents/{WORKFLOW_DIR}?ref={main}',
                              '--jq', '.[] | select(.type == "file") | {path}'])
         out = []
         for path in (f.get('path', '') for f in files):
-            if not str(path).endswith(('.yml', '.yaml')):
+            if not str(path).endswith(WORKFLOW_EXT):
                 continue
             text = self._api([f'repos/{self.slug}/contents/{path}?ref={main}',
                               '-H', 'Accept: application/vnd.github.raw'])

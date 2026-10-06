@@ -11,6 +11,7 @@ occupancy answer (R16), and the ``NAME=value`` prefix of a test command (§12).
 """
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -2741,8 +2742,14 @@ class PathFilteredRequiredCheck(unittest.TestCase):
         self.runner = runner
         return host
 
-    def _gh(self, checks, runs, jobs):
+    #: all four required jobs declared in one workflow file — a head whose workflows vouch for
+    #: every required name, so a test wanting the card's case passes ``workflows=`` without
+    #: ``p1-e2e`` (PD9).
+    WORKFLOWS = {'ci.yml': 'name: ci\njobs:\n  gate:\n  gate-tests:\n  m8-e2e:\n  p1-e2e:\n'}
+
+    def _gh(self, checks, runs, jobs, workflows=None):
         self.calls = []
+        workflows = self.WORKFLOWS if workflows is None else workflows
 
         def gh(args):
             self.calls.append(args)
@@ -2752,13 +2759,28 @@ class PathFilteredRequiredCheck(unittest.TestCase):
                 return 0, json.dumps({'workflow_runs': runs}), ''
             if args[0] == 'api' and args[1].split('?')[0].endswith('/jobs'):
                 return 0, json.dumps({'jobs': jobs}), ''
+            if args[0] == 'api' and '/contents/' in args[1]:
+                if workflows is False:            # the directory listing itself does not read
+                    return 1, '', 'not found'
+                target = args[1].split('?')[0]
+                if target.endswith('.github/workflows'):
+                    listing = [{'name': f, 'path': f'.github/workflows/{f}', 'type': 'file'}
+                              for f in workflows]
+                    return 0, json.dumps(listing), ''
+                for f, text in workflows.items():
+                    if target.endswith(f'.github/workflows/{f}'):
+                        if text is None:          # this one file does not read
+                            return 1, '', 'not found'
+                        return 0, text, ''
+                return 1, '', 'unexpected'
             return 1, '', 'unexpected'
         return gh
 
-    def _gate(self, host, checks, runs, jobs, prev=None):
+    def _gate(self, host, checks, runs, jobs, prev=None, workflows=None):
         f = {'branch': 'worker/T-0001', 'prev': prev or rec(lane.GATE, pr=7), 'class': lane.CODE,
              'head': HEAD}
-        with mock.patch.object(harvest, '_gh', side_effect=self._gh(checks, runs, jobs)), \
+        with mock.patch.object(harvest, '_gh',
+                               side_effect=self._gh(checks, runs, jobs, workflows=workflows)), \
                 mock.patch.object(lane.Lane, 'set', lambda self, f, s, r, result=None, **kw:
                                   self.results.update({f['branch']: (s, r)})), \
                 mock.patch.object(lane, 'send_back', lambda ln, f, *a, **k:
@@ -2784,7 +2806,8 @@ class PathFilteredRequiredCheck(unittest.TestCase):
         text = '\n'.join(self.lines)
         self.assertIn('m8-e2e skipped by the workflow — satisfied (run completed, gate, '
                       'gate-tests success)', text)
-        self.assertIn('p1-e2e not created by the workflow — satisfied', text)
+        self.assertIn('p1-e2e declared in ci.yml and not created by the workflow — satisfied',
+                      text)
         self.assertTrue(f.get('on_checks'))
 
     def test_a_run_still_in_progress_waits_and_never_reaches_the_local_gate(self):
@@ -2829,6 +2852,7 @@ class PathFilteredRequiredCheck(unittest.TestCase):
         self.assertEqual(got[0], lane.WAITING_CI)
         self.assertIn('m8-e2e', got[1])
         self.assertFalse(any('/actions/runs' in ' '.join(a) for a in self.calls))
+        self.assertFalse(any('/contents/' in ' '.join(a) for a in self.calls))
 
     def test_unreadable_runs_hold(self):
         host = self._host()
@@ -2857,6 +2881,85 @@ class PathFilteredRequiredCheck(unittest.TestCase):
         with mock.patch.object(harvest, '_gh', side_effect=self._gh(
                 self._checks(), self.DONE, self.JOBS)):
             self.assertIn('m8-e2e', host.recheck(f, 7))
+        self.assertFalse(any('/actions/runs' in ' '.join(a) for a in self.calls))
+        self.assertFalse(any('/contents/' in ' '.join(a) for a in self.calls))
+
+    UNDECLARED = {'ci.yml': 'name: ci\njobs:\n  gate:\n  gate-tests:\n  m8-e2e:\n'}
+
+    def test_a_missing_check_no_workflow_declares_waits(self):
+        host = self._host()
+        how, got, _f = self._gate(host, self._checks(), self.DONE, self.JOBS,
+                                  workflows=self.UNDECLARED)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('p1-e2e', got[1])
+        text = '\n'.join(self.lines)
+        self.assertIn('no workflow at the head declares a job for it', text)
+        self.assertIsNone(re.search(r'p1-e2e[^\n]*satisfied', text))
+        self.assertIn('m8-e2e skipped by the workflow — satisfied', text)
+
+    def test_a_declared_missing_check_still_merges_and_names_its_file(self):
+        host = self._host()
+        how, _got, _f = self._gate(host, self._checks(), self.DONE, self.JOBS)
+        self.assertEqual(how, 'ci')
+        text = '\n'.join(self.lines)
+        self.assertIn('p1-e2e declared in ci.yml and not created by the workflow — satisfied '
+                      '(run completed, gate, gate-tests success)', text)
+
+    def test_a_job_name_and_a_called_workflows_job_answer_for_the_required_name(self):
+        host = self._host()
+        workflows = {'ci.yml': 'name: ci\njobs:\n  gate:\n  gate-tests:\n  m8-e2e:\n'
+                               '  deploy-preview:\n    name: p1-e2e\n'}
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(
+                self._checks(), self.DONE, self.JOBS, workflows=workflows)):
+            out, running, refused = host.path_filtered(HEAD, [], ['p1-e2e', 'p1-e2e / build'],
+                                                        ['gate', 'gate-tests'])
+        self.assertIsNone(running)
+        self.assertEqual(refused, {})
+        self.assertIn('p1-e2e declared in ci.yml', out['p1-e2e'])
+        self.assertIn('p1-e2e / build declared in ci.yml', out['p1-e2e / build'])
+
+    def test_unreadable_workflows_satisfy_nothing(self):
+        host = self._host()
+        how, got, _f = self._gate(host, self._checks(), self.DONE, self.JOBS, workflows=False)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('p1-e2e', got[1])
+        text = '\n'.join(self.lines)
+        self.assertIn('the workflows at the head did not read', text)
+        self.assertIn('m8-e2e skipped by the workflow — satisfied', text)
+        host2 = self._host()
+        how2, got2, _f2 = self._gate(host2, self._checks(), self.DONE, self.JOBS,
+                                     workflows={'ci.yml': None})
+        self.assertIsNone(how2)
+        self.assertEqual(got2[0], lane.WAITING_CI)
+        self.assertIn('p1-e2e', got2[1])
+        self.assertIn('the workflows at the head did not read', '\n'.join(self.lines))
+
+    def test_nothing_missing_reads_no_workflow(self):
+        host = self._host()
+        checks = self._checks() + [{'name': 'p1-e2e', 'bucket': 'skipping'}]
+        jobs = self.JOBS + [{'name': 'p1-e2e', 'conclusion': 'skipped'}]
+        how, _got, _f = self._gate(host, checks, self.DONE, jobs)
+        self.assertEqual(how, 'ci')
+        self.assertFalse(any('/contents/' in ' '.join(a) for a in self.calls))
+
+    def test_the_recheck_before_merging_judges_the_same(self):
+        host = self._host()
+        f = {'branch': 'worker/T-0001', 'class': lane.CODE, 'head': HEAD, 'how': 'ci',
+             'on_checks': True}
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(
+                self._checks(), self.DONE, self.JOBS, workflows=self.UNDECLARED)):
+            why = host.recheck(f, 7)
+        self.assertIn('p1-e2e', why)
+        self.assertTrue(any('/contents/' in ' '.join(a) for a in self.calls))
+        # the memo: a second recheck on the same head makes no new /contents/ call — the
+        # workflows at this head were read once already this pass (P11)
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(
+                self._checks(), self.DONE, self.JOBS, workflows=self.UNDECLARED)):
+            why2 = host.recheck(f, 7)
+        self.assertIn('p1-e2e', why2)
+        self.assertFalse(any('/contents/' in ' '.join(a) for a in self.calls))
 
 
 class AConflictingBranchNeverWaitsForCI(LaneFixture):
