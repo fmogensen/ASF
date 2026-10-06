@@ -275,10 +275,13 @@ def held_label(data):
 def waiting(product_name, out=print, now=None, installed=None, run=subprocess.run):
     """True when this tick must not start: an upgrade owned by another product is pending, and
     this tick's running would only keep the gap the upgrade needs from coming. The owner's ticks
-    go on — the owner drains and retries the upgrade at its start."""
+    go on — the owner drains and retries the upgrade at its start. A product with a
+    merge-queue batch in flight is never held (#25): the batch lands first."""
     data = pending(product_name, now, installed, out=out, run=run)
     if data is None or data.get('owner') == product_name:
         return False
+    if in_flight(product_name):
+        return False    # drain first (#25): the clocks land the batch in flight, then the gap
     out(f'tick: waiting — upgrade to {data["sha"][:7]} pending')
     return True
 
@@ -643,6 +646,15 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
             return 2
         ref = resolved
     targets = marked_products(owner) if others and (owner or wait_s) else []
+    if targets:
+        # drain first (#25): the pending mark is a full hold, so a product with a batch in
+        # flight, or whose own move drains, is never marked — the hold would keep the batch from
+        # landing and the move would wait on it forever. Its floor reaches the gap by draining.
+        draining_now = [n for n in targets if n != owner and (in_flight(n) or draining(n))]
+        if draining_now:
+            out(f'upgrade: not parking {", ".join(draining_now)} — a batch in flight or a move '
+                'drains there; it lands first')
+        targets = [n for n in targets if n not in draining_now]
     if targets:
         url = repo_url(run)
         if not owner and not ref:

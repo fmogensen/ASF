@@ -1446,6 +1446,34 @@ class HarvestStepTests(StepsTestCase):
         self.assertIn('harvest: not started — upgrade to ddddddd pending, the floor drains',
                       self.lines)
 
+    def test_a_pending_or_draining_move_never_blocks_landing_a_batch_in_flight(self):
+        """#25 (2026-10-06 drain deadlock): the harvest that lands a batch already in flight is
+        started whatever upgrade marker is up — a shared install's pending mark, a move's hold
+        or its drain — so a move can never wait on a batch its own marker keeps from landing."""
+        from asf import upgrade
+        flying = mock.patch.object(upgrade, 'in_flight', return_value=['batch/1'])
+        flying.start()
+        self.addCleanup(flying.stop)
+        self.addCleanup(upgrade.clear_pending, 'sample')
+        self.addCleanup(upgrade.clear_draining, 'sample')
+        marks = {
+            'shared install pending': lambda: upgrade.write_pending('d' * 40, 'other', 'sample'),
+            'move hold': lambda: upgrade._mark('sample', 'd' * 40),
+            'move drain': lambda: upgrade._mark_draining('sample', 'd' * 40),
+        }
+        for what, mark in marks.items():
+            upgrade.clear_pending('sample')
+            upgrade.clear_draining('sample')
+            mark()
+            spawn = mock.Mock(return_value=4242)
+            self.lines.clear()
+            with mock.patch('asf.drift.installed_commit', return_value='c' * 40):
+                rc = step_harvest.run(self.ctx(), out=self.lines.append, spawn=spawn)
+            self.assertEqual(rc, 0, what)
+            spawn.assert_called_once()
+            self.assertFalse(any('harvest: not started' in l for l in self.lines),
+                             (what, self.lines))
+
     def test_the_tick_after_a_green_gate_reports_the_landing_once(self):
         self.finished_branch()
         step_harvest.run(self.ctx(), out=self.lines.append, spawn=self.inline())

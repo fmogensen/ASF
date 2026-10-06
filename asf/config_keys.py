@@ -45,6 +45,7 @@ KNOWN_CONFIG_KEYS = frozenset({
     'network.probe', 'network.recover', 'network.watchdog', 'network.hosts',
     'workers.heartbeat_min', 'workers.heartbeat_missed', 'workers.heartbeat_grace_min',
     'workers.heartbeat_resumes',
+    'ci_heartbeat.targets.*', 'ci_heartbeat.stale_min', 'ci_heartbeat.seen_file',
     'cloud.*', 'upgrade.min_interval_min', 'upgrade.drain_wait_s', 'credentials.*',
     'tune.enabled', 'tune.window_days', 'tune.min_samples', 'tune.trial_samples', 'tune.min_gain',
     'tune.max_regress', 'tune.bounds.*', 'tune.products.*',

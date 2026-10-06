@@ -126,6 +126,15 @@ class Causes(unittest.TestCase):
         got2, _stray2 = ci_cancels.cause(short, {}, [short, later], {}, {}, None, 'main', False)
         self.assertNotEqual(got2, 'timeout')
 
+    def test_a_zero_limit_is_no_limit_never_a_timeout(self):
+        # #26: a job whose limit reads 0 is not "past its timeout" after 12 minutes
+        run = {'id': 1, 'head_branch': 'b', 'head_sha': 'aaa', 'event': 'push',
+               'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:12:00Z',
+               'jobs': [{'name': 'site', 'started_at': '2026-01-01T00:00:00Z',
+                         'completed_at': '2026-01-01T00:12:00Z'}]}
+        got, _stray = ci_cancels.cause(run, {}, [run], {'site': 0}, {}, None, 'main', False)
+        self.assertNotEqual(got, 'timeout')
+
     def test_an_inferred_merge_needs_the_merge_before_the_cancel(self):
         run = {'id': 1, 'head_branch': 'worker/T-1', 'head_sha': 'aaa', 'event': 'pull_request',
                'pr': 7, 'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T01:00:00Z'}

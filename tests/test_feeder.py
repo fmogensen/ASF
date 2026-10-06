@@ -664,6 +664,50 @@ class ConsoleAmendRowsTest(unittest.TestCase):
         self.assertEqual([(r.kind, r.launches, r.brief_kind) for r in mine],
                          [(rows.CONSOLE_AMEND, False, 'correct')])
 
+    def t0056(self, **corr):
+        """T-0056's shape (2026-09-24 → 10-06): ``writes:`` reach the set, the branch already
+        carries the amendable file, and the pending correction is a footprint one whose red
+        tests sit outside ``writes:`` — no console edit can clear it."""
+        idx = self.idx({'T-0056': self.task('T-0056', ['asf/briefs/templates/idea.md',
+                                                       'asf/ingest.py'])})
+        c = {'kind': 'footprint', 'verdict': 'widen', 'rounds': 1, 'at': '2026-09-24T00:00:00Z',
+             'branch': 'worker/T-0056', 'needs': ['tests/test_ingest.py', 'tests/test_roles.py'],
+             'text': 'gate red: tests/test_ingest.py tests/test_roles.py\n'
+                     'footprint: the red is outside writes: — needs tests/test_ingest.py'}
+        c.update(corr)
+        mine = [r for r in rows.candidates(idx, product(), [],
+                                           occupancy=occ(corrections={'T-0056': c}))
+                if r.item_id == 'T-0056']
+        self.assertEqual(len(mine), 1, mine)
+        return mine[0]
+
+    def test_a_footprint_correction_outside_the_set_is_a_launching_correct_row(self):
+        r = self.t0056(amend_missing=[])
+        self.assertEqual((r.kind, r.launches, r.brief_kind), (rows.FIX_CORRECT, True, 'correct'))
+        # an older hold that recorded no branch fact: a footprint red is outside writes: by
+        # definition, so it never needs the console either
+        r = self.t0056()
+        self.assertEqual((r.kind, r.launches), (rows.FIX_CORRECT, True))
+
+    def test_a_correction_naming_an_amendable_path_or_a_branch_without_it_is_the_consoles(self):
+        r = self.t0056(needs=['asf/briefs/templates/idea.md'])
+        self.assertEqual((r.kind, r.launches), (rows.CONSOLE_AMEND, False))
+        r = self.t0056(amend_missing=['asf/briefs/templates/idea.md'])
+        self.assertEqual((r.kind, r.launches), (rows.CONSOLE_AMEND, False))
+
+    def test_a_branch_far_behind_the_trunk_is_rebased_not_corrected(self):
+        r = self.t0056(amend_missing=[], behind=1100)
+        self.assertEqual((r.kind, r.launches, r.brief_kind, r.branch),
+                         (rows.CONFLICT, True, 'rebase', 'worker/T-0056'))
+        self.assertIn('1100 commits behind', r.reason)
+        p = product(conventions={'flags': {'correction_rebase_behind': 2000}})
+        idx = self.idx({'T-0056': self.task('T-0056', ['asf/briefs/templates/idea.md'])})
+        c = {'kind': 'footprint', 'verdict': 'widen', 'rounds': 1, 'branch': 'worker/T-0056',
+             'text': 'red', 'amend_missing': [], 'behind': 1100}
+        r = [r for r in rows.candidates(idx, p, [], occupancy=occ(corrections={'T-0056': c}))
+             if r.item_id == 'T-0056'][0]
+        self.assertEqual(r.kind, rows.FIX_CORRECT)
+
     def test_a_delivery_whose_union_reaches_the_set_waits_on_the_console(self):
         lead = {'id': 'F-0097', 'type': 'feature', 'state': 'New', 'rank': 1,
                 'stage': 'plan-approved', 'delivers': ['F-0097', 'B-0034']}

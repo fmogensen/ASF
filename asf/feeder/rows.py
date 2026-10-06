@@ -878,6 +878,39 @@ def landed_doc(item, product, c):
         f'{doc} on origin/{trunk_of(product)}' in (item.get('evidence') or ())
 
 
+#: ``flags.correction_rebase_behind``: a correction of an amendable-reaching item whose branch
+#: is this many commits behind the trunk is rebased before it is corrected (T-0056: 1,100)
+CORRECTION_REBASE_BEHIND = 300
+
+_PATH_RE = re.compile(r'[\w.-]+(?:/[\w.*-]+)+')
+
+
+def correction_rebase_behind(product):
+    return _whole_flag(product, 'correction_rebase_behind', CORRECTION_REBASE_BEHIND)
+
+
+def correction_amend(product, item, c):
+    """The amendable path a correction ``c`` of ``item`` needs the console for, else None.
+    None when ``writes:`` reach no amendable path. Otherwise the console's when the correction
+    names one (its ``needs``/``files``, or a path in its text), or when the hold read that the
+    branch does not yet carry an amendable path of ``writes:`` (``amend_missing``, written by
+    :func:`asf.harvest.lane.hold_with_correction`). A hold that recorded no such fact: a
+    ``footprint`` red is outside ``writes:`` by definition, so not the console's; any other kind
+    stays the console's, as before."""
+    hit = amendable.reaches(product, list(item.get('writes') or ()))
+    if not hit:
+        return None
+    named = list(c.get('needs') or ()) + list(c.get('files') or ()) \
+        + _PATH_RE.findall(str(c.get('text') or ''))
+    got = amendable.reaches(product, [str(p) for p in named]) if named else None
+    if got:
+        return got
+    missing = c.get('amend_missing')
+    if isinstance(missing, list):
+        return missing[0] if missing else None
+    return None if c.get('kind') == FOOTPRINT else hit
+
+
 def correction_rows(items, product, busy, corrections):
     """``corrections`` is ``{item: {kind, text, rounds, same, at, branch, ruled}}`` — a branch
     the harvest held (the row runs on that branch when it is given). ``same`` is how many holds in
@@ -910,11 +943,25 @@ def correction_rows(items, product, busy, corrections):
                            action=f'{PARKED} {c.get("reason") or c["kind"]}', brief_kind='correct',
                            branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
             continue
-        # a correction of an item whose writes: reach the amendable set is the console's too: a
-        # session relaunched on it only buys the hook's refusal again (T-0303, 2026-09-27)
+        # a correction of an item whose writes: reach the amendable set is the console's too
+        # when it needs an amendable file: a session relaunched on it only buys the hook's
+        # refusal again (T-0303, 2026-09-27). One that does not — the branch already carries the
+        # amendable edit and the red is elsewhere — is an ordinary correction (T-0056: a
+        # footprint red outside writes: sat on CONSOLE → AMEND for 12 days); far behind the
+        # trunk it is rebased first
         amend = console_amend_row(product, iid, fid, item.get('writes'), branch, 'correct', tier)
-        if amend:
-            out.append(amend)
+        needs_amend = correction_amend(product, item, c) if amend else None
+        if needs_amend:
+            out.append(amend if needs_amend == amend.amend else
+                       console_amend_row(product, iid, fid, [needs_amend], branch, 'correct',
+                                         tier))
+            continue
+        behind = c.get('behind')
+        if amend and isinstance(behind, int) and behind >= correction_rebase_behind(product):
+            out.append(Row(tier=tier, kind=CONFLICT, item_id=iid, feature_id=fid, action=LAUNCH,
+                           brief_kind='rebase', branch=branch, correction=c['text'],
+                           reason=f"{branch} is {behind} commits behind the trunk: rebase it "
+                                  f"before the correction ({c.get('kind')}) is tried on it"))
             continue
         if c.get('operator_ruling'):
             # ``asf correct`` at the cap: ONE code session on the Task's own branch carries the

@@ -1024,6 +1024,23 @@ class Source:
         return False
 
 
+_LIMIT_RE = re.compile(r'exceeded the maximum execution time of\s*'
+                       r'(?:(\d+)\s*minutes?|(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?)')
+
+
+def _execution_limit_min(notes):
+    """The minutes of the host's "exceeded the maximum execution time of …" annotation in
+    ``notes`` — ``4h0m0s`` → 240, ``30m0s`` → 30, ``360 minutes`` → 360 — or None when there is
+    none or it reads as 0 (#26: a batch run's ``site`` job, cut at ``4h0m0s``, was named as
+    past "its 0 min timeout"). A 0 or unreadable limit is no timeout, never one already passed."""
+    got = _LIMIT_RE.search(notes or '')
+    if not got:
+        return None
+    words, h, m, sec = (int(g) if g else 0 for g in got.groups())
+    mins = words or h * 60 + m + (1 if sec >= 30 else 0)
+    return mins or None
+
+
 class GitHubSource(Source):
     def __init__(self, product, run=None):
         self.product = product
@@ -1270,9 +1287,9 @@ class GitHubSource(Source):
             jid, _, name = line.partition('\t')
             notes = self._gh(['api', f'repos/{self.slug}/check-runs/{jid}/annotations',
                               '--jq', '.[].message'])
-            got = re.search(r'exceeded the maximum execution time of (?:(\d+)m)?', notes or '')
-            if got:
-                return name, int(got.group(1) or 0)
+            mins = _execution_limit_min(notes)
+            if mins:
+                return name, mins
         return ()
 
     def job_p50_min(self, workflow, job):

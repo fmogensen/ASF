@@ -899,6 +899,26 @@ class TestExplainCancels(Base):
         self.assertEqual(self.explain([self.run_of(36618622420)], cause=self.TIMEOUT)[0], 0)
         self.assertEqual(self.lines, [])            # said once
 
+    def test_an_hours_timeout_reads_its_minutes_never_zero(self):
+        # #26 (2026-10-06): a batch run's `site` job cancelled at "4h0m0s" was named as having
+        # passed "its 0 min timeout" — the reader took only a leading minutes field
+        n, _gh = self.explain([self.run_of(9, 'batch/x', 'workflow_dispatch')],
+                              cause='The job has exceeded the maximum execution time of 4h0m0s\n'
+                                    'The operation was canceled.')
+        self.assertEqual(n, 1)
+        self.assertTrue(any('passed its 240 min timeout' in l for l in self.lines), self.lines)
+        self.assertFalse(any(' 0 min timeout' in l for l in self.lines), self.lines)
+
+    def test_a_zero_or_unreadable_timeout_is_no_timeout_never_already_expired(self):
+        # #26: a 0 or missing per-job timeout means "no timeout", never "expired"
+        for note in ('The job has exceeded the maximum execution time of 0m0s',
+                     'The job has exceeded the maximum execution time of'):
+            self.lines.clear()
+            self.explain([self.run_of(11, 'batch/x', 'workflow_dispatch')], cause=note)
+            self.assertFalse(any('min timeout' in l for l in self.lines), (note, self.lines))
+            claim = ci_queue.load_claims(env.state_dir('p')).get('11') or {}
+            self.assertNotEqual(claim.get('cause'), 'job-timeout', note)
+
     RULES_TIMEOUT = 'The job has exceeded the maximum execution time of 10m0s\nThe operation was canceled.'
 
     def contended(self, runs, p50, **kw):

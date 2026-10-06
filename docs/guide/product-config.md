@@ -62,6 +62,12 @@ covers the item's `writes:` and its report says `done`, else reset; a park older
 `roots_park_stale_days` (3) with at least `roots_min_dependants` (5) rows behind it becomes the
 first NEEDS DECISION line of `asf next` and one groom question. Nothing is unparked by code.
 
+`correction_rebase_behind: 300` (default 300): a correction of an item whose `writes:` reach
+the amendable set goes to the console (CONSOLE → AMEND) only when it needs an amendable file —
+the correction names one, or the hold read that the branch does not yet carry the amendable
+`writes:` — else it is an ordinary FIX → CORRECT row; one whose branch is at least this many
+commits behind the trunk is a CONFLICT → REBASE row first (T-0056).
+
 `groom_rules: [dedupe-findings, dedupe-scorecard, report-covered]` (default none) adds rules
 the groom step runs every tick. `dedupe-findings`: the younger of two open invariant-finding
 Bugs of one `(invariant, cause)` closes as a duplicate of the oldest — a Bug the filer keyed on a
