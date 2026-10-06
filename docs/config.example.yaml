@@ -20,6 +20,16 @@ scheduler:
   # legacy_labels: [old.job.*]     # pre-ASF jobs listed in the doctor's SCHEDULER section
   # legacy_cron: /opt/old/tick      # a pre-ASF crontab line (substring); doctor is red while present
   # systemd_unit_dir: ~/.config/systemd/user   # where kind systemd writes its units (this default)
+  # provider: launchd              # the older synonym of kind
+  # occupancy: ...                 # registered, read by no code of this release
+  # interval_s: 600                # no longer read: clocks live in the product file (doctor says so)
+  # min_every_s: 60                # the shortest clock interval accepted
+  # queue_every_s: 60              # the CI queue clock's interval
+
+# schema_version: 1                # the config file's shape version (written by `asf init`)
+# legacy_steps: [old.job.label]    # tools/cutover.sh: pre-ASF jobs the cutover excuses
+# cutover:
+#   job_timeout_s: 90              # tools/cutover.sh: how long gate 3 waits for a record run
 
 # legacy_paths: directories of pre-ASF tools, for the doctor's one-factory check and cutover.
 # legacy_paths: [~/old-factory/bin]
@@ -90,6 +100,37 @@ worker_pool:
   #                                       # `asf workers enable <account>`. Unset: generic defaults
   #                                       # (401/403 unauthorized/forbidden, invalid api key, org
   #                                       # not allowed, subscription/account disabled)
+  # binary: claude                       # the runtime CLI a session runs (default claude)
+  # permission_mode: <mode>              # the runtime's permission mode for every session (default: unset)
+  # fake_script: ~/bin/fake-session      # backend fake: the script a fake session runs
+  # launch_concurrency: 4                # launches one wave starts at once (1: one at a time)
+  # id_range_prefixes: [S, T, B]         # the record id prefixes a session may mint ...
+  # id_range_start: 5000                 # ... from this number up ...
+  # id_range_size: 50                    # ... in blocks of this many per session
+  # progress_sampler: false              # false turns the session progress sampler off (default on)
+  # env:                                 # variables every local worker session gets (default none:
+  #   JOBS: '2'                          # a test runner's pool size is a product's conventions.worker_env)
+  # worktree_setup_timeout_s: 900        # conventions.worktree_setup is killed after this (s)
+  # model_fallback:                      # a brief label with no model falls back to this label
+  #   cheap: light
+  # orphan_grace_s: 1800                 # an unrecorded worktree this old is reclaimed (spawn: 1800,
+  #                                      # the reaper: 3600 when unset)
+  # stop_grace_s: 10                     # SIGTERM to SIGKILL when a run is stopped
+  # progress:                            # the session progress sampler
+  #   sample_every_s: 60
+  #   window_min: 10                     # the window "tool classes lately" is read over
+  #   keep_days: 7                       # a progress file untouched this long is swept
+  #   watch_max_h: 24                    # a sampler never outlives this
+  # seats:                               # the machine's seat ledger
+  #   claim_ttl_s: 1800                  # a claim no launch caught up with expires
+  #   lock_wait_s: 5
+  # caps:                                # how often one item may go round before it parks
+  #   relaunch: 2                        # launches of one job on an unchanged head and card
+  #   empty: 2                           # ends that wrote nothing
+  #   incomplete: 2                      # resumed deliveries leaving the same Tasks unbuilt
+  #   same_head_loop: 3                  # runs of one kind all handed the same head
+  #   hook_refusal: 2                    # holds in a row on the same hook refusal
+  # accounts[].note — note: free text on an account for the operator; nothing reads it
 
 # quota band (percent of each window, not a fraction). An account at or above `cooldown` in any
 # window takes one job at a time; at or above `stop` it takes none. Running sessions are never
@@ -105,6 +146,22 @@ quota_guards:
     five_h: 90
     seven_d: 90
     seven_d_model: 90
+  # seven_d_cooldown: 90         # the older flat spelling of cooldown.seven_d
+  # stale_after_min: 30          # a quota reading older than this is stale
+  # five_h_usd: 40               # dollars of one full 5h window (unset: estimated from history)
+  # running_allowance: 0.5       # the share of its estimate a running session still holds
+  # min_runs: 3                  # runs of one (kind, family) before history replaces default_cost
+  # model_families: [opus, sonnet, haiku]   # names a model id contains, matched in this order
+  # default_cost:                # percent of a 5h window one launch spends, per family and kind
+  #   opus:                      # (`*`: any other kind / family; every row needs a `*`)
+  #     spec: 10
+  #     '*': 8
+  #   sonnet:
+  #     '*': 4
+  #   haiku:
+  #     '*': 1
+  #   '*':
+  #     '*': 6
 
 # account_lock: an account manager's global usage lock, named so a wedged one is reported (status
 # Quota row, doctor `quota lock` row) and, opt-in, reclaimed by the tick. Unset = off: nothing is
@@ -148,6 +205,7 @@ host_guards:
 #   helper_model: haiku
 #   poll_min: 15               # how often a working run's routine is read
 #   max_creates_per_tick: 2    # cloud launches one wave tries (claude-remote default 2; 0: no limit)
+#   helper_timeout_s: 120      # each helper call is killed after this
 #
 # The runtime `claude-cloud` is refused at config check: the runtime CLI cannot create a cloud
 # session non-interactively (`-p --cloud` is interactive only), so a lane on it could never launch.
@@ -196,6 +254,9 @@ cloud:
   # The lane is unready — the wave says `cloud lane unready: <why> — local lane only` — while a
   # critical check of `asf cloud doctor --product <p>` fails (the token secret's name in the repo,
   # the workflow on the trunk, an online runner carrying runs_on, a cloud account).
+  # workflow: asf-worker.yml   # runtime actions: the workflow file dispatched
+  # launch_wait_s: 30          # how long a dispatch waits for its run to show up
+  # lost_after_min: 15         # a dispatched run not listed after this never will: ended dead
   # local_only: [groom]        # kinds that never leave the host; a card's own `local_only: true`
                                # keeps that item's rows local too (both modes)
 
@@ -254,11 +315,23 @@ capacity:
 # defaults shown, anything unnamed every tick).
 # deferred_max_age_s: a deferred part whose last run is older than this runs on the next tick
 # whatever its every_n (default 3600: at least hourly).
+# budget_s: the tick's wall-clock budget (0: none); unset, it is `watchdog.factor` × the clock's
+# interval, at least `watchdog.floor_s`, or `watchdog.default_s` for a clock with no interval.
+# The locks: the daily waits `daily_lock_wait_s` for a running tick, a record part
+# `record_lock_wait_s`, polling every `lock_poll_s`.
 # tick:
 #   step_timeout_s: 900
 #   wave_first: true
 #   every_n: {backfill: 3, plan-order: 3, file-bugs: 3, rollup: 3}
 #   deferred_max_age_s: 3600
+#   budget_s: 7200
+#   daily_lock_wait_s: 2700
+#   record_lock_wait_s: 600
+#   lock_poll_s: 10
+#   watchdog:
+#     factor: 3
+#     floor_s: 3600
+#     default_s: 7200
 
 # factory: the identity the tick's state commits are authored as (default "ASF <asf@localhost>").
 # factory:
@@ -271,16 +344,23 @@ capacity:
 # drain_marker_max_s: a move's drain marker (state/<p>/upgrade-draining.json) that records no
 # deadline — written by an older build — is dropped once older than this (default 960); one
 # with a deadline is dropped 60s past it.
+# repo_url: where `asf upgrade` fetches from (a fork or a mirror); pending_ttl_s: how long a
+# pending install waits for its gap between ticks.
 # upgrade:
 #   min_interval_min: 30
 #   drain_wait_s: 180
 #   drain_marker_max_s: 960
+#   repo_url: https://github.com/fmogensen/ASF.git
+#   pending_ttl_s: 600
 
 # operator.path_prefix: directories (`:`-joined) searched before the inherited PATH when the
 # release rollup runs `gh` — for a host whose scheduler jobs get a minimal PATH. Default: unset,
 # the inherited PATH alone.
+# tick_file / plugin_dir: tools/cutover.sh retires the pre-ASF tick procedure file and plugin dir.
 # operator:
 #   path_prefix: /usr/local/bin
+#   tick_file: ~/old-factory/TICK.md
+#   plugin_dir: ~/old-factory/plugin
 
 # connectors: which implementation each external concern uses (docs/guide/writing-a-connector.md).
 # Unset, each kind keeps today's behaviour. A value is a name — in-tree, or a Python entry point
@@ -307,6 +387,122 @@ capacity:
 #   seen_file: ~/.ASF/state/ci-heartbeat/seen.json
 #   targets:
 #     box-1: user@box-1.example
+
+# network: the forge reachability probe (asf.tick.network). probe/recover/watchdog: on | off
+# (default off); hosts: the names a probe resolves (default the forge's two hosts).
+# network:
+#   probe: on
+#   recover: off
+#   watchdog: off
+#   hosts: [git.example.com]
+
+# credentials: signed-in tools as rules (asf.credentials; docs/guide/product-config.md).
+# credentials:
+#   window_days: 7
+#   probe_every: 1h
+#   providers:
+#     forge:
+#       probe: forge-cli auth status
+#       renew: forge-cli auth login
+
+# Timeouts and list sizes every subprocess call takes (seconds). A large monorepo or a slow
+# link needs longer git; a busy repo more than 300 open PRs (gh stops at its --limit silently).
+# git:
+#   timeout_s: 120            # one git call
+#   fetch_timeout_s: 120      # one fetch
+# github:
+#   json_timeout_s: 60        # a JSON read (a list, a view, an api GET)
+#   log_timeout_s: 300        # any other call, e.g. a long job's log
+#   cmd_timeout_s: 30         # a short call outside the forge client (CI queue, pool, alerts)
+#   pr_list_limit: 300        # --limit of a `gh pr list` (unset: 300; retention 1000, the lane 500)
+#   rate_limit:
+#     latch_s: 600            # after a rate-limit answer no gh call is made for this long
+#     memo_s: 30              # a read listing is reused this long within a process
+
+# harvest.round_cap: holds in a row on the same finding before the correction goes to adjudicate.
+# transplant: the lane rebuilds an approved head's change on the trunk at most `cap` times
+# (0: never), each regeneration killed after `regen_timeout_s`.
+# harvest:
+#   round_cap: 3
+#   transplant:
+#     cap: 2
+#     regen_timeout_s: 900
+
+# merge: the trunk-merge gate (the command run on a branch with the trunk merged in).
+# merge:
+#   timeout_s: 900
+#   fetch_timeout_s: 60
+
+# ci: the CI queue's timings (asf.ci_queue). GitHub-hosted runners pick up and start in other
+# times than a self-hosted pool; each automatic rerun costs money.
+# ci:
+#   stuck_retry_s: 1800       # a stuck cancelled run is tried again this often
+#   stale_s: 1800             # a queue entry not asked about in this long has left the line
+#   pickup_s: 180             # a run admitted this recently still holds its runners
+#   urgent_hold_s: 2700       # how long a priority batch holds PR starts behind it
+#   expect_ttl_s: 600         # a workflow's measured jobs per class are reused this long
+#   phantom:
+#     gap_s: 600              # passes further apart are not consecutive
+#     red_s: 600              # a runner busy with no job this long turns doctor red
+#   stall:
+#     gap_s: 600
+#     rerun_max: 2            # stalls on one branch and sha before the run is not re-run
+#   job_timeout_min: 360      # a job with no timeout-minutes of its own (the host's default)
+#   measure:                  # runner scores (asf.ci_measure)
+#     window_days: 14
+#     min_readings: 5         # readings before a runner is scored
+#     min_green_rate: 0.85    # below this a runner is flaky
+
+# trunk_red: the red-trunk watch (asf.trunk_red).
+# trunk_red:
+#   seen_hours: 24            # a red check seen within this is still the same red
+#   read_every_s: 300         # how often the trunk's checks are read
+#   find_wait_s: 1800         # how long a fix is looked for before it is filed
+#   max_tries: 2
+#   list_every_s: 600
+# stale_ref:                  # a workflow run waiting on a ref that never moved
+#   wait_s: 1800
+#   keep_s: 259200
+# trunk_watch:                # commits that bypassed review (asf.trunk_watch)
+#   days: 3
+#   ruleset_read_s: 86400
+
+# bugs: CI-red cards the tick files (asf.tick.file_bugs).
+# bugs:
+#   ci_red_window_h: 24       # refusals within this count toward one card
+#   check_failure_runs: 3     # failing runs of one rule check before it is surfaced
+#   ci_red_title: 'CI red: '  # the card title's prefix (its signature too)
+
+# flaky.title_prefix: a flaky test's card title and signature start with it. Changing it starts
+# new signatures (a card under the old prefix is no longer matched).
+# flaky:
+#   title_prefix: 'flaky e2e: '
+#   s1_runs: 3                # flaky runs in window_days that make the card S1
+#   window_days: 7
+#   lookback_days: 7          # how far back one pass ever reads
+#   max_runs: 30              # run logs one pass reads at most
+
+# brief: how much history a session brief carries.
+# brief:
+#   reservations_max: 12      # held numbers listed per id sequence
+#   answers_max: 5            # operator answers quoted
+#   judged_commits_max: 20    # commits since the judged head listed
+
+# groom: word-overlap thresholds of the inbox groom (0..1).
+# groom:
+#   near_duplicate_overlap: 0.6
+#   templated_overlap: 0.9
+
+# changelog: the release rollup (asf.metrics). branch: where a changelog commit goes when the
+# trunk takes no factory push; notes_max_commits: item-less commits a version lists one by one.
+# changelog:
+#   branch: asf/changelog
+#   notes_max_commits: 30
+
+# tick.dry_run_min_free_bytes: a dry run refuses below this much free disk (default 10 GiB).
+
+# Every key above is registered in asf/config_keys.py; a numeric one is checked for its kind and
+# range there, and a malformed value keeps its default and is named in doctor's `config keys` row.
 
 # Everything ASF reads and writes lives under ~/.ASF: products/, state/<product>/ (the session
 # ledger, the worktrees, the tick's record clone), logs/. Set $ASF_HOME to move all of it.

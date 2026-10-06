@@ -1405,7 +1405,7 @@ def render_notes(items, found, improvements, install=None):
         if rows:
             out += [f'### {heading}', ''] + [f'- {i} {t}'.rstrip() for i, t in sorted(rows.items())] + ['']
     if improvements:
-        shown = improvements[:NOTES_MAX_COMMITS]
+        shown = improvements[:tunable('NOTES_MAX_COMMITS')]
         out += ['### Improvements and hotfixes', ''] + [f'- {s}' for s in shown]
         if len(improvements) > len(shown):
             out.append(f'- … and {len(improvements) - len(shown)} more')
@@ -1647,7 +1647,7 @@ def _changelog_pr(product, sha, path, subject, guard):
     """Put the changelog commit ``sha`` up as a PR instead of pushing it to the trunk: force
     :data:`CHANGELOG_BRANCH` to it and open the PR (an open one is simply updated by the push).
     None — the trunk did not move."""
-    branch = CHANGELOG_BRANCH
+    branch = tunable('CHANGELOG_BRANCH')
     if gitpush.push(['-q', 'origin', f'+{sha}:refs/heads/{branch}'], product.repo_dir,
                     guard=guard).returncode:
         print(f"release: could not push {path} to {branch}; retrying next rollup", file=sys.stderr)
@@ -2165,7 +2165,7 @@ def _limit_of(name, limits):
     for key in (name, MATRIX_SUFFIX.sub('', name)):
         if key in limits:
             return limits[key]
-    return ci_pool.DEFAULT_JOB_TIMEOUT_MIN
+    return ci_pool.tunable('DEFAULT_JOB_TIMEOUT_MIN')
 
 
 #: trigger events a pull request's own checks run under — the host's word for "this is a PR
@@ -2373,6 +2373,21 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     root = os.path.abspath(args.root)
     return {'append': cmd_append, 'rollup': cmd_rollup, 'backfill': cmd_backfill}[args.command](args, root)
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'NOTES_MAX_COMMITS': 'changelog.notes_max_commits',
+    'CHANGELOG_BRANCH': 'changelog.branch',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])
 
 
 if __name__ == '__main__':

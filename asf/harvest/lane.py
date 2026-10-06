@@ -2859,7 +2859,7 @@ class Lane:
         reset = lifecycle.resets(self.path).get(item) or {}
         if reset and reset.get('head') in (appr['head'], head):
             return None  # the operator reset this content: it restarts, it is not carried
-        if transplant_mod.count(self.state_dir, item, appr['head']) >= transplant_mod.CAP:
+        if transplant_mod.count(self.state_dir, item, appr['head']) >= transplant_mod.tunable('CAP'):
             return None
         why = (f"kind={corr.get('kind')}" if corr else prev.get('reason') or state)
         return appr, why
@@ -4131,7 +4131,9 @@ class GitHubHost(Host):
         """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest.
         ``draft`` (``isDraft``): the owner parked it — the lane's one place this is read
         (:func:`next_state`'s Tp parks any open state on it)."""
-        data = H.gh_json(['pr', 'list', '-R', self.slug, '--state', 'all', '--limit', '500',
+        from asf import github
+        data = H.gh_json(['pr', 'list', '-R', self.slug, '--state', 'all',
+                          '--limit', str(github.pr_list_limit(500)),
                           '--json', 'number,headRefName,headRefOid,state,mergeCommit,'
                                     'autoMergeRequest,title,baseRefName,isDraft'], [])
         out = {}

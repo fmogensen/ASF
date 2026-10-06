@@ -116,11 +116,12 @@ def _checkout(repo, path, sha):
     return ''
 
 
-def check(repo, holder, branch, sha, trunk, command, timeout=TIMEOUT_S, fetch=True):
+def check(repo, holder, branch, sha, trunk, command, timeout=None, fetch=True):
     """``(ok, line)``: ``command`` run on ``sha`` with ``origin/<trunk>`` merged into it, in the
     cached checkout of ``branch`` under ``holder``. ``ok`` True when it passed; False when the
     merge conflicts or the command failed (``line`` says which, with the command's last
     :data:`TAIL_LINES` lines); None when no checkout could be made (nothing was judged)."""
+    timeout = tunable('TIMEOUT_S') if timeout is None else timeout
     os.makedirs(holder, exist_ok=True)
     name = slug(branch)
     path = os.path.join(holder, name)
@@ -128,7 +129,7 @@ def check(repo, holder, branch, sha, trunk, command, timeout=TIMEOUT_S, fetch=Tr
         fcntl.flock(lock, fcntl.LOCK_EX)
         if fetch:
             _git(['fetch', '-q', 'origin', f'+refs/heads/{trunk}:refs/remotes/origin/{trunk}'],
-                 cwd=repo, timeout=FETCH_TIMEOUT_S)
+                 cwd=repo, timeout=tunable('FETCH_TIMEOUT_S'))
         if _git(['rev-parse', '-q', '--verify', f'origin/{trunk}^{{commit}}'],
                 cwd=repo).returncode != 0:
             return None, f'origin/{trunk} does not resolve: nothing to merge'
@@ -217,3 +218,18 @@ def register(sub):
                    help='read the pre-push hook\'s ref lines on stdin and check each pushed head')
     env.add_product_arg(p)
     p.set_defaults(func=cmd_trunk_check)
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'TIMEOUT_S': 'merge.timeout_s',
+    'FETCH_TIMEOUT_S': 'merge.fetch_timeout_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

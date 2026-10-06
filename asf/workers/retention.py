@@ -29,7 +29,7 @@ import os
 import re
 import time
 
-from asf import env, gitpush, refguard
+from asf import env, github, gitpush, refguard
 from asf.harvest import harvest as H
 
 #: The lane's archive namespace (:meth:`asf.harvest.lane.Lane.archive` pushes ``archive/<b>``).
@@ -91,7 +91,8 @@ def host_facts(product):
     slug = repo_slug(product)
     if not slug:
         return set(), set()
-    prs = H.gh_json(['pr', 'list', '-R', slug, '--state', 'open', '--limit', '1000',
+    prs = H.gh_json(['pr', 'list', '-R', slug, '--state', 'open',
+                     '--limit', str(github.pr_list_limit(1000)),
                      '--json', 'headRefName'], None)
     heads = ({p.get('headRefName') for p in prs if isinstance(p, dict)}
              if isinstance(prs, list) else None)

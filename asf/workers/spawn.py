@@ -433,7 +433,7 @@ def _last_touched(path):
 def _stale_orphan(path, now=None):
     """Whether the orphan worktree at ``path`` is old enough to reclaim (:data:`ORPHAN_GRACE_S`)."""
     now = time.time() if now is None else now
-    return now - _last_touched(path) >= ORPHAN_GRACE_S
+    return now - _last_touched(path) >= tunable('ORPHAN_GRACE_S')
 
 
 def _commit_leftovers(holder):
@@ -979,7 +979,7 @@ def model_arg(model, cfg=None):
     if not isinstance(table, dict):  # a misshapen value is no entry, never a TypeError
         table = {}
     if model not in table:
-        alt = MODEL_FALLBACK.get(model)
+        alt = tunable('MODEL_FALLBACK').get(model)
         if alt and alt in table:
             return table[alt]
         raise SpawnError(f'NEEDS OPERATOR: worker_pool.models has no entry for {model} '
@@ -1002,7 +1002,7 @@ def settings_file(wp):
 
 
 #: How long ``conventions.worktree_setup`` may run in a fresh worktree before the launch is
-#: refused.
+#: refused (config ``worker_pool.worktree_setup_timeout_s``: a large install needs longer).
 WORKTREE_SETUP_TIMEOUT_S = 900
 
 
@@ -1063,7 +1063,7 @@ def _record_setup(worktree, command, took_s):
 
 
 def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
-                       timeout=WORKTREE_SETUP_TIMEOUT_S):
+                       timeout=None):
     """Run the product's ``conventions.worktree_setup`` (a shell command) in ``worktree``, under
     the environment the session itself will have (:func:`asf.workers.runtime.build_env`, worker
     mode: the allow-list, the account's HOME). Its output goes to ``briefs/<job>.setup.log``.
@@ -1075,6 +1075,9 @@ def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
     command = getattr(product.conventions, 'worktree_setup', None)
     if not command:
         return None
+    if timeout is None:
+        from asf import config_keys
+        timeout = config_keys.value('worker_pool.worktree_setup_timeout_s', WORKTREE_SETUP_TIMEOUT_S)
     if setup_done(worktree, command):
         return None          # this tree already ran exactly this command (F-0127, D6)
     runtime_mod.seed_home(account)
@@ -1248,3 +1251,18 @@ def load_cfg():
         return env.load_config()
     except env.ConfigError:
         return {}
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'MODEL_FALLBACK': 'worker_pool.model_fallback',
+    'ORPHAN_GRACE_S': 'worker_pool.orphan_grace_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

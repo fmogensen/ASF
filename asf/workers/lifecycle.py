@@ -74,7 +74,7 @@ import stat
 import subprocess
 import time
 
-from asf import budget, env, gitops, tokens
+from asf import budget, config_keys, env, gitops, tokens
 from asf.workers import account_auth
 from asf.workers import cloudpid
 from asf.workers import headroom
@@ -157,6 +157,31 @@ REDACT_REFUSAL_RE = re.compile(r'(?:^|; )redact: \S+:\d+ ')
 #: than :data:`ROUND_CAP` because a hook refusal spends no round in the first place — a session
 #: is not at fault for the hook, so there is no reason to let it try the identical push twice.
 HOOK_REFUSAL_CAP = 2
+
+
+def round_cap():
+    """Config ``harvest.round_cap``, else :data:`ROUND_CAP`."""
+    return config_keys.value('harvest.round_cap', ROUND_CAP)
+
+
+def hook_refusal_cap():
+    """Config ``worker_pool.caps.hook_refusal``, else :data:`HOOK_REFUSAL_CAP`."""
+    return config_keys.value('worker_pool.caps.hook_refusal', HOOK_REFUSAL_CAP)
+
+
+def empty_ends_cap():
+    """Config ``worker_pool.caps.empty``, else :data:`EMPTY_CAP`."""
+    return config_keys.value('worker_pool.caps.empty', EMPTY_CAP)
+
+
+def incomplete_cap():
+    """Config ``worker_pool.caps.incomplete``, else :data:`INCOMPLETE_CAP`."""
+    return config_keys.value('worker_pool.caps.incomplete', INCOMPLETE_CAP)
+
+
+def loop_cap():
+    """Config ``worker_pool.caps.same_head_loop``, else :data:`LOOP_CAP`."""
+    return config_keys.value('worker_pool.caps.same_head_loop', LOOP_CAP)
 #: A hook's refusal text carries the redaction scanner's own ``redact: <file>:<line>`` line
 #: (:mod:`asf.redact`) anywhere in it — the same line a product's own pre-push hook prints when
 #: it runs that scan itself.
@@ -2606,8 +2631,9 @@ def seats(rows):
     return sum(1 for r in rows if 'state' not in r or holds_seat(r['state']))
 
 
-def derive(run, ev, cap=ROUND_CAP, path=None):
-    """The state of ``run`` given its evidence. Pure: no git, no clock."""
+def derive(run, ev, cap=None, path=None):
+    """The state of ``run`` given its evidence. Pure: no git, no clock. ``cap``: :func:`round_cap`."""
+    cap = round_cap() if cap is None else cap
     if landed(run):
         return State(LANDED if ev.worktree else REAPED)
     corr = pending_correction(run, path)
@@ -2797,7 +2823,7 @@ LOOP_CAP = 3
 CORRECT = 'correct'
 
 
-def same_head_loop(path, run, head=None, cap=LOOP_CAP, kind=None, main=None):
+def same_head_loop(path, run, head=None, cap=None, kind=None, main=None):
     """The sha ``run``'s item is looping on, or None: its last ``cap`` runs (a spent window's
     excepted) are all of ``kind`` — the kind the hold routes to, ``run``'s own when not given —
     and were all launched on one head (spawn's ``launch_head``) — so none of the first
@@ -2809,6 +2835,7 @@ def same_head_loop(path, run, head=None, cap=LOOP_CAP, kind=None, main=None):
 
     A worktree whose HEAD is a rebase of that sha onto a newer trunk (:func:`rebase_of`, with
     ``main`` given) moved the branch, though no commit is new: not a loop (a product's F-0037)."""
+    cap = loop_cap() if cap is None else cap
     item = (run or {}).get('item')
     kind = kind or (run or {}).get('kind')
     if not item or not kind or not path:
@@ -2838,7 +2865,7 @@ def loop_text(n, kind, sha, item):
             f'could not move the branch, fix that, then `asf unpark {item}`')
 
 
-def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=None, main=None):
+def hold(path, run, kind, text, now, empty_cap=None, head=None, finding=None, main=None):
     """``(fields, line)``: what to append to ``run`` to hold its branch and hand it back, and
     the line to print. The rounds counter runs over every run of the item and stops climbing at
     :data:`ROUND_CAP` (B-0048). The escalation is counted on the hold's finding instead
@@ -2850,6 +2877,9 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
     and so does the loop guard (:func:`same_head_loop`): the same kind handed the same head
     :data:`LOOP_CAP` times — ``head``, when the caller knows it, is where the branch sits now;
     ``main``, when given, lets a worktree rebased onto a newer trunk count as a moved head."""
+    if empty_cap is None:
+        empty_cap = empty_ends_cap()
+    cap = round_cap()
     item = run.get('item')
     branch = run.get('branch') or run.get('job')
     routes_to = CORRECT if kind in MECHANICAL else run.get('kind')
@@ -2859,7 +2889,7 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
     judged = head if isinstance(head, str) and re.fullmatch(r'[0-9a-fA-F]{7,40}', head) else None
     head = (text or '').split('\n', 1)[0]  # the line is one line; the correction keeps it all
     if loop:
-        reason = loop_text(LOOP_CAP, routes_to, loop, item)
+        reason = loop_text(loop_cap(), routes_to, loop, item)
         fields = {'correction': {'kind': kind, 'text': text, 'at': now, 'parked': True,
                                  'reason': reason, 'loop_head': loop},
                   'operator_flagged': 1}
@@ -2877,16 +2907,16 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
     corr = {'kind': kind, 'text': text, 'at': now, 'finding': keys, 'same': same}
     if judged:
         corr['judged_head'] = judged
-    if kind == INCOMPLETE and same >= INCOMPLETE_CAP:
+    if kind == INCOMPLETE and same >= incomplete_cap():
         # a resumed delivery left the very same Tasks unbuilt: pause after the second failure
         reason = incomplete_park_text(same, keys, item)
         fields = {'correction': dict(corr, parked=True, reason=reason), 'operator_flagged': 1}
         return fields, f'parked {branch}: {reason}'
     prev = max([rounds_of(path, item), run.get('rounds') or 0])
     fields = {'correction': corr}
-    if prev < ROUND_CAP:  # B-0048: the counter never passes the cap
+    if prev < cap:  # B-0048: the counter never passes the cap
         fields['rounds'] = prev + 1
-    if same >= ROUND_CAP:
+    if same >= cap:
         # the first at_cap hold hands the item to adjudicate; the next is that ruling's own
         # attempt failing; only a third — the adjudicate row cannot land either — flags
         at_cap_before = sum(1 for r in item_runs(path, item)
@@ -2896,7 +2926,7 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
             fields['operator_flagged'] = 1
         return fields, (f'held {branch}: {head} — adjudicate pending ({kind}: the same finding '
                         f'{same} times in a row)')
-    return fields, f'held {branch}: {head} — back to its session (round {min(prev + 1, ROUND_CAP)})'
+    return fields, f'held {branch}: {head} — back to its session (round {min(prev + 1, cap)})'
 
 
 #: The hold kind a review's changes come back as (:mod:`asf.harvest.lane`): its finding is the C
@@ -2952,7 +2982,7 @@ def repeats(corr):
     corr = corr or {}
     if corr.get('same'):
         return int(corr['same'])
-    return ROUND_CAP if corr.get('at_cap') else 1
+    return round_cap() if corr.get('at_cap') else 1
 
 
 def review_answered(path, item, review_path, head):
@@ -3094,7 +3124,7 @@ def hook_refusal_hold(path, run, text, now):
         corr.update(parked=True, reason=reason)
         return ({'correction': corr, 'operator_flagged': 1},
                 f'held {branch}: {reason} (security hold)')
-    if same < HOOK_REFUSAL_CAP:
+    if same < hook_refusal_cap():
         return {'correction': corr}, f'held {branch}: {text} (no round spent)'
     corr['at_cap'] = True
     return ({'correction': corr},

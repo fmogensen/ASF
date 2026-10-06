@@ -128,7 +128,8 @@ DEFAULT_LAUNCH_WAIT_S = 30
 DEFAULT_RUNS_ON = ('ubuntu-latest',)
 DEFAULT_TOKEN_SECRET = 'CLAUDE_CODE_OAUTH_TOKEN'
 DEFAULT_WORKFLOW = 'asf-worker.yml'
-#: a dispatched run that has not shown up in the run list after this long never will
+#: a dispatched run that has not shown up in the run list after this long never will (config
+#: ``cloud.lost_after_min``)
 LOST_AFTER_MIN = 15
 REPORT_TRAILER = 'ASF-Report'
 SESSION_TRAILER = 'ASF-Session'
@@ -447,7 +448,7 @@ def _pre_push_lines(product):
 
 # ---- status -----------------------------------------------------------------------------------
 
-def classify(view, report, elapsed_min, timeout_min, run_id=None):
+def classify(view, report, elapsed_min, timeout_min, run_id=None, lost_after_min=None):
     """``(status, why)`` — the cloud run's state from its evidence: ``view`` is the workflow
     run's ``{status, conclusion}`` (None when unread), ``report`` the report commit or None.
     Pure: no gh, no git, no clock."""
@@ -460,7 +461,10 @@ def classify(view, report, elapsed_min, timeout_min, run_id=None):
     if timeout_min and elapsed_min is not None and elapsed_min >= timeout_min:
         return DEAD, f'timed out after {timeout_min:g}m'
     if not run_id:
-        if elapsed_min is not None and elapsed_min >= LOST_AFTER_MIN:
+        if lost_after_min is None:
+            from asf import config_keys
+            lost_after_min = config_keys.value('cloud.lost_after_min', LOST_AFTER_MIN)
+        if elapsed_min is not None and elapsed_min >= lost_after_min:
             return DEAD, 'the dispatched run never appeared'
         return WORKING, 'dispatched'
     return WORKING, f'run {run_id} {state or "unread"}'

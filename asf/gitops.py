@@ -19,17 +19,32 @@ left outside these modules; each migration lowers its baseline.
 """
 import subprocess
 
-from asf import hermetic
+from asf import config_keys, hermetic
 from asf.github import Result, now_iso
 
-#: Seconds one git read may take before its answer is Unknown.
+#: Seconds one git read may take before its answer is Unknown (config ``git.timeout_s``).
 TIMEOUT_S = 120
+#: ``timeout``'s default: the configured :data:`TIMEOUT_S` (or :data:`FETCH_TIMEOUT_S`).
+DEFAULT = object()
 
 
-def git(args, cwd, *, timeout=TIMEOUT_S, env=None):
+def timeout_s():
+    """Seconds one git call may take: config ``git.timeout_s``, else :data:`TIMEOUT_S`."""
+    return config_keys.value('git.timeout_s', TIMEOUT_S)
+
+
+def fetch_timeout_s():
+    """Seconds a fetch may take: config ``git.fetch_timeout_s``, else :data:`FETCH_TIMEOUT_S`."""
+    return config_keys.value('git.fetch_timeout_s', FETCH_TIMEOUT_S)
+
+
+def git(args, cwd, *, timeout=DEFAULT, env=None):
     """Run ``git <args>`` in ``cwd``. ``ok`` with ``data`` = stdout stripped when git exits 0;
     otherwise not ``ok`` — ``rc`` is git's code (a definite answer some helpers read), or ``-1``
-    when git never answered (``reason`` ``'timeout'`` or the error)."""
+    when git never answered (``reason`` ``'timeout'`` or the error). ``timeout`` defaults to
+    :func:`timeout_s`."""
+    if timeout is DEFAULT:
+        timeout = timeout_s()
     try:
         p = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True,
                            timeout=timeout, env=hermetic.git_env(env))
@@ -96,12 +111,14 @@ def head_sha(ls_remote_out, branch):
     return ''
 
 
-#: Seconds a fetch may take.
+#: Seconds a fetch may take (config ``git.fetch_timeout_s``).
 FETCH_TIMEOUT_S = 120
 
 
-def fetch(cwd, remote='origin', ref=None, *, timeout=FETCH_TIMEOUT_S):
+def fetch(cwd, remote='origin', ref=None, *, timeout=DEFAULT):
     """``git fetch -q <remote> [<ref>]`` — the one write here, to remote-tracking refs only. The
     :class:`Result`; not ``ok`` (offline, no such remote, a timeout) leaves the refs as they
     were, and a caller reads what it then cannot find as Unknown."""
+    if timeout is DEFAULT:
+        timeout = fetch_timeout_s()
     return git(['fetch', '-q', remote, *([ref] if ref else [])], cwd, timeout=timeout)

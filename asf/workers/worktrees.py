@@ -216,7 +216,7 @@ def plan(product, buffer=DEFAULT_BUFFER, alive=None, fetch=False, now=None):
         if run is not None and (lifecycle.is_live(run) or alive(run.get('pid'))):
             v.action, v.reason = LIVE, 'live session'
             continue
-        if run is None and now - _mtime(path) < ORPHAN_GRACE_S:
+        if run is None and now - _mtime(path) < tunable('ORPHAN_GRACE_S'):
             v.reason = 'no session yet (new)'
             continue
         safe, why = safety(path, branch, main, heads, run=run, fetch=fetch)
@@ -419,3 +419,17 @@ def report(verdicts, out=print):
     for v in verdicts:
         if v.action != LIVE:
             out(f'worktree {v.action:<6} {v.name:<28} {v.reason}')
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'ORPHAN_GRACE_S': 'worker_pool.orphan_grace_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

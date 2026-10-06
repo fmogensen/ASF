@@ -91,9 +91,9 @@ def cmd_correct(args, fetch=None, alive=None):
               f'them (health will end them)')
     rounds = lifecycle.rounds_of(path, item)
     run = open_lane_run(product, runs) or max(runs, key=lambda r: r.get('started') or '')
-    if rounds >= lifecycle.ROUND_CAP:
+    if rounds >= lifecycle.round_cap():
         if getattr(args, 'from_pr', None):
-            print(f'asf correct: {item} has used its {lifecycle.ROUND_CAP} correction rounds — '
+            print(f'asf correct: {item} has used its {lifecycle.round_cap()} correction rounds — '
                   f'at the cap the instruction is an operator ruling; give it without --from-pr')
             return 1
         return attach_ruling(product, item, ruling_run(product, item, runs), why)
@@ -110,7 +110,7 @@ def cmd_correct(args, fetch=None, alive=None):
     if number:
         corr['from_pr'] = int(number)
     pool_mod.update_session(product, run['job'], correction=corr, rounds=rounds + 1)
-    print(f'corrected {item} on {run["branch"]} (round {rounds + 1} of {lifecycle.ROUND_CAP}, '
+    print(f'corrected {item} on {run["branch"]} (round {rounds + 1} of {lifecycle.round_cap()}, '
           f'job {run["job"]}): {why}')
     return 0
 
@@ -220,12 +220,12 @@ def attach_ruling(product, item, run, why):
     now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     filed = file_ruling(product, item, why, now[:16].replace('T', ' '))
     text = RULING_HEAD.format(at=now, branch=run['branch']) + why
-    corr = {'kind': OPERATOR, 'text': text, 'at': now, 'same': lifecycle.ROUND_CAP,
+    corr = {'kind': OPERATOR, 'text': text, 'at': now, 'same': lifecycle.round_cap(),
             'operator_ruling': True}
     if run.get('_foreign'):
         corr['branch'] = run['branch']  # no run on a code branch: the row names the Task's own
     pool_mod.update_session(product, run['job'], correction=corr)
-    print(f'{item} has used its {lifecycle.ROUND_CAP} correction rounds: the instruction is an '
+    print(f'{item} has used its {lifecycle.round_cap()} correction rounds: the instruction is an '
           f'operator ruling — one code session on {run["branch"]} carries it out next tick '
           f'(job {run["job"]})'
           + (f'; card History: {filed}' if filed else '; filed on the card\'s History'))

@@ -45,9 +45,17 @@ TRUNCATED_ROWS = 1000
 MAX_RUNS_PER_PASS = 30
 #: The run links a card body lists (newest first); every run id stays in ``links.runs``.
 BODY_RUNS = 10
+#: A flaky test's card title and signature start with this (config ``flaky.title_prefix``). Changing
+#: it starts new signatures: a card filed under the old prefix is no longer matched.
 SIG_PREFIX = 'flaky e2e: '
 TITLE_MAX = 120
 GH_TIMEOUT_S = 120
+
+
+def sig_prefix():
+    """Config ``flaky.title_prefix``, else :data:`SIG_PREFIX`."""
+    from asf import config_keys
+    return config_keys.value('flaky.title_prefix', SIG_PREFIX)
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07')
 #: ``gh run view --log`` prefixes ``<job>\t<step>\t``; a job log prefixes an ISO timestamp.
@@ -153,10 +161,10 @@ def record_run(state, run, flaky):
 
 
 def severity(entry, now):
-    cutoff = now - datetime.timedelta(days=S1_WINDOW_DAYS)
+    cutoff = now - datetime.timedelta(days=tunable('S1_WINDOW_DAYS'))
     recent = [r for r in entry['runs'] if (parse_iso(r['ts']) or cutoff) >= cutoff]
     trunk = [r for r in entry['runs'] if r.get('trunk')]
-    return 'S1' if len(recent) >= S1_RUNS or len(trunk) >= S1_TRUNK_RUNS else 'S3'
+    return 'S1' if len(recent) >= tunable('S1_RUNS') or len(trunk) >= S1_TRUNK_RUNS else 'S3'
 
 
 # ------------------------------------------------------------------- card --
@@ -200,7 +208,7 @@ def _replace_line(body, prefix, line):
 def file_or_update(root, canonical, key, entry, now, default_bug_epic=None):
     """File the Bug for one flaky test, or bring its card's count up to date. Returns
     ``filed``, ``updated`` or ``unchanged``."""
-    sig = SIG_PREFIX + key
+    sig = sig_prefix() + key
     sev = severity(entry, now)
     last_day = today()
     run_ids = sorted({r['run'] for r in entry['runs']})
@@ -217,7 +225,7 @@ def file_or_update(root, canonical, key, entry, now, default_bug_epic=None):
             _count_line(entry), _runners_line(entry), _runs_line(entry)])
         new_id = mint_id(root, canonical, 'bug')
         write_new_item(root, canonical, 'bug', new_id, typed, body, last_day, 'file-bugs',
-                       acceptance=[f"`{key}` is flaky in no CI run for {S1_WINDOW_DAYS} days"],
+                       acceptance=[f"`{key}` is flaky in no CI run for {tunable('S1_WINDOW_DAYS')} days"],
                        shape=('signature', 'bug'))
         return 'filed'
     typed, _machine = frontmatter.split_machine(rec['meta'])
@@ -381,7 +389,7 @@ def window_since(state, now):
     window; the full ``LOOKBACK_DAYS`` floor otherwise — including when there is no
     ``window_from`` at all, which is a state file written before this card and today's exact
     behaviour."""
-    floor = now - datetime.timedelta(days=LOOKBACK_DAYS)
+    floor = now - datetime.timedelta(days=tunable('LOOKBACK_DAYS'))
     since = parse_iso(state.get('window_from'))
     if since is None or since < floor:
         since = floor
@@ -395,7 +403,7 @@ def next_window(unread, now):
     at ``now - LOOKBACK_DAYS`` either way. ``unread``: a run's own dict lacks ``created`` (a fake
     source that predates this card), its ``ts`` stands in — losing D5's precision for that source,
     never a ``KeyError``."""
-    floor = now - datetime.timedelta(days=LOOKBACK_DAYS)
+    floor = now - datetime.timedelta(days=tunable('LOOKBACK_DAYS'))
     if unread:
         oldest = min(r.get('created') or r['ts'] for r in unread)
         since = (parse_iso(oldest) or floor) - datetime.timedelta(seconds=1)
@@ -417,7 +425,7 @@ def collect(state, source, workflow, conv, now, out=print):
             f"truncated, runs older than it cannot be read")
     unseen = sorted((r for r in listed if str(r['id']) not in state['seen']),
                     key=lambda r: r['ts'])
-    runs, deferred = unseen[:MAX_RUNS_PER_PASS], unseen[MAX_RUNS_PER_PASS:]
+    runs, deferred = unseen[:tunable('MAX_RUNS_PER_PASS')], unseen[tunable('MAX_RUNS_PER_PASS'):]
     touched = set()
     failed = []
     from asf import ci_pool
@@ -440,7 +448,7 @@ def collect(state, source, workflow, conv, now, out=print):
         run = dict(r, trunk=conv.is_trunk(r['branch']))
         touched |= record_run(state, run, flaky)
         state['seen'][str(r['id'])] = r['ts']
-    cutoff = (now - datetime.timedelta(days=LOOKBACK_DAYS + 1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    cutoff = (now - datetime.timedelta(days=tunable('LOOKBACK_DAYS') + 1)).strftime('%Y-%m-%dT%H:%M:%SZ')
     state['seen'] = {k: v for k, v in state['seen'].items() if v >= cutoff}
     state['last_pass'] = now.strftime('%Y-%m-%dT%H:%M:%SZ')
     state['window_from'] = next_window(deferred + failed, now)
@@ -455,7 +463,7 @@ def file_flaky_bugs(root, canonical, state, now, default_bug_epic=None, reload=N
     outcomes = {}
     for key in sorted(state['tests']):
         o = file_or_update(root, canonical, key, state['tests'][key], now, default_bug_epic)
-        outcomes[SIG_PREFIX + key] = o
+        outcomes[sig_prefix() + key] = o
         if o == 'filed' and reload is not None:
             canonical = reload()
     return outcomes
@@ -476,8 +484,8 @@ def run_pass(root, canonical, product, conv, now, level='auto', default_bug_epic
     if level != 'auto':
         prefix = 'NEEDS OPERATOR: ' if level == 'human-now' else ''
         for key in sorted(state['tests']):
-            if _find_card(canonical, SIG_PREFIX + key) is None:
-                out(f'{prefix}held file_bug on {SIG_PREFIX}{key} — widen approvals: file_bug '
+            if _find_card(canonical, sig_prefix() + key) is None:
+                out(f'{prefix}held file_bug on {sig_prefix()}{key} — widen approvals: file_bug '
                     f'in products/<p>.yaml')
         return {}
     outcomes = file_flaky_bugs(root, canonical, state, now, default_bug_epic, reload=reload)
@@ -486,3 +494,20 @@ def run_pass(root, canonical, product, conv, now, level='auto', default_bug_epic
     if filed or updated:
         out(f"file-bugs: flaky — {filed} filed, {updated} updated")
     return outcomes
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'S1_RUNS': 'flaky.s1_runs',
+    'S1_WINDOW_DAYS': 'flaky.window_days',
+    'LOOKBACK_DAYS': 'flaky.lookback_days',
+    'MAX_RUNS_PER_PASS': 'flaky.max_runs',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

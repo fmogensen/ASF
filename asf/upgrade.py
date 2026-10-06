@@ -112,7 +112,7 @@ def cooling(product, now=None):
         return None
     if not isinstance(at, (int, float)):
         return None
-    until = at + PENDING_TTL_S
+    until = at + tunable('PENDING_TTL_S')
     return until if (now or time.time()) < until else None
 
 
@@ -223,7 +223,7 @@ def pending(product, now=None, installed=None, out=print, run=subprocess.run):
         clear_pending(product)
         clear_expired(product)  # the sha is in: whatever cool-down an earlier expiry left is moot
         return None
-    if age is None or age > PENDING_TTL_S or age < -60:
+    if age is None or age > tunable('PENDING_TTL_S') or age < -60:
         clear_pending(product)
         _write_json(expired_path(product), {'sha': data['sha'], 'owner': data.get('owner'),
                                      'at': now or time.time()})
@@ -259,7 +259,7 @@ def held(product_name, now=None):
     if not isinstance(at, (int, float)):
         return None
     age = (now or time.time()) - at
-    if age > PENDING_TTL_S or age < -60:  # a clock step leaves a future `at`; pending() clears it
+    if age > tunable('PENDING_TTL_S') or age < -60:  # a clock step leaves a future `at`; pending() clears it
         return None
     return data
 
@@ -416,7 +416,7 @@ def repo_url(run=subprocess.run):
     except (TypeError, ValueError, KeyError):
         spec = ''
     m = re.match(r'git\+(.+?)(@[^@/]+)?$', spec or '')
-    return m.group(1) if m else os.environ.get('ASF_REPO_URL', DEFAULT_REPO_URL)
+    return m.group(1) if m else os.environ.get('ASF_REPO_URL', tunable('DEFAULT_REPO_URL'))
 
 
 def remote_head(url, run=subprocess.run, branch='main'):
@@ -1567,3 +1567,18 @@ def register(subparsers):
                         f'SECONDS (default {DEFAULT_MANUAL_WAIT_S}) for them to end, then install')
     p.set_defaults(run=cmd_upgrade)
     return p
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'DEFAULT_REPO_URL': 'upgrade.repo_url',
+    'PENDING_TTL_S': 'upgrade.pending_ttl_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

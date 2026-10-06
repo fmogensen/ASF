@@ -25,7 +25,7 @@ STRICT = 'the host requires an up-to-date branch'
 #: the exceptions an S1 or hotfix branch admits while a run is in flight (F-0203 C4)
 URGENT_EXCEPTIONS = (CONFLICT,)
 
-CI_FLIGHT_TIMEOUT_S = 30
+CI_FLIGHT_TIMEOUT_S = 30   # the default of config github.cmd_timeout_s
 #: the one line a deferred rewrite writes, whatever the site (F-0203 C11)
 DEFER_FMT = '{what} deferred: {branch} CI in flight (run {run})'
 #: the line when the host could not say whether a run is in flight: Unknown is never "nothing
@@ -33,7 +33,7 @@ DEFER_FMT = '{what} deferred: {branch} CI in flight (run {run})'
 UNKNOWN_FMT = '{what} deferred: {branch} CI in flight unknown ({why})'
 
 
-def run_in_flight(product, branch, run=None, timeout=CI_FLIGHT_TIMEOUT_S):
+def run_in_flight(product, branch, run=None, timeout=None):
     """The newest run of the product's ``ci.workflow`` on ``branch`` the host has not completed:
     ``{'id': <int>, 'status': <str>}``; None when nothing is in flight or no ``ci.workflow`` /
     ``repo_slug`` is configured (no CI to wait for); an Unknown :class:`asf.github.Result` when
@@ -49,7 +49,7 @@ def run_in_flight(product, branch, run=None, timeout=CI_FLIGHT_TIMEOUT_S):
     try:
         r = connectors.ci().call(['run', 'list', '-R', repo_slug, '--workflow', workflow, '--branch', branch,
                        '--limit', '20', '--json', 'databaseId,status,createdAt'],
-                      json=True, timeout=timeout, run=run, env=ci_pool._gh_env(product))
+                      json=True, timeout=github.cmd_timeout_s() if timeout is None else timeout, run=run, env=ci_pool._gh_env(product))
     except gh_limit.RateLimited:
         return github.unknown('rate limited')
     if not r.ok:

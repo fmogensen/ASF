@@ -177,7 +177,7 @@ def cause(run, claims, runs, timeouts, prs, repo, trunk, fetch):
         if started is None or completed is None:
             continue
         # a 0 or missing limit is no declared limit (the host's own), never one already passed
-        limit = timeouts.get(job.get('name')) or ci_pool.DEFAULT_JOB_TIMEOUT_MIN
+        limit = timeouts.get(job.get('name')) or ci_pool.tunable('DEFAULT_JOB_TIMEOUT_MIN')
         if (completed - started).total_seconds() / 60 >= limit - 1:
             return 'timeout', None
 

@@ -163,7 +163,7 @@ def observe(product, names, key, prs, head, base, files, fail_files=(), links=No
                                  'fail_files': sorted(set(fail_files or ())),
                                  'tests': sorted(set((tests or {}).get(n) or ())),
                                  'link': (links or {}).get(n)})
-        data['seen'] = [s for s in data['seen'] if s.get('at', 0) >= now - SEEN_HOURS * 3600]
+        data['seen'] = [s for s in data['seen'] if s.get('at', 0) >= now - tunable('SEEN_HOURS') * 3600]
         save(sd, data)
     except OSError:
         pass
@@ -206,7 +206,7 @@ def suspects(product, now=None, data=None):
     tip, moved = _trunk(sd)
     if not tip:
         return {}   # the trunk watch has not read the trunk yet: nothing to compare with
-    floor = max(now - SEEN_HOURS * 3600, moved or 0)
+    floor = max(now - tunable('SEEN_HOURS') * 3600, moved or 0)
     if (data.get('green') or {}).get('sha') == tip:
         return {}   # a full run judged this tip green: the landings' reds are their own
     by = {}
@@ -273,7 +273,7 @@ class Door:
         from asf import mutation_guard
         if mutation_guard.is_mutating_gh(args):
             gh_limit.forget()   # a write can change any listing this process read before it
-        return github.gh(args, json=json, timeout=github.JSON_TIMEOUT_S,
+        return github.gh(args, json=json, timeout=github.json_timeout_s(),
                          env=_auth_env(self.product))
 
 
@@ -390,7 +390,7 @@ def read_full(product, data, now, src, out):
     full = data.get('full') or {}
     if full.get('state') not in ('dispatched', 'running'):
         return
-    if now - (full.get('read_at') or 0) < READ_EVERY_S:
+    if now - (full.get('read_at') or 0) < tunable('READ_EVERY_S'):
         return
     full['read_at'] = int(now)
     trunk, slug = product.conventions.main, product.repo_slug
@@ -399,10 +399,10 @@ def read_full(product, data, now, src, out):
         if r is UNKNOWN:
             return      # the listing did not read: never "lost" on it — read again
         if r is None:
-            if now - (full.get('at') or now) > FIND_S:
+            if now - (full.get('at') or now) > tunable('FIND_S'):
                 full['state'] = 'lost'
                 out(f'trunk watch: the full run dispatched on {trunk} @ {_short(full.get("sha"))} '
-                    f'was never listed in {FIND_S // 60} min — lost')
+                    f'was never listed in {tunable("FIND_S") // 60} min — lost')
             return
         full['run'], full['url'] = str(r.get('databaseId')), r.get('url')
         full['state'] = 'running'
@@ -630,7 +630,7 @@ def stale_first(product, tip, now=None):
         at = stale_ref._epoch(red.get('at'))
         # bounded: a request the queue never reads again (its branch gone) holds nothing for long
         if red.get('kind') == 'checks' and at and moved and at < moved \
-                and now - moved < stale_ref.WAIT_S:
+                and now - moved < stale_ref.tunable('WAIT_S'):
             prs.add(int(k))
     return ('PR ' + ', '.join(f'#{n}' for n in sorted(prs)) + ' red on a merge ref from before '
             f'{product.conventions.main} moved') if prs else ''
@@ -675,20 +675,20 @@ def tick(product, stall=None, out=print, now=None, src=None):
         if why and not busy:
             tried = full.get('sha') == tip and (
                 full.get('state') in ('red', 'green')
-                or (full.get('tries') or 0) >= MAX_TRIES)
+                or (full.get('tries') or 0) >= tunable('MAX_TRIES'))
             if not tried and (full.get('state') != 'refused' or now - full.get('at', 0)
-                              >= LIST_EVERY_S):
+                              >= tunable('LIST_EVERY_S')):
                 busy = dispatch(product, data, tip, why, now, src, out)
         every = product.conventions.trunk_full_every_hours()
         if every and not busy:
             last = data.get('full_at') or 0
-            if now - last >= every * 3600 and now - (data.get('listed') or 0) >= LIST_EVERY_S:
+            if now - last >= every * 3600 and now - (data.get('listed') or 0) >= tunable('LIST_EVERY_S'):
                 data['listed'] = int(now)
                 seen = _last_full(product, src)
                 if seen is UNKNOWN:
                     out(f'trunk watch: the runs of {workflow(product)} on '
                         f'{product.conventions.main} unreadable — the safety net is asked '
-                        f'again in {LIST_EVERY_S // 60} min, never dispatched on an unread list')
+                        f'again in {tunable("LIST_EVERY_S") // 60} min, never dispatched on an unread list')
                     seen = None
                     every = None
                 if seen and seen > last:
@@ -757,3 +757,21 @@ def doctor_rows(product, now=None):
                              f'— {net}')]
     return [(True, True, f'no check red on {product.conventions.main}; last full run '
                          f'{(now - last) / 3600:.1f}h ago — {net}')]
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'SEEN_HOURS': 'trunk_red.seen_hours',
+    'READ_EVERY_S': 'trunk_red.read_every_s',
+    'FIND_S': 'trunk_red.find_wait_s',
+    'MAX_TRIES': 'trunk_red.max_tries',
+    'LIST_EVERY_S': 'trunk_red.list_every_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

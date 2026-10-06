@@ -162,10 +162,11 @@ def _signal(pid, sig):
     os.killpg(os.getpgid(int(pid)), sig)
 
 
-def stop_session(session, alive, grace_s=tokens.STOP_GRACE_S):
+def stop_session(session, alive, grace_s=None):
     """End a live run: SIGTERM to its process group, then SIGKILL if ``alive`` still says the pid
     is there after ``grace_s``. A run that is gone or not ours is not an error — the caller still
     writes its cap line."""
+    grace_s = tokens.tunable('STOP_GRACE_S') if grace_s is None else grace_s
     pid = session.get('pid')
     if cloudpid.is_token(pid):
         from asf.workers import cloud

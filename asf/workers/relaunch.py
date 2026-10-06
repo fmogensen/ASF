@@ -39,7 +39,8 @@ from asf.workers import landing
 from asf.workers import lifecycle
 from asf.workers import report as report_mod
 
-#: Launches of one job handed the same state before the row parks instead of launching again.
+#: Launches of one job handed the same state before the row parks instead of launching again
+#: (config ``worker_pool.caps.relaunch``).
 CAP = 2
 #: The correction kind of a relaunch-cap park.
 RELAUNCH_CAP = 'relaunch cap'
@@ -168,7 +169,7 @@ def landed_in(reason):
     return m.group(2) if m else ''
 
 
-def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP,
+def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=None,
             writes=(), product=None):
     """``None`` when the launch may go ahead, else the park's reason: :data:`CAP` launches of
     ``job`` on one state, or one whose report ended terminal on it (:func:`terminal`) while the
@@ -176,7 +177,7 @@ def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main
     return assess(path, job, item, head, card, cause, repo, main, cap, writes, product)[0]
 
 
-def assess(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP,
+def assess(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=None,
            writes=(), product=None):
     """``(reason, landed)``: :func:`verdict`'s reason (or None), and the sha of the commit the
     last report names that git verified on ``origin/<main>`` ('' when none) — the evidence a
@@ -186,6 +187,9 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
     decision this pass, neither a park nor a close.
     Under ``product``'s ``flags.facts: shadow`` the ``landed`` half is compared with the landing
     fact (:func:`asf.facts.landing.landed`); the answer is always this one."""
+    if cap is None:
+        from asf import config_keys
+        cap = config_keys.value('worker_pool.caps.relaunch', CAP)
     runs = streak(path, job, item, head, card, cause)
     on_head = head_streak(path, job, item, head, card)
     if len(on_head) >= cap and len(on_head) > len(runs):

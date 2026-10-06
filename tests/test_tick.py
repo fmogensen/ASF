@@ -1157,3 +1157,30 @@ class CommandStepHostPressure(unittest.TestCase):
         with mock.patch.dict(os.environ, {'ASF_HOST_READING': '0 10 0'}):
             rc = steps.run_command('batch', "sh -c 'echo ran'", 5, emit=lines.append)
         self.assertEqual((rc, lines), (0, ['[command:batch] ran']))
+
+
+class MinimalProductTick(TickTestCase):
+    """F-0247: a product with no product-specific config at all — a file with only its repo and
+    record, an empty config.yaml — ticks on every default: each tunable at its built-in value, no
+    product's test-runner knob in a worker's environment, no config row."""
+
+    def test_a_minimal_product_ticks_on_the_defaults(self):
+        from asf import config_keys, doctor, gitops, github
+        from asf.tick import watchdog
+        from asf.workers import headroom, lifecycle
+        cfg = env.load_config()
+        self.assertEqual(cfg, {})
+        self.assertEqual(config_keys.problems(cfg), [])
+        self.assertEqual(doctor.check_config_keys(cfg), [])
+        self.assertEqual(env.worker_env(cfg, env.load_product('sample')), {})
+        self.assertEqual((gitops.timeout_s(), gitops.fetch_timeout_s()), (120, 120))
+        self.assertEqual((github.json_timeout_s(), github.cmd_timeout_s(),
+                          github.pr_list_limit()), (60, 30, 300))
+        self.assertEqual((lifecycle.round_cap(), lifecycle.loop_cap(), lifecycle.empty_ends_cap(),
+                          lifecycle.incomplete_cap(), lifecycle.hook_refusal_cap()), (3, 3, 2, 2, 2))
+        self.assertEqual(headroom.default_cost(), headroom.DEFAULT_COST)
+        self.assertEqual(watchdog.seconds_for(None, ['wave'], interval_s=600), 3600)
+        self.assertEqual(ci_queue.tunable('STUCK_RETRY_S'), 1800)
+        rc, out = self.run_tick(steps='record,prs,harvest')   # the steps that need no host
+        self.assertEqual(rc, 0, out)
+        self.assertIn('committed and pushed', out)

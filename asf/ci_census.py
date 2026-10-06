@@ -106,7 +106,7 @@ def tier_of(score, carried=None):
     """The tier a runner belongs in. No score, no ratio, or fewer than MIN_READINGS: BULK (D7).
     Flaky: BULK (D15). ratio <= PROMOTE_AT: FAST. ratio >= DEMOTE_AT: BULK. Between: ``carried``
     — the tier the last census gave it — else BULK (D6)."""
-    if score is None or score.ratio is None or score.n < ci_measure.MIN_READINGS:
+    if score is None or score.ratio is None or score.n < ci_measure.tunable('MIN_READINGS'):
         return BULK
     if score.flaky:
         return BULK
@@ -150,7 +150,7 @@ def _worst_kind(score):
 
 def _provisional_reason(score):
     n = score.n if score else 0
-    return f"{n} green reading{'s' if n != 1 else ''}, fewer than {ci_measure.MIN_READINGS}: provisional"
+    return f"{n} green reading{'s' if n != 1 else ''}, fewer than {ci_measure.tunable('MIN_READINGS')}: provisional"
 
 
 def _flaky_reason(score):
@@ -160,7 +160,7 @@ def _flaky_reason(score):
 def _promote_reason(score):
     n_kinds = len(score.ratios)
     return (f"{score.ratio:.2f}× over {n_kinds} job kind{'s' if n_kinds != 1 else ''}, "
-            f'{score.n} green readings in {ci_measure.WINDOW_DAYS} d')
+            f'{score.n} green readings in {ci_measure.tunable("WINDOW_DAYS")} d')
 
 
 def _demote_reason(score):
@@ -169,7 +169,7 @@ def _demote_reason(score):
     ratio = score.ratios[kind]
     return (f'runs {kind} at {median_s:g}s, {ratio:.2g}× the fleet best '
             f'(demote at {DEMOTE_AT:.2f}×), {score.n} green readings in '
-            f'{ci_measure.WINDOW_DAYS} d')
+            f'{ci_measure.tunable("WINDOW_DAYS")} d')
 
 
 def _floor_reason(score):
@@ -181,7 +181,7 @@ def _floor_reason(score):
 def _reason_for(tier, score, floored):
     if floored:
         return _floor_reason(score)
-    if score is None or score.ratio is None or score.n < ci_measure.MIN_READINGS:
+    if score is None or score.ratio is None or score.n < ci_measure.tunable('MIN_READINGS'):
         return _provisional_reason(score)
     if score.flaky:
         return _flaky_reason(score)
@@ -200,7 +200,7 @@ def _prev_tiers(product):
 
 
 def _read_events(root, now):
-    return (metrics.read_stream(root, 'ci', metrics.days_back(metrics.today(), ci_measure.WINDOW_DAYS))
+    return (metrics.read_stream(root, 'ci', metrics.days_back(metrics.today(), ci_measure.tunable('WINDOW_DAYS')))
             if root else [])
 
 
@@ -282,7 +282,7 @@ def refresh(product, backend, root=None, now=None, out=print):
         })
 
     doc = {
-        'v': CENSUS_VERSION, 'taken': _iso(now), 'window_days': ci_measure.WINDOW_DAYS,
+        'v': CENSUS_VERSION, 'taken': _iso(now), 'window_days': ci_measure.tunable('WINDOW_DAYS'),
         'runners': runners_doc,
         'measure': {
             'taken': _iso(now),

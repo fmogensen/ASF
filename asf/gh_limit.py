@@ -61,7 +61,7 @@ def is_rate_limited(*texts):
 
 def latched():
     """The reason this process stopped calling GitHub, or None."""
-    if _state['latched'] and time.monotonic() - _state['latched_at'] > LATCH_S:
+    if _state['latched'] and time.monotonic() - _state['latched_at'] > tunable('LATCH_S'):
         _state.update(latched=None, said=False, budget={}, low_said=False)
     return _state['latched']
 
@@ -123,7 +123,7 @@ def cmd_is_gh(cmd):
 def memo_get(key):
     """A read's output this process got under ``key`` within :data:`MEMO_S`, else None."""
     hit = _state['memo'].get(key)
-    if hit is None or time.monotonic() - hit[0] > MEMO_S:
+    if hit is None or time.monotonic() - hit[0] > tunable('MEMO_S'):
         return None
     return hit[1]
 
@@ -189,3 +189,18 @@ def low(product=None, run=None, env=None, out=None):
         print(f'gh: {left} GitHub calls left this hour (reserve {floor}) — non-essential polling'
               ' skipped this pass', file=out or sys.stderr, flush=True)
     return True
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'LATCH_S': 'github.rate_limit.latch_s',
+    'MEMO_S': 'github.rate_limit.memo_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])
