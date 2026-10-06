@@ -656,5 +656,35 @@ class GroomDigestProseTests(unittest.TestCase):
             'the adjudicate sessions for today are spent and the question is still open', text)
 
 
+class FootprintWideningProseTests(unittest.TestCase):
+    """T-0501: the operating guide stops claiming `asf set` stops in the checkout and gains the
+    `## Widening a Task's footprint` section — read from the checkout, not a fixture (P13)."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def test_guide_carries_the_widening_command(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn('asf set T-0338 writes+=', text)
+
+    def test_guide_says_set_publishes_rather_than_stopping_in_the_checkout(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn('`asf set` publishes the card itself', text)
+
+    def test_guide_names_the_i3_refusal(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn('I3', text)
+
+    def test_the_widening_heading_exists(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn("## Widening a Task's footprint", text)
+
+    def test_the_stale_drift_sentence_is_gone(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertNotIn(
+            'and your own edits change your checkout and stop there', text)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -456,10 +456,34 @@ a run: `asf tick --product <p> --steps daily --daily`.
 
 ## Your checkout drifts from the tick's clone
 
-Only `asf inbox` and `asf new` commit and push what they write. `asf groom`, `asf groom --apply`,
-`asf set` and your own edits change your checkout and stop there — the tick, working in its clone
-from `origin`, never sees them. Commit and push after each, and pull before you edit: the tick
-pushes a `tick: state` commit every run, so an unpulled checkout is always behind.
+Every console command that writes the record commits and pushes what *it* wrote — `asf inbox`,
+`asf new`, `asf set`, `asf groom` and `asf groom --apply` — and nothing you changed by hand rides
+along. Your own edits stop in your checkout: the tick, working in its clone from `origin`, never
+sees them, so commit and push after each. Pull before you edit — the tick pushes a `tick: state`
+commit every run, so an unpulled checkout is always behind.
+
+## Widening a Task's footprint
+
+A push is refused because the diff names a file outside the Task's `writes:`. Widening it is one
+command, and `asf set` publishes the card itself (above):
+
+    asf set T-0338 writes+=asf/tick/widen_footprint.py
+
+`writes:` and `after:` are the two list fields: `+=PATH` adds, `-=PATH` removes, `=[a, b]`
+replaces, and `+=[a, b]` takes several at once. A path the footprint already covers — named, or
+under one of its globs — is not added twice, and a `-=` that would remove nothing is refused
+rather than reported as done. A Task never ends with an empty `writes:`.
+
+Two refusals are the record protecting itself, not a bug:
+
+- `I3: writes: intersects Active task T-0412's writes:` — another Active Task holds that path. One
+  of the two has to finish first; the card is left exactly as it was.
+- An approvals-protected path — it goes to its approval class, not into a footprint.
+
+Most widenings are not yours to make. When a coder session's REPORT names `needs writes:`, or its
+branch goes red on a file outside the footprint, the tick widens the Task itself and sends the same
+session back as a correction with no round spent. The command above is for the card in front of
+you — a plan that under-scoped a Task you are about to start, or a footprint you are narrowing.
 
 ## The direct lane, small Features, and comparing them
 
