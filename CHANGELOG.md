@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.183 — 2026-10-06
+
+### Features landed
+
+- The shadow ledger now settles decisions against outcomes and reports a confidence bound via `asf deciders`; cloud-run spend that used to show as unknown now estimates from comparable priced runs when there's enough history (#836)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.183"`
+
 ## v0.1.182 — 2026-10-06
 
 ### Features landed
