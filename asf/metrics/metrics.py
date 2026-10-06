@@ -30,7 +30,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-from asf import env, gh_limit, github, gitpush, mutation_guard, refguard
+from asf import ci_jobs, ci_pool, env, gh_limit, github, gitpush, mutation_guard, refguard
 from asf import tokens
 from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
                              Conventions)
@@ -184,7 +184,13 @@ SCHEMAS = {
 JOB_SCHEMA = {'name': (('str',), REQ), 'conclusion': (('str',), REQ), 'runner': (('str', 'null'), None),
               'minutes': (('num',), REQ), 'failed_step': (('str', 'null'), None),
               # seconds from the job's creation to a runner picking it up (the CI queue wait)
-              'queued_s': (('num', 'null'), None)}
+              'queued_s': (('num', 'null'), None),
+              # the job's limit in minutes — its `timeout-minutes`, else the host's default;
+              # None when the workflow could not be read (F-0131 C8)
+              'limit': (('num', 'null'), None),
+              # why a cancelled job was cancelled: asf.ci_jobs.CAUSES, or None when the job did
+              # not end cancelled — or when it was imported before F-0131 (C9)
+              'cause': (('str', 'null'), None)}
 HINTS_KEY = 'match_hints'   # {title, body, prs, files, pr_info}: matcher input, never stored
 
 
@@ -1961,8 +1967,39 @@ def ci_runs_held(root, days):
     return {(e['run'], e['attempt']) for e in read_stream(root, 'ci', days)}
 
 
+def job_limits(product):
+    """`{job or display name: minutes}` declared by the product's workflows, `{}` when there is
+    no product or the host cannot be read. The one host read this module does not make through
+    `gh`: it goes through `asf.ci_pool.backend_for`, the tree's one reader of workflow files,
+    with the product's own login (F-0131 C7)."""
+    if product is None:
+        return {}
+    backend = ci_pool.backend_for(product)
+    if backend is None:
+        return {}
+    try:
+        return backend.timeouts()
+    except ci_pool.BackendError:
+        return {}
+
+
+MATRIX_SUFFIX = re.compile(r' \(.*\)$')
+
+
+def _limit_of(name, limits):
+    """The limit for an API job name: the declared minutes for that name, for the same name
+    without its matrix values (`tests (3.12)` → `tests`, P3), else the host's default — and
+    None when no workflow could be read at all, because then nothing is known (C4, C8)."""
+    if not limits:
+        return None
+    for key in (name, MATRIX_SUFFIX.sub('', name)):
+        if key in limits:
+            return limits[key]
+    return ci_pool.DEFAULT_JOB_TIMEOUT_MIN
+
+
 def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, conv=None,
-                since=None, held=(), report=None):
+                since=None, held=(), report=None, limits=None):
     """Finished CI runs since `since` (or the last `days` days when `since` is None), with their
     jobs, as validated events (not yet appended) — except a run already in `held` (`(run,
     attempt)` pairs the stream already holds, D4), whose jobs and PR info are not re-fetched. A
@@ -1999,6 +2036,7 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
     with ThreadPoolExecutor(8) as pool:
         all_jobs = list(pool.map(jobs_of, fresh))
     pr_cache = {}
+    limits = job_limits(product) if limits is None else limits
 
     def info(n):
         if n not in pr_cache:
@@ -2010,10 +2048,14 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
         js = [{'name': j['name'], 'conclusion': j.get('conclusion') or 'unknown', 'runner': j.get('runner_name'),
                'minutes': mins(j.get('started_at'), j.get('completed_at')) if j.get('started_at') and j.get('completed_at') else 0,
                'failed_step': (j.get('failed') or [None])[0],
-               'queued_s': queued_s(j.get('created_at'), j.get('started_at'))} for j in jobs]
+               'queued_s': queued_s(j.get('created_at'), j.get('started_at')),
+               'limit': _limit_of(j['name'], limits)} for j in jobs]
         branch = r['head_branch'] or ''
         prs = r['pr'][0] if r['pr'] else None
         batch = branch if conv.branch_kind(branch) == 'batch' else None
+        superseded = r.get('conclusion') == 'cancelled' and any(c > r['created_at'] for c in by_branch[branch])
+        for j in js:                       # the cause needs every row of the run, so: a second pass
+            j['cause'] = ci_jobs.cancel_cause(j, js, r.get('conclusion') or 'unknown', superseded)
         hints = {}
         if batch and batch_prs.get(batch):
             hints['prs'] = batch_prs[batch]
@@ -2026,7 +2068,7 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, 
             'pr': prs, 'batch': batch, 'conclusion': r.get('conclusion') or 'unknown', 'attempt': r.get('run_attempt') or 1,
             'minutes': sum(j['minutes'] for j in js), 'jobs': js,
             'cancelled_minutes': sum(j['minutes'] for j in js if j['conclusion'] == 'cancelled'),
-            'superseded': r.get('conclusion') == 'cancelled' and any(c > r['created_at'] for c in by_branch[branch]),
+            'superseded': superseded,
             HINTS_KEY: hints})
     if report is not None:
         report.update(since=since, listed=len(runs), held=len(runs) - len(fresh), fetched=len(fresh),

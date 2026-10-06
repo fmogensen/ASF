@@ -222,6 +222,65 @@ class Schema(Base):
         self.assertIn('no rule matched', ev['item_reason'])
 
 
+class JobCauseImport(Base):
+    RUNS = [{'id': 10, 'name': 'ci', 'head_branch': 'cloud/x', 'head_sha': 'a' * 40, 'conclusion': 'cancelled',
+             'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:30:00Z', 'run_attempt': 1, 'pr': []},
+            {'id': 11, 'name': 'ci', 'head_branch': 'cloud/y', 'head_sha': 'b' * 40, 'conclusion': 'cancelled',
+             'created_at': '2026-09-21T02:00:00Z', 'updated_at': '2026-09-21T02:01:00Z', 'run_attempt': 1, 'pr': []}]
+    JOBS = {
+        10: [{'name': 'tests (3.12)', 'conclusion': 'cancelled', 'runner_name': 'box1',
+              'started_at': '2026-09-21T01:00:00Z', 'completed_at': '2026-09-21T01:30:00Z', 'failed': []},
+             {'name': 'tests (3.13)', 'conclusion': 'success', 'runner_name': 'box2',
+              'started_at': '2026-09-21T01:00:00Z', 'completed_at': '2026-09-21T01:05:00Z', 'failed': []}],
+        11: [{'name': 'tests (3.12)', 'conclusion': 'cancelled', 'runner_name': 'box1',
+              'started_at': '2026-09-21T02:00:00Z', 'completed_at': '2026-09-21T02:01:00Z', 'failed': []},
+             {'name': 'tests (3.13)', 'conclusion': 'cancelled', 'runner_name': 'box2',
+              'started_at': '2026-09-21T02:00:00Z', 'completed_at': '2026-09-21T02:01:00Z', 'failed': []}],
+    }
+
+    def fake_gh_lines_answered(self, args, timeout=300):
+        joined = ' '.join(args)
+        if '/jobs' in joined:
+            run = int(joined.split('/runs/')[1].split('/')[0])
+            return self.JOBS[run], True
+        return self.RUNS, True
+
+    def events(self, limits):
+        with mock.patch.object(metrics, 'gh_lines_answered', side_effect=self.fake_gh_lines_answered):
+            return {e['run']: e for e in metrics.ci_from_api(
+                2, 'ci', {}, self.items, repo_slug='sample/sample', limits=limits)}
+
+    def test_a_job_at_its_limit_is_timeout_its_green_sibling_is_not(self):
+        evs = self.events({'tests': 30})
+        js = {j['name']: j for j in evs[10]['jobs']}
+        self.assertEqual((js['tests (3.12)']['limit'], js['tests (3.12)']['cause']), (30, 'timeout'))
+        self.assertEqual((js['tests (3.13)']['limit'], js['tests (3.13)']['cause']), (30, None))
+
+    def test_a_run_wide_cancel_is_failure_on_every_leg(self):
+        evs = self.events({'tests': 30})
+        js = {j['name']: j for j in evs[11]['jobs']}
+        self.assertEqual(js['tests (3.12)']['cause'], 'failure')
+        self.assertEqual(js['tests (3.13)']['cause'], 'failure')
+
+    def test_no_limit_known_claims_nothing(self):
+        # C4: with limits == {}, the cancelled leg beside a green sibling has no limit to have
+        # run to, so it reads failure rather than runner-loss.
+        evs = self.events({})
+        js = {j['name']: j for j in evs[10]['jobs']}
+        self.assertIsNone(js['tests (3.12)']['limit'])
+        self.assertEqual(js['tests (3.12)']['cause'], 'failure')
+
+    def test_validate_fills_limit_and_cause_with_none(self):
+        self.assertNotIn('limit', job('x'))             # the fixture helper carries neither key
+        self.assertNotIn('cause', job('x'))
+        ev = metrics.validate('ci', ci_event(99), self.items)
+        for j in ev['jobs']:
+            self.assertIsNone(j['limit'])
+            self.assertIsNone(j['cause'])
+        with self.assertRaises(metrics.SchemaError):
+            metrics.validate('ci', ci_event(99, jobs=[dict(job('x'), bogus=1)]), self.items)
+
+
 class Append(Base):
     def test_cli_appends_and_is_idempotent(self):
         payload = json.dumps(ci_event(77))
@@ -1348,7 +1407,8 @@ class Backfill(Base):
                 mock.patch.object(metrics, 'pr_info', side_effect=lambda n, *a, **kw: prs.get(n)), \
                 mock.patch.object(metrics, 'today', return_value='2026-09-21'), \
                 mock.patch.object(env, 'ASF_HOME', home), \
-                mock.patch.object(env, 'load_product', return_value=stub_product):
+                mock.patch.object(env, 'load_product', return_value=stub_product), \
+                mock.patch.object(metrics, 'job_limits', return_value={}):
             rc, out, _ = run_cli(self.root, *argv)
             self.assertEqual(rc, 0)
             self.assertIn('ci appended: 2', out)
