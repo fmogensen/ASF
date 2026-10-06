@@ -589,10 +589,11 @@ class ProductHarvestTests(unittest.TestCase):
             sh(['git', 'commit', '-qm', subject], cwd=self.worker)
         sh(['git', 'push', '-q', 'origin', branch], cwd=self.worker)
 
-    def session(self, job, item, branch, rc=0):
+    def session(self, job, item, branch, rc=0, worktree=None):
         with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
             f.write(json.dumps({'job': job, 'item': item, 'branch': branch, 'account': 'test',
-                                'pid': dead_pid(), 'started': '2026-09-21T00:00:00Z'}) + '\n')
+                                'pid': dead_pid(), 'started': '2026-09-21T00:00:00Z',
+                                **({'worktree': worktree} if worktree else {})}) + '\n')
             f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
                                 'end_reason': 'finished' if rc == 0 else 'failed', 'rc': rc}) + '\n')
 
@@ -846,10 +847,26 @@ class ProductHarvestTests(unittest.TestCase):
         self.push_lane('task/T-0001', [('task(T-0001): the change', {'a.txt': 'a\n'})])
         sh(['git', 'push', '-q', 'origin', 'task/T-0001:main'], cwd=self.worker)
         sh(['git', 'push', '-q', 'origin', '--delete', 'task/T-0001'], cwd=self.worker)
-        self.session('task-t-0001', 'T-0001', 'task/T-0001')
+        head = self.origin_main()
+        # round E #24: on-trunk only on a head the trunk holds — here the run's own worktree
+        wt = os.path.join(self.base, 'wt-t-0001')
+        sh(['git', 'clone', '-q', self.origin, wt])
+        self.session('task-t-0001', 'T-0001', 'task/T-0001', worktree=wt)
         results, _lines = self.harvest(self.product())
         self.assertEqual(results, {'task/T-0001': 'landed'})
         self.assertEqual(self.record('task/T-0001').get('harvested'), self.origin_main())
+        lane_rec = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl')) \
+            ['task/T-0001']['lane']
+        self.assertEqual((lane_rec['method'], lane_rec['head']), ('on-trunk', head))
+
+    def test_a_finished_run_whose_branch_is_gone_with_no_head_to_prove_is_not_landed(self):
+        # round E #24: no record, no REPORT, no worktree — nothing shows the trunk holds its work
+        self.push_lane('task/T-0001', [('task(T-0001): the change', {'a.txt': 'a\n'})])
+        sh(['git', 'push', '-q', 'origin', 'task/T-0001:main'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', '--delete', 'task/T-0001'], cwd=self.worker)
+        self.session('task-t-0001', 'T-0001', 'task/T-0001')
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {})
 
     def test_a_live_or_unfinished_run_on_a_merged_branch_is_left_open(self):
         self.push_lane('task/T-0001', [('task(T-0001): the change', {'a.txt': 'a\n'})])

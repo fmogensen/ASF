@@ -41,6 +41,19 @@ def publish(root, path, message):
     return False
 
 
+#: How many times a record commit is built again when another commit landed in the checkout
+#: while it was being built (a tick's record push, a second console command).
+COMMIT_RETRIES = 5
+#: Seconds between those attempts (times the attempt).
+COMMIT_RETRY_S = 0.5
+#: git's words for a lock another process holds (``index.lock``, ``cannot lock ref``).
+_LOCK_WORDS = ('.lock', 'cannot lock ref', 'unable to lock')
+
+
+class ConcurrentCommit(RuntimeError):
+    """Another process kept committing to the record checkout through every retry."""
+
+
 def commit_paths(root, rels, message):
     """Commit ``rels`` as the working tree of the record checkout ``root`` has them, with the
     derived record they imply (:func:`asf.record.index.refresh` over ``HEAD`` plus ``rels``),
@@ -48,14 +61,39 @@ def commit_paths(root, rels, message):
     checkout rides along; afterwards the checkout's index and working tree hold what was
     committed for those paths — a card the operator had edited by hand keeps the edit, with its
     Children/Backlinks brought up to date. False when there was nothing to commit; a refusal
-    by the pre-commit raises (``subprocess.CalledProcessError``), its output on stderr."""
+    by the pre-commit raises (``subprocess.CalledProcessError``), its output on stderr.
+
+    The scratch index is built from the ``HEAD`` read at the start (its base). Another commit in
+    the same checkout meanwhile (a tick's record push, a second console command) would make the
+    new commit's parent that one while its tree is the base's — reverting it silently — or fail
+    on a lock. Either way the attempt is undone (the branch put back to the other commit, only
+    when it still names ours) and built again on the new ``HEAD``, up to
+    :data:`COMMIT_RETRIES` times; then :class:`ConcurrentCommit`."""
+    import time
     from asf.record.core import title_scrub
+    scrub = title_scrub(root)
+    for attempt in range(COMMIT_RETRIES):
+        got = _commit_once(root, rels, message, scrub)
+        if got is not None:
+            return got
+        time.sleep(COMMIT_RETRY_S * (attempt + 1))
+    raise ConcurrentCommit(f'record commit "{message}": the checkout kept moving under it '
+                           f'({COMMIT_RETRIES} attempts)')
+
+
+def _head(root):
+    p = _run_git(root, ['rev-parse', '--verify', '-q', 'HEAD'])
+    return p.stdout.strip() if p.returncode == 0 else ''
+
+
+def _commit_once(root, rels, message, scrub):
+    """One attempt of :func:`commit_paths`: True/False as it returns, None to try again."""
     from asf.record.index import refresh
     dirty = set(_dirty(root))
-    scrub = title_scrub(root)
+    base = _head(root)
     with tempfile.TemporaryDirectory(prefix='asf-publish-') as scratch:
         tree_dir = os.path.join(scratch, 'tree')
-        git_env = tree.head_index(root, os.path.join(scratch, 'index'))
+        git_env = tree.head_index(root, os.path.join(scratch, 'index'), rev=base or None)
         tree.lay_out(root, tree_dir, tree.record_paths(), git_env)
         for rel in rels:
             _copy(os.path.join(root, rel), os.path.join(tree_dir, rel))
@@ -71,10 +109,24 @@ def commit_paths(root, rels, message):
                  git_env=git_env).check_returncode()
         if _run_git(root, ['diff', '--cached', '--quiet'], git_env=git_env).returncode == 0:
             return False
+        if _head(root) != base:
+            return None  # another commit landed while this one was built: build it again
         done = _run_git(root, ['commit', '-q', '-s', '-m', message], git_env=git_env)
         if done.returncode != 0:
+            if _head(root) != base or any(w in done.stderr for w in _LOCK_WORDS):
+                return None  # a lock another commit held, or HEAD moved under the commit
             sys.stderr.write(done.stdout + done.stderr)
             done.check_returncode()
+        new = _head(root)
+        parent = _run_git(root, ['rev-parse', '--verify', '-q', f'{new}^']).stdout.strip() \
+            if new else ''
+        if base and parent != base:
+            # HEAD moved between the check and the commit: ours sits on the other commit with
+            # the base's tree. Put the branch back on the other commit (only while it still
+            # names ours) and build again
+            _run_git(root, ['update-ref', '-m', 'asf: record commit raced, built again',
+                            'HEAD', parent, new])
+            return None
         _run_git(root, ['reset', '-q', '--', *paths])
         for p in paths:
             if p in derived and p in dirty and p != 'index.json':

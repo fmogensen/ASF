@@ -725,6 +725,19 @@ def _place_worktree(product, repo, job, branch):
         if what:
             raise SpawnError(why, clear=f'git -C {repo} worktree remove --force {candidate}'
                                         f'  # after checking nothing in it is wanted')
+        if not _is_checkout(candidate):
+            # a leftover directory with no git checkout in it (a product's T-0091: a review
+            # session ran in one, and its review could never be filed) is never reused: it is
+            # set aside in the trash, and the launch cuts a real worktree below
+            ok, where = _discard(product, candidate)
+            if not ok:
+                raise SpawnError(f'{candidate} is a leftover directory with no git checkout and '
+                                 f'could not be set aside: {where}')
+            print(f'set aside {candidate}: a leftover directory with no git checkout, not reused '
+                  f'({where})', file=sys.stderr)
+            if candidate == held:
+                held = None
+            continue
         current = _worktree_branch(candidate)
         # another branch checked out (a detached tree; one mid-rebase is settled before launch)
         checkout = candidate == path and current not in (branch, 'HEAD', '')
@@ -913,6 +926,16 @@ def _local_branch_exists(repo, branch):
     p = subprocess.run(['git', 'rev-parse', '--verify', '-q', f'refs/heads/{branch}'], cwd=repo,
                        capture_output=True, text=True)
     return p.returncode == 0
+
+
+def _is_checkout(path):
+    """True when ``path`` is the top of a git checkout of its own (a linked worktree's ``.git``
+    file or a repository's ``.git``) — never a plain directory, nor one inside another checkout."""
+    if not os.path.exists(os.path.join(path, '.git')):
+        return False
+    from asf import gitops
+    p = gitops.git(['rev-parse', '--show-toplevel'], path)
+    return p.ok and os.path.realpath(p.data) == os.path.realpath(path)
 
 
 def _worktree_branch(path):

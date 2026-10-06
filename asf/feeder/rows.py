@@ -128,6 +128,8 @@ WAITS_LANDING = 'WAITS ON landing'
 #: a correction already adjudicated at this same hold (B-0128): no session, no round, until the
 #: PR merges or closes, or a new push moves the head
 WAITS_MERGE = 'WAITS ON merge'
+#: a pushed item sent BACK with no correction pending (:func:`pushed_rows`)
+WAITS_LANE = 'WAITS ON lane'
 #: an Epic past its typed budget (F-0052): this module owns the action word, asf.budget the money
 WAITS_BUDGET = 'WAITS ON budget'
 #: ``priority: later`` on an item, its Feature or its Epic: the product put the work aside
@@ -198,7 +200,7 @@ PR_RE = re.compile(r'\bPR #\d+\b')
 OPEN_PR_RE = re.compile(r'\bPR #(\d+) OPEN\b')
 #: the occupancy keys that say an item's work is pushed: a lane state, a wait on the lane, a
 #: correction (:func:`pushed_ids`)
-PUSHED_KEYS = ('review', 'landing', 'waiting_landing', 'corrections')
+PUSHED_KEYS = ('review', 'landing', 'waiting_landing', 'corrections', 'back')
 #: ingest's line for a spec that sits on a branch, not the trunk (``spec on <branch>[ (review …)]``)
 SPEC_ON_BRANCH_RE = re.compile(r'^spec on (?!origin/)(\S+)')
 #: ingest's line for a plan that sits on a branch, not the trunk (``plan on <branch>[ (review …)]``)
@@ -2391,8 +2393,14 @@ def pushed_rows(items, product, pushed, occupancy, spoken):
         f = _task_feature(items, item) if kind == 'task' else feature_of(items, item)
         number = open_pr_of(item)
         what = f'PR #{number}' if number else 'its branch'
+        back = (occ.get('back') or {}).get(iid)
         if iid in waiting:
             action = f'{WAITS_LANDING}: {what} {waiting[iid]}'
+        elif back:
+            # sent back with no correction pending: the lane returns it to PUSHED on its next
+            # pass ("correction answered") — no run is missing, and no session is owed
+            action = (f"{WAITS_LANE}: {what} sent back ({back.get('reason') or 'BACK'}) on "
+                      f"{back.get('branch')}, no correction pending — the lane re-reads it")
         else:
             action = f'{WAITS_LANDING}: {what} open, no run holds it — the lane takes it up'
         row = Row(tier=review_tier(item), kind=PUSHED_LAND, item_id=iid,

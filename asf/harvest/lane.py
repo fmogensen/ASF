@@ -1508,6 +1508,30 @@ class Lane:
         return bool(a) and H.sh(['git', 'merge-base', '--is-ancestor', a, b],
                                 cwd=self.repo).returncode == 0
 
+    def full_sha(self, sha):
+        """``sha`` (a prefix the repo knows) as its full 40 hex, else as given."""
+        from asf import gitops
+        return gitops.rev_parse(self.repo, f'{sha}^{{commit}}') or sha
+
+    @staticmethod
+    def run_heads(run):
+        """The heads a finished run's facts name for its branch, gone from origin: the sha its
+        REPORT's ``pushed:`` line names, and its worktree's HEAD while the worktree stands."""
+        from asf import gitops
+        from asf.workers import report as report_mod
+        out = []
+        rec = lifecycle.result_of(run) or {}
+        text = rec.get('result') if isinstance(rec, dict) else ''
+        m = lifecycle.PUSHED_SHA_RE.search(report_mod.parse(text or '').get('pushed') or '')
+        if m:
+            out.append(m.group(0).lower())
+        wt = (run or {}).get('worktree')
+        if wt and os.path.isdir(wt):
+            head = gitops.rev_parse(wt, 'HEAD')
+            if head:
+                out.append(head)
+        return out
+
     def gather(self, prs=True):
         """``{branch: facts}`` for every lane branch; ``prs``: read the host's PR list (the
         in-process pass), else take the PR number off the lane record (the gate pass)."""
@@ -1607,10 +1631,14 @@ class Lane:
         if rec.get('state') == MERGING and rec.get('sha'):
             f['merging_landed'] = self.is_ancestor(rec['sha'], f'origin/{trunk}')
         if not head:
-            if rec.get('head'):
-                f['gone_merged'] = self.is_ancestor(rec['head'], f'origin/{trunk}')
-            elif not rec and lifecycle.eligible(run):
-                f['gone_merged'] = True
+            # a branch gone from origin is MERGED on-trunk only on a head the trunk holds: the
+            # record's, else the sha the run's REPORT says it pushed. Never on its word alone (a
+            # product's lane wrote head-less on-trunk records for many items on 2026-09-28)
+            heads = [rec['head']] if rec.get('head') else (
+                self.run_heads(run) if not rec and lifecycle.eligible(run) else [])
+            gone = next((h for h in heads if self.is_ancestor(h, f'origin/{trunk}')), None)
+            if gone:
+                f['gone_merged'], f['trunk_head'] = True, self.full_sha(gone)
             return f
         ahead = H.sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{b}'],
                      cwd=repo).stdout.strip()
@@ -2266,7 +2294,16 @@ class Lane:
             self.out(f'DRY: would mark {b} landed — {line}')
             self.results[b] = 'dry'
             return None
-        rec = self.record(f, MERGED, reason, sha=sha, method=method)
+        # an on-trunk record carries the head the trunk holds (the branch's, or — the branch
+        # gone — the one :meth:`gather` proved an ancestor of the trunk); with none it is no
+        # landing at all, and nothing is written
+        trunk_head = f.get('head') or f.get('trunk_head')
+        if method == 'on-trunk' and not trunk_head:
+            self.out(f'not landed {b}: on-trunk with no head the trunk holds — nothing written')
+            self.results[b] = 'unproven'
+            return None
+        rec = self.record(f, MERGED, reason, sha=sha, method=method,
+                          head=None if f.get('head') else f.get('trunk_head'))
         self.write(f, rec, harvested=sha, correction=None)
         f['prev'] = rec
         if f.get('head') and method in ('on-trunk', 'ff'):
@@ -3211,7 +3248,7 @@ def precheck(lane, entries):
     its checks alone (``'ci'``; R25's docs-only trunk move counts as that). The ready ones."""
     product, conv, out = lane.product, lane.conv, lane.out
     ready, shared_taken = [], None
-    for f in entries:
+    for f in shared_path_order(lane, entries):
         b, rec = f['branch'], f.get('prev') or {}
         if has_adjudicate_commit(lane.repo, lane.trunk, b):
             out(f'held {b}: ruling belongs in the record')
@@ -3263,11 +3300,36 @@ def precheck(lane, entries):
             if shared_taken:
                 out(f'waiting {b}: touches {hits[0]}, a shared path {shared_taken} already '
                     f'takes this tick')
-                wait(lane, f, 'shared-path')
+                wait(lane, f, SHARED_PATH)
                 continue
             shared_taken = b
         ready.append(f)
     return ready
+
+
+#: the WAITING reason of a branch a shared path held back this tick (:func:`precheck`)
+SHARED_PATH = 'shared-path'
+
+
+def shared_path_order(lane, entries):
+    """``entries`` in the order :func:`precheck` takes them: a branch that has waited on a
+    shared path (WAITING ``shared-path``) for at least ``lane.shared_path_aging`` first, the
+    oldest wait first; every other entry after them in its own order. Only one branch a tick
+    takes a shared file, and the first one to ask won it every tick — a product's green code PR
+    (T-0389, #1091) starved behind a stream of document PRs on one shared registry file."""
+    from asf.conventions import DEFAULT_LANE_SHARED_PATH_AGING, duration_seconds
+    reader = getattr(lane.conv, 'lane_shared_path_aging_s', None)
+    aging = reader() if reader else duration_seconds(DEFAULT_LANE_SHARED_PATH_AGING)
+    now = getattr(lane, 'now', None) or time.time()
+    aged = []
+    for i, f in enumerate(entries):
+        rec = f.get('prev') or {}
+        at = _parse_at(rec.get('at')) if rec.get('state') == WAITING \
+            and rec.get('reason') == SHARED_PATH else None
+        if at is not None and now - at >= aging:
+            aged.append((at, i))
+    first = [entries[i] for _at, i in sorted(aged)]
+    return first + [f for i, f in enumerate(entries) if i not in {j for _a, j in aged}]
 
 
 def wait(lane, f, reason, result='waiting', state=WAITING, **extra):

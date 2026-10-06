@@ -66,6 +66,11 @@ conventions:
   # exact sha. A moved member head or a trunk that moved past the batch drops it and cuts it
   # again; a red batch splits in two, a red batch of one goes back to its session).
   # merge: manual
+  # The same key as a map adds the opt-in factory-only rule (default off): a CI check
+  # (`python3 -m asf.factory_only --product-file <this file>` on pull requests) refuses a PR into
+  # the trunk whose head branch is under none of branch_prefixes. Escapes: a release tag, and a
+  # PR touching nothing but bot_paths (default [CHANGELOG.md]).
+  # merge: {mode: manual, factory_only: false, bot_paths: [CHANGELOG.md]}
   # the queue's shape under `merge: queue` (defaults shown): the ref prefix the product's CI runs
   # its full matrix on, PRs per batch, batches in flight (each stacked on the one before), and how
   # long a batch may wait for its checks before it is cut again.
@@ -197,12 +202,15 @@ conventions:
   #   forbidden_markers: ['(?i)\[\s*legal\s*:']
   # the PR lane: which landing class needs an approved ASF review before the gate (none |
   # required; default docs: none, code: required), and how long an open lane state may sit
-  # unchanged and unheld before it is stale (<n>s|m|h|d, default 2d). Block maps only.
+  # unchanged and unheld before it is stale (<n>s|m|h|d, default 2d). One branch a tick takes a
+  # shared_paths/shared_writes file; a branch held WAITING on one for shared_path_aging goes first
+  # next time, oldest wait first (<n>s|m|h|d, default 30m; 0s: first come). Block maps only.
   lane:
     review:
       docs: none
       code: required
     stale_after: 2d
+    shared_path_aging: 30m
   # a command run in every fresh worker worktree before its session starts (default: none).
   # worktree_setup: make deps
   # GitHub access is per product, not per account: a fine-grained token covers one GitHub owner,
