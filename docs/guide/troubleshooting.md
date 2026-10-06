@@ -85,6 +85,7 @@ it never removes the interpreter running it, so that last step is always yours.
 | --- | --- | --- |
 | `NEEDS OPERATOR: run asf schema-migrate — <detail>` (exit 3) | the record's schema and the package's disagree; writes are refused | `asf schema-migrate --product <p> --drain`; if the record is newer, reinstall the newer `asf` |
 | `NEEDS OPERATOR: rule check <timed out\|failed>: R-nnnn — 3 runs in a row …` | a rule's check script is slow or broken — a factory problem, not a product Bug | fix the script, or raise `ASF_RULE_CHECK_TIMEOUT` in the tick job's environment ([rule cards](product-config.md#rule-cards)) |
+| `NEEDS OPERATOR: S1 intake card <file> is stuck on an intake question — …` | an intake card the groom could not type reads S1, and its question is unanswered | answer its `inbox:<file>` line in the groom file (`/asf:groom`), or `asf groom --product <p>` if there is no file yet |
 
 ### The groom digest
 
