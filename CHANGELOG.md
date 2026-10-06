@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.172 — 2026-10-06
+
+### Features landed
+
+- `asf status` has a `CI reds` row (reds 24h by class: real · flaky · ours, plus replay / tooling / check when non-zero), `asf scorecard` shows the red PR runs per class with a 7-day trend plus run-window CI targets (first pass ≥ 0.9 over 50 PRs, 0 runner-class reds in 100 runs, last 20 trunk runs green), and release-readiness gains criterion 12 "PR CI healthy"; criteria 3/4/6/10 no longer misread cancelled runs, release commits or missing data (#820)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.172"`
+
 ## v0.1.171 — 2026-10-06
 
 ### Features landed
