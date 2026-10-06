@@ -2336,9 +2336,16 @@ class TestHealth(Home):
             self.assertIn('redact: a.txt:1', run['correction']['text'])
             self.assertNotIn('commit and push what you have', run['correction']['text'])
             self.assertIn(('refused', 'published', line), found)
+            # F-0228: the pair it was refused at, and no second push while it reads the same
+            self.assertEqual(run['publish_refused_heads'],
+                             git('rev-parse', 'HEAD', cwd=wt) + ' '
+                             + (self._ls_remote_one(wt, branch) or '-'))
+            found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+            self.assertEqual(pub.call_count, 1)          # was 2: the hook is not run again
+            self.assertFalse(any(j == 'refused' and w == 'published' for j, w, _d in found), found)
+            self.commit(wt, 'another')                   # the head moves: the refusal is forgotten
             found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
             self.assertEqual(pub.call_count, 2)
-            self.assertFalse(any(j == 'refused' and w == 'published' for j, w, _d in found), found)
 
     def test_b0063_stale_local_lane_branches_are_pruned_strays_named(self):
         # thirty-seven local branches sat in the scheduler's checkout after their worktrees

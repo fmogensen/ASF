@@ -113,7 +113,7 @@ TRANSITIONS = {
 #: A run's own fields: they belong to one launch and never fold into the next (B-0041).
 RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
               'harvest', 'correction', 'rounds', 'stop_tip', 'capped', 'runtime_session',
-              'resumed', 'continued', 'publish_refused', 'dead_class')
+              'resumed', 'continued', 'publish_refused', 'dead_class', 'publish_refused_heads')
 
 FINISHED = 'finished'
 #: A session whose deliverable was never a commit, and which delivered it: not a failure, and not
@@ -1601,6 +1601,7 @@ class Evidence:
     alive: bool = False          #: the pid answers
     worktree: bool = False       #: the worktree directory exists
     uncommitted: int = 0         #: files in the worktree not committed
+    head: str = ''               #: the worktree's HEAD sha; '' when it could not be read
     remote_sha: str = ''         #: ``origin/<branch>``'s tip; '' when the branch is not on origin
     head_on_remote: bool = False  #: the worktree's HEAD is contained in ``origin/<branch>``
     unpushed: int = 0            #: commits on HEAD not on ``origin/<branch>`` (``origin/<main>``
@@ -2402,6 +2403,7 @@ def gather(product, run, alive=None, worktree=None, heads=None, liveness=None):
         return ev
     ev.worktree = True
     ev.uncommitted = len([ln for ln in st.stdout.splitlines() if ln.strip()])
+    ev.head = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
     if branch:
         known = heads.sha(wt, branch) if heads is not None else None
         if known is None:
