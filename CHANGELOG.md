@@ -2,6 +2,26 @@
 
 One entry per released version, newest first.
 
+## v0.1.167 — 2026-10-06
+
+### Features landed
+
+- The hook derives the index it cannot find (#816)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.167"`
+
+## v0.1.166 — 2026-10-06
+
+### Features landed
+
+- One grace, one predicate, one index — and the stop reading them instead of its own arithmetic (#815)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.166"`
+
 ## v0.1.165 — 2026-10-06
 
 ### Features landed
