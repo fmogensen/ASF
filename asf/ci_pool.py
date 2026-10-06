@@ -812,7 +812,7 @@ def parse_timeouts(text):
     job's own ``timeout-minutes`` sits at the indent of its mapping keys, beside ``runs-on:``,
     while a **step's** ``timeout-minutes`` is deeper, under ``steps:``. A job that declares none is
     absent — its limit is the host's (:data:`DEFAULT_JOB_TIMEOUT_MIN`), which is not this parser's
-    to invent. A non-integer or templated value (``${{ … }}``) is skipped.
+    to invent. A non-integer, zero or templated value (``${{ … }}``) is skipped (#26).
     """
     lines = text.splitlines()
     out = {}
@@ -847,8 +847,8 @@ def parse_timeouts(text):
             continue
         if stripped.startswith('timeout-minutes:'):
             value = stripped[len('timeout-minutes:'):].strip()
-            if _INT_RE.match(value):
-                minutes = int(value)
+            if _INT_RE.match(value) and int(value) > 0:
+                minutes = int(value)        # 0 is no limit of the job's own, never a passed one
         elif stripped.startswith('name:'):
             name = stripped[len('name:'):].strip().strip('"\'')
         else:
@@ -1574,6 +1574,8 @@ def register(subparsers):
     env.add_product_arg(c)
     c.add_argument('--apply', action='store_true', help='take the census and write the labels')
     c.set_defaults(run=ci_census.cmd_census)
+    from asf import ci_heartbeat
+    ci_heartbeat.register(sub)
     from asf import ci_measure
     ci_measure.register(sub)
     from asf import ci_queue

@@ -280,6 +280,12 @@ class JobTimeouts(unittest.TestCase):
         self.assertEqual(ci_pool.parse_timeouts(text),
                          {'a': 45, 'c': 20, 'd': 15, 'Deploy Job': 15})
 
+    def test_a_zero_timeout_is_no_declared_timeout(self):
+        # #26: `timeout-minutes: 0` is no limit of the workflow's own, never one already passed
+        text = '\n'.join(['on: push', 'jobs:', '  site:', '    runs-on: x',
+                          '    timeout-minutes: 0', '  b:', '    timeout-minutes: 7', ''])
+        self.assertEqual(ci_pool.parse_timeouts(text), {'b': 7})
+
     def test_no_jobs_at_all(self):
         self.assertEqual(ci_pool.parse_timeouts('on: push\n'), {})
 

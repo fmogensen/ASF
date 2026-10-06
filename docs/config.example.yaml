@@ -278,5 +278,17 @@ capacity:
 #   #   command: my-vault read {ref}
 #   #   timeout_s: 30
 
+# ci_heartbeat: the self-hosted CI boxes are the product's ci.pool (each runner's `box:`); a
+# heartbeat watchdog and its installer read them from `asf ci boxes --product <p>` (box=target
+# lines; --missing: only boxes with no fresh heartbeat). targets: a box's ssh target (default the
+# box name, an ssh alias). seen_file: {box: epoch} of the newest heartbeat the watchdog read
+# (default state/ci-heartbeat/seen.json under the ASF home); `asf doctor` is red for a pool box
+# with none newer than stale_min minutes (default 10). No seen file: no doctor row.
+# ci_heartbeat:
+#   stale_min: 10
+#   seen_file: ~/.ASF/state/ci-heartbeat/seen.json
+#   targets:
+#     box-1: user@box-1.example
+
 # Everything ASF reads and writes lives under ~/.ASF: products/, state/<product>/ (the session
 # ledger, the worktrees, the tick's record clone), logs/. Set $ASF_HOME to move all of it.

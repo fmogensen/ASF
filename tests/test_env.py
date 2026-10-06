@@ -668,6 +668,7 @@ _PLANNED_FLAG_VALUES = {
     'head_capped': 'true', 'unknown_holds': 'true', 'models.cheap_kinds': '[review, groom]',
     'roots_unverified_hours': '24', 'roots_park_stale_days': '3', 'roots_min_dependants': '5',
     'queue_store': 'on', 'store_shared': 'on', 'docs_review': 'skip', 'id_claim': 'push',
+    'correction_rebase_behind': '300',
 }
 PLANNED_PRODUCT = _dedent("""
     product: sample

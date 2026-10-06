@@ -1398,6 +1398,8 @@ def run(product_name):
         rows.append(('ci pool', required, ok, detail))
     for required, ok, detail in check_ci_runners(product):
         rows.append(('ci runners', required, ok, detail))
+    for required, ok, detail in check_ci_heartbeat(product):
+        rows.append(('ci heartbeat', required, ok, detail))
     for required, ok, detail in check_queue_bypass(product):
         rows.append(('queue bypass', required, ok, detail))
     for required, ok, detail in check_queue_cancels(product):
@@ -1550,6 +1552,17 @@ def check_ci_pool(product):
     provider-like labels in ``runs-on``, missing or offline runners. No rows without a pool."""
     from asf import ci_pool
     return ci_pool.doctor_rows(product)
+
+
+def check_ci_heartbeat(product, now=None):
+    """[(required, ok, detail)] — every ``ci.pool`` box with a heartbeat in the last
+    ``ci_heartbeat.stale_min`` minutes (:func:`asf.ci_heartbeat.doctor_rows`, off the watchdog's
+    seen file, no ssh): red naming a box with none. No rows without a pool or a seen file."""
+    from asf import ci_heartbeat
+    try:
+        return ci_heartbeat.doctor_rows(product, now=now)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(False, None, f'cannot read the ci heartbeat file — {e}')]
 
 
 def check_ci_runners(product, now=None):

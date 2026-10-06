@@ -1210,6 +1210,37 @@ def widen_candidates(files, item_writes, touched=(), read=None, own=False):
     return needs, tests, exercised
 
 
+def _amend_facts(fields, lane, f, branch, touched=()):
+    """T-0056: on the correction of an item whose ``writes:`` reach the amendable set, the two
+    facts the feeder routes it by (:func:`asf.feeder.rows.correction_amend`) — ``amend_missing``,
+    the amendable ``writes:`` the branch's diff does not carry yet (empty: the console's edit is
+    on the branch, so the correction is a worker's), and ``behind``, the commits the branch is
+    behind the trunk. Nothing without the pass (``lane``/``f``) or an amendable ``writes:``;
+    an unreadable count is left out."""
+    corr = (fields or {}).get('correction')
+    if lane is None or f is None or not isinstance(corr, dict):
+        return
+    product = getattr(lane, 'product', None)
+    card = (getattr(lane, 'items', None) or {}).get(f.get('item') or '') or {}
+    writes = list(card.get('writes') or ())
+    if product is None or not writes:
+        return
+    from asf import amendable
+    inside, _outside = amendable.partition(product, writes)
+    if not inside:
+        return
+    import fnmatch
+    diff = list(f.get('files') or touched or ())
+    corr['amend_missing'] = [w for w in inside
+                             if not any(d == w or fnmatch.fnmatch(d, w) for d in diff)]
+    from asf import gitops
+    trunk = getattr(lane, 'trunk', None) or 'main'
+    behind = gitops.rev_list_count(getattr(lane, 'repo', None), f'origin/{branch}',
+                                   f'origin/{trunk}')
+    if behind is not None:
+        corr['behind'] = behind
+
+
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
                          touched=(), conv=None, own=False, read=None, head=None, finding=None,
                          main=None, lane=None, f=None):
@@ -1255,11 +1286,13 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
             dict(record, branch=branch, job=job), needs, fact,
             f'{text}\nfootprint: the red is outside writes: — needs {" ".join(needs)}',
             now_iso(), tests=tests)
+        _amend_facts(fields, lane, f, branch, touched)
         H.mark_session(state_dir, job, **fields, branch=branch)
         out(line)
         return 'held'
     fields, line = lifecycle.hold(H.sessions_path(state_dir), dict(record, branch=branch, job=job),
                                   kind, text, now_iso(), head=head, finding=finding, main=main)
+    _amend_facts(fields, lane, f, branch, touched)
     H.mark_session(state_dir, job, **fields, branch=branch)
     out(line)
     return 'held'

@@ -1120,6 +1120,33 @@ class DrainTest(HomeCase):
             skip_pipx=False, ref=self.SHA, owner='factory', wait=60, sleep=sleep), run=run)
         self.assertEqual(seen[0]['sha'], self.SHA)  # parked the others while it drained
 
+    def test_a_shared_install_never_parks_a_product_draining_or_with_a_batch_in_flight(self):
+        """#25: the shared install's pending mark is a full hold (no tick, no harvest). Written
+        on a product with a merge-queue batch in flight, or one whose move drains, it keeps that
+        batch from landing — and the move waits on the batch: a deadlock. Drain first: such a
+        product is never marked, and a marker already up never holds its ticks."""
+        import json
+        for name in ('busy', 'moving'):
+            self.write(env.product_path(name), 'backlog_dir: /nonexistent\n')
+        self.write(os.path.join(env.ASF_HOME, 'state', 'busy', 'merge-queue.json'),
+                   json.dumps({'batches': [{'ref': 'batch/9', 'sha': 'c' * 40, 'members': []}]}))
+        os.makedirs(os.path.join(env.ASF_HOME, 'state', 'moving'), exist_ok=True)
+        upgrade._mark_draining('moving', 'e' * 40)
+        seen = []
+
+        def sleep(_s):
+            seen.append({n: upgrade.read_pending(n) for n in ('busy', 'moving', 'other')})
+        run = SequencedRun(['4242\n', ''], installed=self.SHA)
+        _rc, out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+            skip_pipx=False, ref=self.SHA, owner='factory', wait=60, sleep=sleep), run=run)
+        self.assertTrue(seen, out)
+        self.assertIsNone(seen[0]['busy'], out)
+        self.assertIsNone(seen[0]['moving'], out)
+        self.assertEqual(seen[0]['other']['sha'], self.SHA)   # an idle product still waits
+        # a marker already up (an older build wrote it) never holds a tick with a batch in flight
+        upgrade.write_pending(self.SHA, 'factory', 'busy')
+        self.assertFalse(upgrade.waiting('busy', out=lambda _l: None, installed='c' * 40))
+
     def test_the_wait_is_bounded_and_keeps_the_mark_for_the_next_start(self):
         run = SequencedRun(['4242\n'], installed=self.SHA)
         rc, out, slept = self.upgrade(run, wait=30)

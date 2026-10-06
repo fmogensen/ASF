@@ -2844,6 +2844,31 @@ class ForeignRedTests(unittest.TestCase):
         self.assertEqual(self.hold(['asf/other.py'], []), 'held')
         self.assertEqual(self.hold([], ['asf/harvest/harvest.py']), 'held')
 
+    def test_a_hold_of_an_amendable_reaching_item_records_the_branch_facts(self):
+        """T-0056: the feeder routes a correction to the console only when the branch does not
+        yet carry the amendable edit, and rebases one far behind the trunk — so the hold records
+        both: the amendable ``writes:`` the branch's diff lacks, and how far behind it is."""
+        from types import SimpleNamespace
+        from unittest import mock
+        p = env.Product('p', {})
+        writes = ['asf/briefs/templates/idea.md', 'rules/README.md', 'asf/ingest.py']
+        lane_ = SimpleNamespace(product=p, repo=self.state, trunk='main',
+                                items={'T-0080': {'id': 'T-0080', 'writes': writes}})
+        f = {'item': 'T-0080', 'files': ['asf/briefs/templates/idea.md', 'asf/ingest.py']}
+        asked = []
+
+        def count(cwd, a, b):
+            asked.append((cwd, a, b))
+            return 1100
+        with mock.patch('asf.gitops.rev_list_count', count):
+            self.assertEqual(lane.hold_with_correction(
+                self.state, 'worker/T-0080', self.record, 'gate', 'FAILED (failures=1)',
+                self.lines.append, ['asf/ingest.py'], writes, lane=lane_, f=f), 'held')
+        c = [json.loads(l) for l in self.registry().splitlines()][-1]['correction']
+        self.assertEqual(c['amend_missing'], ['rules/README.md'])
+        self.assertEqual(c['behind'], 1100)
+        self.assertEqual(asked, [(self.state, 'origin/worker/T-0080', 'origin/main')])
+
     def hold_diff(self, files, touched):
         return lane.hold_with_correction(self.state, 'plan/F-0039', self.record, 'gate',
                                             'FAILED (failures=1)', self.lines.append, files, (),

@@ -180,7 +180,13 @@ def run(ctx, out=print, spawn=None):
     step_wave.lane_pass(ctx, out)
     from asf import upgrade
     held = upgrade.pending(product.name, out=out)
-    if held is not None:
+    flying = upgrade.in_flight(product.name) if held is not None else []
+    if held is not None and flying:
+        # drain first (#25): the batch already in flight lands before any install or move —
+        # held here, it never lands, and the move waits on it forever
+        out(f'harvest: upgrade to {held["sha"][:7]} pending, but batch(es) in flight '
+            f'({", ".join(flying)}) land first')
+    elif held is not None:
         # a detached harvest lives for many minutes: one started now keeps the gap the pending
         # install needs from coming. The floor drains; the next tick after the install starts it.
         out(f'harvest: not started — upgrade to {held["sha"][:7]} pending, the floor drains')
