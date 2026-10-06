@@ -761,7 +761,10 @@ def pr_ci_criterion(product, ci, as_of, claims=None):
     _seats, tcfg = throughput.settings(product)
     forge = bool(getattr(product, 'repo_slug', None)) and getattr(product, 'ci', None) != 'none'
     d = reds.compute({'ci': ci or [], 'forge': forge, 'main': getattr(product, 'main', None),
-                      'claims': reds.load_claims(product) if claims is None else claims}, as_of, tcfg)
+                      'claims': reds.load_claims(product) if claims is None else claims,
+                      'base_time': None if claims is not None else reds.git_base_time(
+                          getattr(product, 'repo_dir', None), getattr(product, 'main', None))},
+                     as_of, tcfg)
     met, ev = reds.criterion(d, tcfg)
     lim = tcfg.get('first_pass_min')
     return Criterion('pr_ci', 'PR CI healthy (first pass'

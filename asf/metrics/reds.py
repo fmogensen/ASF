@@ -5,24 +5,33 @@ targets measured over runs rather than days.
 shows as not green — :data:`RED`: ``failure``, ``cancelled``, ``timed_out``, ``startup_failure``
 — is one visible red, and each gets exactly one class (:func:`classify_run`), first match wins:
 
-``ours``     a cancel the factory made itself: its claim in the cancel ledger
-             (:func:`asf.ci_queue.claim_cancel`, read through :func:`asf.ci_cancels.claims`) names
-             one of ``own_cancel_causes`` (queue relief, step-silence stall, dedupe, the post-merge
-             cancel, the merge queue's drop and reap), or the run was ``superseded`` by a newer run
-             on its branch. Counted apart, so a fix that turns them into silent skips reads as
-             fewer visible reds.
-``infra``    the run or a job of it ended on the runner rather than the code: ``timed_out`` or
+``ours``     a cancel the factory made itself: the cancel ledger
+             (:func:`asf.ci_queue.claim_cancel`, read through :func:`asf.ci_cancels.claims`) holds
+             a claim for it whose cause is one of ``own_cancel_causes`` (``*``, the default: any
+             claim — the ledger is only the factory's word), or the run was ``superseded`` by a
+             newer run on its branch. Counted apart, so a fix that turns them into silent skips
+             reads as fewer visible reds.
+``infra``    the run ended on the runner rather than the code: ``timed_out`` or
              ``startup_failure``, a job cancelled at its own limit or by runner loss
-             (:mod:`asf.ci_jobs`), a timeout claim, or a failed step matching ``infra_steps``
-             (out of memory, the runner's own set-up).
+             (:mod:`asf.ci_jobs`), a red whose only non-green jobs never got a runner, or a failed
+             step matching ``infra_steps`` (out of memory, the runner's own set-up).
+``tooling``  tooling not on the branch: CI ran the branch's own old copy of a tool. The same
+             failed step (workflow, job, step) is red on ``tooling_min_prs`` or more distinct PRs
+             within ``tooling_window_h`` hours, and green on newer PRs only — every red PR was
+             cut before every PR that went green on it (:meth:`_Index.tooling`).
 ``check``    every failed job is a deterministic repo check (``check_patterns``: rules, sign-off,
-             release notes, lint …) — red the same way on every attempt.
-``flaky``    a later run of the same head went green (a re-run).
-``real``     a later run on the same PR carried a new head: a new commit was needed.
-``pending``  a failure nothing has followed yet (the PR is still on it, or was abandoned).
+             release notes, lint …).
+``replay``   the same red replayed on an unchanged head: an earlier run or attempt of the same
+             workflow on the same head was already red (a reopen, a blind re-run).
+``flaky``    a later run of the same workflow on the same head went green with the failed jobs
+             themselves green (a twin that skipped the failing job is no evidence).
+``real``     the rest of the failures: the head needs a new commit to go green.
 ``unclassified`` a cancel nobody claimed and no rule explains (a hand cancel, a stray).
 
-The status row folds ``infra`` into ``flaky`` (both re-run green without a code change).
+Reds on merge-queue batch refs are queue candidates, not PRs, and are not counted; every re-run
+attempt is its own red (each one notified, though the host's run list shows only the latest).
+The status row folds ``infra`` into ``flaky`` (neither is the code's); the rest are named when
+non-zero.
 
 **Targets** (:func:`targets`), each ``n/a`` for a product with no forge or no such run, each
 one breach line past its threshold:
@@ -43,13 +52,14 @@ from asf.metrics import throughput as tp
 
 #: the run conclusions the host draws as not green
 RED = ('failure', 'cancelled', 'timed_out', 'startup_failure')
-REAL, FLAKY, INFRA, OURS, CHECK, PENDING, UNCLASSIFIED = (
-    'real', 'flaky', 'infra', 'ours', 'check', 'pending', 'unclassified')
-CLASSES = (REAL, FLAKY, INFRA, OURS, CHECK, PENDING, UNCLASSIFIED)
-LABELS = {REAL: 'real (a new commit was needed)', FLAKY: 'flaky (same head green on re-run)',
-          INFRA: 'infra (runner loss, OOM, timeout)', OURS: 'ours (ASF cancelled it)',
-          CHECK: 'deterministic check', PENDING: 'pending (nothing ran after it yet)',
-          UNCLASSIFIED: 'unclassified'}
+REAL, FLAKY, INFRA, OURS, CHECK, REPLAY, TOOLING, UNCLASSIFIED = (
+    'real', 'flaky', 'infra', 'ours', 'check', 'replay', 'tooling', 'unclassified')
+CLASSES = (REAL, REPLAY, TOOLING, CHECK, FLAKY, INFRA, OURS, UNCLASSIFIED)
+LABELS = {REAL: 'real (a new commit is needed)', FLAKY: 'flaky (same head green on re-run)',
+          INFRA: 'infra (runner loss, no runner, OOM, timeout)', OURS: 'ours (ASF cancelled it)',
+          CHECK: 'deterministic check', REPLAY: 'replay (same red, unchanged head)',
+          TOOLING: 'tooling not on branch', UNCLASSIFIED: 'unclassified'}
+FAILED = ('failure', 'timed_out', 'startup_failure')
 #: the job causes (:data:`asf.ci_jobs.CAUSES`) and claim causes that are the runner's, not the code's
 RUNNER_JOB_CAUSES = ('timeout', 'runner-loss')
 RUNNER_CLAIMS = ('job-timeout', 'contention-rerun', 'contention-alarm', 'contention-refused')
@@ -75,62 +85,168 @@ def is_red(r):
     return r.get('conclusion') in RED
 
 
-def classify_run(r, runs, claims, cfg):
-    """``(class, why)`` for one red run ``r`` — ``runs`` every ``ci`` event (the later runs of
-    its head and PR are read from it), ``claims`` the cancel ledger ``{run id: {cause}}``."""
+def _wf(r):
+    return r.get('workflow') or ''
+
+
+def _started(j):
+    return bool(j.get('runner')) or (j.get('minutes') or 0) > 0
+
+
+def _sigs(r):
+    """The failed-step signatures of a run: ``(workflow, job, step)`` per failed job."""
+    return {(_wf(r), j.get('name') or '', j.get('failed_step') or '')
+            for j in r.get('jobs') or () if j.get('conclusion') in FAILED}
+
+
+class _Index:
+    """What the window says beyond one run: the runs per head and per PR, and per failed-step
+    signature the PRs it was red on; per (workflow, job) the PRs it went green on."""
+
+    def __init__(self, runs, base_time=None):
+        self.base_time = base_time
+        self.red_sha = collections.defaultdict(list)    # sig -> [(time, pr, sha)]
+        self.green_sha = collections.defaultdict(list)  # (workflow, job) -> [(time, pr, sha)]
+        self.by = collections.defaultdict(list)
+        self.red_on = collections.defaultdict(list)     # sig -> [(time, pr)]
+        self.green_on = collections.defaultdict(list)   # (workflow, job) -> [(time, pr)]
+        self.first_seen = {}                            # pr -> its first run's time
+        for r in runs:
+            self.by[('sha', r.get('sha'))].append(r)
+            self.by[self.pr_key(r)].append(r)
+            if not is_pr_run(r):
+                continue
+            d = tp.to_dt(r.get('ts'))
+            if d is None:
+                continue
+            pr = r['pr']
+            self.first_seen[pr] = min(d, self.first_seen.get(pr, d))
+            for sig in _sigs(r):
+                self.red_on[sig].append((d, pr))
+                self.red_sha[sig].append((d, pr, r.get('sha')))
+            for j in r.get('jobs') or ():
+                if j.get('conclusion') == 'success':
+                    self.green_on[(_wf(r), j.get('name') or '')].append((d, pr))
+                    self.green_sha[(_wf(r), j.get('name') or '')].append((d, pr, r.get('sha')))
+
+    @staticmethod
+    def pr_key(r):
+        return ('pr', r.get('pr')) if r.get('pr') is not None else ('branch', r.get('branch'))
+
+    def near(self, r):
+        return self.by[('sha', r.get('sha'))] + self.by[self.pr_key(r)]
+
+    def tooling(self, r, cfg):
+        """The failed-step signature that reads as tooling not on the branch, else None: red on
+        ``tooling_min_prs`` or more PRs within the span, green on PRs it was never red on, and
+        every red run's head older than the green ones (all but ``tooling_max_older_share`` of the
+        green PRs) — the step works on branches based after it changed and fails on the ones
+        based before. A head's age is its trunk base's
+        commit time (``base_time(sha)``, read from the clone) when the reader has one, else its
+        PR's first run. A defect of the PRs' own spreads across old and new bases alike and does
+        not separate."""
+        n, hours = cfg.get('tooling_min_prs'), cfg.get('tooling_window_h') or 24
+        d = tp.to_dt(r.get('ts'))
+        if not n or d is None:
+            return None
+        span = datetime.timedelta(hours=hours)
+        for sig in sorted(_sigs(r)):
+            if not sig[2]:
+                continue
+            red = [(p, sha) for t, p, sha in self.red_sha[sig] if abs(t - d) <= span]
+            if len({p for p, _s in red} if red else ()) < n:
+                continue
+            prs = {p for p, _s in red}
+            green = [(p, sha) for t, p, sha in self.green_sha[sig[:2]] if abs(t - d) <= span and p not in prs]
+            if green and self._older(red, green, cfg.get('tooling_max_older_share') or 0):
+                return sig
+        return None
+
+    def _older(self, red, green, share):
+        """Every red head older than the green ones — all but at most ``share`` of the green PRs
+        (the branch that brought the tool in is based before it, yet carries it)."""
+        if self.base_time is not None:
+            rb = [self.base_time(sha) for _p, sha in red]
+            gb = {}
+            for p, sha in green:
+                b = self.base_time(sha)
+                if b is not None:
+                    gb[p] = min(b, gb.get(p, b))
+            if all(b is not None for b in rb) and gb:
+                newest = max(rb)
+                return sum(1 for b in gb.values() if b <= newest) <= share * len(gb)
+        newest = max(self.first_seen[p] for p, _s in red)
+        gp = {p for p, _s in green}
+        return sum(1 for p in gp if self.first_seen[p] <= newest) <= share * len(gp)
+
+
+def _own(cause, cfg):
+    own = cfg.get('own_cancel_causes') or ()
+    return bool(cause) and ('*' in own or cause in own)
+
+
+def classify_run(r, runs, claims, cfg, index=None):
+    """``(class, why)`` for one red run ``r`` — ``runs`` the ``ci`` events around it (its head's
+    and its PR's), ``claims`` the cancel ledger ``{run id: {cause}}``."""
+    index = index or _Index(runs)
     c = r.get('conclusion')
     jobs = r.get('jobs') or ()
     claim = (claims or {}).get(str(r.get('run'))) or {}
     cause = claim.get('cause') if isinstance(claim, dict) else None
     own = cfg.get('own_cancel_causes') or ()
     if c == 'cancelled':
-        if cause in own:
+        if _own(cause, cfg):
             return OURS, f'claimed: {cause}'
+        if r.get('superseded') and ('superseded' in own or '*' in own):
+            return OURS, 'superseded by a newer run on its branch'
         if cause in RUNNER_CLAIMS:
             return INFRA, f'claimed: {cause}'
         hit = next((j for j in jobs if j.get('cause') in RUNNER_JOB_CAUSES), None)
         if hit:
             return INFRA, f"job {hit.get('name')}: {hit.get('cause')}"
-        if r.get('superseded') and 'superseded' in own:
-            return OURS, 'superseded by a newer run on its branch'
         return UNCLASSIFIED, f'cancel with no claim{f" ({cause})" if cause else ""}'
     if c in ('timed_out', 'startup_failure'):
         return INFRA, c
     hit = next((j for j in jobs if j.get('cause') in RUNNER_JOB_CAUSES), None)
     if hit:
         return INFRA, f"job {hit.get('name')}: {hit.get('cause')}"
-    failed = [j for j in jobs if j.get('conclusion') in ('failure', 'timed_out', 'startup_failure')]
+    failed = [j for j in jobs if j.get('conclusion') in FAILED]
+    unstarted = [j for j in jobs if j.get('conclusion') == 'cancelled' and not _started(j)]
+    if not failed and unstarted:
+        return INFRA, f"job {unstarted[0].get('name')} never got a runner"
     hit = next((j for j in failed if _match(j.get('failed_step'), cfg.get('infra_steps'))), None)
     if hit:
         return INFRA, f"step {hit.get('failed_step')!r}"
+    sig = index.tooling(r, cfg)
+    if sig:
+        return TOOLING, f'{sig[1]}: {sig[2]!r} red across PRs, green on others'
     checks = cfg.get('check_patterns') or ()
-    if failed and all(_match(j.get('name'), checks) or _match(j.get('failed_step'), checks)
-                      for j in failed):
-        return CHECK, ', '.join(sorted({str(j.get('failed_step') or j.get('name')) for j in failed}))[:80]
-    later = [x for x in runs if _key(x) > _key(r) and x is not r]
-    if any(x.get('sha') == r.get('sha') and x.get('conclusion') == 'success' for x in later):
-        return FLAKY, 'same head green on re-run'
-    pr, branch = r.get('pr'), r.get('branch')
-    if any(x.get('sha') != r.get('sha') and ((pr is not None and x.get('pr') == pr)
-                                            or (pr is None and branch and x.get('branch') == branch))
-           for x in later):
-        return REAL, 'a new head followed'
-    return PENDING, 'no run followed yet'
+    # a failed job with no failed step of its own (a matrix leg stopped by its sibling) says nothing
+    named = [j for j in failed if j.get('failed_step')] or failed
+    if named and all(_match(j.get('name'), checks) or _match(j.get('failed_step'), checks)
+                     for j in named):
+        return CHECK, ', '.join(sorted({str(j.get('failed_step') or j.get('name')) for j in named}))[:80]
+    same = [x for x in runs if x is not r and x.get('sha') == r.get('sha') and _wf(x) == _wf(r)]
+    if any(_key(x) < _key(r) and x.get('conclusion') in FAILED for x in same):
+        return REPLAY, 'the same head was already red'
+    names = {j.get('name') for j in failed}
+    for x in same:
+        if _key(x) > _key(r) and x.get('conclusion') == 'success':
+            ok = {j.get('name') for j in x.get('jobs') or () if j.get('conclusion') == 'success'}
+            if not x.get('jobs') or names <= ok:
+                return FLAKY, 'same head green on re-run'
+    return REAL, 'the head needs a new commit'
 
 
-def classify(ci, claims, cfg, pick=is_pr_run):
+def classify(ci, claims, cfg, pick=is_pr_run, base_time=None):
     """Every red run ``pick`` selects, oldest first, each ``{run, attempt, ts, pr, sha,
-    conclusion, cls, why}``."""
+    conclusion, cls, why}``. ``base_time(sha)``: when the head's trunk base was committed
+    (:func:`git_base_time`), or None — the tooling class's age test."""
     runs = list(ci or ())
-    by = collections.defaultdict(list)
-    for r in runs:
-        by[('sha', r.get('sha'))].append(r)
-        by[('pr', r.get('pr')) if r.get('pr') is not None else ('branch', r.get('branch'))].append(r)
+    index = _Index(runs, base_time)
     out = []
     for r in sorted((r for r in runs if pick(r) and is_red(r)), key=_key):
-        near = by[('sha', r.get('sha'))] + by[('pr', r.get('pr')) if r.get('pr') is not None
-                                              else ('branch', r.get('branch'))]
-        cls, why = classify_run(r, near, claims, cfg)
+        cls, why = classify_run(r, index.near(r), claims, cfg, index)
         out.append({'run': r.get('run'), 'attempt': r.get('attempt') or 1, 'ts': r.get('ts'),
                     'pr': r.get('pr'), 'sha': r.get('sha'), 'conclusion': r.get('conclusion'),
                     'cls': cls, 'why': why})
@@ -176,7 +292,7 @@ def _target(key, status, detail, value=None, limit=None):
             'value': value, 'limit': limit}
 
 
-def targets(ci, claims, cfg, forge=True, main=None):
+def targets(ci, claims, cfg, forge=True, main=None, base_time=None):
     """The three run-window targets' rows (:data:`TARGETS`)."""
     out = []
     lim, n = cfg.get('first_pass_min'), cfg.get('first_pass_window') or 0
@@ -194,7 +310,7 @@ def targets(ci, claims, cfg, forge=True, main=None):
         out.append(_target('runner_reds', tp.NA, 'no forge' if not forge else 'no CI run'))
     else:
         ids = {(r.get('run'), r.get('attempt') or 1) for r in runs}
-        infra = [x for x in classify(ci, claims, cfg, pick=lambda r: True)
+        infra = [x for x in classify(ci, claims, cfg, pick=lambda r: True, base_time=base_time)
                  if (x['run'], x['attempt']) in ids and x['cls'] == INFRA]
         why = '; '.join(f"{x['run']} {x['why']}" for x in infra[-3:])
         out.append(_target('runner_reds', tp.ALARM if mx is not None and len(infra) > mx else tp.OK,
@@ -230,7 +346,8 @@ def compute(f, now, cfg, days=tp.TREND_DAYS):
     forge = bool(f.get('forge'))
     ci, claims = (f.get('ci') or []) if forge else [], f.get('claims') or {}
     end = tp.to_dt(now) + datetime.timedelta(seconds=1)
-    reds = classify(ci, claims, cfg)
+    base_time = f.get('base_time')
+    reds = classify(ci, claims, cfg, base_time=base_time)
     n = cfg.get('reds_window') or 0
     window = last_runs(ci, n)
     ids = {(r.get('run'), r.get('attempt') or 1) for r in window}
@@ -241,7 +358,7 @@ def compute(f, now, cfg, days=tp.TREND_DAYS):
         e = day_end - datetime.timedelta(days=k)
         s = e - datetime.timedelta(days=1)
         trend.append(counts([x for x in reds if tp._in(x['ts'], s, min(e, end))]))
-    rows = targets(ci, claims, cfg, forge=forge, main=f.get('main'))
+    rows = targets(ci, claims, cfg, forge=forge, main=f.get('main'), base_time=base_time)
     return {'forge': forge, 'runs': len(window),
             'day': counts([x for x in reds if tp._in(x['ts'], end - datetime.timedelta(hours=24), end)]),
             'window': counts(in_window), 'trend': trend, 'targets': rows,
@@ -250,10 +367,10 @@ def compute(f, now, cfg, days=tp.TREND_DAYS):
 
 
 def summary(c):
-    """``9 (real 3 · flaky 4 · ours 2)`` — flaky folds in infra; check, pending and unclassified
-    are named only when non-zero."""
+    """``9 (real 3 · flaky 4 · ours 2)`` — flaky folds in infra; replay, tooling, check and
+    unclassified are named only when non-zero."""
     parts = [f'real {c[REAL]}', f'flaky {c[FLAKY] + c[INFRA]}', f'ours {c[OURS]}']
-    parts += [f'{k} {c[k]}' for k in (CHECK, PENDING, UNCLASSIFIED) if c[k]]
+    parts += [f'{k} {c[k]}' for k in (REPLAY, TOOLING, CHECK, UNCLASSIFIED) if c[k]]
     return f"{c['total']} ({' · '.join(parts)})"
 
 
@@ -270,7 +387,6 @@ def render(d):
             '| Target | Status | Reading | Limit |', '|---|---|---|---|']
     for r in d['targets']:
         out.append(f"| {r['name']} | {r['status']} | {r['detail'].replace('|', '/')} | {r['limit'] or '—'} |")
-    out += [''] + d['alarms'] if d['alarms'] else []
     return '\n'.join(out) + '\n'
 
 
@@ -291,6 +407,35 @@ def criterion(d, cfg):
 
 
 # ------------------------------------------------------------------ readers --
+
+def git_base_time(repo, trunk, git=None):
+    """``base_time(sha)`` over the clone at ``repo``: the commit time of ``sha``'s merge-base
+    with ``origin/<trunk>`` (else ``<trunk>``), cached; None for a sha the clone cannot resolve.
+    Reads only — nothing is fetched. None (no reader) with no clone. ``git(args, cwd)`` is
+    :func:`asf.gitops.git` unless a test hands in its own."""
+    import os
+    if not repo or not trunk or not os.path.isdir(repo):
+        return None
+    if git is None:
+        from asf import gitops
+        git = gitops.git
+    cache = {}
+
+    def read(*args):
+        r = git(list(args), repo)
+        return r.data if getattr(r, 'ok', False) else None
+
+    ref = f'origin/{trunk}' if read('rev-parse', '--verify', '-q', f'origin/{trunk}') else trunk
+
+    def base_time(sha):
+        if not sha:
+            return None
+        if sha not in cache:
+            base = read('merge-base', sha, ref)
+            cache[sha] = tp.to_dt(read('show', '-s', '--format=%cI', base)) if base else None
+        return cache[sha]
+    return base_time
+
 
 def load_claims(product):
     """The cancel ledger (:func:`asf.ci_cancels.claims`), ``{}`` when unreadable."""
@@ -314,7 +459,9 @@ def status_cell(root, product, now=None):
     _seats, cfg = tp.settings(product)
     now = now or datetime.datetime.now(tp.UTC)
     d = compute({'ci': ci, 'claims': load_claims(product), 'forge': True,
-                 'main': getattr(product, 'main', None)}, now, cfg)
+                 'main': getattr(product, 'main', None),
+                 'base_time': git_base_time(getattr(product, 'repo_dir', None),
+                                            getattr(product, 'main', None))}, now, cfg)
     text = f"reds 24h: {summary(d['day'])} · last {d['runs']} PR runs: {d['window']['total']} red"
     breached = [r['key'] for r in d['targets'] if r['status'] == tp.ALARM]
     return text + (f" · BREACH {', '.join(breached)}" if breached else '')

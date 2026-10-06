@@ -64,14 +64,17 @@ DEFAULTS = {
     'quota_cap_hours_min': 1.0,    # an account projected to reach its stop sooner is an alarm
     'quota_window_min': 60,        # the readings the burn rate is taken over
     # the classes of a visible red (asf.metrics.reds); matched case-insensitively as substrings
-    'check_patterns': ['dco', 'sign-off', 'signoff', 'rules', 'notes', 'conventions', 'lint',
-                       'format'],      # a failed job or step that is a deterministic repo check
+    'check_patterns': ['check', 'dco', 'sign-off', 'signoff', 'rules', 'notes', 'conventions',
+                       'lint', 'format'],      # a failed job or step that is a deterministic repo check
     'infra_steps': ['set up job', 'out of memory', 'oom', 'no space left', 'lost communication',
                     'runner'],         # a failed step that is the runner's, not the code's
     # the cancel-ledger causes (asf.ci_queue.claim_cancel) that are the factory's own cancels;
-    # 'superseded' also counts a run a newer run on its branch replaced
-    'own_cancel_causes': ['relief', 'stall', 'duplicate-push', 'merged-pr', 'mq-dropped',
-                          'mq-reaped', 'superseded'],
+    # '*' is any claim (the ledger holds only the factory's word); 'superseded' also counts a
+    # run a newer run on its branch replaced
+    'own_cancel_causes': ['*', 'superseded'],
+    'tooling_min_prs': 3,          # a failed step red on this many PRs, green on another, …
+    'tooling_window_h': 24,        # … within this many hours is tooling not on the branch
+    'tooling_max_older_share': 0.1,  # … when at most this share of the green PRs is based older
 }
 #: the :data:`DEFAULTS` keys that are lists
 LIST_KEYS = ('check_patterns', 'infra_steps', 'own_cancel_causes')
@@ -654,12 +657,18 @@ def load(root, product, facts=None):
             'ci': facts.ci, 'gates': facts.gates, 'items': facts.items, 'runs': facts.runs,
             'forge': bool(getattr(product, 'repo_slug', None)), 'pool': pool,
             'main': getattr(product, 'main', None), 'claims': _claims(product),
+            'base_time': _base_time(product),
             'quota': samples, 'stop': stop, 'as_of': facts.as_of}
 
 
 def _claims(product):
     from asf.metrics import reds
     return reds.load_claims(product)
+
+
+def _base_time(product):
+    from asf.metrics import reds
+    return reds.git_base_time(getattr(product, 'repo_dir', None), getattr(product, 'main', None))
 
 
 def for_product(root, product, facts=None):
