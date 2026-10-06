@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.170 — 2026-10-06
+
+### Features landed
+
+- The merge queue no longer re-runs a deterministic (registers / pre-cut) red and no longer drops a stacked chain on a re-run the host refused; `asf correct` targets the item's open lane; globs in one folder with different literal tails no longer collide; an auth error on launch (local or cloud) takes the account out of the pool at once with one ALARM (#824)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.170"`
+
 ## v0.1.169 — 2026-10-06
 
 ### Features landed
