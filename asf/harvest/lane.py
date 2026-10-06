@@ -145,8 +145,8 @@ import subprocess
 import tempfile
 import time
 
-from asf import (approvals, attestation, customer_content, env, gitpush, refguard, reviews,
-                 run_cancel)
+from asf import (approvals, attestation, ci_flight, customer_content, env, gitpush, refguard,
+                 reviews, run_cancel, tree_green)
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -2521,6 +2521,51 @@ class Lane:
         f['naming_repair'] = res = self._repair_naming(f)
         return res
 
+    def reword_held(self, f):
+        """Why the naming reword must not rewrite this branch *now*, else '' — B-0275. A rewrite
+        gives the PR a new head with the same tree, and GitHub throws the old head's checks away:
+        on a head whose CI is already in (or still coming) that is a full rerun bought for a
+        commit message, and on a saturated pool it costs the PR its landing window (2026-10-06: a
+        reword force-pushed a green head carrying an ``asf land --priority`` request; the rerun
+        cost 45–60 min and the PR its goal-day window).
+
+        Three reasons, each the lane's own state or one host read:
+
+        * the PR carries an ``asf land`` request — the merge queue is holding it to land as it is;
+        * its required checks are green on this very head (:func:`asf.tree_green.green_on`);
+        * a run is in flight on the branch (:func:`asf.ci_flight.verdict`, F-0203).
+
+        The reword is :data:`DEFERRED`, never dropped: it happens on a later pass, once the PR has
+        landed or its head moved for a reason of its own. Nothing is lost by waiting — a document
+        lane's trunk subject is composed at merge time (:func:`squash_subject`), not read off the
+        branch — and a naming refusal keeps the lane from landing the branch itself meanwhile.
+
+        The answer is the whole line to print, else '': the in-flight one is
+        :data:`asf.ci_flight.DEFER_FMT`, the one line every deferred rewrite writes (F-0203 C11).
+        """
+        b, head = f['branch'], f.get('head')
+        number = (f.get('pr') or {}).get('number') or (f.get('prev') or {}).get('pr')
+        why = ''
+        if self.land_requested(f.get('pr'), f.get('prev')):
+            why = (f'PR #{number or "?"} carries an asf land request — the merge queue lands it '
+                   f'as it is; the reword waits')
+        if not why and number and head:
+            green = tree_green.green_on(self.state_dir, number, head)
+            if green:
+                names = ', '.join(green.get('passed') or ()) or 'its required checks'
+                why = (f'{names} green on {str(head)[:9]} — a rewrite throws that CI away; the '
+                       f'reword waits')
+        if why:
+            return f'reword {b}: deferred — {why}'
+        return ci_flight.verdict(self.product, b, 'reword', flight=self.flight())
+
+    def flight(self):
+        """The pass's one :class:`asf.ci_flight.Flight` reader: one host read a branch, whatever
+        asks."""
+        if getattr(self, '_flight', None) is None:
+            self._flight = ci_flight.Flight()
+        return self._flight
+
     def _repair_naming(self, f):
         b, item = f['branch'], f.get('item')
         if (f.get('refusal') or (None,))[0] != lifecycle.NAMING or not item \
@@ -2535,6 +2580,10 @@ class Lane:
         if f.get('live'):
             self.out(f'reword {b}: deferred — a live session holds the branch; the lane rewords '
                      f'it once the session ends')
+            return DEFERRED
+        held = self.reword_held(f)
+        if held:
+            self.out(held)
             return DEFERRED
         if self.dry_run:
             self.out(f'DRY: would reword the subjects on {b} (naming) — no session')
@@ -4350,6 +4399,8 @@ class GitHubHost(Host):
         state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
                                           head=exact_head(f),
                                           attest_context=attestation.context(self.product))
+        state, detail, checks = self.carried_green(f, number, required, exact_head(f), state,
+                                                   detail, checks)
         if state == 'red' or (state != 'green' and f.get('how') == 'ci'):
             return f'required checks {state} at merge: {detail}'
         if f.get('on_checks') and required:
@@ -4359,6 +4410,40 @@ class GitHubHost(Host):
             if skipped or missing:
                 return f'required checks not green at merge: {", ".join(skipped + missing)}'
         return None
+
+    def carried_green(self, f, number, required, head, state, detail, checks):
+        """``(state, detail, checks)`` with a green **carried** onto ``head`` when its own checks
+        are not in yet but an earlier head of this PR passed every required check on a
+        byte-identical tree (:mod:`asf.tree_green`, B-0275) — unchanged otherwise.
+
+        The checks handed back are the remembered required names, each a success: every reader
+        downstream (:func:`passed_names`, :meth:`not_green`, :meth:`recheck`) judges the carry
+        exactly as it would the head that earned it. Only a *pending* head carries: a red one has a
+        verdict of its own, and a green one needs none."""
+        if state != 'pending' or not required or not number or not head:
+            return state, detail, checks
+        rec = tree_green.carried(self.lane.state_dir, number, head,
+                                 tree_green.tree_at(getattr(self.lane, 'repo', None), head),
+                                 required)
+        if rec is None:
+            return state, detail, checks
+        line = tree_green.carried_line(rec)
+        self.lane.out(f'harvest: {f["branch"]}: PR #{number} {line} — its required checks stand, '
+                      f'no rerun')
+        return 'green', line, [{'name': n, 'bucket': PASS_BUCKETS[0], 'carried': rec['head']}
+                               for n in rec.get('passed') or ()]
+
+    def remember_green(self, number, required, head, checks):
+        """Write down that every required check is success on ``head``, with its root tree, so a
+        later head of this PR carrying the same tree reads green instead of waiting on a rerun
+        (:func:`asf.tree_green.remember`). A head that is green only because nothing is required,
+        or because no check reported, remembers nothing: there is no green there to carry."""
+        if not number or not head or not required:
+            return
+        passed = passed_names(checks, required)
+        if set(required) <= passed:
+            tree_green.remember(self.lane.state_dir, number, head,
+                                tree_green.tree_at(getattr(self.lane, 'repo', None), head), passed)
 
     def not_green(self, f, required, checks):
         """``(passed, skipped, missing, satisfied, running)`` for a PR whose required checks
@@ -4818,6 +4903,12 @@ class GitHubHost(Host):
         state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
                                           head=exact_head(f),
                                           attest_context=attestation.context(self.product))
+        # the PR's exact head only (:func:`exact_head`): a green belongs to the sha that earned
+        # it, and a carry onto a sha the PR is not at would be a green for nothing
+        state, detail, checks = self.carried_green(f, number, required, exact_head(f), state,
+                                                  detail, checks)
+        if state == 'green':
+            self.remember_green(number, required, exact_head(f), checks)
         ignored = not_required_red(checks, required)
         if ignored:
             lane.out(f'harvest: {b}: PR #{number} check(s) red but not required — '

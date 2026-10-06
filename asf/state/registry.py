@@ -78,6 +78,7 @@ REGISTRY = {
     'ref-push-failed.json': _s('asf.harvest.lane'),
     'landing-required-checks.json': _s('asf.harvest.lane'),
     'landing-missing-since.json': _s('asf.harvest.lane'),
+    'tree-green.json': _s('asf.tree_green'),
     'transplants.jsonl': _s('asf.harvest.transplant', JSONL),
     'deploys.json': _s('asf.harvest.deploy'),
     # the record, its checks and the scorecard
