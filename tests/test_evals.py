@@ -8,12 +8,15 @@ own amendable set (F-0024: no session edits it, a person lands it through ``asf 
 tests that load the *shipped* set skip when it has not landed yet rather than failing on a hold
 this module cannot resolve; see the T-0288 report's ``NEEDS OPERATOR`` line.
 """
+import contextlib
+import io
 import json
 import os
 import re
 import tempfile
 import unittest
 
+from asf import cli
 from asf.evals import set as evals_set
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -309,6 +312,70 @@ class SetHashTests(unittest.TestCase):
                     except (UnicodeDecodeError, OSError):
                         continue
                     self.assertNotIn(needle, contents, path)
+
+
+class CoverageTests(unittest.TestCase):
+    """§3.5: every lever this repo's manifest declares has a pair or a recorded exemption, or
+    ``asf evals check`` names it and refuses. Every case runs through ``$ASF_EVALS_DIR`` the way
+    ``cli.main(['evals', 'check'])`` itself resolves the set, which is what makes this the same
+    assertion as the fence's own ``asf evals check`` line."""
+
+    def setUp(self):
+        self._orig_evals_dir = os.environ.get('ASF_EVALS_DIR')
+
+    def tearDown(self):
+        if self._orig_evals_dir is None:
+            os.environ.pop('ASF_EVALS_DIR', None)
+        else:
+            os.environ['ASF_EVALS_DIR'] = self._orig_evals_dir
+
+    def _main(self, root, argv):
+        os.environ['ASF_EVALS_DIR'] = root
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(argv)
+        return rc, out.getvalue()
+
+    @unittest.skipUnless(SHIPPED_MANIFEST, 'evals/manifest.json has not landed — it is in the'
+                                           ' amendable set (F-0024); see NEEDS OPERATOR')
+    def test_shipped_rosters_levers_each_have_a_pair_or_a_recorded_exemption(self):
+        eval_set = evals_set.load()
+        for lever in eval_set.levers:
+            expects = {t.expect for t in lever.tasks}
+            has_pair = 'fire' in expects and 'no-fire' in expects
+            self.assertTrue(has_pair or lever.exempt_reason,
+                            f'{lever.id} has neither a pair nor a recorded exemption')
+
+    def test_a_lever_with_only_one_polarity_is_a_coverage_failure_not_a_pass(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_manifest(root, [lever_entry('alpha')])
+            make_exemptions(root)
+            write_json(os.path.join(root, 'alpha', '001-fire.json'), fire_task('alpha', '001-fire'))
+            write_json(os.path.join(root, 'alpha', '002-fire-too.json'),
+                       fire_task('alpha', '002-fire-too', want_ids=('F-0002',)))
+            rc, out = self._main(root, ['evals', 'check'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('alpha', out)
+
+    def test_an_undeclared_unexempted_lever_makes_check_exit_1_naming_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_manifest(root, [lever_entry('alpha')])
+            make_exemptions(root)
+            rc, out = self._main(root, ['evals', 'check'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('alpha', out)
+
+    def test_the_same_lever_with_an_entry_exits_0_and_is_reported_exempt_and_counted(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_manifest(root, [lever_entry('alpha')])
+            write_json(os.path.join(root, 'alpha', '001-fire.json'), fire_task('alpha', '001-fire'))
+            make_exemptions(root, [{'lever': 'alpha', 'reason': 'no pair yet', 'card': 'B-0001'}])
+            rc_check, out_check = self._main(root, ['evals', 'check'])
+            rc_run, out_run = self._main(root, ['evals', 'run'])
+        self.assertEqual(rc_check, 0, out_check)
+        self.assertEqual(rc_run, 0, out_run)
+        self.assertIn('exempt', out_run)
+        self.assertIn('1 lever exempt', out_run)
 
 
 if __name__ == '__main__':

@@ -302,6 +302,11 @@ def build_parser():
     p_rules.add_argument('--json', action='store_true')
     p_rules.add_argument('--verbose', action='store_true')
 
+    p_evals = sub.add_parser('evals', help='run the instrument the factory is judged by')
+    p_evals.add_argument('evals_command', nargs='?', choices=['run', 'check', 'hash'])
+    p_evals.add_argument('--product')
+    p_evals.add_argument('--json', action='store_true')
+
     p_evidence = sub.add_parser('evidence', help='the evidence pass (git/gh derived state)')
     p_evidence.add_argument('--product')
     p_evidence.add_argument('--fresh', action='store_true')
@@ -632,6 +637,9 @@ def _main(argv=None):
     if args.command == 'rules':
         from asf.rules.rules import cmd_check as rules_cmd_check
         return rules_cmd_check(args, resolve_record(args))
+    if args.command == 'evals':
+        from asf.evals.run import cmd_evals
+        return cmd_evals(args)
     if args.command == 'evidence':
         from asf.evidence.evidence import main as evidence_main
         evidence_args = ['--json']
