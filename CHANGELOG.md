@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.149 — 2026-10-06
+
+### Features landed
+
+- `git config` is judged by git's own grammar — every read form passes, every set form of the hooks path holds (#790)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.149"`
+
 ## v0.1.148 — 2026-10-06
 
 ### Bugs fixed
