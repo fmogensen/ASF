@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.204 — 2026-10-06
+
+### Features landed
+
+- The groom commits and pushes its own output, on the tick as well as on the console (#881)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.204"`
+
 ## v0.1.203 — 2026-10-06
 
 ### Features landed
