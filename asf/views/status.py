@@ -39,6 +39,7 @@ Every row is filled from what exists, or says which key would fill it —
   parks every tick (:func:`asf.upgrade.held`).
 """
 import datetime
+import glob
 import json
 import os
 import re
@@ -236,13 +237,82 @@ def _record_period_s(product):
                 DEFAULT_RECORD_CLOCK_S)
 
 
+#: how many day files of ``metrics/ticks`` the Stale row reads: today's and yesterday's, so a
+#: tick a few minutes after midnight still finds the tick before it (D11)
+STALE_TICK_DAYS = 2
+
+
+def _last_record_tick(root, product):
+    """``(ts, duration_s)`` of the newest ``metrics/ticks`` line in the operator's checkout that
+    says a tick *finished a record* — its ``steps`` carry a landed ``record`` entry (D3) — or
+    ``None`` when no such line is readable.
+
+    ``ts`` is stamped when the tick ends (:func:`asf.tick.tick.tick_line`), the same moment the
+    push reaches this checkout (:func:`asf.tick.shadow.sync_operator_checkout`), which is why it
+    is a truer "the record is this old" than ``index.json``'s ``generated`` (D2). ``duration_s``
+    is that tick's own length, and is ``None`` when the line does not carry one (D5).
+    """
+    from asf.views import index_reader as ix
+    name = getattr(product, 'name', None)
+    try:
+        paths = sorted(glob.glob(os.path.join(root, 'metrics', 'ticks', '*.jsonl')))[-STALE_TICK_DAYS:]
+    except OSError:
+        return None
+    best = None
+    for path in paths:
+        try:
+            with open(path, encoding='utf-8') as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for raw in lines:
+            try:
+                ev = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            if ev.get('product') not in (name, None):
+                continue
+            steps = ev.get('steps')
+            if not isinstance(steps, list):
+                continue
+            if not any(isinstance(s, dict) and s.get('step') == 'record' and s.get('ok') is True
+                       for s in steps):
+                continue
+            ts = ix.parse_ts(ev.get('ts'))
+            if ts is None:
+                continue
+            if best is None or ts > best[0]:
+                best = (ts, ev.get('ts'), ev.get('duration_s'))
+    return (best[1], best[2]) if best else None
+
+
+def _stale_after_s(product, duration_s):
+    """The age past which the record table is stale: twice one full cadence — the record clock's
+    idle plus the tick that follows it (D1). ``duration_s`` ``None`` or negative contributes
+    nothing, so a checkout with no readable cadence keeps the old ``2 x`` the clock (D5)."""
+    duration = (duration_s if isinstance(duration_s, (int, float))
+                and not isinstance(duration_s, bool) and duration_s > 0 else 0)
+    return 2 * (_record_period_s(product) + duration)
+
+
 def stale_cell(root, product):
     """B-0124: the record step's own health first (:func:`asf.tick.record_health.line`) — the
     one artifact that survives when the push that would carry a ``metrics/ticks`` line can't
     reach origin, which is exactly when a failing record step needs to be readable. When that
     stamp says the last tick landed (or none has run on this host), the fallback is the index's
     own age against twice the record clock's period — the tick may not even be firing. ``None``
-    (no row) when neither says the table is stale."""
+    (no row) when neither says the table is stale.
+
+    F-0221: the fallback then judges the tick's real cadence. The age is taken from the freshest
+    thing in the checkout that says a tick finished a record — a ``metrics/ticks`` line stamped at
+    a tick's end, or ``index.json``'s ``generated`` when there is none (D2) — and the threshold is
+    twice one full cadence, the record clock's idle plus the last tick's measured ``duration_s``
+    (D1). Past it, a pending upgrade that parks this product's ticks names itself instead of
+    being called a stall (D8, D9); otherwise no tick finished a record in that window, and the row
+    says STALE. ``None`` (no row) when nothing says the table is stale."""
+    from asf import upgrade
     from asf.tick import record_health
     from asf.views import index_reader as ix
     line = record_health.line(product)
@@ -257,10 +327,22 @@ def stale_cell(root, product):
     when = ix.parse_ts(generated)
     if when is None:
         return None
-    age_s = (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()
-    if age_s <= 2 * _record_period_s(product):
+
+    last = _last_record_tick(root, product)
+    duration_s = last[1] if last else None
+    freshest, stamp = when, generated
+    if last is not None:
+        tick_when = ix.parse_ts(last[0])
+        if tick_when is not None and tick_when > freshest:
+            freshest, stamp = tick_when, last[0]        # D2: never the older of the two
+
+    age_s = (datetime.datetime.now(datetime.timezone.utc) - freshest).total_seconds()
+    if age_s <= _stale_after_s(product, duration_s):
         return None
-    return f"STALE since {ix.local_stamp(generated, '%H:%M')} — no fresh record in {ix.span(age_s)}"
+    marker = upgrade.held(getattr(product, 'name', None))
+    if marker is not None:                              # D7, D8
+        return f"{upgrade.held_label(marker)} — no fresh record in {ix.span(age_s)}"
+    return f"STALE since {ix.local_stamp(stamp, '%H:%M')} — no fresh record in {ix.span(age_s)}"
 
 
 def wave_latency_cell(product):
