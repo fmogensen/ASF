@@ -342,6 +342,28 @@ class FootprintTest(unittest.TestCase):
         self.assertIsNone(footprint.overlaps(['apps/web/**'], ['apps/api/**', 'docs/x.md']))
         self.assertIsNone(footprint.overlaps([], ['a']))
 
+    def test_globs_in_one_folder_with_different_literal_suffixes_are_disjoint(self):
+        """Two migrations globs in one folder were held apart as overlapping (round G #28)."""
+        self.assertFalse(footprint.globs_overlap('migrations/*_a.sql', 'migrations/*_b.sql'))
+        self.assertIsNone(footprint.overlaps(['migrations/*_a.sql'], ['migrations/*_b.sql']))
+
+    def test_globs_with_different_literal_prefixes_are_disjoint(self):
+        self.assertFalse(footprint.globs_overlap('migrations/a_*.sql', 'migrations/b_*.sql'))
+
+    def test_a_wider_suffix_glob_still_overlaps(self):
+        self.assertTrue(footprint.globs_overlap('migrations/*.sql', 'migrations/*_b.sql'))
+        self.assertTrue(footprint.globs_overlap('migrations/*_b.sql', 'migrations/*.sql'))
+        self.assertTrue(footprint.globs_overlap('migrations/0*_a.sql', 'migrations/*_a.sql'))
+
+    def test_an_exact_path_and_a_glob_matching_it_overlap(self):
+        self.assertTrue(footprint.globs_overlap('migrations/001_b.sql', 'migrations/*_b.sql'))
+        self.assertFalse(footprint.globs_overlap('migrations/001_a.sql', 'migrations/*_b.sql'))
+
+    def test_double_star_and_classes_stay_conservative(self):
+        self.assertTrue(footprint.globs_overlap('apps/**', 'apps/*_b.sql'))
+        self.assertTrue(footprint.globs_overlap('apps/**/a.ts', 'apps/**/b.ts'))
+        self.assertTrue(footprint.globs_overlap('apps/[ab]*.ts', 'apps/*.md'))
+
     def test_first_conflict_names_the_running_task(self):
         running = [('T-1', ['docs/a.md']), ('T-2', ['src/**'])]
         self.assertEqual(footprint.first_conflict(['src/x.py'], running), 'T-2')
