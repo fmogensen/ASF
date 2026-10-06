@@ -110,7 +110,7 @@ TRANSITIONS = {
 #: A run's own fields: they belong to one launch and never fold into the next (B-0041).
 RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
               'harvest', 'correction', 'rounds', 'stop_tip', 'capped', 'runtime_session',
-              'resumed', 'continued', 'publish_refused')
+              'resumed', 'continued', 'publish_refused', 'dead_class')
 
 FINISHED = 'finished'
 #: A session whose deliverable was never a commit, and which delivered it: not a failure, and not
@@ -118,7 +118,9 @@ FINISHED = 'finished'
 #: said so, and what it did produce is somewhere the branch cannot show" — an adjudicate ruling on
 #: the item's card, or a review finding the lane's own restack already cleared (F-0157).
 NOTHING_TO_LAND = 'nothing to land'
-#: read, never written: ledgers on disk carry this on runs health judged before F-0098
+#: written by `judge` today (`return None if ev.alive else DEAD_PID`) and the key the scorecard
+#: counts (`asf/scorecard/score.py:failure_class`); ledgers on disk also carry it on runs health
+#: judged before F-0098, which is why `is_dead_reason` reads for it rather than a newer spelling.
 DEAD_PID = 'dead pid'
 STOPPED = 'stopped'
 PUSHED_AFTER_STOP = 'pushed after stop'
@@ -1497,6 +1499,7 @@ class Evidence:
     #: when the branch was never pushed)
     has_commits: bool = False    #: the branch was ever committed to
     in_trunk: bool = False       #: HEAD is an ancestor of ``origin/<main>``
+    liveness: str = ''           #: one of :data:`LIVENESS`, when a caller asked; '' otherwise (F-0234)
 
     @property
     def pushed(self):
@@ -2272,12 +2275,15 @@ class RemoteHeads:
         return next((sha for sha, ref in refs if ref.strip() == want), '')
 
 
-def gather(product, run, alive=None, worktree=None, heads=None):
+def gather(product, run, alive=None, worktree=None, heads=None, liveness=None):
     """The :class:`Evidence` for ``run`` — git in its worktree (``run['worktree']`` unless given),
     ``origin/<branch>`` from the product repo's remote, the log through the runtime. ``heads``
-    (a :class:`RemoteHeads`) answers ``origin/<branch>`` for a pass over many worktrees."""
+    (a :class:`RemoteHeads`) answers ``origin/<branch>`` for a pass over many worktrees.
+    ``liveness``, when given, is a verdict callable over a pid, read into ``ev.liveness``."""
     alive = alive or pid_alive
-    ev = Evidence(result=runtime_mod.read_result(run.get('log')), alive=alive(run.get('pid')))
+    pid = run.get('pid')
+    ev = Evidence(result=runtime_mod.read_result(run.get('log')), alive=alive(pid),
+                  liveness=liveness(pid) if liveness else '')
     wt = worktree or run.get('worktree')
     branch = run.get('branch')
     main = getattr(product, 'main', 'main') or 'main'

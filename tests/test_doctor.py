@@ -265,6 +265,33 @@ class TestOneFactoryCheck(unittest.TestCase):
             self.assertIn('check_generic.sh in product repo', detail)
 
 
+class TestCheckDeadSessions(unittest.TestCase):
+    """F-0234 §4: `doctor.check_dead_sessions` wraps `health.dead_census_line`, exactly as
+    `check_branches` wraps `retention.doctor_line` — a count of things that already happened is
+    not a broken installation (C8), so the row is non-required (``False``)."""
+
+    def test_reads_the_health_census_line(self):
+        product = env.Product('x', {})
+        data = {'days': 14, 'runs': 0, 'by_class': {}, 'unclassified': 0}
+        with mock.patch('asf.workers.health.dead_census', return_value=data):
+            ok, detail = doctor.check_dead_sessions(product)
+        self.assertTrue(ok)
+        self.assertEqual(detail, 'dead sessions: 0 in 14 days')
+
+    def test_an_unknown_death_standing_is_not_ok(self):
+        product = env.Product('x', {})
+        data = {'days': 14, 'runs': 1, 'by_class': {'unknown': 1}, 'unclassified': 0}
+        with mock.patch('asf.workers.health.dead_census', return_value=data):
+            ok, detail = doctor.check_dead_sessions(product)
+        self.assertFalse(ok)
+        self.assertIn('unknown 1', detail)
+
+    def test_an_unreadable_ledger_is_none_not_a_broken_installation(self):
+        product = env.Product('x', {})
+        with mock.patch('asf.workers.health.dead_census', side_effect=OSError('boom')):
+            self.assertIsNone(doctor.check_dead_sessions(product))
+
+
 class RedactionHooksTests(unittest.TestCase):
     """T-0025 (F-0075 §2.4): ``check_redaction_hooks`` reads back the git hooks
     ``asf.hooks.ensure_git_hooks`` writes — read-only, so this row never writes one itself."""

@@ -19,6 +19,9 @@ from asf import ci_flight
 from asf import env
 from asf import hooks as hooks_mod
 from asf import progress
+from asf.improve.measure import Run
+from asf.scorecard import diagnose, score
+from asf.scorecard.facts import Facts, to_dt
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import observe
@@ -3035,6 +3038,81 @@ class LivenessSilenceBoundTests(unittest.TestCase):
                                         is_ours=lambda p: True, silent_min=30,
                                         silent_for=lambda p: None)
         self.assertTrue(alive(4242))
+
+
+class DeadCensusTests(Home):
+    """F-0234 §3/§4: the ledger's own `dead pid` runs, classed and counted — `health.dead_census`
+    and `doctor`'s `dead sessions` row, and the number this card exists to drive to zero."""
+
+    def _dead(self, job, dead_class, ended='2026-01-05T00:00:00Z'):
+        pool_mod.append_session(self.product, {'job': job, 'item': 'B-0001', 'branch': f'fix/{job}',
+                                               'pid': 1, 'started': '2025-12-31T00:00:00Z'})
+        fields = {'ended': ended, 'end_reason': lifecycle.DEAD_PID}
+        if dead_class is not None:
+            fields['dead_class'] = dead_class
+        pool_mod.update_session(self.product, job, **fields)
+
+    def test_the_census_classes_each_death_and_counts_what_has_no_class(self):
+        self._dead('j1', lifecycle.GONE)
+        self._dead('j2', lifecycle.REUSED)
+        self._dead('j3', lifecycle.UNKNOWN)
+        self._dead('j4', None)  # a row written before this card: a death with no dead_class
+        now = to_dt('2026-01-10T00:00:00Z').timestamp()
+        data = health_mod.dead_census(self.product, days=14, now=now)
+        self.assertEqual(data['by_class'], {'gone': 1, 'reused': 1, 'unknown': 1})
+        self.assertEqual(data['unclassified'], 1)
+        self.assertEqual(data['runs'], 4)
+
+    def test_the_line_reads_not_ok_while_unknown_stands_and_ok_once_it_does_not(self):
+        ok, line = health_mod.dead_census_line({'days': 14, 'runs': 11, 'unclassified': 0,
+                                                'by_class': {'gone': 6, 'reused': 1, 'unknown': 4}})
+        self.assertFalse(ok)
+        self.assertEqual(line, 'dead sessions: 11 in 14 days — gone 6, reused 1, unknown 4')
+        ok, _ = health_mod.dead_census_line({'days': 14, 'runs': 7, 'unclassified': 0,
+                                             'by_class': {'gone': 6, 'reused': 1}})
+        self.assertTrue(ok)
+
+    def test_every_row_still_counts_under_the_card_it_was_filed_under(self):
+        # the card's own verification (C1, PD13): the class lives on a new field, `end_reason`
+        # stays `dead pid`, and `score`/`diagnose` read it with the key the card was filed under
+        # — a renamed class would score a false victory over a number nobody moved
+        self._dead('j1', lifecycle.GONE)
+        self._dead('j2', lifecycle.REUSED)
+        self._dead('j3', lifecycle.UNKNOWN)
+        self._dead('j4', None)
+        sessions = pool_mod.load_sessions(self.product)
+        runs = []
+        for job in ('j1', 'j2', 'j3', 'j4'):
+            s = sessions[job]
+            self.assertEqual(s['end_reason'], lifecycle.DEAD_PID)
+            self.assertEqual(score.failure_class(s['end_reason']), 'dead pid')
+            runs.append(Run(job=job, kind='task', model='m', item='B-0001',
+                            started='2025-12-31T00:00:00Z', ended=s['ended'], minutes=10.0,
+                            landed=False, end_reason=s['end_reason'], usd=1.0))
+        facts = Facts(items={}, sessions=[], ci=[], gates=[], runs=runs, clutter={},
+                     as_of='2026-01-10T00:00:00Z')
+        start, end = diagnose.window(facts.as_of, 14)
+        self.assertEqual(diagnose.metric(facts, 'failure:dead pid', start, end), 2.0)
+
+
+class HealthOneObserveCallTests(Home):
+    """F-0234 PD5: `health.health`'s own `if alive is None:` branch reads the tick's one
+    `ps axeww` once and derives both `alive` and `liveness` from it — a second, independent read
+    here would double the single most expensive thing the health pass does."""
+
+    class _CountingSource:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self):
+            self.calls += 1
+            return []
+
+    def test_one_read_builds_both_callables(self):
+        src = self._CountingSource()
+        with mock.patch.object(health_mod, 'settle_ended', return_value=[]):
+            health_mod.health(self.product, fix=False, session_source=src)
+        self.assertEqual(src.calls, 1)
 
 
 class TestCorrectOnce(Home):
