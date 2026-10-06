@@ -83,6 +83,13 @@ worker_pool:
   # sessions: process           # process | command | fake — how the pool observes running sessions
   # sessions_command: bin/sessions   # prints one JSON object per session: {"pid", "ppid", "env"}
   # session_match: '^(\S*/)?claude(\s|$)'   # default: the runtime binary as argv[0]
+  # auth_error_patterns:                 # regexes (ignoring case) for a launch the provider refused
+  #   - 'oauth_org_not_allowed'           # for the account; one match takes the account out of the
+  #   - 'subscription (has been )?disabled'   # pool at once, raises one ALARM and relaunches the
+  #                                       # item elsewhere (or it waits, with one account), until
+  #                                       # `asf workers enable <account>`. Unset: generic defaults
+  #                                       # (401/403 unauthorized/forbidden, invalid api key, org
+  #                                       # not allowed, subscription/account disabled)
 
 # quota band (percent of each window, not a fraction). An account at or above `cooldown` in any
 # window takes one job at a time; at or above `stop` it takes none. Running sessions are never

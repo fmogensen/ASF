@@ -17,6 +17,18 @@ import subprocess
 DEFAULT_BINARY = 'claude'
 #: What an operator runs once to mint an account's long-lived session token.
 TOKEN_COMMAND = f'{DEFAULT_BINARY} setup-token'
+#: The texts an account's auth refusal reaches a session's result (or its raw log) in: a
+#: lowercase regex each, matched ignoring case. ``worker_pool.auth_error_patterns`` replaces
+#: them (:mod:`asf.workers.account_auth`): one match takes the account out of the pool.
+DEFAULT_AUTH_ERROR_PATTERNS = (
+    r'invalid api key', r'please run /login', r'authentication[_ ]error', r'oauth token',
+    r'oauth_org_not_allowed', r'(?:org|organization)[_ ]not[_ ]allowed', r'permission_error',
+    r'(?:api error|http|status(?: code)?)[: ]*40[13]\b',
+    r'\b40[13]\b.{0,80}\b(?:unauthori[sz]ed|forbidden)\b',
+    r'\b(?:unauthori[sz]ed|forbidden)\b.{0,80}\b40[13]\b',
+    r'subscription (?:is |has been |was )?(?:disabled|inactive|suspended|cancell?ed|expired)',
+    r'account (?:is |has been |was )?(?:disabled|suspended|deactivated)',
+)
 
 
 def configured_binary(cfg):

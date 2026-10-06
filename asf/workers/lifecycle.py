@@ -73,6 +73,7 @@ import subprocess
 import time
 
 from asf import budget, env, gitops, tokens
+from asf.workers import account_auth
 from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import runtime as runtime_mod
@@ -140,6 +141,8 @@ NETWORK_RE = re.compile(r'could not resolve host|connection (?:reset|refused|tim
                         r'remote end hung up|ssl_error|gnutls', re.I)
 #: The end_reason of a run a spent window cut short (asf.workers.headroom).
 QUOTA_EXHAUSTED_REASON = f'failed: {headroom.QUOTA_EXHAUSTED}'
+#: The end_reason of a run an auth error refused on its account (asf.workers.account_auth).
+AUTH_REASON = f'failed: {account_auth.AUTH}'
 #: What a refusal BY THE REPO'S HOOK says. A bare ``refused`` is not in it: the factory's own
 #: publish refusals ("would lose N commit(s)", "rebase conflicts in", "protected ref") say
 #: ``refused`` too and are not the hook's.
@@ -724,7 +727,8 @@ def live_all(state_root, alive=None):
 def note_spent_windows(state_root=None, alive=None, now=None):
     """Stop, at once, the account of every run under every product's registry that is still
     live on the ledger, whose pid is gone, and whose log's last run closed on a usage-limit
-    result (:func:`asf.workers.runtime.failure_reason` → ``quota-exhausted``). Health records the
+    result (:func:`asf.workers.runtime.failure_reason` → ``quota-exhausted``), or blocks it on an
+    auth error (``auth``, :func:`asf.workers.account_auth.block`). Health records the
     end only on its own product's next pass; the wave of another product may place a launch on
     the same account before that, so the pool calls this before it reads the stops
     (:func:`asf.workers.headroom.active_limits`). The lines :func:`headroom.note_exhausted` prints."""
@@ -741,7 +745,15 @@ def note_spent_windows(state_root=None, alive=None, now=None):
             if not is_live(run) or not run.get('account') or alive(run.get('pid')):
                 continue
             rec = runtime_mod.read_result(run.get('log'))
-            if rec is None or runtime_mod.failure_reason(rec) != headroom.QUOTA_EXHAUSTED:
+            sig = runtime_mod.failure_reason(rec) if rec is not None else None
+            if sig == account_auth.AUTH:
+                # an auth refusal: the account is out from this failure; health's own pass on
+                # the run prints the one ALARM (account_auth.note)
+                account_auth.block(run['account'], job=run.get('job', ''),
+                                   product=run.get('product') or name)
+                out.append(f"{run['account']} unusable: auth error")
+                continue
+            if sig != headroom.QUOTA_EXHAUSTED:
                 continue
             out.append(headroom.note_exhausted(run.get('product') or name, run, rec, now=now))
     return out
@@ -1202,9 +1214,15 @@ def unlanded(path, alive=None, result=None):
 
 
 def quota_exhausted(run):
-    """The run ended on a spent window (:data:`asf.workers.headroom.QUOTA_EXHAUSTED`): the
-    account's fault, not the work's — no attempt, no round, no answer to a correction."""
-    return (run or {}).get('end_reason') == QUOTA_EXHAUSTED_REASON
+    """The run ended on a spent window (:data:`asf.workers.headroom.QUOTA_EXHAUSTED`) or on an
+    auth error that took its account out (:data:`AUTH_REASON`, :mod:`asf.workers.account_auth`):
+    the account's fault, not the work's — no attempt, no round, no answer to a correction."""
+    return (run or {}).get('end_reason') in (QUOTA_EXHAUSTED_REASON, AUTH_REASON)
+
+
+def auth_failed(run):
+    """The run ended on an auth error (:data:`AUTH_REASON`): its account is blocked."""
+    return (run or {}).get('end_reason') == AUTH_REASON
 
 
 def attempts(path):
@@ -2433,7 +2451,10 @@ def judge(run, ev, landing=None):
     if landing is None:
         landing = lands(run)
     if ev.result is None:
-        return None if ev.alive else DEAD_PID
+        if ev.alive:
+            return None
+        # the CLI refused the account before its stream began: the refusal is in the raw log
+        return AUTH_REASON if account_auth.in_log(run.get('log')) else DEAD_PID
     if not runtime_mod.result_ok(ev.result):
         sig = runtime_mod.failure_reason(ev.result)
         # a run that lands nothing may say `pushed: no` truthfully: that is not unpushed work
