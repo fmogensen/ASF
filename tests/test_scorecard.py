@@ -36,10 +36,11 @@ def write(root, rel, text):
     return path
 
 
-def run(job, ended, reason, landed=False, usd=1.0, minutes=10.0, publish_refused='', worktree=''):
+def run(job, ended, reason, landed=False, usd=1.0, minutes=10.0, publish_refused='', worktree='',
+        runtime_error=''):
     return Run(job=job, kind='task', model='m', item=None, started=ended, ended=ended,
                minutes=minutes, landed=landed, end_reason=reason, usd=usd,
-               publish_refused=publish_refused, worktree=worktree)
+               publish_refused=publish_refused, worktree=worktree, runtime_error=runtime_error)
 
 
 def gate(ts, signature='--- test_tick_steps: FAILED (rc 1)', conclusion='failure', scheme=None,
@@ -539,6 +540,79 @@ class NotPushedCauseTests(unittest.TestCase):
             "(1 hook refused, 1 rebase conflict), 1 had no worktree left to publish, "
             "1 ended for a reason this line cannot read.")
         self.assertTrue(c.detail.endswith(expected_line), c.detail)
+
+
+class DeadRunCauseTests(unittest.TestCase):
+    """F-0223, S-36550: the `failed` class's frozen string, key and title do not move (D1); the
+    cause's detail gains the sub-cause line naming what the runtime itself said, beside the
+    `failed: not pushed` fold it mirrors."""
+
+    def window(self, f, days=7):
+        return diagnose.window(f.as_of, days)
+
+    def test_dead_sub_cause_returns_the_right_name_for_each_precedence_case(self):
+        named = run('u', 'x', 'failed', runtime_error='max turns')
+        unrecorded = run('u', 'x', 'failed', runtime_error='')
+
+        self.assertEqual(diagnose.dead_sub_cause(named), 'max turns')
+        self.assertEqual(diagnose.dead_sub_cause(unrecorded), 'not recorded')
+
+    def test_dead_sub_cause_line_renders_the_cards_own_example_sentence(self):
+        subs = {'max turns': 8, 'during execution': 3, 'not recorded': 2}
+        line = diagnose.dead_sub_cause_line(subs, 13)
+        self.assertEqual(line,
+            "of the 13 runs: 8 ran out of turns, 3 errored during execution, "
+            "2 ended before this was recorded.")
+        self.assertNotIn('runtime error', line)  # zero runs in that bucket: absent
+        self.assertEqual(diagnose.dead_sub_cause_line({}, 0), '')
+        self.assertEqual(diagnose.dead_sub_cause_line({'max turns': 1}, 0), '')
+        self.assertEqual(sum(subs.values()), 13)  # the printed counts sum to the total above them
+
+    def test_dead_sub_cause_line_prints_an_unmapped_name_and_not_recorded_last(self):
+        subs = {'max turns': 2, 'some new thing': 1, 'not recorded': 1}
+        line = diagnose.dead_sub_cause_line(subs, 4)
+        self.assertEqual(line,
+            "of the 4 runs: 2 ran out of turns, 1 some new thing, "
+            "1 ended before this was recorded.")
+
+    def test_rank_folds_a_bare_failed_run_into_the_failed_classs_sub_and_leaves_not_pushed_alone(self):
+        runs = [
+            run('u1', '2026-09-05T00:00:00Z', 'failed', runtime_error='max turns'),
+            run('u2', '2026-09-05T00:00:00Z', 'failed', runtime_error=''),
+            run('u3', '2026-09-05T00:00:00Z',
+                f"failed: {lifecycle.push_gap(lifecycle.Evidence(uncommitted=3, unpushed=0))}",
+                worktree='/tmp/wt'),
+        ]
+        f = facts_fixture(runs=runs)
+        r = diagnose.rank(f, *self.window(f))
+        by_name = {c['name']: c for c in r['by_failure']}
+        self.assertEqual(by_name['failed']['sub'], {'max turns': 1, 'not recorded': 1})
+        self.assertEqual(by_name['failed: not pushed']['sub'], {'uncommitted': 1})
+
+    def test_the_causes_detail_carries_the_dead_sub_cause_line_unchanged_key_title_marker(self):
+        runs = [run(f'j{i}', '2026-09-05T00:00:00Z', 'failed', runtime_error='max turns')
+                for i in range(8)]
+        runs += [run(f'k{i}', '2026-09-05T00:00:00Z', 'failed', runtime_error='during execution')
+                for i in range(3)]
+        runs += [run(f'm{i}', '2026-09-05T00:00:00Z', 'failed') for i in range(2)]
+        f = facts_fixture(runs=runs)
+        found = {c.key: c for c in diagnose.causes(f, *self.window(f))}
+        self.assertIn('failure:failed', found)
+        c = found['failure:failed']
+        self.assertEqual(c.key, 'failure:failed')
+        self.assertEqual(c.title, "Sessions die with 'failed' 13 times a week")
+        expected_line = ("of the 13 runs: 8 ran out of turns, 3 errored during execution, "
+                         "2 ended before this was recorded.")
+        self.assertTrue(c.detail.endswith(expected_line), c.detail)
+
+    def test_metric_of_failure_failed_is_unchanged_by_the_sub_cause_fold(self):
+        # D1: the whole Story cannot move the count diagnose.metric reads for `failure:failed`
+        runs = [run(f'j{i}', '2026-09-05T00:00:00Z', 'failed', runtime_error='max turns')
+                for i in range(5)]
+        f = facts_fixture(runs=runs)
+        s, e = self.window(f)
+        weeks = (e - s).total_seconds() / (7 * 86400)
+        self.assertEqual(diagnose.metric(f, 'failure:failed', s, e), round(5 / weeks, 2))
 
 
 class Prod:

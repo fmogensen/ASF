@@ -102,6 +102,60 @@ _SUB_PHRASES = {
 }
 
 
+#: The `failed` class's sub-causes, in the order its detail line prints them. The names are
+#: **open** — unlike :data:`NOT_PUSHED_SUBS`, computed from a frozen regex, the runtime can name
+#: an error this table has never seen, and that name is printed as itself (F-0223, PD10).
+DEAD_SUBS = ('max turns', 'during execution', 'runtime error')
+_DEAD_PHRASES = {
+    'max turns': 'ran out of turns',
+    'during execution': 'errored during execution',
+    'runtime error': 'hit a runtime error',
+    'not recorded': 'ended before this was recorded',
+}
+
+
+def dead_sub_cause(run):
+    """One ``run`` of the ``failed`` class to its sub-cause name — pure and total, in this
+    precedence, disjoint and exhaustive so the line sums to the count above it:
+
+    1. a non-empty ``run.runtime_error`` — the runtime said what it was.
+    2. a falsy one — the run was recorded before this card landed (or the runtime named
+       nothing): ``'not recorded'``.
+
+    It reads :attr:`asf.improve.measure.Run.runtime_error` and nothing else — no ``end_reason``
+    parsing, no regex (F-0223, PD10)."""
+    return run.runtime_error or 'not recorded'
+
+
+def dead_sub_cause_line(subs, total):
+    """The `failed` class's sibling of :func:`sub_cause_line`, over a ``{name: int}`` dict
+    (:data:`rank`'s failure fold's ``sub`` key): ``of the 13 runs: 8 ran out of turns, 3 errored
+    during execution, 2 ended before this was recorded.`` A name no run has is absent, never
+    printed as zero; ``not recorded`` prints last. ``''`` for an empty ``subs`` or a zero
+    ``total``. Pure."""
+    if not subs or not total:
+        return ''
+    parts = []
+    seen = set()
+    for name in DEAD_SUBS:
+        n = subs.get(name, 0)
+        seen.add(name)
+        if not n:
+            continue
+        parts.append(f'{n} {_DEAD_PHRASES[name]}')
+    for name in sorted(k for k in subs if k not in seen and k != 'not recorded'):
+        n = subs.get(name, 0)
+        if not n:
+            continue
+        parts.append(f'{n} {name}')
+    n = subs.get('not recorded', 0)
+    if n:
+        parts.append(f'{n} {_DEAD_PHRASES["not recorded"]}')
+    if not parts:
+        return ''
+    return f'of the {total} runs: ' + ', '.join(parts) + '.'
+
+
 def sub_cause(run):
     """One ``run`` to one name of :data:`NOT_PUSHED_SUBS` (or, under ``refused``, of
     :data:`REFUSAL_SUBS`) — pure, in this precedence, which is what makes the buckets disjoint and
@@ -197,6 +251,9 @@ def rank(facts, start, end):
         c['minutes'] = round(c['minutes'] + r.minutes, 1)
         if k == 'failed: not pushed':
             sub = sub_cause(r)
+            c['sub'][sub] = c['sub'].get(sub, 0) + 1
+        elif k == 'failed':
+            sub = dead_sub_cause(r)
             c['sub'][sub] = c['sub'].get(sub, 0) + 1
 
     jobs = {}
@@ -301,6 +358,10 @@ def causes(facts, start, end, limits=None):
                       f"{t['failure_per_week']:g}/week.")
             if c['name'] == 'failed: not pushed':
                 line = sub_cause_line(c['sub'], c['runs'])
+                if line:
+                    detail += f' {line}'
+            elif c['name'] == 'failed':
+                line = dead_sub_cause_line(c['sub'], c['runs'])
                 if line:
                     detail += f' {line}'
             out.append(Cause(

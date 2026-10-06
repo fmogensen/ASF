@@ -427,5 +427,101 @@ class PromptTests(RuleTests):
         self.assertNotEqual(path, self.product.conventions.review_path('f-0039', 3))
 
 
+class ResumeCutOffTests(Home):
+    """F-0223, S-36553: a session the runtime merely cut off (:data:`health.RESUMABLE`) is
+    resumed once, not buried — handed back to ``runtime.continue_run``, no ``ended`` written,
+    ``resumed: 1`` on the row; a second cut-off, a runtime that cannot resume, and a
+    non-resumable subtype all fall through to Task 3's `UNPUSHED` hold."""
+
+    ITEM = 'F-0001'
+
+    def spawn(self, job, steps, item=ITEM):
+        rt = runtime_mod.FakeRuntime(list(steps))
+        rec = spawn_mod.spawn(self.product, feature_row(job, item=item), self.acct(), 'b',
+                              runtime=rt, cfg=self.cfg)
+        return rec, rt
+
+    def test_a_max_turns_run_is_resumed_with_no_ended_and_resumed_on_the_row(self):
+        rec, rt = self.spawn('cutoff', [{'ok': False, 'pid': 81, 'subtype': 'error_max_turns'},
+                                        {'ok': True, 'pid': 82, 'result': 'done'}])
+        found = health_mod.health(self.product, fix=True, runtime_fn=lambda: rt,
+                                  alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('cutoff', 'resumed', 'max turns'), found)
+        s = pool_mod.load_sessions(self.product)['cutoff']
+        self.assertNotIn('ended', s)
+        self.assertEqual(s['resumed'], 1)
+        self.assertEqual(s['pid'], 82)
+        # the brief handed to the resumed session carries died_text's words
+        self.assertEqual(rt.calls[-1][1].rstrip('\n'), lifecycle.died_text('max turns').rstrip('\n'))
+
+    def test_the_same_run_cut_off_a_second_time_is_not_resumed_again(self):
+        rec, rt = self.spawn('twice', [{'ok': False, 'pid': 83, 'subtype': 'error_max_turns'},
+                                       {'ok': False, 'pid': 84, 'subtype': 'error_max_turns'}])
+        health_mod.health(self.product, fix=True, runtime_fn=lambda: rt,
+                          alive=lambda pid: False, out=lambda s: None)
+        s = pool_mod.load_sessions(self.product)['twice']
+        self.assertEqual(s['resumed'], 1)
+        self.assertEqual(s['pid'], 84)
+        # the resumed child died too (same log, same pid field): judged, not resumed again
+        found = health_mod.health(self.product, fix=True, runtime_fn=lambda: rt,
+                                  alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'twice' and f[1] == 'resumed'], found)
+        s = pool_mod.load_sessions(self.product)['twice']
+        self.assertTrue(s.get('ended'))
+        self.assertEqual(s['correction']['kind'], lifecycle.UNPUSHED)
+
+    def test_a_runtime_that_declines_falls_through_to_the_hold(self):
+        rec, rt = self.spawn('declines', [{'ok': False, 'pid': 85, 'subtype': 'error_max_turns'},
+                                          {'decline': True}])
+        found = health_mod.health(self.product, fix=True, runtime_fn=lambda: rt,
+                                  alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'declines' and f[1] == 'resumed'], found)
+        s = pool_mod.load_sessions(self.product)['declines']
+        self.assertTrue(s.get('ended'))
+        self.assertEqual(s['correction']['kind'], lifecycle.UNPUSHED)
+
+    def test_a_during_execution_run_is_never_resumed(self):
+        rec, rt = self.spawn('duringexec', [{'ok': False, 'pid': 86,
+                                             'subtype': 'error_during_execution'}])
+        calls_before = len(rt.calls)
+        found = health_mod.health(self.product, fix=True, runtime_fn=lambda: rt,
+                                  alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'duringexec' and f[1] == 'resumed'], found)
+        self.assertEqual(len(rt.calls), calls_before)  # continue_run never even called
+        s = pool_mod.load_sessions(self.product)['duringexec']
+        self.assertTrue(s.get('ended'))
+        self.assertEqual(s['correction']['kind'], lifecycle.UNPUSHED)
+
+    def test_runtime_fn_none_resumes_nothing(self):
+        # PD5: None means no resume attempted at all — today's behaviour, every other test of
+        # `health` in the tree
+        rec, rt = self.spawn('nofn', [{'ok': False, 'pid': 87, 'subtype': 'error_max_turns'}])
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'nofn' and f[1] == 'resumed'], found)
+        s = pool_mod.load_sessions(self.product)['nofn']
+        self.assertTrue(s.get('ended'))
+
+    def test_a_resumed_run_whose_pid_is_still_alive_produces_no_transition(self):
+        # PD7: between the spawn and the child's first `init` line, `read_result` still reads
+        # the old error — a run marked `resumed` whose pid answers must not be re-judged on top
+        # of a resume that is live and working
+        rec, rt = self.spawn('live', [{'ok': False, 'pid': 88, 'subtype': 'error_max_turns'}])
+        # the row is marked resumed by hand, as a real resume would — the log still carries only
+        # the old cut-off result: no child has written anything yet
+        pool_mod.update_session(self.product, 'live', pid=89, resumed=1)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: pid == 89,
+                                  out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'live' and f[1] != 'opening'], found)
+        s = pool_mod.load_sessions(self.product)['live']
+        self.assertNotIn('ended', s)
+        # once the resumed pid is gone too, the window closes and the hold fires
+        found2 = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                   out=lambda s: None)
+        self.assertTrue([f for f in found2 if f[0] == 'live' and f[1] == 'held'], found2)
+        s2 = pool_mod.load_sessions(self.product)['live']
+        self.assertTrue(s2.get('ended'))
+
+
 if __name__ == '__main__':
     unittest.main()

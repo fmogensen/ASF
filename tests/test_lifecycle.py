@@ -42,6 +42,7 @@ UPDATE_FIELDS = {
     'correction': [{'kind': 'gate', 'text': 'FAIL: t', 'at': '2026-01-01T00:01:00Z'}],
     'rounds': [1, 2, 3],
     'dead_class': ['gone', 'reused', 'unknown'],
+    'runtime_error': ['max turns', 'during execution', 'runtime error'],
 }
 
 
@@ -1159,6 +1160,50 @@ class EmptyEndsTests(unittest.TestCase):
         self.write(dict(fields, job='b', rounds=1))
         run = lc.latest(self.path)['b']
         self.assertEqual(lc.derive(run, lc.Evidence(), path=self.path).name, lc.HELD)
+
+
+class DiedTextTests(unittest.TestCase):
+    """F-0223, S-36552: `died_text(word)` — the correction a bare-`failed` run with a branch
+    hands its next session. It is the sibling of `unpushed_text`/`empty_branch_text`, so it
+    appends `ALREADY_LANDED` exactly as they do and the `UNPUSHED` hold it feeds has the same
+    shape as the one an unpushed run gets."""
+
+    def test_the_parenthesis_names_the_runtimes_word_when_there_is_one(self):
+        text = lc.died_text('max turns')
+        self.assertIn('cut off mid-flight (max turns)', text)
+        self.assertIn('pick the work up from there', text)
+
+    def test_an_empty_word_still_reads_as_english(self):
+        text = lc.died_text('')
+        self.assertIn('cut off mid-flight —', text)  # no stray "()"
+        self.assertNotIn('()', text)
+
+    def test_it_appends_already_landed_like_its_siblings(self):
+        for text in (lc.died_text('max turns'), lc.died_text('')):
+            self.assertIn('--allow-empty', text)
+            self.assertIn('already landed in <sha>', text)
+
+    def test_the_unpushed_hold_it_feeds_has_the_same_shape_as_an_unpushed_runs(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 's.jsonl')
+
+        def write(line):
+            with open(path, 'a') as f:
+                f.write(json.dumps(line) + '\n')
+
+        run = {'job': 'j', 'item': 'T-0001', 'branch': 'worker/T-0001', 'pid': 1, 'started': 't1'}
+        write(run)
+        died_fields, died_line = lc.hold(path, run, lc.UNPUSHED, lc.died_text('max turns'), 'tn')
+        unpushed_fields, unpushed_line = lc.hold(
+            path, dict(run, job='k'), lc.UNPUSHED,
+            lc.unpushed_text('failed: not pushed: 0 uncommitted file(s), 0 unpushed commit(s)'),
+            'tn')
+        self.assertEqual(died_fields['correction']['kind'], unpushed_fields['correction']['kind'])
+        self.assertEqual(died_fields['rounds'], unpushed_fields['rounds'])
+        self.assertEqual(died_line.split(': ', 1)[0], unpushed_line.split(': ', 1)[0])
+        self.assertTrue(died_line.startswith('held worker/T-0001: '))
+        self.assertIn('cut off mid-flight (max turns)', died_fields['correction']['text'])
 
 
 class BlockedParkTests(unittest.TestCase):

@@ -13,7 +13,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from test_workers import Home, feature_row  # noqa: E402
+from test_workers import Home, feature_row, git  # noqa: E402
 
 from asf import capacity as capacity_mod
 from asf.feeder import rows as feeder_rows
@@ -173,6 +173,100 @@ class ReapedEmptyDeadRun(DeadRunHoldsNoSeat):
                                       items={'F-0001': {'state': 'New'}}, reaped_empty=True)
         self.assertEqual(got, 'held')
         self.assertEqual(set(lifecycle.corrections(path)), {'F-0001'})
+
+
+class ItemGoesBackTests(Home):
+    """F-0223, S-36552: a bare-`failed` run with a branch takes the `UNPUSHED` hold — the item
+    goes back rather than nowhere — and the ladder's other arms are untouched: no branch, no
+    hold; a parked question keeps its precedence over the new arm."""
+
+    ITEM = 'F-0001'
+
+    def spawn(self, job, step, item=ITEM):
+        rt = runtime_mod.FakeRuntime([step])
+        return spawn_mod.spawn(self.product, feature_row(job, item=item), self.acct(), 'b',
+                               runtime=rt, cfg=self.cfg)
+
+    def commit(self, wt, name='x'):
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, name), 'w') as f:
+            f.write(name)
+        git('add', name, cwd=wt)
+        git('commit', '-q', '-m', name, cwd=wt)
+
+    def _branchless_log(self, job, rec):
+        path = runtime_mod.job_log_path(self.product.name, job)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(rec) + '\n')
+        return path
+
+    def test_a_bare_failed_run_with_a_branch_takes_an_unpushed_hold_with_died_text(self):
+        rec = self.spawn('broken', {'ok': False, 'pid': 61})
+        wt = rec['worktree']
+        self.commit(wt)
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertTrue([d for j, w, d in found if j == 'broken' and w == 'held'], found)
+        s = pool_mod.load_sessions(self.product)['broken']
+        self.assertEqual(s['end_reason'], lifecycle.FAILED_BARE)
+        corr = s['correction']
+        self.assertEqual(corr['kind'], lifecycle.UNPUSHED)
+        self.assertIn('cut off mid-flight', corr['text'])
+        self.assertIn(s.get('runtime_error') or '', corr['text'])
+
+    def test_a_bare_failed_run_with_no_branch_is_untouched(self):
+        log = self._branchless_log('nobranch', {'type': 'result', 'subtype': 'error',
+                                                'is_error': True, 'result': ''})
+        run = {'job': 'nobranch', 'item': 'F-0001', 'kind': 'task', 'account': 'acct-a',
+               'model': 'sonnet', 'pid': 1, 'started': '2026-09-24T04:10:55Z', 'log': log}
+        path = pool_mod.sessions_path(self.product)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(run) + '\n')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'nobranch' and f[1] in ('held', 'parked')],
+                         found)
+        s = pool_mod.load_sessions(self.product)['nobranch']
+        self.assertEqual(s['end_reason'], lifecycle.FAILED_BARE)
+        self.assertNotIn('correction', s)
+        self.assertNotIn('rounds', s)
+
+    def test_a_bare_failed_run_with_a_question_is_parked_not_held(self):
+        # PD3: a cut-off session that declared a question is parked (F-0126), not handed back —
+        # the parked-question arm sits above this one and keeps its precedence
+        items = {self.ITEM: {'id': self.ITEM, 'title': 'a feature', 'writes': ['a.py']}}
+        rec = self.spawn('asking', {'ok': False, 'pid': 62,
+                                    'result': 'NEEDS OPERATOR: which account owns this?'})
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertFalse([f for f in found if f[0] == 'asking' and f[1] == 'held'], found)
+        parked = [d for j, w, d in found if j == 'asking' and w == 'parked']
+        self.assertTrue(parked, found)
+        s = pool_mod.load_sessions(self.product)['asking']
+        self.assertEqual(s['correction']['kind'], lifecycle.BLOCKED)
+
+    def test_a_run_whose_runtime_error_is_empty_still_gets_a_readable_text(self):
+        rec = self.spawn('blank', {'ok': False, 'pid': 63, 'result': ''})
+        wt = rec['worktree']
+        self.commit(wt)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        s = pool_mod.load_sessions(self.product)['blank']
+        self.assertIn('cut off mid-flight', s['correction']['text'])
+        self.assertNotIn('()', s['correction']['text'])
+
+    def test_the_first_bare_failed_hold_spends_one_round(self):
+        # D4: this arm calls `lifecycle.hold` with `UNPUSHED` and nothing else — the rounds
+        # counter, `same_head_loop` and the cap-to-adjudicate escalation are properties of
+        # `hold` itself (pinned directly against the unpushed hold it mirrors in
+        # tests.test_lifecycle.DiedTextTests), exercised here only enough to show this arm
+        # reaches the same loop
+        rec = self.spawn('loopy', {'ok': False, 'pid': 64})
+        wt = rec['worktree']
+        self.commit(wt)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        s = pool_mod.load_sessions(self.product)['loopy']
+        self.assertEqual(s['rounds'], 1)
+        self.assertEqual(s['correction']['kind'], lifecycle.UNPUSHED)
 
 
 class FeederSendsNothingBack(unittest.TestCase):

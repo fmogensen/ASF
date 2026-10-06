@@ -644,6 +644,37 @@ def result_ok(rec):
             and failure_reason(rec) is None)
 
 
+#: The runtime's own error subtypes, mapped to the words the factory uses. A subtype not named
+#: here reads as its own text, sanitised; a record that carries only `is_error` reads
+#: `RUNTIME_ERROR`.
+ERROR_SUBTYPES = {
+    'error_max_turns': 'max turns',
+    'error_during_execution': 'during execution',
+}
+RUNTIME_ERROR = 'runtime error'
+
+
+def error_subtype(rec):
+    """The runtime's own name for the error it declared on ``rec``, or None when it declared
+    none. Structured fields only (D2): ``subtype`` first, then ``is_error``. Pure.
+
+    It reads ``rec['result']`` **never** — the docstring says so and names F-0028 D9 and
+    ``runtime.py:480-481`` (:func:`failure_reason`'s own comment), because a text read here is
+    the forgeable half and the trap :func:`report.parse`'s guard exists to avoid."""
+    if not rec:
+        return None
+    subtype = rec.get('subtype')
+    if subtype and subtype != 'success':
+        if subtype in ERROR_SUBTYPES:
+            return ERROR_SUBTYPES[subtype]
+        text = re.sub(r'^error_', '', subtype)
+        text = re.sub(r'[^a-zA-Z0-9]+', ' ', text).strip().lower()[:32]
+        return text or RUNTIME_ERROR
+    if rec.get('is_error'):
+        return RUNTIME_ERROR
+    return None
+
+
 def brief_text(job):
     """What a local session reads on stdin: the brief file, then — for a job launched with the
     heartbeat (``job.heartbeat``, :mod:`asf.workers.heartbeat`) — its HEARTBEAT block, under the
@@ -684,8 +715,11 @@ class Runtime:
 
 class FakeRuntime(Runtime):
     """Replays scripted results in order: each is a dict ``{"ok": bool, "result": str,
-    "pid": int, "running": bool}``. ``running`` leaves the log without a result line (a session
-    still going). Every call is kept in ``calls`` as ``(job, brief_text)``."""
+    "pid": int, "running": bool, "subtype": str, "is_error": bool}``. ``running`` leaves the log
+    without a result line (a session still going). ``subtype``/``is_error`` default to the
+    ordinary success/error shape ``ok`` implies; a step naming its own (``error_max_turns``, …)
+    lets a test drive :func:`error_subtype` without hand-writing a log. Every call is kept in
+    ``calls`` as ``(job, brief_text)``."""
     name = 'fake'
 
     def __init__(self, script=None, path=None):
@@ -728,8 +762,10 @@ class FakeRuntime(Runtime):
             if step.get('running'):
                 return Result(pid=pid, log_path=log_path)
             ok = bool(step.get('ok', True))
-            log.write(json.dumps({'type': 'result', 'subtype': 'success' if ok else 'error',
-                                  'is_error': not ok, 'result': step.get('result', '')}) + '\n')
+            log.write(json.dumps({'type': 'result',
+                                  'subtype': step.get('subtype', 'success' if ok else 'error'),
+                                  'is_error': step.get('is_error', not ok),
+                                  'result': step.get('result', '')}) + '\n')
         return Result(ok=ok, pid=pid, returncode=0 if ok else 1, text=step.get('result', ''),
                       log_path=log_path)
 

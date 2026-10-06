@@ -225,7 +225,8 @@ def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
     items = health_mod.record_items(product)
     spare, alive = spare_this_waves_runs(ctx)
-    found = health_mod.health(product, fix=True, out=out, items=items, alive=alive, spare=spare)
+    found = health_mod.health(product, fix=True, out=out, items=items, alive=alive, spare=spare,
+                              runtime_fn=runtime_fn)
     reap_worktrees(ctx, out=out)
     file_rulings(ctx, out=out)  # B-0064
     rejudge(ctx, items, out=out)

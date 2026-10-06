@@ -110,9 +110,14 @@ TRANSITIONS = {
 #: A run's own fields: they belong to one launch and never fold into the next (B-0041).
 RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
               'harvest', 'correction', 'rounds', 'stop_tip', 'capped', 'runtime_session',
-              'resumed', 'continued', 'publish_refused', 'dead_class')
+              'resumed', 'continued', 'publish_refused', 'dead_class', 'runtime_error')
 
 FINISHED = 'finished'
+#: The reason a run gets when the runtime declared an error of its own and no signature, no cap
+#: and no typed REPORT named it (`judge`'s bare fallback). Three readers test for this exact
+#: string — `health.publish_gap`, `push_retry`, `republish_steps` and the end-of-run ladder's own
+#: arm (F-0223) — so it is spelled once.
+FAILED_BARE = 'failed'
 #: A session whose deliverable was never a commit, and which delivered it: not a failure, and not
 #: a landing. `finished` means "pushed commits"; this means "there was nothing to push, the session
 #: said so, and what it did produce is somewhere the branch cannot show" — an adjudicate ruling on
@@ -2440,7 +2445,7 @@ def judge(run, ev, landing=None):
         if not (not landing and sig == runtime_mod.report.UNPUSHED
                 and not ev.result.get('is_error')
                 and ev.result.get('subtype', 'success') == 'success'):
-            return f'failed: {sig}' if sig else 'failed'
+            return f'failed: {sig}' if sig else FAILED_BARE
     if run.get('branch') and landing:
         if not ev.pushed:
             return f'failed: {push_gap(ev)}'
@@ -3094,6 +3099,17 @@ def empty_branch_text():
     """The correction a run judged ``failed: empty branch: …`` hands its next session (B-0076)."""
     return (f'{EMPTY_BRANCH} — commit and push what you have, or say why not in the report; '
             f'{ALREADY_LANDED}')
+
+
+def died_text(word):
+    """The correction a run judged bare ``failed`` with a branch hands its next session: the
+    runtime cut it off mid-flight, named by ``word`` when there is one — not
+    :func:`asf.tick.step_health.died_text`, which is the correction a twice-dead session hands
+    its next run (B-0062); different module, different argument, different sentence (PD12)."""
+    paren = f' ({word})' if word else ''
+    return (f'the session was cut off mid-flight{paren} — its branch holds what it had done; '
+            f'pick the work up from there, finish it, and push; if it cannot be finished, say '
+            f'why in the report; {ALREADY_LANDED}')
 
 
 # ---- what spawn and health ask ---------------------------------------------------

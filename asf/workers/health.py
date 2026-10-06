@@ -72,6 +72,9 @@ from asf.workers import spawn as spawn_mod
 #: honest report is a dead end nobody comes back to (B-0075).
 UNPUSHED_REASON_PREFIXES = ('failed: not pushed', f'failed: {report_mod.UNPUSHED}')
 
+#: The runtime's own errors that mean "this session ran out of room", not "this work failed".
+RESUMABLE = ('max turns',)
+
 
 def ruling_ready(run):
     """B-0064's ruling, read as a publish instruction (F-0176): an ``adjudicate`` run whose REPORT
@@ -465,7 +468,8 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     wt, branch = run.get('worktree'), run.get('branch')
     ready = ruling_ready(run)
     result_ok = (reason == lifecycle.FINISHED
-                 or (reason or '').startswith(UNPUSHED_REASON_PREFIXES) or ready)
+                 or (reason or '').startswith(UNPUSHED_REASON_PREFIXES) or ready
+                 or reason == lifecycle.FAILED_BARE)  # F-0223: a mid-flight death still has work
     if not result_ok or not branch:
         return reason, ev, None
     if not wt or not os.path.isdir(wt):
@@ -603,7 +607,9 @@ def republish_steps(product, registry, job, run, alive, found):
     recorded is not printed again."""
     reason = run.get('end_reason') or ''
     wt, branch = run.get('worktree'), run.get('branch')
-    if not (reason.startswith(UNPUSHED_REASON_PREFIXES) or ruling_ready(run)) \
+    # F-0223: a bare `failed` run's publish is retried on the same terms as an unpushed one
+    if not (reason.startswith(UNPUSHED_REASON_PREFIXES) or ruling_ready(run)
+            or reason == lifecycle.FAILED_BARE) \
             or run.get('harvested') or not branch:
         return
     if not wt or not os.path.isdir(wt) or alive(run.get('pid')):
@@ -639,8 +645,12 @@ def republish_steps(product, registry, job, run, alive, found):
 def push_retry(ev, reason, line):
     """``(class, detail)`` when an unpushed run's push failed on the network or was refused by
     the repo's hook — read off its REPORT's ``pushed:`` line and the factory's own publish line
-    — else None (:func:`asf.workers.lifecycle.push_failure`)."""
-    if not (reason or '').startswith(UNPUSHED_REASON_PREFIXES):
+    — else None (:func:`asf.workers.lifecycle.push_failure`).
+
+    A dead run's publish can be refused by the repo's hook or lose the network exactly as an
+    unpushed run's can, and this function is the only reader that tells those two apart (F-0223,
+    PD1)."""
+    if not ((reason or '').startswith(UNPUSHED_REASON_PREFIXES) or reason == lifecycle.FAILED_BARE):
         return None
     said = report_mod.parse(str((ev.result or {}).get('result') or '')).get('pushed') or ''
     if not report_mod.NO_RE.match(said):
@@ -653,6 +663,57 @@ def push_retry(ev, reason, line):
             detail = ' '.join(f'{said} {line or ""}'.split()) or text
             return cls, detail[:600]
     return None
+
+
+def resume_cut_off(product, job, s, ev, runtime, now):
+    """``(True, word)`` when the run was handed back to ``runtime.continue_run`` for one more
+    turn — its registry row marked ``resumed: 1``, no ``ended`` written — else ``(False, '')``
+    and the ladder below judges it exactly as it does today (D5).
+
+    Refuses, in this order: a run already carrying ``resumed`` — once, then the hold; an
+    ``error_subtype(ev.result)`` that is falsy or not in :data:`RESUMABLE` — this is not a "ran
+    out of room" subtype; a row with no ``worktree`` or no ``branch`` — nothing to resume into;
+    an empty ``runtime_mod.runtime_session(s.get('log'))`` — the runtime never wrote an ``init``
+    line for this row, so there is nothing to resume (PD6)."""
+    if s.get('resumed'):
+        return False, ''
+    word = runtime_mod.error_subtype(ev.result)
+    if not word or word not in RESUMABLE:
+        return False, ''
+    wt, branch = s.get('worktree'), s.get('branch')
+    if not wt or not branch:
+        return False, ''
+    sid = runtime_mod.runtime_session(s.get('log'))
+    if not sid:
+        return False, ''
+    from asf import env as env_mod  # local: health avoids a module-level env dependency
+    from asf.workers import githooks
+    from asf.workers import stall as stall_mod  # local: stall imports health (circular)
+    job_env = {'ASF_SESSION': s.get('session') or ''}
+    if s.get('id_range'):
+        job_env['BACKLOG_ID_RANGE'] = s['id_range']
+    brief = s.get('brief') or ''
+    base = brief[:-3] if brief.endswith('.md') else brief
+    brief_path = f'{base}.resume.md'
+    with open(brief_path, 'w', encoding='utf-8') as f:
+        f.write(lifecycle.died_text(word) + '\n')
+    try:
+        cfg = env_mod.load_config()
+    except env_mod.ConfigError:
+        cfg = {}
+    run_job = runtime_mod.Job(product.name, job, wt, brief_path, s.get('model'),
+                              account=stall_mod._account(s), env=job_env, log_path=s.get('log'),
+                              hooks_dir=githooks.ensure(product), resume=sid,
+                              passthrough=env_mod.env_passthrough(cfg))
+    try:
+        result = runtime.continue_run(run_job)
+    except runtime_mod.AuthEnvError as e:  # the account's credential file is gone: no resume
+        print(f'resume of {job} not launched: {e}')
+        return False, ''
+    if result is None:  # this runtime cannot resume (P11): fall through to the hold
+        return False, ''
+    pool_mod.update_session(product, job, pid=result.pid, resumed=1)
+    return True, word
 
 
 def _lane_branches(product):
@@ -714,7 +775,7 @@ def prune_branches(product, registry, fix=False):
 
 
 def health(product, fix=False, alive=None, session_source=None, out=print, items=None,
-           spare=()):
+           spare=(), runtime_fn=None):
     """Returns a list of ``(job, what, detail)`` transitions/findings. Every judgement is
     :mod:`asf.workers.lifecycle`'s: :func:`~asf.workers.lifecycle.judge` for the ``ended`` line,
     :func:`~asf.workers.lifecycle.reap_verdict` for the worktrees; this function gathers the
@@ -723,7 +784,13 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
     ``items`` is the record's index (``{id: card}``, removed cards included; default: the
     product's record clone). A run whose item is removed or done is ended and reaped, never held:
     no correction is written on it, and one still pending is dropped (``released``) — a session
-    sent back to a card nobody wants work on has nothing to do, and its row only waits."""
+    sent back to a card nobody wants work on has nothing to do, and its row only waits.
+
+    ``runtime_fn``: a callable returning a runtime, called only at the moment a resume is
+    attempted (:func:`resume_cut_off`, S-36553) — never built when no resume is tried, so no test
+    of this function pays for a runtime it does not exercise. None means no resume is attempted
+    at all, which is the behaviour without that Story; a resume is attempted only when ``fix``
+    and ``runtime_fn`` are both truthy (PD5)."""
     found = []
     registry = pool_mod.sessions_path(product)
     beats = heartbeat.Beats(product)  # every run's beat and branch: one ls-remote for the pass
@@ -778,6 +845,13 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             s.pop('correction', None)
             found.append((job, 'released', f'{s.get("item")}: its Feature was re-planned — '
                                            'the park lifts'))
+        if s.get('resumed') and alive(s.get('pid')):
+            # the spawn has returned but the child has not yet written its own `init` line:
+            # `read_result` still reads the cut-off result, and judging now would hold a resume
+            # that is live and working (F-0223, PD7). Once the child writes `init`,
+            # `read_result` is None and `judge` already returns None for a live run — the guard
+            # is needed for exactly that window and stops mattering by itself
+            return
         if s.get('ended'):
             landed_sha = lifecycle.empty_on_a_landed_lane(registry, s)
             if landed_sha:
@@ -808,8 +882,10 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                     if line:
                         found.append((job, 'published', line))
                     ok = reason == lifecycle.FINISHED
-                    pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1)
-                    s.update(end_reason=reason, rc=0 if ok else 1)
+                    runtime_error = runtime_mod.error_subtype(ev.result) or ''
+                    pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1,
+                                            runtime_error=runtime_error)
+                    s.update(end_reason=reason, rc=0 if ok else 1, runtime_error=runtime_error)
                     found.append((job, 're-judged', reason))
                     if lifecycle.quota_exhausted(s):
                         found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
@@ -831,13 +907,19 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         if retry:  # the repo's own pre-push hook refused it: its output, no round spent
             reason = f'failed: {retry[0]}: {retry[1]}'
         now = pool_mod.now_iso()
+        if fix and runtime_fn:  # S-36553: a session the runtime merely cut off, not buried (D5)
+            resumed, word = resume_cut_off(product, job, s, ev, runtime_fn(), now)
+            if resumed:
+                found.append((job, 'resumed', word))
+                return
         # the class is only ever the class of a death (F-0234): a retry or a hook refusal above
         # may have turned `reason` into something other than DEAD_PID since `ev` was gathered
         dead_class = (ev.liveness or None) if reason == lifecycle.DEAD_PID else None
+        runtime_error = runtime_mod.error_subtype(ev.result) or ''
         pool_mod.update_session(product, job, ended=now, end_reason=reason,
                                 runtime_session=runtime_mod.runtime_session(s.get('log')) or None,
-                                dead_class=dead_class)
-        s.update(ended=now, end_reason=reason)
+                                dead_class=dead_class, runtime_error=runtime_error)
+        s.update(ended=now, end_reason=reason, runtime_error=runtime_error)
         found.append((job, 'ended', reason))
         pushes, defect = pushlog.defect(product, s)
         if pushes:  # one push per correction round: a second one is this run's defect
@@ -866,12 +948,14 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             found.append((job, 'landed', f'its branch landed at {landed_sha[:9]}: nothing to push'))
         elif question and items is not None and not (ev.unpushed or ev.uncommitted) and (
                 reason.startswith(UNPUSHED_REASON_PREFIXES)
-                or reason == f'failed: {lifecycle.EMPTY_BRANCH}'):
+                or reason == f'failed: {lifecycle.EMPTY_BRANCH}'
+                or reason == lifecycle.FAILED_BARE):
             # nothing to land, and the run's own report declared a question for a person:
             # relaunching it buys the same report again, so the item is parked (F-0126). A run
             # with commits or files in its worktree has something to land — never this park (a
             # product's T-0349: an approved transplant parked "nothing to land" because its
-            # report asked a person to publish it); it is held below with its work as the input
+            # report asked a person to publish it); it is held below with its work as the input.
+            # A cut-off session that declared a question is parked too, not handed back (F-0223)
             fields, line = lifecycle.blocked_park(
                 question, s.get('item'), lifecycle.card_fingerprint(product, s.get('item'), items), now)
             pool_mod.update_session(product, job, **fields)
@@ -894,6 +978,25 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
             text = lifecycle.unpushed_text(reason)
+            if lifecycle.rebase_conflict(line):  # the factory's rebase conflicted: files named
+                text = lifecycle.rebase_conflict_text(s.get('branch') or job, line)
+                fields, line = lifecycle.rebase_conflict_hold(registry, s, text, now,
+                                                              main=product.main)
+                pool_mod.update_session(product, job, **fields)
+                found.append((job, 'held', line.split(': ', 1)[1]))
+                return
+            if lifecycle.stale_head(line):  # origin holds commits this head lacks: a rebase
+                text = lifecycle.stale_head_text(s.get('branch') or job, line)
+            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED, text, now,
+                                          main=product.main)
+            pool_mod.update_session(product, job, **fields)
+            found.append((job, 'held', line.split(': ', 1)[1]))
+        elif reason == lifecycle.FAILED_BARE and s.get('branch') and not ruling_ready(s):
+            # the runtime killed the session mid-flight; its branch now holds whatever it had
+            # done (D3). The same loop an unpushed run gets: finish the work, or say why it
+            # cannot (D4). A ready ruling is never held for correction (B-0064): the ruling
+            # itself is the deliverable, and `publish_gap` already published it above
+            text = lifecycle.died_text(s.get('runtime_error'))
             if lifecycle.rebase_conflict(line):  # the factory's rebase conflicted: files named
                 text = lifecycle.rebase_conflict_text(s.get('branch') or job, line)
                 fields, line = lifecycle.rebase_conflict_hold(registry, s, text, now,
