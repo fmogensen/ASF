@@ -573,7 +573,10 @@ def evidence(run, s, elapsed, now, client=None):
     """``(status, why, report)`` of a routine run — see the module doc."""
     tid = trigger_of(run)
     view = view_of(last_run(run, s, now, client))  # before the report: no race with its end
-    report = cloud.report_commit(run.get('worktree'), run.get('branch'), run.get('session'))
+    try:
+        report = cloud.report_commit(run.get('worktree'), run.get('branch'), run.get('session'))
+    except cloud.ReportUnreadable as e:
+        return cloud.WORKING, f'report unreadable ({e}): left as it is', None
     status, why = cloud.classify(view, report, elapsed, s.timeout_min, tid)
     if status != cloud.WORKING:
         retire(run, client)

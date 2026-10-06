@@ -811,6 +811,35 @@ class Sync(Placement):
                          (cloud.DEAD, 'run 500 ended failure without the report commit'))
         self.assertFalse(lifecycle.pid_alive(rec['pid']))
 
+    def test_a_fetch_failure_never_concludes_dead_off_a_stale_view(self):
+        # B-0293: the report is genuinely on origin, but report_commit's own `git fetch` fails
+        # transiently (a network blip) — the run must be left as it is, never judged dead off a
+        # stale or absent local view of origin/<branch>
+        rec = self.launch()
+        fake = FakeGh()
+        self.assertEqual(self.sync(fake)[0][1], cloud.WORKING)
+        self.push_as_the_job(rec)
+        fake.view_ = {'status': 'completed', 'conclusion': 'success'}
+        real_git = cloud._git
+
+        def failing_fetch(args, cwd):
+            if args[:1] == ['fetch']:
+                return subprocess.CompletedProcess(args, 1, stdout='',
+                                                   stderr='fatal: unable to access origin')
+            return real_git(args, cwd)
+
+        lines = []
+        with mock.patch.object(cloud, '_git', side_effect=failing_fetch):
+            (job, status, why), = self.sync(fake, lines=lines)
+        self.assertEqual((job, status), ('spec-1', cloud.WORKING), why)
+        self.assertIn('report unreadable', why)
+        self.assertFalse(pool_mod.load_sessions(self.product)['spec-1'].get('ended'))
+        self.assertTrue(lifecycle.pid_alive(rec['pid']))
+        self.assertTrue(any('report unreadable' in ln for ln in lines), lines)
+        # the fetch recovers next pass: the report, already on origin, finishes the run
+        (job, status, why), = self.sync(fake)
+        self.assertEqual((job, status), ('spec-1', cloud.FINISHED), why)
+
     def test_a_run_past_its_limit_is_cancelled_and_dead(self):
         rec = self.launch()
         fake = FakeGh()
