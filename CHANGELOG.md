@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.158 — 2026-10-06
+
+### Features landed
+
+- The brief names the push-free gate, and says a refused push ends no turn (#796)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.158"`
+
 ## v0.1.157 — 2026-10-06
 
 ### Features landed
