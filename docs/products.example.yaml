@@ -115,6 +115,23 @@ conventions:
   #   wave_latency: 2          # the last tick's start → its wave's start (asf status: Wave latency)
   # prs_per_tick: 6
   # land_window_days: 7    # the window `asf status`'s Features row measures time-to-land over
+  # the feeder and the tick's own policy numbers (F-0013 §2.6), all shown at their defaults.
+  # decision_rows: 5          # UNDECIDED → DECIDE rows minted per tick
+  # attempt_limit: 3          # fix sessions a Bug gets before it is adjudicated
+  # stalemate_round: 4        # the review round a Feature's spec/plan stalls at before it is
+  #                           # adjudicated
+  # correction_rounds: 3      # holds on the same finding before a correction becomes an
+  #                           # ADJUDICATE row
+  # ci_refusal_window_h: 24   # hours a failing check goes unrefused before the bug filer
+  #                           # surfaces it
+  # check_failure_runs: 3     # consecutive failing runs of the same check before the bug
+  #                           # filer surfaces it
+  # feeder:
+  #   max_specs_in_flight: 2  # the most spec/plan sessions in flight at once
+  # git:
+  #   push_timeout_s: 120     # a factory git push past this is killed, the ref logged and left
+  #                           # as it was (asf.gitpush)
+  #   read_timeout_s: 120     # a git read past this fails, text on stderr (asf.gitrun)
   # the heading a plan uses to mark one task's section (default "### Task"; not read by the
   # current tools).
   task_heading: "## Task"
@@ -397,6 +414,12 @@ stage_limits:
   bug_S1: 10m
   bug_S2: 24h
   undecided_close: 14d
+  bug_quiet: 3d           # asf.evidence.closing: how long an open Bug may sit with no finding
+  s1_hours: 2h            # asf.feeder.render: an open S1 Bug's age before the render step warns
+  heartbeat_min: 30m      # asf.workers.continuation: a running session's quiet window
+  silent_min: 30m         # asf.workers.stall: a running session's no-output window
+                          # the three above also take a plain integer of their own unit
+                          # (hours, minutes, minutes) in place of a duration string
 
 # size classes: how a Task's footprint maps to a train/lane.
 size_classes:

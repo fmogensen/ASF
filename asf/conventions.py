@@ -18,6 +18,18 @@ The product yaml carries the overrides::
       default_bug_epic: E-0042
       test_command: make test
       briefs_dir: docs/briefs
+      decision_rows: 5           # default 5: UNDECIDED → DECIDE rows minted per tick
+      attempt_limit: 3           # default 3: fix sessions a Bug gets before it is adjudicated
+      stalemate_round: 4         # default 4: the review round a Feature's spec/plan stalls at
+                                  # before it is adjudicated
+      correction_rounds: 3       # default 3: holds on the same finding before a correction
+                                  # becomes an ADJUDICATE row
+      feeder:
+        max_specs_in_flight: 2   # default 2: the most spec/plan sessions in flight at once
+      ci_refusal_window_h: 24    # default 24: hours a failing check goes unrefused before the
+                                  # bug filer surfaces it
+      check_failure_runs: 3      # default 3: consecutive failing runs of the same check before
+                                  # the bug filer surfaces it
       harvest:
         gate: per-branch          # default combined: one gate per tick (B-0040)
         branches_per_tick: 3
@@ -25,6 +37,8 @@ The product yaml carries the overrides::
       git:
         push_timeout_s: 300       # default 120: a factory git push past it is killed, the ref
                                   # logged and left as it was (asf.gitpush)
+        read_timeout_s: 150       # default 120: one git read past it fails, text on stderr
+                                  # (asf.gitrun)
       amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
                                                           # of these globs is merge_amendable_set;
                                                           # unset = the defaults in asf/amendable.py,
@@ -84,6 +98,12 @@ The product yaml carries the overrides::
         migrations: db/migrations/NNNN_*.sql  # the zero-padded number field in the path
         bands: docs/decisions/NNNN-*.md       # a directory sequence too — one number per file,
                                                # never one file holding every band (unsupported)
+      stage_limits:               # how long an item may sit in one condition (F-0013 §2.7); a
+                                  # product overriding one key keeps the other fourteen
+        bug_S1: 5m                # every value a duration (<n>s|m|h|d) except the three keys
+        s1_hours: 2               # below, whose name carries their unit and also take a plain
+        heartbeat_min: 15         # integer of it (default 2h, 30m, 30m)
+        silent_min: 15
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -183,6 +203,30 @@ DEFAULT_GATE_TIMEOUT_S = 600
 #: ``git: {push_timeout_s: …}`` in the yaml.
 DEFAULT_PUSH_TIMEOUT_S = 120
 
+#: The most seconds one ``git`` read (:mod:`asf.gitrun`, F-0013 §2.1) may take — the one number
+#: that module carries. Spelt ``git: {read_timeout_s: …}`` in the yaml, beside ``push_timeout_s``.
+DEFAULT_READ_TIMEOUT_S = 120
+
+#: How many UNDECIDED → DECIDE rows the feeder mints per tick (:func:`asf.feeder.rows.decision_rows`).
+DEFAULT_DECISION_ROWS = 5
+#: Fix sessions a Bug gets before it is adjudicated (:func:`asf.feeder.rows.attempt_limit`).
+DEFAULT_ATTEMPT_LIMIT = 3
+#: The review round a Feature's spec/plan stalls at before it is adjudicated
+#: (:func:`asf.feeder.rows.stalemate_round`).
+DEFAULT_STALEMATE_ROUND = 4
+#: Holds on the same finding before a correction becomes an ADJUDICATE row
+#: (``asf.feeder.rows.CORRECTION_ROUNDS``).
+DEFAULT_CORRECTION_ROUNDS = 3
+#: The most spec/plan sessions in flight at once (:func:`asf.feeder.rows.max_specs_in_flight`,
+#: spelt ``feeder: {max_specs_in_flight: …}``).
+DEFAULT_MAX_SPECS_IN_FLIGHT = 2
+#: Hours a failing check must go unrefused before the bug filer surfaces it
+#: (``asf.tick.file_bugs.CI_REFUSAL_WINDOW_H``).
+DEFAULT_CI_REFUSAL_WINDOW_H = 24
+#: Consecutive failing runs of the same check before the bug filer surfaces it
+#: (``asf.tick.file_bugs.CHECK_FAILURE_RUNS_TO_SURFACE``).
+DEFAULT_CHECK_FAILURE_RUNS = 3
+
 #: The window `asf status`'s Features row measures time-to-land over.
 DEFAULT_LAND_WINDOW_DAYS = 7
 
@@ -194,7 +238,9 @@ DEFAULT_HEAVY_SHARE_PCT = 50
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
 #: The keys of the yaml's ``git:`` block and the field each one is.
-GIT_KEYS = {'push_timeout_s': 'push_timeout_s'}
+GIT_KEYS = {'push_timeout_s': 'push_timeout_s', 'read_timeout_s': 'read_timeout_s'}
+#: The keys of the yaml's ``feeder:`` block and the field each one is.
+FEEDER_KEYS = {'max_specs_in_flight': 'max_specs_in_flight'}
 
 #: Paths (globs) that count as documentation beside ``specs_dir``, ``plans_dir`` and
 #: ``reviews_dir``: a branch touching only docs roots is the ``docs`` landing class
@@ -520,6 +566,37 @@ def _positive_number_problem(value):
     return None
 
 
+#: ``stage_limits:`` — how long an item may sit in one condition. Every value is a duration
+#: (``<n>s|m|h|d``) except the three keys whose name carries a unit, which also take a plain
+#: integer of that unit (F-0013 D12).
+DEFAULT_STAGE_LIMITS = {
+    'card_undecided': '3d', 'spec-draft': '24h', 'spec-review': '12h', 'plan-draft': '24h',
+    'plan-review': '12h', 'plan-approved': '24h', 'task_active': '45m',
+    'pr_approved_unbatched': '10m', 'bug_S1': '10m', 'bug_S2': '24h', 'undecided_close': '14d',
+    'bug_quiet': '3d', 's1_hours': '2h', 'heartbeat_min': '30m', 'silent_min': '30m',
+}
+#: The keys whose name names their unit: an integer under one of them is read in that unit.
+STAGE_LIMIT_INT_UNITS = {'s1_hours': 3600, 'heartbeat_min': 60, 'silent_min': 60}
+
+
+def _stage_limit_ok(key, value):
+    """True when ``value`` is a shape :meth:`Conventions.stage_limit` reads for ``key``: a
+    duration string, or a plain integer under a key in :data:`STAGE_LIMIT_INT_UNITS`. Anything
+    else (a bad string, an integer under any other key, a non-scalar) is not — the default
+    applies and :func:`validate_mapping` names it."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return key in STAGE_LIMIT_INT_UNITS
+    if isinstance(value, str):
+        try:
+            duration_seconds(value)
+            return True
+        except ValueError:
+            return False
+    return False
+
+
 #: A bare variable name (``auth_env``, ``worker_pool.accounts[].auth_env`` in ``asf.env``): a
 #: leading letter/underscore, then letters, digits or underscores — what a shell accepts on the
 #: left of ``export``.
@@ -530,8 +607,8 @@ def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
     ``worktree_setup``, ``pre_push_check``, ``auth_env``, ``full_suite_commands``, ``customer_content``,
-    ``security`` and ``feeder`` are checked — every other key is kept verbatim (see the module
-    doc), so a product file written for a newer ``asf`` still loads."""
+    ``security``, ``feeder`` and ``stage_limits`` are checked — every other key is kept verbatim
+    (see the module doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -687,6 +764,17 @@ def validate_mapping(data):
                                     or per <= 0):
                 problems.append(('feeder.features_per_session',
                                  f'must be a number > 0, not {per!r}'))
+    limits = data.get('stage_limits')
+    if limits is not None:
+        if not isinstance(limits, dict):
+            problems.append(('stage_limits', f'must be a map, not {limits!r}'))
+        else:
+            for key, value in limits.items():
+                if key not in DEFAULT_STAGE_LIMITS:
+                    problems.append((f'stage_limits.{key}', 'is not a known limit'))
+                elif not _stage_limit_ok(key, value):
+                    problems.append((f'stage_limits.{key}',
+                                     f'must be a duration <n>s|m|h|d, not {value!r}'))
     problems.extend(_retention_problems(data.get('branch_retention')))
     lane = data.get('lane')
     if lane is None:
@@ -772,6 +860,24 @@ class Conventions:
     #: The most paths whose line counts a brief's preamble measures (F-0022).
     preamble_max_files: int = DEFAULT_PREAMBLE_MAX_FILES
     prs_per_tick: int = DEFAULT_PRS_PER_TICK
+    #: How many UNDECIDED → DECIDE rows the feeder mints per tick (:data:`DEFAULT_DECISION_ROWS`).
+    decision_rows: int = DEFAULT_DECISION_ROWS
+    #: Fix sessions a Bug gets before it is adjudicated (:data:`DEFAULT_ATTEMPT_LIMIT`).
+    attempt_limit: int = DEFAULT_ATTEMPT_LIMIT
+    #: The review round a Feature's spec/plan stalls at before it is adjudicated
+    #: (:data:`DEFAULT_STALEMATE_ROUND`).
+    stalemate_round: int = DEFAULT_STALEMATE_ROUND
+    #: Holds on the same finding before a correction becomes an ADJUDICATE row
+    #: (:data:`DEFAULT_CORRECTION_ROUNDS`).
+    correction_rounds: int = DEFAULT_CORRECTION_ROUNDS
+    #: ``feeder.max_specs_in_flight`` (:data:`DEFAULT_MAX_SPECS_IN_FLIGHT`).
+    max_specs_in_flight: int = DEFAULT_MAX_SPECS_IN_FLIGHT
+    #: Hours a failing check must go unrefused before the bug filer surfaces it
+    #: (:data:`DEFAULT_CI_REFUSAL_WINDOW_H`).
+    ci_refusal_window_h: int = DEFAULT_CI_REFUSAL_WINDOW_H
+    #: Consecutive failing runs of the same check before the bug filer surfaces it
+    #: (:data:`DEFAULT_CHECK_FAILURE_RUNS`).
+    check_failure_runs: int = DEFAULT_CHECK_FAILURE_RUNS
     land_window_days: int = DEFAULT_LAND_WINDOW_DAYS
     area_depth: int = DEFAULT_AREA_DEPTH
     batch_max_globs: int = DEFAULT_BATCH_MAX_GLOBS
@@ -787,6 +893,8 @@ class Conventions:
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
     #: ``git.push_timeout_s`` (:data:`DEFAULT_PUSH_TIMEOUT_S`).
     push_timeout_s: int = DEFAULT_PUSH_TIMEOUT_S
+    #: ``git.read_timeout_s`` (:data:`DEFAULT_READ_TIMEOUT_S`; :mod:`asf.gitrun`).
+    read_timeout_s: int = DEFAULT_READ_TIMEOUT_S
     briefs_dir: str = DEFAULT_BRIEFS_DIR
     evals_dir: str = DEFAULT_EVALS_DIR
     matrix_path: str = DEFAULT_MATRIX_PATH
@@ -926,7 +1034,8 @@ class Conventions:
             # ``models.<kind>``: a label, or a map of labels by class (asf.briefs.build)
             if not model_value_ok(value):
                 misshapen[f'models.{kind}'] = value
-        for block, block_keys in (('harvest', HARVEST_KEYS), ('git', GIT_KEYS)):
+        for block, block_keys in (('harvest', HARVEST_KEYS), ('git', GIT_KEYS),
+                                  ('feeder', FEEDER_KEYS)):
             value_ = data.pop(block, None)
             if isinstance(value_, dict):  # ``harvest: {gate, …}`` / ``git: {…}`` → the fields
                 rest = {}
@@ -988,6 +1097,25 @@ class Conventions:
                     else 'a map')
             out.append((key, f'must be {want}, not {value!r}'))
         return out
+
+    def stage_limit(self, key):
+        """``stage_limits.<key>`` in seconds (F-0013 §2.7): the product's own ``stage_limits``
+        entry for ``key`` when it has one, else :data:`DEFAULT_STAGE_LIMITS`'s — merged per
+        key, in :func:`savings_for`'s shape (a product overriding one limit keeps the other
+        fourteen). A duration string is read through :func:`duration_seconds`; a plain integer
+        under a key in :data:`STAGE_LIMIT_INT_UNITS` is that many of its unit; anything else —
+        an integer under any other key, a value that parses as neither — is the default (and a
+        :func:`validate_mapping` problem, never raised here). ``key`` must be one of
+        :data:`DEFAULT_STAGE_LIMITS`; any other raises :class:`KeyError`."""
+        if key not in DEFAULT_STAGE_LIMITS:
+            raise KeyError(key)
+        held = self.stage_limits if isinstance(self.stage_limits, dict) else {}
+        value = held.get(key) if key in held else DEFAULT_STAGE_LIMITS[key]
+        if not _stage_limit_ok(key, value):
+            value = DEFAULT_STAGE_LIMITS[key]
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value * STAGE_LIMIT_INT_UNITS[key]
+        return duration_seconds(value)
 
     # ---- the lane ------------------------------------------------------------
 

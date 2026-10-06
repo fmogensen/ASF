@@ -1083,6 +1083,25 @@ def check_savings(product):
     return findings
 
 
+def stage_limit_findings(product):
+    """[(ok, detail)] — the ``conventions`` doctor row's ``stage_limits`` findings (F-0013
+    §2.7): every key of a product's ``conventions.stage_limits`` block is a key of
+    ``conventions.DEFAULT_STAGE_LIMITS`` and every value a shape :meth:`Conventions.stage_limit`
+    reads (a duration, or the plain integer the three unit-named keys also take) — a misspelled
+    or misshapen limit is told to the operator rather than silently read as the default. A block
+    written in some shape other than a map is its own red finding rather than a crash. Green
+    names the key count and how many were overridden."""
+    conv = getattr(product, 'conventions', None)
+    limits = getattr(conv, 'stage_limits', None)
+    problems = conventions.validate_mapping({'stage_limits': limits})
+    findings = [(False, f'{key} {why}') for key, why in problems]
+    if not findings:
+        overridden = len(limits) if isinstance(limits, dict) else 0
+        findings.append((True, f'stage_limits: {len(conventions.DEFAULT_STAGE_LIMITS)} limits, '
+                                f'{overridden} overridden'))
+    return findings
+
+
 def check_convention_shapes(product):
     """[(ok, detail)] — one RED finding per map-valued convention the product file wrote in
     another shape (``conventions.models: light``, ``landing_checks_missing: '{docs: wait}'``),
@@ -1386,6 +1405,8 @@ def run(product_name):
     for detail in model_table_lines(product):
         rows.append(('model table', False, True, detail))
     for ok, detail in check_convention_shapes(product):
+        rows.append(('conventions', True, ok, detail))
+    for ok, detail in stage_limit_findings(product):
         rows.append(('conventions', True, ok, detail))
     from asf.harvest import deploy  # each environment's deploy mode, and a deprecated key
     for ok, detail in deploy.findings(product):

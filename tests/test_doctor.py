@@ -675,6 +675,41 @@ class TestCheckSavings(unittest.TestCase):
         self.assertFalse(any(r[1] for r in savings_rows))  # never required
 
 
+class ConventionsRowTests(unittest.TestCase):
+    """`doctor.stage_limit_findings` — F-0013 §2.7, appended to the `conventions` row."""
+
+    def test_an_unknown_key_turns_the_row_red_with_the_detail(self):
+        product = env.Product('a', {'conventions': {'stage_limits': {'tsak_active': '1h'}}})
+        findings = doctor.stage_limit_findings(product)
+        self.assertEqual(findings,
+                         [(False, 'stage_limits.tsak_active is not a known limit')])
+
+    def test_a_well_formed_block_is_green(self):
+        product = env.Product('a', {'conventions': {'stage_limits': {'bug_S1': '30m'}}})
+        findings = doctor.stage_limit_findings(product)
+        self.assertEqual(findings, [(True, 'stage_limits: 15 limits, 1 overridden')])
+
+    def test_no_stage_limits_block_is_green_with_none_overridden(self):
+        product = env.Product('a', {})
+        findings = doctor.stage_limit_findings(product)
+        self.assertEqual(findings, [(True, 'stage_limits: 15 limits, 0 overridden')])
+
+    def test_a_non_map_stage_limits_is_its_own_red_line(self):
+        product = env.Product('a', {'conventions': {'stage_limits': 'oops'}})
+        findings = doctor.stage_limit_findings(product)
+        self.assertEqual(findings, [(False, "stage_limits must be a map, not 'oops'")])
+
+    def test_the_row_appears_beside_check_convention_shapes(self):
+        product = env.Product('a', {})
+        with mock.patch.object(doctor, 'check_config', return_value=(True, '', {}, product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')):
+            rows = doctor.run('a')
+        conventions_rows = [r for r in rows if r[0] == 'conventions']
+        self.assertTrue(any('stage_limits:' in r[3] for r in conventions_rows), conventions_rows)
+        self.assertTrue(all(r[1] for r in conventions_rows))  # required
+
+
 class CheapTierAdviceTests(unittest.TestCase):
     """`doctor.check_models` — the `models` row naming an unmapped `cheap` (plan F-0093 Task 2)."""
 

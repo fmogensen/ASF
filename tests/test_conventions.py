@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from asf import conventions as conv_mod
+from asf import conventions as conv_mod, env
 from asf.conventions import Conventions
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -298,6 +298,14 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_REPEAT_FAILURE_N, c.repeat_failure_n)
         self.assertEqual(conv_mod.DEFAULT_IDLE_WAVE_TICKS, c.idle_wave_ticks)
         self.assertEqual(conv_mod.DEFAULT_HEAVY_SHARE_PCT, c.heavy_share_pct)
+        self.assertEqual(conv_mod.DEFAULT_DECISION_ROWS, c.decision_rows)
+        self.assertEqual(conv_mod.DEFAULT_ATTEMPT_LIMIT, c.attempt_limit)
+        self.assertEqual(conv_mod.DEFAULT_STALEMATE_ROUND, c.stalemate_round)
+        self.assertEqual(conv_mod.DEFAULT_CORRECTION_ROUNDS, c.correction_rounds)
+        self.assertEqual(conv_mod.DEFAULT_MAX_SPECS_IN_FLIGHT, c.max_specs_in_flight)
+        self.assertEqual(conv_mod.DEFAULT_CI_REFUSAL_WINDOW_H, c.ci_refusal_window_h)
+        self.assertEqual(conv_mod.DEFAULT_CHECK_FAILURE_RUNS, c.check_failure_runs)
+        self.assertEqual(conv_mod.DEFAULT_READ_TIMEOUT_S, c.read_timeout_s)
 
 
 class AmendableFieldsTests(unittest.TestCase):
@@ -416,6 +424,85 @@ class SelfBugThresholdTests(unittest.TestCase):
         c = Conventions()
         self.assertEqual(c.get('repeat_failure_n'), c.repeat_failure_n)
         self.assertEqual(c['idle_wave_ticks'], c.idle_wave_ticks)
+
+
+class FeederPolicyFieldTests(unittest.TestCase):
+    """F-0013 §2.6: eight policy numbers the feeder and the tick read, each a field."""
+
+    FIELDS = ('decision_rows', 'attempt_limit', 'stalemate_round', 'correction_rounds',
+             'max_specs_in_flight', 'ci_refusal_window_h', 'check_failure_runs', 'read_timeout_s')
+    DEFAULTS = (5, 3, 4, 3, 2, 24, 3, 120)
+
+    def test_the_defaults_are_what_the_card_says(self):
+        c = Conventions()
+        self.assertEqual(tuple(getattr(c, name) for name in self.FIELDS), self.DEFAULTS)
+
+    def test_get_reads_each_one_as_the_attribute_does(self):
+        c = Conventions()
+        for name in self.FIELDS:
+            self.assertEqual(c.get(name), getattr(c, name), name)
+
+    def test_a_product_overriding_each_one_reaches_the_field(self):
+        c = Conventions.from_mapping(dict(zip(self.FIELDS, (6, 4, 5, 4, 3, 25, 4, 130))))
+        self.assertEqual(tuple(getattr(c, name) for name in self.FIELDS), (6, 4, 5, 4, 3, 25, 4, 130))
+        self.assertEqual(c.extra, {})
+
+    def test_max_specs_in_flight_is_read_out_of_the_feeder_block(self):
+        c = Conventions.from_mapping({'feeder': {'max_specs_in_flight': 4}})
+        self.assertEqual(c.max_specs_in_flight, 4)
+        self.assertEqual(c.extra, {})
+
+    def test_read_timeout_s_is_read_out_of_the_git_block_beside_push_timeout_s(self):
+        c = Conventions.from_mapping({'git': {'read_timeout_s': 30}})
+        self.assertEqual(c.read_timeout_s, 30)
+        c = Conventions.from_mapping({'git': {'push_timeout_s': 300, 'read_timeout_s': 30}})
+        self.assertEqual((c.push_timeout_s, c.read_timeout_s), (300, 30))
+
+
+class StageLimitTests(unittest.TestCase):
+    """F-0013 §2.7: ``stage_limits`` — one block, one grammar, one reader."""
+
+    def test_the_default_is_what_the_card_says(self):
+        self.assertEqual(Conventions().stage_limit('bug_S1'), 600)
+        self.assertEqual(len(conv_mod.DEFAULT_STAGE_LIMITS), 15)
+
+    def test_a_product_overriding_one_key_keeps_the_other_fourteen(self):
+        c = Conventions.from_mapping({'stage_limits': {'bug_S1': '30m'}})
+        self.assertEqual(c.stage_limit('bug_S1'), 1800)
+        for key, default in conv_mod.DEFAULT_STAGE_LIMITS.items():
+            if key != 'bug_S1':
+                self.assertEqual(c.stage_limit(key), conv_mod.duration_seconds(default), key)
+
+    def test_conventions_stage_limits_wins_over_the_top_level_block(self):
+        p = env.Product('a', {'conventions': {'stage_limits': {'bug_S1': '2h'}},
+                              'stage_limits': {'bug_S1': '1h'}})
+        self.assertEqual(p.conventions.stage_limit('bug_S1'), 7200)
+
+    def test_the_top_level_block_still_works_alone(self):
+        p = env.Product('a', {'stage_limits': {'bug_S1': '1h'}})
+        self.assertEqual(p.conventions.stage_limit('bug_S1'), 3600)
+
+    def test_the_three_unit_named_keys_take_a_plain_integer(self):
+        c = Conventions.from_mapping({'stage_limits': {'s1_hours': 2, 'heartbeat_min': 30,
+                                                        'silent_min': 30}})
+        self.assertEqual(c.stage_limit('s1_hours'), 7200)
+        self.assertEqual(c.stage_limit('heartbeat_min'), 1800)
+        self.assertEqual(c.stage_limit('silent_min'), 1800)
+
+    def test_a_bad_value_is_the_default_and_a_validate_mapping_problem(self):
+        for bad in ('2x', {}, 24):
+            c = Conventions.from_mapping({'stage_limits': {'bug_S1': bad}})
+            self.assertEqual(c.stage_limit('bug_S1'), 600, bad)
+            problems = conv_mod.validate_mapping({'stage_limits': {'bug_S1': bad}})
+            self.assertTrue(any(key == 'stage_limits.bug_S1' for key, _ in problems), bad)
+
+    def test_an_unknown_key_is_named_as_not_a_known_limit(self):
+        problems = conv_mod.validate_mapping({'stage_limits': {'tsak_active': '1h'}})
+        self.assertEqual(problems, [('stage_limits.tsak_active', 'is not a known limit')])
+
+    def test_a_key_not_in_default_stage_limits_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            Conventions().stage_limit('nope')
 
 
 if __name__ == '__main__':
