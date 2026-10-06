@@ -423,6 +423,10 @@ class LaneFixture(unittest.TestCase):
         sh(['git', 'commit', '-qm', subject], cwd=self.worker, env_=self.ident)
         sh(['git', 'push', '-q', '-f', 'origin', branch], cwd=self.worker)
 
+    def push_lane_empty(self, branch):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'origin/main:refs/heads/' + branch], cwd=self.worker)
+
     def push_main(self, files, subject):
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
         sh(['git', 'checkout', '-q', '-B', 'tmp-main', 'origin/main'], cwd=self.worker)
@@ -447,6 +451,59 @@ class LaneFixture(unittest.TestCase):
 
     def origin_main(self):
         return sh(['git', 'rev-parse', 'main'], cwd=self.origin).stdout.strip()
+
+
+class OwnCommits(LaneFixture):
+    """A1 (F-0191) — the lane writes down how many commits of its own the branch carried,
+    at the moment it can still count them, and carries the count forward once it cannot."""
+
+    def test_a_branch_with_a_commit_records_own_1_through_to_merged_ff(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        lane.lane_pass(self.product(), self.state_dir, out=lambda *_: None)
+        gated = self.lane_of('worker/T-0001')
+        self.assertEqual(gated['state'], lane.GATE)
+        self.assertEqual(gated['own'], 1)
+        harvest.run_product_harvest(self.product(), self.state_dir, out=lambda *_: None,
+                                    lane_pass=False)
+        landed = self.lane_of('worker/T-0001')
+        self.assertEqual(landed['state'], lane.MERGED)
+        self.assertEqual(landed['method'], 'ff')
+        self.assertEqual(landed['own'], 1)
+
+    def test_a_branch_pushed_at_the_trunk_tip_records_own_0(self):
+        # the item's commit is already on the trunk (PD6): the branch itself carries nothing
+        self.push_main({'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.push_lane_empty('worker/T-0001')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        lane.lane_pass(self.product(), self.state_dir, out=lambda *_: None)
+        landed = self.lane_of('worker/T-0001')
+        self.assertEqual(landed['state'], lane.MERGED)
+        self.assertEqual(landed['method'], lane.ON_TRUNK)
+        self.assertEqual(landed['own'], 0)
+
+    def test_a_branch_gone_from_origin_carries_the_previous_own_forward(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        lane.lane_pass(self.product(), self.state_dir, out=lambda *_: None)
+        gated = self.lane_of('worker/T-0001')
+        self.assertEqual(gated['own'], 1)
+        # the branch's own commit reaches the trunk another way, then the branch itself is gone
+        sh(['git', 'push', '-q', 'origin', 'worker/T-0001:main'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', '--delete', 'worker/T-0001'], cwd=self.worker)
+        lane.lane_pass(self.product(), self.state_dir, out=lambda *_: None)
+        landed = self.lane_of('worker/T-0001')
+        self.assertEqual(landed['state'], lane.MERGED)
+        self.assertEqual(landed['method'], lane.ON_TRUNK)
+        self.assertEqual(landed['own'], 1, 'the last pass that could count it stands (PD7)')
+
+    def test_a_record_with_neither_known_has_no_own_key_at_all(self):
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None)
+        f = {'branch': 'worker/T-0001', 'item': 'T-0001', 'head': HEAD}
+        ln.write(f, ln.record(f, lane.STALE, 'test: no ahead, no prior own'))
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual(rec_['state'], lane.STALE)
+        self.assertNotIn('own', rec_)
 
 
 class LaneRepo(LaneFixture):
