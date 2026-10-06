@@ -1,3 +1,4 @@
+import datetime
 import os
 import shutil
 import subprocess
@@ -768,8 +769,9 @@ class TestCmdDoctorSubprocess(unittest.TestCase):
                 self.assertIn(' ok ', lines[row], lines[row])
 
 
-class TestSchedulerSection(unittest.TestCase):
-    """`asf doctor`'s scheduler section, against the fake launchctl from test_scheduler."""
+class SchedulerSectionFixture(unittest.TestCase):
+    """The fixture `TestSchedulerSection` and `SchedulerStepFieldTests` both build on: a fake
+    launchd, a fake ASF_HOME, and the one product both read jobs and logs for."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='asf-doctor-sched-')
@@ -831,6 +833,10 @@ class TestSchedulerSection(unittest.TestCase):
             stamp = time.time() - age_s
             os.utime(path, (stamp, stamp))
         return path
+
+
+class TestSchedulerSection(SchedulerSectionFixture):
+    """`asf doctor`'s scheduler section, against the fake launchctl from test_scheduler."""
 
     # ---- the rows ---------------------------------------------------------------------------
 
@@ -1044,6 +1050,268 @@ class TestSchedulerSection(unittest.TestCase):
         self.assertEqual(doctor.format_age(600), '10m')
         self.assertEqual(doctor.format_age(7200), '2h')
         self.assertEqual(doctor.format_age(200000), '2d')
+
+
+class CurrentStepTests(unittest.TestCase):
+    """`doctor.current_step` (F-0142): the step a tick's log says it is inside right now, read off
+    its own start line."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-doctor-step-')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write(self, text):
+        path = os.path.join(self.tmp, 'tick.log')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return path
+
+    def test_a_dangling_start_line_gives_the_step_owner_pid_and_age(self):
+        path = self.write('[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n')
+        now = datetime.datetime(2026, 1, 1, 0, 10, 0, tzinfo=datetime.timezone.utc).timestamp()
+        running = doctor.current_step(path, alive=lambda pid: True, now=now)
+        self.assertEqual(running, {'step': 'harvest', 'owner': 'asf', 'pid': 48213,
+                                    'alive': True, 'seconds': 600.0})
+
+    def test_a_start_line_closed_by_its_own_end_line_gives_none(self):
+        path = self.write('[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n'
+                           '[step:harvest] 22.7s ok=yes owner=asf pid=48213 '
+                           'at=2026-01-01T00:00:22Z\n')
+        self.assertIsNone(doctor.current_step(path))
+
+    def test_a_start_line_closed_by_a_different_steps_end_line_gives_none(self):
+        """The loop is strictly sequential (D14): whichever step line is last answers, even if
+        it does not pair with the start line above it."""
+        path = self.write('[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n'
+                           '[step:wave] 1.0s ok=yes owner=asf pid=48213 at=2026-01-01T00:00:01Z\n')
+        self.assertIsNone(doctor.current_step(path))
+
+    def test_a_log_with_no_step_line_gives_none(self):
+        path = self.write('starting\ntick: state committed\n')
+        self.assertIsNone(doctor.current_step(path))
+
+    def test_an_empty_log_gives_none(self):
+        self.assertIsNone(doctor.current_step(self.write('')))
+
+    def test_a_missing_path_gives_none(self):
+        self.assertIsNone(doctor.current_step(os.path.join(self.tmp, 'no-such-file.log')))
+
+    def test_a_none_path_gives_none(self):
+        self.assertIsNone(doctor.current_step(None))
+
+    def test_a_pre_f_0142_log_ending_in_the_bare_end_line_gives_none(self):
+        path = self.write('[step:x] 3.1s\n')
+        self.assertIsNone(doctor.current_step(path))
+
+    def test_a_failed_line_matches_neither_pattern_and_the_start_line_still_answers(self):
+        path = self.write('[step:wave] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n'
+                           '[step:wave] FAILED the wave broke\n'
+                           'Traceback (most recent call last):\n'
+                           '    ...\n')
+        running = doctor.current_step(path)
+        self.assertEqual(running['step'], 'wave')
+
+    def test_a_dead_pid_comes_back_not_alive_via_the_alive_argument(self):
+        path = self.write('[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n')
+        running = doctor.current_step(path, alive=lambda pid: False)
+        self.assertFalse(running['alive'])
+
+    def test_a_dead_pid_comes_back_not_alive_via_the_default_lifecycle_check(self):
+        path = self.write('[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n')
+        with mock.patch.object(doctor.lifecycle, 'pid_alive', return_value=False):
+            running = doctor.current_step(path)
+        self.assertFalse(running['alive'])
+
+    def test_an_unparseable_at_gives_seconds_none_and_the_rest_intact(self):
+        path = self.write('[step:harvest] start owner=asf pid=48213 at=not-a-timestamp\n')
+        running = doctor.current_step(path, alive=lambda pid: True)
+        self.assertEqual(running, {'step': 'harvest', 'owner': 'asf', 'pid': 48213,
+                                    'alive': True, 'seconds': None})
+
+    def test_a_line_written_by_tick_step_start_line_itself_parses_back(self):
+        """The one assertion that stops `_STEP_START_RE` and the formatter drifting apart
+        (F-0142 plan, Task 2 step 11)."""
+        from asf.tick import tick
+        path = self.write(tick.step_start_line('harvest', 'asf') + '\n')
+        running = doctor.current_step(path)
+        self.assertEqual(running['step'], 'harvest')
+        self.assertEqual(running['owner'], 'asf')
+        self.assertEqual(running['pid'], os.getpid())
+
+
+class LogTailWindowTests(unittest.TestCase):
+    """`_log_lines` and `_log_tail` over it (F-0142, D7/D15/PD5): a bounded read of the log's own
+    end, never the whole file."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-doctor-tail-')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def write(self, text):
+        path = os.path.join(self.tmp, 'tick.log')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return path
+
+    def test_log_lines_on_a_small_log_is_its_non_empty_rstripped_lines_oldest_first(self):
+        path = self.write('one\n\ntwo\nthree\n')
+        self.assertEqual(doctor._log_lines(path), ['one', 'two', 'three'])
+
+    def test_log_tail_on_a_small_log_is_unchanged_from_today(self):
+        path = self.write('one\ntwo\nthree\n')
+        self.assertEqual(doctor._log_tail(path), 'three')
+
+    def test_log_tail_on_a_log_larger_than_the_window_still_yields_the_true_last_line(self):
+        path = self.write(('x' * 2000 + '\n') * 10 + 'last\n')
+        self.assertEqual(doctor._log_lines(path, limit=1000)[-1], 'last')
+        self.assertEqual(doctor._log_tail(path), 'last')
+
+    def test_log_tail_of_none_is_none(self):
+        self.assertIsNone(doctor._log_tail(None))
+
+    def test_log_tail_of_a_missing_path_is_none(self):
+        self.assertIsNone(doctor._log_tail(os.path.join(self.tmp, 'gone.log')))
+
+    def test_log_tail_of_an_empty_file_is_empty_string(self):
+        self.assertEqual(doctor._log_tail(self.write('')), '')
+
+    def test_a_start_line_pushed_out_of_the_window_gives_no_current_step(self):
+        """D7's accepted cost, pinned: a step that prints more than the window's worth of its own
+        output after its start line shows no `step:` field, rather than a wrong one."""
+        path = self.write('[step:batch] start owner=command pid=48213 at=2026-01-01T00:00:00Z\n')
+        with open(path, 'a', encoding='utf-8') as f:
+            while os.path.getsize(path) <= doctor.LOG_TAIL_BYTES:
+                f.write('[command:batch] filler line of output\n')
+        self.assertIsNone(doctor.current_step(path))
+
+    def test_a_window_boundary_falling_mid_line_drops_the_fragment(self):
+        lines = [f'line-{i:03d}' for i in range(50)]
+        path = self.write('\n'.join(lines) + '\n')
+        size = os.path.getsize(path)
+        # a limit that lands inside a line, not on a boundary
+        limit = size - len(lines[0]) - 3
+        result = doctor._log_lines(path, limit=limit)
+        self.assertEqual(result[-1], lines[-1])
+        self.assertNotIn(lines[0], result)
+
+    def test_a_file_larger_than_the_window_with_no_newline_in_it_yields_the_partial_line(self):
+        """PD5/D15's one named behaviour change: `_log_tail` reading the whole file would have
+        returned this file's one true last line too, but a bounded read whose window holds no
+        newline at all yields that partial fragment instead — the cost D7 accepts."""
+        path = self.write('x' * 5000)
+        result = doctor._log_lines(path, limit=10)
+        self.assertEqual(result, ['x' * 10])
+
+
+class SchedulerStepFieldTests(SchedulerSectionFixture):
+    """The SCHEDULER row's `step:` field and its one new `YELLOW` (F-0142)."""
+
+    def test_a_healthy_job_mid_step_is_ok_and_shows_the_step_between_last_run_and_log(self):
+        log = self.write_log(
+            'tick-sample-record.log',
+            f'[step:harvest] start owner=asf pid={os.getpid()} at=2026-01-01T00:00:00Z\n'
+            '[command:batch] merging #412\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3', '-m', 'asf.cli'], log=log)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
+
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.OK)
+        detail = rows[0][2]
+        self.assertIn('step: harvest running', detail)
+        self.assertIn('(asf, pid', detail)
+        self.assertLess(detail.index('last-run='), detail.index('  step: '))
+        self.assertLess(detail.index('  step: '), detail.index('  log: '))
+
+    def test_a_dead_pid_mid_step_is_yellow_and_names_the_unfinished_step(self):
+        log = self.write_log(
+            'tick-sample-record.log',
+            '[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3', '-m', 'asf.cli'], log=log)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
+
+        with mock.patch.object(doctor.lifecycle, 'pid_alive', return_value=False):
+            rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.YELLOW)
+        self.assertIn('unfinished — its tick (pid 48213) is gone', rows[0][2])
+        self.assertFalse(doctor.scheduler_is_red(rows))
+
+    def test_a_nonzero_last_exit_with_a_dangling_start_line_stays_red_not_downgraded(self):
+        log = self.write_log(
+            'tick-sample-record.log',
+            '[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3'], log=log)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record',
+                   read_fixture('launchctl-print.txt').replace('last exit code = 0',
+                                                               'last exit code = 1'))
+        with mock.patch.object(doctor.lifecycle, 'pid_alive', return_value=False):
+            rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.RED)
+
+    def test_a_never_exited_job_past_two_intervals_with_a_dangling_start_line_stays_red(self):
+        log = self.write_log(
+            'tick-sample-dispatch.log',
+            '[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n')
+        self.install_plist('asf.sample.dispatch', ['python3', '-m', 'asf.cli'],
+                           log=log, interval=600, age_s=3600)
+        fake_loaded(self.statedir, ['asf.sample.dispatch'])
+        fake_print(self.statedir, 'asf.sample.dispatch',
+                   read_fixture('launchctl-print-never-exited.txt'))
+        with mock.patch.object(doctor.lifecycle, 'pid_alive', return_value=False):
+            rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.RED)
+
+    def test_a_job_with_no_step_line_grows_no_step_field_and_is_byte_for_byte_todays_row(self):
+        log = self.write_log('tick-sample-record.log', 'starting\ntick: state committed\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3', '-m', 'asf.cli'], log=log)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
+
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertNotIn('  step: ', rows[0][2])
+        self.assertEqual(rows[0][2],
+                         'state=running  runs=7  last-exit=0  '
+                         'last-run=' + doctor.format_age(doctor._age_s(log)) +
+                         '  log: tick: state committed')
+
+    def test_a_job_whose_log_ends_in_an_end_line_grows_no_step_field(self):
+        log = self.write_log(
+            'tick-sample-record.log',
+            '[step:harvest] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n'
+            '[step:harvest] 22.7s ok=yes owner=asf pid=48213 at=2026-01-01T00:00:22Z\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3', '-m', 'asf.cli'], log=log)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
+
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertNotIn('  step: ', rows[0][2])
+
+    def test_each_clocks_row_reads_its_own_log(self):
+        """P19: a job row's step field names its own clock's tick, not another's."""
+        record_log = self.write_log(
+            'tick-sample-record.log',
+            f'[step:record] start owner=asf pid={os.getpid()} at=2026-01-01T00:00:00Z\n')
+        health_log = self.write_log(
+            'tick-sample-health.log',
+            f'[step:health] start owner=asf pid={os.getpid()} at=2026-01-01T00:00:00Z\n')
+        wave_log = self.write_log(
+            'tick-sample-wave.log',
+            '[step:wave] start owner=asf pid=48213 at=2026-01-01T00:00:00Z\n'
+            '[step:wave] 1.0s ok=yes owner=asf pid=48213 at=2026-01-01T00:00:01Z\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3'], log=record_log)
+        self.install_plist('asf.sample.health', ['/usr/bin/python3'], log=health_log)
+        self.install_plist('asf.sample.wave', ['/usr/bin/python3'], log=wave_log)
+        fake_loaded(self.statedir, ['asf.sample.record', 'asf.sample.health', 'asf.sample.wave'])
+        for label in ('asf.sample.record', 'asf.sample.health', 'asf.sample.wave'):
+            fake_print(self.statedir, label, read_fixture('launchctl-print.txt'))
+
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        by_label = {r[1]: r[2] for r in rows}
+        self.assertIn('step: record running', by_label['asf.sample.record'])
+        self.assertIn('step: health running', by_label['asf.sample.health'])
+        self.assertNotIn('  step: ', by_label['asf.sample.wave'])
 
 
 class TestDoctorStamp(unittest.TestCase):
