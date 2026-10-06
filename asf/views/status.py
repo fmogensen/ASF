@@ -20,9 +20,11 @@ Every row is filled from what exists, or says which key would fill it —
   starts" only while the cap holds a launching row, else "the cap holds no row now";
 * **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
   closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
-* **Ready to launch** — the rows this tick's wave would start: the feeder over the record's
-  ``index.json``, less the sessions in flight, through the wave's own per-row filter
-  (:func:`asf.tick.step_wave.would_start`) — held back and failing-to-spawn rows named apart;
+* **Ready to launch** — the rows this tick's one plan (:func:`_plan`) would launch, less the
+  sessions in flight — a failing-to-spawn row named apart;
+* **S1 gate** — the S1 lane's cut of that same plan (:func:`asf.feeder.tiers.gate`): who holds
+  the floor and how many rows behind it, and any open S1 nothing is working; no row while the
+  gate holds nothing (P11);
 * **Decisions** — the undecided cards (D6's one ranking) and the first few to decide;
 * **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
   cell naming the band when it is not ``free``, and a stopped account's reset (``— resets
@@ -36,6 +38,7 @@ Every row is filled from what exists, or says which key would fill it —
   ``waiting on upgrade to <sha> since <time> (owner <product>)`` while a pending upgrade marker
   parks every tick (:func:`asf.upgrade.held`).
 """
+import collections
 import datetime
 import json
 import os
@@ -47,6 +50,46 @@ from asf import env
 
 def not_configured(key):
     return f"— (not configured: {key})"
+
+
+#: the view's own one plan, in ``status.py`` until ``step_wave.plan_now`` exists — the work
+#: F-0113's reshape dropped (T-0438) — at which point ``_plan`` becomes a call to it and this
+#: record goes.
+#: product   the product the plan was made for
+#: items     the live ``{id: item}`` map (:func:`asf.views.index_reader.load`)
+#: rows      the cut plan (:func:`asf.feeder.rows.plan_rows`, ``s1_first=True`` — this tick's
+#:           launch order)
+#: inputs    the keyword facts ``plan_rows`` takes beside the index
+#:           (:func:`asf.tick.step_wave.plan_inputs`)
+#: capacity  the session ceiling (:func:`asf.tick.step_wave.capacity`)
+#: inflight  the sessions running now (:func:`asf.tick.step_wave.inflight`)
+#: gate      the S1 lane's gate over the cut and the uncut plan (:func:`asf.feeder.tiers.gate`),
+#:           or ``None``
+Plan = collections.namedtuple('Plan', 'product items rows inputs capacity inflight gate')
+
+
+def _plan(root, product):
+    """The view's one plan for ``product``'s ``root``, or ``None`` when there is nothing to plan
+    from — the condition the feeder cells have always tested. Raises on an unreadable plan: one
+    bad read never reaches here uncaught, because every caller is a cell `render` already wraps
+    in its own ``try`` (RD6)."""
+    from asf.feeder import rows as feeder_rows
+    from asf.feeder import tiers
+    from asf.tick import step_wave
+    from asf.views import index_reader as ix
+    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+        return None
+    items, _generated = ix.load(root)
+    inputs = step_wave.plan_inputs(product, root)
+    running = step_wave.inflight(product)
+    cap = step_wave.capacity(product)
+    rows = feeder_rows.plan_rows(items, product, running, cap, **inputs)
+    # the uncut plan: capacity nothing can exhaust, so the S1 lane's cut of it is the product's
+    # whole demand behind the gate, not just this tick's (RD2)
+    uncut = feeder_rows.plan_rows(items, product, running, len(items) + len(running or ()),
+                                  s1_first=False, **inputs)
+    return Plan(product=product, items=items, rows=rows, inputs=inputs, capacity=cap,
+               inflight=running, gate=tiers.gate(rows, uncut, held=inputs.get('held')))
 
 
 _DIGEST_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})-digest\.md$')
@@ -284,51 +327,50 @@ def _residue(item):
     return isinstance(evidence, list) and bool(evidence) and evidence[-1] == 'rule: no-rule'
 
 
-def ready_cell(root, product):
-    """How many rows this tick's wave would start, and the first of them — the wave's own filter
-    (:func:`asf.tick.step_wave.would_start`: approval holds, trunk closes, host pressure, seats,
-    the relaunch cap), so N is never a row the wave then refuses. A row the plan launches but
-    that filter refuses is counted as held back, by why; a row failing to spawn tick after tick
-    is tried by the wave but not counted as starting."""
+def ready_cell(plan):
+    """How many rows this tick's one plan (:func:`_plan`) would launch, and the first of them.
+    A row failing to spawn tick after tick is in the plan but not counted as starting."""
     from asf.feeder import rows as feeder_rows
-    from asf.tick import step_wave
-    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+    if plan is None:
         return not_configured('backlog_dir (no index.json)')
-    screened, _seats, _running = step_wave.would_start(product, root)
-    starting = [s for s in screened if s.starts]
-    failing = [s for s in starting if feeder_rows.FAILING_TO_SPAWN in s.row.action]
-    ready = [s for s in starting if s not in failing]
-    back = {}
-    for s in screened:
-        if s.row.launches and s.why:
-            back[s.kind] = back.get(s.kind, 0) + 1
-    notes = []
-    if failing:
-        notes.append(f"{len(failing)} {feeder_rows.FAILING_TO_SPAWN.lower()}")
-    if back:
-        notes.append(f"{sum(back.values())} held back ("
-                     + ', '.join(f'{k} {n}' for k, n in sorted(back.items())) + ')')
-    tail = ''.join(f'; {n}' for n in notes)
+    starting = [r for r in plan.rows if r.launches]
+    failing = [r for r in starting if feeder_rows.FAILING_TO_SPAWN in r.action]
+    ready = [r for r in starting if r not in failing]
+    tail = f"; {len(failing)} {feeder_rows.FAILING_TO_SPAWN.lower()}" if failing else ''
     if not ready:
-        waiting = sum(1 for s in screened if not s.row.launches)
-        parts = ([f"{waiting} row(s) waiting"] if waiting else []) + notes
-        return f"0 ({'; '.join(parts)})" if parts else "0"
-    first = ready[0].row
+        return f"0{tail}" if tail else "0"
+    first = ready[0]
     return f"{len(ready)} — first: {first.kind} {first.item_id}{tail}"
 
 
-def build_cell(root, product):
+def s1_gate_cell(plan):
+    """The S1 lane's cut, or ``None`` — a row that only speaks up when something is wrong
+    (P11). ``B-0057 holds 94 rows (PLAN → CODE 47, …)``, and a second sentence per S1 that
+    nothing is working: ``B-0061 S1, nothing working it (blocked by B-0041)``."""
+    from asf.feeder import tiers
+    if plan is None or plan.gate is None:
+        return None
+    g = plan.gate
+    clauses = []
+    if g.holders:
+        line = tiers.gate_line(g)
+        if line:
+            clauses.append(line[len('S1 gate: '):])
+    for item_id, waits_on, reason in g.unworked:
+        text, _cmd = tiers._remedy(item_id, waits_on, reason, plan.product)
+        clauses.append(f'{item_id} S1, nothing working it ({text})')
+    return ' · '.join(clauses) if clauses else None
+
+
+def build_cell(plan):
     """``3 / 6 (auto: sessions 3, quota-stopped 2/5, CI free 1)`` — what ``asf next`` says under
     its table (:func:`asf.feeder.rows.build_load`)."""
     from asf.feeder import rows as feeder_rows
-    from asf.tick.step_wave import capacity, inflight, plan_inputs
-    from asf.views import index_reader as ix
-    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+    if plan is None:
         return not_configured('backlog_dir (no index.json)')
-    items, _generated = ix.load(root)
-    inputs = plan_inputs(product, root)
+    inputs = plan.inputs
     x, n, why, binds = feeder_rows.build_state(
-        items, product, capacity(product), inflight(product), inputs.get('occupancy'),
+        plan.items, plan.product, plan.capacity, plan.inflight, inputs.get('occupancy'),
         landed_shas=inputs.get('landed_shas'), bandwidth=inputs.get('bandwidth'),
         attempts=inputs.get('attempts'), groom_state=inputs.get('groom_state'),
         held=inputs.get('held'), gate=inputs.get('gate'), adjudicated=inputs.get('adjudicated'),
@@ -337,22 +379,19 @@ def build_cell(root, product):
     return f"{x} / {n} ({why})" + feeder_rows.build_binds_note(x, n, binds)
 
 
-def decisions_cell(root, product):
+def decisions_cell(plan):
     """The decision debt: how many open cards wait for ``decided: true``, and the ids to spend it
     on first — the same ranking (``undecided_rows``) and the same ``busy`` the wave plans with."""
     from asf.feeder import rows as feeder_rows
-    from asf.tick.step_wave import inflight, plan_inputs
-    from asf.views import index_reader as ix
-    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+    if plan is None:
         return not_configured('backlog_dir (no index.json)')
-    items, _generated = ix.load(root)
-    held = feeder_rows.inflight_ids(inflight(product)) | {
-        i for i in feeder_rows.occupied(plan_inputs(product, root)['occupancy'])
-        if feeder_rows.is_open(items.get(i) or {})}
-    rows = feeder_rows.undecided_rows(items, product, held, limit=0)
+    held = feeder_rows.inflight_ids(plan.inflight) | {
+        i for i in feeder_rows.occupied(plan.inputs['occupancy'])
+        if feeder_rows.is_open(plan.items.get(i) or {})}
+    rows = feeder_rows.undecided_rows(plan.items, plan.product, held, limit=0)
     if not rows:
         return "0"
-    shown = ', '.join(r.item_id for r in rows[:feeder_rows.decision_rows(product)])
+    shown = ', '.join(r.item_id for r in rows[:feeder_rows.decision_rows(plan.product)])
     return f"{len(rows)} undecided — next: {shown}" if shown else f"{len(rows)} undecided"
 
 
@@ -623,6 +662,15 @@ def render(root, product, cfg=None):
     out = [f"**FACTORY STATUS {now}**", ""]
     out.append("| Metric | Now |")
     out.append("|---|---|")
+    # a one-slot cache with a sentinel, so a None plan is cached too, and the record clone, the
+    # ledger reads and the two plans are made at most once per render — lazily, behind render's
+    # own per-cell try, not eagerly above it (RD6)
+    _plan_cache = []
+
+    def plan():
+        if not _plan_cache:
+            _plan_cache.append(_plan(root, product))
+        return _plan_cache[0]
     for name, cell in (('Stale', lambda: stale_cell(root, product)),
                        ('Version', lambda: version_cell(product=product)),
                        ('Runners', lambda: runners_cell(product)),
@@ -631,14 +679,15 @@ def render(root, product, cfg=None):
                        ('Merge', lambda: merge_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
                        ('Quarantine', lambda: quarantine_cell(product)),
-                       ('Features in build', lambda: build_cell(root, product)),
+                       ('Features in build', lambda: build_cell(plan())),
                        ('Value', lambda: value_cell(root, product)),
                        ('A/B pairs', lambda: ab_pairs_cell(root, product)),
                        ('Release', lambda: release_cell(root, product)),
                        ('Tune', lambda: tune_cell(product, cfg)),
                        ('Record', lambda: record_cell(root)),
-                       ('Ready to launch', lambda: ready_cell(root, product)),
-                       ('Decisions', lambda: decisions_cell(root, product)),
+                       ('Ready to launch', lambda: ready_cell(plan())),
+                       ('S1 gate', lambda: s1_gate_cell(plan())),
+                       ('Decisions', lambda: decisions_cell(plan())),
                        ('Parked', lambda: parked_cell(product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('PAUSED', lambda: paused_cell(cfg, product)),

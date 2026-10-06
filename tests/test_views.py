@@ -313,36 +313,95 @@ class StatusViewTests(ViewsTestCase):
             self.assertIn('| PAUSED | X |', status.render(self.root, self.product, cfg={}))
 
     def test_no_index_names_the_backlog(self):
-        self.assertEqual(status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product),
-                         '— (not configured: backlog_dir (no index.json))')
+        plan = status._plan(os.path.join(self.tmp, 'nowhere'), self.product)
+        self.assertEqual(status.ready_cell(plan), '— (not configured: backlog_dir (no index.json))')
 
     def test_the_ready_cell_counts_rows_failing_to_spawn(self):
         from asf.feeder import rows as feeder_rows
-        from asf.tick import step_wave
         mk = lambda iid, action: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
                                                  feature_id='F-0001', action=action,
                                                  brief_kind='task', branch='', reason='')
-        screened = [step_wave.Screened(mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2')),
-                    step_wave.Screened(mk('T-0002', 'would launch'))]
-        with mock.patch.object(step_wave, 'would_start', return_value=(screened, 5, [])):
-            cell = status.ready_cell(self.root, self.product)
-        # the wave tries the failing row, but it does not start: N is the one that does
-        self.assertEqual(cell, f'1 — first: {feeder_rows.PLAN_CODE} T-0002; 1 failing to spawn')
+        plan = status.Plan(product=self.product, items={}, rows=[
+            mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2'),
+            mk('T-0002', 'would launch')], inputs={}, capacity=5, inflight=[], gate=None)
+        # the plan tries the failing row, but it does not start: N is the one that does
+        self.assertEqual(status.ready_cell(plan),
+                         f'1 — first: {feeder_rows.PLAN_CODE} T-0002; 1 failing to spawn')
 
-    def test_the_ready_cell_counts_only_what_the_wave_would_start(self):
-        # 2026-10-04: status said 2 ready while the wave launched 0 — an ungrantable approval
-        # hold and a relaunch-cap park, both refused by the wave's own filter
-        from asf.feeder import rows as feeder_rows
+    def _s1_gate_record(self, bugs, features, capacity=3):
+        items = {'E-0001': INDEX['items']['E-0001']}
+        items.update(bugs)
+        items.update(features)
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+        return env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
+                                 'deploy_sha': 'none', 'capacity': {'sessions': capacity}})
+
+    def _holding_record(self):
+        """RD8: five open S1 Bugs (the fifth blocked), seven decided Feature cards, 3 seats,
+        nothing in flight — ``B-0004`` holds the floor and the lane cuts every Feature row
+        behind it."""
+        bugs = {f'B-{n:04d}': {'id': f'B-{n:04d}', 'type': 'bug', 'title': f'bug {n}',
+                               'severity': 'S1', 'decided': True, 'state': 'New',
+                               'stage_since': f'2026-01-01T0{n}:00:00Z'}
+               for n in range(1, 5)}
+        bugs['B-0005'] = {'id': 'B-0005', 'type': 'bug', 'title': 'bug 5', 'severity': 'S1',
+                          'decided': True, 'state': 'New', 'blocked': True,
+                          'blocked_by_open': ['B-0099'], 'stage_since': '2026-01-01T05:00:00Z'}
+        features = {f'F-{n:04d}': {'id': f'F-{n:04d}', 'type': 'feature', 'title': f'feature {n}',
+                                   'parent': 'E-0001', 'rank': n, 'stage': 'card', 'state': 'New',
+                                   'decided': True}
+                   for n in range(1, 8)}
+        return self._s1_gate_record(bugs, features, capacity=3)
+
+    def test_the_s1_gate_row_names_the_holder_and_the_unworked_s1(self):
+        self.product = self._holding_record()
+        rows = self.rows({'scheduler': {'kind': 'none'}})
+        self.assertEqual(rows['S1 gate'],
+                         'B-0004 holds 7 rows (CARD → SPEC 7) · '
+                         'B-0005 S1, nothing working it (blocked by B-0099)')
+
+    def test_the_s1_gate_row_sits_between_ready_to_launch_and_decisions(self):
+        self.product = self._holding_record()
+        text = status.render(self.root, self.product, cfg={'scheduler': {'kind': 'none'}})
+        names = [ln.split(' | ')[0].lstrip('| ') for ln in text.splitlines() if ln.startswith('| ')]
+        self.assertEqual(names[names.index('Ready to launch') + 1], 'S1 gate')
+        self.assertEqual(names[names.index('S1 gate') + 1], 'Decisions')
+
+    def test_the_default_record_has_no_s1_gate_row_and_is_unchanged(self):
+        rows = self.rows({'scheduler': {'kind': 'none'}})
+        self.assertNotIn('S1 gate', rows)
+        self.assertEqual(rows['Ready to launch'], '1 — first: CARD → SPEC F-0001')
+        self.assertRegex(rows['Features in build'],
+                         r'^0 / \d+ \(auto: sessions \d+, quota-stopped \S+, CI free \S+\)$')
+
+    def test_an_all_seated_s1_renders_the_unworked_sentence_with_no_held_clause(self):
+        # RD3: holders == [] with held > 0 — the one S1 that launches gets a real seat, so it
+        # is never a holder; the blocked one still goes unworked
+        bugs = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'title': 'bug 1', 'severity': 'S1',
+                           'decided': True, 'state': 'New', 'stage_since': '2026-01-01T01:00:00Z'},
+               'B-0002': {'id': 'B-0002', 'type': 'bug', 'title': 'bug 2', 'severity': 'S1',
+                         'decided': True, 'state': 'New', 'blocked': True,
+                         'blocked_by_open': ['B-0099'], 'stage_since': '2026-01-01T02:00:00Z'}}
+        features = {f'F-{n:04d}': {'id': f'F-{n:04d}', 'type': 'feature', 'title': f'feature {n}',
+                                   'parent': 'E-0001', 'rank': n, 'stage': 'card', 'state': 'New',
+                                   'decided': True}
+                   for n in range(1, 4)}
+        product = self._s1_gate_record(bugs, features, capacity=1)
+        plan = status._plan(self.root, product)
+        self.assertEqual(plan.gate.holders, [])
+        self.assertGreater(plan.gate.held, 0)
+        self.assertEqual(status.s1_gate_cell(plan),
+                         'B-0002 S1, nothing working it (blocked by B-0099)')
+
+    def test_one_plan_feeds_every_feeder_row(self):
+        # D15, RD5: a render whose four feeder rows (Features in build, Ready to launch, S1
+        # gate, Decisions) are all filled still reads the ledger and the record once
         from asf.tick import step_wave
-        mk = lambda iid: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
-                                         feature_id='F-0001', action='would launch',
-                                         brief_kind='task', branch='', reason='')
-        screened = [step_wave.Screened(mk('T-0001'), 'held touch_amendable_set (human-now)',
-                                       step_wave.HELD),
-                    step_wave.Screened(mk('T-0002'), 'launched 2 time(s)', step_wave.CAPPED)]
-        with mock.patch.object(step_wave, 'would_start', return_value=(screened, 5, [])):
-            cell = status.ready_cell(self.root, self.product)
-        self.assertEqual(cell, '0 (2 held back (held 1, relaunch cap 1))')
+        product = self._holding_record()
+        with mock.patch.object(step_wave, 'plan_inputs', wraps=step_wave.plan_inputs) as spy:
+            status.render(self.root, product, cfg={'scheduler': {'kind': 'none'}})
+        self.assertEqual(spy.call_count, 1)
 
 
 class DecisionsCellTests(ViewsTestCase):
@@ -364,18 +423,18 @@ class DecisionsCellTests(ViewsTestCase):
 
     def test_the_count_and_the_first_ids(self):
         self._index(73)
-        self.assertEqual(status.decisions_cell(self.root, self.product),
+        self.assertEqual(status.decisions_cell(status._plan(self.root, self.product)),
                          '73 undecided — next: F-0001, F-0002, F-0003, F-0004, F-0005')
         self.assertEqual(self.rows()[1]['Decisions'],
                          '73 undecided — next: F-0001, F-0002, F-0003, F-0004, F-0005')
 
     def test_every_card_decided_is_zero(self):
         self._index(3, decided=True)
-        self.assertEqual(status.decisions_cell(self.root, self.product), '0')
+        self.assertEqual(status.decisions_cell(status._plan(self.root, self.product)), '0')
 
     def test_no_index_names_the_backlog(self):
-        self.assertEqual(status.decisions_cell(os.path.join(self.tmp, 'nowhere'), self.product),
-                         status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product))
+        plan = status._plan(os.path.join(self.tmp, 'nowhere'), self.product)
+        self.assertEqual(status.decisions_cell(plan), status.ready_cell(plan))
 
     def test_a_raising_cell_leaves_the_table(self):
         with mock.patch.object(status, 'decisions_cell', side_effect=ValueError('boom')):
