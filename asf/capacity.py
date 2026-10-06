@@ -425,7 +425,7 @@ def _weight_of(name, product):
 
 
 def _demand_path(name):
-    return os.path.join(env.state_dir(name), DEMAND_FILE)
+    return os.path.join(env.ASF_HOME, 'state', name, DEMAND_FILE)
 
 
 def _now():
@@ -440,6 +440,7 @@ def write_demand(name, inflight, wanted):
            'wanted': int(wanted)}
     path = _demand_path(name)
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(rec, f, sort_keys=True)

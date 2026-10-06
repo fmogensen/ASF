@@ -776,11 +776,14 @@ def level_of(product, cls):
 # ---- the ledger ----------------------------------------------------------------
 
 def ledger_path(product):
-    return os.path.join(env.state_dir(product), 'approvals.jsonl')
+    name = product.name if isinstance(product, env.Product) else product
+    return os.path.join(env.ASF_HOME, 'state', name, 'approvals.jsonl')
 
 
 def append(product, record):
-    with open(ledger_path(product), 'a', encoding='utf-8') as f:
+    path = ledger_path(product)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(record, sort_keys=True) + '\n')
 
 

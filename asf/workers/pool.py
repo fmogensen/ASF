@@ -220,7 +220,8 @@ def is_cloud_lane(s):
 # ---- the session ledger -----------------------------------------------------
 
 def sessions_path(product):
-    return os.path.join(env.state_dir(product), 'sessions.jsonl')
+    name = product.name if isinstance(product, env.Product) else product
+    return os.path.join(env.ASF_HOME, 'state', name, 'sessions.jsonl')
 
 
 #: a wave's launches append from threads (:func:`asf.workers.wave.wave`): one line at a time
@@ -229,8 +230,11 @@ _APPEND_LOCK = threading.Lock()
 
 def append_session(product, record):
     line = json.dumps(record, sort_keys=True) + '\n'
-    with _APPEND_LOCK, open(sessions_path(product), 'a', encoding='utf-8') as f:
-        f.write(line)
+    path = sessions_path(product)
+    with _APPEND_LOCK:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(line)
 
 
 # The fields that belong to ONE run of a job (:data:`asf.workers.lifecycle.RUN_FIELDS`): a
