@@ -228,6 +228,7 @@ class Context:
         self.wave_latency_s = None
         self.wave_started_at = None       # UTC stamp of this tick's wave start, once it ran
         self.health_freed = False         # health ended, held or corrected a run this tick
+        self.runs_before_wave = None      # {job: run identity} on the ledger as the wave began
         self.cadence = None               # this tick's asf.tick.cadence.Cadence, once made
         from asf.facts import cache as facts_cache, landing as facts_landing
         facts_cache.clear()  # a tick reads its facts afresh (asf.facts.cache)
@@ -720,11 +721,23 @@ def groom_first(ctx, queue):
     return any(r[0] == 'groom' and r[1] == 'asf' for r in queue) and fresh_inbox(ctx)
 
 
+def run_identity(run):
+    """What tells one run of a job from the next: its session id, else its start."""
+    return (run or {}).get('session') or (run or {}).get('started')
+
+
 def note_wave_latency(ctx):
     """The tick's start → this wave's start: one line, the tick's ``wave_latency_s`` and the
     product's ``wave-latency.json`` (:mod:`asf.tick.wave_latency`)."""
     from asf.tick import wave_latency
-    ctx.wave_started_at = _stamp()  # health spares what this wave launches (step_health)
+    ctx.wave_started_at = _stamp()
+    # health spares what this wave launches (step_health): the runs on the ledger as it starts
+    from asf.workers import pool as pool_mod
+    try:
+        ctx.runs_before_wave = {job: run_identity(r)
+                                for job, r in pool_mod.load_sessions(ctx.product).items()}
+    except (OSError, ValueError):
+        ctx.runs_before_wave = None
     ctx.wave_latency_s = round(time.monotonic() - ctx.started, 1)
     print(f'tick: wave latency {ctx.wave_latency_s:.1f}s (tick start → wave start)', flush=True)
     wave_latency.write(ctx.product, ctx.wave_latency_s)

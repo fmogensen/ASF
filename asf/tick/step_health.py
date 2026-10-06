@@ -257,12 +257,13 @@ def spare_this_waves_runs(ctx):
     is judged by the next tick — as it was when health ran first — never ended (or reaped) in the
     tick that started it. ``(jobs, alive)``: the jobs health leaves alone and the pid reading
     the stall check and the reaper go by; ``((), None)`` (the checks' own) when no wave ran first."""
-    since = getattr(ctx, 'wave_started_at', None)
-    if not since:
+    before = getattr(ctx, 'runs_before_wave', None)
+    if not getattr(ctx, 'wave_started_at', None) or before is None:
         return (), None
+    from asf.tick.tick import run_identity
     sessions = pool_mod.load_sessions(ctx.product)
     fresh = {job: s.get('pid') for job, s in sessions.items()
-             if not s.get('ended') and str(s.get('started') or '') >= since}
+             if not s.get('ended') and before.get(job) != run_identity(s)}
     if not fresh:
         return (), None
     pids = {pid for pid in fresh.values() if pid}

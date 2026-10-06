@@ -259,9 +259,13 @@ class HealthSparesThisWavesRunsTests(HomeCase):
         product = env.Product('p', {})
         pool_mod.append_session(product, {'job': 'old', 'pid': 11, 'started': '2026-10-06T01:00:00Z'})
         pool_mod.append_session(product, {'job': 'new', 'pid': 22, 'started': '2026-10-06T01:20:05Z'})
-        ctx = mock.Mock(product=product, wave_started_at=None)
+        ctx = mock.Mock(product=product, wave_started_at=None, runs_before_wave=None)
         self.assertEqual(step_health.spare_this_waves_runs(ctx), ((), None))
-        ctx.wave_started_at = '2026-10-06T01:20:00Z'
+        # the ledger as the wave began: 'old' was there; 'new' is this wave's — even when a
+        # fast host launched both within one second
+        ctx.wave_started_at = '2026-10-06T01:20:05Z'
+        from asf.tick.tick import run_identity
+        ctx.runs_before_wave = {'old': run_identity(pool_mod.load_sessions(product)['old'])}
         with mock.patch('asf.workers.health.alive_for', lambda product, runs: lambda pid: False):
             spare, alive = step_health.spare_this_waves_runs(ctx)
         self.assertEqual(spare, {'new'})
