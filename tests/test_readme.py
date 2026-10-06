@@ -686,5 +686,50 @@ class FootprintWideningProseTests(unittest.TestCase):
             'and your own edits change your checkout and stop there', text)
 
 
+class TickStepLineProseTests(unittest.TestCase):
+    """F-0142/T-0496: the operating guide documents the start/end pair a step now prints (not
+    only the end line), that the doctor reads the start line, and the getting-started guide's
+    SCHEDULER field list carries the `step:` field and the YELLOW it can raise — read from the
+    checkout, not a fixture."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def test_operating_names_the_start_line_and_its_fields(self):
+        text = self._read('docs/guide/operating.md')
+        for needle in ('[step:<name>] start owner=', 'ok=<yes|no>', 'pid=', 'at=', 'flushed'):
+            self.assertIn(needle, text, needle)
+
+    def test_operating_names_every_skip_reason(self):
+        text = self._read('docs/guide/operating.md')
+        for needle in ('off', 'already ran today', 'at CI capacity', 'already running'):
+            self.assertIn(needle, text, needle)
+
+    def test_operating_no_longer_carries_the_old_end_only_sentence(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertNotIn('Each step ends with `[step:<name>] <seconds>s`', text)
+
+    def test_operating_names_doctor_reading_the_start_line(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn('asf doctor', text)
+        self.assertIn('step: <name> running', text)
+
+    def test_operating_still_carries_the_failed_line(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn('[step:<name>] FAILED', text)
+
+    def test_getting_started_scheduler_paragraph_names_the_step_field(self):
+        text = self._read('docs/guide/getting-started.md')
+        self.assertIn('step:', text)
+        self.assertIn('last-exit', text)
+        self.assertIn('last-run', text)
+
+    def test_getting_started_names_the_yellow_for_a_tick_killed_inside_a_step(self):
+        text = self._read('docs/guide/getting-started.md')
+        self.assertIn('YELLOW', text)
+        self.assertIn('killed inside a step', text)
+
+
 if __name__ == '__main__':
     unittest.main()
