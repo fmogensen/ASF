@@ -87,9 +87,8 @@ def ruling_ready(run):
 
 
 pid_alive = lifecycle.pid_alive
-
-#: seconds an ended run's own process gets to exit by itself before health stops it (T-0196)
-LINGER_GRACE_S = 300
+#: the one number (:data:`asf.workers.lifecycle.LINGER_GRACE_S`) — see there for why
+LINGER_GRACE_S = lifecycle.LINGER_GRACE_S
 #: seconds between the SIGTERM and the SIGKILL of a lingering process
 STOP_WAIT_S = 5
 
@@ -301,8 +300,7 @@ def settle_ended(product, sessions, now=None, fix=True, session_source=None, ret
                 detail += '; routine disabled' if ok else '; routine left as it is'
             found.append((job, 'settled', detail))
             continue
-        ended = cloud._parse_ts(run.get('ended'))
-        if not run.get('session') or ended is None or now - ended < grace_s:
+        if not run.get('session') or not lifecycle.linger_spent(run, now, grace_s):
             continue
         try:
             local.append((job, run, int(pid)))
