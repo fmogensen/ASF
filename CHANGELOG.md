@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.205 — 2026-10-07
+
+### Features landed
+
+- The wave asks the trunk again, at the seat, and closes what it finds (#903)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.205"`
+
 ## v0.1.204 — 2026-10-06
 
 ### Features landed
