@@ -31,7 +31,11 @@ from asf.record.ingest import is_retired, match_feature
 DONE_STATES = ('Resolved', 'Closed')
 
 STORIES_LINE_RE = re.compile(r'^\s*stories\s*:\s*(.+)$', re.IGNORECASE | re.MULTILINE)
-STORY_ID_RE = re.compile(r'\bS-\d{4}\b')
+#: `ids.mint_id` formats every id as ``{n:04d}`` — a *minimum* width, not a cap, so a counter
+#: past 9999 mints ``S-37300`` and the like. `\d{4}` alone stopped matching those the moment the
+#: Story counter crossed that line, so a Feature could carry three real five-digit Stories in its
+#: spec and plan and still mint `after: none` Task cards with no `stories:` at all (F-0133).
+STORY_ID_RE = re.compile(r'\bS-\d{4,}\b')
 DESCRIPTION_CHARS = 4000
 
 
