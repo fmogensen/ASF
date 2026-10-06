@@ -21,8 +21,8 @@ ticks, as the minutes between two real ticks would. :meth:`Factory.gh` moves the
 CI or a person would; :meth:`Factory.snapshot` reads the ledger, the record and the rows;
 :meth:`Factory.fork` copies a factory as it stands, for scenarios that start from one state.
 
-One call reaches past the seams: ``asf.harvest.pr_hygiene.run`` puts ``/opt/homebrew/bin`` ahead
-of ``PATH``, so where a real ``gh`` lives there, PR hygiene runs it instead of the fake. The
+One call reaches past the seams: the release rollup's ``gh`` runs under ``operator.path_prefix``
+ahead of ``PATH``, so where a real ``gh`` lives there, it runs instead of the fake. The
 harness points ``GH_CONFIG_DIR`` at an empty directory and blanks the tokens, so that ``gh`` has
 no login and fails at once, asking no network: in the harness, hygiene sees no PRs.
 """

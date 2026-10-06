@@ -423,7 +423,7 @@ generated: 2026-09-21 — from metrics/ci (3), metrics/sessions (4), metrics/tic
 | agents | 6 launches in 2 ticks, 1 relaunches | 3 PRs merged → 2.0 launches per merged PR |
 | tokens | in — · out — · cache rd — · cache wr — | 4 sessions, 0 capped |
 | spec quality | 1 specs reviewed, 0 in round 1 | mean 2.0 rounds, median 2 |
-| bandwidth | cux 5h/7d: accta 12/21 %, acctb 5/6 % | 2 runners seen, 40 runner-minutes |
+| bandwidth | quota 5h/7d: accta 12/21 %, acctb 5/6 % | 2 runners seen, 40 runner-minutes |
 
 ## Cost per Feature (7 days)
 

@@ -23,3 +23,23 @@
 \bnina\b
 \banette\b
 \bjan\b
+
+# Generic patterns added before the public release (the genericity audit's section B). They name
+# a class of private detail, never one backend: name the interface (account_lock.*,
+# operator.path_prefix), not the tool behind it on one operator's machine.
+#
+# An account manager's own name and its home directory (the interface is `account_lock.*`). Each
+# pattern is written so it does not match its own line here (a bracketed letter).
+\bc[u]x\b|~/\.c[u]x\b
+# A private claude.ai link: an artifact, a chat or a project. (A cloud session URL is the runtime's
+# own generic link template and is not matched.)
+claude\.ai/(code/)?artifacts?/|claude\.ai/(chat|project)/
+# A personal mailbox at a consumer email provider (the `.ai` domains are matched above).
+@(gmail|googlemail|outlook|icloud|me|hotmail|live|yahoo|proton|protonmail)\.[a-z]+\b
+# An operator's home directory. Allowed, because they are placeholders every fixture and doc uses:
+# /Users/someone/, /Users/operator/, /Users/x/ (and the /home/ twins), and a relative
+# `<tmp>/home/...` path.
+(^|[^a-z0-9_.~>-])/(Users|home)/(?!(someone|operator|x)/)[a-z][a-z0-9_.-]*/
+# A package manager's install prefix baked in as a path (the interface is operator.path_prefix,
+# or shutil.which over PATH).
+/opt/home[b]rew\b|linuxb[r]ew|/usr/local/Cel[l]ar\b

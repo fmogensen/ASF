@@ -160,7 +160,7 @@ def _in_asf_checkout(directory):
     """Whether ``directory`` sits inside a git checkout *of asf itself* — a work tree whose root
     carries the ``asf`` package (``asf/__init__.py``), the moving code a pinned clock must not
     reach. Any other git work tree on ``PATH`` is a tool's install, not asf's code: Homebrew's
-    prefix is itself a git checkout (``/opt/homebrew/.git``), and dropping it took ``gh`` off a
+    prefix is itself a git checkout (``<prefix>/.git``), and dropping it took ``gh`` off a
     pinned product's clocks (2026-10-03: "lane: pass failed — No such file or directory: 'gh'")."""
     root = _checkout_root(directory)
     return root is not None and os.path.isfile(os.path.join(root, 'asf', '__init__.py'))

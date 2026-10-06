@@ -342,7 +342,7 @@ class RuleCardTests(unittest.TestCase):
         banned = [
             'git push', 'git fetch', 'git commit', 'git merge ', 'git checkout',
             'git worktree add', 'git branch -', 'gh run cancel', 'gh pr merge',
-            'gh pr close', 'gh api -X', 'gh api --method', 'cux switch',
+            'gh pr close', 'gh api -X', 'gh api --method',
             'docker compose', 'docker rm', 'docker stop', 'kill -9', 'rm -rf',
         ]
         d = os.path.join(self.ROOT, 'tools', 'checks')

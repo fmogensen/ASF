@@ -419,11 +419,12 @@ def quota_cell(cfg):
 
 
 def quota_lock_prefix(cfg):
-    """``cux lock wedged N min — held by pid X (child of Y); `` when the account manager's usage
-    lock is wedged (:mod:`asf.workers.cuxlock`) — the cause behind a row of stale readings."""
-    from asf.workers import cuxlock
+    """``account lock wedged N min — held by pid X (child of Y); `` when the account manager's
+    usage lock is wedged (:mod:`asf.workers.account_lock`) — the cause behind a row of stale
+    readings."""
+    from asf.workers import account_lock
     try:
-        w = cuxlock.probe_wedge()
+        w = account_lock.probe_wedge(cfg)
     except Exception:  # noqa: BLE001 — a probe that fails says nothing
         return ''
     return f'{w.label}; ' if w is not None and w.wedged else ''

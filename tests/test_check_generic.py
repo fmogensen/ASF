@@ -92,5 +92,50 @@ class CheckGenericTests(unittest.TestCase):
         self.assertIn('notes.md', r.stdout)
 
 
+def _public_patterns():
+    import re
+    from asf import redact
+    with open(PATTERNS_FILE, encoding='utf-8') as f:
+        return [re.compile(t, re.IGNORECASE) for t in redact._names_from_lines(f.read())]
+
+
+class ReleaseAuditPatternTests(unittest.TestCase):
+    """The genericity audit's section B: the private details check_generic used to miss. Every
+    sample is built from parts, so this file never carries the literal it tests."""
+
+    def hits(self, line):
+        return [p.pattern for p in _public_patterns() if p.search(line)]
+
+    def test_each_private_detail_is_caught(self):
+        samples = [
+            'refresh via ' + 'c' + 'ux usage refresh',                 # an account tool's name
+            'the lock at ~/.' + 'c' + 'ux/.lock',                     # its home directory
+            'see https://claude.ai/code/' + 'artifact/2564648b-4a57',  # a private artifact link
+            'see https://claude.ai/' + 'artifact/abc',
+            'see https://claude.ai/' + 'chat/abc',
+            'mail op' + '@' + 'gmail.com for access',                  # a consumer mailbox
+            'mail op' + '@' + 'proton' + 'mail.com',
+            'cd /' + 'Users/' + 'alice/Code/repo',                     # an operator home
+            'cd /' + 'home/' + 'alice/src',
+            "PATH='/opt/" + "homebrew/bin:'",                         # a package manager prefix
+        ]
+        for line in samples:
+            with self.subTest(line=line):
+                self.assertTrue(self.hits(line), line)
+
+    def test_placeholders_and_generic_text_pass(self):
+        clean = [
+            'path = /Users/operator/Library/LaunchAgents/asf.sample.record.plist',
+            'file:///Users/someone/x', '/usr/bin/python3 /Users/x/.local/bin/asf tick',
+            '/home/someone/.local/bin/claude', "<tmp>/home/state/sample",
+            'https://claude.ai/code/session_01Xy',     # the cloud runtime's own link template
+            'account_lock.path', 'quota_guards.reclaim_cux_lock', 'an.operator@example.invalid',
+            '/usr/local/bin/asf hook approvals',
+        ]
+        for line in clean:
+            with self.subTest(line=line):
+                self.assertEqual(self.hits(line), [], line)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -28,8 +28,8 @@ def hermetic_home():
     os.environ['ASF_HOME'] = chosen
     from asf import env, hermetic
     env.ASF_HOME = chosen
-    # the host's real account-manager lock is never probed by a test (asf.workers.cuxlock)
-    os.environ['ASF_CUX_LOCK'] = os.path.join(chosen, 'cux', '.lock')
+    # the host's real account-manager lock is never probed by a test (asf.workers.account_lock)
+    os.environ['ASF_ACCOUNT_LOCK'] = os.path.join(chosen, 'account-manager', '.lock')
     for var in hermetic.CALLER_IDENTITY:
         os.environ.pop(var, None)
     # B-0114: a session that runs the suite carries its own core.hooksPath in GIT_CONFIG_*, and

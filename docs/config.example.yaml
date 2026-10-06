@@ -95,7 +95,15 @@ quota_guards:
     five_h: 90
     seven_d: 90
     seven_d_model: 90
-  # reclaim_cux_lock: true   # opt-in: the tick reclaims a wedged ~/.cux/.lock (see product-config.md)
+
+# account_lock: an account manager's global usage lock, named so a wedged one is reported (status
+# Quota row, doctor `quota lock` row) and, opt-in, reclaimed by the tick. Unset = off: nothing is
+# probed. See guide/product-config.md, "A wedged usage lock".
+# account_lock:
+#   path: ~/.<manager>/.lock               # the lock file
+#   process: <manager>                     # its program name; reclaim signals nothing without it
+#   refresh_command: <manager> usage refresh   # run once after a reclaim
+#   reclaim: true                          # default false (older spelling: quota_guards.reclaim_cux_lock)
 
 # host guard: the tick starts no new session and no landing gate while this host is loaded — the
 # 15-minute load average at or over `load_per_core` × cores, or swap in use at or over `swap_pct`
@@ -238,6 +246,12 @@ capacity:
 # upgrade:
 #   min_interval_min: 30
 #   drain_wait_s: 180
+
+# operator.path_prefix: directories (`:`-joined) searched before the inherited PATH when the
+# release rollup runs `gh` — for a host whose scheduler jobs get a minimal PATH. Default: unset,
+# the inherited PATH alone.
+# operator:
+#   path_prefix: /usr/local/bin
 
 # Everything ASF reads and writes lives under ~/.ASF: products/, state/<product>/ (the session
 # ledger, the worktrees, the tick's record clone), logs/. Set $ASF_HOME to move all of it.

@@ -27,4 +27,61 @@ The operator's guide is [`docs/guide/`](docs/guide/): [getting started](docs/gui
 [upgrading](docs/guide/upgrading.md), [troubleshooting](docs/guide/troubleshooting.md) and the
 planned [connectors](docs/guide/connectors.md).
 
+## Quick start
+
+Try it first on the bundled sample product. From a clone, with `git` and Python 3 only (no account,
+no network, no `gh`), this materialises [`sample/`](sample/) in a temporary directory and walks it
+through `asf init`, `asf next`, one `asf tick`, `asf doctor`, `asf roadmap` and `asf scorecard`:
+
+```bash
+git clone https://github.com/fmogensen/ASF.git && cd ASF
+bash tools/quickstart.sh
+```
+
+Then your own product, with one Claude Code account, no cloud lane and GitHub-hosted CI. Run the
+Install line above with `--account <name>[:<config dir>]` added (`asf install --help` lists every
+flag). It ends on `asf doctor` and a dry tick. After that:
+
+```bash
+asf doctor --product <product>             # one table; every row green or naming its fix
+asf next --product <product>               # what the next tick would start, and why
+asf tick --product <product> --dry-run     # a tick on a throwaway copy: no push, no PR, no session
+```
+
+The clock you chose with `--scheduler` runs the real ticks. Ideas, bugs and requests enter through
+`asf inbox` ([the daily loop](docs/guide/operating.md#the-groom-and-the-inbox)).
+
+## Configuration
+
+Everything machine- or product-specific lives in `~/.ASF` (`$ASF_HOME` moves it), never in this
+repo:
+
+- `~/.ASF/config.yaml` — shared by every product on the machine. `asf install` writes it once:
+  `default_product`, `scheduler.kind`, `worker_pool.backend`, `worker_pool.models` and
+  `worker_pool.accounts` (one entry is enough), `capacity.total.sessions`. Annotated:
+  [`docs/config.example.yaml`](docs/config.example.yaml).
+- `~/.ASF/products/<product>.yaml` — one file per product. The minimum is `product`, `repo_slug`,
+  `repo_dir`, `main`, `backlog_dir` and `ci.test_command`, plus the `steps` and `clocks` that
+  `asf init` writes. Annotated: [`docs/products.example.yaml`](docs/products.example.yaml); key by
+  key: [the product file](docs/guide/product-config.md).
+
+Every other key has a default, and the optional lanes (cloud sessions, a merge queue, extra
+accounts) stay off until you set them. `asf doctor` names any key no code reads.
+
+## Upgrade
+
+```bash
+asf upgrade --to <version>        # a release, tag or commit; without --to, main's head
+asf --version
+asf doctor --product <product>
+```
+
+One `asf upgrade` upgrades the package for every product on the machine and ends on a schema
+table. When a release raises the record's schema, commands that write the record refuse until you
+run `asf schema-migrate --product <product> --drain` — forward-only, one commit per step
+([schema migrations](docs/guide/upgrading.md#schema-migrations)). `upgrade: auto` under a product's
+`approvals:` lets the tick run `asf upgrade` itself — today only for ASF's own repo as a product
+([the product file](docs/guide/product-config.md#approvals)). Rolling back, and what is safe while
+sessions run: [upgrading](docs/guide/upgrading.md).
+
 Not "ASF" the Apache Software Foundation.

@@ -1,30 +1,38 @@
-"""asf.workers.cuxlock — a wedged account-manager usage lock: named always, reclaimed on opt-in.
+"""asf.workers.account_lock — a wedged account-manager usage lock: named when configured,
+reclaimed on opt-in.
 
-The quota source (``worker_pool.quota_command``) may refresh its readings through the cux account
-manager, which serialises every refresh on one global file lock (``~/.cux/.lock``). When a cux
-poller hangs while it holds that lock, every refresh times out (``acquire lock: timeout``), every
-reading goes stale and the wave throttles launches — four times on one day, for up to 6 h.
+The quota source (``worker_pool.quota_command``) may refresh its readings through an account
+manager that serialises every refresh on one global file lock (``account_lock.path``). When one of
+its pollers hangs while it holds that lock, every refresh times out, every reading goes stale and
+the wave throttles launches.
 
-**Detect (always on).** :func:`probe_wedge` lists the lock's holders (``lsof``) against the
-process table (``ps``). A hold older than :data:`WEDGED_AFTER_MIN` is wedged; ``asf status`` (Quota
-row) and ``asf doctor`` then say ``cux lock wedged N min — held by pid X (child of Y)``. N is a
-lower bound: the youngest holder's age.
+Nothing here runs unless the operator names the lock: ``account_lock.path`` unset (the default) is
+no probe, no row and no reclaim — a host with one account and no account manager never sees it.
 
-**Reclaim (opt-in, ``quota_guards.reclaim_cux_lock: true``; default off).** A holder is a target
-only when EVERY one of these holds (:func:`decide`):
+**Detect.** :func:`probe_wedge` lists the lock's holders (``lsof``) against the process table
+(``ps``). A hold older than :data:`WEDGED_AFTER_MIN` is wedged; ``asf status`` (Quota row) and
+``asf doctor`` then say ``account lock wedged N min — held by pid X (child of Y)``. N is a lower
+bound: the youngest holder's age.
 
-* it is a cux process and NOT a claude process;
-* its parent is a cux process — it is a child, never the wrapper;
+**Reclaim (opt-in, ``account_lock.reclaim: true``; default off).** It also needs
+``account_lock.process``, the account manager's program name. A holder is a target only when
+EVERY one of these holds (:func:`decide`):
+
+* it is an account-manager process and NOT a claude process;
+* its parent is an account-manager process — it is a child, never the wrapper;
 * it has no children of its own — a live session always has one;
 * it is at least :data:`RECLAIM_AFTER_MIN` minutes old;
 * it is not pid 0/1, this process or one of its ancestors.
 
 The lock is reclaimed only when at least one holder is a target and every other holder is the
-parent of a target (the cux binary that forked the pollers — it is never signalled). Anything else
+parent of a target (the binary that forked the pollers — it is never signalled). Anything else
 holding the lock stops the whole reclaim. Before acting the table is read a second time and the
 same targets (pid AND start time — a reused pid never matches) must come out; then each target
-gets SIGTERM (never SIGKILL), the lock file moves to ``.lock.stale-HHMM``, ``cux usage refresh``
-runs once, and the tick logs the pids.
+gets SIGTERM (never SIGKILL), the lock file moves to ``.lock.stale-HHMM``,
+``account_lock.refresh_command`` runs once when set, and the tick logs the pids.
+
+``quota_guards.reclaim_cux_lock`` is the older spelling of ``account_lock.reclaim`` and is still
+honoured.
 """
 import collections
 import datetime
@@ -43,16 +51,50 @@ Wedge = collections.namedtuple('Wedge', 'wedged label minutes')
 Decision = collections.namedtuple('Decision', 'act targets refused why')
 
 
-def lock_path():
-    """``$ASF_CUX_LOCK`` when set (a non-default cux home; the test suite's own), else
-    ``~/.cux/.lock``."""
-    if os.environ.get('ASF_CUX_LOCK'):
-        return os.environ['ASF_CUX_LOCK']
-    return os.path.join(os.path.expanduser('~'), '.cux', '.lock')
+#: What the labels call the lock.
+NAME = 'account lock'
+#: The reason a disabled reclaim gives, naming the key that turns it on.
+OFF = 'reclaim off (account_lock.reclaim)'
+
+
+def settings(cfg):
+    """The ``account_lock`` block of ``config.yaml`` as a dict ({} when absent or not a map)."""
+    block = (cfg or {}).get('account_lock')
+    return block if isinstance(block, dict) else {}
+
+
+def lock_path(cfg=None):
+    """``$ASF_ACCOUNT_LOCK`` when set (the test suite's own), else ``account_lock.path`` with
+    ``~`` expanded, else None — no lock is configured and nothing is probed."""
+    if os.environ.get('ASF_ACCOUNT_LOCK'):
+        return os.environ['ASF_ACCOUNT_LOCK']
+    path = settings(cfg).get('path')
+    if isinstance(path, str) and path.strip():
+        return os.path.expanduser(path.strip())
+    return None
+
+
+def process_name(cfg):
+    """``account_lock.process``: the account manager's program name, or '' when unset."""
+    name = settings(cfg).get('process')
+    return name.strip() if isinstance(name, str) else ''
+
+
+def refresh_command(cfg):
+    """``account_lock.refresh_command`` as argv, or None when unset."""
+    cmd = settings(cfg).get('refresh_command')
+    if isinstance(cmd, list):
+        return [str(c) for c in cmd] or None
+    if isinstance(cmd, str) and cmd.strip():
+        return shlex.split(cmd)
+    return None
 
 
 def reclaim_enabled(cfg):
-    """Only a real YAML ``true`` turns reclaim on — a string, a number or a typo stays off."""
+    """Only a real YAML ``true`` turns reclaim on — a string, a number or a typo stays off.
+    ``quota_guards.reclaim_cux_lock`` is the older spelling, still honoured."""
+    if settings(cfg).get('reclaim') is True:
+        return True
     g = (cfg or {}).get('quota_guards')
     return isinstance(g, dict) and g.get('reclaim_cux_lock') is True
 
@@ -118,7 +160,7 @@ def _argv(proc):
 
 
 def _names(proc):
-    """The program's base name, and — for an interpreter (``node x/cux``) — its script's."""
+    """The program's base name, and — for an interpreter (``node x/manager``) — its script's."""
     argv = _argv(proc)
     if not argv:
         return []
@@ -128,8 +170,9 @@ def _names(proc):
     return names
 
 
-def is_cux(proc):
-    return proc is not None and 'cux' in _names(proc)
+def is_manager(proc, name):
+    """Whether ``proc`` is the account manager ``name`` (its program or interpreted script)."""
+    return bool(name) and proc is not None and name in _names(proc)
 
 
 def is_claude(proc):
@@ -181,18 +224,18 @@ def diagnose(holders, table):
     """The lock's state as a :class:`Wedge`."""
     procs = [table[p] for p in holders if p in table]
     if not procs:
-        return Wedge(False, 'cux lock free', 0)
+        return Wedge(False, f'{NAME} free', 0)
     minutes = min(p.age_s for p in procs) // 60
     leaves = [p for p in procs if not children(table, p.pid)]
     lead = max(leaves or procs, key=lambda p: p.age_s)
     more = f', +{len(holders) - 1} more' if len(holders) > 1 else ''
     who = f'pid {lead.pid} (child of {lead.ppid}){more}'
     if minutes >= WEDGED_AFTER_MIN:
-        return Wedge(True, f'cux lock wedged {minutes} min — held by {who}', minutes)
-    return Wedge(False, f'cux lock held {minutes} min by {who}', minutes)
+        return Wedge(True, f'{NAME} wedged {minutes} min — held by {who}', minutes)
+    return Wedge(False, f'{NAME} held {minutes} min by {who}', minutes)
 
 
-def _refusal(proc, table, protect, min_age_s):
+def _refusal(proc, table, protect, min_age_s, name):
     """Why ``proc`` must not be signalled, or '' when it is a target."""
     if proc is None:
         return 'not in the process table'
@@ -200,10 +243,10 @@ def _refusal(proc, table, protect, min_age_s):
         return 'this process or its ancestor'
     if is_claude(proc):
         return 'a claude process'
-    if not is_cux(proc):
-        return 'not a cux process'
-    if not is_cux(table.get(proc.ppid)):
-        return 'not a child of a cux process (the wrapper)'
+    if not is_manager(proc, name):
+        return 'not an account-manager process'
+    if not is_manager(table.get(proc.ppid), name):
+        return 'not a child of an account-manager process (the wrapper)'
     if children(table, proc.pid):
         return 'has children'
     if proc.age_s < min_age_s:
@@ -211,16 +254,19 @@ def _refusal(proc, table, protect, min_age_s):
     return ''
 
 
-def decide(holders, table, enabled, protect=None, min_age_s=RECLAIM_AFTER_MIN * 60):
+def decide(holders, table, enabled, protect=None, min_age_s=RECLAIM_AFTER_MIN * 60, name=''):
     """A :class:`Decision` over a process table: ``act`` with ``targets`` (Procs) only when every
-    rule in the module doc holds; ``refused`` maps each other holder to why. Pure."""
+    rule in the module doc holds; ``refused`` maps each other holder to why. ``name`` is the
+    account manager's program name; without one nothing is a target. Pure."""
     if not enabled:
-        return Decision(False, (), {}, 'reclaim off (quota_guards.reclaim_cux_lock)')
+        return Decision(False, (), {}, OFF)
+    if not name:
+        return Decision(False, (), {}, 'account_lock.process unset — no holder can be a target')
     protect = set(protect or ()) | {os.getpid()}
     protect |= ancestors(table, os.getpid())
     targets, refused = [], {}
     for pid in holders:
-        why = _refusal(table.get(pid), table, protect, min_age_s)
+        why = _refusal(table.get(pid), table, protect, min_age_s, name)
         if why:
             refused[pid] = why
         else:
@@ -237,18 +283,22 @@ def decide(holders, table, enabled, protect=None, min_age_s=RECLAIM_AFTER_MIN * 
 
 # ---- the probe for status/doctor, and the tick's reclaim -----------------------------------
 
-def probe_wedge(lock=None):
-    """The lock's :class:`Wedge`, or None when there is no lock file (no cux on this host)."""
-    lock = lock or lock_path()
-    if not os.path.exists(lock):
+def probe_wedge(cfg=None, lock=None):
+    """The lock's :class:`Wedge`, or None when no lock is configured or its file is absent."""
+    lock = lock or lock_path(cfg)
+    if not lock or not os.path.exists(lock):
         return None
     holders, table = probe(lock)
     return diagnose(holders, table)
 
 
-def _default_refresh():
+def run_refresh(argv):
+    """Run the configured refresh once: its exit code, 'none' when no command is set, or the
+    exception's name."""
+    if not argv:
+        return 'none'
     try:
-        return subprocess.run(['cux', 'usage', 'refresh'], capture_output=True, text=True,
+        return subprocess.run(argv, capture_output=True, text=True,
                               timeout=REFRESH_TIMEOUT_S).returncode
     except (OSError, subprocess.SubprocessError) as e:
         return f'{type(e).__name__}'
@@ -262,18 +312,22 @@ def _stale_name(lock, now):
     return name
 
 
-def reclaim(cfg, lock=None, probe=probe, kill=os.kill, refresh=_default_refresh, protect=None,
+def reclaim(cfg, lock=None, probe=probe, kill=os.kill, refresh=None, protect=None,
             guard_dir=None, now=None):
     """Reclaim a wedged lock when ``cfg`` opts in and :func:`decide` agrees twice. Returns a
     record: ``acted``, ``why``, and — when it acted — ``terminated`` ({pid, ppid, age_min}),
     ``moved_to`` and ``refresh``."""
-    lock = lock or lock_path()
+    lock = lock or lock_path(cfg)
     rec = {'acted': False, 'why': ''}
     enabled = reclaim_enabled(cfg)
+    name = process_name(cfg)
+    if refresh is None:
+        argv = refresh_command(cfg)
+        refresh = lambda: run_refresh(argv)  # noqa: E731
     if not enabled:
-        rec['why'] = 'reclaim off (quota_guards.reclaim_cux_lock)'
+        rec['why'] = OFF
         return rec
-    if not os.path.exists(lock):
+    if not lock or not os.path.exists(lock):
         rec['why'] = 'no lock file'
         return rec
     holders, table = probe(lock)
@@ -282,7 +336,7 @@ def reclaim(cfg, lock=None, probe=probe, kill=os.kill, refresh=_default_refresh,
     if not wedge.wedged:
         rec['why'] = 'not wedged'
         return rec
-    first = decide(holders, table, enabled, protect)
+    first = decide(holders, table, enabled, protect, name=name)
     rec['refused'] = {str(k): v for k, v in first.refused.items()}
     if not first.act:
         rec['why'] = first.why
@@ -291,7 +345,7 @@ def reclaim(cfg, lock=None, probe=probe, kill=os.kill, refresh=_default_refresh,
         from asf import env
         guard_dir = os.path.join(env.ASF_HOME, 'state')
     os.makedirs(guard_dir, exist_ok=True)
-    with open(os.path.join(guard_dir, 'cux-lock-reclaim.lock'), 'a') as guard:
+    with open(os.path.join(guard_dir, 'account-lock-reclaim.lock'), 'a') as guard:
         try:
             fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -299,7 +353,7 @@ def reclaim(cfg, lock=None, probe=probe, kill=os.kill, refresh=_default_refresh,
             return rec
         inode = os.stat(lock).st_ino
         holders2, table2 = probe(lock)
-        second = decide(holders2, table2, enabled, protect)
+        second = decide(holders2, table2, enabled, protect, name=name)
         same = {(t.pid, t.start) for t in first.targets} == {(t.pid, t.start) for t in second.targets}
         if not second.act or not same:
             rec['why'] = 'the second look differs — nothing touched'
@@ -332,13 +386,13 @@ def tick_pass(cfg, out=print, event=None):
     if rec.get('acted'):
         pids = ', '.join(f"{t['pid']} (child of {t['ppid']}, {t['age_min']} min)"
                          for t in rec.get('terminated', []))
-        out(f"quota    {rec.get('label', 'cux lock wedged')} — reclaimed: SIGTERM {pids or 'none'}; "
+        out(f"quota    {rec.get('label', f'{NAME} wedged')} — reclaimed: SIGTERM {pids or 'none'}; "
             f"lock moved to {os.path.basename(rec.get('moved_to') or '?')}; "
             f"refresh {rec.get('refresh')}")
         if event is not None:
-            event('cux_lock_reclaim', terminated=rec.get('terminated', []),
+            event('account_lock_reclaim', terminated=rec.get('terminated', []),
                   moved_to=rec.get('moved_to'), refresh=str(rec.get('refresh')),
                   label=rec.get('label'))
-    elif rec.get('label', '').startswith('cux lock wedged'):
+    elif rec.get('label', '').startswith(f'{NAME} wedged'):
         out(f"quota    {rec['label']} — not reclaimed: {rec.get('why')}")
     return rec
