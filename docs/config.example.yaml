@@ -118,8 +118,10 @@ host_guards:
   load_per_core: 2.0
   swap_pct: 85
 
-# cloud: the cloud lane (asf.workers.cloud). A row the local lane cannot take — no local seat, or
-# host pressure — runs off this host instead. Runtime `actions` (asf.workers.actions) dispatches
+# cloud: the cloud lane (asf.workers.cloud) — the default executor: every row runs there first,
+# off this host, except what must stay here (asf.workers.cloud.LOCAL_KINDS, cloud.local_only, or
+# a card's own local_only: true) or what mode: overflow (below) routes by need alone instead —
+# no local seat, or host pressure. Runtime `actions` (asf.workers.actions) dispatches
 # the product's asf-worker workflow on `runs_on`: the job checks the branch out, runs the session,
 # builds, tests, commits and pushes, and harvest lands it as any branch. `asf cloud install
 # --product <p>` writes the workflow into the product checkout (commit it to the default branch);
@@ -171,26 +173,18 @@ cloud:
   timeout_min: 240             # a run still working after this is cancelled, and ends dead
                                # (the backstop: the heartbeat above ends a stalled run sooner)
   # heartbeat_min: 5           # the lane's own heartbeat_* keys override workers: for cloud runs
-  # mode: overflow (default; alias local) — local first; primary — the cloud first (below);
-  # off — no new cloud launch, live runs drain. `default: true` is the older spelling of primary.
-  # In primary a row goes local only when it must (local_only) or as the fallback: the lane full,
+  # mode: primary (the default, unwritten or written true — F-0216 C5) — the cloud first, up to
+  # max_inflight; local only when a row must stay (local_only) or as the fallback: the lane full,
   # unready, out of quota, or erroring (fallback_failures creates failed in fallback_window_min
   # → fallback_cooldown_min local); each fallback is a `— cloud fallback: <why>` launch line.
-  mode: overflow
+  # overflow (alias local; `default: false` the older spelling) — local first, the cloud takes
+  # only what the local lane cannot. off — no new cloud launch, live runs drain.
   # fallback_failures: 3
   # fallback_window_min: 30
   # fallback_cooldown_min: 30
-  # default: the cloud as the DEFAULT executor instead of overflow. true: a row of kind coder,
-  # correct, review, adjudicate, fix-bug, spec, plan, direct or groom (every kind with
-  # `rows: any`; a cloud-ok row too) goes to the cloud FIRST, up to max_inflight; the local lane
-  # takes rows that are local-only, and every row while the cloud lane is full or unready. Host
-  # pressure then holds local rows only — a cloud row runs nothing here, bounded by max_inflight
-  # and its account's quota; the fair share bounds both lanes (a cloud session is a live one).
-  # The lane is unready — the wave says `cloud lane unready: <why> — local lane only` — while a
-  # critical check of `asf cloud doctor --product <p>` fails (the token secret's name in the repo,
-  # the workflow on the trunk, an online runner carrying runs_on, a cloud account).
-  # local_only: [groom]        # kinds that never leave the host; a card's own `local_only: true`
-                               # keeps that item's rows local too (both modes)
+  # local_only: []             # kinds that never leave the host, beside the built-in floor
+                               # (groom, groom-clerk, close — asf.workers.cloud.LOCAL_KINDS); a
+                               # card's own `local_only: true` keeps that item's rows local too
 
 # capacity: the ceilings the factory runs under. Every number is "at most this many at once".
 # A key left out means "no opinion" — the next fallback applies (see docs/guide/product-config.md).

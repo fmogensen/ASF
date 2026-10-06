@@ -781,7 +781,7 @@ work splits between this host and the cloud lane:
 
 ```yaml
 cloud:
-  mode: primary              # overflow (default) | local | primary | off
+  mode: overflow              # primary (default) | overflow (alias local) | off
   max_inflight: 4            # cloud sessions at once
   local_only: [review]       # kinds that never leave the host (groom, groom-clerk, close always)
   fallback_failures: 3       # primary only: this many failed cloud creates …
@@ -791,9 +791,9 @@ cloud:
 
 | mode | what it does |
 | --- | --- |
-| `overflow` (default) | Local first. A row goes to the cloud only when the local lane cannot take it (no local seat, every local account capped or out of quota, a host hold) and the row is eligible: `cloud.rows: any`, or a `cloud-ok` row. |
+| `primary` (default — F-0216 C5: taken when neither `mode` nor `default` is written) | Cloud first. Every row goes to the cloud lane, up to `max_inflight` and the lane accounts' quota headroom, except what must run here: the kinds `groom`, `groom-clerk` and `close`, the kinds in `cloud.local_only`, and an item whose card says `local_only: true`. `cloud.rows` does not narrow this mode — it is the overflow path's dial. |
+| `overflow` | Local first. A row goes to the cloud only when the local lane cannot take it (no local seat, every local account capped or out of quota, a host hold) and the row is eligible: `cloud.rows: any`, or a `cloud-ok` row. A written `default: false` is the older spelling. |
 | `local` | The same as `overflow` — an alias, for "local first". |
-| `primary` | Cloud first. Every row goes to the cloud lane, up to `max_inflight` and the lane accounts' quota headroom, except what must run here: the kinds `groom`, `groom-clerk` and `close`, the kinds in `cloud.local_only`, and an item whose card says `local_only: true`. `cloud.rows` does not narrow this mode — it is the overflow path's dial. |
 | `off` | No new cloud launch at all, whatever accounts are configured. Cloud runs already live drain as usual (each health pass syncs them); the `role: cloud` accounts stay off the local lane. |
 
 In `primary` the local lane is also the **fallback**: a cloud-first row runs here when the cloud lane
@@ -806,8 +806,10 @@ erroring — …; local lane until HH:MM`), and the `asf status` capacity row's 
 `cloud 2/4 primary (last fallback 3m ago: <job> local — <why>)` for an hour after, or `(fallback:
 …)` while a cool-down holds.
 
-`cloud.default: true` is the older spelling of `mode: primary`; a written `mode` wins. An unknown
-mode, or a fallback number that is not above 0, refuses the file at `asf product check`.
+`cloud.default: true` is the older spelling of `mode: primary`, `default: false` of `mode:
+overflow`; an unwritten `mode` and an unwritten `default` both take `primary`, and a written
+`mode` wins over either. An unknown mode, or a fallback number that is not above 0, refuses the
+file at `asf product check`.
 
 **Switching is one line, picked up on the next tick.** Every tick is a fresh process that reads
 the product file again; nothing is cached across ticks, so `mode: primary` → `mode: local` (or
