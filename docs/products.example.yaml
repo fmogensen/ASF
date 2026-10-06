@@ -91,6 +91,10 @@ conventions:
   #                       # the cut, named, and sent back — a merge=union file merges clean in git,
   #                       # only a check of the tree sees two rows claiming one id
   #   precut_check_timeout_s: 120
+  #   deterministic_jobs: []   # (default none) CI jobs whose red is deterministic — a registers or
+  #                       # rules check answers the same on every run: flake triage never re-runs
+  #                       # it, the blame sends the member whose rows it names back at once. A job
+  #                       # whose failed step runs a precut_check command is deterministic too.
   # harvest: one gate over every eligible branch (combined, bisecting on red) or per-branch; the
   # most branches one run gates; seconds before a gate is killed and counted red.
   # harvest:
