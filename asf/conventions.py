@@ -452,6 +452,7 @@ DEFAULT_DESIGN_SPEC_NAME = None  # the one spec `asf migrate` reads as the desig
 DEFAULT_DECISIONS_FILE = None    # a decisions file `asf migrate` mines for D-rows
 DEFAULT_REPORTS_DIR = None       # a directory of hotfix / diagnostic reports `asf migrate` adopts
 DEFAULT_REPORT_PATTERN = None    # regex over a file name in reports_dir; None → every .md
+DEFAULT_LEGACY_BRANCH = None     # regex (named group slug) over a pre-ASF branch name (F-0130)
 DEFAULT_CI_WORKFLOW = None       # the workflow whose runs on the trunk are the green evidence
 DEFAULT_CI_DEV_JOB = None        # the job in that workflow whose success marks the dev sha
 DEFAULT_CI_WORKFLOWS = ()        # extra workflows the ci stream backfill always keeps (metrics.py)
@@ -579,8 +580,8 @@ def validate_mapping(data):
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
     ``worktree_setup``, ``pre_push_check``, ``pre_push_checks``, ``auth_env``,
     ``full_suite_commands``, ``check_commands``, ``read_only_allow``, ``customer_content``,
-    ``security`` and ``feeder`` are checked — every other key is kept verbatim (see the module
-    doc), so a product file written for a newer ``asf`` still loads."""
+    ``security``, ``feeder`` and ``legacy_branch`` are checked — every other key is kept verbatim
+    (see the module doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -625,6 +626,19 @@ def validate_mapping(data):
                     re.compile(pattern)
                 except re.error as e:
                     problems.append(('full_suite_commands', f'{pattern!r} is not a regex ({e})'))
+    legacy_branch = data.get('legacy_branch')
+    if legacy_branch is not None:
+        if not isinstance(legacy_branch, str) or not legacy_branch.strip():
+            problems.append(('legacy_branch', f'must be a regex string, not {legacy_branch!r}'))
+        else:
+            try:
+                pattern = re.compile(legacy_branch)
+            except re.error as e:
+                problems.append(('legacy_branch', f'{legacy_branch!r} is not a regex ({e})'))
+            else:
+                if 'slug' not in pattern.groupindex:
+                    problems.append(('legacy_branch',
+                                     f'must have a named group slug, not {legacy_branch!r}'))
     checks = data.get('check_commands')
     if checks is not None:
         if not isinstance(checks, list):
@@ -879,6 +893,16 @@ class Conventions:
     decisions_file: str = DEFAULT_DECISIONS_FILE
     reports_dir: str = DEFAULT_REPORTS_DIR
     report_pattern: str = DEFAULT_REPORT_PATTERN
+    #: ``legacy_branch``: a regex over a pre-ASF branch name, with a named group ``slug`` and an
+    #: optional named group ``task``, read by ``asf backfill`` only when the record's own legacy
+    #: matcher (:func:`asf.record.match.match_event`, rule 4) resolved nothing for the name (F-0130,
+    #: D5). ``None`` — the default — means that fallback is not offered. ``legacy_review`` is not
+    #: declared: F-0130's replan cut it along with its only reader, an open-pull-request adoption
+    #: path this product no longer has — do not re-add it speculatively. A product's pre-ASF
+    #: branch *prefixes* are a different key, ``branch_prefixes.legacy`` (F-0130, D8), already read
+    #: by :meth:`branch_kind`, the lane's ``orphan_claims``/``unclaimed_legacy`` and
+    #: ``branch_retention.legacy_prefixes``.
+    legacy_branch: str = DEFAULT_LEGACY_BRANCH
     ci_workflow: str = DEFAULT_CI_WORKFLOW
     #: Extra workflow names/files the metrics backfill always keeps, matched against a run's
     #: display name or its workflow file's basename, beside the generic pull-request/trunk/batch
