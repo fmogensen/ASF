@@ -108,7 +108,9 @@ def _round(stage):
 def timeline(meta, body):
     """What a card's History says about it: ``created``, ``landed``, ``prod`` (stamps or ``None``),
     ``send_backs`` (a review round that went up, or a review that went back to its draft) and
-    ``reopens`` (a landed card that went back to Active, or a landed stage that went back).
+    ``reopens`` (a landed card that went back to Active, or a landed stage that went back), with
+    ``closes`` and ``reopened`` the stamps of every entry into a landed state and every reopening
+    (the false-close rate, :mod:`asf.metrics.throughput`).
 
     ``landed``/``prod`` are the *last* entry into the state that stuck: a card reopened after it
     landed has not landed until it lands again. A card that is landed now but whose History does
@@ -117,6 +119,7 @@ def timeline(meta, body):
     created = lines[0][0] if lines else (meta.get('stage_since') or meta.get('updated'))
     landed = prod = None
     send_backs = reopens = 0
+    closes, reopened = [], []
     for stamp, text in lines:
         m = _STAGE_RE.search(text)
         if m:
@@ -127,24 +130,30 @@ def timeline(meta, body):
                 send_backs += 1
             elif ba.endswith('-review') and bb == ba.replace('-review', '-draft'):
                 send_backs += 1
+            if bb in LANDED_STAGES and ba not in LANDED_STAGES:
+                closes.append(stamp)
             if bb in LANDED_STAGES and landed is None:
                 landed = stamp
             if bb == 'on-prod' and prod is None:
                 prod = stamp
             if ba in LANDED_STAGES and bb not in LANDED_STAGES:
                 reopens += 1
+                reopened.append(stamp)
                 landed = prod = None
             elif ba == 'on-prod' and bb != 'on-prod':
                 prod = None
         m = _STATE_RE.search(text)
         if m:
             a, b = m.group(1), m.group(2)
+            if b in LANDED_STATES and a not in LANDED_STATES:
+                closes.append(stamp)
             if b in LANDED_STATES and landed is None:
                 landed = stamp
             if b == 'Closed' and prod is None:
                 prod = stamp
             if a in LANDED_STATES and b not in LANDED_STATES:
                 reopens += 1
+                reopened.append(stamp)
                 landed = prod = None
     state, stage = meta.get('state'), _base(meta.get('stage'))
     now_landed = state in LANDED_STATES or stage in LANDED_STAGES
@@ -159,7 +168,8 @@ def timeline(meta, body):
     elif prod is None:
         prod = since
     return {'created': created, 'landed': landed, 'prod': prod,
-            'send_backs': send_backs, 'reopens': reopens}
+            'send_backs': send_backs, 'reopens': reopens,
+            'closes': sorted(set(closes)), 'reopened': sorted(set(reopened))}
 
 
 def _description(body):

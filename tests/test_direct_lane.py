@@ -262,14 +262,15 @@ class ScorecardByLane(unittest.TestCase):
                                          'median_lead_days': 1.0, 'usd_per_feature': 5.0,
                                          'sessions_per_feature': 1.0, 'repair_per_feature': 0.0,
                                          'ci_min_per_feature': 10.0})
-        # F-0011: spec $4 + coder $6 + review $1 = $11, 3 sessions, 1 repair, 20 CI min
+        # F-0011: spec $4 + coder $6 + review $1 = $11, 3 sessions, 20 CI min; its Task's first
+        # review is planned work, not repair (ADR 0003)
         self.assertEqual(got['full'], {'lane': 'full', 'landed': 1, 'ids': ['F-0011'],
                                        'median_lead_days': 3.0, 'usd_per_feature': 11.0,
-                                       'sessions_per_feature': 3.0, 'repair_per_feature': 1.0,
+                                       'sessions_per_feature': 3.0, 'repair_per_feature': 0.0,
                                        'ci_min_per_feature': 20.0})
         line = score.lanes_line(got, 7)
         self.assertTrue(line.startswith('lanes 7 d: direct 1 landed, lead 1 d, $5.00/f'), line)
-        self.assertIn('full 1 landed, lead 3 d, $11.00/f, 3 sessions/f, 1 repair/f, 20 CI min/f',
+        self.assertIn('full 1 landed, lead 3 d, $11.00/f, 3 sessions/f, 0 repair/f, 20 CI min/f',
                       line)
 
     def test_the_pair_table_puts_each_direct_feature_beside_its_partner(self):
@@ -277,7 +278,7 @@ class ScorecardByLane(unittest.TestCase):
         p1 = table['p1']
         self.assertEqual((p1['direct']['id'], p1['full']['id']), ('F-0010', 'F-0011'))
         self.assertEqual(p1['delta'], {'lead_days': -2.0, 'cost': -6.0, 'sessions': -2,
-                                       'repair_sessions': -1, 'ci_min': -10.0})
+                                       'repair_sessions': 0, 'ci_min': -10.0})
         self.assertEqual(p1['note'], '')
         p2 = table['p2']
         self.assertEqual((p2['direct']['id'], p2['full']['id']), ('F-0013', 'F-0012'))

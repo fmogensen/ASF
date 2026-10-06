@@ -3,13 +3,15 @@
 ``ab_pair``, with the pairs whose Features overlap), and the ``Value`` row of ``asf status``.
 
 The SCORECARD: the headline, one row per ISO week (``--weeks``, the current week first), one row
-per Feature landed in those weeks, where the last ``window_days`` went (by session kind, failure
+per Feature landed in those weeks, the throughput metrics with their 7-day trend and their alarms
+(:mod:`asf.metrics.throughput`), where the last ``window_days`` went (by session kind, failure
 class, CI job, Feature), the causes over threshold and the loop's state for each (filed, card,
 verdict), and the stored weekly snapshots. Computed from facts on every run; nothing is written.
 """
 import json
 
 from asf import env
+from asf.metrics import throughput
 from asf.scorecard import diagnose, loop, score
 from asf.scorecard.facts import load, state_file
 
@@ -52,6 +54,7 @@ def compute(root, product, weeks=4, facts=None):
         'loop': state,
         'snapshots': loop.snapshots(product)[-weeks:],
         'diagnostics': list(facts.diagnostics),
+        'throughput': throughput.for_product(root, product, facts),
     }
 
 
@@ -68,6 +71,8 @@ def render(d):
                    f"| {_m(w['own_usd_per_feature'])} | {_tok(w['tokens'])} | {w['ci_min']:,.0f} "
                    f"| {w['repair_sessions']} | {_n(w['repair_per_feature'])} | {w['bugs']} ({w['s1']}) "
                    f"| {w['dead_sessions']} ({_m(w['dead_usd'])}) |")
+    if d.get('throughput'):
+        out += [''] + throughput.render(d['throughput']).rstrip('\n').split('\n')
     c = d['clutter'] or {}
     out += ['', f"Clutter now: {_n(c.get('stale_prs'))} stale PRs of {_n(c.get('open_prs'))} open · "
                 f"{_n(c.get('branches'))} branches with no open PR", '']

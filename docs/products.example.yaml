@@ -478,3 +478,32 @@ clocks:
 #   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product}
 #   requires: {install: [], upgrade: [], generic: [], docs: []}   # Features each criterion also needs landed
 #   blocking: []                   # Features that must be landed before a release
+#   floor:                         # criterion 9: no leftover older than its deadline; `off` disables a kind
+#     stale_pr_days: 3             # an open PR the lane marks STALE
+#     run_min: 30                  # a CI run still queued/running whose branch is gone or whose PR is closed
+#     heartbeat_factor: 2          # a live cloud run silent this many heartbeats
+#     stage_factor: 3              # a Task in one stage this many times its stage_limits value
+#     branches: on                 # a remote head past its retention (branch_retention), awaiting delete
+#   seats:                         # criterion 10, and the seat-utilisation alarm of `asf scorecard` and the tick
+#     min_pct: 60                  # busy seats / available (local share + cloud max) below this …
+#     idle_min: 30                 # … for this many minutes while the wave had launchable rows is red
+#     max_gap_min: 15              # a gap between two tick readings longer than this ends a stretch
+# A kind or a metric the product has no lane for (no forge, no cloud, no merge queue, no
+# self-hosted runner, no quota reader, no price) reads n/a, never red. `floor:` and `seats:` are
+# read, but `asf doctor`'s product row names them as unknown keys while an older pinned reader
+# (tools/pinned-readers.txt) is still in use.
+
+# Optional: the throughput metrics' alarms (`asf scorecard`'s Throughput table, asf.metrics.throughput).
+# The seat alarm reads release.seats above; every other key is a limit, `off` (or absent, where
+# the default is off) for no alarm. Defaults shown.
+# improve:
+#   scorecard:
+#     throughput:
+#       false_close_max: 0          # reopened / landed in the window, a fraction
+#       first_pass_min: off         # PRs green on the first CI attempt / PRs, a fraction
+#       detect_p90_max_min: off     # watchdog time-to-detect p90, minutes
+#       merge_wait_p90_max_min: off # PR green → landed p90, minutes
+#       runner_queue_p90_max_min: off  # CI queue wait p90 of any runner class, minutes
+#       cloud_dead_max: off         # the cloud lane's dead + timeout rate, a fraction
+#       quota_cap_hours_min: 1      # an account projected to reach its 5-hour stop sooner alarms
+#       quota_window_min: 60        # the quota readings the burn rate is taken over

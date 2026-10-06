@@ -464,4 +464,10 @@ def daily(product, root, out=print, facts=None, factory=None):
     out(f"scorecard: {score.headline_line(h, facts.clutter)} · week {row['week']}: {row['landed']} landed"
         f" · {len(found)} cause(s) over threshold, {len(filed)} filed, {len(verdicts)} verified"
         f" · {score.lanes_line(lanes, LANE_DAYS)}")
+    try:  # the throughput metrics' alarms, one breach line each (asf.metrics.throughput)
+        from asf.metrics import throughput
+        for line in throughput.for_product(root, product, facts)['alarms']:
+            out(line)
+    except Exception as e:  # noqa: BLE001 — a metric not read never fails the loop
+        out(f'metrics: throughput not read ({type(e).__name__}: {e})')
     return 0

@@ -551,6 +551,9 @@ IMPROVE_FIELDS = {'thresholds': _MAP, 'epic': _STR, 'window_days': None, 'premiu
 RELEASE_FIELDS = {'window_days': None, 'max_hand_fixes': None, 'max_repair_per_feature': None,
                   'ci_runs': None, 'min_upgrades': None, 'hand_types': _LIST,
                   'readme_sections': _LIST, 'ci_steps': _MAP, 'requires': _MAP, 'blocking': _LIST}
+# ``release.floor`` and ``release.seats`` (criteria 9 and 10) are read by asf.release but not
+# listed here while a pinned reader (tools/pinned-readers.txt) predates them: a product file that
+# sets one loads, and the doctor's product row names it as unknown until that reader is dropped.
 # every product-file section whose own keys are checked, keyed by its own field table.
 NESTED_FIELDS = {
     'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS, 'improve': IMPROVE_FIELDS,
