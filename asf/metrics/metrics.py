@@ -2340,10 +2340,6 @@ def main(argv=None):
     return {'append': cmd_append, 'rollup': cmd_rollup, 'backfill': cmd_backfill}[args.command](args, root)
 
 
-if __name__ == '__main__':
-    sys.exit(main())
-
-
 # ---- tunables ---------------------------------------------------------------
 
 #: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
@@ -2357,3 +2353,7 @@ def tunable(name):
     """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
     from asf import config_keys
     return config_keys.value(TUNABLES[name], globals()[name])
+
+
+if __name__ == '__main__':
+    sys.exit(main())

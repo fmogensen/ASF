@@ -486,8 +486,10 @@ class WatchTests(unittest.TestCase):
 
 class LeafImportTests(unittest.TestCase):
     """PD13: the stdlib and ``asf.env``, exactly the licence :mod:`asf.tokens` takes — plus
-    ``asf.detach`` (F-0066 Task 5 step 2), imported inside :func:`progress.start` only: stdlib-only
-    itself, so it costs the leaf no cycle back into :mod:`asf.workers`."""
+    ``asf.detach`` (F-0066 Task 5 step 2), imported inside :func:`progress.start` only, and
+    ``asf.config_keys`` (F-0247), imported inside :func:`progress.tunable` only: both stdlib-only
+    themselves (``config_keys`` imports ``asf.env`` lazily), so neither costs the leaf a cycle
+    back into :mod:`asf.workers`."""
 
     def test_no_asf_import_but_asf_env_and_asf_detach(self):
         path = os.path.join(REPO_ROOT, 'asf', 'progress.py')
@@ -503,7 +505,7 @@ class LeafImportTests(unittest.TestCase):
                         self.assertEqual({a.name for a in node.names}, {'spawn'})
                     else:
                         self.assertEqual(node.module, 'asf')
-                        self.assertEqual({a.name for a in node.names}, {'env'})
+                        self.assertIn({a.name for a in node.names}, [{'env'}, {'config_keys'}])
 
 
 if __name__ == '__main__':

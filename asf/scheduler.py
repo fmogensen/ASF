@@ -465,7 +465,7 @@ def _clock_refusal(name, entry, product, tick_steps, stale):
         except ValueError:
             return f'every {every!r} is not a valid duration (<n><s|m|h|d>)'
         if secs < tunable('MIN_EVERY_S'):
-            return f'every {every} is under the {tunable('MIN_EVERY_S')}s minimum'
+            return f'every {every} is under the {tunable("MIN_EVERY_S")}s minimum'
     else:
         if not AT_RE.match(str(at).strip()):
             return f'at {at!r} is not HH:MM, 24h'
@@ -1620,10 +1620,6 @@ def main(argv=None):
     return cmd_scheduler(args)
 
 
-if __name__ == '__main__':
-    sys.exit(main())
-
-
 # ---- tunables ---------------------------------------------------------------
 
 #: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
@@ -1637,3 +1633,7 @@ def tunable(name):
     """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
     from asf import config_keys
     return config_keys.value(TUNABLES[name], globals()[name])
+
+
+if __name__ == '__main__':
+    sys.exit(main())

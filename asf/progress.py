@@ -15,8 +15,9 @@ previous sample. :func:`judge` compares the newest sample with the newest one at
 minutes older: all four equal is ``STUCK``, any difference is ``MOVING``, and not enough evidence
 is ``UNKNOWN`` — never a stall (F-0066 D6).
 
-A leaf: the stdlib and ``asf.env``, exactly the licence :mod:`asf.tokens` takes, so
-:mod:`asf.workers.runtime` may read :data:`NO_PROGRESS` with no cycle.
+A leaf: the stdlib and ``asf.env``, exactly the licence :mod:`asf.tokens` takes, plus
+``asf.config_keys`` for :func:`tunable`, so :mod:`asf.workers.runtime` may read :data:`NO_PROGRESS`
+with no cycle.
 """
 import calendar
 import collections

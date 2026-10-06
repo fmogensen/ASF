@@ -395,7 +395,7 @@ def read_full(product, data, now, src, out):
             if now - (full.get('at') or now) > tunable('FIND_S'):
                 full['state'] = 'lost'
                 out(f'trunk watch: the full run dispatched on {trunk} @ {_short(full.get("sha"))} '
-                    f'was never listed in {tunable('FIND_S') // 60} min — lost')
+                    f'was never listed in {tunable("FIND_S") // 60} min — lost')
             return
         full['run'], full['url'] = str(r.get('databaseId')), r.get('url')
         full['state'] = 'running'
@@ -620,7 +620,7 @@ def tick(product, stall=None, out=print, now=None, src=None):
                 if seen is UNKNOWN:
                     out(f'trunk watch: the runs of {workflow(product)} on '
                         f'{product.conventions.main} unreadable — the safety net is asked '
-                        f'again in {tunable('LIST_EVERY_S') // 60} min, never dispatched on an unread list')
+                        f'again in {tunable("LIST_EVERY_S") // 60} min, never dispatched on an unread list')
                     seen = None
                     every = None
                 if seen and seen > last:

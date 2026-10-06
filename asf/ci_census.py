@@ -160,7 +160,7 @@ def _flaky_reason(score):
 def _promote_reason(score):
     n_kinds = len(score.ratios)
     return (f"{score.ratio:.2f}× over {n_kinds} job kind{'s' if n_kinds != 1 else ''}, "
-            f'{score.n} green readings in {ci_measure.tunable('WINDOW_DAYS')} d')
+            f'{score.n} green readings in {ci_measure.tunable("WINDOW_DAYS")} d')
 
 
 def _demote_reason(score):
@@ -169,7 +169,7 @@ def _demote_reason(score):
     ratio = score.ratios[kind]
     return (f'runs {kind} at {median_s:g}s, {ratio:.2g}× the fleet best '
             f'(demote at {DEMOTE_AT:.2f}×), {score.n} green readings in '
-            f'{ci_measure.tunable('WINDOW_DAYS')} d')
+            f'{ci_measure.tunable("WINDOW_DAYS")} d')
 
 
 def _floor_reason(score):
