@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.193 — 2026-10-06
+
+### Bugs fixed
+
+- Round I — replan never drops Tasks into a new one it did not mint; GitHub-dirty git-clean PRs refresh; job parks hold one job; correct --drop; push-auth probes relaunches (#847)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.193"`
+
 ## v0.1.192 — 2026-10-06
 
 ### Bugs fixed
