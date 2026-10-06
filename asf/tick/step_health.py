@@ -11,12 +11,20 @@ one cold retry first (``correct_once``): its own job, its own ledger line, so th
 onto it (D-0048, part b). Only a session whose correction already ran (or just ran and failed
 again) becomes a ``needs-operator`` event, once: the session is marked ``operator_flagged`` so
 the next tick does not raise it again.
+
+A ``STUCK`` run is probed and stopped — never relaunched here: the item's own feeder row does
+that, on the branch this run already pushed. A second ``STUCK`` on the same item is held as
+well. An ``INPUT`` run's question reaches the operator once, and its item's routing is untouched.
 """
 import os
+import time
 
+from asf import gitops
+from asf import progress
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
+from asf.workers import report as report_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
@@ -93,6 +101,111 @@ def died_before(path, job):
     """True when ``job``'s run before its latest one also ended on a dead pid."""
     rs = lifecycle.runs(path).get(job) or []
     return len(rs) >= 2 and rs[-2].get('end_reason') == 'dead pid'
+
+
+def stuck_probe_line(session, main='main'):
+    """What is on the run's branch, printed before anything is stopped: the head, the commits
+    above the trunk and the dirty files — what the relaunch inherits and what the operator
+    reads."""
+    job = session.get('job')
+    wt = session.get('worktree') or ''
+    head, files, _digest = progress.probe(wt)
+    commits = gitops.rev_list_count(wt, f'origin/{main}', 'HEAD')
+    commits_s = str(commits) if commits is not None else '?'
+    return (f'STUCK {job:<24} probe: head {head or "?"}, {commits_s} commits above {main}, '
+            f'{files} dirty files')
+
+
+def stopped_for_no_progress_before(path, session):
+    """True when some other job of this run's item already carries ``no_progress`` on its
+    registry line (PD8): a relaunch comes back under a new job name, so a per-job shape like
+    :func:`died_before` cannot see it — this walks every job of the item instead."""
+    item = session.get('item')
+    job = session.get('job')
+    if not item:
+        return False
+    for other_job, runs in lifecycle.runs(path).items():
+        if other_job == job:
+            continue
+        if any(r.get('item') == item and isinstance(r.get('no_progress'), dict) for r in runs):
+            return True
+    return False
+
+
+def no_progress_text(session, minutes, evidence):
+    """The correction text a second ``STUCK`` hold hands the item — the first line is what the
+    hold prints (``lifecycle.hold`` keeps only that line for the printed line)."""
+    job = session.get('job')
+    return (f"session {job} ({session.get('item') or '?'}) made no progress for {minutes}m "
+            f"({evidence}) — stopped a second time on this item")
+
+
+def handle_stuck(ctx, session, minutes, out=print, items=None):
+    """``stopped`` | ``held`` | ``closed`` for one run that has made no progress.
+
+    The branch is probed first and printed. Then the run is stopped unconditionally (PD7),
+    exactly as a capped run is ended: ``stop_session``, one ``asf.no_progress`` result line when
+    the run has not already written one, ``no_progress`` on its registry line. A removed or done
+    item is only stopped, never held. Otherwise, when this item's branch has already been
+    stopped for no progress before (under a different job), the second one is also held
+    (D8) — a correction on the run, a round on the item, the ADJUDICATE row at the cap; a first
+    one is only ``stopped``: health ends it next pass as ``failed: no progress`` and the item's
+    own feeder row relaunches it on the branch (P20) — nothing here launches anything.
+    """
+    product = ctx.product
+    job = session.get('job')
+    out(stuck_probe_line(session, main=product.main))
+    plimit = progress.progress_min(product)
+    verdict = progress.judge(progress.read(product, job), time.time(), plimit)
+    evidence = verdict.evidence
+    at = pool_mod.now_iso()
+    alive = health_mod.alive_for(product, [session])
+    stall_mod.stop_session(session, alive)
+    log = session.get('log')
+    if log and runtime_mod.read_result(log) is None:
+        stall_mod._append_line(log, progress.result_record('stuck', minutes, evidence, at))
+    path = pool_mod.sessions_path(product)
+    pool_mod.update_session(product, job, no_progress={'minutes': minutes, 'evidence': evidence,
+                                                        'at': at})
+    if lifecycle.closed_state(items, session.get('item')):
+        return 'closed'
+    if stopped_for_no_progress_before(path, session):
+        fields, line = lifecycle.hold(path, session, 'no progress',
+                                      no_progress_text(session, minutes, evidence),
+                                      pool_mod.now_iso())
+        ctx.event('held', job=job, item=session.get('item'), text=line)
+        pool_mod.update_session(product, job, **fields)
+        out(line)
+        return 'held'
+    return 'stopped'
+
+
+def handle_input(ctx, session, out=print, items=None):
+    """The question, once: the ``NEEDS OPERATOR`` line, one ``needs-operator`` event, and
+    ``input_flagged`` on the run so no later tick raises it again. The item's routing is not
+    touched (D11)."""
+    job = session.get('job')
+    rec = runtime_mod.read_result(session.get('log'))
+    question = report_mod.needs_input(str((rec or {}).get('result') or '')) or '?'
+    line = (f"NEEDS OPERATOR: session {job} ({session.get('item') or '?'}) needs input — "
+            f"{question}")
+    out(line)
+    ctx.event('needs-operator', message=line, job=job, item=session.get('item'))
+    pool_mod.update_session(ctx.product, job, input_flagged=1)
+    return line
+
+
+def progress_sweep(ctx, out=print):
+    """Progress files untouched past :data:`asf.progress.KEEP_DAYS` days, removed
+    (:func:`asf.progress.sweep`). Printed, never raised: the next tick sweeps again."""
+    try:
+        swept = progress.sweep(ctx.product)
+    except Exception as e:  # noqa: BLE001 — a sweep never stops a tick
+        out(f'progress: skipped — {type(e).__name__}: {e}')
+        return None
+    if swept:
+        out(f"progress: swept {', '.join(swept)}")
+    return swept
 
 
 def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None, reaped_empty=False):
@@ -229,7 +342,7 @@ def run(ctx, out=print, runtime_fn=_runtime):
     widen_footprints(ctx, items, out=out)
     close_landed_parks(ctx, out=out)
     stalled = stall_mod.stall(product, out=out)
-    ctx.counts['stalls'] += len(stalled)
+    ctx.counts['stalls'] += len([r for r in stalled if r[1] != 'INPUT'])  # a question is no stall
     sessions = pool_mod.load_sessions(product)
     empty = {job for job, what, detail in found if what == 'reaped' and detail == 'empty'}
     for job in dead_jobs(found, stalled):
@@ -237,6 +350,15 @@ def run(ctx, out=print, runtime_fn=_runtime):
         if session is not None:
             handle_dead(ctx, dict(session, job=job), runtime_fn=runtime_fn, out=out,
                         items=items, reaped_empty=job in empty)
+    for job, state, minutes in stalled:
+        session = sessions.get(job)
+        if session is None:
+            continue
+        if state == 'STUCK':
+            handle_stuck(ctx, dict(session, job=job), minutes, out=out, items=items)
+        elif state == 'INPUT':
+            handle_input(ctx, dict(session, job=job), out=out, items=items)
+    progress_sweep(ctx, out=out)
     hold_failed_corrections(ctx, sessions, out=out, items=items)
     ci_trials(ctx, out=out)
     branch_retention(ctx, items, out=out)

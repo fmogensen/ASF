@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import capacity, env
+from asf import capacity, env, progress
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
@@ -23,6 +23,7 @@ from asf.tick import shadow, step_daily, step_groom, step_harvest, step_health, 
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
+from asf.workers import stall as stall_mod
 from tests.test_tick import TickTestCase, _git, steps_only
 
 DEAD_PID = 999999
@@ -295,6 +296,181 @@ class HealthStepTests(StepsTestCase):
         step_health.run(ctx, out=self.lines.append)
         self.assertEqual(self.lines, ['health: clean', 'stall: none'])
         self.assertEqual(ctx.counts['stalls'], 0)
+
+
+class StuckRunTests(StepsTestCase):
+    """``handle_stuck``: a live run with no progress is probed, stopped and marked — unconditionally
+    (PD7) — and held only the second time an item's branch is stopped this way."""
+
+    def setUp(self):
+        super().setUp()
+        self.stopped = []
+
+        def fake_stop_session(session, alive):
+            self.stopped.append(session['job'])
+
+        p = mock.patch.object(step_health.stall_mod, 'stop_session', fake_stop_session)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def make_worktree(self, branch):
+        """Two commits above ``main``, pushed, plus one dirty file — exactly what the probe
+        reports and what must still be there once the run is stopped."""
+        wt = os.path.join(self.tmp, 'wt-' + branch.replace('/', '_'))
+        _git(['worktree', 'add', '-q', '-b', branch, wt, 'main'], self.repo)
+        for i in range(2):
+            with open(os.path.join(wt, f'f{i}.txt'), 'w') as f:
+                f.write(f'change {i}\n')
+            _git(['add', '-A'], wt)
+            _git(['commit', '-q', '-m', f'work {i}'], wt)
+        _git(['push', '-q', 'origin', branch], wt)
+        with open(os.path.join(wt, 'scratch.txt'), 'w') as f:
+            f.write('wip\n')
+        return wt
+
+    def stuck_session(self, job, item, branch=None):
+        branch = branch or f"task/{item.lower().replace('-', '')}"
+        wt = self.make_worktree(branch)
+        log = os.path.join(self.tmp, job + '.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+        now = time.time()
+        base = {'commit': 'abc', 'digest': 'd1', 'classes': 1, 'novel': 1, 'files': 0,
+                'seen': ['Bash']}
+        older_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 20 * 60))
+        newer_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))
+        progress.append(self.product, job, dict(base, at=older_at, last_call_at=older_at))
+        progress.append(self.product, job, dict(base, at=newer_at, last_call_at=newer_at))
+        self.session(job=job, item=item, pid=424242, log=log, worktree=wt, branch=branch,
+                     kind='task', model='opus', account=None)
+        return wt, log
+
+    def handle(self, job, items=None):
+        ctx = self.ctx()
+        s = dict(pool_mod.load_sessions(self.product)[job], job=job)
+        return ctx, step_health.handle_stuck(ctx, s, 20, out=self.lines.append, items=items)
+
+    def test_stuck_run_is_probed_stopped_and_marked(self):
+        wt, log = self.stuck_session('task-t-0350', 'T-0350')
+        ctx, result = self.handle('task-t-0350', items={})
+        self.assertEqual(result, 'stopped')
+        self.assertEqual(self.stopped, ['task-t-0350'])
+        probe = [ln for ln in self.lines if ln.startswith('STUCK ')]
+        self.assertEqual(len(probe), 1, self.lines)
+        self.assertIn('2 commits above main', probe[0])
+        self.assertIn('1 dirty files', probe[0])
+        rec = runtime_mod.read_result(log)
+        self.assertTrue(rec['is_error'])
+        self.assertEqual(runtime_mod.failure_reason(rec), progress.NO_PROGRESS)
+        sess = pool_mod.load_sessions(self.product)['task-t-0350']
+        self.assertEqual(sess['no_progress']['minutes'], 20)
+        self.assertEqual(self.events(ctx), [])
+        # the branch, the worktree and both commits are exactly where they were
+        self.assertTrue(os.path.isdir(wt))
+        self.assertEqual(_git(['rev-list', '--count', 'origin/main..HEAD'], wt), '2')
+        self.assertTrue(os.path.exists(os.path.join(wt, 'scratch.txt')))
+
+    def test_a_result_is_not_appended_twice(self):
+        wt, log = self.stuck_session('task-t-0350', 'T-0350')
+        self.handle('task-t-0350', items={})
+        first = runtime_mod.read_result(log)
+        self.handle('task-t-0350', items={})
+        self.assertEqual(runtime_mod.read_result(log), first)
+
+    def test_second_stuck_run_on_the_same_item_is_held_as_well_as_stopped(self):
+        self.stuck_session('task-t-0350-a', 'T-0350', branch='task/t-0350-a')
+        ctx, first = self.handle('task-t-0350-a', items={})
+        self.assertEqual(first, 'stopped')
+        self.lines.clear()
+        self.stuck_session('task-t-0350-b', 'T-0350', branch='task/t-0350-b')
+        s = dict(pool_mod.load_sessions(self.product)['task-t-0350-b'], job='task-t-0350-b')
+        second = step_health.handle_stuck(ctx, s, 20, out=self.lines.append, items={})
+        self.assertEqual(second, 'held')
+        held = [ln for ln in self.lines if ln.startswith('held ')]
+        self.assertEqual(len(held), 1, self.lines)
+        self.assertEqual([e['kind'] for e in self.events(ctx)], ['held'])
+        sess = pool_mod.load_sessions(self.product)['task-t-0350-b']
+        self.assertEqual(sess['correction']['kind'], 'no progress')
+        self.assertEqual(sess['rounds'], 1)
+
+    def test_stuck_run_of_a_done_item_is_stopped_and_never_held(self):
+        self.stuck_session('task-t-0350', 'T-0350')
+        ctx, result = self.handle('task-t-0350', items={'T-0350': {'id': 'T-0350', 'removed': True}})
+        self.assertEqual(result, 'closed')
+        self.assertEqual(self.events(ctx), [])
+        self.assertFalse(any(ln.startswith('held ') for ln in self.lines), self.lines)
+
+    def test_run_dispatches_stuck_and_input_and_counts_only_the_stuck_row(self):
+        self.session(job='t1', item='T-0350', pid=1, log='x', worktree='w', branch='b')
+        self.session(job='t2', item='T-0351', pid=2, log='y', worktree='w2', branch='b2')
+        ctx = self.ctx()
+        calls = []
+
+        def fake_stuck(ctx_, session, minutes, out=print, items=None):
+            calls.append(('stuck', session['job'], minutes))
+            return 'stopped'
+
+        def fake_input(ctx_, session, out=print, items=None):
+            calls.append(('input', session['job']))
+            return 'line'
+
+        def fake_stall(product, out=print):
+            return [('t1', 'STUCK', 20), ('t2', 'INPUT', None)]
+
+        with mock.patch.object(step_health, 'handle_stuck', fake_stuck), \
+             mock.patch.object(step_health, 'handle_input', fake_input), \
+             mock.patch.object(step_health.stall_mod, 'stall', fake_stall):
+            step_health.run(ctx, out=self.lines.append)
+        self.assertEqual(sorted(calls), [('input', 't2'), ('stuck', 't1', 20)])
+        self.assertEqual(ctx.counts['stalls'], 1)
+
+
+class InputRowTests(StepsTestCase):
+    """``handle_input``: the question a run's result declares reaches the operator once."""
+
+    def input_session(self, job='fix-b-0001', item='B-0001',
+                       question='no credential for the release host'):
+        log = os.path.join(self.tmp, job + '.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+            f.write(json.dumps({'type': 'result', 'subtype': 'error', 'is_error': True,
+                                'result': f'NEEDS OPERATOR: {question}'}) + '\n')
+        self.session(job=job, item=item, pid=DEAD_PID, log=log, kind='fix', model='opus',
+                     account=None)
+        return log
+
+    def test_input_row_raises_once_and_marks_the_run(self):
+        self.input_session()
+        ctx = self.ctx()
+        s = dict(pool_mod.load_sessions(self.product)['fix-b-0001'], job='fix-b-0001')
+        line = step_health.handle_input(ctx, s, out=self.lines.append, items={})
+        self.assertTrue(line.startswith('NEEDS OPERATOR:'), line)
+        self.assertIn('fix-b-0001', line)
+        self.assertIn('no credential for the release host', line)
+        self.assertEqual(self.lines, [line])
+        evs = self.events(ctx)
+        self.assertEqual([e['kind'] for e in evs], ['needs-operator'])
+        self.assertEqual(evs[0]['message'], line)
+        self.assertEqual(evs[0]['job'], 'fix-b-0001')
+        sess = pool_mod.load_sessions(self.product)['fix-b-0001']
+        self.assertEqual(sess['input_flagged'], 1)
+        # the item's own state and rows are not touched (D11)
+        self.assertNotIn('correction', sess)
+        self.assertNotIn('rounds', sess)
+
+    def test_a_second_pass_over_the_same_ledger_raises_and_appends_nothing(self):
+        self.input_session()
+        ctx = self.ctx()
+        step_health.run(ctx, out=self.lines.append)
+        needs = [ln for ln in self.lines if ln.startswith('NEEDS OPERATOR:')]
+        self.assertEqual(len(needs), 1, self.lines)
+        self.assertEqual(ctx.counts['stalls'], 0)
+        before = dict(pool_mod.load_sessions(self.product)['fix-b-0001'])
+        self.lines.clear()
+        step_health.run(ctx, out=self.lines.append)
+        self.assertFalse(any(ln.startswith('NEEDS OPERATOR:') for ln in self.lines), self.lines)
+        self.assertEqual([e['kind'] for e in self.events(ctx)], ['needs-operator'])
+        self.assertEqual(pool_mod.load_sessions(self.product)['fix-b-0001'], before)
 
 
 # ---- wave -------------------------------------------------------------------------
