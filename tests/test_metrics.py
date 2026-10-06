@@ -1924,3 +1924,132 @@ class DeliveredVsSingleTest(Base):
         self.assertEqual(rows['single']['landed'], 1)
         self.assertIsNone(rows['single']['median_hours'])
         self.assertIsNone(rows['delivered']['median_hours'])
+
+
+def _shipped_fixture():
+    """F-0001 shipped twice in this window (newer event wins); F-0002 only in the previous window;
+    F-0003 falls back to `stage_since`; F-0004's event wins over its own `stage_since` and lands in
+    the previous window only, never both; T-0001 and F-9999 are excluded (not a Feature / not in
+    `items`); F-0005 (`landed`) and F-0006 (`on-prod`, no `stage_since`) are excluded outright."""
+    items = {
+        'F-0001': {'type': 'feature', 'stage': 'building 1/1'},
+        'F-0002': {'type': 'feature', 'stage': 'building 1/1'},
+        'F-0003': {'type': 'feature', 'stage': 'on-prod', 'stage_since': '2026-09-16T00:00:00Z'},
+        'F-0004': {'type': 'feature', 'stage': 'on-prod', 'stage_since': '2026-09-16T00:00:00Z'},
+        'F-0005': {'type': 'feature', 'stage': 'landed', 'stage_since': '2026-09-17T00:00:00Z'},
+        'F-0006': {'type': 'feature', 'stage': 'on-prod'},
+        'T-0001': {'type': 'task', 'stage': 'on-prod'},
+    }
+    events = [
+        {'kind': metrics.ON_PROD_EVENT, 'item': 'F-0001', 'ts': '2026-09-17T08:00:00Z'},
+        {'kind': metrics.ON_PROD_EVENT, 'item': 'F-0001', 'ts': '2026-09-19T08:00:00Z'},
+        {'kind': metrics.ON_PROD_EVENT, 'item': 'F-0002', 'ts': '2026-09-10T08:00:00Z'},
+        {'kind': metrics.ON_PROD_EVENT, 'item': 'F-0004', 'ts': '2026-09-09T08:00:00Z'},
+        {'kind': metrics.ON_PROD_EVENT, 'item': 'T-0001', 'ts': '2026-09-17T08:00:00Z'},
+        {'kind': metrics.ON_PROD_EVENT, 'item': 'F-9999', 'ts': '2026-09-17T08:00:00Z'},
+    ]
+    return items, events
+
+
+class ShippedTests(Base):
+    def windows(self, items, events):
+        this_wk, prev_wk = metrics.days_back(DAY, 7), metrics.days_back(DAY, 14)[:7]
+        return metrics.shipped(events, items, this_wk), metrics.shipped(events, items, prev_wk)
+
+    def test_the_event_wins_over_the_window_it_falls_in(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertEqual(week['F-0001'], '2026-09-19')
+        self.assertNotIn('F-0001', prev)
+
+    def test_an_event_only_in_the_previous_window(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertNotIn('F-0002', week)
+        self.assertEqual(prev['F-0002'], '2026-09-10')
+
+    def test_stage_since_is_the_fallback_for_no_event(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertEqual(week['F-0003'], '2026-09-16')
+        self.assertNotIn('F-0003', prev)
+
+    def test_the_event_wins_even_older_and_outside_the_window_asked_for(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertNotIn('F-0004', week)
+        self.assertEqual(prev['F-0004'], '2026-09-09')
+
+    def test_only_a_feature_counts(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertNotIn('T-0001', week)
+        self.assertNotIn('T-0001', prev)
+
+    def test_an_id_items_does_not_name_is_excluded(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertNotIn('F-9999', week)
+        self.assertNotIn('F-9999', prev)
+
+    def test_landed_with_a_windowed_stage_since_is_excluded(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertNotIn('F-0005', week)
+        self.assertNotIn('F-0005', prev)
+
+    def test_on_prod_with_no_stage_since_is_excluded(self):
+        items, events = _shipped_fixture()
+        week, prev = self.windows(items, events)
+        self.assertNotIn('F-0006', week)
+        self.assertNotIn('F-0006', prev)
+
+
+def _usd_session(item, usd):
+    return {'task': 't', 'account': 'a1', 'kind': 'code', 'result': 'finished', 'item': item, 'usd': usd}
+
+
+class ThroughputTests(Base):
+    def test_three_priced_ids(self):
+        items = {i: {'type': 'feature'} for i in ('F-0001', 'F-0002', 'F-0003')}
+        costs = metrics.compute_costs([], [_usd_session('F-0001', 10.00), _usd_session('F-0002', 12.00),
+                                           _usd_session('F-0003', 15.20)])
+        self.assertEqual(metrics.throughput(items, costs, list(items)),
+                         {'features': 3, 'priced': 3, 'usd': 37.20, 'mean': 12.40})
+
+    def test_a_fourth_unpriced_id_counts_only_in_features(self):
+        items = {i: {'type': 'feature'} for i in ('F-0001', 'F-0002', 'F-0003', 'F-0004')}
+        costs = metrics.compute_costs([], [_usd_session('F-0001', 10.00), _usd_session('F-0002', 12.00),
+                                           _usd_session('F-0003', 15.20)])
+        self.assertEqual(metrics.throughput(items, costs, list(items)),
+                         {'features': 4, 'priced': 3, 'usd': 37.20, 'mean': 12.40})
+
+    def test_all_unpriced_gives_no_mean(self):
+        items = {i: {'type': 'feature'} for i in ('F-0001', 'F-0002', 'F-0003', 'F-0004')}
+        self.assertEqual(metrics.throughput(items, {}, list(items)),
+                         {'features': 4, 'priced': 0, 'usd': None, 'mean': None})
+
+    def test_no_ids_divides_by_nothing(self):
+        self.assertEqual(metrics.throughput({}, {}, []), {'features': 0, 'priced': 0, 'usd': None, 'mean': None})
+
+    def test_a_features_cost_sums_its_stories_tasks_and_bugs(self):
+        items = {'F-0001': {'type': 'feature', 'children': ['S-0001', 'T-0001', 'B-0001']},
+                 'S-0001': {'type': 'story', 'children': []},
+                 'T-0001': {'type': 'task', 'children': []},
+                 'B-0001': {'type': 'bug', 'children': []}}
+        costs = metrics.compute_costs([], [_usd_session('S-0001', 2.0), _usd_session('T-0001', 3.0),
+                                           _usd_session('B-0001', 1.0)])
+        self.assertEqual(metrics.throughput(items, costs, ['F-0001']),
+                         {'features': 1, 'priced': 1, 'usd': 6.0, 'mean': 6.0})
+
+    def test_whole_life_cost_ignores_the_window(self):
+        old_day = (dt.date.fromisoformat(DAY) - dt.timedelta(days=20)).isoformat()
+        metrics.append_event(self.root, 'sessions', dict(_usd_session('F-0001', 5.0), ts=f'{DAY}T08:00:00Z'))
+        metrics.append_event(self.root, 'sessions', dict(_usd_session('F-0001', 9.0), ts=f'{old_day}T08:00:00Z'))
+        items = {'F-0001': {'type': 'feature'}}
+        week = metrics.throughput(items, metrics.compute_costs(
+            [], metrics.read_stream(self.root, 'sessions', metrics.days_back(DAY, 7))), ['F-0001'])
+        month = metrics.throughput(items, metrics.compute_costs(
+            [], metrics.read_stream(self.root, 'sessions', metrics.days_back(DAY, 30))), ['F-0001'])
+        self.assertEqual(week['features'], month['features'])
+        self.assertLess(week['usd'], month['usd'])

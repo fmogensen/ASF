@@ -37,8 +37,12 @@ from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DE
 from asf.record import frontmatter
 from asf.record import match
 from asf.record.index import do_index
+from asf.record.ingest import ON_PROD_EVENT
 
 STREAMS = ('ci', 'sessions', 'ticks', 'landings', 'gates')
+#: The `evidence.feature_stage` token for "reached production" — the card's prose says
+#: "on-production", the record says `on-prod` (F-0044 §1.1).
+ON_PROD_STAGE = 'on-prod'
 #: How far back one collecting pass reaches when the record gives it no watermark, or when the
 #: watermark is older than that (D2). A gap longer than this is skipped — and said out loud.
 CI_CATCH_UP_DAYS = 14
@@ -509,6 +513,63 @@ def subtree_cost(items, costs, iid):
             total['usd'] = (total['usd'] or 0.0) + c['usd']
         _add_tokens(total['tokens'], c['tokens'])
     return total
+
+
+def shipped(events, items, days):
+    """{feature id: the day it reached `on-prod`} over `days`, newest wins.
+
+    An ``ingest.ON_PROD_EVENT`` line is the record; a Feature now at `on-prod` whose id no event
+    names at all falls back to its `stage_since` day (the stream is younger than the record). The
+    first pass runs over every event given, not just `days` — an item an older event names must
+    never fall back to `stage_since`, or it would land in both windows. Only ids that are
+    Features in `items` count; `days` is a list of ``YYYY-MM-DD``.
+    """
+    seen = {}
+    for ev in events:
+        if ev.get('kind') != ON_PROD_EVENT:
+            continue
+        fid, ts = ev.get('item'), ev.get('ts')
+        if ts and (fid not in seen or ts > seen[fid]):
+            seen[fid] = ts
+    seen = {fid: ts[:10] for fid, ts in seen.items()}
+    for fid, it in items.items():
+        if it.get('stage') == ON_PROD_STAGE and it.get('stage_since'):
+            seen.setdefault(fid, it['stage_since'][:10])
+    days = set(days)
+    return {fid: d for fid, d in seen.items() if d in days and items.get(fid, {}).get('type') == 'feature'}
+
+
+def throughput(items, costs, ids):
+    """{'features': n, 'priced': k, 'usd': total of the priced, 'mean': mean or None} — each id's
+    whole-life `subtree_cost` in USD; an id whose cost is unknown counts in `features`, never in
+    `priced`, `usd` or `mean`."""
+    features = priced = 0
+    usd = None
+    for iid in ids:
+        features += 1
+        cost = subtree_cost(items, costs, iid)['usd']
+        if cost is not None:
+            priced += 1
+            usd = (usd or 0.0) + cost
+    mean = usd / priced if priced else None
+    return {'features': features, 'priced': priced, 'usd': usd, 'mean': mean}
+
+
+def record_throughput(root, items, day):
+    """(this week, last week) for one record: two `throughput` dicts and the two windows.
+
+    Returns ``(week, prev, this_wk, prev_wk)`` where the windows are ``days_back(day, 7)`` and
+    ``days_back(day, 14)[:7]``. Reads `metrics/events`, `metrics/ci` and `metrics/sessions`
+    undated — the cost is whole-life (F-0044 §1.4) — so the same record read with a 7-day window
+    and a 30-day one gives the same `features` and a larger `usd`.
+    """
+    this_wk, prev_wk = days_back(day, 7), days_back(day, 14)[:7]
+    events = read_stream(root, 'events')
+    ci, sessions = read_stream(root, 'ci'), read_stream(root, 'sessions')
+    costs = compute_costs(ci, sessions)
+    week = throughput(items, costs, shipped(events, items, this_wk))
+    prev = throughput(items, costs, shipped(events, items, prev_wk))
+    return week, prev, this_wk, prev_wk
 
 
 def esc(s):
