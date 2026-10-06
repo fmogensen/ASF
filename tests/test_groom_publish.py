@@ -7,6 +7,7 @@ import contextlib
 import datetime
 import filecmp
 import io
+import itertools
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ from unittest import mock
 
 from asf import env
 from asf.groom import groom
+from asf.record import core
 from asf.record.core import ITEM_FOLDERS
 from asf.record.ids import write_new_item
 from tests.test_groom import make_repo
@@ -131,15 +133,32 @@ class GroomPublishTests(unittest.TestCase):
                 with open(os.path.join(root, 'inbox', 'a.md'), 'w', encoding='utf-8') as f:
                     f.write('# Checkout is broken\nsignature: pay\n\nCustomers cannot pay.\n')
             args = self._args()
+            # B-0356: index.json's `generated` (asf.record.core.now_iso) is wall-clock, one
+            # second resolution, and the wrapped call writes it twice (once in `_groom`, again
+            # when `publish.commit_paths` rebuilds the derived tree) against the direct call's
+            # once — on a loaded CI runner those calls can land in different seconds, making
+            # this pair flaky. Force every call to land in a different second so the race
+            # reproduces every run instead of by luck.
+            ticks = itertools.count()
             with contextlib.redirect_stdout(io.StringIO()), \
-                    mock.patch.object(env, 'load_product', side_effect=env.ConfigError('none')):
+                    mock.patch.object(env, 'load_product', side_effect=env.ConfigError('none')), \
+                    mock.patch.object(core, 'now_iso',
+                                      side_effect=lambda: f'2026-01-01T00:00:{next(ticks):02d}Z'):
                 wrapped_rc = groom.cmd_groom(args, wrapped_root)
                 direct_rc = groom._groom(self._args(), direct_root)
             self.assertEqual(wrapped_rc, direct_rc)
             cmp = filecmp.dircmp(wrapped_root, direct_root)
-            self.assertEqual(cmp.diff_files, [])
+            self.assertEqual([f for f in cmp.diff_files if f != 'index.json'], [])
             self.assertEqual(cmp.left_only, [])
             self.assertEqual(cmp.right_only, [])
+            # index.json itself: the same items, `generated` timestamp aside
+            with open(os.path.join(wrapped_root, 'index.json'), encoding='utf-8') as f:
+                wrapped_index = json.load(f)
+            with open(os.path.join(direct_root, 'index.json'), encoding='utf-8') as f:
+                direct_index = json.load(f)
+            wrapped_index.pop('generated', None)
+            direct_index.pop('generated', None)
+            self.assertEqual(wrapped_index, direct_index)
             self.assertFalse(os.path.isdir(os.path.join(wrapped_root, '.git')))
         finally:
             shutil.rmtree(wrapped_root, ignore_errors=True)
