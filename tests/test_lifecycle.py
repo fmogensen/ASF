@@ -2368,8 +2368,8 @@ class NothingToLandTests(unittest.TestCase):
         # outcome_class's membership fallback reads OUTCOME_CLASSES[3:-1]
         self.assertEqual(lc.OUTCOME_CLASSES[3:-1], (
             'dead pid', 'pushed after stop', 'unpushed work', 'unknown model', 'auth',
-            'quota-exhausted', 'permission', 'hook refused', 'network error', 'token cap',
-            'run cap', 'nothing to land'))
+            'quota-exhausted', 'permission', 'overloaded', 'hook refused', 'network error',
+            'token cap', 'run cap', 'nothing to land'))
 
     def test_classify_on_a_run_ended_with_it(self):
         run = {'ended': 't1', 'end_reason': lc.NOTHING_TO_LAND}
@@ -2732,8 +2732,8 @@ class OutcomeClassTests(unittest.TestCase):
     def test_the_vocabulary_is_the_specs_in_the_specs_order(self):
         self.assertEqual(lc.OUTCOME_CLASSES, (
             'finished', 'not pushed', 'empty branch', 'dead pid', 'pushed after stop',
-            'unpushed work', 'unknown model', 'auth', 'quota-exhausted', 'permission', 'hook refused',
-            'network error', 'token cap', 'run cap', 'nothing to land', 'other'))
+            'unpushed work', 'unknown model', 'auth', 'quota-exhausted', 'permission', 'overloaded',
+            'hook refused', 'network error', 'token cap', 'run cap', 'nothing to land', 'other'))
 
     def test_a_run_ended_by_its_token_cap(self):
         self.assertIn(lc.tokens.TOKEN_CAP, lc.OUTCOME_CLASSES)
@@ -2742,6 +2742,12 @@ class OutcomeClassTests(unittest.TestCase):
     def test_a_run_ended_by_its_run_cap(self):
         self.assertIn(lc.budget.RUN_CAP, lc.OUTCOME_CLASSES)
         self.assertEqual(lc.outcome_class(f'failed: {lc.budget.RUN_CAP}'), lc.budget.RUN_CAP)
+
+    def test_b0294_an_overloaded_api_error_is_its_own_class_not_other(self):
+        self.assertEqual(lc.outcome_class(f'failed: {lc.runtime_mod.OVERLOADED}'),
+                         lc.runtime_mod.OVERLOADED)
+        self.assertIn(lc.runtime_mod.OVERLOADED, lc.OUTCOME_CLASSES)
+        self.assertIn(lc.runtime_mod.OVERLOADED, lc.FAILING_CLASSES)
 
 
 class PublishRedactionTests(unittest.TestCase):

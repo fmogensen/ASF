@@ -605,6 +605,16 @@ def runtime_session(log_path):
     return str((init_line(log_path) or {}).get('session_id') or '')
 
 
+#: The API's own side down, not the session's work or an exhausted window: a 5xx the provider
+#: itself names (``overloaded_error``, ``internal_server_error``, ``service_unavailable_error``,
+#: ``bad_gateway_error``) or reports as ``API Error: 5xx`` the way :data:`headroom.LIMIT_RE`
+#: already reads ``API Error: 429`` (B-0294: left unnamed, these fell to :data:`OTHER` with every
+#: other failure nobody named, which is why the share of sessions ending ``other`` read high
+#: enough to cross the threshold on data that was mostly this one retryable cause).
+OVERLOADED = 'overloaded'
+OVERLOADED_RE = re.compile(r'overloaded_error|internal_server_error|service_unavailable_error|'
+                           r'bad_gateway_error|API Error: 5\d\d', re.I)
+
 # the CLI's own error texts, which it reports with ``subtype: success``
 FAILURE_SIGNATURES = (
     ('unknown model', re.compile(r'issue with the selected model|model .* (?:not found|does not exist)', re.I)),
@@ -613,6 +623,7 @@ FAILURE_SIGNATURES = (
     # a spent window — the session limit, the usage limit, a rate limit (asf.workers.headroom)
     (headroom.QUOTA_EXHAUSTED, headroom.LIMIT_RE),
     ('permission', re.compile(r'permission denied|not permitted to use', re.I)),
+    (OVERLOADED, OVERLOADED_RE),
 )
 
 
