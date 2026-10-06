@@ -89,6 +89,14 @@ QUEUE_EVERY_S = 60
 HOST_CLOCK = 'net-probe'
 HOST_PRODUCT = 'host'
 
+#: the wave's own clock (T-defect #54, :mod:`asf.tick.wave_clock`): every product whose clocks
+#: carry a ``wave`` step gets it too, like the queue's own job above — the launch path alone,
+#: every ``clocks.wave.every`` (default :data:`asf.tick.wave_clock.DEFAULT_EVERY_S`), under its
+#: own lock, never the product's tick lock, so a long tick's health, harvest or CI-log work never
+#: makes a ready row or a free seat wait for it. ``clocks.wave: off`` turns it off.
+WAVE_CLOCK = 'wave'
+WAVE_COMMAND = 'wave'
+
 
 class SchedulerError(Exception):
     pass
@@ -400,6 +408,8 @@ def tick_argv(product_name, clock, interpreter=None):
     python = interpreter or sys.executable
     if clock.command == QUEUE_COMMAND:
         return [python, '-m', 'asf.cli', 'ci', 'queue', '--apply', '--product', product_name]
+    if clock.command == WAVE_COMMAND:
+        return [python, '-m', 'asf.cli', 'wave', '--product', product_name]
     argv = [python, '-m', 'asf.cli', 'tick', '--product', product_name]
     if clock.shadow:
         argv.append('--shadow')
@@ -513,6 +523,10 @@ def clocks(product):
         conv = getattr(product, 'conventions', None)
         if ci_queue.mode(product) != 'off' or (conv is not None and conv.merge_queue()):
             built.append(Clock(QUEUE_CLOCK, [], False, tunable('QUEUE_EVERY_S'), None, QUEUE_COMMAND))
+    if WAVE_CLOCK not in declared and any('wave' in (c.steps or []) for c in built):
+        from asf.tick import wave_clock
+        if not wave_clock.off():
+            built.append(Clock(WAVE_CLOCK, [], False, wave_clock.every_s(), None, WAVE_COMMAND))
     return built
 
 

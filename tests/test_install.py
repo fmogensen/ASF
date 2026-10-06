@@ -3073,7 +3073,7 @@ class InitDefaultClocksTests(HomeCase):
                  test_command='true')
         self.write(env.product_path('fresh'), init.render_product_yaml(d))
         names = sorted(c.name for c in scheduler.clocks(env.load_product('fresh')))
-        self.assertEqual(names, ['daily', 'dispatch', 'record'])
+        self.assertEqual(names, ['daily', 'dispatch', 'record', 'wave'])
 
 
 class InstallStepsTests(HomeCase):

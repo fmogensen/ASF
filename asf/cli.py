@@ -337,6 +337,8 @@ def build_parser():
 
     from asf.tick.tick import register as register_tick
     register_tick(sub)
+    from asf.tick.wave_clock import register as register_wave_clock
+    register_wave_clock(sub)
     from asf.tick.watch import register as register_watch
     register_watch(sub)
     from asf.init import register_commands as register_install
@@ -664,6 +666,9 @@ def _main(argv=None):
     if args.command == 'tick':
         from asf.tick.tick import cmd_tick
         return cmd_tick(args)
+    if args.command == 'wave':
+        from asf.tick.wave_clock import cmd_wave
+        return cmd_wave(args)
     if args.command == 'watch':
         from asf.tick.watch import cmd_watch
         return cmd_watch(args)

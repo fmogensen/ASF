@@ -794,7 +794,8 @@ class InstalledButUndeclaredTest(SchedulerTestCase):
         self.assertNotIn('retired', result.stdout)
         env_product = env.load_product('sample')
         self.assertEqual([scheduler.label_for('sample', c.name) for c in
-                          scheduler.clocks(env_product)], [self.LABEL])
+                          scheduler.clocks(env_product)],
+                         [self.LABEL, 'asf.sample.wave'])
 
 
 if __name__ == '__main__':

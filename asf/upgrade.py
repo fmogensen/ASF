@@ -784,9 +784,10 @@ DRAIN_MARGIN_S = 60
 #: (an older build's) is dropped
 DEFAULT_DRAIN_MARKER_MAX_S = DEFAULT_MOVE_WAIT_S + DRAIN_MARGIN_S
 #: the product's processes a move waits out: its ticks, its ``ci queue`` passes (the queue clock
-#: pushes and cancels runs) and its background harvest — by interpreter argv, as
-#: :data:`TICK_PATTERN`, but also the suffixed ``asf-<p>-<sha7>`` and dispatcher entry points
-MOVE_PATTERN = r'(-m asf\.cli|/asf\S*) (tick|ci queue)( |$)|-m asf\.tick\.step_harvest( |$)'
+#: pushes and cancels runs), its wave clock's own runs (:mod:`asf.tick.wave_clock`: it spawns
+#: sessions too) and its background harvest — by interpreter argv, as :data:`TICK_PATTERN`, but
+#: also the suffixed ``asf-<p>-<sha7>`` and dispatcher entry points
+MOVE_PATTERN = r'(-m asf\.cli|/asf\S*) (tick|ci queue|wave)( |$)|-m asf\.tick\.step_harvest( |$)'
 #: the move waits (CI unknown, the floor still busy): nothing changed, try again later
 MOVE_DEFERRED = 3
 #: a check run conclusion that is a red verdict (anything else not ``success`` is Unknown)

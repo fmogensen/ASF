@@ -492,7 +492,8 @@ class AppliedTest(SharedFixture, unittest.TestCase):
                             f'{label} not installed:\n{result.stdout}')
         installs = [row for row in self._manifest_rows() if row[0] == 'scheduler_install']
         self.assertEqual(sorted(row[3] for row in installs),
-                         sorted(['asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily']))
+                         sorted(['asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily',
+                                 'asf.sample.wave']))
 
     def test_the_installed_job_is_runnable(self):
         """B-0014 (b): absolute interpreter, a working directory, PYTHONPATH (or, from a checkout,

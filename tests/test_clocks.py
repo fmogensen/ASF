@@ -40,6 +40,7 @@ class ClocksParseTest(SchedulerTestCase):
             Clock('dispatch', ['health', 'wave', 'prs', 'harvest', 'batch'], False, 600, None),
             Clock('daily', ['daily'], False, None, {'Hour': 6, 'Minute': 50}),
             Clock('shadow', [], True, 1800, None),
+            Clock('wave', [], False, 60, None, scheduler.WAVE_COMMAND),
         ])
 
     def test_no_clocks_is_needs_operator(self):
@@ -193,11 +194,11 @@ class ClocksInstallTest(SchedulerTestCase):
         rc, _out = self._install()
         self.assertEqual(rc, 0)
         for label in ('asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily',
-                      'asf.sample.shadow'):
+                      'asf.sample.shadow', 'asf.sample.wave'):
             self.assertTrue(
                 os.path.isfile(os.path.join(self._agents_dir(), f'{label}.plist')), label)
         bootstraps = [l for l in stub_argv(self.statedir) if l.startswith('bootstrap')]
-        self.assertEqual(len(bootstraps), 4, bootstraps)
+        self.assertEqual(len(bootstraps), 5, bootstraps)
 
     def test_install_retires_an_undeclared_job(self):
         self.write_config('  legacy_labels: [old.*]\n')
@@ -263,14 +264,15 @@ class ClocksCliTest(SchedulerTestCase):
         result = self._run(['render', '--product', 'sample', '--clock', 'nope'])
         self.assertEqual(result.returncode, 2)
         self.assertIn('no clock nope in products/sample.yaml (clocks: record, dispatch, daily, '
-                      'shadow)', result.stdout + result.stderr)
+                      'shadow, wave)', result.stdout + result.stderr)
 
     def test_render_json_lists_every_clock(self):
         self.write_product(CARD_EXAMPLE, steps_yaml=BATCH_OWNED)
         result = self._run(['render', '--product', 'sample', '--json'])
         self.assertEqual(result.returncode, 0, result.stderr)
         jobs = json.loads(result.stdout)
-        self.assertEqual([j['clock'] for j in jobs], ['record', 'dispatch', 'daily', 'shadow'])
+        self.assertEqual([j['clock'] for j in jobs],
+                         ['record', 'dispatch', 'daily', 'shadow', 'wave'])
 
     def test_no_clocks_exits_2_with_needs_operator(self):
         result = self._run(['render', '--product', 'sample'])
@@ -286,7 +288,9 @@ class ClocksCliTest(SchedulerTestCase):
         fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
         result = self._run(['status', '--product', 'sample'])
         self.assertEqual(result.returncode, 1, result.stdout)
-        self.assertEqual(len(result.stdout.strip().splitlines()), 2, result.stdout)
+        # record is loaded; dispatch (declared) and wave (auto-injected: dispatch carries the
+        # wave step) are both not loaded
+        self.assertEqual(len(result.stdout.strip().splitlines()), 3, result.stdout)
 
 
 if __name__ == '__main__':
