@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.198 — 2026-10-06
+
+### Features landed
+
+- The `ci` stream matches the workflow by file name too, and carries seconds, queue wait and wall time (#857)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.198"`
+
 ## v0.1.197 — 2026-10-06
 
 ### Features landed
