@@ -141,7 +141,31 @@ def find_stale(canonical, limits, now):
     return out
 
 
+def cmd_act(args, root):
+    """``asf stale --act [--dry-run]``: the act pass (:mod:`asf.stale_act`) by hand — it acts
+    whatever ``conventions.stale.act`` says (the operator asked), each kind as configured."""
+    from asf import stale_act
+    product = product_of(args)
+    if product is None:
+        print('stale --act: no product configured', file=sys.stderr)
+        return 2
+    dry = bool(getattr(args, 'dry_run', False))
+    as_json = bool(getattr(args, 'json', False))
+    out = (lambda line: print(line, file=sys.stderr)) if as_json else print
+    done = stale_act.run(product, root, act_now=True, dry_run=dry, out=out)
+    if as_json:
+        print(json.dumps(done, indent=2, sort_keys=True, default=str))
+    elif not done:
+        print('stale: nothing past its deadline')
+    return 0
+
+
 def cmd_stale(args, root):
+    if getattr(args, 'act', False):
+        return cmd_act(args, root)
+    if getattr(args, 'dry_run', False):
+        print('stale: --dry-run goes with --act', file=sys.stderr)
+        return 2
     by_id, parse_errors = load_items(root)
     if parse_errors:
         for f, line, why in parse_errors:

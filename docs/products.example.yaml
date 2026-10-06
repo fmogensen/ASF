@@ -211,6 +211,22 @@ conventions:
       code: required
     stale_after: 2d
     shared_path_aging: 30m
+  # stale means act (asf.stale_act; `asf stale --act [--dry-run]` by hand): a leftover past its
+  # deadline is acted on, every action a line in state/<product>/stale-acts.jsonl. `act`: the
+  # tick acts (true) or only prints its `would …` lines (false); unset, it acts for ASF's own
+  # repo only. `pr`: an open PR the lane holds STALE past `pr_after` is archived as
+  # archive/pr-<n>, closed with its reason, its branch deleted, and its open item re-planned.
+  # `task`: an Active Task past `task_factor` x its task_active limit, its branch unmoved as long
+  # and over `task_behind` commits behind the trunk, is re-planned from the trunk (its branch
+  # archived, its PR closed). `pr: false` / `task: false` turn a kind off. A product with no PR
+  # host skips the pr kind as not applicable.
+  # stale:
+  #   act: true
+  #   pr: true
+  #   pr_after: 3d
+  #   task: true
+  #   task_factor: 3
+  #   task_behind: 200
   # a command run in every fresh worker worktree before its session starts (default: none).
   # worktree_setup: make deps
   # GitHub access is per product, not per account: a fine-grained token covers one GitHub owner,

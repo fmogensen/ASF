@@ -240,6 +240,7 @@ def run(ctx, out=print, runtime_fn=_runtime):
     hold_failed_corrections(ctx, sessions, out=out, items=items)
     ci_trials(ctx, out=out)
     branch_retention(ctx, items, out=out)
+    stale_acts(ctx, out=out)
     return 0
 
 
@@ -265,6 +266,19 @@ def branch_retention(ctx, items, out=print):
         return retention.sweep(ctx.product, fix=True, out=out, items=items)
     except Exception as e:  # noqa: BLE001 — the next tick sweeps again
         out(f'retention: skipped — {type(e).__name__}: {e}')
+        return None
+
+
+def stale_acts(ctx, out=print):
+    """Stale means act (:mod:`asf.stale_act`): a lane-STALE PR past its deadline archived and
+    closed, a stuck Task far behind the trunk re-planned — acted on where
+    ``conventions.stale.act`` holds (by default ASF's own repo), the ``would …`` lines elsewhere.
+    Printed, never raised: the next tick tries again."""
+    from asf import stale_act
+    try:
+        return stale_act.run(ctx.product, ctx.record_root(), out=out)
+    except Exception as e:  # noqa: BLE001 — a clean-up never stops a tick
+        out(f'stale: skipped — {type(e).__name__}: {e}')
         return None
 
 
