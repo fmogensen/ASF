@@ -1496,6 +1496,12 @@ def run(product_name):
         rows.append(('token-caps', False, ok, detail))
     for required, ok, detail in check_ci_pool(product):
         rows.append(('ci pool', required, ok, detail))
+    from asf import ci_census
+    for required, ok, detail in ci_census.census_rows(product):
+        rows.append(('ci census', required, ok, detail))
+    for required, ok, detail in check_ci_measure(product):
+        label = 'ci baseline' if detail.startswith('ci baseline:') else 'ci measure'
+        rows.append((label, required, ok, detail))
     for required, ok, detail in check_ci_runners(product):
         rows.append(('ci runners', required, ok, detail))
     for required, ok, detail in check_ci_heartbeat(product):
@@ -1677,6 +1683,62 @@ def check_ci_pool(product):
     provider-like labels in ``runs-on``, missing or offline runners. No rows without a pool."""
     from asf import ci_pool
     return ci_pool.doctor_rows(product)
+
+
+def check_ci_measure(product, now=None, root=None):
+    """[(required, ok, detail)] — three advisory row groups off the ``ci`` stream and the
+    published baseline (:mod:`asf.ci_measure`), with no CI host call at all (PD8): a slow runner
+    and a flaky runner, both off :func:`asf.ci_measure.scores`, and a green reading that has
+    quietly grown past its own baseline, off :func:`asf.ci_measure.regressions` against the
+    **converted** published baselines (R1 — :func:`asf.ci_measure.read_baselines` returns the
+    file's own ``{runner: {kind: {'p50_s', 'n'}}}`` shape, not the ``(seconds, n)`` tuples
+    ``regressions`` wants). Every row is advisory (D19): the demotion a slow or flaky box earns
+    is already the action a required row cannot outrun any faster. ``[]`` with no stream, no
+    census (:func:`asf.ci_census.cached`, D2's degradation applied here too), or on any
+    exception reading either file — a diagnostic command that dies on a state file is worse than
+    one that says nothing."""
+    from asf import ci_census, ci_measure
+    from asf.metrics import metrics
+    from asf.tick import shadow
+    root = root if root is not None else shadow.record_dir(product.name)
+    try:
+        tiers_list = ci_census.cached(product)
+        if not tiers_list:
+            return []
+        window_days = ci_measure.tunable('WINDOW_DAYS')
+        events = metrics.read_stream(root, 'ci', metrics.days_back(metrics.today(), window_days))
+        rdgs = ci_measure.readings(events, now=now)
+        sc = ci_measure.scores(rdgs)
+        tiers = {e.runner: e.role for e in tiers_list}
+        per = ci_measure.read_baselines(product).get('per') or {}
+        base = {r: {k: (v['p50_s'], v['n']) for k, v in kinds.items()} for r, kinds in per.items()}
+        regress = ci_measure.regressions(rdgs, base)
+    except Exception:  # noqa: BLE001 — a diagnostic row is never worth a doctor crash
+        return []
+    out = []
+    for name in sorted(sc):
+        score = sc[name]
+        if score.ratio is not None and score.ratio >= ci_census.DEMOTE_AT and score.ratios:
+            kind = max(score.ratios, key=lambda k: score.ratios[k])
+            n = score.n
+            out.append((False, False,
+                        f'ci measure: {name} runs {kind} at {score.medians[kind]:g}s, '
+                        f'{score.ratios[kind]:.2g}× the fleet best ({n} green reading'
+                        f'{"s" if n != 1 else ""}, {window_days} d) — '
+                        f'{tiers.get(name, ci_census.BULK)}'))
+    for name in sorted(sc):
+        score = sc[name]
+        if score.flaky:
+            out.append((False, False,
+                        f'ci measure: {name} green {score.green_rate} over {score.n} readings '
+                        f'— flaky, never {ci_census.FAST}'))
+    for runner_name, kind, latest, base_s in regress:
+        n = base.get(runner_name, {}).get(kind, (None, 0))[1]
+        out.append((False, False,
+                    f'ci baseline: {kind} on {runner_name} last ran {latest:g}s against its '
+                    f'{base_s:g}s baseline ({latest / base_s:.2g}×) — {n} green reading'
+                    f'{"s" if n != 1 else ""}'))
+    return out
 
 
 def check_ci_heartbeat(product, now=None):
