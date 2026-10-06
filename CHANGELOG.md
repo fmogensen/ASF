@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.142 — 2026-10-06
+
+### Features landed
+
+- A tick no longer blocks on the lane. The pre-push check on a branch the lane rebuilt runs as a background job that a later pass reads, one lane pass stops at a time budget, and the merge queue lands green batches from its own one-minute job instead of waiting for the next tick (#786)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.142"`
+
 ## v0.1.141 — 2026-10-06
 
 ### Bugs fixed
