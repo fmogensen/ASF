@@ -8,14 +8,21 @@ A Task's list fields ``writes:`` and ``after:`` take three forms: ``writes=[a, b
 list, ``writes+=a`` (or ``writes+=[a, b]``) adds what is not there yet, ``writes-=a`` removes.
 Both sides are flattened first, so a plan's packed entry (``writes: [a.py b.py]``) is the paths it
 names. On ``writes:`` an add the footprint already covers adds nothing, and a remove that would
-remove nothing is refused."""
+remove nothing is refused.
+
+A Bug's ``severity`` is settable here (F-0163), and it is the one field this command reasons about
+rather than merely writing: it appends ``- <date> set: severity S1 → S2 — <why>`` to ``## History``
+in the same guarded write as the field, and refuses a move **off** ``S1`` without ``--why``. S1 is
+the severity that holds the whole tier-2 queue (:func:`asf.feeder.rows.bug_rows`), so leaving it
+spends something that belongs to other work; the sentence that justifies it is worth more later
+than the field."""
 import os
 import sys
 import tempfile
 
 from asf.record import frontmatter
 from asf.record import writer as card_writer
-from asf.record.core import canonicalize, load_items, record_root
+from asf.record.core import canonicalize, load_items, parse_sections, record_root, today
 from asf.record.new import _parse_sets  # noqa: F401
 
 #: The list-valued fields ``asf set`` writes with ``=`` / ``+=`` / ``-=``, per type.
@@ -23,6 +30,39 @@ LIST_FIELDS = {'task': ('writes', 'after')}
 #: Fields ``asf set`` writes on an existing card that ``asf new --set`` does not take: a card is
 #: re-parented (``parent=S-0001``) or taken off the board (``removed=true`` or a reason).
 SET_ONLY = ('parent', 'removed')
+#: The History line a severity change files on the Bug — the card's own words, dated like every
+#: other line in the record and named for its writer (D3).
+SEVERITY_HISTORY = '- {date} set: severity {old} → {new}'
+#: …with the reason a move off S1 must carry.
+SEVERITY_WHY = ' — {why}'
+
+
+def severity_change(rec, updates, why):
+    """``(history_line, None)`` for a severity assignment in ``updates``, ``(None, None)`` when
+    there is none or the value is the one already on the card (D5), or ``(None, reason)`` when the
+    change is refused.
+
+    Refused when the card leaves ``S1`` without a ``--why`` (D4), when ``--why`` is given and no
+    severity moves (D6), or when the card carries no ``## History`` section to write the line into
+    (D9)."""
+    new = updates.get('severity')
+    old = rec['meta'].get('severity')
+    noop = new is None or new == old
+    if why and noop:
+        return None, "--why records why a severity moved; no severity assignment in this command"
+    if why and '\n' in why:
+        return None, "--why is one line, because it is written as one line of ## History"
+    if noop:
+        return None, None
+    if old == 'S1' and new != 'S1' and not why:
+        return None, (f"severity={new} leaves S1 without --why \"<reason>\" — leaving S1 "
+                       "releases the lane's hold on everything behind it")
+    if not any(h.strip() == '## History' for h, _ in parse_sections(rec['body'])[1]):
+        return None, f"{rec['relpath']} has no ## History section to record the change in"
+    line = SEVERITY_HISTORY.format(date=today(), old=old, new=new)
+    if why:
+        line += SEVERITY_WHY.format(why=why)
+    return line, None
 
 
 def _as_list(value):
@@ -193,8 +233,12 @@ def _set_one(args, root, rec, item_id, assignments, canonical=None):
             updates[top] = value
             all_noop = False
 
+    history, err = severity_change(rec, updates, getattr(args, 'why', None))
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
     from asf.record.check import product_of  # the same soft loader cmd_check uses (D5, PD6)
-    err = set_typed(rec, updates, product=product_of(args))
+    err = set_typed(rec, updates, product=product_of(args), history=[history] if history else ())
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 2
@@ -211,6 +255,8 @@ def _set_one(args, root, rec, item_id, assignments, canonical=None):
     if not all_noop:
         print(f"{item_id}: set " + ', '.join(
             f"{k}={' '.join(v)}" if k in lists else k for k, v in updates.items()))
+    if history:
+        print(f"{item_id}: history: " + history.split('set: ', 1)[1])
     return 0
 
 
@@ -275,7 +321,10 @@ def _flip_reverse_holds(root, item_id, added, product):
 def set_typed(rec, updates, writer='set', product=None, history=()):
     """Write ``updates`` (typed fields) onto the card ``rec`` (a ``load_items`` record) through the
     parser: rendered on a scratch copy, parsed back, written only when every field round-trips.
-    ``history``: lines appended to the card's ``## History`` in the same write (``asf retire``).
+    ``history``: lines appended to the card's ``## History`` in the same write (``asf retire``,
+    and a Bug's severity move, F-0163) — never a second write afterwards, so the guard that can
+    refuse the change sees the whole change, and a card never holds a field whose reason failed
+    to land.
     ``product``: passed to the record stage's I3 check, so a ``writes:`` update that only adds a
     path ``product``'s ``conventions.shared_paths`` covers is never refused as intersecting
     another Active Task's footprint. Returns None on success, else the reason the card is

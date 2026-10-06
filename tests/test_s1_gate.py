@@ -71,7 +71,8 @@ class AnUnworkedS1HoldsNothing(unittest.TestCase):
         self.assertEqual(tiers.needs_operator(g, product()),
                          ['NEEDS OPERATOR: B-0057 is S1 and nothing is working it — adjudicated '
                           'after 4 sessions — the S1 lane holds 0 of 0 tier-2 rows behind it — '
-                          'asf set B-0057 severity=S2 --product sample'])
+                          'asf set B-0057 severity=S2 --why "<why this is not S1>" --product '
+                          'sample'])
 
     def test_an_undecided_s1_holds_nothing(self):
         # 270 days before the wall clock the gate reads (a fixed date aged a day a day)

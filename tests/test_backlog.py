@@ -286,6 +286,201 @@ class SetCommandTests(unittest.TestCase):
         self.assertEqual(self.read(), before)
 
 
+class SetSeverityFieldTests(unittest.TestCase):
+    """F-0163: `severity` joins `SETTABLE['bug']`, gated to S1|S2|S3 (:data:`asf.record.new.
+    SEVERITIES`) before the card is touched — and on no other type's list."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        self.bug = write_item(self.root, 'B-0001', 'bug', 'Broken', parent='E-0001',
+                              typed_lines=('severity: S1',))
+
+    def read(self):
+        with open(self.bug, encoding='utf-8') as f:
+            return f.read()
+
+    def test_severity_is_settable_and_writes_the_field_and_the_history(self):
+        r = run(['set', 'B-0001', 'severity=S2', '--why', 'main green, prod deployed'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        meta, body = frontmatter.parse(self.read())
+        self.assertEqual(meta['severity'], 'S2')
+        self.assertIn('set: severity S1 → S2 — main green, prod deployed', body)
+
+    def test_lowercase_value_is_accepted_and_written_canonically(self):
+        r = run(['set', 'B-0001', 'severity=s2', '--why', 'x'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        meta, _body = frontmatter.parse(self.read())
+        self.assertEqual(meta['severity'], 'S2')
+
+    def test_bad_value_is_refused_before_the_card_is_touched(self):
+        before = self.read()
+        for bad in ('S4', 'x'):
+            r = run(['set', 'B-0001', f'severity={bad}'], self.root)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn('one of S1, S2, S3', r.stderr)
+            self.assertEqual(self.read(), before)
+
+    def test_no_other_type_gained_the_field(self):
+        f1 = write_item(self.root, 'F-0001', 'feature', 'Thing', parent='E-0001')
+        with open(f1, encoding='utf-8') as f:
+            before = f.read()
+        r = run(['set', 'F-0001', 'severity=S2'], self.root)
+        self.assertEqual(r.returncode, 2)
+        with open(f1, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+        before_bug = self.read()
+        r = run(['set', 'B-0001', 'scope=x'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.read(), before_bug)
+
+
+class SetSeverityHistoryTests(unittest.TestCase):
+    """F-0163 D2/D5/D9: a severity change files its own dated `## History` line in the same
+    staged write as the field, so the record never holds a severity it cannot explain."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        self.bug = write_item(self.root, 'B-0001', 'bug', 'Broken', parent='E-0001',
+                              typed_lines=('severity: S2',))
+
+    def read(self):
+        with open(self.bug, encoding='utf-8') as f:
+            return f.read()
+
+    def test_the_line_is_dated_and_placed_inside_history_untouched_otherwise(self):
+        from asf.record.core import today
+        r = run(['set', 'B-0001', 'severity=S3'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('history: severity S2 → S3', r.stdout)
+        _meta, body = frontmatter.parse(self.read())
+        self.assertIn(f'- {today()} set: severity S2 → S3\n', body)
+        self.assertIn('- 2026-01-01: created\n', body)
+        self.assertIn('## Children', body)
+        self.assertIn('## Backlinks', body)
+
+    def test_a_second_set_appends_a_second_line(self):
+        run(['set', 'B-0001', 'severity=S3'], self.root)
+        r = run(['set', 'B-0001', 'severity=S2'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _meta, body = frontmatter.parse(self.read())
+        self.assertEqual(body.count('set: severity'), 2)
+
+    def test_a_change_to_the_same_value_writes_no_line_and_is_not_refused(self):
+        r = run(['set', 'B-0001', 'severity=S2'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _meta, body = frontmatter.parse(self.read())
+        self.assertNotIn('set: severity', body)
+        self.assertNotIn('history:', r.stdout)
+
+    def test_a_card_with_no_history_section_is_refused_with_the_field_unwritten(self):
+        bare = ("## Description\n\n## Acceptance\n- [ ] \n\n## Non-goals\n\n"
+                "## Children\n\n## Backlinks\n")
+        no_hist = write_item(self.root, 'B-0002', 'bug', 'No history', parent='E-0001',
+                             typed_lines=('severity: S2',), body=bare)
+        with open(no_hist, encoding='utf-8') as f:
+            before = f.read()
+        r = run(['set', 'B-0002', 'severity=S3'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('History', r.stderr)
+        with open(no_hist, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+
+    def test_the_field_and_the_line_land_in_one_write_a_refused_write_has_neither(self):
+        from asf.record.core import canonicalize, load_items
+        from asf.record.setfield import set_typed
+        write_item(self.root, 'F-0001', 'feature', 'Thing', parent='E-0001')
+        active = ('schema_version: 1', 'state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                 'updated: 2026-01-01T00:00:00Z')
+        write_item(self.root, 'T-0002', 'task', 'Other', parent='F-0001',
+                  typed_lines=('writes: [lib/x.py]',), machine_lines=active)
+        t1 = write_item(self.root, 'T-0001', 'task', 'Do', parent='F-0001',
+                        typed_lines=('writes: [src/a.py]',), machine_lines=active)
+        with open(t1, encoding='utf-8') as f:
+            before = f.read()
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        err = set_typed(canonical['T-0001'], {'writes': ['src/a.py', 'lib/x.py']},
+                        history=['- 2026-01-01 set: test line'])
+        self.assertIn('I3', err)
+        with open(t1, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+
+
+class SetSeverityWhyTests(unittest.TestCase):
+    """F-0163 D4/D5/D6/PD5: leaving S1 requires `--why`, and its words land verbatim in the
+    History line and nowhere else."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        self.bug = write_item(self.root, 'B-0001', 'bug', 'Broken', parent='E-0001',
+                              typed_lines=('severity: S1',))
+
+    def read(self):
+        with open(self.bug, encoding='utf-8') as f:
+            return f.read()
+
+    def test_leaving_s1_without_why_is_refused(self):
+        before = self.read()
+        for target in ('S2', 'S3'):
+            r = run(['set', 'B-0001', f'severity={target}'], self.root)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn('--why', r.stderr)
+            self.assertEqual(self.read(), before)
+
+    def test_leaving_s1_with_why_lands_verbatim(self):
+        r = run(['set', 'B-0001', 'severity=S2', '--why', 'main green, prod deployed'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _meta, body = frontmatter.parse(self.read())
+        self.assertIn('— main green, prod deployed', body)
+
+    def test_no_flag_needed_once_off_s1(self):
+        other = write_item(self.root, 'B-0002', 'bug', 'Also', parent='E-0001',
+                           typed_lines=('severity: S2',))
+        for target in ('S3', 'S2', 'S1'):  # S2→S3, S3→S2, S2→S1 — none leaves S1
+            r = run(['set', 'B-0002', f'severity={target}'], self.root)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        with open(other, encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read())
+        self.assertEqual(meta['severity'], 'S1')
+
+    def test_why_with_no_severity_assignment_is_refused(self):
+        before = self.read()
+        r = run(['set', 'B-0001', 'rank=5', '--why', 'x'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('--why', r.stderr)
+        self.assertEqual(self.read(), before)
+
+    def test_why_beside_a_noop_severity_is_refused(self):
+        before = self.read()
+        r = run(['set', 'B-0001', 'severity=S1', '--why', 'x'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.read(), before)
+
+    def test_a_multiline_why_is_refused_and_the_card_is_byte_identical(self):
+        before = self.read()
+        _meta, body_before = frontmatter.parse(before)
+        n_before = len(body_before.splitlines())
+        r = run(['set', 'B-0001', 'severity=S2', '--why', 'line one\nline two'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('one line', r.stderr)
+        self.assertEqual(self.read(), before)
+        _meta, body_after = frontmatter.parse(self.read())
+        self.assertEqual(len(body_after.splitlines()), n_before)
+
+    def test_why_never_reaches_another_fields_line(self):
+        r = run(['set', 'B-0001', 'rank=5', 'severity=S2', '--why', 'x'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _meta, body = frontmatter.parse(self.read())
+        self.assertEqual(body.count(' — x'), 1)
+        self.assertIn('set: severity S1 → S2 — x', body)
+
+
 class SetListFieldTests(unittest.TestCase):
     """A Task's writes: and after: are list fields of `asf set`: =, += and -= forms, through the
     same parser and stage as every other field (T-0338: widening writes: was a hand edit)."""
@@ -1194,6 +1389,37 @@ class BugSeverityTests(unittest.TestCase):
         run(['index'], self.root)
         r = run(['check'], self.root)
         self.assertNotIn('without severity', r.stdout)
+
+
+class S1RemedyRunsTests(unittest.TestCase):
+    """F-0163 S-36203 (PD6): the S1 gate's `NEEDS OPERATOR` remedy is a command that actually
+    runs — taken from the product, never hand-typed, so the gate's advice and the command's
+    gate are proven to agree."""
+
+    def test_the_printed_remedy_runs_against_a_real_record(self):
+        import shlex
+
+        from asf.env import Product
+        from asf.feeder import tiers
+
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        write_item(root, 'E-0001', 'epic', 'Factory')
+        bug = write_item(root, 'B-0057', 'bug', 'Nothing works it', parent='E-0001',
+                         typed_lines=('severity: S1',))
+        product = Product('sample', {})
+        _text, cmd = tiers._remedy('B-0057', 'operator', 'adjudicated after 4 sessions', product)
+        self.assertIn('--why', cmd)
+        parts = shlex.split(cmd)[1:]  # drop the leading `asf`
+        if '--product' in parts:  # the record is the subprocess's cwd; no product file here
+            i = parts.index('--product')
+            del parts[i:i + 2]
+        r = run(parts, root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(bug, encoding='utf-8') as f:
+            meta, body = frontmatter.parse(f.read())
+        self.assertEqual(meta['severity'], 'S2')
+        self.assertIn('set: severity S1 → S2 — <why this is not S1>', body)
 
 
 class DeliveryFieldTests(unittest.TestCase):
