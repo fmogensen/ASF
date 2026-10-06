@@ -39,7 +39,7 @@ from asf.record import match
 from asf.record.index import do_index
 from asf.record.ingest import ON_PROD_EVENT
 
-STREAMS = ('ci', 'sessions', 'ticks', 'landings', 'gates')
+STREAMS = ('ci', 'sessions', 'ticks', 'landings', 'gates', 'events')
 #: The `evidence.feature_stage` token for "reached production" — the card's prose says
 #: "on-production", the record says `on-prod` (F-0044 §1.1).
 ON_PROD_STAGE = 'on-prod'
@@ -130,6 +130,7 @@ class SchemaError(Exception):
 REQ = object()
 MATCH = object()
 TS = object()
+PRODUCT = object()
 
 _CHECK = {
     'str': lambda v: isinstance(v, str),
@@ -149,7 +150,7 @@ SCHEMAS = {
         'conclusion': (('str',), REQ), 'attempt': (('int',), REQ), 'minutes': (('num',), REQ),
         'jobs': (('list',), REQ), 'cancelled_minutes': (('num',), 0), 'superseded': (('bool',), False),
         'items': (('list', 'null'), MATCH), 'item_reason': (('str', 'null'), None),
-        'wall_minutes': (('num',), 0), 'queue_s': (('num',), 0),
+        'wall_minutes': (('num',), 0), 'queue_s': (('num',), 0), 'product': (('str', 'null'), PRODUCT),
     },
     'sessions': {
         'ts': (('str',), TS), 'task': (('str',), REQ), 'account': (('str',), REQ), 'model': (('str', 'null'), None),
@@ -160,13 +161,14 @@ SCHEMAS = {
         'in_tokens': (('int', 'null'), None), 'turns': (('int', 'null'), None),
         'tokens_input': (('int', 'null'), None), 'tokens_output': (('int', 'null'), None),
         'tokens_cache_read': (('int', 'null'), None), 'tokens_cache_write': (('int', 'null'), None),
+        'product': (('str', 'null'), PRODUCT),
     },
     'ticks': {
         'ts': (('str',), TS), 'tick': (('int',), REQ), 'duration_s': (('num', 'null'), None),
         'launches': (('int',), REQ), 'merges': (('int',), REQ), 'stalls': (('int',), REQ),
         'refusals': (('int',), REQ), 'relaunches': (('int',), REQ), 'quota': (('dict',), {}),
         'refused_files': (('dict',), {}),
-        'steps': (('list',), []), 'product': (('str', 'null'), None),
+        'steps': (('list',), []), 'product': (('str', 'null'), PRODUCT),
         # the wave's seat reading (asf.metrics.throughput.seats_record); absent on a tick with no wave
         'seats': (('dict', 'null'), None),
         'wave_latency_s': (('num', 'null'), None),   # the tick's start → its wave's start
@@ -179,6 +181,7 @@ SCHEMAS = {
         'kind': (('str',), MATCH),             # session_kind(record): spec | plan | code | fix | …
         'item': (('str', 'null'), MATCH),      # the card it landed for
         'item_reason': (('str', 'null'), None),
+        'product': (('str', 'null'), PRODUCT),
     },
     'gates': {
         'ts': (('str',), REQ),                    # when the gate started
@@ -188,6 +191,20 @@ SCHEMAS = {
         'conclusion': (('str',), REQ),            # 'success' | 'failure'
         'signature': (('str', 'null'), None),     # the first failing line, truncated to 120
         'items': (('list', 'null'), None),
+        'product': (('str', 'null'), PRODUCT),
+    },
+    'events': {
+        'ts':      (('str',), TS),
+        'kind':    (('str',), REQ),           # one of asf.metrics.log.KINDS
+        'key':     (('str',), REQ),           # the natural key within (day, kind)
+        'product': (('str', 'null'), PRODUCT),
+        'tick':    (('int', 'null'), None),   # the HHMM of the tick that raised it
+        'item':    (('str', 'null'), None),   # PD5: not MATCH — the caller names the item
+        'job':     (('str', 'null'), None),
+        'account': (('str', 'null'), None),   # a<n> — never a name (B-0023)
+        'branch':  (('str', 'null'), None),
+        'text':    (('str', 'null'), None),   # the one-line human detail the renderer prints
+        'fields':  (('dict',), {}),           # kind-specific payload; never rendered, never counted
     },
 }
 JOB_SCHEMA = {'name': (('str',), REQ), 'conclusion': (('str',), REQ), 'runner': (('str', 'null'), None),
@@ -220,7 +237,7 @@ def _apply(schema, obj, where):
             out[key] = v
         elif default is REQ:
             raise SchemaError(f"{where}: missing required key {key!r}")
-        elif default in (MATCH, TS):
+        elif default in (MATCH, TS, PRODUCT):
             out[key] = default
         else:
             out[key] = json.loads(json.dumps(default))
@@ -245,7 +262,7 @@ def pick_item(items, ids):
     return sorted(ids, key=lambda i: (order.index(items[i].get('type')) if items[i].get('type') in order else 9, i))[0]
 
 
-def validate(stream, obj, items, now=None):
+def validate(stream, obj, items, now=None, product=None):
     """The normalised event for `stream`: schema-checked, ts and derived fields filled, item(s) matched.
     Raises SchemaError with the reason."""
     if stream not in SCHEMAS:
@@ -261,6 +278,8 @@ def validate(stream, obj, items, now=None):
         ev['ts'] = iso(now or now_utc())
     if not TS_RE.match(ev['ts']) or parse_ts(ev['ts']) is None:
         raise SchemaError(f"{stream}: 'ts' must be a UTC ISO timestamp like 2026-09-21T06:40:00Z, got {ev['ts']!r}")
+    if ev.get('product') is PRODUCT:
+        ev['product'] = product
     if stream == 'ci':
         if ev['attempt'] < 1:
             raise SchemaError("ci: 'attempt' must be >= 1")
@@ -304,7 +323,13 @@ def validate(stream, obj, items, now=None):
             raise SchemaError("gates: 'seconds' must be >= 0")
         if not all(isinstance(b, str) for b in ev['branches']):
             raise SchemaError("gates: every entry of 'branches' must be a string")
-    else:
+    elif stream == 'events':
+        from asf.metrics import log as log_mod  # local: log imports metrics
+        if ev['kind'] not in log_mod.KINDS:
+            raise SchemaError(f"events: 'kind' must be one of {', '.join(log_mod.KINDS)}, got {ev['kind']!r}")
+        if ev['item'] is not None and ID_RE.match(ev['item']) and items and ev['item'] not in items:
+            raise SchemaError(f"events: {ev['item']} is not in index.json — an id is never invented")
+    elif stream == 'ticks':
         for k in ('launches', 'merges', 'stalls', 'refusals', 'relaunches'):
             if ev[k] < 0:
                 raise SchemaError(f"ticks: {k!r} must be >= 0")
@@ -351,6 +376,8 @@ def natural_key(stream, ev):
         return (ev['job'], ev['sha'])
     if stream == 'gates':
         return (ev['ts'], tuple(ev['branches']))
+    if stream == 'events':
+        return (ev['kind'], ev['key'])
     return (ev['tick'],)
 
 
@@ -404,6 +431,12 @@ def append_event(root, stream, ev):
     key = natural_key(stream, ev)
     lines = read_file(path)
     hit = next((i for i, e in enumerate(lines) if natural_key(stream, e) == key), None)
+    if isinstance(ev.get('product'), str):
+        products = {e['product'] for e in lines if isinstance(e.get('product'), str)}
+        other = next((p for p in products if p != ev['product']), None)
+        if other is not None:
+            rel = os.path.relpath(path, root)
+            raise SchemaError(f"{stream}: {rel} holds product {other!r} — a stream file never mixes products")
     if hit is None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         prefix = ''
@@ -611,6 +644,12 @@ def _median_p90(mins):
     return f"median {round(mid)} min, p90 {xs[-(-9 * n // 10) - 1]} min"
 
 
+def _payload(ev, key):
+    """A payload key off `events`: `fields` first (lines this Feature writes), the top level
+    second (every line written before it) — PD7."""
+    return ev.get('fields', {}).get(key, ev.get(key))
+
+
 def intake_latency_rows(events, conv=None):
     """The two latency rows over the `events` stream: `asf inbox` → decided (the `intake` event's
     `filed` to the item's first `groom_answer` deciding it) and decided → first session (that
@@ -623,10 +662,10 @@ def intake_latency_rows(events, conv=None):
             continue
         kind = ev.get('kind')
         if kind == 'intake':
-            f = parse_ts(ev.get('filed'))
+            f = parse_ts(_payload(ev, 'filed'))
             if f is not None and item not in filed:
                 filed[item] = f
-        elif kind == 'groom_answer' and ev.get('field') == 'decided' and str(ev.get('value')).lower() == 'true':
+        elif kind == 'groom_answer' and _payload(ev, 'field') == 'decided' and str(_payload(ev, 'value')).lower() == 'true':
             if item not in decided or ts < decided[item]:
                 decided[item] = ts
         elif kind == 'launch':

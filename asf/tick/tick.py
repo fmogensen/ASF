@@ -222,6 +222,7 @@ class Context:
         self._record = None
         self.stale_reason = None  # set when the record step failed: the index is not this tick's
         self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
+        self.events = []          # the stored `events` lines this tick's steps raised (asf.metrics.log)
         self.seats = None         # the wave's seat reading, carried on the tick line
         self.record_tail_pending = False  # the record's fast parts ran; its tail is still due
         self.started = time.monotonic()   # the tick's start: what wave_latency_s is aged from
@@ -247,15 +248,17 @@ class Context:
         return self._record
 
     def event(self, kind, **fields):
-        """Append one line to ``metrics/events/<day>.jsonl`` in the record clone."""
+        """Validate and append one `events` line through `asf.metrics.log.emit`, and keep it on
+        `self.events`. `key` is the caller's `key=` when given, else `kind` — a stand-in every
+        call site gets its own key for once every tool appends its own event."""
+        from asf.metrics import log
         root = self.record_root()
-        stamp = _stamp()
-        rec = dict(fields, kind=kind, product=self.product.name, ts=stamp)
-        path = os.path.join(root, 'metrics', 'events', f'{stamp[:10]}.jsonl')
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(rec, sort_keys=True, ensure_ascii=False) + '\n')
-        return rec
+        key = fields.pop('key', kind)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        ev = log.emit(root, self.product.name, kind, key, tick=int(now.strftime('%H%M')), **fields)
+        if ev is not None:
+            self.events.append(ev)
+        return ev
 
 
 class StepFailed(Exception):

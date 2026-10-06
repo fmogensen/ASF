@@ -123,30 +123,13 @@ def _landing_update(machine, new_state, now, reverts, closes):
     return _KEEP
 
 
-def write_on_prod_event(root, iid, from_stage, now):
-    """Append one `metrics/events/<day>.jsonl` line for `iid`'s transition into `on-prod`.
-    Idempotent per day (returns False and writes nothing on a repeat): the metrics clone this
-    feeds is reset and re-derived every cycle. Not `asf.metrics.metrics.append_event`: its
-    `natural_key` has no `events` branch and raises `KeyError` on a line with no `tick`."""
-    path = os.path.join(root, 'metrics', 'events', f"{now[:10]}.jsonl")
-    if os.path.exists(path):
-        with open(path, encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except ValueError:  # the stream is unvalidated (§1.1); a rollup must not fail on it
-                    continue
-                if obj.get('kind') == ON_PROD_EVENT and obj.get('item') == iid:
-                    return False
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    line = json.dumps({'from': from_stage or '', 'item': iid, 'kind': ON_PROD_EVENT, 'ts': now},
-                      sort_keys=True, ensure_ascii=False)
-    with open(path, 'a', encoding='utf-8') as f:
-        f.write(line + '\n')
-    return True
+def write_on_prod_event(root, iid, from_stage, product):
+    """Append one `metrics/events` line for `iid`'s transition into `on-prod`, through
+    `asf.metrics.log.emit` — idempotent on `(kind, key)` (:func:`asf.metrics.metrics.append_event`),
+    `key` being the item id."""
+    from asf.metrics import log
+    return log.emit(root, product.name if product else None, ON_PROD_EVENT, key=iid, item=iid,
+                     from_stage=from_stage or '') is not None
 
 
 def is_retired(meta):
@@ -1532,7 +1515,7 @@ def ingest_into(root, ev, product=None):
             if new_body != body2:
                 writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         if type_ == 'feature' and stage_val.get(iid) == 'on-prod' and old != 'on-prod':
-            write_on_prod_event(root, iid, old, now)
+            write_on_prod_event(root, iid, old, product)
 
     tick_proven(canonical, ev, now[:16].replace('T', ' '), task_ev)
     note_dead_after(canonical, now)

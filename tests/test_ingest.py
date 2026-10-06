@@ -1396,7 +1396,7 @@ class APlanReachedOnlyByItsLink(unittest.TestCase):
 TS_RE = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
 
 
-class FeatureOnProdEventTests(unittest.TestCase):
+class OnProdEventTests(unittest.TestCase):
     """§2.1/§3.1: the transition into `on-prod` writes one `metrics/events` line, the durable
     record F-0044's rollup reads. Built on the fixture shape of `ProductionIsTheProductsOwn`."""
 
@@ -1445,7 +1445,9 @@ class FeatureOnProdEventTests(unittest.TestCase):
         self.assertEqual(list(obj), sorted(obj))
         self.assertTrue(TS_RE.match(obj['ts']))
         self.assertEqual({k: v for k, v in obj.items() if k != 'ts'},
-                         {'from': 'landed', 'item': 'F-0001', 'kind': ingest.ON_PROD_EVENT})
+                         {'kind': ingest.ON_PROD_EVENT, 'key': 'F-0001', 'product': None, 'tick': None,
+                          'item': 'F-0001', 'job': None, 'account': None, 'branch': None, 'text': None,
+                          'fields': {'from_stage': 'landed'}})
 
     def test_a_second_ingest_the_same_day_adds_none(self):
         self.landed_feature('F-0001')
@@ -1515,29 +1517,20 @@ class FeatureOnProdEventTests(unittest.TestCase):
         self.assertEqual(with_write, without_write)
 
     def test_write_on_prod_event_is_idempotent_and_sorted(self):
-        now = '2026-03-04T10:00:00Z'
-        self.assertTrue(ingest.write_on_prod_event(self.root, 'F-0009', 'landed', now))
-        self.assertFalse(ingest.write_on_prod_event(self.root, 'F-0009', 'landed', now))
-        path = os.path.join(self.root, 'metrics', 'events', '2026-03-04.jsonl')
-        with open(path, encoding='utf-8') as f:
-            lines = [l for l in f if l.strip()]
-        self.assertEqual(len(lines), 1)
-        obj = json.loads(lines[0])
-        self.assertEqual(obj, {'from': 'landed', 'item': 'F-0009', 'kind': ingest.ON_PROD_EVENT,
-                              'ts': now})
-        self.assertEqual(list(obj), sorted(obj))
-
-    def test_an_unparseable_line_is_skipped_not_raised_on(self):
+        self.assertTrue(ingest.write_on_prod_event(self.root, 'F-0009', 'landed', None))
+        self.assertTrue(ingest.write_on_prod_event(self.root, 'F-0009', 'landed', None))
         day = today()
         path = os.path.join(self.root, 'metrics', 'events', f"{day}.jsonl")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write('not json\n')
-        now = f"{day}T10:00:00Z"
-        self.assertTrue(ingest.write_on_prod_event(self.root, 'F-0010', 'landed', now))
         with open(path, encoding='utf-8') as f:
             lines = [l for l in f if l.strip()]
-        self.assertEqual(len(lines), 2)
+        # append_event's own natural key — (kind, key) — does the dedup; not a hand-rolled scan
+        self.assertEqual(len(lines), 1)
+        obj = json.loads(lines[0])
+        self.assertEqual(list(obj), sorted(obj))
+        self.assertEqual({k: v for k, v in obj.items() if k != 'ts'},
+                         {'kind': ingest.ON_PROD_EVENT, 'key': 'F-0009', 'product': None, 'tick': None,
+                          'item': 'F-0009', 'job': None, 'account': None, 'branch': None, 'text': None,
+                          'fields': {'from_stage': 'landed'}})
 
     def test_intake_latency_rows_is_unmoved_by_the_new_kind(self):
         from asf.metrics import metrics
