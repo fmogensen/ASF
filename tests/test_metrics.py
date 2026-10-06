@@ -1906,6 +1906,20 @@ class LandingStreamTests(Base):
         with self.assertRaises(metrics.SchemaError):
             metrics.validate('landings', self.landing(item='T-9999'), self.items)
 
+    def test_a_five_digit_id_survives_the_item_id_gate(self):
+        r"""B-0273/C1: `ID_RE` validates what `match.ID_TOKEN` finds, so it takes 5+ digits too.
+
+        With `^[EFSTBDR]-\d{4}$` the resolved id was refused and the caught SchemaError dropped
+        the whole landing, leaving the row absent rather than merely unattributed.
+        """
+        items = {'T-32850': {'type': 'task'}}
+        ev = metrics.validate('landings', self.landing(job='code-t-32850', branch='cloud/T-32850'), items)
+        self.assertEqual((ev['item'], ev['item_reason']), ('T-32850', None))
+        for good in ('T-32850', 'T-0913', 'E-123456'):
+            self.assertTrue(metrics.ID_RE.match(good), good)
+        for bad in ('T-123', 'X-0001', 'T-0001x', 't-32850'):
+            self.assertFalse(metrics.ID_RE.match(bad), bad)
+
     def test_kind_falls_back_to_the_job_name(self):
         ev = self.landing()
         del ev['kind']
