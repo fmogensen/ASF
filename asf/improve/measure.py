@@ -12,16 +12,27 @@ is cumulative within a ``session_id``, so a job's spend is the sum over its sess
 id's max (:func:`job_spend`) — not the last line (``metrics.session_event`` reads that one, and
 undercounts a resumed job) and not the sum of every line. The registry cannot say which session id
 belongs to which run, so a job's spend is split over its ended runs pro rata by minutes.
+
+**Cloud runs carry no usage data**: the cloud lane's job logs never hold a ``total_cost_usd``
+line, so :func:`job_spend` reads ``None`` for one and every run of that job gets ``usd=None``.
+:func:`ended_runs` fills that gap where it can: a cloud run with no spend is given the median
+``usd`` of this call's own priced runs sharing its ``(kind, model)``, once there are at least
+``measure.cost_estimate_min_samples`` of them (``config.yaml``, :func:`settings`) — fewer leaves
+``usd`` ``None`` rather than guess from too little. A filled-in run carries ``usd_estimated=True``
+so a reader can tell a measurement from a guess.
 """
 import collections
 import dataclasses
 import datetime
 import json
 import os
+import statistics
 
 from asf.workers import cloudpid, lifecycle, pool
 
 _STAMP = '%Y-%m-%dT%H:%M:%SZ'
+#: ``config.yaml measure:`` defaults.
+DEFAULTS = {'cost_estimate_min_samples': 3}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,6 +52,7 @@ class Run:
     worktree: str = ''  #: the registry's `worktree` key; read by diagnose's sub-causes and nothing else
     attempt: int = 1        # 1-based, among this job's ended runs in ledger order
     cloud: bool = False     #: ran on the cloud lane (its pid is a cloud token); read by asf.metrics.throughput
+    usd_estimated: bool = False  #: `usd` is a same-(kind, model) median, not a measurement
 
 
 class Cell(collections.namedtuple('Cell', 'sessions hours usd')):
@@ -93,6 +105,48 @@ def job_spend(job, logs_dir):
     return sum(best.values()) if best else None
 
 
+def settings(cfg=None):
+    """``config.yaml measure:`` over :data:`DEFAULTS`: ``cost_estimate_min_samples``, the priced
+    same-``(kind, model)`` runs a cloud run with no usage data needs before its spend is
+    estimated rather than left ``None``."""
+    if cfg is None:
+        from asf import env
+        try:
+            cfg = env.load_config()
+        except Exception:  # noqa: BLE001 — no config is the defaults
+            cfg = {}
+    block = (cfg or {}).get('measure')
+    block = block if isinstance(block, dict) else {}
+    out = dict(DEFAULTS)
+    try:
+        out['cost_estimate_min_samples'] = max(
+            1, int(block.get('cost_estimate_min_samples', DEFAULTS['cost_estimate_min_samples'])))
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def _estimate_cloud_spend(runs, cfg):
+    """``runs`` with every cloud, unpriced run's ``usd`` filled from the median of this set's own
+    priced runs sharing its ``(kind, model)`` — only once there are ``cost_estimate_min_samples``
+    of them (:func:`settings`); otherwise the run is returned unchanged."""
+    if not any(r.usd is None and r.cloud for r in runs):
+        return runs
+    min_n = settings(cfg)['cost_estimate_min_samples']
+    priced = collections.defaultdict(list)
+    for r in runs:
+        if r.usd is not None:
+            priced[(r.kind, r.model)].append(r.usd)
+    out = []
+    for r in runs:
+        same = priced.get((r.kind, r.model), ())
+        if r.usd is None and r.cloud and len(same) >= min_n:
+            out.append(dataclasses.replace(r, usd=statistics.median(same), usd_estimated=True))
+        else:
+            out.append(r)
+    return out
+
+
 def _logs_dir_of(product):
     if product is None:
         return None
@@ -101,12 +155,15 @@ def _logs_dir_of(product):
     return os.path.dirname(metrics.job_log_path(name, 'x'))
 
 
-def ended_runs(product, *, ledger=None, logs_dir=None, since=None, as_of=None):
+def ended_runs(product, *, ledger=None, logs_dir=None, since=None, as_of=None, cfg=None):
     """Every ended run of every job of ``product``'s registry (``ledger`` overrides the path),
     oldest first, each carrying its share of the job's spend from ``logs_dir`` (default: the
     product's job-log directory). ``since`` (``YYYY-MM-DD``) keeps runs with ``ended[:10] >=
     since``; ``as_of`` (a full ISO stamp) keeps ``ended <= as_of``. The split of a job's spend is
-    over *all* its ended runs, before either filter, so a window carries its own share."""
+    over *all* its ended runs, before either filter, so a window carries its own share — and so
+    is :func:`_estimate_cloud_spend`'s fill-in of a cloud run with no usage data (``cfg``: the
+    ``config.yaml`` the estimate's ``measure.cost_estimate_min_samples`` reads; default
+    ``env.load_config()``)."""
     if ledger is None:
         ledger = pool.sessions_path(product)
     if logs_dir is None:
@@ -128,6 +185,7 @@ def ended_runs(product, *, ledger=None, logs_dir=None, since=None, as_of=None):
                 usd=None if spend is None else spend * share,
                 publish_refused=r.get('publish_refused') or '', worktree=r.get('worktree') or '',
                 attempt=attempt, cloud=cloudpid.is_token(r.get('pid'))))
+    out = _estimate_cloud_spend(out, cfg)
     if since:
         out = [r for r in out if r.ended[:10] >= since]
     if as_of:

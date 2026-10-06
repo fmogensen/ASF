@@ -278,12 +278,15 @@ capacity:
 # step at a time — the next cheaper model of `models` (labels of worker_pool.models, most capable
 # first), or one seat more or fewer within `seats: [min, max]` — measured off the session
 # registry: repair rounds per landed item, failure rate, landed share, spend per landed item.
-# After `trial_samples` runs it keeps the step when landed items per unit of spend rose by
-# `min_gain` at repair no worse than before, and reverts it when repair or the failure rate
-# worsened by more than `max_regress` (or the gain did not come). Never outside the bounds, one
-# live trial per kind, S1 rows untouched. `asf tune freeze` reverts every live trial and starts
-# none; `asf tune history` lists every change with its reason and numbers. Off by default; a
-# product turns it on under `products.<name>`. ASF's own install tunes itself like this:
+# `lookback_days.<kind>` holds a kind's runs out of a trial's verdict until they ended that many
+# days ago, so the repair work they cause (a plan's shows up in the work built on it; a groom's or
+# a replan's in the Tasks it reshaped) has had time to happen; a kind not named there judges at
+# once (`plan: 7` is the built-in default). After `trial_samples` matured runs it keeps the step
+# when landed items per unit of spend rose by `min_gain` at repair no worse than before, and
+# reverts it when repair or the failure rate worsened by more than `max_regress` (or the gain did
+# not come). Never outside the bounds, one live trial per kind, S1 rows untouched. `asf tune
+# freeze` reverts every live trial and starts none; `asf tune history` lists every change with its
+# reason and numbers. Off by default; a product turns it on under `products.<name>`:
 # tune:
 #   enabled: false            # the default for every product
 #   window_days: 7            # the rolling window the signal is read over
@@ -293,16 +296,54 @@ capacity:
 #   max_regress: 0.10         # the rise in repair or failure rate that reverts it
 #   required: false           # release readiness counts criterion 11 (self-tuning live) even
 #                             # while the loop is off; unset, it reads n/a then
+#   lookback_days:
+#     plan: 7                 # the built-in default; named here to show it can be overridden
+#     groom: 3
+#     replan: 3
 #   bounds:
 #     review:
 #       models: [heavy, light]
 #       seats: [1, 3]
 #     coder:
 #       models: [light, cheap]
+#     plan:
+#       models: [heavy, light]
+#     groom:
+#       models: [heavy, light]
+#     replan:
+#       models: [light, cheap]
 #   products:
-#     asf:
+#     sample:
 #       enabled: true
 #       required: true
+
+# shadow: the code decider ledger (asf.shadow). A decider that replaces a model session —
+# `conventions.flags.<flag>: shadow` — runs beside it: the code's answer is logged against the
+# incumbent's for EVERY decision (`asf deciders`), the count over DISTINCT cases (a repeat ask on
+# the same evidence is one trial, not a second), with the one-sided error bound at `confidence`
+# (95%: about `3/N` at zero diffs). `outcome_days` is how long a closing decider's "landed" answer
+# waits before it is judged against what actually happened (an item reopened inside that window is
+# a diff, even where the incumbent agreed). `min_n` is the distinct cases a decider needs before a
+# flip is argued — one number for every decider, or a map by name. A decider that closes, removes
+# or pushes is never cut over by code: the operator flips its flag by hand, only after the
+# evidence.
+# shadow:
+#   confidence: 0.95
+#   outcome_days: 7
+#   min_n: 300                 # every decider's default
+#   # min_n:                   # or a map, per decider:
+#   #   facts: 300
+#   #   mechanical: 40
+#   #   roots: 100
+
+# measure: the session-registry arithmetic (asf.improve.measure) behind `asf improve` and the
+# self-tuning loop's own signal. A cloud-lane run's job log carries no local usage data
+# (`total_cost_usd`), so its spend would otherwise read as unknown; `cost_estimate_min_samples` is
+# how many of this call's own priced runs sharing that run's (kind, model) must exist before its
+# spend is filled in as their median instead — the run then carries `usd_estimated: true`, so a
+# reader can tell the measured dollars from the guessed ones. Fewer samples leaves it unknown.
+# measure:
+#   cost_estimate_min_samples: 3
 
 # tick: a command step (a product's `steps: {<step>: "<command>"}`) is killed after this many
 # seconds and exits 124 (default 900).

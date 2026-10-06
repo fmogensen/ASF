@@ -57,6 +57,9 @@ KNOWN_CONFIG_KEYS = frozenset({
     'upgrade.drain_marker_max_s', 'credentials.*',
     'tune.enabled', 'tune.window_days', 'tune.min_samples', 'tune.trial_samples', 'tune.min_gain',
     'tune.max_regress', 'tune.bounds.*', 'tune.products.*', 'tune.required',
+    'tune.lookback_days.*',
+    'shadow.confidence', 'shadow.outcome_days', 'shadow.min_n.*',
+    'measure.cost_estimate_min_samples',
     'factory.git_identity',
     # the cloud lane (asf.workers.cloud): each key by name, so a typo (`poll_mins`) is named
     'cloud.enabled', 'cloud.runtime', 'cloud.max_inflight', 'cloud.rows', 'cloud.accounts',
