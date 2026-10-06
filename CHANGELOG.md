@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.182 — 2026-10-06
+
+### Features landed
+
+- CI box list has three hand-kept copies that drift: one source (ci.pool / runner connector) for watchdog, installer and doctor (#787)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.182"`
+
 ## v0.1.181 — 2026-10-06
 
 ### Features landed
