@@ -17,6 +17,7 @@ import dataclasses
 import datetime
 import re
 
+from asf import ci_jobs
 from asf.scorecard import score
 from asf.scorecard.facts import to_dt
 
@@ -208,16 +209,25 @@ def rank(facts, start, end):
                 continue
             name = str(j.get('name') or '?')
             c = jobs.setdefault(f'ci-job:{name}', {'name': f'ci-job:{name}', 'minutes': 0.0,
-                                                   'runs': 0, 'red': 0, 'scope': PRODUCT})
+                                                   'runs': 0, 'red': 0, 'scope': PRODUCT,
+                                                   'timeouts': 0, 'runner_losses': 0})
             c['minutes'] = round(c['minutes'] + score._num(j.get('minutes')), 1)
             c['runs'] += 1
-            c['red'] += 1 if j.get('conclusion') not in ('success', 'skipped', 'neutral', 'cancelled') else 0
+            # a cancelled job is red when its own ending is what cancelled it: a timeout is this
+            # job's limit, a lost runner is this job's box. A cancel that followed a verdict
+            # elsewhere — and an unclassified one — is not this job's (F-0131 C11).
+            cause = j.get('cause')
+            c['timeouts'] += 1 if cause == ci_jobs.TIMEOUT else 0
+            c['runner_losses'] += 1 if cause == ci_jobs.RUNNER_LOSS else 0
+            c['red'] += 1 if (j.get('conclusion') not in ('success', 'skipped', 'neutral', 'cancelled')
+                              or cause in (ci_jobs.TIMEOUT, ci_jobs.RUNNER_LOSS)) else 0
     for g in facts.gates:
         if not score.in_window(g.get('ts'), start, end):
             continue
         red = g.get('conclusion') != 'success'
         name = f"gate:{_sig_class(g.get('signature'))}" if red else 'gate:green'
-        c = jobs.setdefault(name, {'name': name, 'minutes': 0.0, 'runs': 0, 'red': 0, 'scope': PRODUCT})
+        c = jobs.setdefault(name, {'name': name, 'minutes': 0.0, 'runs': 0, 'red': 0, 'scope': PRODUCT,
+                                   'timeouts': 0, 'runner_losses': 0})
         c['minutes'] = round(c['minutes'] + score._num(g.get('seconds')) / 60, 1)
         c['runs'] += 1
         c['red'] += 1 if red else 0
@@ -313,7 +323,9 @@ def causes(facts, start, end, limits=None):
                 c['name'], PRODUCT, per_week, t['ci_red_per_week'], 'red runs/week',
                 f"CI {c['name']} is red {per_week:g} times a week",
                 f"{c['red']} of {c['runs']} runs red over {days} days, {c['minutes']:,.0f} runner "
-                f"minutes; threshold {t['ci_red_per_week']:g}/week.",
+                f"minutes; threshold {t['ci_red_per_week']:g}/week."
+                + (f" {c['timeouts']} ran to their limit." if c['timeouts'] else '')
+                + (f" {c['runner_losses']} lost their runner." if c['runner_losses'] else ''),
                 scheme=(max(schemes(facts, start, end), default=None)
                         if c['name'].startswith('gate:') else None)))
     landed = _landed_window(facts, start, end)

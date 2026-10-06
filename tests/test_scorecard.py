@@ -451,6 +451,66 @@ class DiagnoseTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             diagnose.metric(f, 'nonsense', s, s + wk)
 
+    def test_a_timeout_cancel_counts_red_under_the_same_key_with_a_timeout(self):
+        ci = [{'ts': '2026-09-03T00:00:00Z', 'minutes': 360,
+               'jobs': [{'name': 'tests', 'conclusion': 'cancelled', 'minutes': 360, 'cause': 'timeout'}]}]
+        f = facts_fixture(ci=ci)
+        r = diagnose.rank(f, *self.window(f))
+        job = next(c for c in r['by_ci_job'] if c['name'] == 'ci-job:tests')
+        self.assertEqual(job['red'], 1)
+        self.assertEqual(job['timeouts'], 1)
+        self.assertEqual(job['runner_losses'], 0)
+
+    def test_a_runner_loss_cancel_counts_red_under_the_same_key_with_a_runner_loss(self):
+        ci = [{'ts': '2026-09-03T00:00:00Z', 'minutes': 2,
+               'jobs': [{'name': 'tests', 'conclusion': 'cancelled', 'minutes': 2, 'cause': 'runner-loss'}]}]
+        f = facts_fixture(ci=ci)
+        r = diagnose.rank(f, *self.window(f))
+        job = next(c for c in r['by_ci_job'] if c['name'] == 'ci-job:tests')
+        self.assertEqual(job['red'], 1)
+        self.assertEqual(job['timeouts'], 0)
+        self.assertEqual(job['runner_losses'], 1)
+
+    def test_a_failure_cancel_and_an_unclassified_cancel_are_not_red(self):
+        ci = [{'ts': '2026-09-03T00:00:00Z', 'minutes': 10,
+               'jobs': [{'name': 'tests', 'conclusion': 'cancelled', 'minutes': 5, 'cause': 'failure'},
+                        {'name': 'tests', 'conclusion': 'cancelled', 'minutes': 5}]}]
+        f = facts_fixture(ci=ci)
+        r = diagnose.rank(f, *self.window(f))
+        job = next(c for c in r['by_ci_job'] if c['name'] == 'ci-job:tests')
+        self.assertEqual(job['runs'], 2)
+        self.assertEqual(job['red'], 0)
+        self.assertEqual(job['timeouts'], 0)
+        self.assertEqual(job['runner_losses'], 0)
+
+    def test_metric_reads_the_timeout_red_count_off_the_same_key(self):
+        ci = [{'ts': '2026-09-03T00:00:00Z', 'minutes': 360,
+               'jobs': [{'name': 'tests', 'conclusion': 'cancelled', 'minutes': 360, 'cause': 'timeout'}]}]
+        f = facts_fixture(ci=ci)
+        self.assertEqual(diagnose.metric(f, 'ci-job:tests', *self.window(f)), 1.0)   # 1 red / 1 week
+
+    def test_five_timed_out_runs_raise_a_product_cause_over_the_default_threshold(self):
+        # 5 red runs over the 7-day (1-week) window; threshold 3.0/week
+        ci = [{'ts': f'2026-09-0{i + 1}T00:00:00Z', 'minutes': 360,
+               'jobs': [{'name': 'tests', 'conclusion': 'cancelled', 'minutes': 360, 'cause': 'timeout'}]}
+              for i in range(5)]
+        f = facts_fixture(ci=ci)
+        found = {c.key: c for c in diagnose.causes(f, *self.window(f))}
+        c = found['ci-job:tests']
+        self.assertEqual(c.scope, diagnose.PRODUCT)
+        self.assertEqual(c.value, 5.0)
+        self.assertTrue(c.detail.endswith('5 ran to their limit.'))
+
+    def test_a_gate_row_still_carries_the_two_new_counters_at_zero(self):
+        f = facts_fixture()
+        r = diagnose.rank(f, *self.window(f))
+        for c in r['by_ci_job']:
+            self.assertIn('timeouts', c)
+            self.assertIn('runner_losses', c)
+        gate_row = next(c for c in r['by_ci_job'] if c['name'] == 'gate:green')
+        self.assertEqual(gate_row['timeouts'], 0)
+        self.assertEqual(gate_row['runner_losses'], 0)
+
 
 class NotPushedCauseTests(unittest.TestCase):
     """T-0525: the frozen string, class, key and title do not move; the cause's detail gains one
