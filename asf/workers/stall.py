@@ -299,7 +299,11 @@ def correct_once(product, session, error_text, runtime):
     job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
                           session.get('model'), account=_account(session),
                           env=retry_env, hooks_dir=hooks_dir,
-                          passthrough=env.env_passthrough(_cfg()))
+                          passthrough=env.env_passthrough(_cfg()),
+                          # the product's own credentials, as the first launch had them: without
+                          # them the correction's git has no helper and cannot push (2026-10-06)
+                          product_auth_env=env.product_auth_env(product),
+                          branch=session.get('branch'), base=product.main)
     # launched, not waited on (B-0085): this runs inside the tick's health step, and waiting
     # here stopped health, harvest and the operator's tables for as long as a model session takes
     # — one tick sat inside four serial adjudications for an hour. The run is in the registry
