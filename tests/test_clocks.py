@@ -67,11 +67,17 @@ class ClocksParseTest(SchedulerTestCase):
             self.assertIn(f'clock {name}:', msg, msg)
 
     def test_ownerless_step_refused(self):
-        self.write_product('  bad:\n    steps: [batch]\n    every: 5m\n')
+        self.write_product('  bad:\n    steps: [batch]\n    every: 5m\n',
+                            steps_yaml='steps:\n  batch: asf\n')
         product = env.load_product('sample')
         with self.assertRaises(scheduler.SchedulerError) as ctx:
             scheduler.clocks(product)
         self.assertIn('batch', str(ctx.exception))
+
+    def test_a_clock_naming_batch_loads_when_batch_is_undeclared(self):
+        self.write_product('  bad:\n    steps: [batch]\n    every: 5m\n')
+        product = env.load_product('sample')
+        self.assertEqual([c.name for c in scheduler.clocks(product)], ['bad'])
 
     def test_clocks_is_a_product_field(self):
         text = ('product: sample\nrepo_slug: acme/sample\n'
