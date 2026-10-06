@@ -3,7 +3,9 @@ command, the daily part, the doctor's row, the installer) are all built against
 (:mod:`asf.credentials`)."""
 import datetime
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -18,6 +20,18 @@ NOW = datetime.datetime(2026, 9, 27, 12, 0, 0, tzinfo=datetime.timezone.utc)
 def fake_run(stdout='', stderr='', returncode=0):
     def run(cmd, env=None, capture_output=True, text=True, timeout=None):
         return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+    return run
+
+
+def counting_run(stdout='', stderr='', returncode=0):
+    """A fake ``run=`` that records every command it was called with, so a test can assert how
+    many times (and whether) a probe actually ran."""
+    calls = []
+
+    def run(cmd, env=None, capture_output=True, text=True, timeout=None):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+    run.calls = calls
     return run
 
 
@@ -212,6 +226,137 @@ class ConfigTest(unittest.TestCase):
         provider = credentials.Provider('provider-a', 'check-a', 'login-a', account='lane-9')
         with self.assertRaises(runtime_mod.AuthEnvError):
             credentials.probe_env(provider, {}, StubProduct())
+
+
+class CheckTest(unittest.TestCase):
+    """``check()``'s cache decision (D6), its thread pool, and the command built on it:
+    ``render``/``as_json``/``quiet``/``cmd_check`` (§2.3)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='credentials_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def cfg(self, probe_every=None, window_days=None):
+        provider = {'probe': 'check-a', 'renew': 'login-a'}
+        if window_days is not None:
+            provider['window_days'] = window_days
+        section = {'providers': {'provider-a': provider}}
+        if probe_every is not None:
+            section['probe_every'] = probe_every
+        return {'credentials': section}
+
+    def test_a_cached_result_is_not_reprobed(self):
+        cfg = self.cfg()
+        product = StubProduct(credentials=['provider-a'])
+        run = counting_run(stdout='expires 2026-12-01T00:00:00Z\n')
+
+        credentials.check(product, cfg, now=NOW, run=run)
+        self.assertEqual(len(run.calls), 1)
+
+        # the same instant again: the cache is fresh (default probe_every is 1h) — no reprobe
+        credentials.check(product, cfg, now=NOW, run=run)
+        self.assertEqual(len(run.calls), 1)
+
+        # fresh=True bypasses the cache even though it is still fresh
+        credentials.check(product, cfg, fresh=True, now=NOW, run=run)
+        self.assertEqual(len(run.calls), 2)
+
+        # two hours later the cached probed_at is stale (> the default 1h probe_every):
+        # a plain call (no fresh) reprobes on its own
+        later = NOW + datetime.timedelta(hours=2)
+        credentials.check(product, cfg, now=later, run=run)
+        self.assertEqual(len(run.calls), 3)
+
+    def test_the_window_is_recomputed_from_the_cache(self):
+        cfg = self.cfg(probe_every='7d', window_days=3)
+        product = StubProduct(credentials=['provider-a'])
+        expiry = (NOW + datetime.timedelta(days=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        run = counting_run(stdout=f'expires {expiry}\n')
+
+        results = credentials.check(product, cfg, now=NOW, run=run)
+        self.assertEqual(len(run.calls), 1)
+        self.assertEqual(credentials.verdict(results[0], NOW, 3), 'ok')
+
+        # three days on, the cache (still fresh under a 7d probe_every) is not re-probed, but
+        # its stored expiry now ticks the provider into its window
+        later = NOW + datetime.timedelta(days=3)
+        results = credentials.check(product, cfg, now=later, run=run)
+        self.assertEqual(len(run.calls), 1)
+        self.assertEqual(results[0].expires, expiry)
+        self.assertEqual(credentials.verdict(results[0], later, 3), 'expiring')
+
+    def test_quiet_is_the_rule_contract(self):
+        cfg = self.cfg()
+        product = StubProduct(credentials=['provider-a'])
+
+        def result(state, expires=''):
+            return credentials.Result(provider='provider-a', state=state, expires=expires)
+
+        with mock.patch.object(credentials, '_now', return_value=NOW):
+            out = []
+            rc = credentials.quiet([result('valid', expires='never')], product, cfg,
+                                   out=out.append)
+            self.assertEqual(rc, 0)
+            self.assertEqual(out, [])
+
+            out = []
+            expiring = result('valid', expires=(NOW + datetime.timedelta(days=1))
+                              .strftime('%Y-%m-%dT%H:%M:%SZ'))
+            rc = credentials.quiet([expiring], product, cfg, out=out.append)
+            self.assertEqual(rc, 1)
+            self.assertEqual(len(out), 1)
+            self.assertIn('provider-a', out[0])
+            self.assertIn('login-a', out[0])
+
+            out = []
+            rc = credentials.quiet([result('invalid')], product, cfg, out=out.append)
+            self.assertEqual(rc, 1)
+            self.assertIn('login-a', out[0])
+
+            out, err_lines = [], []
+
+            class _Err:
+                def write(self, text):
+                    err_lines.append(text)
+
+            rc = credentials.quiet([result('broken')], product, cfg, out=out.append,
+                                   err=_Err())
+            self.assertEqual(rc, 2)
+            self.assertEqual(out, [])  # a broken probe raises no bad verdict line
+            self.assertTrue(any('provider-a' in line for line in err_lines))
+
+    def test_the_table_names_no_provider_twice(self):
+        cfg = self.cfg()
+        product = StubProduct(credentials=['provider-a'])
+        dup = [credentials.Result(provider='provider-a', state='valid', expires='never'),
+              credentials.Result(provider='provider-a', state='valid', expires='never')]
+        out = []
+        with mock.patch.object(credentials, '_now', return_value=NOW):
+            credentials.render(dup, product, cfg, out=out.append)
+        body = [line for line in out if line.startswith('provider-a')]
+        self.assertEqual(len(body), 1)
+
+    def test_a_broken_probe_does_not_overwrite_a_known_expiry(self):
+        cfg = self.cfg(probe_every='7d', window_days=3)
+        product = StubProduct(credentials=['provider-a'])
+        good_expiry = (NOW + datetime.timedelta(days=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        good_run = counting_run(stdout=f'expires {good_expiry}\n')
+        credentials.check(product, cfg, now=NOW, run=good_run)
+
+        broken_run = counting_run(returncode=2, stderr='boom\n')
+        broken_results = credentials.check(product, cfg, fresh=True, now=NOW, run=broken_run)
+        self.assertEqual(broken_results[0].state, 'broken')
+
+        # the cache on disk still carries the good expiry, recomputed as `expiring` next call
+        later = NOW + datetime.timedelta(days=1)
+        results = credentials.check(product, cfg, now=later, run=broken_run)
+        self.assertEqual(results[0].expires, good_expiry)
+        self.assertEqual(credentials.verdict(results[0], later, 3), 'expiring')
 
 
 if __name__ == '__main__':

@@ -9,15 +9,19 @@ never printed, logged or returned raw: only the last non-empty line survives, sc
 anything secret-shaped and truncated, and that is the only thing this module ever keeps of what a
 probe said (:func:`run_probe`).
 
-Nothing in this module has a caller outside its own tests: it is the surface the credential
-command, the daily part, the doctor's row and the installer are built against.
+``asf credentials check`` (:func:`cmd_check`) is this module's own command; the cache it reads
+and writes (:func:`read_cache`, :func:`write_cache`) is also the surface the daily part, the
+doctor's row and the installer are built against.
 """
+import concurrent.futures
 import dataclasses
 import datetime
+import json
 import os
 import re
 import shlex
 import subprocess
+import sys
 
 from asf import env, hermetic, redact
 from asf.workers import pool
@@ -330,3 +334,267 @@ def bad(results, cfg=None, providers_by_name=None, now=None):
         if verdict(result, now, window) in ('invalid', 'expiring'):
             out.append(result)
     return out
+
+
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+# ---- the cache (D6) -----------------------------------------------------------------------
+
+def cache_path(product):
+    return os.path.join(env.state_dir(product.name), 'credentials.json')
+
+
+def read_cache(product):
+    """``{name: Result}``, ``{}`` on a missing or unreadable file — the same tolerance
+    :func:`asf.tick.file_bugs._read_ledger` has: a corrupt cache is a cache miss, never a
+    raise. Exported for the doctor's row, which reads it directly and probes nothing."""
+    path = cache_path(product)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    providers_data = data.get('providers') if isinstance(data, dict) else None
+    if not isinstance(providers_data, dict):
+        return {}
+    out = {}
+    for name, entry in providers_data.items():
+        if not isinstance(entry, dict):
+            continue
+        out[name] = Result(provider=name, state=entry.get('state', ''),
+                           expires=entry.get('expires', ''), detail=entry.get('detail', ''),
+                           probed_at=entry.get('probed_at', ''))
+    return out
+
+
+def write_cache(product, results, previous=None):
+    """``{"providers": {name: {state, expires, detail, probed_at}}}``, written through a
+    ``.tmp`` and ``os.replace`` — the idiom :func:`asf.tick.file_bugs._write_ledger` uses. A
+    provider whose new result is ``broken`` keeps its previous entry; a provider with no
+    previous entry and a broken result is simply absent (PD8) — a broken probe is never
+    remembered, so the next run always re-probes it."""
+    previous = previous or {}
+    providers_out = {}
+    for result in results:
+        if result.state == STATE_BROKEN:
+            prev = previous.get(result.provider)
+            if prev is not None:
+                providers_out[result.provider] = {
+                    'state': prev.state, 'expires': prev.expires,
+                    'detail': prev.detail, 'probed_at': prev.probed_at,
+                }
+            continue
+        providers_out[result.provider] = {
+            'state': result.state, 'expires': result.expires,
+            'detail': result.detail, 'probed_at': result.probed_at,
+        }
+    path = cache_path(product)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'providers': providers_out}, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _cache_age_seconds(probed_at, now):
+    if not probed_at:
+        return None
+    try:
+        probed = datetime.datetime.strptime(probed_at, '%Y-%m-%dT%H:%M:%SZ')
+    except ValueError:
+        return None
+    probed = probed.replace(tzinfo=datetime.timezone.utc)
+    return (now - probed).total_seconds()
+
+
+def check(product, cfg, fresh=False, now=None, run=subprocess.run):
+    """``[Result]``, one per provider :func:`for_product` returns, in the product's order. An
+    entry is taken from the cache when ``fresh`` is false and its ``probed_at`` is within
+    :func:`probe_every` of ``now``; every other provider is probed, together, in a
+    ``ThreadPoolExecutor`` (PD7) — the wait is a subprocess wait, so the worst case is one
+    :data:`PROBE_TIMEOUT_S`, not N of them. The cache is rewritten after. Verdicts are never
+    stored: :func:`verdict` and :func:`days_left` are recomputed from ``expires`` and ``now``
+    on every call, which is what lets a cached entry tick into its window without a probe
+    (D6)."""
+    now = now if now is not None else _now()
+    providers_list = for_product(product, cfg)
+    if not providers_list:
+        return []
+    previous = read_cache(product)
+    stale_after = probe_every(cfg)
+    to_probe = []
+    results_by_name = {}
+    for provider in providers_list:
+        cached = previous.get(provider.name)
+        if not fresh and cached is not None:
+            age = _cache_age_seconds(cached.probed_at, now)
+            if age is not None and age <= stale_after:
+                results_by_name[provider.name] = cached
+                continue
+        to_probe.append(provider)
+    if to_probe:
+        workers = min(8, len(to_probe))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool_exec:
+            probed = list(pool_exec.map(
+                lambda provider: run_probe(provider, probe_env(provider, cfg, product), now, run=run),
+                to_probe))
+        for result in probed:
+            results_by_name[result.provider] = result
+    results = [results_by_name[p.name] for p in providers_list]
+    write_cache(product, results, previous=previous)
+    return results
+
+
+# ---- the command (§2.3) -------------------------------------------------------------------
+
+def _rc(results, cfg, now=None):
+    now = now if now is not None else _now()
+    by_name = providers(cfg)
+    has_broken = False
+    has_bad = False
+    for result in results:
+        provider = by_name.get(result.provider)
+        window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+        v = verdict(result, now, window)
+        if v == 'broken':
+            has_broken = True
+        elif v in ('invalid', 'expiring'):
+            has_bad = True
+    if has_broken:
+        return 2
+    if has_bad:
+        return 1
+    return 0
+
+
+def _default_window_days(cfg):
+    section = (cfg or {}).get('credentials')
+    default_window = section.get('window_days') if isinstance(section, dict) else None
+    return default_window if _positive_int(default_window) else DEFAULT_WINDOW_DAYS
+
+
+def render(results, product, cfg, out=print):
+    """The table of §2.3, one row per provider sorted by name, under
+    ``views.header.head('credentials check', product.name, clause)`` with the clause ``<n> ok,
+    <n> expiring, <n> invalid`` (and ``, <n> broken`` when any is). An ``ok`` row reads
+    ``expires <iso> (<n>d)`` or ``expiry unknown``; an ``EXPIRING`` row ends ``— renew: <the
+    renew command>``; an ``INVALID`` row reads ``not signed in — renew: <the renew command>``;
+    a ``BROKEN`` row reads ``probe failed — <detail>``."""
+    from asf.views import header
+    now = _now()
+    by_name = providers(cfg)
+    counts = {'ok': 0, 'expiring': 0, 'invalid': 0, 'broken': 0}
+    rows = []
+    seen = set()
+    for result in sorted(results, key=lambda r: r.provider):
+        if result.provider in seen:
+            continue
+        seen.add(result.provider)
+        provider = by_name.get(result.provider)
+        window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+        renew = provider.renew if provider is not None else ''
+        v = verdict(result, now, window)
+        counts['ok' if v == 'unknown' else v] += 1
+        if v in ('ok', 'unknown'):
+            left = days_left(result, now)
+            detail = f'expires {result.expires} ({int(left)}d)' if left is not None else 'expiry unknown'
+            rows.append(f'{result.provider}  OK        {detail}')
+        elif v == 'expiring':
+            left = days_left(result, now)
+            rows.append(f'{result.provider}  EXPIRING  expires {result.expires} ({int(left)}d) '
+                       f'— renew: {renew}')
+        elif v == 'invalid':
+            rows.append(f'{result.provider}  INVALID   not signed in — renew: {renew}')
+        else:
+            rows.append(f'{result.provider}  BROKEN    probe failed — {result.detail}')
+    clause = f"{counts['ok']} ok, {counts['expiring']} expiring, {counts['invalid']} invalid"
+    if counts['broken']:
+        clause += f", {counts['broken']} broken"
+    out(header.head('credentials check', product.name, clause))
+    for row in rows:
+        out(row)
+
+
+def as_json(results, product, cfg):
+    """``{"product", "window_days", "providers": [{"provider", "state", "verdict", "expires",
+    "days_left", "probed_at", "detail", "renew"}]}``. No token: ``detail`` is the scrubbed one
+    and there is no other field carrying probe output."""
+    now = _now()
+    by_name = providers(cfg)
+    out_providers = []
+    for result in results:
+        provider = by_name.get(result.provider)
+        window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+        out_providers.append({
+            'provider': result.provider,
+            'state': result.state,
+            'verdict': verdict(result, now, window),
+            'expires': result.expires,
+            'days_left': days_left(result, now),
+            'probed_at': result.probed_at,
+            'detail': result.detail,
+            'renew': provider.renew if provider is not None else '',
+        })
+    return {
+        'product': product.name,
+        'window_days': _default_window_days(cfg),
+        'providers': out_providers,
+    }
+
+
+def quiet(results, product, cfg, out=print, err=sys.stderr):
+    """The rc. Nothing printed and 0 when every verdict is ``ok`` or ``unknown``. One line per
+    bad provider and 1 when any is ``invalid``/``expiring``, each line exactly §2.3's shape.
+    ``credentials: probe broken for <name>: <detail>`` on stderr and 2 when any probe is
+    broken — 2 beats 1 (PD17), and the bad lines are still written to stdout first."""
+    now = _now()
+    by_name = providers(cfg)
+    bad_lines = []
+    broken_any = False
+    bad_any = False
+    for result in results:
+        provider = by_name.get(result.provider)
+        window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+        renew = provider.renew if provider is not None else ''
+        v = verdict(result, now, window)
+        if v == 'broken':
+            broken_any = True
+            print(f'credentials: probe broken for {result.provider}: {result.detail}', file=err)
+        elif v == 'expiring':
+            bad_any = True
+            left = days_left(result, now)
+            bad_lines.append(
+                f'credential {result.provider} expires {result.expires} '
+                f'({int(left)}d, window {window}d) — renew: {renew}')
+        elif v == 'invalid':
+            bad_any = True
+            bad_lines.append(f'credential {result.provider} is not valid — renew: {renew}')
+    for line in bad_lines:
+        out(line)
+    if broken_any:
+        return 2
+    if bad_any:
+        return 1
+    return 0
+
+
+def cmd_check(args, product, cfg):
+    """Dispatch over ``--json``, ``--quiet`` and the default table, and the rc rules of §2.3:
+    0 when every verdict is ``ok`` or ``unknown``, 1 when any is ``invalid``/``expiring``, 2
+    when any is ``broken``. A product that names no provider is 0 with ``no providers
+    configured`` in place of the rows."""
+    results = check(product, cfg, fresh=getattr(args, 'fresh', False))
+    if getattr(args, 'quiet', False):
+        return quiet(results, product, cfg)
+    if getattr(args, 'json', False):
+        print(json.dumps(as_json(results, product, cfg), indent=2, sort_keys=True))
+        return _rc(results, cfg)
+    if not results:
+        from asf.views import header
+        print(header.head('credentials check', product.name, 'no providers configured'))
+        return 0
+    render(results, product, cfg)
+    return _rc(results, cfg)
