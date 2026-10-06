@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.139 — 2026-10-06
+
+### Bugs fixed
+
+- A test run inside a worker session can no longer rewrite a worker account's live settings.json, even when it runs an old branch's tests (#783)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.139"`
+
 ## v0.1.138 — 2026-10-06
 
 ### Features landed
