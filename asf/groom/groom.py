@@ -1209,7 +1209,40 @@ def merge_groom_text(existing, sections, intake_path=None):
     return '\n'.join(lines) + '\n', added
 
 
+def _commit_message(args):
+    """The subject the groom's own commit carries: the date it groomed, and which of the three
+    ways it was called."""
+    date = args.date or datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    if getattr(args, 'answers_file', None):
+        return f'groom: {date} (answers)'
+    if getattr(args, 'incremental', False):
+        return f'groom: {date} (tick)'
+    return f'groom: {date}' + (' --apply' if getattr(args, 'apply', False) else '')
+
+
 def cmd_groom(args, root):
+    """``asf groom``: intake, the policy pass and the questions — and then a commit of what it
+    wrote, pushed (F-0133).
+
+    The groom rewrites cards, ``groom/<date>.md``, the digest and ``index.json`` and, until this,
+    committed none of it: on the console that was papered over by ``asf.cli._published``, but the
+    tick calls this function directly (:mod:`asf.tick.step_groom`) and the output waited for the
+    tick's one end-of-tick commit. Anything that stopped the tick reaching it — a later step
+    raising, the record lock held, a refused push — left the work in the clone, and the next
+    tick's ``ensure_clone`` resets hard and cleans: the groom's cards and its file were *lost*,
+    not merely uncommitted.
+
+    Only what this call changed is committed (:func:`asf.record.publish.publish_changes` diffs
+    against the snapshot taken here), so an earlier step's writes to the same clone stay for
+    ``finish``. A ``root`` that is not a checkout with an ``origin`` is left entirely alone."""
+    from asf.record import publish
+    before = publish.snapshot(root)
+    rc = _groom(args, root)
+    publish.publish_changes(root, before, _commit_message(args))
+    return rc
+
+
+def _groom(args, root):
     date = args.date or datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
     by_id, parse_errors = load_items(root)
     if parse_errors:

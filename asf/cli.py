@@ -525,11 +525,6 @@ def line_buffered(*streams):
             pass
 
 
-def _utc_today():
-    import datetime
-    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
-
-
 def _published(cmd, args, record, message):
     """Run a console command that writes the record, then commit and push what it wrote
     (:func:`asf.record.publish.publish_changes`): the tick's clone resets to origin, so an edit
@@ -621,8 +616,7 @@ def _main(argv=None):
                           'record: migrate-landing ' + ('--revert' if args.revert else '--apply'))
     if args.command == 'groom':
         from asf.groom.groom import cmd_groom
-        return _published(cmd_groom, args, resolve_record(args),
-                          f"groom: {args.date or _utc_today()}" + (' --apply' if args.apply else ''))
+        return cmd_groom(args, resolve_record(args))
     if args.command == 'stale':
         from asf.tick.stale import cmd_stale
         return cmd_stale(args, resolve_record(args, announce=_announce_stderr))  # stdout: the table / --json
