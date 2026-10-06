@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.179 — 2026-10-06
+
+### Features landed
+
+- A Feature with no Story is no longer planned — ASF first runs a spec-amend session that derives its Stories (checkbox acceptance lines, minted through `asf new story`) from the spec, the plan and the landed Tasks; Features already in build keep building, and `feeder.stories_before_plan: false` turns it off per product (#835)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.179"`
+
 ## v0.1.178 — 2026-10-06
 
 ### Features landed
