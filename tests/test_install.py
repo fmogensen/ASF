@@ -1306,6 +1306,135 @@ class DeadWaiterTest(HomeCase):
         self.assertTrue(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
 
 
+class _HookRepoCase(HomeCase):
+    """A temp ASF home, a runnable ``asf``, and repos with or without a versioned hooks dir."""
+
+    def setUp(self):
+        super().setUp()
+        self.asf = executable_asf(os.path.join(self.tmp, 'bin'))
+        self.which = lambda name: self.asf
+        self.write(env.config_path(), '')
+        self.none = os.path.join(self.tmp, 'no-rules')
+
+    def repo(self, name, versioned_hooks):
+        path = os.path.join(self.tmp, name)
+        _git(['init', '-q', '-b', 'main', path])
+        if versioned_hooks:
+            self.write(os.path.join(path, '.githooks', 'README'), 'hooks live here\n')
+            _git(['config', 'core.hooksPath', '.githooks'], cwd=path)
+            _git(['add', '.'], cwd=path)
+            _git(['-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-qm', 'hooks dir'], cwd=path)
+        return path
+
+
+class HooksPlanTests(_HookRepoCase):
+    """F-0109 §2.3: ``hooks.plan`` — one row per target a hooks install would touch, writing
+    nothing, ``tracked`` true only where the write would change the product's source."""
+
+    def test_a_versioned_hooks_dir_is_tracked_and_dot_git_hooks_is_not(self):
+        versioned, plain = self.repo('versioned', True), self.repo('plain', False)
+        product = env.Product('sample', {'repo_dir': versioned, 'backlog_dir': plain})
+        rows = hooks.plan(product, rules_dir=self.none, which=self.which)
+        git_rows = [r for r in rows if r['kind'] == 'git-hook']
+        self.assertEqual(len(git_rows), 4)
+        for r in git_rows:
+            self.assertEqual(r['action'], 'write')
+            self.assertEqual(r['tracked'], r['path'].startswith(versioned + os.sep), r)
+        # nothing written
+        self.assertFalse(os.path.exists(os.path.join(versioned, '.githooks', 'pre-commit')))
+
+    def test_after_an_install_every_hook_is_already_ours(self):
+        plain = self.repo('plain', False)
+        product = env.Product('sample', {'repo_dir': plain})
+        hooks.install(product, rules_dir=self.none, which=self.which)
+        rows = hooks.plan(product, rules_dir=self.none, which=self.which)
+        self.assertEqual({r['action'] for r in rows if r['kind'] == 'git-hook'}, {'already ours'})
+
+    def test_a_foreign_hook_is_left(self):
+        plain = self.repo('plain', False)
+        self.write(os.path.join(plain, '.git', 'hooks', 'pre-push'), '#!/bin/sh\necho mine\n')
+        rows = hooks.plan(env.Product('sample', {'repo_dir': plain}), rules_dir=self.none,
+                          which=self.which)
+        by = {os.path.basename(r['path']): r['action'] for r in rows if r['kind'] == 'git-hook'}
+        self.assertEqual(by, {'pre-commit': 'write', 'pre-push': 'left (not ours)'})
+
+    def test_dry_run_prints_the_plan_and_writes_nothing(self):
+        versioned = self.repo('versioned', True)
+        self.write(env.product_path('sample'), f'product: sample\nrepo_dir: {versioned}\n')
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out), \
+                mock.patch.object(hooks, 'RULES_DIR', self.none), \
+                mock.patch.object(hooks.shutil, 'which', self.which):
+            rc = hooks.cmd_hooks(argparse.Namespace(product='sample', dry_run=True, approve=False))
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn('git-hook', text)
+        self.assertIn('tracked', text)
+        self.assertIn('would be withheld', text)
+        self.assertFalse(os.path.exists(os.path.join(versioned, '.githooks', 'pre-commit')))
+
+
+class HooksApprovalTests(_HookRepoCase):
+    """F-0109 §2.4: a tracked write is withheld while the matrix has ``touch_security`` above
+    ``auto``; every other hook is written; ``--approve`` (or a granted hold) lets it through."""
+
+    def product(self, level=None):
+        versioned, plain = self.repo('versioned', True), self.repo('plain', False)
+        data = {'repo_dir': versioned, 'backlog_dir': plain}
+        if level:
+            data['approvals'] = {'touch_security': level}
+        self.versioned, self.plain = versioned, plain
+        return env.Product('sample', data)
+
+    def account_cfg(self):
+        acct_dir = os.path.join(self.tmp, 'acct-a')
+        return {'worker_pool': {'accounts': [{'name': 'acct-a', 'config_dir': acct_dir}]}}, \
+            os.path.join(acct_dir, 'settings.json')
+
+    def test_human_now_withholds_the_tracked_write_and_writes_the_rest(self):
+        product = self.product()
+        cfg, acct_settings = self.account_cfg()
+        rc, msg = hooks.install(product, rules_dir=self.none, which=self.which, cfg=cfg)
+        self.assertEqual(rc, hooks.WITHHELD_RC, msg)
+        self.assertFalse(os.path.exists(os.path.join(self.versioned, '.githooks', 'pre-commit')))
+        self.assertFalse(os.path.exists(os.path.join(self.versioned, '.githooks', 'pre-push')))
+        self.assertTrue(os.path.isfile(os.path.join(self.plain, '.git', 'hooks', 'pre-commit')))
+        self.assertTrue(os.path.isfile(acct_settings))  # the approvals hook: never withheld
+        self.assertIn('NEEDS OPERATOR', msg)
+        self.assertIn('--approve', msg)
+        self.assertIn('touch_security at human-now', msg)
+
+    def test_auto_writes_as_before(self):
+        product = self.product('auto')
+        rc, msg = hooks.install(product, rules_dir=self.none, which=self.which)
+        self.assertEqual(rc, 0, msg)
+        self.assertTrue(os.path.isfile(os.path.join(self.versioned, '.githooks', 'pre-commit')))
+
+    def test_approve_writes_and_records_the_grant(self):
+        from asf import approvals
+        product = self.product()
+        rc, msg = hooks.install(product, rules_dir=self.none, which=self.which, approve=True)
+        self.assertEqual(rc, 0, msg)
+        self.assertTrue(os.path.isfile(os.path.join(self.versioned, '.githooks', 'pre-push')))
+        self.assertTrue(approvals.is_granted(product, 'install/touch_security'))
+
+    def test_a_foreign_hook_and_a_withheld_write_together_are_rc_3(self):
+        product = self.product()
+        self.write(os.path.join(self.plain, '.git', 'hooks', 'pre-push'), '#!/bin/sh\necho mine\n')
+        rc, msg = hooks.install(product, rules_dir=self.none, which=self.which)
+        self.assertEqual(rc, hooks.WITHHELD_RC)
+        self.assertIn("is not asf's", msg)
+
+    def test_a_granted_hold_lets_the_next_install_through(self):
+        from asf import approvals
+        product = self.product()
+        hooks.install(product, rules_dir=self.none, which=self.which)
+        approvals.resolve(product, 'install/touch_security', 'granted')
+        rc, msg = hooks.install(product, rules_dir=self.none, which=self.which)
+        self.assertEqual(rc, 0, msg)
+        self.assertTrue(os.path.isfile(os.path.join(self.versioned, '.githooks', 'pre-commit')))
+
+
 class HooksTest(HomeCase):
     def setUp(self):
         super().setUp()
@@ -1317,7 +1446,11 @@ class HooksTest(HomeCase):
         self.repo = os.path.join(self.tmp, 'repo')
         _git(['init', '-q', self.repo])  # ensure_git_hooks (F-0075) needs a real git repo
         self.settings = os.path.join(self.repo, '.claude', 'settings.json')
-        self.product = env.Product('sample', {'repo_dir': self.repo})
+        # the repo's own .claude/settings.json is a file its git status would show: the matrix
+        # gates that write (F-0109, HooksApprovalTests). These cases are about the merge, so the
+        # product says touch_security: auto and every write goes through as before.
+        self.product = env.Product('sample', {'repo_dir': self.repo,
+                                              'approvals': {'touch_security': 'auto'}})
         self.asf = executable_asf(os.path.join(self.tmp, 'bin'))
         self.which = lambda name: self.asf
         self.write(env.config_path(), '')  # an empty config.yaml: no real account is touched
@@ -1468,7 +1601,12 @@ class ConsolePermissionsTest(HomeCase):
 
     def test_doctor_check_names_missing_rules_by_name(self):
         product = env.load_product('sample')
-        ok, detail = console_perms.check_doctor(product, home=os.path.join(self.tmp, 'no-such-home'))
+        home = os.path.join(self.tmp, 'partial-home')
+        # one rule already there: a partial list is red and names the rest (none at all is
+        # "not configured" — a clean install before the operator writes the offer, F-0109)
+        self.write(os.path.join(home, '.claude', 'settings.json'),
+                   json.dumps({'permissions': {'allow': [console_perms.FIXED_ALLOW[-1]]}}))
+        ok, detail = console_perms.check_doctor(product, home=home)
         self.assertFalse(ok)
         self.assertIn('Bash(asf:*)', detail)
         self.assertIn('Bash(git push --force* origin trunk)', detail)
@@ -2017,6 +2155,37 @@ class VersionStringTest(unittest.TestCase):
 #: The one-product install script, as the suite runs it.
 INSTALL_SH = os.path.join(REPO, 'tools', 'install.sh')
 
+_TTY = []
+
+
+def _operator_tty():
+    """``subprocess`` kwargs that run the child with a controlling terminal — an operator at a
+    keyboard — while its stdout and stderr stay the caller's pipes. F-0109: with no terminal the
+    script's default form never runs the package half, so every case that is about that half
+    (the lock, the ref, the pipx call) runs it this way. A fresh pty per child: a tty that is
+    still another session's controlling terminal cannot become this one's."""
+    import pty
+    for fd in _TTY:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _TTY.clear()
+    master, slave = pty.openpty()
+    _TTY.extend([master, slave])
+    name = os.ttyname(slave)
+
+    def become_session_leader_with_a_tty():
+        import fcntl
+        import termios
+        os.setsid()
+        fd = os.open(name, os.O_RDWR)
+        try:
+            fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
+        except OSError:
+            pass  # Linux: opening it as a session leader already made it the controlling tty
+    return {'preexec_fn': become_session_leader_with_a_tty}
+
 
 def _bootstrap_resolve_tag_snippet():
     """The exact ``python3`` heredoc the bootstrap runs to resolve the default ref — read from
@@ -2080,10 +2249,198 @@ class ReleaseRefTests(unittest.TestCase):
         env = dict(os.environ, HOME=home, ASF_HOME=asf_home, ASF_REPO_URL=empty_remote,
                    PATH=bin_dir + os.pathsep + os.environ.get('PATH', ''))
         r = subprocess.run(['bash', INSTALL_SH, 'demo'], capture_output=True, text=True, env=env,
+                           **_operator_tty(),
                            timeout=30)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('NEEDS OPERATOR', r.stderr)
         self.assertNotIn('main', r.stderr)  # never a silent fall back to the trunk
+
+
+class InstallHalvesDocsTests(unittest.TestCase):
+    """F-0109 §2.7: the install path as the docs describe it — both halves named in the README
+    and the guide, every new installer line in the troubleshooting table, the pre-ASF link
+    before the clocks, and the known-issues page the clean-install jobs keep."""
+
+    def read(self, *parts):
+        with open(os.path.join(REPO, *parts), encoding='utf-8') as f:
+            return f.read()
+
+    def test_the_readme_names_both_halves(self):
+        text = self.read('README.md')
+        for word in ('--package-only', '--no-package', 'docs/KNOWN-ISSUES.md'):
+            self.assertIn(word, text)
+
+    def test_the_guide_names_who_runs_which_half_and_the_pre_asf_step(self):
+        text = self.read('docs', 'guide', 'getting-started.md')
+        for word in ('### Who runs which half', '--package-only', '--no-package', '--yes',
+                     'troubleshooting.md#retiring-a-pre-asf-scheduler', 'write them? [y/N]',
+                     'not configured'):
+            self.assertIn(word, text)
+        self.assertLess(text.index('Retiring a pre-ASF scheduler'), text.index('## 4.'))
+
+    def test_every_new_installer_line_is_in_the_troubleshooting_table(self):
+        text = self.read('docs', 'guide', 'troubleshooting.md')
+        for line in ('step 1 installs the package and needs a terminal',
+                     'asf is not installed — the operator runs',
+                     'asf is <release> (<commit>), not <ref>',
+                     'is tracked in its repo and the matrix has touch_security at',
+                     'WITHHELD', 'ASF clocks are not installed beside a live pre-ASF job',
+                     'install: no scheduler', '--dry-run'):
+            self.assertIn(line, text)
+        self.assertIn('## Retiring a pre-ASF scheduler', text)
+
+    def test_the_known_issues_page_names_the_clean_install_jobs(self):
+        text = self.read('docs', 'KNOWN-ISSUES.md')
+        self.assertIn('install-clean-linux', text)
+        self.assertIn('install-clean-macos', text)
+        workflow = self.read('.github', 'workflows', 'install-clean.yml')
+        for job in ('install-clean-linux:', 'install-clean-macos:', 'tools/install-clean.sh'):
+            self.assertIn(job, workflow)
+
+
+class InstallScriptSeamTests(unittest.TestCase):
+    """F-0109 §2.1-2.2: ``install.sh`` in two halves — ``--package-only`` (the operator's, the
+    pipx step) and ``--no-package`` (a session's: everything after it). Off a terminal the
+    default form never runs pipx silently: it names the operator command, still runs what a
+    session may run, and exits non-zero. Each case runs on a PATH holding only stubs plus the
+    host's own ``git`` and ``python3`` — never a real ``asf`` or ``pipx``."""
+
+    VERSION = '0.1.5 (abcdef123456)'
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='install_seam_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin = os.path.join(self.tmp, 'bin')
+        self.host = os.path.join(self.tmp, 'host')
+        os.makedirs(self.bin)
+        os.makedirs(self.host)
+        for tool in ('git', 'python3'):
+            os.symlink(shutil.which(tool), os.path.join(self.host, tool))
+        self.home = os.path.join(self.tmp, 'home')
+        self.asf_home = os.path.join(self.home, '.ASF')
+        os.makedirs(self.asf_home)
+        self.calls = os.path.join(self.tmp, 'asf.log')
+        self.pipx_calls = os.path.join(self.tmp, 'pipx.log')
+        self.stub('pipx', f'echo "$*" >> "{self.pipx_calls}"')
+
+    def stub(self, name, body):
+        path = os.path.join(self.bin, name)
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\n' + body + '\n')
+        os.chmod(path, 0o755)
+
+    def with_asf(self, rc=0):
+        self.stub('asf', f'if [ "$1" = --version ]; then echo "{self.VERSION}"; exit 0; fi\n'
+                         f'echo "$*" >> "{self.calls}"\nexit {rc}')
+
+    def run_script(self, args, tty, **extra):
+        # stubs, then the host's git and python3, then the system dirs (sh, mkdir, date) —
+        # where neither an `asf` nor a `pipx` of the host's own is ever found ahead of the stubs
+        path = os.pathsep.join([self.bin, self.host, '/usr/bin', '/bin'])
+        env = {'HOME': self.home, 'ASF_HOME': self.asf_home, 'PATH': path,
+               'ASF_REPO_URL': os.path.join(self.tmp, 'no-remote.git')}
+        env.update(extra)
+        kw = _operator_tty() if tty else {'start_new_session': True}  # a new session: no tty
+        return subprocess.run([shutil.which('bash'), INSTALL_SH] + args, capture_output=True,
+                              text=True, env=env, stdin=subprocess.DEVNULL, timeout=60, **kw)
+
+    def read(self, path):
+        if not os.path.exists(path):
+            return ''
+        with open(path) as f:
+            return f.read()
+
+    def install_log(self):
+        return self.read(os.path.join(self.asf_home, 'logs', 'install.log'))
+
+    # ---- no terminal ------------------------------------------------------------------
+
+    def test_no_tty_default_names_the_operator_command_and_runs_the_session_half(self):
+        self.with_asf()
+        r = self.run_script(['demo', 'abcdef1', '--', '--repo', '/r'], tty=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('NEEDS OPERATOR: step 1 installs the package and needs a terminal', r.stdout)
+        self.assertIn('bash tools/install.sh demo abcdef1 --package-only', r.stdout)
+        self.assertIn('bash tools/install.sh demo abcdef1 --no-package', r.stdout)
+        self.assertEqual(self.read(self.pipx_calls), '')       # never attempted
+        self.assertEqual(self.read(self.calls).strip(), 'install --product demo --repo /r')
+        self.assertEqual(self.install_log(), '')                # no install by hand happened
+
+    def test_no_tty_default_without_asf_stops_at_the_operator_command(self):
+        r = self.run_script(['demo'], tty=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('asf is not installed', r.stderr)
+        self.assertIn('--package-only', r.stderr)
+        self.assertEqual(self.read(self.pipx_calls), '')
+
+    def test_package_only_without_a_tty_is_refused(self):
+        self.with_asf()
+        r = self.run_script(['demo', 'abcdef1', '--package-only'], tty=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('needs a terminal', r.stderr)
+        self.assertEqual(self.read(self.pipx_calls), '')
+        self.assertEqual(self.read(self.calls), '')
+
+    def test_yes_runs_the_package_half_without_a_tty_and_answers_yes(self):
+        self.with_asf()
+        r = self.run_script(['demo', 'abcdef1', '--yes'], tty=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('git+', self.read(self.pipx_calls))
+        self.assertEqual(self.read(self.calls).strip(), 'install --product demo --yes')
+        self.assertIn('\tdemo\tabcdef1', self.install_log())
+
+    def test_the_env_yes_is_the_same_answer(self):
+        self.with_asf()
+        r = self.run_script(['demo', 'abcdef1'], tty=False, ASF_INSTALL_YES='1')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('git+', self.read(self.pipx_calls))
+
+    # ---- the two halves at a terminal -------------------------------------------------
+
+    def test_package_only_installs_and_names_the_session_half(self):
+        self.with_asf()
+        r = self.run_script(['demo', 'abcdef1', '--package-only'], tty=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('git+', self.read(self.pipx_calls))
+        self.assertEqual(self.read(self.calls), '')             # asf install not run
+        self.assertIn('--no-package', r.stdout)
+        self.assertEqual(self.install_log().count('\n'), 1)
+
+    def test_no_package_never_runs_pipx_and_writes_no_log_line(self):
+        self.with_asf()
+        r = self.run_script(['--no-package', 'demo', '--', '--yes'], tty=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read(self.pipx_calls), '')
+        self.assertEqual(self.read(self.calls).strip(), 'install --product demo --yes')
+        self.assertEqual(self.install_log(), '')
+
+    def test_default_at_a_terminal_runs_both_halves(self):
+        self.with_asf()
+        r = self.run_script(['demo', 'abcdef1'], tty=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('git+', self.read(self.pipx_calls))
+        self.assertEqual(self.read(self.calls).strip(), 'install --product demo')
+
+    # ---- the ref check on the session half --------------------------------------------
+
+    def test_no_package_refuses_an_asf_at_another_ref(self):
+        self.with_asf()
+        r = self.run_script(['demo', 'deadbee', '--no-package'], tty=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(f'asf is {self.VERSION}, not deadbee', r.stderr)
+        self.assertIn('--package-only', r.stderr)
+        self.assertEqual(self.read(self.calls), '')
+
+    def test_no_package_accepts_the_release_or_a_commit_prefix(self):
+        self.with_asf()
+        for ref in ('v0.1.5', '0.1.5', 'abcdef1', 'abcdef123456'):
+            r = self.run_script(['demo', ref, '--no-package'], tty=True)
+            self.assertEqual(r.returncode, 0, (ref, r.stderr))
+
+    def test_both_flags_is_a_usage_error(self):
+        r = self.run_script(['demo', '--package-only', '--no-package'], tty=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('usage', r.stderr)
 
 
 class InstallScriptTest(unittest.TestCase):
@@ -2127,6 +2484,7 @@ class InstallScriptTest(unittest.TestCase):
     def _run(self, args, install_rc=0, **extra_env):
         self._write_scripts(install_rc=install_rc)
         return subprocess.run(['bash', INSTALL_SH] + args, capture_output=True, text=True,
+                              **_operator_tty(),
                               env=self._env(**extra_env), timeout=60)
 
     def _pipx_call(self):
@@ -2207,6 +2565,7 @@ class InstallScriptTest(unittest.TestCase):
         try:
             r = subprocess.run(
                 ['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True, text=True,
+                **_operator_tty(),
                 env=self._env(ASF_INSTALL_LOCK_WAIT_S='30', ASF_INSTALL_LOCK_POLL_S='0.1'),
                 timeout=60)
         finally:
@@ -2233,7 +2592,8 @@ class InstallScriptTest(unittest.TestCase):
         import fcntl
         held = open(lock_path, 'a')
         fcntl.flock(held, fcntl.LOCK_EX)
-        proc = subprocess.Popen(['bash', script, 'demo', 'deadbeef'], stdout=subprocess.PIPE,
+        proc = subprocess.Popen(['bash', script, 'demo', 'deadbeef'], **_operator_tty(),
+                                stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
                                 env=self._env(ASF_INSTALL_LOCK_WAIT_S='30',
                                               ASF_INSTALL_LOCK_POLL_S='0.1'))
@@ -2273,6 +2633,7 @@ class InstallScriptTest(unittest.TestCase):
         try:
             r = subprocess.run(
                 ['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True, text=True,
+                **_operator_tty(),
                 env=self._env(ASF_INSTALL_LOCK_WAIT_S='0.5', ASF_INSTALL_LOCK_POLL_S='0.1'),
                 timeout=60)
         finally:
@@ -2297,7 +2658,7 @@ class InstallScriptTest(unittest.TestCase):
         os.chmod(os.path.join(self.bin_dir, 'asf'), 0o755)
 
         import fcntl
-        proc = subprocess.Popen(['bash', INSTALL_SH, 'demo', 'deadbeef'],
+        proc = subprocess.Popen(['bash', INSTALL_SH, 'demo', 'deadbeef'], **_operator_tty(),
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  env=self._env())
         try:
@@ -2367,7 +2728,7 @@ class InstallCommandTests(HomeCase):
     def test_scheduler_and_console_permissions_reject_an_unknown_value(self):
         top = self._parser()
         with self.assertRaises(SystemExit):
-            top.parse_args(['install', '--product', 'demo', '--scheduler', 'systemd'])
+            top.parse_args(['install', '--product', 'demo', '--scheduler', 'upstart'])
         with self.assertRaises(SystemExit):
             top.parse_args(['install', '--product', 'demo', '--console-permissions', 'global'])
 
@@ -2401,12 +2762,8 @@ class InstallCommandTests(HomeCase):
         self.assertTrue(ok)
         self.assertEqual(fake_input.call_count, 3)
         self.assertEqual(args.repo, os.getcwd())
-        self.assertEqual(args.scheduler, install.default_scheduler())
+        self.assertEqual(args.scheduler, install.default_scheduler())  # the platform's own
         self.assertEqual(args.record, '/existing/backlog')
-
-    def test_the_default_scheduler_follows_the_platform(self):
-        self.assertEqual(install.default_scheduler('darwin'), 'launchd')
-        self.assertEqual(install.default_scheduler('linux'), 'cron')
 
     def test_yes_off_tty_with_no_default_is_needs_operator_and_writes_nothing(self):
         args = _install_args(repo=None, record=None, scheduler=None, yes=True)
@@ -2531,6 +2888,120 @@ class InstallAccountsTests(HomeCase):
         with mock.patch('builtins.open', side_effect=spy):
             found = install.detect_accounts(env.ASF_HOME)
         self.assertEqual(found, [('acct-a', config_dir)])
+
+
+class InstallHooksApprovalTests(HomeCase):
+    """F-0109 §2.5: ``asf install``'s step 7 asks once on the terminal when the hooks plan
+    would write a file the product repo tracks; ``--yes``/``--approve`` answer it; with no
+    terminal it is withheld — ``WITHHELD``, not ``FAILED`` — and the steps after it still run."""
+
+    BEARING = [{'kind': 'git-hook', 'action': 'write', 'tracked': True, 'path': '/r/.githooks/pre-push'}]
+
+    def step(self, answer, **over):
+        args = _install_args(**dict({'yes': False}, **over))
+        with mock.patch.object(install.env, 'load_product', return_value='P'), \
+                mock.patch.object(install.hooks, 'plan', return_value=self.BEARING), \
+                mock.patch.object(install.hooks, 'gated', return_value=self.BEARING), \
+                mock.patch.object(install.hooks, 'gate_level', return_value='human-now'), \
+                mock.patch.object(install, '_ask_tty', return_value=answer) as ask, \
+                mock.patch.object(install.hooks, 'install',
+                                  side_effect=lambda p, approve: (0, 'hooks: ok') if approve
+                                  else (install.hooks.WITHHELD_RC, 'NEEDS OPERATOR: tracked')) as inst:
+            result, out, err = _quiet(install._step_hooks, args)
+        return result, ask, inst, out
+
+    def test_asked_on_the_terminal_and_answered_yes(self):
+        result, ask, inst, out = self.step('y')
+        self.assertEqual(result, (0, 'ok'))
+        ask.assert_called_once()
+        self.assertIn('[y/N]', ask.call_args[0][0])
+        inst.assert_called_once_with('P', approve=True)
+        self.assertIn('/r/.githooks/pre-push', out)   # the plan is printed before the question
+
+    def test_answered_no_is_withheld_not_failed(self):
+        result, _ask, inst, _out = self.step('n')
+        self.assertEqual(result[0], install.WITHHELD)
+        self.assertIn('--approve', result[1])
+        inst.assert_called_once_with('P', approve=False)
+
+    def test_no_terminal_is_withheld(self):
+        result, _ask, _inst, _out = self.step(None)
+        self.assertEqual(result[0], install.WITHHELD)
+
+    def test_yes_and_approve_answer_without_asking(self):
+        for over in ({'yes': True}, {'approve': True}):
+            result, ask, inst, _out = self.step(None, **over)
+            self.assertEqual(result, (0, 'ok'))
+            ask.assert_not_called()
+
+    def test_a_withheld_step_does_not_stop_the_rest_and_the_run_is_not_green(self):
+        ran, lines = [], []
+        steps = [install.Step('step 7', lambda: (install.WITHHELD, 'tracked'), False),
+                 install.Step('step 8', lambda: (ran.append(8), (0, 'ok'))[1], False)]
+        rc = install.run_steps(steps, out=lines.append)
+        self.assertEqual(ran, [8])
+        self.assertNotEqual(rc, 0)
+        self.assertIn('step 7: WITHHELD tracked', lines)
+        self.assertIn('  WITHHELD step 7: tracked', lines)
+        self.assertFalse(any('FAILED' in l for l in lines))
+
+
+class InstallSchedulerChoiceTests(HomeCase):
+    """F-0109 / the clean install: the clock adapter a host can actually run, and no ASF clock
+    installed beside a pre-ASF job that is still live."""
+
+    def test_the_platform_default(self):
+        self.assertEqual(install.default_scheduler(platform='darwin'), 'launchd')
+        with mock.patch.object(install, '_systemd_user_ok', return_value=True):
+            self.assertEqual(install.default_scheduler(platform='linux'), 'systemd')
+        with mock.patch.object(install, '_systemd_user_ok', return_value=False):
+            self.assertEqual(install.default_scheduler(platform='linux'), 'none')
+
+    def test_the_systemd_probe_reads_the_user_manager(self):
+        from asf.connectors import systemd
+        ok = lambda *a, **k: subprocess.CompletedProcess(a[0], 0, 'PATH=/x', '')  # noqa: E731
+        bad = lambda *a, **k: subprocess.CompletedProcess(a[0], 1, '', 'Failed to connect to bus')  # noqa: E731
+        self.assertTrue(systemd.user_manager_ok(run=ok, which=lambda n: '/bin/systemctl'))
+        self.assertFalse(systemd.user_manager_ok(run=bad, which=lambda n: '/bin/systemctl'))
+        self.assertFalse(systemd.user_manager_ok(run=ok, which=lambda n: None))
+
+    def test_systemd_is_a_choice(self):
+        self.assertIn('systemd', install.SCHEDULERS)
+
+    def test_none_names_the_hand_tick_and_the_guidance(self):
+        args = _install_args(scheduler='none')
+        result, out, _err = _quiet(install._step_scheduler, args)
+        self.assertEqual(result, (0, 'already in place'))
+        self.assertIn('no scheduler', out)
+        self.assertIn('asf tick --product demo', out)
+
+    def test_a_live_pre_asf_job_keeps_the_asf_clocks_out(self):
+        args = _install_args(scheduler='launchd')
+        with mock.patch.object(install.env, 'load_config',
+                               return_value={'scheduler': {'kind': 'launchd',
+                                                           'launchd_label': 'com.example.old'}}), \
+                mock.patch.object(install.doctor, 'check_scheduler',
+                                  return_value=(False, 'pre-ASF launchd job com.example.old still loaded')), \
+                mock.patch.object(install.scheduler, 'cmd_scheduler') as cmd:
+            result, _out, err = _quiet(install._step_scheduler, args)
+        self.assertEqual(result[0], 1)
+        cmd.assert_not_called()
+        self.assertIn('NEEDS OPERATOR', err)
+        self.assertIn('Retiring a pre-ASF scheduler', err)
+
+
+class InitDefaultClocksTests(HomeCase):
+    """F-0109 / the clean install: a new product file carries clocks, so the clocks step of a
+    first install has something to install (macOS: "declares no clocks" failed step 8)."""
+
+    def test_a_fresh_product_file_declares_clocks_the_scheduler_reads(self):
+        from asf import scheduler
+        d = dict(product='fresh', repo_slug='o/r', repo_dir='/r', main='main', backlog_dir='/b',
+                 specs_dir='docs/specs', plans_dir='docs/plans', ci_provider='github-actions',
+                 test_command='true')
+        self.write(env.product_path('fresh'), init.render_product_yaml(d))
+        names = sorted(c.name for c in scheduler.clocks(env.load_product('fresh')))
+        self.assertEqual(names, ['daily', 'dispatch', 'record'])
 
 
 class InstallStepsTests(HomeCase):
@@ -2694,16 +3165,18 @@ class InstallStepsTests(HomeCase):
     def test_step_7_calls_hooks_install_in_process(self):
         args = _install_args()
         with mock.patch.object(install.env, 'load_product', return_value='THE-PRODUCT'), \
+                mock.patch.object(install.hooks, 'plan', return_value=[]), \
                 mock.patch.object(install.hooks, 'install',
                                   return_value=(0, 'hooks: ok')) as inst:
             result, out, err = _quiet(install._step_hooks, args)
         self.assertEqual(result, (0, 'ok'))
-        inst.assert_called_once_with('THE-PRODUCT')
+        inst.assert_called_once_with('THE-PRODUCT', approve=True)  # --yes answers it
         self.assertIn('hooks: ok', out)
 
     def test_step_7_a_refusal_is_recorded_not_raised(self):
         args = _install_args()
         with mock.patch.object(install.env, 'load_product', return_value='THE-PRODUCT'), \
+                mock.patch.object(install.hooks, 'plan', return_value=[]), \
                 mock.patch.object(install.hooks, 'install',
                                   return_value=(2, 'NEEDS OPERATOR: no repo_dir')):
             result, out, err = _quiet(install._step_hooks, args)

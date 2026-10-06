@@ -24,12 +24,13 @@ no file to copy by hand:
 | `--repo-url` | cloned into `--repo` only when that directory does not exist | — |
 | `--record` | the record's directory (the backlog: one markdown card per work item) | the product file's `backlog_dir`; asked once |
 | `--record-url` | cloned into `--record` only when that directory does not exist | — |
-| `--scheduler` | the clock adapter: `launchd` (installed end to end) or `cron` (ASF prints the lines, you add them) or `none` | `launchd`; asked once |
+| `--scheduler` | the clock adapter: `launchd` (macOS, installed end to end), `systemd` (Linux user timers, installed end to end), `cron` (ASF prints the lines, you add them) or `none` | `launchd` on macOS; `systemd` on Linux when `systemctl --user` answers, else `none`; asked once |
 | `--account` | one worker account, `NAME[:CONFIG_DIR]`; repeatable | detected under `<ASF_HOME>/accounts/` |
 | `--fake-workers` | `worker_pool.backend: fake`, and no account | off |
 | `--console-permissions` | writes the console's own allow list at this scope (`user` or `repo`) instead of only offering it | offered, not written |
 | `--allow-checkout` | configure from a checkout or editable install | refused otherwise |
-| `--yes` | never prompt; a missing flag with no default is refused | off (a missing flag is asked for on a tty) |
+| `--yes` | never prompt; a missing flag with no default is refused; answers the hooks question yes | off (a missing flag is asked for on a tty) |
+| `--approve` | write hook files the product repo tracks without asking (you answering for `touch_security`) | off (asked on a tty, withheld without one) |
 
 `~/.ASF/config.yaml` is written once, from these flags: `default_product`, `scheduler.kind`,
 `worker_pool.backend|models|accounts`, `capacity.total.sessions`. It is never rewritten after
@@ -53,7 +54,7 @@ key it could not — it never overwrites an existing file, it prints the diff it
 ## 2. Run the installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [ref] -- <asf install flags>
+curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [ref] [--package-only|--no-package] [--yes] -- <asf install flags>
 ```
 
 or, from a checkout of the ASF repo, `bash tools/install.sh <product> [ref] -- <asf install
@@ -71,6 +72,45 @@ each printing one `step N: <label>: <detail>` line. Steps 1–5 abort the run wh
 installed. `NEEDS OPERATOR: …` lines name what only you can do — see
 [troubleshooting.md](troubleshooting.md). The whole run is idempotent: rerun it after fixing a
 `FAILED` line.
+
+### Who runs which half
+
+| step | `--package-only` | `--no-package` | neither flag |
+| --- | --- | --- | --- |
+| 1 `pipx install` (under the tick lock) and the `install.log` line | run | skipped | run* |
+| 2 `asf install` — config, record, account, hooks, clocks, plugin, doctor | skipped | run | run |
+
+`*` unless there is no terminal and no `--yes`. The package half is the **operator's**: a Claude
+Code session in auto mode is refused a network package install by its own runtime, and cannot add
+the rule that would allow it. So the operator runs
+`bash tools/install.sh <product> <ref> --package-only` in a terminal; the product's session then
+finishes with `bash tools/install.sh <product> <ref> --no-package`, which checks that the `asf`
+on `PATH` is that ref first. Run with no flag and no terminal, the script prints that operator
+command as one `NEEDS OPERATOR` line, still runs the session half when `asf` is there, and exits
+non-zero. `--yes` (or `ASF_INSTALL_YES=1`) is the answer for a machine with no terminal, such as
+CI.
+
+**Hooks the product repo tracks.** When a repo keeps its git hooks in a versioned directory
+(`core.hooksPath` set to `.githooks/`), or versions `.claude/settings.json`, writing ASF's hook
+there changes the product's source — the approval matrix's `touch_security`. `asf install` prints
+the plan (`asf hooks install --product <p> --dry-run` shows the same) and asks once,
+`write them? [y/N]`, on the terminal. With no terminal the write is withheld (`WITHHELD`, with a
+hold `install/touch_security` in `asf approvals list`), every other hook is still written, and
+`asf hooks install --product <p> --approve` — or `asf approvals resolve install/touch_security
+granted` and a re-run — writes it.
+
+**A product that had its own clocks.** Retire them first —
+[Retiring a pre-ASF scheduler](troubleshooting.md#retiring-a-pre-asf-scheduler). ASF never boots
+out a job it did not install, and the clocks step refuses to install ASF's clocks while a pre-ASF
+job the operator config names (`scheduler.launchd_label`, `scheduler.legacy_cron`) is still live.
+
+**The scheduler.** `--scheduler` defaults to `launchd` on macOS and to `systemd` (user timers) on
+Linux when `systemctl --user` answers; otherwise `none`, which installs no clock and says how to
+tick by hand. On a Linux server, `loginctl enable-linger $USER` keeps the user manager running.
+
+**Before any login.** A clean install with no `gh auth login`, no worker token and no console
+allow list yet ends with those doctor rows as `skip — not configured: …`, each naming its one
+command; never red.
 
 ## 3. Adopt the record
 

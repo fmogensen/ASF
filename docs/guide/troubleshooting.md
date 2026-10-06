@@ -18,6 +18,10 @@ The bootstrap (`tools/install.sh`, or the `curl … | bash` line in the root REA
 | `install: NEEDS OPERATOR: a running tick of <p> still held its lock after <n>s …` | a tick would be torn by a package swap mid-run | wait for it to finish, then rerun |
 | `install: NEEDS OPERATOR: pipx install --force … failed (exit <n>) while holding <p>'s tick lock` | the pipx install itself failed | fix what pipx printed above, then rerun |
 | `install: NEEDS OPERATOR: asf is not on PATH after pipx install …` | pipx's bin dir is not on `PATH` | `pipx ensurepath`, open a new shell |
+| `install: NEEDS OPERATOR: step 1 installs the package and needs a terminal — run: …` | the default form, run with no terminal (a Claude Code session): the package half was not attempted | the operator runs the printed `--package-only` line in a terminal; the session then runs the `--no-package` line |
+| `install: NEEDS OPERATOR: asf is not installed — the operator runs: …` | `--no-package` with no `asf` on `PATH` | the operator runs the printed `--package-only` line |
+| `install: NEEDS OPERATOR: asf is <release> (<commit>), not <ref> — …` | `--no-package <ref>` against an `asf` at another ref | the operator runs the printed `--package-only` line for that ref |
+| `install: OUTSTANDING: step 1 (the package) was not run here — …` | the session half ran; the package half is still owed | the operator runs the printed line |
 
 `asf install --product <p>` (what the bootstrap hands off to):
 
@@ -27,6 +31,10 @@ The bootstrap (`tools/install.sh`, or the `curl … | bash` line in the root REA
 | `NEEDS OPERATOR: <version> is a checkout at <dir> — pass --allow-checkout …` | step 2: run from a checkout or editable install | pass `--allow-checkout`, or install the pinned package instead |
 | `NEEDS OPERATOR: no --<repo\|record\|scheduler> given, and no default — pass --<name>` | a flag with no default, given `--yes` or off a tty | pass the flag |
 | `NEEDS OPERATOR: no worker account found — run claude setup-token for <name>, then uncomment its auth_env in <config>` | step 6: no account token found | `claude setup-token`, then edit `~/.ASF/config.yaml` |
+| `NEEDS OPERATOR: <path> is tracked in its repo and the matrix has touch_security at <level> — asf hooks install --product <p> --approve` | step 7: an ASF hook would land in a file the product repo versions, and nobody answered | `asf hooks install --product <p> --approve` (or `asf approvals resolve install/touch_security granted`, then rerun); `asf hooks install --product <p> --dry-run` shows what it would write |
+| `step 7: the hooks: WITHHELD …` and `WITHHELD step 7` in the summary | the same, as the step and summary report it; steps 8-12 still ran | as above |
+| `install: NEEDS OPERATOR: pre-ASF … still loaded — ASF clocks are not installed beside a live pre-ASF job …` | step 8: a pre-ASF job the config names still runs | [retire it](#retiring-a-pre-asf-scheduler), then rerun |
+| `install: no scheduler — no clock will tick <p> …` | step 8 with `--scheduler none` (the Linux default where `systemctl --user` does not answer) | tick by hand, or rerun with `--scheduler systemd` once the user manager answers (`loginctl enable-linger $USER`) |
 | `install: NEEDS OPERATOR: clock(s) still not loaded after retrying the bootstrap: <labels>` | step 8: a clock still absent after one retried install | `asf scheduler install --product <p>`, or install it on your own scheduler |
 | `install: in the Claude Code session for this product, add the plugin once: /plugin marketplace add <dir>` then `/plugin install asf@asf` | step 9's tail, when the runtime CLI offers no non-interactive install | run the two lines in that session |
 | `asf install: NEEDS OPERATOR — fix the FAILED step(s) above and re-run` | one or more of steps 1–12 failed | fix each `FAILED` line above, then rerun the installer — it is idempotent |
@@ -60,6 +68,7 @@ it never removes the interpreter running it, so that last step is always yours.
 | `NEEDS OPERATOR: <dir> is not a git repo — asf hooks install cannot place its hooks there` | `repo_dir` or `backlog_dir` is wrong | fix the path, then `asf hooks install --product <p>` |
 | `NEEDS OPERATOR: <hook> is not asf's — add the line: "<asf>" redact --pre-commit\|--pre-push --product <p>` | a hook ASF did not write is in the way. | add the line to that hook — see [below](#the-redaction-hooks) — then rerun `asf hooks install --product <p>` |
 | `NEEDS OPERATOR: product <p> has no repo_dir …` | a rule card declares a Claude Code hook but there is no product repo to put it in | set `repo_dir` |
+| `NEEDS OPERATOR: <path> is tracked in its repo and the matrix has touch_security at <level> …` | the hook would land in a file the product repo versions (a `.githooks/` set as `core.hooksPath`, a versioned `.claude/settings.json`) | `asf hooks install --product <p> --dry-run` shows every target and whether it is tracked; `--approve` writes it |
 
 ### Approvals
 

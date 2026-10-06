@@ -124,7 +124,10 @@ class SecondInstallChangesNothingTests(unittest.TestCase):
         os.makedirs(self.rules)
         with open(os.path.join(self.rules, 'R-0001.md'), 'w') as f:
             f.write('---\nid: R-0001\ntype: rule\ntitle: guard\nhook: [PreToolUse, Stop]\n---\n')
-        self.product = env.Product('sample', {'repo_dir': self.repo})
+        # the repo's .claude/settings.json would be a new file in its git status — gated by the
+        # matrix (F-0109); these cases are about reading back what was written, so: auto
+        self.product = env.Product('sample', {'repo_dir': self.repo,
+                                              'approvals': {'touch_security': 'auto'}})
         self.settings = os.path.join(self.repo, '.claude', 'settings.json')
 
         self.asf_live = executable_asf_suffixed(os.path.join(self.tmp, 'bin'), '-live')

@@ -16,15 +16,15 @@ us what broke ([Feedback](#feedback)). The factory's own record is
 
 ## Install
 
-Needs macOS or Linux, `git`, `gh`, `pipx` and Claude Code. Per product, once:
+Needs macOS or Linux, `git`, `gh`, `pipx` and Claude Code. Per product, once, in a terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> -- --repo <dir> --record <dir>
 ```
 
-The clock is launchd on macOS and cron on Linux unless you pass `--scheduler launchd|cron|none`.
+The clock is launchd on macOS and systemd user timers on Linux unless you pass `--scheduler launchd|systemd|none`.
 
-The last two steps are the doctor and a dry tick run; then in that product's Claude Code session, `/plugin marketplace add ~/.ASF/plugin` and `/plugin install asf@asf`. A session whose working directory is the product's repo or its record needs no `ASF_PRODUCT`.
+The `pipx` half (`--package-only`) needs you at a terminal; a product's Claude Code session runs the rest with `--no-package` ([who runs which half](docs/guide/getting-started.md#who-runs-which-half), [known issues](docs/KNOWN-ISSUES.md)). The last two steps are the doctor and a dry tick run; then in that product's Claude Code session, `/plugin marketplace add ~/.ASF/plugin` and `/plugin install asf@asf`. A session whose working directory is the product's repo or its record needs no `ASF_PRODUCT`.
 
 The operator's guide is [`docs/guide/`](docs/guide/): [getting started](docs/guide/getting-started.md),
 [the product file](docs/guide/product-config.md), [the daily loop](docs/guide/operating.md),

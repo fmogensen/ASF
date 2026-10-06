@@ -117,6 +117,11 @@ def check_doctor(product, home=None):
         have_deny.update(perms.get('deny') or [])
     missing_allow = [r for r in allow_rules(product) if r not in have_allow]
     missing_deny = [r for r in deny_rules(product) if r not in have_deny]
+    wanted = allow_rules(product) + deny_rules(product)
+    if wanted and len(missing_allow) + len(missing_deny) == len(wanted):
+        cmd = 'asf console-permissions install --product ' + (product.name if product else '<p>')
+        return None, (f'not configured: no console allow list yet ({len(wanted)} rules offered '
+                      f'by `asf console-permissions offer`) — {cmd} --scope user|repo')
     if missing_allow or missing_deny:
         names = ', '.join(missing_allow + missing_deny)
         cmd = 'asf console-permissions install --product ' + (product.name if product else '<p>')

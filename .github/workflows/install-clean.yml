@@ -1,0 +1,63 @@
+name: install-clean
+
+# The preview release's gate item (a): ASF installs from zero on a clean machine to a green
+# `asf doctor` — no asf, no gh login, no Claude login. One job per platform, each running
+# tools/install-clean.sh from this checkout as the package source: the no-terminal default
+# (a session) must name the operator's command and install nothing; the --yes install must pass
+# every step; `asf doctor` must exit 0 with no RED row ("not configured" for a missing login).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  install-clean-linux:
+    # a bare ubuntu container: no Python, no pipx, no gh until apt puts them there, and no
+    # systemd user manager — so the scheduler defaults to "none", with its guidance printed
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    timeout-minutes: 20
+    steps:
+      - name: the host packages a new user installs first
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git python3 python3-venv pipx gh ca-certificates >/dev/null
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: a new user, with a copy of this checkout and nothing else
+        run: |
+          useradd -m -s /bin/bash someone
+          git config --global --add safe.directory '*'
+          git clone -q "$GITHUB_WORKSPACE" /home/someone/asf
+          git -C /home/someone/asf fetch -q --tags "$GITHUB_WORKSPACE"
+          git -C /home/someone/asf checkout -q "$GITHUB_SHA"
+          chown -R someone /home/someone/asf
+      - name: install from zero to a green doctor
+        run: |
+          su - someone -c "env -u GH_TOKEN -u GITHUB_TOKEN bash /home/someone/asf/tools/install-clean.sh $GITHUB_SHA"
+
+  install-clean-macos:
+    # a hosted macOS runner with a fresh HOME: no ~/.ASF, no gh login, no Claude login; the
+    # scheduler defaults to launchd and its clocks are installed and read back for real
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: install from zero to a green doctor
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          command -v pipx >/dev/null || brew install pipx
+          env -u GH_TOKEN -u GITHUB_TOKEN bash tools/install-clean.sh "$GITHUB_SHA"
+      - name: take the clocks back out
+        if: always()
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v asf >/dev/null && asf uninstall --product example || true

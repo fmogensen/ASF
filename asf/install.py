@@ -100,6 +100,13 @@ class Step:
         self.abort = abort
 
 
+#: A step's status that means "a person must answer first", not "broken" (F-0109): the hooks
+#: step withheld a write to a file the product's repo tracks. Not an int, so no step's own exit
+#: code can be mistaken for it. Recorded as ``WITHHELD`` beside ``FAILED``; the run still exits
+#: non-zero — the install is not complete until answered.
+WITHHELD = 'withheld'
+
+
 def run_steps(steps, out=print):
     """Runs each :class:`Step` in order, printing ``<label>: <detail>`` — ``detail`` is
     ``ok`` / ``wrote …`` / ``already in place`` / ``repaired …`` on success, else
@@ -107,13 +114,16 @@ def run_steps(steps, out=print):
     other failure is recorded and the rest still runs. Ends with a summary line naming every
     failed step, and returns 0 only when every step that ran passed — the bootstrap's own
     discipline, moved here without change."""
-    failed = []
+    failed, withheld = [], []
     ran = 0
     for step in steps:
         rc, detail = step.fn()
         ran += 1
         if rc == 0:
             out(f'{step.label}: {detail}')
+        elif rc == WITHHELD:
+            out(f'{step.label}: WITHHELD {detail}')
+            withheld.append(f'{step.label}: {detail}')
         else:
             out(f'{step.label}: FAILED {detail} (exit {rc})')
             failed.append(f'{step.label} (exit {rc})')
@@ -121,9 +131,11 @@ def run_steps(steps, out=print):
                 break
     out('')
     out('asf install: summary')
-    if failed:
+    if failed or withheld:
         for line in failed:
             out(f'  FAILED {line}')
+        for line in withheld:
+            out(f'  WITHHELD {line}')
         return 1
     out(f'  every step passed ({ran}/{len(steps)})')
     return 0
@@ -323,12 +335,40 @@ def _doctor_red_keys(product_name):
 
 # ---- step 7: the hooks ------------------------------------------------------------
 
+def _ask_tty(question):
+    """The answer to ``question`` read from the controlling terminal, never stdin — under
+    ``curl … | bash`` stdin is the script itself. None when there is no terminal."""
+    try:
+        with open('/dev/tty', 'r+', encoding='utf-8') as tty:
+            tty.write(question)
+            tty.flush()
+            return tty.readline().strip()
+    except OSError:
+        return None
+
+
 def _step_hooks(args):
     """Step 7 — ``asf hooks install --product <p>``, in-process. Idempotent because
-    ``hooks.merge`` merges and keeps every unrelated key (``asf/hooks.py:252-272``)."""
+    ``hooks.merge`` merges and keeps every unrelated key. A write to a file the product's repo
+    tracks is the approval matrix's ``touch_security`` (F-0109): the plan is printed, and unless
+    ``--approve``/``--yes`` already answered, the operator is asked once on the terminal; off a
+    terminal the write is withheld (``WITHHELD``, the hold in the approvals ledger) and every
+    other hook is still written."""
     product = env.load_product(args.product)
-    rc, message = hooks.install(product)
+    approve = bool(getattr(args, 'approve', False) or args.yes)
+    rows = hooks.plan(product)
+    if not approve and hooks.gated(product, rows):
+        print(hooks.format_plan(rows))
+        bearing = hooks.approval_bearing(rows)
+        answer = _ask_tty(f'install: {len(bearing)} hook file(s) above are tracked in the '
+                          f'product repo (touch_security is {hooks.gate_level(product)}) — '
+                          'write them? [y/N] ')
+        approve = (answer or '').lower() in ('y', 'yes')
+    rc, message = hooks.install(product, approve=approve)
     print(message, file=sys.stderr if rc else sys.stdout)
+    if rc == hooks.WITHHELD_RC:
+        return WITHHELD, (f'tracked hook file(s) not written — asf hooks install --product '
+                    f'{args.product} --approve')
     return rc, ('ok' if rc == 0 else 'see NEEDS OPERATOR above')
 
 
@@ -356,7 +396,17 @@ def _step_scheduler(args):
     (``scheduler_install_verified``, the bootstrap's own retry, behaviour intact). With
     ``--scheduler none`` there is nothing to install or read back (PD10)."""
     if args.scheduler == 'none':
+        print(f'install: no scheduler — no clock will tick {args.product}; run '
+              f'`asf tick --product {args.product}` by hand, or re-run with --scheduler '
+              f'{default_scheduler(probe=False)} on a host that has one '
+              f'({_scheduler_guidance()})')
         return 0, 'already in place'
+    ok, detail = doctor.check_scheduler(env.load_config())
+    if not ok:
+        print(f'install: NEEDS OPERATOR: {detail} — ASF clocks are not installed beside a live '
+              f'pre-ASF job (two factories would tick one product); see "Retiring a pre-ASF '
+              f'scheduler" in docs/guide/troubleshooting.md, then re-run', file=sys.stderr)
+        return 1, 'a pre-ASF job is still live'
     install_ns = argparse.Namespace(scheduler_command='install', product=args.product,
                                     clock=None, label=None, json=False)
     rc = scheduler.cmd_scheduler(install_ns)
@@ -466,13 +516,42 @@ def _tail_lines(dest):
     ]
 
 
+# ---- the scheduler this host can run (F-0109) ----------------------------------------
+
+#: The ``--scheduler`` choices: launchd (macOS), systemd user timers (Linux), cron (printed
+#: only), none.
+SCHEDULERS = ('launchd', 'systemd', 'cron', 'none')
+
+
+def _systemd_user_ok():
+    """Whether ``systemctl --user`` answers here — the systemd connector's own probe."""
+    from asf.connectors import systemd
+    return systemd.user_manager_ok()
+
+
+def default_scheduler(probe=True, platform=None):
+    """``launchd`` on macOS; on Linux ``systemd`` when a user manager answers (``probe``), else
+    ``none``; ``none`` anywhere else."""
+    platform = platform or sys.platform
+    if platform == 'darwin':
+        return 'launchd'
+    if platform.startswith('linux'):
+        if not probe:
+            return 'systemd'
+        return 'systemd' if _systemd_user_ok() else 'none'
+    return 'none'
+
+
+def _scheduler_guidance():
+    if sys.platform == 'darwin':
+        return 'launchd needs a logged-in GUI session'
+    if sys.platform.startswith('linux'):
+        return ('systemd needs a user manager: `systemctl --user status` must answer; on a '
+                'server, `loginctl enable-linger $USER` keeps it running')
+    return 'no scheduler adapter for this platform'
+
+
 # ---- the missing-flag rule (PD9) ------------------------------------------------
-
-def default_scheduler(platform=None):
-    """The clock adapter a new install gets when ``--scheduler`` is not given: launchd on macOS,
-    cron everywhere else — a Linux machine has no launchd."""
-    return 'launchd' if (platform or sys.platform) == 'darwin' else 'cron'
-
 
 def _resolve_missing(args):
     """``--repo``, ``--record`` and ``--scheduler``: a missing one is asked for once on a tty,
@@ -482,7 +561,8 @@ def _resolve_missing(args):
     ``backlog_dir``. Returns False when the run must stop here."""
     interactive = sys.stdin.isatty() and not args.yes
     existing = env.load_file(env.product_path(args.product))
-    defaults = {'repo': os.getcwd(), 'record': existing.get('backlog_dir'), 'scheduler': default_scheduler()}
+    defaults = {'repo': os.getcwd(), 'record': existing.get('backlog_dir'),
+                'scheduler': default_scheduler()}
     for name in ('repo', 'record', 'scheduler'):
         if getattr(args, name):
             continue
@@ -543,8 +623,9 @@ def register(subparsers):
     p.add_argument('--record',
                    help="the record's directory (default: the product file's backlog_dir; asked once)")
     p.add_argument('--record-url', help='cloned into --record only when that directory does not exist')
-    p.add_argument('--scheduler', choices=['launchd', 'cron', 'none'],
-                   help='the clock adapter (default: launchd on macOS, cron elsewhere; asked once)')
+    p.add_argument('--scheduler', choices=list(SCHEDULERS),
+                   help='the clock adapter (default: launchd on macOS, systemd on Linux when '
+                        'its user manager answers, else none; asked once)')
     p.add_argument('--account', action='append', metavar='NAME[:CONFIG_DIR]',
                    help='repeatable; default: detect under <ASF_HOME>/accounts/')
     p.add_argument('--fake-workers', action='store_true', help='backend: fake, and no account')
@@ -553,7 +634,11 @@ def register(subparsers):
     p.add_argument('--allow-checkout', action='store_true',
                    help='configure from a checkout or editable install (refused otherwise)')
     p.add_argument('--yes', action='store_true',
-                   help='never prompt; a missing flag with no default is refused')
+                   help='never prompt; a missing flag with no default is refused; answers the '
+                        'hooks question yes')
+    p.add_argument('--approve', action='store_true',
+                   help='write hook files the product repo tracks without asking (a person '
+                        'answering for touch_security)')
     p.set_defaults(run=cmd_install)
     return p
 

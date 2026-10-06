@@ -187,6 +187,60 @@ class AreaClassTest(unittest.TestCase):
         self.assertIsNone(approvals.area_class(product, 'x'))
 
 
+class InstallHoldTests(unittest.TestCase):
+    """F-0109 §2.6: a hooks install that withholds a tracked write asks ``install/touch_security``
+    in the ledger; ``--approve`` appends the grant before writing; a question a person dropped
+    for the same paths is not asked again."""
+
+    ROWS = [{'kind': 'git-hook', 'action': 'write', 'tracked': True, 'path': '/r/.githooks/pre-push'},
+            {'kind': 'git-hook', 'action': 'write', 'tracked': True, 'path': '/r/.githooks/pre-commit'},
+            {'kind': 'git-hook', 'action': 'write', 'tracked': False, 'path': '/b/.git/hooks/pre-push'}]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.product = Product('demo', {})
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+
+    def bearing(self):
+        return hooks.approval_bearing(self.ROWS)
+
+    def test_a_withheld_write_is_one_refused_line_with_the_sorted_paths(self):
+        with mock.patch.dict(os.environ, {}, clear=False) as e:
+            e.pop('ASF_JOB', None)
+            hooks._record_gate(self.product, self.ROWS, self.bearing(), approve=False)
+        [rec] = approvals.read(self.product)
+        self.assertEqual(rec['event'], 'refused')
+        self.assertEqual(rec['hold'], 'install/touch_security')
+        self.assertEqual(rec['item'], 'install')
+        self.assertEqual(rec['level'], 'human-now')
+        self.assertEqual(rec['job'], 'install')
+        self.assertEqual(rec['tool'], 'hooks install')
+        self.assertEqual(rec['subject'], '/r/.githooks/pre-commit, /r/.githooks/pre-push')
+        self.assertEqual([(h['item'], h['class']) for h in approvals.open_holds(self.product)],
+                         [('install', 'touch_security')])
+
+    def test_approve_appends_the_grant(self):
+        hooks._record_gate(self.product, self.ROWS, [], approve=True)
+        self.assertTrue(approvals.is_granted(self.product, 'install/touch_security'))
+        self.assertEqual(hooks.gated(self.product, self.ROWS), [])  # the grant stands for these paths
+
+    def test_a_grant_for_other_paths_does_not_carry_over(self):
+        hooks._record_gate(self.product, self.ROWS[:1], [], approve=True)
+        self.assertEqual(len(hooks.gated(self.product, self.ROWS)), 2)
+
+    def test_a_dropped_question_is_not_asked_again(self):
+        hooks._record_gate(self.product, self.ROWS, self.bearing(), approve=False)
+        approvals.resolve(self.product, 'install/touch_security', 'dropped')
+        hooks._record_gate(self.product, self.ROWS, self.bearing(), approve=False)
+        refused = [r for r in approvals.read(self.product) if r['event'] == 'refused']
+        self.assertEqual(len(refused), 1)
+
+
 class LedgerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
