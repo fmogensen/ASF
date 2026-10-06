@@ -348,6 +348,15 @@ def pr_list(product=None, sources=None):
     return sources.host.prs()
 
 
+def _gh_json(args, timeout=60, product=None):
+    """No caller left in this module (D3 — every host read now goes through `sources.host`).
+    Kept only so a test fixture outside this Task's footprint
+    (`tests/test_doc_lane_landing.py`'s `Product.discover()`, and `tests/test_review_reader.py`
+    which imports it) can still `mock.patch.object(evidence, "_gh_json", …)` without an
+    `AttributeError` (needs writes: tests/test_doc_lane_landing.py, to drop the mock)."""
+    return [] if not args.startswith("api ") else {}
+
+
 # ---- slugs, verdicts, rounds ----------------------------------------------------------------
 DATE_PREFIX = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-")
 H1_ALIAS = re.compile(r"^#\s+([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\s*[—–-]")
