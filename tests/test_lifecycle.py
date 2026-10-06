@@ -41,6 +41,7 @@ UPDATE_FIELDS = {
     'harvested': ['abc123'],
     'correction': [{'kind': 'gate', 'text': 'FAIL: t', 'at': '2026-01-01T00:01:00Z'}],
     'rounds': [1, 2, 3],
+    'dead_class': ['gone', 'reused', 'unknown'],
 }
 
 
@@ -485,6 +486,20 @@ class LivenessVerdictTests(unittest.TestCase):
     def test_the_vocabulary(self):
         self.assertEqual(set(lc.LIVENESS), {lc.ALIVE, lc.GONE, lc.REUSED, lc.UNKNOWN})
         self.assertLessEqual(set(lc.LIVE_VERDICTS), set(lc.LIVENESS))
+
+
+class GatherLivenessTests(unittest.TestCase):
+    """F-0234 §3: `gather`'s new `liveness=` fills `Evidence.liveness` — a null default like
+    every other field (P2), so a caller that asks nothing of it changes nothing it reads."""
+    RUN = {'job': 'j', 'pid': 1, 'started': 't'}
+
+    def test_no_liveness_callable_leaves_the_field_empty(self):
+        ev = lc.gather(None, self.RUN, alive=lambda pid: True)
+        self.assertEqual(ev.liveness, '')
+
+    def test_a_liveness_callable_fills_the_field(self):
+        ev = lc.gather(None, self.RUN, alive=lambda pid: True, liveness=lambda pid: lc.GONE)
+        self.assertEqual(ev.liveness, lc.GONE)
 
 
 class NoLandingRunInvariants(unittest.TestCase):

@@ -156,6 +156,62 @@ def alive_for(product, runs, session_source=None):
     return observe.identity_alive(observed, runs, **kw)
 
 
+def liveness_for(product, runs, session_source=None):
+    """``callable(pid) -> one of lifecycle.LIVENESS`` (F-0234): the class a run's pid answers to,
+    on the same observation :func:`alive_for` reads. When the source is unreadable the fallback
+    is the OS answer in the card's own vocabulary (PD6) — never ``UNKNOWN``, which would defer
+    every run in the factory for as long as ``ps`` stays unreadable, and agrees exactly with
+    :func:`alive_for`'s own ``pid_alive`` fallback so the two callables never disagree on a pid."""
+    observed, why, kw = _observe(product, runs, session_source)
+    if why:
+        return lambda pid: lifecycle.ALIVE if pid_alive(pid) else lifecycle.GONE
+    return observe.liveness_for(observed, runs, **kw)
+
+
+def dead_census(product, days=14, now=None):
+    """``{'days', 'runs', 'by_class': {word: n}, 'unclassified': n}`` over the registry's
+    ``dead pid`` runs ended within the last ``days`` days (F-0234) — the ledger folded the way
+    :func:`asf.workers.retention.census` folds branches (P17), every run of every job, not just
+    each job's latest. ``unclassified`` counts a death with no ``dead_class``: a row written
+    before this card landed, and not an error."""
+    now = time.time() if now is None else now
+    since = now - days * 86400
+    by_class = {word: 0 for word in lifecycle.LIVENESS}
+    unclassified = runs = 0
+    for rs in lifecycle._folded(pool_mod.sessions_path(product)).view.values():
+        for r in rs:
+            if r.get('end_reason') != lifecycle.DEAD_PID:
+                continue
+            ended = cloud._parse_ts(r.get('ended'))
+            if ended is None or ended < since:
+                continue
+            runs += 1
+            cls = r.get('dead_class')
+            if cls in by_class:
+                by_class[cls] += 1
+            else:
+                unclassified += 1
+    return {'days': days, 'runs': runs, 'by_class': {k: v for k, v in by_class.items() if v},
+            'unclassified': unclassified}
+
+
+def dead_census_line(data):
+    """``(ok, 'dead sessions: 11 in 14 days — gone 6, reused 1, unknown 4')`` off a
+    :func:`dead_census` dict. ``ok`` is False while any death in the window is ``unknown`` — the
+    class this card exists to drive to zero, so a row that reads ok while it stands would hide
+    the card's own remaining work. Formats the stored data; measures nothing."""
+    days, runs = data['days'], data['runs']
+    if not runs:
+        return True, f'dead sessions: 0 in {days} days'
+    by_class, unclassified = data.get('by_class') or {}, data.get('unclassified') or 0
+    order = {word: i for i, word in enumerate(lifecycle.LIVENESS)}
+    parts = [f'{cls} {n}' for cls, n in sorted(by_class.items(), key=lambda cn: order[cn[0]])]
+    if unclassified:
+        parts.append(f'unclassified {unclassified}')
+    ok = not by_class.get(lifecycle.UNKNOWN)
+    return ok, f"dead sessions: {runs} in {days} days — {', '.join(parts)}"
+
+
 def remote_retire(run):
     """Disable an ended ``claude-remote`` run's routine — :func:`asf.workers.remote.retire`, the
     one call :func:`asf.workers.cloud.stop` already makes (once per token, a refusal is False)."""
@@ -683,8 +739,17 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
     sessions = pool_mod.load_sessions(product)
     if items is None:
         items = record_items(product)
+    liveness = None
     if alive is None:
-        alive = alive_for(product, sessions.values(), session_source)
+        # one `_observe` (one `ps axeww`) feeds both callables (PD5) — a second, independent
+        # `liveness_for` call here would read the tick's one most expensive thing twice
+        observed, why, kw = _observe(product, sessions.values(), session_source)
+        if why:
+            alive = pid_alive
+            liveness = lambda pid: lifecycle.ALIVE if pid_alive(pid) else lifecycle.GONE  # noqa: E731
+        else:
+            alive = observe.identity_alive(observed, sessions.values(), **kw)
+            liveness = observe.liveness_for(observed, sessions.values(), **kw)
     def steps(job, s, found):
         # one run's pass, each publish_gap a yield: run_steps makes the publishes of runs on
         # different branches and worktrees at once, and resumes every run in the ledger's order
@@ -748,7 +813,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             if not closed:
                 yield from republish_steps(product, registry, job, s, alive, found)
             return
-        ev = lifecycle.gather(product, s, alive=alive)
+        ev = lifecycle.gather(product, s, alive=alive, liveness=liveness)
         ev = file_review(product, job, s, ev, alive, found)
         reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
         if reason is None:
@@ -763,8 +828,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         if retry:  # the repo's own pre-push hook refused it: its output, no round spent
             reason = f'failed: {retry[0]}: {retry[1]}'
         now = pool_mod.now_iso()
+        # the class is only ever the class of a death (F-0234): a retry or a hook refusal above
+        # may have turned `reason` into something other than DEAD_PID since `ev` was gathered
+        dead_class = (ev.liveness or None) if reason == lifecycle.DEAD_PID else None
         pool_mod.update_session(product, job, ended=now, end_reason=reason,
-                                runtime_session=runtime_mod.runtime_session(s.get('log')) or None)
+                                runtime_session=runtime_mod.runtime_session(s.get('log')) or None,
+                                dead_class=dead_class)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
         pushes, defect = pushlog.defect(product, s)

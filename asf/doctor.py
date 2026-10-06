@@ -1432,6 +1432,9 @@ def run(product_name):
     branches = check_branches(product)
     if branches:
         rows.append(('branches', False, branches[0], branches[1]))
+    dead = check_dead_sessions(product)
+    if dead:
+        rows.append(('dead sessions', False, dead[0], dead[1]))
     return rows
 
 
@@ -1528,6 +1531,18 @@ def check_branches(product):
     from asf.workers import retention
     try:
         return retention.doctor_line(product)
+    except (OSError, ValueError):
+        return None
+
+
+def check_dead_sessions(product):
+    """``(ok, 'dead sessions: N in 14 days — …')`` — the window's ``dead pid`` runs by the class
+    F-0234 writes on them (:func:`asf.workers.health.dead_census_line`), or None when the ledger
+    could not be read. ``ok`` is False while any death in the window is ``unknown`` — a count of
+    things that already happened is not a broken installation (C8), so the row is non-required."""
+    from asf.workers import health
+    try:
+        return health.dead_census_line(health.dead_census(product))
     except (OSError, ValueError):
         return None
 
