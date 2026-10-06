@@ -336,20 +336,27 @@ def detect_metric(events, start, end, cfg):
 
 # ------------------------------------------------------------------ 5. cloud --
 
-DEAD = ('dead', 'failed', 'stopped', 'stalled', 'killed')
-TIMEOUT = ('timeout', 'timed out')
+TIMEOUT = 'timeout'
+TIMEOUT_REASONS = (TIMEOUT, 'timed out')
+
+
+def _states():
+    from asf.workers import lifecycle
+    return lifecycle.FINISHED, lifecycle.DEAD
+
+
+FINISHED, DEAD = _states()
 
 
 def outcome(run):
-    """``finished`` | ``dead`` | ``timeout`` for one ended run."""
-    reason = str(getattr(run, 'end_reason', '') or '').strip().lower()
+    """:data:`FINISHED` | :data:`DEAD` | :data:`TIMEOUT` for one ended run: a landed run finished;
+    a timeout is its own class; any other run :func:`asf.scorecard.score.is_dead` names is dead."""
+    from asf.scorecard import score
     if getattr(run, 'landed', False):
-        return 'finished'
-    if reason.startswith(TIMEOUT):
-        return 'timeout'
-    if reason.startswith(DEAD):
-        return 'dead'
-    return 'finished'
+        return FINISHED
+    if score.failure_class(getattr(run, 'end_reason', '')).startswith(TIMEOUT_REASONS):
+        return TIMEOUT
+    return DEAD if score.is_dead(run) else FINISHED
 
 
 def lane_outcomes(runs):
@@ -357,8 +364,8 @@ def lane_outcomes(runs):
     c = collections.Counter(outcome(r) for r in runs)
     priced = [r.usd for r in runs if _num(getattr(r, 'usd', None))]
     mins = sorted(r.minutes for r in runs if _num(getattr(r, 'minutes', None)))
-    return {'runs': n, 'finished': _rate(c['finished'], n), 'dead': _rate(c['dead'], n),
-            'timeout': _rate(c['timeout'], n), 'median_min': percentile(mins, 0.5),
+    return {'runs': n, FINISHED: _rate(c[FINISHED], n), DEAD: _rate(c[DEAD], n),
+            TIMEOUT: _rate(c[TIMEOUT], n), 'median_min': percentile(mins, 0.5),
             'usd_per_run': round(sum(priced) / len(priced), 2) if priced else None}
 
 
@@ -373,10 +380,10 @@ def cloud_metric(runs, start, end, cfg):
         if not v['runs']:
             return f'{name}: none'
         usd = 'n/a' if v['usd_per_run'] is None else f"${v['usd_per_run']:,.2f}"
-        return (f"{name} {v['runs']} runs: {v['finished'] * 100:.0f} % finished, "
-                f"{v['dead'] * 100:.0f} % dead, {v['timeout'] * 100:.0f} % timeout, "
+        return (f"{name} {v['runs']} runs: {v[FINISHED] * 100:.0f} % finished, "
+                f"{v[DEAD] * 100:.0f} % dead, {v[TIMEOUT] * 100:.0f} % timeout, "
                 f"median {v['median_min'] if v['median_min'] is not None else '—'} min, {usd}/run")
-    bad = (c['dead'] or 0) + (c['timeout'] or 0)
+    bad = (c[DEAD] or 0) + (c[TIMEOUT] or 0)
     lim = cfg.get('cloud_dead_max')
     st = ALARM if lim is not None and bad > lim else OK
     return _row('cloud', st, side('cloud', c) + '; ' + side('local', l), value=round(bad, 3),

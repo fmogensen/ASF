@@ -127,9 +127,9 @@ class CloudTest(unittest.TestCase):
                 run(at(40), 'timeout', cloud=True), run(at(30), landed=True), run(at(20), 'stalled')]
         row = tp.cloud_metric(runs, START, END, dict(CFG, cloud_dead_max=0.5))
         self.assertEqual(row['cloud']['runs'], 3)
-        self.assertEqual((row['cloud']['dead'], row['cloud']['timeout']), (0.333, 0.333))
+        self.assertEqual((row['cloud'][tp.DEAD], row['cloud'][tp.TIMEOUT]), (0.333, 0.333))
         self.assertEqual(row['cloud']['usd_per_run'], 1.5)
-        self.assertEqual(row['local']['dead'], 0.5)
+        self.assertEqual(row['local'][tp.DEAD], 0.5)
         self.assertEqual(row['status'], tp.ALARM)
 
     def test_unpriced_runs_say_na_for_dollars(self):
