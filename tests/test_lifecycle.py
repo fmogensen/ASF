@@ -468,13 +468,28 @@ class JudgementInvariants(unittest.TestCase):
                 if verdict == lc.FINISHED:
                     self.assertTrue(ev.pushed)
                     self.assertEqual(ev.result, OK)
-                if ev.result == OK and not ev.pushed:
+                if ev.result == OK and not ev.pushed and not ev.alive:
                     self.assertEqual(verdict, 'failed: ' + lc.push_gap(ev))
 
     def test_no_result_is_running_while_alive_and_dead_pid_after(self):
         for ev in evidences():
             if ev.result is None:
                 self.assertEqual(lc.judge(self.RUN, ev), None if ev.alive else lc.DEAD_PID)
+
+    def test_a_live_pid_is_never_judged(self):
+        # F-0160: a result record while the process is up is still working — ok result, error
+        # result and every combination of branch evidence in evidences()
+        for ev in evidences():
+            if ev.alive:
+                with self.subTest(ev=ev):
+                    self.assertIsNone(lc.judge(self.RUN, ev))
+
+    def test_classify_and_judge_agree_on_working(self):
+        # the agreement sweep: classify says `working` exactly when judge returns None
+        for ev in evidences():
+            with self.subTest(ev=ev):
+                self.assertEqual(lc.classify(self.RUN, ev).name == lc.WORKING,
+                                 lc.judge(self.RUN, ev) is None)
 
     def test_a_run_with_no_branch_is_judged_on_the_result_alone(self):
         run = {'job': 'j', 'pid': 1, 'started': 't'}
@@ -810,6 +825,20 @@ class SessionStateInvariants(unittest.TestCase):
         honest = dict(self.RUN, ended='t2', end_reason=f'{lc.DEAD}: {lc.NO_RECORD}')
         self.assertEqual(lc.classify(honest, lc.Evidence()).name, lc.DEAD)
         self.assertEqual(lc.classify(honest, ev).name, lc.ENDED_AWAITING_TICK)
+
+    def test_pd1b_a_dead_pid_run_whose_pid_answers_alive_again_keeps_its_end_reason(self):
+        # F-0160: `judge` now returns None for a live pid, and the ledger branch's `result=` must
+        # not render that None — the run's own recorded `end_reason` is what it falls back to
+        dead_pid = dict(self.RUN, ended='t2', end_reason=lc.DEAD_PID)
+        ev = lc.Evidence(result=OK, alive=True, remote_sha='s', head_on_remote=True,
+                         has_commits=True)
+        self.assertIsNone(lc.judge(dead_pid, ev))
+        status = lc.classify(dead_pid, ev)
+        self.assertEqual(status.result, lc.DEAD_PID)
+        self.assertNotIn('None', status.label)
+        # with the pid gone (alive unset, the default) today's behaviour is unchanged
+        gone_ev = lc.Evidence(result=OK, remote_sha='s', head_on_remote=True, has_commits=True)
+        self.assertEqual(lc.classify(dead_pid, gone_ev).result, lc.judge(dead_pid, gone_ev))
 
     def test_classify_returns_a_named_state_over_generated_runs_and_evidence(self):
         for seed in range(100):

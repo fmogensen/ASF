@@ -567,6 +567,34 @@ class WorktreeSetupProseTests(unittest.TestCase):
             self.assertIn(needle, section)
 
 
+class SessionLivenessProseTests(unittest.TestCase):
+    """F-0160: the operating guide's health row and session table state that a result while the
+    pid is alive is still working — read from the checkout, not a fixture."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def test_health_row_names_stopping_a_process_not_the_old_rule(self):
+        text = self._read('docs/guide/operating.md')
+        row = [l for l in text.splitlines() if l.startswith('| `health`')][0]
+        self.assertIn('stop one that will not exit', row)
+        self.assertNotIn('end finished or dead sessions', row)
+
+    def test_working_and_finished_rows_still_say_what_they_say(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn('its process is alive', text)
+        self.assertIn('its process exited after writing a success result', text)
+
+    def test_holds_a_slot_paragraph_names_a_result_while_the_process_is_up(self):
+        text = self._read('docs/guide/operating.md')
+        self.assertIn('Neither a finished nor a dead session holds a slot', text)
+        section = text.split('Neither a finished nor a dead session holds a slot', 1)[1]
+        section = section.split('\n\n', 1)[0]
+        self.assertIn('still up', section)
+        self.assertIn('still holds its slot', section)
+
+
 class ModelRoutingProseTests(unittest.TestCase):
     """F-0211: the product-config guide documents `conventions.models` — the three-label routing
     a job kind and item class run on — and the built-in table is quoted from `asf doctor` itself

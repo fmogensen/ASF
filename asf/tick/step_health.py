@@ -1,7 +1,8 @@
 """asf.tick.step_health — the tick's ``health`` step: reconcile the sessions, then look for stalls.
 
-``workers.health(product, fix=True)`` ends the sessions whose log carries a result or whose pid is
-gone and reaps the worktrees that pass the reap rule; ``workers.stall(product)`` then lists the
+``workers.health(product, fix=True)`` ends the sessions whose pid is gone — on a result, or on
+nothing at all (``dead pid``) — and stops a process that wrote its result and will not exit, and
+reaps the worktrees that pass the reap rule; ``workers.stall(product)`` then lists the
 live sessions that went silent (``STALL``) or lost their pid (``DEAD``). Both print their own
 lines (``ended`` / ``orphan`` / ``reaped`` / ``keep`` …, ``STALL`` / ``DEAD``).
 

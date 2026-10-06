@@ -77,14 +77,22 @@ def load_acks(product):
 
 
 def classify(session, now, silent_min, alive, verdict=None):
-    """``STALL`` | ``DEAD`` | ``STUCK`` | None for one live session."""
+    """``STALL`` | ``DEAD`` | ``STUCK`` | None for one live session.
+
+    A result is not the end (F-0160): a pid **gone** after one is finished awaiting health's tick
+    (:func:`asf.workers.lifecycle.finished_unrecorded`), never ``DEAD``; a pid still **alive**
+    after one is judged by silence like any other live run, which is how a process
+    :func:`asf.workers.health.settle_quiesced` could not stop reaches an operator. A closed run is
+    judged by silence alone — ``STUCK`` asks whether a session is moving, which a run that has
+    written its result is not trying to do."""
     log = session.get('log')
-    if runtime_mod.read_result(log) is not None:
-        return None
+    result = runtime_mod.read_result(log)
     if not alive(session.get('pid')):
-        return 'DEAD'
+        return None if result is not None else 'DEAD'
     if cloudpid.is_token(session.get('pid')):
         return None  # a cloud session's log is quiet by design: its time limit is the lane's
+    if result is not None:
+        verdict = None
     try:
         mtime = os.path.getmtime(log)
     except (OSError, TypeError):

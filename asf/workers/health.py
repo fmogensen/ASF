@@ -2,7 +2,8 @@
 
 For every live session in ``sessions.jsonl``:
 
-* its log's last line is a result → ended, ``end_reason: finished`` — but only once the job's
+* its pid is gone and its log's last run closed on a result → ended, ``end_reason: finished`` — a
+  result while the pid is alive is still working (F-0160) — but only once the job's
   branch is actually pushed (``origin/<branch>`` exists and contains the worktree's HEAD); an
   ``ok`` result that never pushed ends ``failed: not pushed: <n> uncommitted file(s), <m>
   unpushed commit(s)`` instead, so the item it worked stays open rather than looking done forever
@@ -18,6 +19,10 @@ For every live session in ``sessions.jsonl``:
 * a run ended ``failed: not pushed`` is held like a red gate — a ``correction`` on the run and a
   round on the item — so the feeder's FIX → CORRECT row sends the next session back to the same
   worktree to commit and push what is there (B-0051, B-0052).
+
+A live run whose process wrote its result and will not exit is **stopped** before anything is
+judged (``settle_quiesced``), and an ended run's lingering process after (``settle_ended``) — a
+run is never ended on a live pid (F-0160).
 
 Then the worktrees under ``~/.ASF/state/<product>/worktrees/``: one with no session at all is an
 ``orphan``; one whose session has ended is a reap candidate. With ``fix=True`` a worktree is
@@ -92,6 +97,11 @@ pid_alive = lifecycle.pid_alive
 LINGER_GRACE_S = lifecycle.LINGER_GRACE_S
 #: seconds between the SIGTERM and the SIGKILL of a lingering process
 STOP_WAIT_S = 5
+#: seconds a **live** run's log must have been quiet, its last run closed on a result, before
+#: health stops the process that will not exit (F-0160). The same grace an ended run's process
+#: gets (:data:`LINGER_GRACE_S`), anchored on the log's last write because a live run has no
+#: ``ended`` stamp to measure from.
+QUIESCE_GRACE_S = LINGER_GRACE_S
 
 
 def record_items(product):
@@ -267,6 +277,17 @@ def stop_process(pid, wait_s=STOP_WAIT_S):
     return 'SIGKILL'
 
 
+def own_process(run, pid, observed_by_pid, cmdline, binary):
+    """True when the process at ``pid`` is provably the one the factory launched for ``run``: an
+    observed ``asf`` session sits there carrying the run's own ``ASF_SESSION``, and its command
+    line is the runtime binary with ``-p``. A run with no ``session``, a process with another or
+    no ``ASF_SESSION`` (an interactive session), or any other command line is never touched."""
+    o = observed_by_pid.get(pid)
+    if o is None or o.owner != 'asf' or not run.get('session') or o.session != run.get('session'):
+        return False
+    return is_print_worker(cmdline(pid), binary)
+
+
 def settle_ended(product, sessions, now=None, fix=True, session_source=None, retire=None,
                  cmdline=None, wait_s=STOP_WAIT_S, grace_s=LINGER_GRACE_S):
     """T-0196: an ended run is finished, whatever its pid still answers. ``[(job, what, detail)]``.
@@ -322,10 +343,7 @@ def settle_ended(product, sessions, now=None, fix=True, session_source=None, ret
     cmdline = cmdline or command_line
     binary = (cfg.get('worker_pool') or {}).get('binary') or runtime_mod.DEFAULT_BINARY
     for job, run, pid in local:
-        o = by_pid.get(pid)
-        if o is None or o.owner != 'asf' or o.session != run.get('session'):
-            continue
-        if not is_print_worker(cmdline(pid), binary):
+        if not own_process(run, pid, by_pid, cmdline, binary):
             continue
         mins = int((now - cloud._parse_ts(run['ended'])) // 60)
         if not fix:
@@ -335,6 +353,86 @@ def settle_ended(product, sessions, now=None, fix=True, session_source=None, ret
         found.append((job, 'stopped', f'pid {pid} ({how}): ended {run.get("end_reason")} '
                                       f'{mins}m ago, its process still running'))
     return found
+
+
+def quiet_for(log_path, now):
+    """Seconds since ``log_path`` was last written, or None when there is no readable log."""
+    try:
+        return now - os.path.getmtime(log_path)
+    except (OSError, TypeError):
+        return None
+
+
+def settle_quiesced(product, sessions, now=None, fix=True, session_source=None, cmdline=None,
+                    wait_s=STOP_WAIT_S, grace_s=QUIESCE_GRACE_S):
+    """F-0160: a live run whose process will not exit is stopped, not ended on paper.
+    ``[(job, what, detail)]``, the same shape :func:`settle_ended` returns.
+
+    A candidate is a run with no ``ended`` line, a local pid, a log whose last run has closed on a
+    result (:func:`asf.workers.runtime.read_result`) and no write for ``grace_s``. It is stopped
+    (SIGTERM, then SIGKILL after ``wait_s``) only when :func:`own_process` holds — ``stopped``;
+    without ``fix`` it is only listed ``lingering``. Nothing is written to the ledger: the run is
+    ended by :func:`asf.workers.lifecycle.judge` on the next gather, on its own evidence, once the
+    pid it names is genuinely gone.
+
+    A cloud run is never a candidate: its log is quiet by design, and
+    :func:`asf.workers.cloud.sync` — which is what appends a cloud result line at all — records
+    the token terminal in the same pass, so a cloud result never coexists with a live token.
+    """
+    now = time.time() if now is None else now
+    found, local = [], []
+    for job, run in sessions.items():
+        pid = run.get('pid')
+        if run.get('ended') or cloudpid.is_token(pid) or not run.get('session'):
+            continue
+        if runtime_mod.read_result(run.get('log')) is None:
+            continue
+        quiet = quiet_for(run.get('log'), now)
+        if quiet is None or quiet < grace_s:
+            continue
+        try:
+            local.append((job, run, int(pid)))
+        except (TypeError, ValueError):
+            continue
+    if not local:
+        return found
+    cfg = spawn_mod.load_cfg()
+    observed, why = observe.read(cfg, [], source=session_source)
+    if why:
+        return found
+    by_pid = {}
+    for o in observed:
+        try:
+            by_pid[int(o.pid)] = o
+        except (TypeError, ValueError):
+            continue
+    cmdline = cmdline or command_line
+    binary = (cfg.get('worker_pool') or {}).get('binary') or runtime_mod.DEFAULT_BINARY
+    for job, run, pid in local:
+        if not own_process(run, pid, by_pid, cmdline, binary):
+            continue
+        mins = int(quiet_for(run.get('log'), now) // 60)
+        if not fix:
+            found.append((job, 'lingering', f'pid {pid}: its run closed with a result and its '
+                                            f'log has been quiet {mins}m, still running'))
+            continue
+        how = stop_process(pid, wait_s)
+        found.append((job, 'stopped', f'pid {pid} ({how}): its run closed with a result and its '
+                                      f'log has been quiet {mins}m, still running'))
+    return found
+
+
+def stopped_pids(rows):
+    """The pids a settle pass stopped, from its ``stopped`` rows' detail (``pid <n> …``)."""
+    return {int(d.split()[1]) for _, what, d in rows if what == 'stopped'}
+
+
+def not_alive(alive, pids):
+    """``alive`` with ``pids`` forced dead — what health believes for the rest of a pass in which
+    it stopped them itself."""
+    if not pids:
+        return alive
+    return lambda pid: not (isinstance(pid, int) and pid in pids) and alive(pid)
 
 
 def _git(args, cwd):
@@ -762,6 +860,11 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         else:
             alive = observe.identity_alive(observed, sessions.values(), **kw)
             liveness = observe.liveness_for(observed, sessions.values(), **kw)
+    # F-0160: a live run whose process will not exit is stopped BEFORE anything is judged, so the
+    # pass that frees the seat is the pass that records why — a run is never ended on a live pid
+    quiesced = settle_quiesced(product, sessions, fix=fix, session_source=session_source)
+    found.extend(quiesced)
+    alive = not_alive(alive, stopped_pids(quiesced))
     def steps(job, s, found):
         # one run's pass, each publish_gap a yield: run_steps makes the publishes of runs on
         # different branches and worktrees at once, and resumes every run in the ledger's order
@@ -811,7 +914,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             if s.get('end_reason') == lifecycle.DEAD_PID and not s.get('harvested'):
                 ev = lifecycle.gather(product, s, alive=alive)
                 ev = file_review(product, job, s, ev, alive, found)
-                if ev.result is not None:
+                if ev.result is not None and not ev.alive:  # F-0160: a live pid is not re-judged
                     reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
                     reason, ev, line = yield (product, s, ev, reason, alive)
                     if line:
@@ -939,11 +1042,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
     # T-0196: an ended run is finished — its cloud token settled, its lingering process stopped
     settled = settle_ended(product, sessions, fix=fix, session_source=session_source)
     found.extend(settled)
-    gone_pids = {int(d.split()[1]) for _, what, d in settled if what == 'stopped'}
-    if gone_pids:
-        was_alive = alive
-        alive = lambda pid: (not (isinstance(pid, int) and pid in gone_pids)  # noqa: E731
-                             and was_alive(pid))
+    alive = not_alive(alive, stopped_pids(settled))
     _git(['fetch', '-q', 'origin', product.main], product.repo_dir)
     wdir = spawn_mod.worktrees_dir(product)
     owners = lifecycle.by_worktree(registry)

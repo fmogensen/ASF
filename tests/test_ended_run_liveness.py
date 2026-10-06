@@ -17,6 +17,7 @@ The rule: an ended run's token is settled at once (its routine disabled through 
 its pid, its ``ASF_SESSION``, a ``claude -p`` command line — is stopped once the grace period has
 passed: SIGTERM, then SIGKILL. A process that is not provably the run's own is never touched.
 """
+import json
 import os
 import signal
 import subprocess
@@ -197,6 +198,128 @@ class LocalLingeringProcessTest(Home):
         self.proc.wait(timeout=5)
         self.proc.stdout.close()
         self.assertEqual(self.proc.returncode, -signal.SIGKILL)
+
+
+class QuiescedLiveRunTests(Home):
+    """F-0160: a live run whose process wrote its result and will not exit is stopped, not ended
+    on paper — ``settle_quiesced``."""
+
+    def setUp(self):
+        super().setUp()
+        self.proc = sleeper()
+        self.addCleanup(self._reap)
+
+    def _reap(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait()
+
+    def observed(self, sid=SID):
+        env = {'ASF_SESSION': sid} if sid else {}
+        return observe.FakeSource([{'pid': self.proc.pid, 'ppid': 1, 'env': env}])
+
+    def assert_stopped(self):
+        self.proc.wait(timeout=5)
+        self.assertIsNotNone(self.proc.returncode)
+
+    def assert_running(self):
+        time.sleep(0.05)
+        self.assertIsNone(self.proc.poll())
+
+    def live_run(self, job='review-t-0075', session=SID, pid=None, age=None, extra_init=False):
+        """A live run (no ``ended``) whose log holds one result, aged ``age`` seconds old."""
+        log = os.path.join(self.tmp, f'{job}.jsonl')
+        with open(log, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': 'ok'}) + '\n')
+            if extra_init:
+                f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+        if age is not None:
+            t = time.time() - age
+            os.utime(log, (t, t))
+        pool_mod.append_session(self.product, {
+            'job': job, 'item': 'T-0075', 'kind': 'review', 'account': 'acct-a',
+            'pid': pid if pid is not None else self.proc.pid, 'session': session, 'log': log,
+            'started': '2026-09-26T13:00:00Z'})
+        return log
+
+    def settle(self, source=None, cmdline=None, fix=True):
+        return health_mod.settle_quiesced(
+            self.product, pool_mod.load_sessions(self.product), fix=fix,
+            session_source=source or self.observed(),
+            cmdline=cmdline or (lambda pid: 'claude -p --permission-mode bypassPermissions'),
+            wait_s=2)
+
+    def test_quiet_past_the_grace_is_stopped(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5)
+        found = self.settle()
+        self.assert_stopped()
+        self.assertEqual([(j, w) for j, w, _ in found], [('review-t-0075', 'stopped')])
+
+    def test_within_the_grace_it_is_left_alone(self):
+        self.live_run(age=60)
+        self.assertEqual(self.settle(), [])
+        self.assert_running()
+
+    def test_a_log_whose_mtime_is_now_is_left_alone_however_many_results(self):
+        self.live_run(age=None)
+        self.assertEqual(self.settle(), [])
+        self.assert_running()
+
+    def test_a_second_init_after_the_result_is_never_a_candidate(self):
+        # the nine-result case the card proves: a continuation already started is still running
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5, extra_init=True)
+        self.assertEqual(self.settle(), [])
+        self.assert_running()
+
+    def test_fix_false_lists_lingering_and_touches_nothing(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5)
+        found = self.settle(fix=False)
+        self.assertEqual([(j, w) for j, w, _ in found], [('review-t-0075', 'lingering')])
+        self.assert_running()
+
+    def test_a_cloud_pid_is_never_a_candidate(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5, pid='actions:trig_abc')
+        self.assertEqual(self.settle(), [])
+
+    def test_a_process_carrying_another_session_is_not_the_runs(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5)
+        self.settle(source=self.observed('sample/other@20260927T120000Z'))
+        self.assert_running()
+
+    def test_an_interactive_session_at_the_pid_is_never_touched(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5)
+        self.settle(source=self.observed(None))
+        self.assert_running()
+
+    def test_a_run_with_no_session_id_is_never_touched(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5, session=None)
+        self.settle(source=self.observed(None))
+        self.assert_running()
+
+    def test_a_command_line_that_is_not_claude_p_is_never_touched(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5)
+        self.settle(cmdline=lambda pid: 'claude --resume abc')
+        self.assert_running()
+
+    def test_health_stops_and_ends_a_quiesced_run_in_one_pass(self):
+        self.live_run(age=health_mod.QUIESCE_GRACE_S + 5)
+        lines = []
+        orig = health_mod.command_line
+        health_mod.command_line = lambda pid: 'claude -p --permission-mode bypassPermissions'
+        try:
+            found = health_mod.health(self.product, fix=True, session_source=self.observed(),
+                                      items={}, out=lines.append)
+        finally:
+            health_mod.command_line = orig
+        kinds = {(j, w) for j, w, _ in found if j == 'review-t-0075'}
+        self.assertIn(('review-t-0075', 'stopped'), kinds)
+        self.assertIn(('review-t-0075', 'ended'), kinds)
+        self.assert_stopped()
+        row = pool_mod.load_sessions(self.product)['review-t-0075']
+        self.assertIsNotNone(row.get('ended'))
+        self.assertNotEqual(lifecycle.STOPPED, row.get('end_reason'))
 
 
 if __name__ == '__main__':

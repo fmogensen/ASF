@@ -17,7 +17,7 @@ each step without running anything.
 | step | what it does | typical lines |
 | --- | --- | --- |
 | `record` | in the tick's own clone of the record: CI backfill, derive state from git and CI evidence (`ingest`), mint Tasks from landed plans, file Bugs, roll up metrics and releases, rebuild `index.json`; with `approvals.groom: auto` also apply the adjudicator's answers and groom the inbox | `[record:<part>] 0.8s`, `file-bugs: 0 filed …` |
-| `health` | reconcile the session ledger with what runs: end finished or dead sessions, hold unpushed work, reap worktrees, look for stalls | `ended`, `held`, `reaped`, `stall: none` |
+| `health` | reconcile the session ledger with what runs: end the sessions whose process is gone, stop one that will not exit, hold unpushed work, reap worktrees, look for stalls | `ended`, `held`, `reaped`, `stall: none` |
 | `wave` | say the open holds, then launch what the feeder says — the NEXT table, cut to capacity | `launched <job> <item> → <account> (<model>) pid n`, `waits …` |
 | `prs` | pull-request landing: open a PR per finished branch, then PR hygiene | `prs: opened …`, `prs: landing is fast-forward …` |
 | `harvest` | land finished branches, fast-forward or by merging their PRs (in the background) | `harvest: started in the background`, `landed <branch> → <sha>`, `waiting …`, `held <branch>: …` |
@@ -159,7 +159,9 @@ other`; the finished group only appears when it has rows):
 | **Other** | a session on one of your pool accounts that is not this product's — another product's, or one ASF did not start |
 | **Ended** | sessions that ended yesterday or today, with their result |
 
-Neither a finished nor a dead session holds a slot. The next `health` step records each as one of:
+Neither a finished nor a dead session holds a slot. A session that wrote a result but whose
+process is still up **is** still working and still holds its slot; health stops it after five
+quiet minutes and records the end then. The next `health` step records each as one of:
 
 - `finished` — the session reported success and its branch is on `origin`; harvest takes it next;
 - `failed: not pushed: …` — it said done but left work uncommitted or unpushed; held and sent back;

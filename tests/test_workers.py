@@ -1920,6 +1920,40 @@ class TestHealth(Home):
         self.assertEqual(len(whole), 1, calls)
         self.assertEqual(len(calls) - 1, len(before) - 3, (before, calls))
 
+    def test_f0160_a_live_pid_with_a_result_holds_its_seat_until_the_pid_is_gone(self):
+        # F-0160: a result record while the process is up is still working — no `ended` line, the
+        # seat still held — until the pid is actually gone, in which case it ends on its own
+        # evidence in the very next pass
+        rec = self.spawn('live-result', {'ok': True, 'pid': 12})
+        self.commit(rec['worktree'])
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: True, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'live-result' and f[1] == 'ended'])
+        s = pool_mod.load_sessions(self.product)['live-result']
+        self.assertFalse(s.get('ended'))
+        self.assertTrue(lifecycle.occupies(s, lambda pid: True))
+        self.assertFalse([f for f in found
+                          if f[0] == 'live-result' and f[1] in ('reaped', 'reapable')])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('live-result', 'ended', 'finished'), found)
+
+    def test_pd1a_a_dead_pid_rejudge_is_not_revisited_while_the_pid_answers_again(self):
+        # F-0160: the B-0028 re-judge path must not re-judge a pid that reads alive again — it
+        # stands as `dead pid` until the process is genuinely gone
+        rec = self.spawn('late', {'running': True, 'pid': 12})
+        self.commit(rec['worktree'])
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('late', 'ended', 'dead pid'), found)
+        with open(rec['log'], 'a') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False}) + '\n')
+        found = health_mod.health(self.product, alive=lambda pid: True, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'late' and f[1] == 're-judged'])
+        self.assertEqual(pool_mod.load_sessions(self.product)['late']['end_reason'],
+                         lifecycle.DEAD_PID)
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('late', 're-judged', 'finished'), found)
+
     def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
         rec = self.spawn('late', {'running': True, 'pid': 12})
         self.commit(rec['worktree'])
@@ -2951,6 +2985,52 @@ class TestStall(Home):
         found = stall_mod.stall(self.product, now=now, alive=alive, out=lambda s: None,
                                 sample=False)
         self.assertEqual([(j, st) for j, st, _ in found], [('quiet2', 'STALL')])
+
+    def test_f0160_a_pid_gone_after_a_result_is_not_dead(self):
+        # F-0160: finished-awaiting-health's-tick, never DEAD, and still not STALL
+        self.spawn('gone-result', {'ok': True, 'pid': 50})
+        found = stall_mod.stall(self.product, now=time.time(), alive=lambda pid: False,
+                                out=lambda s: None, sample=False)
+        self.assertFalse([f for f in found if f[0] == 'gone-result'])
+
+    def test_f0160_a_live_run_with_a_result_past_silent_min_is_stall(self):
+        # the process settle_quiesced could not stop reaches an operator as STALL (D7)
+        rec = self.spawn('lingering-result', {'ok': True, 'pid': 51})
+        now = time.time()
+        os.utime(rec['log'], (now - 31 * 60, now - 31 * 60))
+        found = stall_mod.stall(self.product, now=now, alive=lambda pid: True,
+                                out=lambda s: None, sample=False)
+        self.assertIn(('lingering-result', 'STALL'), [(j, st) for j, st, _ in found])
+
+    def test_f0160_the_same_run_inside_the_limit_is_nothing(self):
+        self.spawn('fresh-result', {'ok': True, 'pid': 52})
+        found = stall_mod.stall(self.product, now=time.time(), alive=lambda pid: True,
+                                out=lambda s: None, sample=False)
+        self.assertFalse([f for f in found if f[0] == 'fresh-result'])
+
+    def test_f0160_stuck_is_suppressed_for_a_run_that_has_closed(self):
+        # D9: a run that has written its result is not trying to make progress
+        self.spawn('closed-loop', {'ok': True, 'pid': 103})
+        now = time.time()
+        self._prime('closed-loop', now, same=True)
+        found = stall_mod.stall(self.product, now=now, alive=lambda pid: True,
+                                out=lambda s: None, sample=False)
+        self.assertFalse([f for f in found if f[0] == 'closed-loop' and f[1] == 'STUCK'])
+
+    def test_f0160_stuck_still_fires_for_a_live_run_with_no_result(self):
+        # the suppression is scoped to a closed run — an open one is still judged on progress
+        self.spawn('open-loop', {'running': True, 'pid': 104})
+        now = time.time()
+        self._prime('open-loop', now, same=True)
+        found = stall_mod.stall(self.product, now=now, alive=lambda pid: True,
+                                out=lambda s: None, sample=False)
+        self.assertIn(('open-loop', 'STUCK'), [(j, st) for j, st, _ in found])
+
+    def test_f0160_a_cloud_pid_with_a_result_is_still_exempt(self):
+        self.spawn('cloud-done', {'ok': True, 'pid': 'actions:xyz'})
+        found = stall_mod.stall(self.product, now=time.time(), alive=lambda pid: True,
+                                out=lambda s: None, sample=False)
+        self.assertFalse([f for f in found if f[0] == 'cloud-done'])
 
 
 class LivenessForTests(unittest.TestCase):

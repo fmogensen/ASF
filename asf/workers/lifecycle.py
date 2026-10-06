@@ -2511,6 +2511,16 @@ def lands(run, path=None):
 
 def judge(run, ev, landing=None):
     """The ``end_reason`` health records for a run whose session is over, or None while it runs.
+
+    **A live pid is never judged** (F-0160). A result record is not the end of a session: a job's
+    log may hold several runs (:func:`asf.workers.runtime.read_result`), and between one run's
+    result and the next run's ``init`` the log's last record is a result while the process is
+    still working. Reading that as the end put ``ended`` on a run at its first result and left the
+    process writing for another thirteen minutes, with its seat handed back and its item moved on
+    (2026-09-26, review-t-0075). The pid is the only evidence that distinguishes the last result
+    from the first; health stops a process that has gone quiet and will not exit
+    (:func:`asf.workers.health.settle_quiesced`) rather than recording an end it has not reached.
+
     A result that says ok is ``finished`` only when the branch is pushed; a run with no branch
     (nothing to push) is judged on the result alone. A pushed branch never committed to
     (``ev.has_commits``, the reflog beyond its creation — B-0019's distinction from ``in_trunk``,
@@ -2520,9 +2530,9 @@ def judge(run, ev, landing=None):
     D-0048's loop sends it back to the same session to commit its work or say why there is none."""
     if landing is None:
         landing = lands(run)
+    if ev.alive:
+        return None
     if ev.result is None:
-        if ev.alive:
-            return None
         # the CLI refused the account before its stream began: the refusal is in the raw log
         return AUTH_REASON if account_auth.in_log(run.get('log')) else DEAD_PID
     if not runtime_mod.result_ok(ev.result):
@@ -2585,7 +2595,8 @@ def classify(run, ev, path=None):
             return Status(DEAD, result=STOPPED, reason=STOPPED_BY_OPERATOR, source='ledger')
         if is_dead_reason(reason):
             if ev.result is not None:
-                return Status(ENDED_AWAITING_TICK, result=judge(run, ev, landing=lands(run, path)),
+                return Status(ENDED_AWAITING_TICK,
+                              result=judge(run, ev, landing=lands(run, path)) or reason,
                               source='report')
             return Status(DEAD, reason=NO_RECORD, source='ledger')
         return Status(FAILED, reason=reason, result=reason, source='ledger')
