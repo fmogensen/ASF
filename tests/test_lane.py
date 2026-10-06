@@ -20,7 +20,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import env, gitpush
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest, lane, rebuild_check
 from asf.workers import host, lifecycle
@@ -1923,6 +1923,78 @@ class NamingRewordNeverCostsASession(LaneFixture):
         self.assertIsNone(self.runner().repair_naming(f))
         self.assertEqual(self.tip(), old)
         self.assertTrue(any('under no factory prefix' in l for l in self.lines), self.lines)
+
+
+class ARefusedRewordIsRememberedByItsTip(LaneFixture):
+    """F-0153: 144 log lines in a day — three heads, 48 each, two a tick. The repair kept no
+    memory of a refusal, so every tick re-read, re-reworded, re-pushed and re-logged an
+    unchanging tip."""
+
+    B, AUTHOR = NamingRepair.B, NamingRepair.AUTHOR
+    tip, push_commits, log, sessions = (NamingRepair.tip, NamingRepair.push_commits,
+                                        NamingRepair.log, NamingRepair.sessions)
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def refusing_remote(self, text):
+        """A server-side hook in the bare origin. --no-verify cannot skip it, so this is the one
+        way to stand in for a protected ref; it must go in after the setup pushes."""
+        hook = os.path.join(self.origin, 'hooks', 'pre-receive')
+        with open(hook, 'w', encoding='utf-8') as fh:
+            fh.write('#!/bin/sh\necho "' + text + '" >&2\nexit 1\n')
+        os.chmod(hook, 0o755)
+
+    def counted_pass(self):
+        """One lane pass; the pushes it made."""
+        pushes, real = [], gitpush.push
+
+        def counting(args, cwd, **kw):
+            r = real(args, cwd, **kw)
+            pushes.append(list(args))
+            return r
+        with mock.patch.object(gitpush, 'push', side_effect=counting):
+            lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        return pushes
+
+    def test_a2_a_second_pass_on_the_same_tip_does_no_push_and_logs_nothing_new(self):
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        self.refusing_remote('pre-receive: refs/heads/worker is protected')
+        first = self.counted_pass()
+        self.assertTrue(first)                                    # it tried once
+        memo = self.lane_of(self.B).get('reword_refused') or {}
+        self.assertEqual(memo.get('head'), old)                   # the tip it was refused over
+        self.assertIn('protected', memo.get('why') or '')         # git's own reason, recorded
+        said = list(self.lines)
+
+        self.lines.clear()
+        second = self.counted_pass()
+        self.assertEqual(second, [], second)                      # no push
+        self.assertEqual([l for l in self.lines if 'reword' in l], [])   # nothing new
+        self.assertEqual(self.tip(), old)
+
+        # the reason was logged once, and it was git's stderr
+        self.assertEqual(len([l for l in said if 'reword' in l and 'protected' in l]), 1, said)
+
+    def test_a2_a_moved_tip_retries_once_and_a_pushed_reword_clears_the_memo(self):
+        self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        self.refusing_remote('pre-receive: refs/heads/worker is protected')
+        self.counted_pass()
+        self.assertTrue((self.lane_of(self.B).get('reword_refused') or {}).get('head'))
+        # the writer pushes: a new tip is a new question, and the remote now allows it
+        os.remove(os.path.join(self.origin, 'hooks', 'pre-receive'))
+        sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
+        self.write(self.worker, 'z.txt', 'z\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'tidy again'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', self.B], cwd=self.worker)
+        self.lines.clear()
+        self.assertTrue(self.counted_pass())                      # the moved tip is tried
+        self.assertTrue(any('trees identical — pushed' in l for l in self.lines), self.lines)
+        self.assertIsNone(self.lane_of(self.B).get('reword_refused'))   # cleared by the push
 
 
 class TrunkCommitsNeverReworded(LaneFixture):

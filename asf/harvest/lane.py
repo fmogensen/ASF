@@ -2179,6 +2179,13 @@ class Lane:
             self.results[f['branch']] = result
         return rec
 
+    def memo_refusal(self, f, **fields):
+        """Merge fields onto the branch's lane record, leaving its state and head alone."""
+        rec = dict(f.get('prev') or {}, **fields)
+        self.write(f, rec)
+        f['prev'] = rec
+        return rec
+
     # ---- the in-process pass ------------------------------------------------------------
 
     def advance(self, f):
@@ -2444,6 +2451,9 @@ class Lane:
         if (f.get('refusal') or (None,))[0] != lifecycle.NAMING or not item \
                 or not f.get('head') or not self.repo:
             return None
+        memo = (f.get('prev') or {}).get('reword_refused') or {}
+        if memo.get('head') and memo['head'] == f.get('head'):
+            return DEFERRED          # refused over this tip already: no reword, no push, no line
         if not f.get('kind'):
             # a branch under no factory prefix (the registry knows it, B-0067) is someone else's
             # history: the lane never rewrites it — the naming goes back to its session
@@ -2499,12 +2509,14 @@ class Lane:
                 self.out(f'reword {b}: the branch moved since {old[:9]} was read ({text}) — '
                          f'read again and retried')
                 continue
+            self.memo_refusal(f, reword_refused={'head': old, 'cause': cause, 'why': text,
+                                                  'at': now_iso()})
             if cause == 'lease':
                 self.out(f'reword {b}: deferred — the branch moved under both reads ({text}); '
                          f'a writer is pushing it, the next pass reads it again')
             else:
                 self.out(f'reword {b}: deferred — the push was refused ({cause}: {text}); '
-                         f'trees identical, no session — the next pass tries again')
+                         f'noted at {old[:9]}, no retry until the tip moves')
             return DEFERRED
         H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
         self.out(f'reword {b}: {n} subjects, trees identical — pushed')
@@ -2521,7 +2533,7 @@ class Lane:
             f['correction'] = None
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
-        return self.set(f, PUSHED, f'reworded {n} subjects (naming)')
+        return self.set(f, PUSHED, f'reworded {n} subjects (naming)', reword_refused=None)
 
     def _naming_back(self, f, why):
         """The rewrite cannot be done by the lane: the one line, and the session's correction
