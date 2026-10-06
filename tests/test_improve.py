@@ -148,6 +148,106 @@ class SpendTests(unittest.TestCase):
         self.assertAlmostEqual(sum(r.usd for r in runs), 1.5)  # the first two runs: 0.6 + 0.9
 
 
+def _priced_job(job, cost, logs_dir, kind='coder', model='claude-sonnet-5', pid=1,
+                started='2026-01-01T00:00:00Z', ended='2026-01-01T01:00:00Z'):
+    write_lines(os.path.join(logs_dir, f'{job}.jsonl'), [{'type': 'result', 'total_cost_usd': cost}])
+    return {'job': job, 'kind': kind, 'model': model, 'started': started, 'pid': pid, 'ended': ended}
+
+
+def _cloud_job(job, kind='coder', model='claude-sonnet-5', pid='actions:1',
+               started='2026-01-01T00:00:00Z', ended='2026-01-01T01:00:00Z'):
+    return {'job': job, 'kind': kind, 'model': model, 'started': started, 'pid': pid, 'ended': ended}
+
+
+class CloudCostEstimateTests(unittest.TestCase):
+    """A cloud run's job log never carries ``total_cost_usd`` (no local session accounting), so
+    ``job_spend`` reads ``None`` for it; :func:`measure.ended_runs` fills ``usd`` in from the
+    median of this call's own priced runs sharing the cloud run's ``(kind, model)``, once there
+    are enough of them (``measure.cost_estimate_min_samples``, default 3)."""
+
+    def _runs(self, jobs, logs_dir, cfg=None, **kw):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = os.path.join(d, 'sessions.jsonl')
+            write_lines(ledger, jobs)
+            return measure.ended_runs(None, ledger=ledger, logs_dir=logs_dir, cfg=cfg or {}, **kw)
+
+    def test_a_cloud_run_with_no_price_is_the_median_of_its_kind_and_model(self):
+        with tempfile.TemporaryDirectory() as logs_dir:
+            jobs = [_priced_job('a', 1.0, logs_dir), _priced_job('b', 2.0, logs_dir),
+                    _priced_job('c', 3.0, logs_dir), _cloud_job('cloud')]
+            runs = {r.job: r for r in self._runs(jobs, logs_dir)}
+        self.assertEqual(runs['cloud'].usd, 2.0)
+        self.assertTrue(runs['cloud'].usd_estimated)
+        self.assertTrue(runs['cloud'].cloud)
+
+    def test_a_priced_run_is_never_marked_estimated(self):
+        with tempfile.TemporaryDirectory() as logs_dir:
+            jobs = [_priced_job('a', 1.0, logs_dir), _priced_job('b', 2.0, logs_dir),
+                    _priced_job('c', 3.0, logs_dir), _cloud_job('cloud')]
+            runs = {r.job: r for r in self._runs(jobs, logs_dir)}
+        self.assertFalse(runs['a'].usd_estimated)
+
+    def test_fewer_than_min_samples_leaves_usd_none(self):
+        with tempfile.TemporaryDirectory() as logs_dir:
+            jobs = [_priced_job('a', 1.0, logs_dir), _priced_job('b', 2.0, logs_dir),
+                    _cloud_job('cloud')]
+            runs = {r.job: r for r in self._runs(jobs, logs_dir)}
+        self.assertIsNone(runs['cloud'].usd)
+        self.assertFalse(runs['cloud'].usd_estimated)
+
+    def test_a_local_unpriced_run_is_never_estimated(self):
+        with tempfile.TemporaryDirectory() as logs_dir:
+            jobs = [_priced_job('a', 1.0, logs_dir), _priced_job('b', 2.0, logs_dir),
+                    _priced_job('c', 3.0, logs_dir),
+                    {'job': 'local', 'kind': 'coder', 'model': 'claude-sonnet-5', 'pid': 9,
+                     'started': '2026-01-01T00:00:00Z', 'ended': '2026-01-01T01:00:00Z'}]
+            runs = {r.job: r for r in self._runs(jobs, logs_dir)}
+        self.assertIsNone(runs['local'].usd)
+        self.assertFalse(runs['local'].usd_estimated)
+
+    def test_a_different_kind_or_model_is_not_a_comparable_sample(self):
+        with tempfile.TemporaryDirectory() as logs_dir:
+            jobs = [_priced_job('a', 1.0, logs_dir, kind='review'),
+                    _priced_job('b', 2.0, logs_dir, kind='review'),
+                    _priced_job('c', 3.0, logs_dir, kind='review'),
+                    _cloud_job('cloud', kind='coder')]
+            runs = {r.job: r for r in self._runs(jobs, logs_dir)}
+        self.assertIsNone(runs['cloud'].usd)
+
+    def test_the_min_samples_config_key_lowers_the_bar(self):
+        with tempfile.TemporaryDirectory() as logs_dir:
+            jobs = [_priced_job('a', 1.0, logs_dir), _priced_job('b', 3.0, logs_dir),
+                    _cloud_job('cloud')]
+            runs = {r.job: r for r in self._runs(
+                jobs, logs_dir, cfg={'measure': {'cost_estimate_min_samples': 2}})}
+        self.assertEqual(runs['cloud'].usd, 2.0)
+        self.assertTrue(runs['cloud'].usd_estimated)
+
+    def test_the_min_samples_config_key_can_raise_the_bar_too(self):
+        with tempfile.TemporaryDirectory() as logs_dir:
+            jobs = [_priced_job('a', 1.0, logs_dir), _priced_job('b', 2.0, logs_dir),
+                    _priced_job('c', 3.0, logs_dir), _cloud_job('cloud')]
+            runs = {r.job: r for r in self._runs(
+                jobs, logs_dir, cfg={'measure': {'cost_estimate_min_samples': 4}})}
+        self.assertIsNone(runs['cloud'].usd)
+
+
+class SettingsTests(unittest.TestCase):
+    def test_the_default(self):
+        self.assertEqual(measure.settings({})['cost_estimate_min_samples'], 3)
+
+    def test_a_config_override(self):
+        self.assertEqual(
+            measure.settings({'measure': {'cost_estimate_min_samples': 5}})['cost_estimate_min_samples'], 5)
+
+    def test_a_bad_value_falls_back_to_the_default(self):
+        self.assertEqual(
+            measure.settings({'measure': {'cost_estimate_min_samples': 'lots'}})['cost_estimate_min_samples'], 3)
+
+    def test_zero_or_negative_floors_at_one(self):
+        self.assertEqual(measure.settings({'measure': {'cost_estimate_min_samples': 0}})['cost_estimate_min_samples'], 1)
+
+
 class TableTests(unittest.TestCase):
     def setUp(self):
         self.t = measure.table(fixture_runs())
