@@ -1636,7 +1636,13 @@ def check_doctor(cfg, product):
     except env.ConfigError as e:
         return False, str(e)
 
+    from asf.groom import policy as groom_policy
+
     notes = []
+    if not groom_policy.groom_auto(product):
+        notes.append('groom off: inbox is not groomed — no adjudicate or clerk session is ever '
+                     'launched and no policy answers a card (intake still types them); '
+                     'set approvals.groom: auto')
     defaulted = [c.name for c in CLASSES if levels[c.name][1] == 'default']
     if defaulted:
         notes.append(f'unmapped (taking the catalogue default): {", ".join(defaulted)}')

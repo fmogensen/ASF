@@ -237,6 +237,11 @@ def render_product_yaml(d):
     out += ['ci:',
            _line('provider', d['ci_provider'], '  '),
            _line('test_command', d['test_command'], '  ')]
+    out += ['approvals:',
+           '  # the groom: its policy pass, its adjudicate and clerk sessions, its daily digest.',
+           '  # Off (or absent) means the inbox is typed but nothing decides it and nobody is',
+           '  # asked — `asf doctor` says so. Delete this line to groom by hand instead.',
+           '  groom: auto']
     return '\n'.join(out) + '\n' + DEFAULT_STEPS_AND_CLOCKS
 
 

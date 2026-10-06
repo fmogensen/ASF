@@ -1028,7 +1028,7 @@ class DoctorTest(unittest.TestCase):
 
     def test_a_signal_clears_the_blind_class_and_the_row_goes_quiet(self):
         ok, detail = self.check(
-            ALL_MAPPED + AMENDABLE
+            ALL_MAPPED + '  groom: auto\n' + AMENDABLE
             + "approval_signals:\n  spend_money:\n    commands: ['gh api .*billing']\n"
               "  touch_customer_data:\n    paths: ['data/customers/*']\n")
         self.assertTrue(ok)
@@ -1075,6 +1075,26 @@ class DoctorTest(unittest.TestCase):
         product = _product_yaml('approvals:\n  touch_production: maybe\n')
         rows = [('approvals', True) + approvals.check_doctor({}, product)]
         self.assertTrue(doctor.is_red(rows))
+
+    def test_groom_off_is_the_row_s_first_note(self):
+        ok, detail = self.check()
+        self.assertTrue(ok)
+        notes = self.notes(detail)
+        self.assertTrue(notes[0].startswith('groom off: inbox is not groomed'), detail)
+        self.assertIn('approvals.groom: auto', detail)
+
+    def test_a_groom_that_is_not_auto_is_still_off(self):
+        ok, detail = self.check('approvals:\n  groom: human-now\n')
+        self.assertTrue(ok)
+        notes = self.notes(detail)
+        self.assertTrue(notes[0].startswith('groom off: inbox is not groomed'), detail)
+
+    def test_groom_auto_is_not_named(self):
+        ok, detail = self.check(ALL_MAPPED + '  groom: auto\n' + AMENDABLE
+            + "approval_signals:\n  spend_money:\n    commands: ['gh api .*billing']\n"
+              "  touch_customer_data:\n    paths: ['data/customers/*']\n")
+        self.assertTrue(ok)
+        self.assertNotIn('groom', detail)
 
 
 #: A3's line, asserted verbatim: the class, the item and the command that clears it, in one line

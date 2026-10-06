@@ -19,7 +19,8 @@ import unittest
 from unittest import mock
 
 import asf
-from asf import cli, console_perms, conventions, env, hermetic, hooks, init, install, release, schema, upgrade
+from asf import approvals, cli, console_perms, conventions, env, hermetic, hooks, init, install, release, schema, upgrade
+from asf.groom import policy
 from tests.gitfixture import executable_asf
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -286,6 +287,37 @@ class InitTest(HomeCase):
         self.assertIn('exists — left as is', out)
         self.assertIn('-repo_slug: other/thing', out)
         self.assertIn('+repo_slug: acme/sample', out)
+
+    def test_an_existing_yaml_is_still_never_overwritten(self):
+        path = env.product_path('sample')
+        self.write(path, f'repo_slug: other/thing\nbacklog_dir: {self.backlog}\n')
+        with open(path, 'rb') as f:
+            before = f.read()
+        rc, out, err = self.run_init(backlog=None)
+        self.assertEqual(rc, 0, err)
+        with open(path, 'rb') as f:
+            self.assertEqual(f.read(), before)
+        self.assertIn('+approvals:', out)
+        self.assertIn('+  groom: auto', out)
+
+    def test_a_new_product_yaml_grooms_by_default(self):
+        rc, out, err = self.run_init()
+        self.assertEqual(rc, 0, err)
+        with open(env.product_path('sample')) as f:
+            text = f.read()
+        self.assertIn('groom: auto', text)
+        data = env.loads(text)
+        self.assertEqual(data['approvals'], {'groom': 'auto'})
+        self.assertTrue(policy.groom_auto(env.Product('sample', data)))
+
+    def test_the_gate_is_not_read_as_an_approval_class(self):
+        rc, out, err = self.run_init()
+        self.assertEqual(rc, 0, err)
+        with open(env.product_path('sample')) as f:
+            data = env.loads(f.read())
+        product = env.Product('sample', data)
+        levels = approvals.matrix(product)
+        self.assertEqual(len(levels), len(approvals.CLASSES))
 
     def test_existing_record_is_adopted_as_is(self):
         for folder in init.ITEM_FOLDERS:

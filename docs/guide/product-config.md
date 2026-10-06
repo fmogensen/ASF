@@ -950,9 +950,11 @@ without widening the matrix.
 
 Two more keys under `approvals:` are switches, not classes, and both are **off unless set**:
 
-- `groom: auto` turns on the groom's policy pass, its adjudicate sessions and the daily digest.
-  Unset, the groom still types inbox cards and asks its questions, but decides nothing itself, and
-  the status table's Groom row reads `— (not configured: approvals.groom)`.
+- `groom: auto` turns on the groom's policy pass, its adjudicate sessions and the daily digest. A
+  new product yaml (`asf init`) carries it; drop the line to groom by hand instead. Unset, the
+  groom still types inbox cards and asks its questions, but decides nothing itself, the status
+  table's Groom row reads `— (not configured: approvals.groom)`, and `asf doctor`'s `approvals`
+  row leads its detail with `groom off: inbox is not groomed — …`.
 - `upgrade: auto` lets the tick run `asf upgrade` itself when the trunk's package is ahead of the
   install (only for ASF's own repo as a product).
 
