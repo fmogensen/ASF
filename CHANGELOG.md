@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.207 — 2026-10-07
+
+### Features landed
+
+- Merge queue: drop a batch as soon as a required job is red, without waiting for non-required jobs (#906)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.207"`
+
 ## v0.1.206 — 2026-10-07
 
 ### Features landed
