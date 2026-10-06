@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.180 — 2026-10-06
+
+### Bugs fixed
+
+- The CI stream imports every PR workflow (#837)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.180"`
+
 ## v0.1.179 — 2026-10-06
 
 ### Features landed
