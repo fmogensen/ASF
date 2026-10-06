@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.169 — 2026-10-06
+
+### Features landed
+
+- The doctor's SCHEDULER row reads the start line — one bounded reader, one field, one YELLOW (#809)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.169"`
+
 ## v0.1.168 — 2026-10-06
 
 ### Features landed
