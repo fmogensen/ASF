@@ -314,7 +314,7 @@ import re
 import subprocess
 import time
 
-from asf import attestation, ci_pool, env, gh_limit, mutation_guard, run_cancel
+from asf import attestation, ci_pool, connectors, env, gh_limit, mutation_guard, run_cancel
 
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
@@ -2340,7 +2340,7 @@ class Queue:
     @property
     def source(self):
         if self._source is None:
-            self._source = GitHubSource(self.product)
+            self._source = connectors.ci().source(self.product)
         return self._source
 
     def _read_host(self):
@@ -2949,7 +2949,7 @@ def explain_cancels(product, source=None, out=print, dry_run=False, listing=None
 
 def _explain(product, source, out, dry_run, listing, now):
     now = now or _now()
-    src = source or GitHubSource(product)
+    src = source or connectors.ci().source(product)
     state_dir = env.state_dir(product.name)
     claims = load_claims(state_dir)
     data = load(product.name)
@@ -3042,7 +3042,7 @@ def cancel_duplicate_pushes(product, source=None, out=print, dry_run=False, list
     if m == 'off' or not product.repo_slug or not dedupe_push(product):
         return 0
     dry_run = dry_run or m == 'dry-run'
-    src = source or GitHubSource(product)
+    src = source or connectors.ci().source(product)
     trunk = getattr(product, 'main', None) or 'main'
     exempt = dedupe_exempt_branches(product)
     n = 0
@@ -3649,7 +3649,7 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
         return 0, 0
     dry_run = dry_run or m == 'dry-run'
     now = (now or _now()).astimezone(datetime.timezone.utc)
-    src = source or GitHubSource(product)
+    src = source or connectors.ci().source(product)
     q = Queue(product, source=src, now=now, out=out, write=not dry_run)
     trunk = getattr(product, 'main', None) or 'main'
     twf = workflow_for(product, 'trunk')
@@ -4150,7 +4150,7 @@ def start_admitted(product, items=None, source=None, out=print, dry_run=False, n
     from asf.tick import step_prs
     now = (now or _now()).astimezone(datetime.timezone.utc)
     try:
-        src = source or GitHubSource(product)
+        src = source or connectors.ci().source(product)
         q = Queue(product, source=src, now=now, out=out, write=not dry_run)
         cap, opened, n, tried, blobs, prs = step_prs.prs_per_tick(product), 0, 0, set(), {}, []
         listing = {} if listing is None else listing
@@ -4265,7 +4265,7 @@ def queue_pass(product, items=None, source=None, out=print, dry_run=False, listi
         return None
     try:
         listing = {} if listing is None else listing
-        src = source or GitHubSource(product)
+        src = source or connectors.ci().source(product)
         n = cancel_duplicate_pushes(product, source=src, out=out, dry_run=dry_run,
                                      listing=listing)
         s = update_stalls(product, src, items=items, out=out, dry_run=dry_run, now=now)

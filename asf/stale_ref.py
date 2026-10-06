@@ -33,7 +33,7 @@ import json
 import os
 import time
 
-from asf import connectors, github, gitops
+from asf import connectors, gitops
 from asf.facts import cache as facts_cache
 
 STATE_FILE = 'stale-ref.json'
@@ -85,7 +85,7 @@ def run_of(slug, link):
     rid = m.group(1)
     got = facts_cache.get(slug, RUN_FACT, rid)
     if got is facts_cache.MISS:
-        r = github.api(f'repos/{slug}/actions/runs/{rid}')
+        r = connectors.ci().run(slug, rid)
         got = facts_cache.put(slug, RUN_FACT, rid, '',
                               (r.data.get('event'), _epoch(r.data.get('created_at')))
                               if r.ok and isinstance(r.data, dict) else None)
@@ -133,7 +133,7 @@ def in_flight_run(slug, head):
     None (none, or the list does not read — judged as before). A reopen starts the head's runs
     again and the concurrency group cancels the one still going: a first run cut that way never
     reaches a verdict (2026-10-05), so the reopen waits for it."""
-    r = github.api(f'repos/{slug}/actions/runs?head_sha={head}&per_page=100')
+    r = connectors.ci().runs_for_sha(slug, head)
     runs = r.data.get('workflow_runs') if r.ok and isinstance(r.data, dict) else None
     for run in runs if isinstance(runs, list) else ():
         if isinstance(run, dict) and run.get('status') not in (None, 'completed'):

@@ -65,7 +65,7 @@ import math
 import os
 import subprocess
 
-from asf import env, github
+from asf import connectors, env
 
 DEFAULT_SESSIONS = 4
 #: ``capacity.sessions: auto``'s ceiling when ``sessions_ceiling`` is not written
@@ -610,7 +610,7 @@ def ci_runs_in_flight(product, run=None, timeout=CI_TIMEOUT_S):
     out = gh_limit.memo_get(key) if key else None
     if out is None:
         try:
-            r = github.gh(['run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
+            r = connectors.ci().call(['run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
                            '--json', 'status', '--jq',
                            '[.[] | select(.status != "completed")] | length'],
                           timeout=timeout, run=run, env=ci_pool._gh_env(product))

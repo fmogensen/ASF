@@ -50,3 +50,34 @@ class FakeForge(FakeConnector):
 
     def auth_status(self, **kw):
         return self._answer('auth_status', **kw)
+
+
+class FakeCI(FakeConnector):
+    def runs(self, slug, **kw):
+        return self._answer('runs', slug, **kw)
+
+    def run(self, slug, run_id, **kw):
+        return self._answer('run', slug, run_id, **kw)
+
+    def runs_for_sha(self, slug, sha, **kw):
+        return self._answer('runs_for_sha', slug, sha, **kw)
+
+    def run_log(self, slug, run_id, **kw):
+        return self._answer('run_log', slug, run_id, **kw)
+
+    def rerun(self, slug, run_id, failed=True, **kw):
+        return self._answer('rerun', slug, run_id, failed=failed, **kw)
+
+    def cancel(self, slug, run_id, **kw):
+        return self._answer('cancel', slug, run_id, **kw)
+
+    def call(self, args, **kw):
+        return self._answer('call', list(args), **kw)
+
+    def source(self, product, run=None):
+        from asf import ci_queue
+        return ci_queue.Source()
+
+    def backend(self, product, run=None):
+        from asf import ci_pool
+        return ci_pool.Backend()
