@@ -15,6 +15,40 @@ from tests.test_doc_lane_landing import PLAN, Product
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRS_FIXTURE = os.path.join(HERE, "fixtures", "evidence", "prs.json")
 
+
+class FakeHost(evidence.sources_mod.HostSource):
+    """A `HostSource` double: `prs()` answers a fixed list, `runs()` answers `green`'s shas for
+    a success query and `[]` otherwise — the shape `discover()`'s `ci_green_runs` call needs,
+    with no host reached. `calls` records every `runs()` invocation's `(workflow, branch,
+    status, limit)`, for a test that wants to know which workflows were asked about."""
+
+    def __init__(self, prs=(), green=()):
+        self._prs, self._green = list(prs), list(green)
+        self.calls = []
+
+    def prs(self):
+        return self._prs
+
+    def runs(self, workflow, branch=None, status=None, limit=20):
+        self.calls.append((workflow, branch, status, limit))
+        if status == "success":
+            return [{"headSha": sha, "createdAt": f"2026-09-21T10:0{i}:00Z"}
+                    for i, sha in enumerate(self._green)]
+        return []
+
+    def run_jobs(self, run_id):
+        return []
+
+
+def fake_sources(product, prs=(), green=(), git=None, deploy=None):
+    """A `Sources` whose `git` is real (the test's own throwaway repo), whose `host` is
+    :class:`FakeHost`, and whose `deploy` answers nothing — the injected `sources=` every
+    rewritten mock site below passes to `evidence.discover`/`migrate_sources` in place of
+    patching a private name."""
+    return evidence.sources_mod.Sources(
+        git or evidence.sources_mod.LocalGit(product), FakeHost(prs, green),
+        deploy or evidence.sources_mod.NoDeploy())
+
 # The first product's conventions: task and doc branches share one prefix, and an older merge
 # prefix is still honoured. Every test run with these reproduces its pre-config result.
 FIRST_PRODUCT_PREFIXES = {"code": "cloud/", "spec": "cloud/spec-", "plan": "cloud/plan-",
@@ -241,13 +275,21 @@ class TwoBranchFixtureTests(unittest.TestCase):
 
         self.code_mech = code_mech
 
+    def discover(self, prs):
+        # `tests.test_doc_lane_landing.Product.discover` still patches the now-gone
+        # `evidence._gh_json`; call `evidence.discover` directly with an injected source rather
+        # than touch a file outside this Task's footprint.
+        product = self.p.product()
+        return evidence.discover(product=product, sources=fake_sources(product, prs=prs),
+                                 checked_file=os.path.join(self.p.tmp, "none.txt"))
+
     def test_spec_review_is_the_newer_rounds_table(self):
-        ev = self.p.discover([])
+        ev = self.discover([])
         self.assertEqual(ev["features"]["f-0001"]["spec_review"],
                          (2, "CHANGES REQUESTED", "2-f-0001.md"))
 
     def test_task_row_carries_the_passing_checks(self):
-        ev = self.p.discover([])
+        ev = self.discover([])
         tasks = ev["features"]["f-0001"]["tasks"]
         self.assertEqual(tasks["T1"]["checks"], {
             "path": "1-f-0001-t1.md", "round": 1,
@@ -502,17 +544,9 @@ class ProductRepo:
         green = [self.head] if green is None else green
         with open(PRS_FIXTURE) as f:
             pr_stub = prs if prs is not None else json.load(f)
-
-        def fake_gh(args, timeout=60, product=None):
-            if args.startswith("run list") and "--status success" in args:
-                return [{"headSha": sha, "createdAt": f"2026-09-21T10:0{i}:00Z"}
-                        for i, sha in enumerate(green)]
-            return [] if not args.startswith("api ") else {}
-
-        with mock.patch.object(evidence, "pr_list", return_value=pr_stub), \
-                mock.patch.object(evidence, "_gh_json", side_effect=fake_gh):
-            return evidence.discover(product=product,
-                                     checked_file=os.path.join(self.tmp, "none.txt"))
+        sources = fake_sources(product, prs=pr_stub, green=green)
+        return evidence.discover(product=product, sources=sources,
+                                 checked_file=os.path.join(self.tmp, "none.txt"))
 
     def item(self, id_, type_, parent=None, typed_lines=()):
         lines = [f"id: {id_}", f"type: {type_}", f"title: {id_} item"]
@@ -690,11 +724,20 @@ class AncestryTests(unittest.TestCase):
                                  (sha, bases))
 
     def test_one_git_call_whatever_the_questions(self):
-        real = subprocess.run
-        with mock.patch.object(evidence.subprocess, "run", side_effect=real) as run:
-            check = evidence.ancestry(self.p, ["origin/main"])
-            [check(s) for s in self.shas * 5]
-        self.assertEqual(run.call_count, 1)
+        # the one `rev-list` now runs through the git provider, not a direct `subprocess.run`
+        # in `evidence.py` — count calls on the provider itself.
+        calls = []
+
+        class CountingGit(evidence.sources_mod.LocalGit):
+            def run(self, args, timeout=120, cwd=None):
+                calls.append(args)
+                return super().run(args, timeout=timeout, cwd=cwd)
+
+        sources = evidence.sources_mod.Sources(CountingGit(self.p), evidence.sources_mod.NoHost(),
+                                               evidence.sources_mod.NoDeploy())
+        check = evidence.ancestry(self.p, ["origin/main"], sources=sources)
+        [check(s) for s in self.shas * 5]
+        self.assertEqual(len(calls), 1, calls)
 
     def test_an_unknown_base_or_a_short_sha_asks_merge_base(self):
         check = evidence.ancestry(self.p, ["no-such-ref", self.shas[0]])
@@ -954,6 +997,63 @@ class IngestIdEvidenceTests(unittest.TestCase):
         self.assertEqual(m["evidence"], [f"fix merged ({self.r.head[:9]})", "rule: fixed"])
 
 
+class MergeableTests(unittest.TestCase):
+    """§2.4/§3.4: `id_evidence`'s PR loop fills `mergeable` (and `conflicting`, the id's PR
+    numbers whose own `mergeable` was `CONFLICTING`) from the same loop that already appends to
+    `open_prs` — `CONFLICTING` wins over `MERGEABLE` whichever PR is seen first, `UNKNOWN`, a
+    missing field and a `MERGED`/`CLOSED` PR each give `None` (D12) — and `id_state` renders the
+    `(CONFLICTING)` suffix on exactly the number it belongs to (PD7)."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+
+    def pr(self, number, mergeable, iid="T-0007", state="OPEN"):
+        pr = {"number": number, "state": state, "headRefName": f"fix/other-{number}",
+              "title": f"{iid} — the work", "mergeable": mergeable}
+        if state == "MERGED":
+            pr["mergeCommit"] = {"oid": self.r.head}
+        return pr
+
+    def evidence_for(self, prs):
+        return evidence.id_evidence(self.r.product(ci=None), [], prs, commits=[], green=[])
+
+    def test_conflicting_open_pr_sets_mergeable_and_the_evidence_suffix(self):
+        ev = self.evidence_for([self.pr(41, "CONFLICTING")])
+        self.assertEqual(ev["T-0007"]["mergeable"], "CONFLICTING")
+        self.assertEqual(ev["T-0007"]["conflicting"], [41])
+        _state, lines = evidence.id_state("T-0007", ev["T-0007"])
+        self.assertIn("PR #41 OPEN (CONFLICTING)", lines)
+
+    def test_mergeable_open_pr_sets_mergeable_with_no_extra_line(self):
+        ev = self.evidence_for([self.pr(41, "MERGEABLE")])
+        self.assertEqual(ev["T-0007"]["mergeable"], "MERGEABLE")
+        _state, lines = evidence.id_state("T-0007", ev["T-0007"])
+        self.assertEqual(lines, ["PR #41 OPEN"])
+
+    def test_unknown_missing_or_not_open_gives_none(self):
+        cases = [("UNKNOWN", "OPEN"), (None, "OPEN"), ("CONFLICTING", "MERGED"),
+                 ("CONFLICTING", "CLOSED")]
+        for mergeable, state in cases:
+            with self.subTest(mergeable=mergeable, state=state):
+                ev = self.evidence_for([self.pr(41, mergeable, state=state)])
+                self.assertIsNone((ev.get("T-0007") or {}).get("mergeable"))
+
+    def test_two_open_prs_one_conflicting_the_suffix_lands_on_that_number_alone(self):
+        ev = self.evidence_for([self.pr(40, "MERGEABLE"), self.pr(41, "CONFLICTING")])
+        self.assertEqual(ev["T-0007"]["mergeable"], "CONFLICTING")
+        self.assertEqual(ev["T-0007"]["conflicting"], [41])
+        _state, lines = evidence.id_state("T-0007", ev["T-0007"])
+        self.assertIn("PR #40 OPEN", lines)
+        self.assertIn("PR #41 OPEN (CONFLICTING)", lines)
+        self.assertNotIn("PR #40 OPEN (CONFLICTING)", lines)
+
+    def test_conflicting_seen_first_is_not_downgraded_by_a_later_mergeable_pr(self):
+        ev = self.evidence_for([self.pr(40, "CONFLICTING"), self.pr(41, "MERGEABLE")])
+        self.assertEqual(ev["T-0007"]["mergeable"], "CONFLICTING")
+        self.assertEqual(ev["T-0007"]["conflicting"], [40])
+
+
 class MatchPrefixesTests(unittest.TestCase):
     ITEMS = {"F-0042": {"type": "feature", "title": "Free plan", "legacy_id": "free-plan",
                         "children": []}}
@@ -1001,11 +1101,11 @@ class SecondProductRepo:
         subprocess.run(["git", "clone", "-q", self.origin, self.repo], check=True,
                        capture_output=True, env=dict(os.environ, **GIT_ENV))
 
-    def product(self, conventions=None):
+    def product(self, conventions=None, deploy_sha=None):
         conv = {"specs_dir": "specs", "plans_dir": "plans", "reviews_dir": "reviews"}
         conv.update(conventions or {})
         data = {"repo_dir": self.repo, "repo_slug": "sample/product", "main": "main",
-                "ci": "none", "conventions": conv}
+                "ci": "none", "conventions": conv, "deploy_sha": deploy_sha}
         return env.Product("sample", data)
 
     def close(self):
@@ -1017,16 +1117,10 @@ class SecondProductDiscoverTests(unittest.TestCase):
         self.r = SecondProductRepo()
         self.addCleanup(self.r.close)
 
-    def discover(self, product, gh_calls=None):
-        def fake_gh(args, timeout=60, product=None):
-            if gh_calls is not None:
-                gh_calls.append(args)
-            return [] if not args.startswith("api ") else {}
-
-        with mock.patch.object(evidence, "pr_list", return_value=[]), \
-                mock.patch.object(evidence, "_gh_json", side_effect=fake_gh):
-            return evidence.discover(product=product,
-                                     checked_file=os.path.join(self.r.tmp, "none.txt"))
+    def discover(self, product, sources=None):
+        sources = sources or fake_sources(product)
+        return evidence.discover(product=product, sources=sources,
+                                 checked_file=os.path.join(self.r.tmp, "none.txt"))
 
     def test_specs_and_plans_are_read_from_the_products_dirs(self):
         # `features[slug]["spec"|"plan"]` is the ref string discover() already exposes
@@ -1039,9 +1133,9 @@ class SecondProductDiscoverTests(unittest.TestCase):
         seen = []
         real_read_trees = evidence.read_trees
 
-        def spy(paths, product=None):
+        def spy(paths, product=None, sources=None):
             seen.extend(paths)
-            return real_read_trees(paths, product=product)
+            return real_read_trees(paths, product=product, sources=sources)
 
         with mock.patch.object(evidence, "read_trees", side_effect=spy):
             ev = self.discover(self.r.product())
@@ -1050,26 +1144,32 @@ class SecondProductDiscoverTests(unittest.TestCase):
         self.assertEqual(ev["stories"], {})
 
     def test_no_workflows_means_no_gh_run_queries(self):
-        calls = []
-        ev = self.discover(self.r.product(), gh_calls=calls)
-        self.assertFalse(any(c.startswith("run list") for c in calls), calls)
+        product = self.r.product()
+        host = FakeHost()
+        sources = evidence.sources_mod.Sources(evidence.sources_mod.LocalGit(product), host,
+                                               evidence.sources_mod.NoDeploy())
+        ev = self.discover(product, sources=sources)
+        self.assertFalse(host.calls, host.calls)
         self.assertIsNone(ev["prod_sha"])
         self.assertIsNone(ev["dev_sha"])
         self.assertFalse(ev["prod_deploys"])       # trunk is production: nothing to wait for
         self.assertEqual(ev["prod_mode"], "manual")
 
     def test_workflows_from_conventions(self):
-        calls = []
         product = self.r.product(conventions={
-            "ci_workflow": "build.yml", "ci_dev_job": "stage", "deploy_workflow": "ship.yml"})
-        ev = self.discover(product, gh_calls=calls)
+            "ci_workflow": "build.yml", "ci_dev_job": "stage", "deploy_workflow": "ship.yml"},
+            deploy_sha={"provider": "github-deployments"})
+        host = FakeHost()
+        deploy = evidence.sources_mod.WorkflowDeploy(product, host)
+        sources = evidence.sources_mod.Sources(evidence.sources_mod.LocalGit(product), host, deploy)
+        ev = self.discover(product, sources=sources)
         self.assertTrue(ev["prod_deploys"])        # no successful run found: unknown, not "no deploy"
         self.assertIsNone(ev["prod_sha"])
-        joined = " ".join(calls)
-        self.assertIn("--workflow ship.yml", joined)
-        self.assertIn("--workflow build.yml", joined)
-        self.assertNotIn("deploy-prod.yml", joined)
-        self.assertNotIn("ci.yml", joined)
+        workflows = [c[0] for c in host.calls]
+        self.assertIn("ship.yml", workflows)
+        self.assertIn("build.yml", workflows)
+        self.assertNotIn("deploy-prod.yml", workflows)
+        self.assertNotIn("ci.yml", workflows)
 
 
     def test_prod_mode_auto_is_read_from_deploy_sha(self):
@@ -1083,8 +1183,7 @@ class MigrateSourcesTests(unittest.TestCase):
         self.addCleanup(self.r.close)
 
     def migrate(self, product):
-        with mock.patch.object(evidence, "pr_list", return_value=[]):
-            return evidence.migrate_sources(product=product)
+        return evidence.migrate_sources(product=product, sources=fake_sources(product))
 
     def test_unset_conventions_mean_nothing_found(self):
         out = self.migrate(self.r.product())

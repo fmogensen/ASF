@@ -1,6 +1,7 @@
 import ast
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -308,7 +309,9 @@ class ForProductTests(unittest.TestCase):
 
 class NoVendorOutsideTheProviderTests(unittest.TestCase):
     """§2.2: the direction of the passes (ingest reads evidence, never the reverse) is enforced
-    by the import graph — `asf/evidence/sources.py` never imports `asf.record`."""
+    by the import graph — `asf/evidence/sources.py` never imports `asf.record`. §3.2/PD5: every
+    host read of the evidence pass goes behind the seam — `discover()` over a product with no
+    host asks git alone, and no non-docstring string in `evidence.py` names `gh`."""
 
     def test_sources_does_not_import_record(self):
         path = os.path.join(HERE, '..', 'asf', 'evidence', 'sources.py')
@@ -321,6 +324,42 @@ class NoVendorOutsideTheProviderTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.add(node.module)
         self.assertFalse(any(m == 'asf.record' or m.startswith('asf.record.') for m in imported))
+
+    def test_discover_over_the_sample_product_asks_only_git(self):
+        from asf.evidence import evidence
+
+        def git_only(args, **kwargs):
+            if not args or args[0] != 'git':
+                raise AssertionError(f'not a git argv: {args}')
+            return subprocess.run(args, **kwargs)
+
+        base = REPO.fresh()
+        product = env.Product('t', {'repo_dir': os.path.join(base, 'repo'),
+                                    'repo_slug': 'o/r', 'main': 'main', 'ci': 'none'})
+        src = sources.Sources(sources.LocalGit(product, run=git_only), sources.NoHost(),
+                              sources.NoDeploy())
+        ev = evidence.discover(product=product, sources=src,
+                               checked_file=os.path.join(base, 'none.txt'))
+        self.assertIsInstance(ev, dict)
+        self.assertIn('ids', ev)
+        self.assertIn('features', ev)
+
+    def test_no_gh_string_constant_outside_a_docstring(self):
+        path = os.path.join(HERE, '..', 'asf', 'evidence', 'evidence.py')
+        with open(path) as f:
+            text = f.read()
+        tree = ast.parse(text, filename=path)
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                doc = ast.get_docstring(node, clean=False)
+                if doc:
+                    docstrings.add(doc)
+        hits = [node.value for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and node.value not in docstrings
+                and re.search(r'\bgh\b', node.value)]
+        self.assertEqual(hits, [], hits)
 
 
 if __name__ == '__main__':

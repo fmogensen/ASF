@@ -9,14 +9,17 @@ state" table defines, so they can be unit-tested without touching git or gh.
 
 Most of the object-store plumbing below (`_batch`, `resolve`, `read_blobs`, `parse_tree`,
 `read_trees`, `remote_branches`, `pr_list`, `plan_tasks`, `consumes_edges`, their regexes and
-directory constants, and the `sh` helper `pr_list` depends on) is lifted from the first
-product's pre-asf board, parity and tick-table scripts, which already solve "discover everything
-the board needs" in two `git cat-file --batch` passes over the product repo. `parse_rows` (the
-parity-matrix table parser) is lifted from the same. Reviews are read through the one review
-reader, :mod:`asf.evidence.review`. The prod/dev deploy-sha lookups follow the same shape: the
-newest successful run of `conventions.deploy_workflow` for `prod_sha`, the newest run of
-`conventions.ci_workflow` on the trunk whose `conventions.ci_dev_job` succeeded for `dev_sha` —
-both `None` when the product names no such workflow.
+directory constants, and the `sh` helper) is lifted from the first product's pre-asf board,
+parity and tick-table scripts, which already solve "discover everything the board needs" in two
+`git cat-file --batch` passes over the product repo. `parse_rows` (the parity-matrix table
+parser) is lifted from the same. Reviews are read through the one review reader,
+:mod:`asf.evidence.review`. Every git read, host read (pull requests, workflow runs) and deploy
+read goes through the three providers of :mod:`asf.evidence.sources` — `discover(sources=None)`
+resolves them once, through `for_product`, and threads the same `sources` to every helper below.
+The prod/dev deploy-sha lookups follow the same shape: the newest successful run of
+`conventions.deploy_workflow` for `prod_sha`, the newest run of `conventions.ci_workflow` on the
+trunk whose `conventions.ci_dev_job` succeeded for `dev_sha` — both `None` when the product names
+no such workflow.
 
 **Landing is the merge fact.** An item whose lane branch merged is landed by the run line that
 says so — ``harvested: <sha>`` or a ``lane`` record in state ``MERGED`` in the product's
@@ -28,6 +31,7 @@ Read-only against the product repo (see the resolved `Product.repo_dir`): never 
 or fetch anything there but `git fetch --prune origin`. Python 3 stdlib only.
 """
 import argparse
+import base64
 import json
 import os
 import re
@@ -36,10 +40,12 @@ import subprocess
 import sys
 import time
 
-from asf import env, gh_limit, proves, reviews
+from asf import env, proves, reviews
 from asf.conventions import Conventions
 from asf.evidence import review
 from asf.evidence import review_store
+from asf.evidence import sources as sources_mod
+from asf.evidence.sources import GH_ACTIONS  # noqa: F401 (re-exported, PD15)
 
 # An evidence-file path, not per-product config — no obvious Product field for it.
 # TODO(config): no Product field for this yet.
@@ -47,8 +53,18 @@ CHECKED_FILE = os.path.join(env.ASF_HOME, "checked.txt")
 PR_TTL = 180
 EVIDENCE_TTL = 180
 
-# The `ci.provider` values whose green runs on main `ci_green_runs` knows how to read.
-GH_ACTIONS = ("gh-actions", "github-actions")
+
+def _default_sources(product, need_host=False):
+    """The `sources` a function builds for itself when none is threaded down to it — every
+    caller outside :func:`discover` and the real recorder in `main()`, both of which need the
+    full dispatch. Never resolves `sources.deploy` (`for_product`'s only reader of
+    `product.deploy_sha`): nothing below `discover()` reads a deployed sha, and a minimal test
+    double that carries no `deploy_sha` must not crash resolving `sources.git` for a plain
+    `ancestry` or `main_commits` call."""
+    git = sources_mod.LocalGit(product)
+    host = (sources_mod.NoHost() if not need_host or ci_provider(product) is None
+            else sources_mod.GitHubHost(product))
+    return sources_mod.Sources(git, host, sources_mod.NoDeploy())
 
 
 def branch_prefixes(product=None):
@@ -79,65 +95,43 @@ def _cache_file(name, product):
     return os.path.join(env.state_dir(product), "cache-" + name)
 
 
-def sh(cmd, timeout=120, product=None):
+def sh(cmd, timeout=120, product=None, sources=None):
+    """`cmd` through the git provider: split with `shlex.split` and run as `git <args>` via
+    `sources.git.run`. A `git ...` string is the whole contract; the one caller whose command is
+    not that shape (`full_shas`'s `printf | git cat-file`) falls back to a plain shell, never
+    through the provider."""
     product = product or env.load_product()
-    is_gh = gh_limit.cmd_is_gh(cmd)
-    if is_gh:
-        gh_limit.guard()
+    sources = sources or _default_sources(product)
+    parts = shlex.split(cmd)
+    if parts and parts[0] == "git":
+        return sources.git.run(parts[1:], timeout=timeout)
     try:
         r = subprocess.run(cmd, shell=True, cwd=product.repo_dir, capture_output=True, text=True,
                            timeout=timeout)
-        if is_gh:  # a rate limit is never "no PRs" (RateLimited is no Exception: it leaves)
-            gh_limit.inspect_proc(cmd.split()[1:3], r)
         return r.stdout.strip()
     except Exception:
         return ""
 
 
-# ---- object store: two batch passes for every tree and blob the board needs -----------------
-# Lifted from factory-board.py.
-def _batch(kind, requests, product=None):
-    """One `git cat-file --batch[-check]` process for the whole request list.
-
-    --batch answers with the OID, not the request, so the only way back to "which request was
-    this" is position: the answers arrive in request order, and a missing object still costs one
-    line. Both parsers below rely on that.
-    """
+# ---- object store: the git provider's batch reads, by position ------------------------------
+def _batch(kind, requests, product=None, sources=None):
+    """One `cat-file --batch[-check]` round-trip for the whole request list, through the git
+    provider (:meth:`asf.evidence.sources.GitSource.cat_file`)."""
     if not requests:
         return []
-    product = product or env.load_product()
-    args = ["git", "-C", product.repo_dir, "cat-file", "--batch-check" if kind == "check" else "--batch"]
-    p = subprocess.run(args, input=("\n".join(requests) + "\n").encode(), capture_output=True)
-    out = p.stdout
-    res, i = [], 0
-    for _ in requests:
-        j = out.find(b"\n", i)
-        if j < 0:
-            res.append(None)
-            continue
-        header = out[i:j].decode("utf-8", "replace").split()
-        i = j + 1
-        if len(header) < 3 or header[-1] in ("missing", "ambiguous"):
-            res.append(None)
-            continue
-        if kind == "check":
-            res.append(header[0])
-            continue
-        size = int(header[2])
-        res.append(out[i:i + size])
-        i += size + 1
-    return res
+    sources = sources or _default_sources(product or env.load_product())
+    return sources.git.cat_file(kind, requests)
 
 
-def resolve(paths, product=None):
+def resolve(paths, product=None, sources=None):
     """rev:path → oid, or None. One process for the whole list."""
-    return dict(zip(paths, _batch("check", paths, product=product)))
+    return dict(zip(paths, _batch("check", paths, product=product, sources=sources)))
 
 
-def read_blobs(shas, product=None):
+def read_blobs(shas, product=None, sources=None):
     """oid → bytes. Deduplicated: several branches share the same review blob."""
     uniq = sorted({s for s in shas if s})
-    return dict(zip(uniq, _batch("blob", uniq, product=product)))
+    return dict(zip(uniq, _batch("blob", uniq, product=product, sources=sources)))
 
 
 def parse_tree(data):
@@ -154,20 +148,20 @@ def parse_tree(data):
     return out
 
 
-def read_trees(paths, product=None):
+def read_trees(paths, product=None, sources=None):
     """rev:dir → {name: oid}. Distinct tree oids are fetched once each."""
-    oids = resolve(paths, product=product)
-    blobs = read_blobs(oids.values(), product=product)
+    oids = resolve(paths, product=product, sources=sources)
+    blobs = read_blobs(oids.values(), product=product, sources=sources)
     return {p: parse_tree(blobs.get(o)) for p, o in oids.items()}
 
 
-def read_refs(refs, product=None):
+def read_refs(refs, product=None, sources=None):
     """["rev:path", ...] → {ref: text|None}, one batch round-trip. The general-purpose read
     `backlog.py migrate` uses for spec/plan/report content — every git access it needs stays
     behind this module rather than migrate.py shelling out on its own.
     """
-    oids = resolve(refs, product=product)
-    blobs = read_blobs(oids.values(), product=product)
+    oids = resolve(refs, product=product, sources=sources)
+    blobs = read_blobs(oids.values(), product=product, sources=sources)
     out = {}
     for ref, oid in oids.items():
         blob = blobs.get(oid) if oid else None
@@ -175,17 +169,17 @@ def read_refs(refs, product=None):
     return out
 
 
-def read_ref(ref, product=None):
+def read_ref(ref, product=None, sources=None):
     """"rev:path" → text, or None if missing."""
-    return read_refs([ref], product=product)[ref]
+    return read_refs([ref], product=product, sources=sources)[ref]
 
 
-def list_tree(rev, path, product=None):
+def list_tree(rev, path, product=None, sources=None):
     """rev:path → {name: oid}, the directory listing at that revision."""
-    return read_trees([f"{rev}:{path}"], product=product)[f"{rev}:{path}"]
+    return read_trees([f"{rev}:{path}"], product=product, sources=sources)[f"{rev}:{path}"]
 
 
-def doc_carriers(path, branches, product):
+def doc_carriers(path, branches, product, sources=None):
     """Where a typed document path lives: ``(on_trunk, [remote branches carrying it])``, one
     ``cat-file`` process for the lot. A migrated card's ``links.spec`` can name a spec that sits
     on a pre-lane branch with no PR — the lane's own discovery never looks there, and a Feature
@@ -195,20 +189,21 @@ def doc_carriers(path, branches, product):
     main_ref = f"origin/{product.main}"
     others = sorted(b for b in branches or () if b != product.main)
     refs = [f"{main_ref}:{path}"] + [f"origin/{b}:{path}" for b in others]
-    found = resolve(refs, product=product)
+    found = resolve(refs, product=product, sources=sources)
     return bool(found.get(refs[0])), [b for b in others if found.get(f"origin/{b}:{path}")]
 
 
 # ---- inputs ---------------------------------------------------------------------------------
-def remote_branches(product=None):
-    return set(remote_heads(product=product))
+def remote_branches(product=None, sources=None):
+    return set(remote_heads(product=product, sources=sources))
 
 
-def remote_heads(product=None):
+def remote_heads(product=None, sources=None):
     """``{branch: sha}`` of every branch on origin (one fetch, one ``ls-remote``)."""
     product = product or env.load_product()
-    sh("git fetch --prune -q origin", timeout=180, product=product)
-    out = sh("git ls-remote --heads origin", timeout=120, product=product)
+    sources = sources or _default_sources(product)
+    sources.git.fetch()
+    out = sources.git.run(["ls-remote", "--heads", "origin"], timeout=120)
     heads = {}
     for ln in out.splitlines():
         sha, _, ref = ln.partition("\t")
@@ -223,11 +218,12 @@ ARCHIVE_PR_TAG = "archive/pr-{}"
 _ARCHIVE_PR_RE = re.compile(r"^refs/tags/archive/pr-(\d+)(\^\{\})?$")
 
 
-def archive_tags(product=None):
+def archive_tags(product=None, sources=None):
     """``{pr number: sha}`` of every ``archive/pr-<N>`` tag on origin (an annotated tag read as
     the commit it points at)."""
     product = product or env.load_product()
-    out = sh("git ls-remote --tags origin 'refs/tags/archive/pr-*'", timeout=120, product=product)
+    out = sh("git ls-remote --tags origin 'refs/tags/archive/pr-*'", timeout=120, product=product,
+             sources=sources)
     tags = {}
     for ln in out.splitlines():
         sha, _, ref = ln.partition("\t")
@@ -317,11 +313,11 @@ def closed_moved_heads(heads, prs, archive=None, prefixes=None):
                    and heads[b] not in (p.get("headRefOid"), (archive or {}).get(p.get("number")))})
 
 
-def commit_times(shas, product=None):
+def commit_times(shas, product=None, sources=None):
     """``{sha: committer ISO time}`` for the commits the local clone holds (one ``git show``)."""
     if not shas:
         return {}
-    out = sh("git show -s --format=%H%x09%cI " + " ".join(shas), product=product)
+    out = sh("git show -s --format=%H%x09%cI " + " ".join(shas), product=product, sources=sources)
     times = {}
     for ln in (out or "").splitlines():
         sha, _, at = ln.partition("\t")
@@ -344,31 +340,12 @@ def resets_of(dead, live=()):
     return out
 
 
-def pr_list(product=None):
+def pr_list(product=None, sources=None):
+    """Every pull request, through the host provider (:meth:`HostSource.prs`) — `GitHubHost`
+    keeps its own cache file under the same path this used to manage directly."""
     product = product or env.load_product()
-    cache = _cache_file("prs.json", product)
-    if os.path.exists(cache) and time.time() - os.path.getmtime(cache) < PR_TTL:
-        try:
-            with open(cache) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    # mergeCommit is extra vs. factory-board.py's field list: evidence.py needs the merge sha
-    # (Feature/Task Closed rules), factory-board.py's board never did; `body` carries id tokens.
-    raw = sh(f"gh pr list -R {product.repo_slug} --state all --limit 300 "
-             "--json number,title,body,state,headRefName,headRefOid,closedAt,mergedAt,mergeCommit", timeout=180,
-             product=product)
-    try:
-        data = json.loads(raw) if raw else []
-    except Exception:
-        data = []
-    try:
-        with open(cache + f".{os.getpid()}", "w") as f:
-            json.dump(data, f)
-        os.replace(cache + f".{os.getpid()}", cache)
-    except Exception:
-        pass
-    return data
+    sources = sources or _default_sources(product, need_host=True)
+    return sources.host.prs()
 
 
 # ---- slugs, verdicts, rounds ----------------------------------------------------------------
@@ -552,24 +529,22 @@ def _matrix_paths(spec_paths):
     return [p.strip().strip("`") for p in inner.split(",") if p.strip()]
 
 
-def _newest_success(workflow, product=None):
+def _newest_success(workflow, product=None, sources=None):
     """The newest successful run of `workflow`, or None."""
-    runs = _gh_json(f"run list --workflow {workflow} --limit 15 "
-                    "--json headSha,conclusion,updatedAt", product=product)
+    sources = sources or _default_sources(product or env.load_product(), need_host=True)
+    runs = sources.host.runs(workflow, limit=15)
     return next((r for r in runs if r.get("conclusion") == "success"), None)
 
 
-def _newest_with_job(workflow, job, branch, product=None):
+def _newest_with_job(workflow, job, branch, product=None, sources=None):
     """The newest completed run of `workflow` on `branch` whose `job` succeeded, or None."""
-    runs = _gh_json(f"run list --branch {branch} --workflow {workflow} --limit 40 "
-                    "--json headSha,conclusion,updatedAt,status,databaseId", product=product)
+    sources = sources or _default_sources(product or env.load_product(), need_host=True)
+    runs = sources.host.runs(workflow, branch=branch, limit=40)
     for r in runs:
         if r.get("status") != "completed":
             continue
-        jobs = _gh_json(f"api repos/{product.repo_slug}/actions/runs/{r['databaseId']}/jobs?per_page=60",
-                        product=product)
-        job_list = jobs.get("jobs", []) if isinstance(jobs, dict) else []
-        if any(j.get("name") == job and j.get("conclusion") == "success" for j in job_list):
+        jobs = sources.host.run_jobs(r["databaseId"])
+        if any(j.get("name") == job and j.get("conclusion") == "success" for j in jobs):
             return r
     return None
 
@@ -580,9 +555,12 @@ def _prod_mode(product):
     return deploy.mode(product, 'prod')
 
 
-def discover(product=None, checked_file=None):
-    """The raw evidence `backlog.py ingest` needs, gathered fresh from the product repo and gh."""
+def discover(product=None, checked_file=None, sources=None):
+    """The raw evidence `backlog.py ingest` needs, gathered fresh from the product repo and the
+    three providers (:mod:`asf.evidence.sources`) — `sources` resolved once, here, and threaded
+    to every helper below."""
     product = product or env.load_product()
+    sources = sources or sources_mod.for_product(product)
     prefixes = branch_prefixes(product)
     code, spec_p, plan_p = prefixes["code"], prefixes["spec"], prefixes["plan"]
     token = branch_token(prefixes)
@@ -595,13 +573,14 @@ def discover(product=None, checked_file=None):
     briefs_dir = conv.get("briefs_dir")
     matrix_path = conv.get("matrix_path")
 
-    heads = remote_heads(product=product)
-    prs = pr_list(product=product)
+    heads = remote_heads(product=product, sources=sources)
+    prs = pr_list(product=product, sources=sources)
     # a lane branch whose PR was closed unmerged is not work in flight (its item resets to its
     # spec/plan); an `archive/*` branch is a kept copy, never work in flight either
-    tags = archive_tags(product=product)
+    tags = archive_tags(product=product, sources=sources)
     moved = closed_moved_heads(heads, prs, tags, prefixes)
-    dead = dead_branches(heads, prs, tags, prefixes, commit_times(moved, product=product))
+    dead = dead_branches(heads, prs, tags, prefixes,
+                         commit_times(moved, product=product, sources=sources))
     branches = {b for b in heads if b not in dead and not b.startswith("archive/")}
     pr_by_head = {}
     for p in prs:
@@ -612,7 +591,7 @@ def discover(product=None, checked_file=None):
     tree_paths = [f"{main_ref}:{plans_dir}", f"{main_ref}:{specs_dir}", f"{main_ref}:{reviews_dir}"]
     if briefs_dir:
         tree_paths.append(f"{main_ref}:{briefs_dir}")
-    main_trees = read_trees(tree_paths, product=product)
+    main_trees = read_trees(tree_paths, product=product, sources=sources)
     main_plans = main_trees[f"{main_ref}:{plans_dir}"]
     main_specs = main_trees[f"{main_ref}:{specs_dir}"]
     main_review_tree = dict(main_trees[f"{main_ref}:{reviews_dir}"])
@@ -646,7 +625,7 @@ def discover(product=None, checked_file=None):
     tree_paths = [f"origin/{b}:{reviews_dir}" for b in doc_branches]
     tree_paths += [f"origin/{b}:{plans_dir}" for b in doc_branches]
     tree_paths += [f"origin/{b}:{specs_dir}" for b in doc_branches]
-    trees = read_trees(tree_paths, product=product)
+    trees = read_trees(tree_paths, product=product, sources=sources)
 
     plan_req, spec_req = {}, {}
     for it in inits.values():
@@ -709,7 +688,7 @@ def discover(product=None, checked_file=None):
 
     blobs = read_blobs(list(plan_req.values()) + list(spec_req.values()) +
                        [v[2] for d in wanted.values() for v in d.values()
-                        if not str(v[2]).startswith(STORED_KEY)], product=product)
+                        if not str(v[2]).startswith(STORED_KEY)], product=product, sources=sources)
     blobs.update(stored_blobs)
 
     brief_dirs = {}
@@ -717,7 +696,7 @@ def discover(product=None, checked_file=None):
         hit = [d for d in main_briefs if d == slug or d.endswith("-" + slug)]
         if hit:
             brief_dirs[slug] = f"{main_ref}:{briefs_dir}/{sorted(hit)[-1]}"
-    brief_trees = read_trees(sorted(set(brief_dirs.values())), product=product)
+    brief_trees = read_trees(sorted(set(brief_dirs.values())), product=product, sources=sources)
 
     for it in inits.values():
         head = (blobs.get(plan_req.get(it["slug"])) or blobs.get(spec_req.get(it["slug"])) or b"")
@@ -778,7 +757,7 @@ def discover(product=None, checked_file=None):
             if br:
                 task_tree_paths.append(f"origin/{br}:{reviews_dir}")
         task_rows[slug] = rows
-    task_trees = read_trees(sorted(set(task_tree_paths)), product=product)
+    task_trees = read_trees(sorted(set(task_tree_paths)), product=product, sources=sources)
 
     task_blob_req = []
     for slug, rows in task_rows.items():
@@ -799,7 +778,7 @@ def discover(product=None, checked_file=None):
                 row["review"] = (r, legacy, f, names[f]) if f else None
                 if f:
                     task_blob_req.append(names[f])
-    task_blobs = read_blobs(task_blob_req, product=product)
+    task_blobs = read_blobs(task_blob_req, product=product, sources=sources)
     task_blobs.update(stored_blobs)
     code_required = reviews.required("code")
     for rows in task_rows.values():
@@ -863,7 +842,7 @@ def discover(product=None, checked_file=None):
     # ---- the parity matrix, for Stories — only when the product names one (D1: None = not
     # looked for)
     if matrix_path:
-        matrix_text = sh(f"git show {main_ref}:{matrix_path}", product=product)
+        matrix_text = sh(f"git show {main_ref}:{matrix_path}", product=product, sources=sources)
         rows, _broken = parse_rows(matrix_text) if matrix_text else ([], [])
         stories = {r["id"]: {"status": r["status"], "impl": _matrix_paths(r["impl"]),
                              "test": _matrix_paths(r["tests"]), "area": r["area"],
@@ -872,13 +851,11 @@ def discover(product=None, checked_file=None):
     else:
         stories = {}
 
-    # ---- deploy shas: newest successful run of the product's deploy workflow; newest run of
-    # its ci workflow on the trunk whose named job succeeded. `None` → that query is not made.
-    deploy_workflow, ci_workflow, ci_dev_job = (
-        conv.get("deploy_workflow"), conv.get("ci_workflow"), conv.get("ci_dev_job"))
-    prod = _newest_success(deploy_workflow, product=product) if deploy_workflow else None
-    dev = (_newest_with_job(ci_workflow, ci_dev_job, branch=product.main, product=product)
-           if ci_workflow and ci_dev_job else None)
+    # ---- deploy shas: one call each, through the deploy provider (`None` when the product
+    # names no way to read it — PD14's dispatch, not "unconfigured" meaning "trunk is prod").
+    deploy_workflow = conv.get("deploy_workflow")
+    prod_sha = sources.deploy.sha("prod")
+    dev_sha = sources.deploy.sha("dev")
 
     checked_file = checked_file if checked_file is not None else CHECKED_FILE
     checked = set()
@@ -889,27 +866,27 @@ def discover(product=None, checked_file=None):
                 if m:
                     checked.add(int(m.group(1)))
 
-    main_sha = sh(f"git rev-parse {main_ref}", product=product)
-    commits = main_commits(product)
-    merges = merge_facts(product)
+    main_sha = sh(f"git rev-parse {main_ref}", product=product, sources=sources)
+    commits = main_commits(product, sources=sources)
+    merges = merge_facts(product, sources=sources)
 
     return {
         "features": features,
         "stories": stories,
-        "prod_sha": prod["headSha"] if prod else None,
+        "prod_sha": prod_sha,
         # the product deploys prod (a None `prod_sha` then means unknown, never "trunk is prod"),
         # and who dispatches it: `auto` (ASF) needs no operator tick in checked.txt
         "prod_deploys": bool(deploy_workflow),
         "prod_mode": _prod_mode(product),
-        "dev_sha": dev["headSha"] if dev else None,
+        "dev_sha": dev_sha,
         "checked": checked,
         "main_sha": main_sha or None,
         "merged": merged,
         "branches": sorted(branches),
         "resets": resets_of(dead, branches),
-        "ids": id_evidence(product, branches, prs, commits=commits, merges=merges),
+        "ids": id_evidence(product, branches, prs, commits=commits, merges=merges, sources=sources),
         "lane_docs": lane_docs(product, prs, commits=commits, merges=merges),
-        "proves": landed_proves(product, prs),
+        "proves": landed_proves(product, prs, sources=sources),
         "ci": ci_provider(product),
         "reverts": trunk_reverts(product),
     }
@@ -1015,52 +992,56 @@ def pr_naming_ids(pr):
 
 def ci_provider(product):
     """The product's `ci.provider`, lower-cased; None for `ci: none`, no provider, or a product
-    with no `ci` field at all."""
+    with no `ci` field at all.
+
+    Kept local rather than aliased straight to :func:`asf.evidence.sources.ci_provider` (PD15):
+    that one reads `product.ci` directly, and a bare `types.SimpleNamespace`/`Mock` test double
+    with no `ci` attribute — common throughout the suite, `tests/test_landing_stamp.py` among
+    them — raises `AttributeError` there where this answers `None`, same as `ci: none`. The two
+    agree on every product that actually sets `ci`; `GH_ACTIONS` is still the one import, so the
+    vocabulary itself cannot drift."""
     ci = getattr(product, "ci", None) if product is not None else None
     name = ci if isinstance(ci, str) else (ci or {}).get("provider") if isinstance(ci, dict) else None
     name = str(name).strip().lower() if name else ""
     return None if name in ("", "none", "off") else name
 
 
-def ci_green_runs(product):
+def ci_green_runs(product, sources=None):
     """[headSha, …] of the newest successful CI runs on main, newest first; [] if unreadable."""
+    sources = sources or _default_sources(product, need_host=True)
     if ci_provider(product) not in GH_ACTIONS:
         return []
-    runs = _gh_json(f"run list --branch {product.main} --status success --limit 20 "
-                    "--json headSha,createdAt", product=product)
+    runs = sources.host.runs(None, branch=product.main, status="success", limit=20)
     runs = sorted((r for r in runs if isinstance(r, dict) and r.get("headSha")),
                   key=lambda r: r.get("createdAt") or "", reverse=True)
     return list(dict.fromkeys(r["headSha"] for r in runs))
 
 
-def record_since(product):
+def record_since(product, sources=None):
     """The committer date of the record's first commit (the backlog repo's root), or None.
 
     Commits on main older than the record predate every id in it, so they are not read."""
     d = product.backlog_dir if product is not None else None
     if not d or not os.path.isdir(d):
         return None
-    try:
-        roots = subprocess.run(["git", "-C", d, "rev-list", "--max-parents=0", "HEAD"],
-                               capture_output=True, text=True, timeout=30).stdout.split()
-        if not roots:
-            return None
-        dates = subprocess.run(["git", "-C", d, "show", "-s", "--format=%cI"] + roots,
-                               capture_output=True, text=True, timeout=30).stdout.split()
-    except Exception:
+    sources = sources or _default_sources(product)
+    roots = sources.git.run(["rev-list", "--max-parents=0", "HEAD"], timeout=30, cwd=d).split()
+    if not roots:
         return None
+    dates = sources.git.run(["show", "-s", "--format=%cI"] + roots, timeout=30, cwd=d).split()
     return min(dates) if dates else None
 
 
-def main_commits(product):
+def main_commits(product, sources=None):
     """[(sha, subject, [path, ...])] on origin/<main> since the record's first commit, newest
     first. A merge commit's paths are its diff against its first parent — what it brought in."""
-    since = record_since(product)
+    sources = sources or _default_sources(product)
+    since = record_since(product, sources=sources)
     cmd = (f"git log --format=%x00%H%x09%s --name-only --diff-merges=first-parent "
            f"origin/{product.main}")
     if since:
         cmd += f" --since={since}"
-    return _parse_name_log(sh(cmd, product=product))
+    return _parse_name_log(sh(cmd, product=product, sources=sources))
 
 
 def _parse_name_log(text):
@@ -1076,13 +1057,13 @@ def _parse_name_log(text):
     return out
 
 
-def commit_paths(product, shas):
+def commit_paths(product, shas, sources=None):
     """{sha: [path, ...]} for commits the log did not already give — one `git show` for all."""
     shas = sorted({s for s in shas if s and FULL_SHA_RE.fullmatch(s)})
     if not shas:
         return {}
     text = sh("git show --format=%x00%H%x09%s --name-only --diff-merges=first-parent "
-              + " ".join(shas), product=product)
+              + " ".join(shas), product=product, sources=sources)
     return {sha: paths for sha, _subject, paths in _parse_name_log(text)}
 
 
@@ -1123,6 +1104,13 @@ def lane_kind(branch, prefixes):
 
 MERGED_STATE = "MERGED"
 SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+#: a PR's own `mergeable` vocabulary (never `UNKNOWN`, never a missing field, D12) — the host's
+#: own two states a PR can be read in, not a value either module invents. `asf/feeder/rows.py`
+#: carries the same `CONFLICTING` string as its own module-level constant (read, never
+#: imported: a module-level import of `asf.feeder.rows` from here is circular — `rows.py`
+#: reaches back into `asf.evidence.evidence` through `asf.amendable`/`asf.briefs`).
+CONFLICTING = "CONFLICTING"
+MERGEABLE = "MERGEABLE"
 
 
 def _merge_sha(run):
@@ -1139,7 +1127,7 @@ def _merge_sha(run):
     return v if SHA_RE.fullmatch(v) else None
 
 
-def merge_facts(product, path=None):
+def merge_facts(product, path=None, sources=None):
     """``{"code": {item: {sha, branch, pr}}, "docs": {item: [{kind, sha, branch, files}]}}`` —
     the lane's merge facts off the product's run lines (``sessions.jsonl``): every run whose
     branch merged (:func:`_merge_sha`), newest merge per item. A spec/plan lane branch
@@ -1155,6 +1143,7 @@ def merge_facts(product, path=None):
             path = os.path.join(env.state_dir(product), "sessions.jsonl")
         except Exception:
             return out
+    sources = sources or _default_sources(product)
     prefixes = branch_prefixes(product)
     on_main = None
     for rs in lifecycle.runs(path).values():
@@ -1168,7 +1157,7 @@ def merge_facts(product, path=None):
             lane = run.get("lane") if isinstance(run.get("lane"), dict) else {}
             if _needs_tip(run, lane):
                 if on_main is None:
-                    on_main = _tip_on_main(product)
+                    on_main = _tip_on_main(product, sources=sources)
                 if not on_main(lane.get("head"), branch):
                     continue  # the trunk's sha, not the branch's: no landing of this item
             # a run closed on verified trunk evidence (asf.workers.trunkclose) lands its item
@@ -1200,13 +1189,13 @@ def _needs_tip(run, lane):
     return lane.get("method") == "on-trunk" or not (lane.get("pr") or lane.get("head"))
 
 
-def _tip_on_main(product):
+def _tip_on_main(product, sources=None):
     """``(head, branch) -> bool``: is the branch's tip — the lane's ``head``, else the branch as
     origin has it now — an ancestor of (or the) trunk tip. False when neither is known: a merge
     fact with no tip behind it proves nothing."""
     main = f"origin/{getattr(product, 'main', None) or 'main'}"
     try:
-        reach = ancestry(product, [main])
+        reach = ancestry(product, [main], sources=sources)
     except Exception:  # noqa: BLE001 — no repo: nothing can be shown on the trunk
         return lambda head, branch: False
 
@@ -1214,7 +1203,7 @@ def _tip_on_main(product):
         tip = head
         if not tip and branch:
             tip = sh("git rev-parse --verify -q " + shlex.quote(f"origin/{branch}^{{commit}}"),
-                     product=product).strip()
+                     product=product, sources=sources).strip()
         return bool(tip) and reach(tip)
     return check
 
@@ -1223,7 +1212,7 @@ def _tip_on_main(product):
 REVERTS_RE = re.compile(r"This reverts commit ([0-9a-f]{40})")
 
 
-def trunk_reverts(product):
+def trunk_reverts(product, sources=None):
     """``{reverted sha: reverting sha}`` — every trunk commit a later trunk commit reverts
     (``This reverts commit <sha>`` in its message), one ``git log --grep`` for all. A revert that
     is itself reverted puts its target back: such a target is left out. ``{}`` when git says
@@ -1231,7 +1220,7 @@ def trunk_reverts(product):
     if product is None:
         return {}
     text = sh(f"git log --format=%H%x1e%B --grep='This reverts commit' origin/{product.main} --",
-              product=product)
+              product=product, sources=sources)
     rev = {}
     for sha, body in reversed(_parse_proves_log(text)):  # oldest first: a newer revert wins
         for target in REVERTS_RE.findall(body or ""):
@@ -1314,7 +1303,7 @@ def lane_docs(product, prs, commits=None, paths_of=None, merges=None):
     return out
 
 
-def merge_landed(ids, landed, product, green=None):
+def merge_landed(ids, landed, product, green=None, sources=None):
     """``ids`` (an :func:`id_evidence` map) with every ``{iid: sha}`` of ``landed`` folded in:
     ``commit`` fills when the id carries none yet, ``landed`` carries the sha itself (so
     ``closing.Ev.landed`` can tell a reconciled entry from a commit-subject one), and ``green``
@@ -1330,7 +1319,7 @@ def merge_landed(ids, landed, product, green=None):
     # product's `ci:` field through `ev['ci']` already resolved it
     has_ci = green is not None or ci_provider(product) is not None
     if has_ci and green is None:
-        green = ci_green_runs(product)
+        green = ci_green_runs(product, sources=sources)
     under_green = None
     for iid, sha in landed.items():
         r = dict(out.get(iid) or {"branches": [], "open_prs": [], "commit": None,
@@ -1339,7 +1328,7 @@ def merge_landed(ids, landed, product, green=None):
         if not r.get("commit"):
             if has_ci:
                 if under_green is None:
-                    under_green = ancestry(product, list(green))
+                    under_green = ancestry(product, list(green), sources=sources)
                 is_green = under_green(sha)
             else:
                 is_green = True
@@ -1349,7 +1338,8 @@ def merge_landed(ids, landed, product, green=None):
     return out
 
 
-def id_evidence(product, branches, prs, commits=None, green=None, merges=None, landed=None):
+def id_evidence(product, branches, prs, commits=None, green=None, merges=None, landed=None,
+                sources=None):
     """{id: {branches, open_prs, commit, green}} — every id a branch, PR or commit on main names.
 
     `commit` is first the lane's merge fact for the id (``merges``, the ``code`` half of
@@ -1368,14 +1358,15 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None, l
 
     def rec(iid):
         return out.setdefault(iid, {"branches": [], "open_prs": [], "commit": None,
-                                    "pr": None, "green": False})
+                                    "pr": None, "green": False, "mergeable": None,
+                                    "conflicting": []})
 
     for b in sorted(branches):
         if b == product.main:
             continue
         for iid in id_tokens(b, BRANCH_ID_TOKEN):
             rec(iid)["branches"].append(b)
-    commits = main_commits(product) if commits is None else commits
+    commits = main_commits(product, sources=sources) if commits is None else commits
     dirs = doc_dirs(product)
     facts = sorted(((merges or {}).get("code") or {}).items())
     # A lane merge whose diff is only documents — a writer report saying NO-CHANGE, a review, a
@@ -1385,7 +1376,7 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None, l
     fact_paths = {sha: paths for sha, _s, paths in _commit_rows(commits)}
     unread = [f["sha"] for _i, f in facts if f.get("sha") and f["sha"] not in fact_paths]
     if unread:
-        fact_paths.update(commit_paths(product, unread))
+        fact_paths.update(commit_paths(product, unread, sources=sources))
     for iid, fact in facts:
         if docs_only(fact_paths.get(fact["sha"]), dirs):
             continue
@@ -1414,12 +1405,19 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None, l
         sha = (p.get("mergeCommit") or {}).get("oid") if state == "MERGED" else None
         for iid in ids:
             if state == "OPEN":
-                rec(iid)["open_prs"].append(p["number"])
+                r = rec(iid)
+                r["open_prs"].append(p["number"])
+                pr_mergeable = p.get("mergeable")  # never UNKNOWN, never a missing field (D12)
+                if pr_mergeable == CONFLICTING:
+                    r["mergeable"] = CONFLICTING
+                    r["conflicting"].append(p["number"])
+                elif pr_mergeable == MERGEABLE and r["mergeable"] != CONFLICTING:
+                    r["mergeable"] = MERGEABLE
         if sha and ids and not lane_kind(p.get("headRefName"), prefixes):
             merged_prs.append((p, sha, ids))
     unknown = [sha for _p, sha, _ids in merged_prs if sha not in known]
     if unknown:
-        known.update(commit_paths(product, unknown))
+        known.update(commit_paths(product, unknown, sources=sources))
     for p, sha, ids in merged_prs:
         if docs_only(known.get(sha), dirs) or lands_nothing(p.get("title")):
             continue
@@ -1427,7 +1425,7 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None, l
             if (out.get(iid) or {}).get("commit"):
                 continue
             if on_main is None:
-                on_main = ancestry(product, [main_ref])
+                on_main = ancestry(product, [main_ref], sources=sources)
             if not on_main(sha):
                 continue
             r = rec(iid)
@@ -1436,8 +1434,8 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None, l
     if ci_provider(product) is None:
         for r in out.values():
             r["green"] = bool(r["commit"])
-        return merge_landed(out, landed, product)
-    green = ci_green_runs(product) if green is None else green
+        return merge_landed(out, landed, product, sources=sources)
+    green = ci_green_runs(product, sources=sources) if green is None else green
     covered = {}
     under_green = None  # one rev-list over every green run's sha, made on first use
     for r in out.values():
@@ -1446,10 +1444,10 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None, l
             continue
         if c not in covered:
             if under_green is None:
-                under_green = ancestry(product, list(green))
+                under_green = ancestry(product, list(green), sources=sources)
             covered[c] = under_green(c)
         r["green"] = covered[c]
-    return merge_landed(out, landed, product, green=green)
+    return merge_landed(out, landed, product, green=green, sources=sources)
 
 
 #: A trunk commit's ``git log --format=%H%x1e%B`` record: the 40-hex sha the record separator
@@ -1466,7 +1464,7 @@ def _parse_proves_log(text):
             for i, m in enumerate(marks)]
 
 
-def landed_proves(product, prs):
+def landed_proves(product, prs, sources=None):
     """{story: [{line, test, task, pr, sha, source}, ...]} — every claim that has **landed**
     (§2.6): a claim is not evidence until it is on the trunk.
 
@@ -1501,18 +1499,18 @@ def landed_proves(product, prs):
         if not sha:
             continue
         if on_main is None:
-            on_main = ancestry(product, [main_ref])
+            on_main = ancestry(product, [main_ref], sources=sources)
         if not on_main(sha):
             continue
         task = next((i for i in pr_naming_ids(p) if i.startswith("T-")), None)
         for claim in proves.parse(p.get("body") or ""):
             add(claim, task, p.get("number"), sha, "pr")
 
-    since = record_since(product)
+    since = record_since(product, sources=sources)
     cmd = f"git log --format=%H%x1e%B --grep=^Proves: {main_ref}"
     if since:
         cmd += f" --since={since}"
-    for sha, body in _parse_proves_log(sh(cmd, product=product)):
+    for sha, body in _parse_proves_log(sh(cmd, product=product, sources=sources)):
         subject = body.splitlines()[0] if body else ""
         task = next((i for i in naming_ids(subject, product.main) if i.startswith("T-")), None)
         for claim in proves.parse(body):
@@ -1540,7 +1538,9 @@ def id_state(iid, iev, has_ci=True):
             return "Closed", [line, "CI green on main at or after it" if has_ci else "no CI provider"]
         return "Resolved", [line]
     if iev.get("open_prs"):
-        lines = [f"PR #{n} OPEN" for n in iev["open_prs"]]
+        conflicting = set(iev.get("conflicting") or ())
+        lines = [f"PR #{n} OPEN (CONFLICTING)" if n in conflicting else f"PR #{n} OPEN"
+                 for n in iev["open_prs"]]
         return "Active", lines + [f"branch {b}" for b in iev.get("branches") or []]
     if iev.get("branches"):
         return "Active", [f"branch {b}" for b in iev["branches"]]
@@ -1555,15 +1555,16 @@ def _report_name_ok(name, report_re):
     return name.endswith(".md")
 
 
-def migrate_sources(product=None, design_spec_name=None):
+def migrate_sources(product=None, design_spec_name=None, sources=None):
     """Raw content `backlog.py migrate` needs beyond discover(): every spec doc on origin/main
     (the design spec's D-row table lives among them), the product's decisions file, and every
     report under its reports dir on origin/main and on code/spec/plan branches whose PR is not
-    merged. All git/gh access `migrate` needs stays behind this one function, same as
+    merged. All git/host access `migrate` needs stays behind this one function, same as
     `discover()`. A product that declares none of `design_spec_name`, `decisions_file` or
     `reports_dir` gets empty sources for it — the provider does not look for what was not named.
     """
     product = product or env.load_product()
+    sources = sources or _default_sources(product, need_host=True)
     conv = product.conventions
     # `design_spec_name`/`decisions_file`/`reports_dir`/`report_pattern` are not yet fields of
     # `Conventions` (asf/conventions.py is out of this Task's footprint) — `.get()` reads them
@@ -1573,8 +1574,8 @@ def migrate_sources(product=None, design_spec_name=None):
     reports_dir = conv.get("reports_dir")
     report_re = re.compile(conv.get("report_pattern")) if conv.get("report_pattern") else None
 
-    branches = remote_branches(product=product)
-    prs = pr_list(product=product)
+    branches = remote_branches(product=product, sources=sources)
+    prs = pr_list(product=product, sources=sources)
     pr_by_head = {}
     for p in prs:
         pr_by_head.setdefault(p.get("headRefName") or "", []).append(p)
@@ -1587,17 +1588,19 @@ def migrate_sources(product=None, design_spec_name=None):
     )
 
     specs_dir = conv.specs_dir
-    main_specs_tree = list_tree("origin/main", specs_dir, product=product)
+    main_specs_tree = list_tree("origin/main", specs_dir, product=product, sources=sources)
     spec_refs = [f"origin/main:{specs_dir}/{n}" for n in main_specs_tree if n.endswith(".md")]
-    main_spec_texts = {os.path.basename(r): t for r, t in read_refs(spec_refs, product=product).items()}
+    main_spec_texts = {os.path.basename(r): t
+                       for r, t in read_refs(spec_refs, product=product, sources=sources).items()}
 
-    sdd_decisions_text = (read_ref(f"origin/main:{decisions_file}", product=product)
+    sdd_decisions_text = (read_ref(f"origin/main:{decisions_file}", product=product, sources=sources)
                           if decisions_file else None)
 
     hotfix_texts = {}
     if reports_dir:
         revs = ["origin/main"] + [f"origin/{b}" for b in open_branches]
-        report_trees = read_trees([f"{r}:{reports_dir}" for r in revs], product=product)
+        report_trees = read_trees([f"{r}:{reports_dir}" for r in revs], product=product,
+                                  sources=sources)
         main_names = {n for n in report_trees.get(f"origin/main:{reports_dir}", {})
                      if _report_name_ok(n, report_re)}
         hotfix_refs = [f"origin/main:{reports_dir}/{n}" for n in main_names]
@@ -1609,7 +1612,7 @@ def migrate_sources(product=None, design_spec_name=None):
                 # every stale branch that happens to carry it too.
                 if _report_name_ok(n, report_re) and n not in main_names:
                     hotfix_refs.append(f"{r}:{reports_dir}/{n}")
-        hotfix_texts = read_refs(hotfix_refs, product=product)
+        hotfix_texts = read_refs(hotfix_refs, product=product, sources=sources)
 
     return {
         "design_spec_text": main_spec_texts.get(design_spec_name),
@@ -1623,7 +1626,7 @@ def migrate_sources(product=None, design_spec_name=None):
 FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
-def ancestry(product, bases):
+def ancestry(product, bases, sources=None):
     """``sha -> bool``: is ``sha`` an ancestor of (or equal to) any of ``bases``, as
     :func:`ancestor_of` answers it — from one ``rev-list`` over every base, read once, instead of
     one ``merge-base`` fork per question (a hundred-odd a tick: most of ``ingest``'s time). When
@@ -1631,38 +1634,37 @@ def ancestry(product, bases):
     bases = [b for b in bases if b]
     reach = None
     if bases:
-        r = subprocess.run(["git", "-C", product.repo_dir, "rev-list", *bases, "--"],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            reach = set(r.stdout.split())
+        sources = sources or _default_sources(product)
+        out = sources.git.run(["rev-list", *bases, "--"])
+        if out:
+            reach = set(out.split())
 
     def check(sha):
         if not sha or not bases:
             return False
         if reach is not None and FULL_SHA_RE.fullmatch(sha):
             return sha in reach
-        return any(ancestor_of(sha, b, product=product) for b in bases)
+        return any(ancestor_of(sha, b, product=product, sources=sources) for b in bases)
     return check
 
 
-def ancestor_of(sha, base, product=None):
-    """True if `sha` is an ancestor of `base` in the product repo (a merge landed in `base`)."""
+def ancestor_of(sha, base, product=None, sources=None):
+    """True if `sha` is an ancestor of `base` in the product repo (a merge landed in `base`).
+
+    `GitSource.run` answers with stdout alone (D7: never a command line, never an exit code), so
+    this cannot run `--is-ancestor` and read its exit status; it resolves `sha` to its full oid
+    (:meth:`GitSource.cat_file`) and asks `git merge-base <sha> <base>` instead — the common
+    ancestor of an ancestor and its descendant is the ancestor itself, so `sha` is one exactly
+    when the answer comes back as `sha`."""
     if not sha or not base:
         return False
     product = product or env.load_product()
-    r = subprocess.run(["git", "-C", product.repo_dir, "merge-base", "--is-ancestor", sha, base],
-                       capture_output=True)
-    return r.returncode == 0
-
-
-def _gh_json(args, timeout=60, product=None):
-    product = product or env.load_product()
-    raw = sh(f"gh {args} -R {product.repo_slug}" if not args.startswith("api ") else f"gh {args}",
-             timeout, product=product)
-    try:
-        return json.loads(raw) if raw else ([] if not args.startswith("api ") else {})
-    except json.JSONDecodeError:
-        return [] if not args.startswith("api ") else {}
+    sources = sources or _default_sources(product)
+    full = sources.git.cat_file("check", [sha])[0]
+    if not full:
+        return False
+    out = sources.git.run(["merge-base", full, base]).strip()
+    return bool(out) and out == full
 
 
 # ---------------------------------------------------------------------- state rules (README) ---
@@ -1804,20 +1806,21 @@ def blocked_of(blocked_by, state_by_id):
 
 
 # -------------------------------------------------------------------------------------- cli ----
-def load(fresh=False, product=None, checked_file=None):
+def load(fresh=False, product=None, checked_file=None, sources=None):
     """discover(), through the 3-minute cache under the product's state directory (one file per
     product). Shared by the CLI and by `backlog.py ingest`, so two calls a few seconds apart cost
-    one round-trip to gh/git — the main-branch commit log and the CI green runs included."""
+    one round-trip to the host/git — the main-branch commit log and the CI green runs included.
+    A `Recorded` `sources` is fed to `discover` directly: recording is not a cache mode."""
     product = product or env.load_product()
     cache = _cache_file("evidence.json", product)
-    if not fresh and os.path.exists(cache):
+    if sources is None and not fresh and os.path.exists(cache):
         if time.time() - os.path.getmtime(cache) < EVIDENCE_TTL:
             with open(cache) as f:
                 data = json.load(f)
             data["checked"] = set(data["checked"])
             return data
 
-    data = discover(product=product, checked_file=checked_file)
+    data = discover(product=product, checked_file=checked_file, sources=sources)
     text = json.dumps({**data, "checked": sorted(data["checked"])}, indent=2, sort_keys=True) + "\n"
     try:
         with open(cache + f".{os.getpid()}", "w") as f:
@@ -1828,10 +1831,98 @@ def load(fresh=False, product=None, checked_file=None):
     return data
 
 
+class _RecordingGit:
+    """Wraps a real `GitSource`, logging every call under the key :class:`Recorded` replays it
+    from — `--record`'s whole mechanism."""
+
+    def __init__(self, inner, log):
+        self._inner, self._log = inner, log
+
+    def run(self, args, timeout=120, cwd=None):
+        out = self._inner.run(args, timeout=timeout, cwd=cwd)
+        self._log["git.run:" + " ".join(args)] = out
+        return out
+
+    def cat_file(self, kind, requests):
+        out = self._inner.cat_file(kind, requests)
+        for req, value in zip(requests, out):
+            self._log[f"git.cat_file:{kind}:{req}"] = (
+                base64.b64encode(value).decode("ascii") if kind == "blob" and value is not None
+                else value)
+        return out
+
+    def fetch(self):
+        return self._inner.fetch()
+
+
+class _RecordingHost:
+    """Wraps a real `HostSource`, logging every call under the key :class:`Recorded` replays it
+    from."""
+
+    def __init__(self, inner, log):
+        self._inner, self._log = inner, log
+
+    def prs(self):
+        out = self._inner.prs()
+        self._log["host.prs"] = out
+        return out
+
+    def runs(self, workflow, branch=None, status=None, limit=20):
+        out = self._inner.runs(workflow, branch=branch, status=status, limit=limit)
+        key = "host.runs:" + ":".join(str(p) for p in (workflow, branch) if p is not None)
+        self._log[key] = out
+        return out
+
+    def run_jobs(self, run_id):
+        out = self._inner.run_jobs(run_id)
+        self._log[f"host.run_jobs:{run_id}"] = out
+        return out
+
+
+class _RecordingDeploy:
+    """Wraps a real `DeploySource`, logging every call under the key :class:`Recorded` replays
+    it from."""
+
+    def __init__(self, inner, log):
+        self._inner, self._log = inner, log
+
+    def deployment(self, env_name):
+        out = self._inner.deployment(env_name)
+        self._log[f"deploy.deployment:{env_name}"] = list(out)
+        return out
+
+    def sha(self, env_name):
+        return self.deployment(env_name)[0]
+
+
+def _record(product, record_dir):
+    """`discover()` over the real providers, logging every call made; the three logs are
+    written to `record_dir/{git,host,deploy}.json` — a snapshot :class:`Recorded` replays
+    offline."""
+    real = sources_mod.for_product(product)
+    logs = {"git": {}, "host": {}, "deploy": {}}
+    sources = sources_mod.Sources(_RecordingGit(real.git, logs["git"]),
+                                  _RecordingHost(real.host, logs["host"]),
+                                  _RecordingDeploy(real.deploy, logs["deploy"]))
+    discover(product=product, sources=sources)
+    os.makedirs(record_dir, exist_ok=True)
+    paths = []
+    for name in ("git", "host", "deploy"):
+        path = os.path.join(record_dir, f"{name}.json")
+        with open(path, "w") as f:
+            json.dump(logs[name], f, indent=2, sort_keys=True)
+            f.write("\n")
+        paths.append(path)
+    return paths
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="evidence.py")
     p.add_argument("--json", action="store_true", help="print discover() as JSON")
     p.add_argument("--fresh", action="store_true", help="bypass the 3-minute cache")
+    p.add_argument("--record", metavar="DIR",
+                   help="record every git/host/deploy answer discover() used, to "
+                        "DIR/{git,host,deploy}.json")
     env.add_product_arg(p)
     args = p.parse_args(argv)
 
@@ -1840,6 +1931,11 @@ def main(argv=None):
         return 2
 
     product = env.load_product(args.product)
+    if args.record:
+        for path in _record(product, args.record):
+            print(path)
+        return 0
+
     data = load(fresh=args.fresh, product=product)
     text = json.dumps({**data, "checked": sorted(data["checked"])}, indent=2, sort_keys=True) + "\n"
     sys.stdout.write(text)

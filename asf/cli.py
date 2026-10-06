@@ -303,6 +303,9 @@ def build_parser():
     p_evidence = sub.add_parser('evidence', help='the evidence pass (git/gh derived state)')
     p_evidence.add_argument('--product')
     p_evidence.add_argument('--fresh', action='store_true')
+    p_evidence.add_argument('--record', metavar='DIR',
+                            help='record every git/host/deploy answer discover() used, to '
+                                 'DIR/{git,host,deploy}.json, for offline replay')
 
     p_harvest = sub.add_parser('harvest', help='land worker branches')
     p_harvest.add_argument('--repo')
@@ -637,6 +640,8 @@ def _main(argv=None):
             evidence_args.append('--fresh')
         if args.product:
             evidence_args += ['--product', args.product]
+        if args.record:
+            evidence_args += ['--record', args.record]
         return evidence_main(evidence_args)
     if args.command == 'harvest':
         from asf.harvest.harvest import main as harvest_main
