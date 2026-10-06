@@ -242,6 +242,160 @@ class RuleViolationSignatureTests(unittest.TestCase):
         self.assertEqual(file_bugs.rule_violation_signatures(self.root), {})
 
 
+class RuleViolationFieldTests(unittest.TestCase):
+    """§2.7: a violation line's two optional trailing fields — ``sev=`` is that place's own
+    severity, ``sig=`` makes it its own Bug instead of folding into one Bug per rule."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.state = tempfile.mkdtemp(prefix='filebugs_state_')
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def _file_bugs(self, epic='E-0009'):
+        import argparse
+        import contextlib
+        import io
+        args = argparse.Namespace(default_bug_epic=epic, file_bug_level='auto',
+                                  conventions=Conventions(), state_dir=self.state)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = file_bugs.cmd_file_bugs(args, self.root)
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_line_fields_splits_the_known_fields_off(self):
+        text, sev, sig = file_bugs.line_fields(
+            'R-0009 secret alert open github_pat acme#7 since 2026-01-01 sev=S1 sig=secret-acme-7')
+        self.assertEqual(text, 'R-0009 secret alert open github_pat acme#7 since 2026-01-01')
+        self.assertEqual(sev, 'S1')
+        self.assertEqual(sig, 'secret-acme-7')
+
+    def test_an_unknown_field_stays_in_the_text(self):
+        text, sev, sig = file_bugs.line_fields('R-0001 merged red foo=bar')
+        self.assertEqual(text, 'R-0001 merged red foo=bar')
+        self.assertIsNone(sev)
+        self.assertIsNone(sig)
+
+    def test_an_invalid_severity_is_ignored_and_stays_in_the_text(self):
+        text, sev, sig = file_bugs.line_fields('R-0001 merged red sev=S9')
+        self.assertEqual(text, 'R-0001 merged red sev=S9')
+        self.assertIsNone(sev)
+        self.assertIsNone(sig)
+
+    def test_a_line_with_neither_field_is_unchanged(self):
+        line = 'R-0001 merged with no green run sha=abc1234 3d'
+        text, sev, sig = file_bugs.line_fields(line)
+        self.assertEqual(text, line)
+        self.assertIsNone(sev)
+        self.assertIsNone(sig)
+
+    def test_two_sig_lines_file_two_bugs_each_its_own_severity_and_evidence(self):
+        secret_line = ('R-0009 secret alert open github_pat acme#7 since 2026-01-01 '
+                       'sev=S1 sig=secret-acme-7')
+        dep_line = ('R-0009 dependency alert open high lodash (npm) acme#3 since 2026-01-02 '
+                   'sev=S2 sig=dep-acme-3')
+        data = {'violations': [{'rule': 'R-0009', 'line': secret_line},
+                               {'rule': 'R-0009', 'line': dep_line}]}
+        sigs = file_bugs.rule_violation_signatures(self.root, data)
+        self.assertEqual(set(sigs), {'R-0009: secret-acme-7', 'R-0009: dep-acme-3'})
+        self.assertEqual(sigs['R-0009: secret-acme-7']['severity'], 'S1')
+        self.assertEqual(sigs['R-0009: secret-acme-7']['evidence'], [secret_line])
+        self.assertEqual(sigs['R-0009: dep-acme-3']['severity'], 'S2')
+        self.assertEqual(sigs['R-0009: dep-acme-3']['evidence'], [dep_line])
+
+    def test_two_lines_with_neither_field_file_one_s2_bug_byte_for_byte(self):
+        line1 = 'R-0001 merged with no green run sha=abc1234 3d'
+        line2 = 'R-0001 merged with no green run sha=def5678 1d'
+        write_rule(self.root, 'R-0001', 'Never merge red',
+                  typed_lines=['scope: merge', 'check: tools/checks/r0001.sh'])
+        write_check_script(self.root, 'r0001.sh',
+                           f"#!/usr/bin/env bash\necho '{line1}'\necho '{line2}'\nexit 1\n")
+        run(['index'], self.root)
+        sigs = file_bugs.rule_violation_signatures(self.root)
+        self.assertEqual(len(sigs), 1)
+        sig = list(sigs)[0]
+        self.assertEqual(sig, 'R-0001: rule violated')
+        self.assertEqual(sigs[sig]['severity'], 'S2')
+        self.assertEqual(sigs[sig]['places'], 2)
+        self.assertEqual(sigs[sig]['evidence'], [line1, line2])
+
+    def test_a_second_run_the_same_day_files_nothing_and_bumps_nothing(self):
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        run(['index'], self.root)
+        data = {'violations': [{'rule': 'R-0009', 'line':
+                                'R-0009 secret alert open github_pat acme#7 since 2026-01-01 '
+                                'sev=S1 sig=secret-acme-7'}], 'broken': []}
+        orig = file_bugs.rule_check_results
+        file_bugs.rule_check_results = lambda root: data
+        try:
+            first = self._file_bugs()
+            second = self._file_bugs()
+        finally:
+            file_bugs.rule_check_results = orig
+        self.assertIn('1 filed, 0 bumped', first)
+        self.assertIn('0 filed, 0 bumped', second)
+        bugs = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')]
+        self.assertEqual(len(bugs), 1)
+
+
+class SecretAlertTests(unittest.TestCase):
+    """T-0363's surviving acceptance ("a planted test secret in a branch is filed within one
+    tick"), hermetic per PD10: no subprocess, no ``gh``."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.state = tempfile.mkdtemp(prefix='filebugs_state_')
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        run(['index'], self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def test_a_planted_secret_alert_is_filed_as_an_s1_bug_in_one_tick(self):
+        from asf import env
+        from asf.security import alerts
+
+        class FakeHost(alerts.Host):
+            def secrets(self):
+                return [{'number': 7, 'state': 'open', 'kind': 'github_pat',
+                        'url': 'https://x/7', 'created_at': '2026-01-01T00:00:00Z',
+                        'locations_count': 1}]
+
+            def dependencies(self):
+                return []
+
+        product = env.Product('p', {'repo_slug': 'acme/widgets'})
+        lines = alerts.violations(product, host=FakeHost())
+        self.assertEqual(len(lines), 1)
+        data = {'violations': [{'rule': 'R-0009', 'line': lines[0]}], 'broken': []}
+
+        import argparse
+        import contextlib
+        import io
+        args = argparse.Namespace(default_bug_epic='E-0009', file_bug_level='auto',
+                                  conventions=Conventions(), state_dir=self.state)
+        orig = file_bugs.rule_check_results
+        file_bugs.rule_check_results = lambda root: data
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = file_bugs.cmd_file_bugs(args, self.root)
+        finally:
+            file_bugs.rule_check_results = orig
+        self.assertEqual(rc, 0)
+        bugs = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')]
+        self.assertEqual(len(bugs), 1)
+        with open(os.path.join(self.root, 'bugs', bugs[0])) as f:
+            meta, _body = frontmatter.parse(f.read(), path=f'bugs/{bugs[0]}')
+        self.assertEqual(meta['severity'], 'S1')
+        self.assertEqual(meta['signature'], 'R-0009: secret-acme/widgets-7')
+        self.assertEqual(meta['parent'], 'E-0009')
+
+
 BARE_REF_BODY = (
     "## Description\nas decided in D1, the thing\n\n## Acceptance\n- [ ] \n\n## Non-goals\n\n"
     "## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n"

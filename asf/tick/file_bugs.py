@@ -156,8 +156,41 @@ def rule_check_results(root):
         return None
 
 
+#: A violation line's two optional trailing fields (§2.7) — the filer's, not `rules.py`'s: a
+#: known key's value always comes off the line, even when it is not used (an invalid `sev=`
+#: is dropped as a *field* but, being invalid, is put back — see `line_fields`).
+_FIELD_RE = re.compile(r'\s(?P<key>sev|sig)=(?P<val>\S+)')
+LINE_SEVERITIES = ('S1', 'S2', 'S3')
+
+
+def line_fields(line):
+    """``(text, sev, sig)`` — the line with its trailing ``sev=``/``sig=`` fields removed, the
+    severity when it is one of :data:`LINE_SEVERITIES`, and the place key when there is one. A
+    field this grammar does not know (``foo=bar``) stays in the text, where a reader can see
+    it; an invalid ``sev=`` (not one of :data:`LINE_SEVERITIES`) is ignored as a severity and,
+    exactly like an unknown field, left in the text too."""
+    sev = sig = None
+
+    def strip(m):
+        nonlocal sev, sig
+        key, val = m.group('key'), m.group('val')
+        if key == 'sig':
+            sig = val
+            return ''
+        if val in LINE_SEVERITIES:
+            sev = val
+            return ''
+        return m.group(0)
+
+    text = _FIELD_RE.sub(strip, line).rstrip()
+    return text, sev, sig
+
+
 def rule_violation_signatures(root, data=None):
-    """One signature per violated rule. Only ``violations`` count: a check that timed out or
+    """One signature per violated rule — or, when a line carries its own ``sig=`` (§2.7), one
+    signature per place: a place carrying a stable key from a source outside this record — an
+    alert number, a box, a port — is its own defect, and folding it into one Bug per rule loses
+    the one thing that makes it actionable. Only ``violations`` count: a check that timed out or
     crashed (``broken``) said nothing about the product and files no Bug here."""
     if data is None:
         data = rule_check_results(root)
@@ -166,7 +199,10 @@ def rule_violation_signatures(root, data=None):
 
     # One Bug per RULE, not per place: a Bug per violating location buries the few real problems
     # under noise. The signature is the rule id; every violating place is an evidence line, and
-    # `places` carries how many there are this run.
+    # `places` carries how many there are this run. The exception is a place carrying its own
+    # `sig=` (above): a stable key from a source outside this record — an alert number, a box, a
+    # port — already names a defect of its own, and folding it into one Bug per rule would lose
+    # the one thing that makes it actionable.
     rules_idx = {}
     try:
         with open(os.path.join(root, 'index.json'), encoding='utf-8') as f:
@@ -178,13 +214,23 @@ def rule_violation_signatures(root, data=None):
     for v in data.get('violations') or []:
         rule, line = v.get('rule', ''), v.get('line', '')
         card = rules_idx.get(rule) or {}
+        text, sev, place = line_fields(line)
+        severity = sev if sev else 'S2'
+        if place:
+            sig = f"{rule}: {place}"
+            out[sig] = {
+                'title': truncate(text, 120), 'severity': severity,
+                'evidence': [line], 'runs': [],
+                'acceptance': [f"`asf rules check` reports no violation carrying `{place}`"],
+            }
+            continue
         sig = f"{rule}: rule violated"
         check = card.get('check')
         acceptance = (f"`asf rules check` reports no violation of {rule}: its check "
                       f"`bash {check}` exits 0" if check else
                       f"`asf rules check` reports no violation of {rule}")
         d = out.setdefault(sig, {'title': truncate(f"{rule} violated: {card.get('title') or 'see the rule card'}", 120),
-                                 'severity': 'S2', 'evidence': [], 'runs': [], 'places': 0,
+                                 'severity': severity, 'evidence': [], 'runs': [], 'places': 0,
                                  'acceptance': [acceptance]})
         d['evidence'].append(line)
         d['places'] += 1
