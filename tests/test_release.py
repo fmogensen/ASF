@@ -40,7 +40,7 @@ def good_facts(**over):
                      ('tests', 'check generic', 'success'),
                      ('tests', 'the sample product, end to end', 'success')],
         'docs': {'headings': ['Install', 'Quick start', 'Configuration', 'Upgrade'], 'tag': 'v0.1.0',
-                 'changelog_section': True, 'changelog_notes': True},
+                 'changelog_section': True, 'changelog_notes': True, 'changelog_kept': True},
         'seats': [seat_tick(m, 8, 8, 3) for m in (0, 5, 10)],   # seats in use: criterion 10 has data
     }
     f.update(over)
@@ -48,7 +48,18 @@ def good_facts(**over):
 
 
 def cfg(**block):
-    return release.settings(env.Product('p', {'release': block}))
+    """A release block that configures every criterion (the way a framework's own product file
+    does): the stability rule on, the CI steps, upgrades and README sections named.
+    :func:`product_cfg` is a product's bare block."""
+    block.setdefault('max_hand_fixes', 0)
+    block.setdefault('min_upgrades', 3)
+    block.setdefault('readme_sections', list(release.DEFAULTS['readme_sections']))
+    block['ci_steps'] = {**release.DEFAULTS['ci_steps'], **(block.get('ci_steps') or {})}
+    return release.settings(env.Product('p', {'repo_slug': 'o/r', 'release': block}))
+
+
+def product_cfg(**block):
+    return release.settings(env.Product('p', {'repo_slug': 'o/r', 'release': block}))
 
 
 def seat_tick(minute, busy, avail, launchable, cause='', base=datetime.datetime(2026, 9, 24, 10, 0, tzinfo=UTC)):
@@ -300,8 +311,113 @@ class EvaluateTest(unittest.TestCase):
         self.assertIn('did not answer', out['ci'].evidence)
         self.assertFalse(out['install'].met)
 
-    def test_no_blocking_list_is_unmet(self):
-        self.assertFalse(self.crit(good_facts(), cfg())['blocking'].met)
+    def test_no_blocking_list_is_na(self):
+        out = self.crit(good_facts(), cfg())['blocking']
+        self.assertTrue(out.met)
+        self.assertEqual(out.evidence, 'n/a — no release.blocking list')
+
+
+def minimal_facts(**over):
+    """What a minimal product reads: nothing landed, no upgrade, no CI step of the framework's,
+    a README with no release sections, no tag."""
+    base = dict(items={}, repair={'sessions': 0, 'landed': 0, 'per_feature': None},
+                upgrade={'upgrades': [], 'failed': [], 'torn': [], 'rollbacks': [], 'chain_breaks': []},
+                ci_steps=[('tests', 'tests', 'success')],
+                docs={'headings': ['Usage'], 'tag': None, 'changelog_section': False,
+                      'changelog_notes': False})
+    base.update(over)
+    return good_facts(**base)
+
+
+class ProductGateTest(unittest.TestCase):
+    """F-0248 amendments 6 and 7: release readiness is a per-product gate — the framework's own
+    criteria and the hand-fix rule are opt-in for a product; not applicable reads n/a, never red."""
+
+    def crit(self, facts, c):
+        return {x.key: x for x in release.evaluate(facts, c)}
+
+    def test_max_hand_fixes_defaults_off(self):
+        self.assertIsNone(release.DEFAULTS['max_hand_fixes'])
+        self.assertIsNone(product_cfg()['max_hand_fixes'])
+        hand = [{'sha': 'abc1234', 'date': '2026-09-24T10:00:00Z', 'author': 'Dev', 'subject': 'fix: by hand'}]
+        out = self.crit(good_facts(hand_commits=hand), product_cfg())['stability']
+        self.assertTrue(out.met)
+        self.assertTrue(out.evidence.startswith('n/a — release.max_hand_fixes is off'), out.evidence)
+        for off in ('off', False):
+            self.assertIsNone(product_cfg(max_hand_fixes=off)['max_hand_fixes'])
+
+    def test_a_release_block_that_sets_max_hand_fixes_keeps_the_rule(self):
+        # the factory's own product file sets `max_hand_fixes: 0`: the rule stays on there
+        hand = [{'sha': 'abc1234', 'date': '2026-09-24T10:00:00Z', 'author': 'Dev', 'subject': 'fix: by hand'}]
+        for c in (product_cfg(max_hand_fixes=0), cfg()):
+            out = self.crit(good_facts(hand_commits=hand), c)['stability']
+            self.assertFalse(out.met)
+            self.assertIn('1 hand fix commit(s)', out.evidence)
+
+    def test_a_minimal_product_is_ready_with_every_framework_criterion_na(self):
+        out = self.crit(minimal_facts(), product_cfg())
+        self.assertEqual([k for k, v in out.items() if not v.met], [])
+        na = sorted(k for k, v in out.items() if v.evidence.startswith('n/a'))
+        self.assertEqual(na, ['blocking', 'docs', 'generic', 'install', 'repair', 'stability', 'upgrade'])
+        self.assertEqual(out['ci'].evidence, '10/10 green')
+
+    def test_no_forge_reads_ci_na(self):
+        c = release.settings(env.Product('p', {}))
+        out = self.crit(minimal_facts(ci_runs=None, ci_steps=None), c)['ci']
+        self.assertTrue(out.met)
+        self.assertIn('n/a — no hosted CI', out.evidence)
+        c = release.settings(env.Product('p', {'repo_slug': 'o/r', 'ci': 'none'}))
+        self.assertTrue(self.crit(minimal_facts(ci_runs=None, ci_steps=None), c)['ci'].met)
+        # a hosted CI that did not answer is still red: it applies
+        self.assertFalse(self.crit(minimal_facts(ci_runs=None), product_cfg())['ci'].met)
+
+    def test_a_criterion_the_product_configures_applies(self):
+        c = product_cfg(requires={'install': ['F-0001']}, ci_steps={'generic': 'scan names'},
+                        min_upgrades=1, blocking=['F-0009'], readme_sections=['Install'])
+        out = self.crit(minimal_facts(), c)
+        self.assertEqual(sorted(k for k, v in out.items() if not v.met),
+                         ['blocking', 'docs', 'generic', 'install', 'upgrade'])
+        self.assertIn("'scan names' absent", out['generic'].evidence)
+
+    def test_release_notes_are_checked_only_with_a_changelog(self):
+        facts = minimal_facts(docs={'headings': ['Install'], 'tag': None, 'changelog_section': False,
+                                    'changelog_notes': False})
+        out = self.crit(facts, product_cfg(readme_sections=['Install']))['docs']
+        self.assertTrue(out.met, out.evidence)
+        self.assertIn('release notes n/a', out.evidence)
+        opted = release.settings(env.Product('p', {'release': {'readme_sections': ['Install']},
+                                                   'conventions': {'version': {'changelog': True}}}))
+        self.assertFalse(self.crit(facts, opted)['docs'].met)
+        # a product whose trunk keeps a changelog (its own release workflow writes it) is held to it
+        kept = dict(facts['docs'], changelog_kept=True)
+        self.assertFalse(self.crit(dict(facts, docs=kept), product_cfg(readme_sections=['Install']))['docs'].met)
+
+    def test_self_tuning_off_is_na_unless_required(self):
+        from asf import tune
+        with mock.patch('asf.tune.criterion', return_value=(False, 'tune.enabled is off')), \
+                mock.patch('asf.env.load_config', return_value={}):
+            p = release.tune_criterion(env.Product('p', {}), 7, '2026-09-25T12:00:00Z')
+        self.assertEqual((p.met, p.evidence), (True, 'n/a — tune.enabled is off'))
+        req = {'tune': {'products': {'p': {'required': True}}}}
+        with mock.patch('asf.tune.criterion', return_value=(False, 'tune.enabled is off')), \
+                mock.patch('asf.env.load_config', return_value=req):
+            f = release.tune_criterion(env.Product('p', {}), 7, '2026-09-25T12:00:00Z')
+        self.assertEqual((f.met, f.evidence), (False, 'tune.enabled is off'))
+        self.assertTrue(tune.required(env.Product('p', {}), {'tune': {'required': 'on'}}))
+        self.assertFalse(tune.required(env.Product('p', {}), {}))
+
+    def test_the_factorys_own_repo_and_a_fixture_with_the_same_config_gate_the_same(self):
+        # "generic for any product, starting with itself": no criterion reads which repo it is
+        block = {'max_hand_fixes': 0, 'blocking': ['F-0001'], 'requires': {'install': ['F-0001']}}
+        with tempfile.TemporaryDirectory() as own, tempfile.TemporaryDirectory() as other:
+            with open(os.path.join(own, 'pyproject.toml'), 'w') as f:
+                f.write('[project]\nname = "asf-factory"\n')
+            a = release.settings(env.Product('asf', {'repo_dir': own, 'repo_slug': 'o/r', 'release': block}))
+            b = release.settings(env.Product('fixture', {'repo_dir': other, 'repo_slug': 'o/r', 'release': block}))
+            self.assertEqual(a, b)
+            for facts in (good_facts(), minimal_facts()):
+                self.assertEqual([vars(c) for c in release.evaluate(facts, a)],
+                                 [vars(c) for c in release.evaluate(facts, b)])
 
 
 class GatherTest(unittest.TestCase):
@@ -338,22 +454,27 @@ class GatherTest(unittest.TestCase):
                 return {'jobs': [{'name': 't', 'steps': [{'name': 'check generic', 'conclusion': 'success'}]}]}
 
             product = env.Product('p', {'repo_dir': d, 'repo_slug': 'o/r', 'main': 'main',
-                                        'release': {'blocking': ['F-0001', 'F-0002']}})
+                                        'release': {'blocking': ['F-0001', 'F-0002'], 'min_upgrades': 3,
+                                                    'readme_sections': ['Install', 'Upgrade'],
+                                                    'requires': {'install': ['F-0001'],
+                                                                 'generic': ['F-0001']}}})
             facts = Facts(items={}, sessions=[], ci=[], gates=[], runs=[], clutter={}, as_of='2026-09-25T12:00:00Z')
             out = release.compute(rec, product, now=NOW, git=git, gh_json=gh, log_dir=logs, facts=facts)
             met = {c['key']: c['met'] for c in out['criteria']}
             self.assertFalse(out['ready'])
-            self.assertEqual(met, {'stability': True, 'repair': False, 'ci': True, 'install': False,
+            self.assertEqual(met, {'stability': True, 'repair': True, 'ci': True, 'install': False,
                                    'upgrade': False, 'generic': False, 'docs': False, 'blocking': False,
-                                   'floor': True, 'seats': False, 'tune': False,
+                                   'floor': True, 'seats': False, 'tune': True,
                                    'pr_ci': False})
             ev = {c['key']: c['evidence'] for c in out['criteria']}
             self.assertIn('1 auto-upgrade(s)', ev['upgrade'])       # dated 2026-09-24 12:00 UTC: in the window
             self.assertIn('F-0002 card', ev['blocking'])
             self.assertIn('CHANGELOG has v0.1.0 notes', ev['docs'])
             text = release.render(out)
-            self.assertIn('NOT READY — 3/12 met', text)
-            self.assertEqual(ev['tune'], 'tune.enabled is off')
+            self.assertIn('NOT READY — 5/12 met', text)
+            self.assertTrue(ev['repair'].startswith('n/a — nothing landed'), ev['repair'])
+            self.assertTrue(ev['stability'].startswith('n/a — release.max_hand_fixes is off'))
+            self.assertEqual(ev['tune'], 'n/a — tune.enabled is off')
             self.assertIn('| 1 | Stability (no hand hotfix for 7 d) | yes |', text)
 
 
@@ -374,15 +495,17 @@ class SurfaceTest(unittest.TestCase):
             self.assertEqual(release.cmd_release_readiness(args, '/r'), 1)
         self.assertIn('READY — 1/1 met', out.getvalue())
 
-    def test_status_row_only_for_the_factory_or_a_release_block(self):
+    def test_status_row_only_with_a_release_block_for_every_product(self):
         from asf.views import status
         with tempfile.TemporaryDirectory() as d:
             plain = env.Product('p', {'repo_dir': d})
             self.assertIsNone(status.release_cell('/r', plain))
             with open(os.path.join(d, 'pyproject.toml'), 'w') as f:
                 f.write('[project]\nname = "asf-factory"\n')
+            self.assertIsNone(status.release_cell('/r', plain))    # the factory's own repo too
+            gated = env.Product('p', {'repo_dir': d, 'release': {'window_days': 7}})
             with mock.patch('asf.release.cell', return_value='NOT READY — 3/8 met') as cell:
-                self.assertEqual(status.release_cell('/r', plain), 'NOT READY — 3/8 met')
+                self.assertEqual(status.release_cell('/r', gated), 'NOT READY — 3/8 met')
                 cell.assert_called_once()
 
 

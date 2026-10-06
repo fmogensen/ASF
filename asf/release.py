@@ -2,7 +2,8 @@
 released as a framework? A computed gate, not an opinion: the criteria, each read from facts
 and printed met or unmet with its evidence. Nothing is written.
 
-1. **stability** — no hand hotfix in the last ``window_days``: commits on the trunk of a
+1. **stability** — ``max_hand_fixes`` (default off: a developer committing by hand is normal; a
+   product that wants the rule sets it in its own ``release:`` block) or fewer hand hotfixes in the last ``window_days``: commits on the trunk of a
    ``hand_types`` kind (``fix``, ``hotfix``, ``revert``) that carry no ``ASF-Session:`` trailer
    (so no factory session made them), plus installs by hand: every run of the install script (``install.sh``)
    (``logs/install.log``) and every break in the auto-upgrade chain the tick logs show (an
@@ -37,6 +38,15 @@ and printed met or unmet with its evidence. Nothing is written.
 
 A criterion that does not apply to the product (``n/a``) is met: its evidence says why.
 
+**One gate for every product.** No product is special — the factory's own included: what
+applies is read from the product's own configuration. Criteria 4–7 apply only when its
+``release:`` block configures them (``requires.<key>``, ``ci_steps.<step>``, ``min_upgrades``,
+``readme_sections``), criterion 8 only with a ``blocking`` list, criterion 11 only with
+``tune.enabled`` or ``tune.required`` — each is ``n/a`` otherwise. Criterion 3 is ``n/a`` with no
+forge or ``ci: none``; criterion 2 is ``n/a`` while nothing landed and nothing was repaired.
+Release notes (criterion 7) are checked when the product keeps a changelog: one on its trunk, or
+the rollup's opt-in (:func:`asf.metrics.metrics.changelog_on`).
+
 **Self-tuning live** (criterion 11, appended after the others by :func:`compute`, read whole from
 :func:`asf.tune.criterion`): the self-tuning loop is on, kept at least one change in the window
 that it has not reverted since, and leaves no regression unreverted.
@@ -60,7 +70,8 @@ from dataclasses import asdict, dataclass
 
 DEFAULTS = {
     'window_days': 7,
-    'max_hand_fixes': 0,
+    # None: off — the stability criterion reads n/a until the product's own release block sets it
+    'max_hand_fixes': None,
     'max_repair_per_feature': 3.0,
     'ci_runs': 10,
     'min_upgrades': 3,
@@ -98,13 +109,17 @@ class Criterion:
 # ------------------------------------------------------------ settings --
 
 def settings(product):
+    """:data:`DEFAULTS` under the product's ``release:`` block; ``configured`` names the opt-in
+    criteria the block turns on (see the module docstring)."""
     block = getattr(product, 'release', None) or {}
     block = block if isinstance(block, dict) else {}
     out = {k: (dict(v) if isinstance(v, dict) else list(v) if isinstance(v, list) else v)
            for k, v in DEFAULTS.items()}
     for k in ('window_days', 'max_hand_fixes', 'max_repair_per_feature', 'ci_runs', 'min_upgrades'):
         v = block.get(k)
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
+        if k == 'max_hand_fixes' and _off(v):
+            out[k] = None
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
             out[k] = v
         elif isinstance(v, str):
             try:
@@ -121,6 +136,17 @@ def settings(product):
         out['requires'] = {k: ([str(x) for x in v] if isinstance(v, list) else [str(v)])
                            for k, v in block['requires'].items() if v}
     out['floor'] = floor_settings(block.get('floor'))
+    steps = block.get('ci_steps') if isinstance(block.get('ci_steps'), dict) else {}
+    req = out['requires']
+    out['configured'] = {
+        'install': bool(req.get('install') or steps.get('install_from_zero')),
+        'upgrade': bool(req.get('upgrade') or block.get('min_upgrades') is not None),
+        'generic': bool(req.get('generic') or steps.get('generic') or steps.get('second_product')),
+        'docs': bool(req.get('docs') or isinstance(block.get('readme_sections'), list)),
+        'blocking': bool(out['blocking']),
+    }
+    out['ci_off'] = _ci_off(product)
+    out['notes'] = _changelog_on(product)
     from asf.metrics import throughput
     out['seats'] = throughput.settings(product)[0]
     return out
@@ -128,6 +154,32 @@ def settings(product):
 
 def _off(v):
     return v is False or (isinstance(v, str) and v.strip().lower() in ('off', 'false', 'no', 'none'))
+
+
+def _ci_off(product):
+    """No CI to read: no hosted repo, or ``ci: none`` / ``ci.provider: none``."""
+    if not getattr(product, 'repo_slug', None):
+        return True
+    ci = getattr(product, 'ci', None)
+    name = ci if isinstance(ci, str) else ci.get('provider') if isinstance(ci, dict) else None
+    return isinstance(name, str) and name.strip().lower() in ('none', 'off')
+
+
+def _changelog_on(product):
+    try:
+        from asf.metrics.metrics import changelog_on
+        return changelog_on(product)
+    except Exception:  # noqa: BLE001 — a product the reader cannot read writes no changelog
+        return False
+
+
+def applies(cfg, key):
+    """Does the opt-in criterion ``key`` apply: did the product configure it?"""
+    return bool((cfg.get('configured') or {}).get(key))
+
+
+def _na(key, name, why):
+    return Criterion(key, name, True, f'{NA} — {why}')
 
 
 def floor_settings(block):
@@ -397,76 +449,108 @@ def evaluate(f, cfg):
           + (' …' if len(hand) > 3 else '')
           + ('; installs ' + ', '.join(i.get('installed') or i.get('ref') or '?' for i in installs[:3])
              if installs else ''))
-    out.append(Criterion('stability', f'Stability (no hand hotfix for {w:g} d)',
-                         n <= cfg['max_hand_fixes'], ev))
+    name = f'Stability (no hand hotfix for {w:g} d)'
+    if cfg['max_hand_fixes'] is None:
+        out.append(_na('stability', name, 'release.max_hand_fixes is off (a hand commit is normal '
+                                          'for this product)'))
+    else:
+        out.append(Criterion('stability', name, n <= cfg['max_hand_fixes'], ev))
 
     rp = f['repair']
-    ok = rp['per_feature'] is not None and rp['per_feature'] <= cfg['max_repair_per_feature']
+    name = f"Repair load (≤ {cfg['max_repair_per_feature']:g} per Feature)"
     kinds = rp.get('by_kind') or {}
-    out.append(Criterion('repair', f"Repair load (≤ {cfg['max_repair_per_feature']:g} per Feature)", ok,
-                         f"{rp['sessions']} repair sessions / {rp['landed']} Features landed in {w:g} d = "
-                         f"{'—' if rp['per_feature'] is None else format(rp['per_feature'], 'g')}"
-                         + (' (' + ', '.join(f'{k} {n}' for k, n in kinds.items()) + ')' if kinds else '')))
+    if not rp['sessions'] and not rp['landed']:
+        out.append(_na('repair', name, f'nothing landed and nothing repaired in {w:g} d'))
+    else:
+        ok = rp['per_feature'] is not None and rp['per_feature'] <= cfg['max_repair_per_feature']
+        out.append(Criterion('repair', name, ok,
+                             f"{rp['sessions']} repair sessions / {rp['landed']} Features landed in {w:g} d = "
+                             f"{'—' if rp['per_feature'] is None else format(rp['per_feature'], 'g')}"
+                             + (' (' + ', '.join(f'{k} {n}' for k, n in kinds.items()) + ')' if kinds else '')))
 
     runs = f['ci_runs']
-    if runs is None:
-        out.append(Criterion('ci', f"Main CI green (last {cfg['ci_runs']})", False, 'the forge did not answer'))
+    name = f"Main CI green (last {cfg['ci_runs']})"
+    if cfg.get('ci_off') and not runs:
+        out.append(_na('ci', name, 'no hosted CI (no repo_slug, or ci: none)'))
+    elif runs is None:
+        out.append(Criterion('ci', name, False, 'the forge did not answer'))
     else:
         red = [r for r in runs if r.get('conclusion') != 'success']
         ok = len(runs) >= cfg['ci_runs'] and not red
-        out.append(Criterion('ci', f"Main CI green (last {cfg['ci_runs']})", ok,
+        out.append(Criterion('ci', name, ok,
                              f"{len(runs) - len(red)}/{len(runs)} green"
                              + (': red ' + ', '.join(f"{(r.get('headSha') or '')[:7]} {r.get('conclusion')}"
                                                      for r in red[:3]) if red else '')))
 
     steps = f['ci_steps']
-    pat = cfg['ci_steps']['install_from_zero']
-    found, green = step_state(steps, pat)
-    req_ok, req_ev = _requires(items, cfg, 'install')
-    ev = ('the forge did not answer' if steps is None else
-          f"CI step '{pat}' " + ('green' if green else 'red' if found else 'absent') + ' on the latest main test run')
-    out.append(Criterion('install', 'Install from zero (release tag, doctor green, in CI)',
-                         bool(green and req_ok), ev + req_ev))
+    name = 'Install from zero (release tag, doctor green, in CI)'
+    if not applies(cfg, 'install'):
+        out.append(_na('install', name, 'not configured (release.requires.install, '
+                                        'release.ci_steps.install_from_zero)'))
+    else:
+        pat = cfg['ci_steps']['install_from_zero']
+        found, green = step_state(steps, pat)
+        req_ok, req_ev = _requires(items, cfg, 'install')
+        ev = ('the forge did not answer' if steps is None else
+              f"CI step '{pat}' " + ('green' if green else 'red' if found else 'absent') + ' on the latest main test run')
+        out.append(Criterion('install', name, bool(green and req_ok), ev + req_ev))
 
     up = f['upgrade']
-    req_ok, req_ev = _requires(items, cfg, 'upgrade')
-    ok = (len(up['upgrades']) >= cfg['min_upgrades'] and not up['failed'] and not up['torn']
-          and not up['rollbacks'] and req_ok)
-    out.append(Criterion('upgrade', f"Upgrade safety (≥ {cfg['min_upgrades']} auto-upgrades, none torn)", ok,
-                         f"{len(up['upgrades'])} auto-upgrade(s), {len(up['failed'])} failed, "
-                         + (f"{len(up.get('skipped') or ())} skipped offline, " if up.get('skipped') else '')
-                         + f"{len(up['torn'])} torn tick(s), {len(up['rollbacks'])} rollback(s) in {w:g} d"
-                         + req_ev))
+    name = f"Upgrade safety (≥ {cfg['min_upgrades']} auto-upgrades, none torn)"
+    if not applies(cfg, 'upgrade'):
+        out.append(_na('upgrade', name, 'not configured (release.min_upgrades, release.requires.upgrade)'))
+    else:
+        req_ok, req_ev = _requires(items, cfg, 'upgrade')
+        ok = (len(up['upgrades']) >= cfg['min_upgrades'] and not up['failed'] and not up['torn']
+              and not up['rollbacks'] and req_ok)
+        out.append(Criterion('upgrade', name, ok,
+                             f"{len(up['upgrades'])} auto-upgrade(s), {len(up['failed'])} failed, "
+                             + (f"{len(up.get('skipped') or ())} skipped offline, " if up.get('skipped') else '')
+                             + f"{len(up['torn'])} torn tick(s), {len(up['rollbacks'])} rollback(s) in {w:g} d"
+                             + req_ev))
 
-    gp, sp = cfg['ci_steps']['generic'], cfg['ci_steps']['second_product']
-    g_found, g_green = step_state(steps, gp)
-    s_found, s_green = step_state(steps, sp)
-    req_ok, req_ev = _requires(items, cfg, 'generic')
-    ev = ('the forge did not answer' if steps is None else
-          f"CI '{gp}' {'green' if g_green else 'red' if g_found else 'absent'}, "
-          f"'{sp}' {'green' if s_green else 'red' if s_found else 'absent'}")
-    out.append(Criterion('generic', 'Genericity (check_generic clean, a second product in CI)',
-                         bool(g_green and s_green and req_ok), ev + req_ev))
+    name = 'Genericity (check_generic clean, a second product in CI)'
+    if not applies(cfg, 'generic'):
+        out.append(_na('generic', name, 'not configured (release.requires.generic, release.ci_steps.generic)'))
+    else:
+        gp, sp = cfg['ci_steps']['generic'], cfg['ci_steps']['second_product']
+        g_found, g_green = step_state(steps, gp)
+        s_found, s_green = step_state(steps, sp)
+        req_ok, req_ev = _requires(items, cfg, 'generic')
+        ev = ('the forge did not answer' if steps is None else
+              f"CI '{gp}' {'green' if g_green else 'red' if g_found else 'absent'}, "
+              f"'{sp}' {'green' if s_green else 'red' if s_found else 'absent'}")
+        out.append(Criterion('generic', name, bool(g_green and s_green and req_ok), ev + req_ev))
 
     d = f['docs']
-    missing = [s for s in cfg['readme_sections']
-               if not any(s.lower() in h.lower() for h in d['headings'])]
-    req_ok, req_ev = _requires(items, cfg, 'docs')
-    notes = d['tag'] and d['changelog_section'] and d['changelog_notes']
-    ok = not missing and bool(notes) and req_ok
-    out.append(Criterion('docs', 'First-user docs and release notes', ok,
-                         ('README has every section' if not missing else 'README lacks ' + ', '.join(missing))
-                         + '; ' + (f"CHANGELOG has {d['tag']} notes" if notes else
-                                   f"no CHANGELOG notes for {d['tag']}" if d['tag'] else 'no release tag')
-                         + req_ev))
+    name = 'First-user docs and release notes'
+    if not applies(cfg, 'docs'):
+        out.append(_na('docs', name, 'not configured (release.readme_sections, release.requires.docs)'))
+    else:
+        missing = [s for s in cfg['readme_sections']
+                   if not any(s.lower() in h.lower() for h in d['headings'])]
+        req_ok, req_ev = _requires(items, cfg, 'docs')
+        want_notes = cfg.get('notes') or d.get('changelog_kept', False)
+        notes = d['tag'] and d['changelog_section'] and d['changelog_notes']
+        ok = not missing and (bool(notes) or not want_notes) and req_ok
+        out.append(Criterion('docs', name, ok,
+                             ('README has every section' if not missing else 'README lacks ' + ', '.join(missing))
+                             + '; ' + (f'release notes {NA} (no changelog for this product)' if not want_notes else
+                                       f"CHANGELOG has {d['tag']} notes" if notes else
+                                       f"no CHANGELOG notes for {d['tag']}" if d['tag'] else 'no release tag')
+                             + req_ev))
 
     ids = cfg['blocking']
     rows = [(fid,) + landed(items, fid) for fid in ids]
     open_ = [r for r in rows if not r[1]]
-    out.append(Criterion('blocking', 'Blocking Features landed', bool(ids) and not open_,
-                         'no release.blocking list' if not ids else
-                         f"{len(ids) - len(open_)}/{len(ids)} landed"
-                         + ('; open: ' + ', '.join(f'{r[0]} {r[2]}' for r in open_) if open_ else '')))
+    name = 'Blocking Features landed'
+    if not applies(cfg, 'blocking'):
+        out.append(_na('blocking', name, 'no release.blocking list'))
+    else:
+        out.append(Criterion('blocking', name, bool(ids) and not open_,
+                             'no release.blocking list' if not ids else
+                             f"{len(ids) - len(open_)}/{len(ids)} landed"
+                             + ('; open: ' + ', '.join(f'{r[0]} {r[2]}' for r in open_) if open_ else '')))
     out.append(floor_criterion(f.get('floor') or {}, cfg))
     out.append(seats_criterion(f.get('seats'), f.get('since'), cfg))
     return out
@@ -711,7 +795,11 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
 
     tag = (git(repo, 'describe', '--tags', '--abbrev=0', ref) or '').strip() or None
     readme = git(repo, 'show', f'{ref}:README.md') or ''
-    changelog = git(repo, 'show', f'{ref}:CHANGELOG.md') or ''
+    conv = getattr(product, 'conventions', None)
+    from asf.conventions import DEFAULT_CHANGELOG_FILE
+    log_file = (conv.get('changelog_file') if conv is not None else None) or DEFAULT_CHANGELOG_FILE
+    changelog = git(repo, 'show', f'{ref}:{log_file}') or ''
+    kept = bool(changelog.strip())
     section, notes = changelog_notes(changelog, tag)
     return {
         'as_of': now.strftime('%Y-%m-%dT%H:%M:%SZ'), 'since': since, 'ref': ref, 'items': items,
@@ -724,7 +812,7 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
         'pr_ci': getattr(sf, 'ci', None) or [],
         'upgrade': up, 'ci_runs': runs, 'ci_steps': steps,
         'docs': {'headings': readme_headings(readme), 'tag': tag,
-                 'changelog_section': section, 'changelog_notes': notes},
+                 'changelog_section': section, 'changelog_notes': notes, 'changelog_kept': kept},
     }
 
 
@@ -745,13 +833,16 @@ def _utc(stamp):
 
 
 def tune_criterion(product, window_days, as_of):
-    """Criterion 11, *Self-tuning live* (:func:`asf.tune.criterion`)."""
+    """Criterion 11, *Self-tuning live* (:func:`asf.tune.criterion`); ``n/a`` while the loop is
+    off and ``tune.required`` is not set (:func:`asf.tune.required`)."""
     from asf import tune
     try:
         met, ev = tune.criterion(product, window_days, now=datetime.datetime.strptime(
             as_of, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=UTC))
     except Exception as e:  # noqa: BLE001 — an unreadable tune record is unmet, never a crash
         met, ev = False, f'unreadable: {type(e).__name__}: {e}'
+    if not met and ev == 'tune.enabled is off' and not tune.required(product):
+        met, ev = True, f'{NA} — tune.enabled is off'
     return Criterion('tune', 'Self-tuning live (≥ 1 kept change, 0 unreverted regressions)', met, ev)
 
 

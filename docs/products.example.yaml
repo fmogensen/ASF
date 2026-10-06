@@ -171,7 +171,19 @@ conventions:
   # a regex over a file name in reports_dir; unset matches every .md. Leave out and the product
   # has no such thing — nothing looks for it.
   report_pattern: "hotfix-.*\\.md"
-  # asf.metrics release: a product with no deploy_sha ships its green trunk (B-0077); the rollup
+  # How the product is versioned (asf.metrics.version_conf). With none of these keys a release's
+  # version is its short sha: the rollup cuts no tag and writes no changelog — nothing reaches the
+  # product's repo but the work itself.
+  #   tag_pattern: a regex over tag names — the product's own version tags; a release's version
+  #                is the newest one on its sha, else the short sha. The rollup cuts none.
+  #   cut:         true — the rollup cuts its own v<major>.<minor>.<patch> tags (below; opt-in,
+  #                version_file names the line it starts from). A product versioned by its own
+  #                release workflow leaves it off and names its tags in tag_pattern.
+  #   changelog:   true — file each version's notes in changelog_file (opt-in; on with cut
+  #                unless set false here).
+  # version: {tag_pattern: '^v\\d+\\.\\d+\\.\\d+$', cut: false, changelog: false}
+  # asf.metrics release: a product with no deploy_sha ships its green trunk (B-0077); with
+  # version.cut the rollup
   # tags it when an item landed and release_min_interval has passed since the last release,
   # `v<major>.<minor>.<patch>`: major.minor is the
   # lowest-ranked open Epic whose title carries a version ("… 0.2 — …"), else this file's; the
@@ -226,8 +238,8 @@ conventions:
     pass_budget_s: 300
   # stale means act (asf.stale_act; `asf stale --act [--dry-run]` by hand): a leftover past its
   # deadline is acted on, every action a line in state/<product>/stale-acts.jsonl. `act`: the
-  # tick acts (true) or only prints its `would …` lines (false); unset, it acts for ASF's own
-  # repo only. `pr`: an open PR the lane holds STALE past `pr_after` is archived as
+  # tick acts (true) or only prints its `would …` lines (false, the default for every product —
+  # the factory's own included; its own product file opts in). `pr`: an open PR the lane holds STALE past `pr_after` is archived as
   # archive/pr-<n>, closed with its reason, its branch deleted, and its open item re-planned.
   # `task`: an Active Task past `task_factor` x its task_active limit, its branch unmoved as long
   # and over `task_behind` commits behind the trunk, is re-planned from the trunk (its branch
@@ -242,6 +254,9 @@ conventions:
   #   task_behind: 200
   # a command run in every fresh worker worktree before its session starts (default: none).
   # worktree_setup: make deps
+  # commands the landing gate runs after test_command, each red on a non-zero exit — the
+  # product's own lint or structure checks (default: none, for every product).
+  # gate_checks: [bash tools/check_generic.sh, bash tools/check_conventions.sh]
   # GitHub access is per product, not per account: a fine-grained token covers one GitHub owner,
   # and this product may live under a different owner than an account's other products. VARIABLE:
   # file — read at every launch, merged over the account's own worker_pool.accounts[].auth_env,
@@ -487,10 +502,16 @@ clocks:
     every: 30m
 
 # Optional: the release-readiness gate (`asf release-readiness`, and the Release row of `asf status`
-# for the factory's own product). Every key is optional; the defaults are shown.
+# for the factory's own product). Every key is optional; the defaults are shown. The factory's own
+# source is gated as a framework release: every criterion applies. Any other product is gated as
+# a product: install, upgrade, genericity, docs and blocking apply only when configured here
+# (requires.<key>, ci_steps.<step>, min_upgrades, readme_sections, blocking), self-tuning only with
+# tune.enabled, release notes only with conventions.version.changelog — each reads n/a otherwise.
 # release:
 #   window_days: 7                 # stability and upgrade window
-#   max_hand_fixes: 0              # fix/hotfix/revert commits no factory session made, plus hand installs
+#   max_hand_fixes: off            # fix/hotfix/revert commits no factory session made, plus hand
+#                                  # installs; off (n/a) unless set — a developer's hand commit is
+#                                  # normal. The factory's own product file sets 0.
 #   max_repair_per_feature: 3      # repair sessions per landed Feature over the window
 #   ci_runs: 10                    # the last N finished trunk runs must all be green
 #   min_upgrades: 3                # auto-upgrades in the window, none failed, torn or rolled back

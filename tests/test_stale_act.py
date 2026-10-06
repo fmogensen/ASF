@@ -186,13 +186,15 @@ class DryRunAndDefaults(Fixture):
                       act_now=True, out=lambda _l: None)  # asf stale --act
         self.assertTrue(fake.calls)
 
-    def test_asf_own_repo_acts_by_default(self):
+    def test_no_repo_acts_by_default_the_factorys_own_included(self):
+        # "generic for any product, starting with itself": the factory's own repository is a
+        # product like any other — off by default, on only by its own conventions.stale.act
         here = os.path.dirname(os.path.dirname(os.path.abspath(stale_act.__file__)))
-        own = Product('asf', {'repo_dir': here})
-        self.assertTrue(stale_act.acts(own))
+        self.assertFalse(stale_act.acts(Product('asf', {'repo_dir': here})))
         self.assertFalse(stale_act.acts(product()))
-        self.assertFalse(stale_act.acts(Product('asf', {'repo_dir': here,
-                                                        'conventions': {'stale': {'act': False}}})))
+        self.assertTrue(stale_act.acts(Product('asf', {'repo_dir': here,
+                                                       'conventions': {'stale': {'act': True}}})))
+        self.assertTrue(stale_act.acts(product({'act': True})))
 
     def test_every_kind_can_be_disabled(self):
         self.lane(days=5)

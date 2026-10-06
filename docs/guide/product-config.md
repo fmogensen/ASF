@@ -280,7 +280,7 @@ branch after it. So harvest never merges a PR on its checks alone:
 
 - **The local gate.** Every PR the rules above allow is gated on this machine first, the way
   fast-forward landing gates a branch: its head rebased onto `origin/<main>`, then the product's
-  gate (`test_command`, and on asf's own repo its own checks). All the PRs mergeable in one
+  gate (`test_command`, then any `gate_checks` commands). All the PRs mergeable in one
   harvest are stacked into **one** combined head and gated **once**, bisecting on red; the gate
   runs under the product's harvest lock, so never two at a time. Only a green head is merged.
   A red one goes back: a code PR to its session (a correction, as a red fast-forward gate); a
