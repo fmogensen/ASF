@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.201 — 2026-10-06
+
+### Features landed
+
+- The lane writes down what the branch carried (#865)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.201"`
+
 ## v0.1.200 — 2026-10-06
 
 ### Features landed
