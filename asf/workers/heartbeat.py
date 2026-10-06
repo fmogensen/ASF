@@ -44,8 +44,8 @@ the new run's movement.
 The lane's time limit stays the backstop: a run that keeps beating but loops still ends
 ``timed out``.
 
-Config (``~/.ASF/config.yaml``; a product file's ``workers:`` over it, and the ``cloud:`` block's
-keys over both for a cloud-lane run)::
+Config (``~/.ASF/config.yaml``; the ``cloud:`` block's keys — the operator's, or a product
+file's — over it for a cloud-lane run)::
 
     workers:
       heartbeat_min: 5          # minutes between beats
@@ -126,22 +126,16 @@ def config_problems(block, prefix='workers'):
     return out
 
 
-def _block(cfg, product, name):
-    c = (cfg or {}).get(name) if isinstance((cfg or {}).get(name), dict) else {}
-    out = dict(c or {})
-    own = product._get(name) if product is not None and hasattr(product, '_get') else None
-    if isinstance(own, dict):
-        out.update(own)
-    return out
-
-
 def settings(cfg, product=None, lane='local'):
-    """:class:`Settings` for a run of ``lane`` (``local`` | ``cloud``): ``workers:`` (the
-    operator's, the product file's over it), then for the cloud lane the ``cloud:`` block's
-    heartbeat keys over that. An unreadable value is the default (the config check names it)."""
-    c = _block(cfg, product, 'workers')
+    """:class:`Settings` for a run of ``lane`` (``local`` | ``cloud``): the operator's
+    ``workers:``, then for the cloud lane the ``cloud:`` block's heartbeat keys over it (the
+    operator's, the product file's ``cloud:`` over that). An unreadable value is the default
+    (the config check names it)."""
+    w = (cfg or {}).get('workers')
+    c = dict(w) if isinstance(w, dict) else {}
     if lane == 'cloud':
-        c.update({k: v for k, v in _block(cfg, product, 'cloud').items() if k in KEYS})
+        from asf.workers import cloud  # local: cloud imports this module
+        c.update({k: v for k, v in cloud.raw(cfg, product).items() if k in KEYS})
     def get(key, default):  # each key alone: one bad key never discards the good ones
         return _num(c[key]) if key in c and not config_problems({key: c[key]}) \
             else float(default)
@@ -569,6 +563,9 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
     with open(path, 'w', encoding='utf-8') as f:
         f.write(continue_text(original, why, run.get('branch'), head, notes, summary, local))
     started = pool_mod.now_iso()
+    while started <= str(run.get('started') or ''):  # a fresh id even within the same second
+        started = time.strftime('%Y-%m-%dT%H:%M:%SZ',
+                                time.gmtime(parse_ts(started) + 1))
     sid = lifecycle.session_id(product.name, job_name, started)
     conv = getattr(product, 'conventions', None)
     row = types.SimpleNamespace(kind=run.get('kind'), item=run.get('item'), job=job_name,

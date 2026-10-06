@@ -50,10 +50,12 @@ class Config(unittest.TestCase):
         lane = hb.settings(cfg, lane='cloud')
         self.assertEqual((lane.interval_min, lane.missed), (7, 4))
 
-    def test_a_product_file_overrides_the_operator(self):
+    def test_a_product_files_cloud_block_overrides_the_cloud_lane(self):
         product = env.Product('p', {'repo_dir': '/r', 'main': 'main',
-                                    'workers': {'heartbeat_missed': 3}})
-        self.assertEqual(hb.settings({'workers': {'heartbeat_missed': 5}}, product).missed, 3)
+                                    'cloud': {'heartbeat_missed': 3}})
+        cfg = {'workers': {'heartbeat_missed': 5}}
+        self.assertEqual(hb.settings(cfg, product, lane='cloud').missed, 3)
+        self.assertEqual(hb.settings(cfg, product).missed, 5)
 
     def test_bad_values_are_config_problems(self):
         for bad in (0, -1, 'x', True):
@@ -397,7 +399,9 @@ class LocalStall(Home):
         rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
         rec = spawn_mod.spawn(self.product, feature_row('spec-1'), self.acct(), 'spec it\n',
                               runtime=rt, cfg=self.cfg)
-        _job, brief = rt.calls[0]
+        first, brief = rt.calls[0]
+        self.assertNotIn('HEARTBEAT', brief)  # the brief file stays the factory's text …
+        brief = runtime_mod.brief_text(first)  # … the session reads it with the rule
         self.assertIn('HEARTBEAT', brief)
         self.assertIn(f"refs/asf/hb/spec-1 '{rec['session']}'", brief)
         self.assertEqual(rec['heartbeat_min'], 5)
@@ -417,7 +421,8 @@ class LocalStall(Home):
         self.assertEqual(stopped, [4242])
         self.assertEqual((new['pid'], new['worktree'], new['resumed_from']),
                          (4343, rec['worktree'], rec['session']))
-        _job, text = rt2.calls[0]
+        cont, text = rt2.calls[0]
+        self.assertIn(f"refs/asf/hb/spec-1 '{new['session']}'", runtime_mod.brief_text(cont))
         self.assertIn('CONTINUE', text)
         self.assertIn('next: wire the parser', text)
         self.assertIn('tool Read', text)

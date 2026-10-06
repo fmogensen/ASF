@@ -1116,12 +1116,9 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                                     row.item, branch)
     started = pool_mod.now_iso()
     sid = lifecycle.session_id(product.name, row.job, started)
-    # every runtime beats (asf.workers.heartbeat): a local brief carries the rule here, a cloud
-    # one in its CLOUD block (asf.workers.cloud.cloud_brief, from job.heartbeat)
+    # every runtime beats (asf.workers.heartbeat): the runtime hands the session the rule from
+    # job.heartbeat — a local one after the brief, a cloud one in its CLOUD block
     beat = heartbeat.settings(cfg, product, 'cloud' if cloud else 'local')
-    if not cloud:
-        brief_text = brief_text.rstrip('\n') + '\n' + '\n'.join(
-            heartbeat.brief_lines(row.job, sid, beat)) + '\n'
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)

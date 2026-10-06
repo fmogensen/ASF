@@ -141,7 +141,7 @@ host_guards:
 # stopped, ended dead, and continued in the same tick by a new session from its branch head,
 # its notes and a summary of its last events. heartbeat_resumes caps the continuations of one
 # chain (0: end it dead, no continuation). The lane's own limit (cloud.timeout_min) stays the
-# backstop. A product file's `workers:` overrides these; the `cloud:` block's heartbeat_* keys
+# backstop. The `cloud:` block's heartbeat_* keys (the operator's, or a product file's)
 # override them for cloud-lane runs.
 workers:
   heartbeat_min: 5
