@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.146 — 2026-10-06
+
+### Features landed
+
+- The class written on the ledger, and the key the card verifies itself on left exactly where it is (#789)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.146"`
+
 ## v0.1.145 — 2026-10-06
 
 ### Features landed
