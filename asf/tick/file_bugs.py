@@ -68,7 +68,7 @@ def ci_signatures(root, now, conv=None):
     second failure. A failure on the trunk or on a merge-batch branch
     (`conventions.branch_prefixes`) is one severity worse: it blocks everyone, not one branch."""
     conv = conv or DEFAULTS
-    cutoff = now - datetime.timedelta(hours=CI_REFUSAL_WINDOW_H)
+    cutoff = now - datetime.timedelta(hours=tunable('CI_REFUSAL_WINDOW_H'))
     raw = {}
     trunk_latest = {}  # job name -> (ts, failed step or None) of the trunk's newest run of it
     for run in _jsonl_lines(os.path.join(root, 'metrics', 'ci', '*.jsonl')):
@@ -100,17 +100,17 @@ def ci_signatures(root, now, conv=None):
         if d['count'] < 2 and sig not in red_now:
             continue
         out[sig] = {
-            'title': truncate(f"{CI_RED_TITLE}{sig}", 120),
+            'title': truncate(f"{tunable('CI_RED_TITLE')}{sig}", 120),
             'severity': 'S2' if d['main_or_batch'] else 'S3',
             'evidence': d['evidence'],
             'runs': sorted(r for r in d['runs'] if r is not None),
-            'acceptance': [f"`{sig}` fails in no CI run for {CI_REFUSAL_WINDOW_H}h"],
+            'acceptance': [f"`{sig}` fails in no CI run for {tunable('CI_REFUSAL_WINDOW_H')}h"],
         }
     return out
 
 
 def refusal_signatures(root, now):
-    cutoff = now - datetime.timedelta(hours=CI_REFUSAL_WINDOW_H)
+    cutoff = now - datetime.timedelta(hours=tunable('CI_REFUSAL_WINDOW_H'))
     totals = {}
     for tick in _jsonl_lines(os.path.join(root, 'metrics', 'ticks', '*.jsonl')):
         ts = parse_iso(tick.get('ts'))
@@ -128,7 +128,7 @@ def refusal_signatures(root, now):
         sig = f"refusal: {file}"
         out[sig] = {'title': truncate(f"Refused twice: {file}", 120), 'severity': 'S3',
                     'evidence': d['evidence'], 'runs': [],
-                    'acceptance': [f"no tick refuses `{file}` for {CI_REFUSAL_WINDOW_H}h"]}
+                    'acceptance': [f"no tick refuses `{file}` for {tunable('CI_REFUSAL_WINDOW_H')}h"]}
     return out
 
 
@@ -305,7 +305,7 @@ def report_check_failures(failures, ledger, now_iso, out=print):
         entry['last'] = now_iso
         checks[rid] = entry
         out(failure_line(b))
-        if entry['runs'] >= CHECK_FAILURE_RUNS_TO_SURFACE and not entry.get('surfaced'):
+        if entry['runs'] >= tunable('CHECK_FAILURE_RUNS_TO_SURFACE') and not entry.get('surfaced'):
             entry['surfaced'] = now_iso
             out(f"NEEDS OPERATOR: rule check {entry['kind']}: {rid} — {entry['runs']} runs in a row "
                 f"since {entry['since']} ({entry['line']}); a factory-side problem with the check, "
@@ -434,7 +434,7 @@ def invariant_signatures(findings):
             'title': truncate(f"Invariant {f.invariant}: {cause}", 120),
             'severity': 'S3', 'evidence': [], 'runs': [], 'places': 0,
             'acceptance': [f"no writer is refused on {f.invariant} for `{cause}` for "
-                           f"{CI_REFUSAL_WINDOW_H}h"]})
+                           f"{tunable('CI_REFUSAL_WINDOW_H')}h"]})
         paths = seen.setdefault(sig, [])
         for path in (f.paths or (f.subject,)):
             if path in paths:
@@ -631,3 +631,19 @@ def cmd_file_bugs(args, root):
         do_index(root)
     print(f"file-bugs: {filed} filed, {bumped} bumped, {skipped} unchanged")
     return 0
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'CI_REFUSAL_WINDOW_H': 'bugs.ci_red_window_h',
+    'CHECK_FAILURE_RUNS_TO_SURFACE': 'bugs.check_failure_runs',
+    'CI_RED_TITLE': 'bugs.ci_red_title',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

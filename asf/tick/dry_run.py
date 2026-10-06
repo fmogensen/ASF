@@ -115,7 +115,7 @@ def _tree_size(path, skip=_NOT_COPIED):
 def _check_space(src, dest_parent, min_free=None):
     need = _tree_size(src)
     free = shutil.disk_usage(dest_parent).free
-    floor = MIN_FREE_BYTES if min_free is None else min_free
+    floor = tunable('MIN_FREE_BYTES') if min_free is None else min_free
     if free - need < floor:
         gb = 1024 ** 3
         raise CopyRefused(
@@ -347,3 +347,17 @@ def run(product, fresh=False, out=print, state_copy=None):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return 0
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'MIN_FREE_BYTES': 'tick.dry_run_min_free_bytes',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

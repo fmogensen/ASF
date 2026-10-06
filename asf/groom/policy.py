@@ -245,7 +245,7 @@ def templated(title_a, title_b):
 
 def near_duplicate_threshold(title_a, title_b):
     """The overlap at which two titles are near-duplicates: raised for templated titles."""
-    return TEMPLATED_OVERLAP if templated(title_a, title_b) else NEAR_DUPLICATE_OVERLAP
+    return tunable('TEMPLATED_OVERLAP') if templated(title_a, title_b) else tunable('NEAR_DUPLICATE_OVERLAP')
 
 
 def _footprint(typed):
@@ -1028,3 +1028,18 @@ def apply_groom_rules(product, root, now=None, out=print, dry_run=False, commits
         from asf.record.index import do_index
         do_index(root)
     return done
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'NEAR_DUPLICATE_OVERLAP': 'groom.near_duplicate_overlap',
+    'TEMPLATED_OVERLAP': 'groom.templated_overlap',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

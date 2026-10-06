@@ -1593,3 +1593,17 @@ def register(subparsers):
     c.add_argument('--json', action='store_true', help='the rows as a list of objects')
     c.set_defaults(run=ci_cancels.cmd_cancels)
     return p
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'DEFAULT_JOB_TIMEOUT_MIN': 'ci.job_timeout_min',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

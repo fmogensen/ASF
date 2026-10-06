@@ -433,7 +433,7 @@ def _last_touched(path):
 def _stale_orphan(path, now=None):
     """Whether the orphan worktree at ``path`` is old enough to reclaim (:data:`ORPHAN_GRACE_S`)."""
     now = time.time() if now is None else now
-    return now - _last_touched(path) >= ORPHAN_GRACE_S
+    return now - _last_touched(path) >= tunable('ORPHAN_GRACE_S')
 
 
 def _commit_leftovers(holder):
@@ -979,7 +979,7 @@ def model_arg(model, cfg=None):
     if not isinstance(table, dict):  # a misshapen value is no entry, never a TypeError
         table = {}
     if model not in table:
-        alt = MODEL_FALLBACK.get(model)
+        alt = tunable('MODEL_FALLBACK').get(model)
         if alt and alt in table:
             return table[alt]
         raise SpawnError(f'NEEDS OPERATOR: worker_pool.models has no entry for {model} '
@@ -1251,3 +1251,18 @@ def load_cfg():
         return env.load_config()
     except env.ConfigError:
         return {}
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'MODEL_FALLBACK': 'worker_pool.model_fallback',
+    'ORPHAN_GRACE_S': 'worker_pool.orphan_grace_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

@@ -56,7 +56,7 @@ def brief_section(product, item):
     """The brief's ``OPERATOR ANSWER`` section for ``item`` — '' when none was given."""
     if product is None or not item:
         return ''
-    recs = answers(product, item)[-MAX_IN_BRIEF:]
+    recs = answers(product, item)[-tunable('MAX_IN_BRIEF'):]
     if not recs:
         return ''
     lines = [HEAD]
@@ -149,3 +149,17 @@ def register(sub):
     env.add_product_arg(p)
     p.set_defaults(func=cmd_answer)
     return p
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'MAX_IN_BRIEF': 'brief.answers_max',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

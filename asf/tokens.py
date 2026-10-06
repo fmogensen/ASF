@@ -252,3 +252,17 @@ def cap_result(kind, dimension, tokens, limit, by_dim, at):
         'asf': {'cap': {'kind': kind, 'dimension': dimension, 'tokens': tokens, 'limit': limit,
                         'at': at or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}},
     }
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'STOP_GRACE_S': 'worker_pool.stop_grace_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

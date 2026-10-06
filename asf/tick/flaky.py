@@ -161,10 +161,10 @@ def record_run(state, run, flaky):
 
 
 def severity(entry, now):
-    cutoff = now - datetime.timedelta(days=S1_WINDOW_DAYS)
+    cutoff = now - datetime.timedelta(days=tunable('S1_WINDOW_DAYS'))
     recent = [r for r in entry['runs'] if (parse_iso(r['ts']) or cutoff) >= cutoff]
     trunk = [r for r in entry['runs'] if r.get('trunk')]
-    return 'S1' if len(recent) >= S1_RUNS or len(trunk) >= S1_TRUNK_RUNS else 'S3'
+    return 'S1' if len(recent) >= tunable('S1_RUNS') or len(trunk) >= S1_TRUNK_RUNS else 'S3'
 
 
 # ------------------------------------------------------------------- card --
@@ -225,7 +225,7 @@ def file_or_update(root, canonical, key, entry, now, default_bug_epic=None):
             _count_line(entry), _runners_line(entry), _runs_line(entry)])
         new_id = mint_id(root, canonical, 'bug')
         write_new_item(root, canonical, 'bug', new_id, typed, body, last_day, 'file-bugs',
-                       acceptance=[f"`{key}` is flaky in no CI run for {S1_WINDOW_DAYS} days"],
+                       acceptance=[f"`{key}` is flaky in no CI run for {tunable('S1_WINDOW_DAYS')} days"],
                        shape=('signature', 'bug'))
         return 'filed'
     typed, _machine = frontmatter.split_machine(rec['meta'])
@@ -389,7 +389,7 @@ def window_since(state, now):
     window; the full ``LOOKBACK_DAYS`` floor otherwise — including when there is no
     ``window_from`` at all, which is a state file written before this card and today's exact
     behaviour."""
-    floor = now - datetime.timedelta(days=LOOKBACK_DAYS)
+    floor = now - datetime.timedelta(days=tunable('LOOKBACK_DAYS'))
     since = parse_iso(state.get('window_from'))
     if since is None or since < floor:
         since = floor
@@ -403,7 +403,7 @@ def next_window(unread, now):
     at ``now - LOOKBACK_DAYS`` either way. ``unread``: a run's own dict lacks ``created`` (a fake
     source that predates this card), its ``ts`` stands in — losing D5's precision for that source,
     never a ``KeyError``."""
-    floor = now - datetime.timedelta(days=LOOKBACK_DAYS)
+    floor = now - datetime.timedelta(days=tunable('LOOKBACK_DAYS'))
     if unread:
         oldest = min(r.get('created') or r['ts'] for r in unread)
         since = (parse_iso(oldest) or floor) - datetime.timedelta(seconds=1)
@@ -425,7 +425,7 @@ def collect(state, source, workflow, conv, now, out=print):
             f"truncated, runs older than it cannot be read")
     unseen = sorted((r for r in listed if str(r['id']) not in state['seen']),
                     key=lambda r: r['ts'])
-    runs, deferred = unseen[:MAX_RUNS_PER_PASS], unseen[MAX_RUNS_PER_PASS:]
+    runs, deferred = unseen[:tunable('MAX_RUNS_PER_PASS')], unseen[tunable('MAX_RUNS_PER_PASS'):]
     touched = set()
     failed = []
     from asf import ci_pool
@@ -448,7 +448,7 @@ def collect(state, source, workflow, conv, now, out=print):
         run = dict(r, trunk=conv.is_trunk(r['branch']))
         touched |= record_run(state, run, flaky)
         state['seen'][str(r['id'])] = r['ts']
-    cutoff = (now - datetime.timedelta(days=LOOKBACK_DAYS + 1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    cutoff = (now - datetime.timedelta(days=tunable('LOOKBACK_DAYS') + 1)).strftime('%Y-%m-%dT%H:%M:%SZ')
     state['seen'] = {k: v for k, v in state['seen'].items() if v >= cutoff}
     state['last_pass'] = now.strftime('%Y-%m-%dT%H:%M:%SZ')
     state['window_from'] = next_window(deferred + failed, now)
@@ -494,3 +494,20 @@ def run_pass(root, canonical, product, conv, now, level='auto', default_bug_epic
     if filed or updated:
         out(f"file-bugs: flaky — {filed} filed, {updated} updated")
     return outcomes
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'S1_RUNS': 'flaky.s1_runs',
+    'S1_WINDOW_DAYS': 'flaky.window_days',
+    'LOOKBACK_DAYS': 'flaky.lookback_days',
+    'MAX_RUNS_PER_PASS': 'flaky.max_runs',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

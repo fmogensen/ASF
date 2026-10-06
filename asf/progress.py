@@ -111,8 +111,9 @@ def append(product, job, sample, keep=KEEP_SAMPLES):
                 f.write(json.dumps(s) + '\n')
 
 
-def sweep(product, days=KEEP_DAYS):
+def sweep(product, days=None):
     """Progress files untouched for ``days``, removed; the job names, for the caller to print."""
+    days = tunable('KEEP_DAYS') if days is None else days
     d = store_dir(product)
     cutoff = time.time() - days * 86400
     swept = []
@@ -206,9 +207,10 @@ def scan(log, prev=None):
     return new_offset, calls, novel, len(seen_set), seen, ring, result
 
 
-def window_classes(samples, now, minutes=WINDOW_MIN):
+def window_classes(samples, now, minutes=None):
     """The distinct tool classes seen in the last ``minutes``: the union of ``seen`` over the
     samples at or after ``now - minutes``, in first-seen order."""
+    minutes = tunable('WINDOW_MIN') if minutes is None else minutes
     cutoff = now - minutes * 60
     out, seen = [], set()
     for s in samples:
@@ -311,7 +313,7 @@ def evidence_line(samples, verdict, now):
     newest = samples[-1] if samples else {}
     commit = newest.get('commit') or 'no commit'
     files = newest.get('files') or 0
-    classes = window_classes(samples, now, WINDOW_MIN)
+    classes = window_classes(samples, now, tunable('WINDOW_MIN'))
     word = 'class' if len(classes) == 1 else 'classes'
     part = f'{len(classes)} tool {word}'
     if classes:
@@ -396,7 +398,7 @@ def _pid_alive(pid):
     return True
 
 
-def watch(product, job, every=SAMPLE_EVERY_S, alive=None, now=None, max_h=WATCH_MAX_H):
+def watch(product, job, every=None, alive=None, now=None, max_h=None):
     """Sample ``job`` every ``every`` seconds until it ends; returns the number of samples taken.
 
     Ends on: a sample whose ``result`` is True (the run wrote its result), a pid that is gone
@@ -411,6 +413,8 @@ def watch(product, job, every=SAMPLE_EVERY_S, alive=None, now=None, max_h=WATCH_
     under ``env.state_dir(product)`` directly, the fold it needs being "the last line for this
     job", not :mod:`asf.workers.pool`'s whole one, which the licence forbids importing.
     """
+    every = tunable('SAMPLE_EVERY_S') if every is None else every
+    max_h = tunable('WATCH_MAX_H') if max_h is None else max_h
     clock = now if callable(now) else time.time
     alive = alive if alive is not None else _pid_alive
     started = clock()
@@ -455,3 +459,20 @@ def start(product, record, cfg=None, spawn_fn=None, cloud=False):
         return spawn_fn(argv)
     except OSError:
         return None
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'SAMPLE_EVERY_S': 'worker_pool.progress.sample_every_s',
+    'WINDOW_MIN': 'worker_pool.progress.window_min',
+    'KEEP_DAYS': 'worker_pool.progress.keep_days',
+    'WATCH_MAX_H': 'worker_pool.progress.watch_max_h',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

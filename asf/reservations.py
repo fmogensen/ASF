@@ -312,8 +312,9 @@ def load(state_dir):
     return data if isinstance(data, dict) else {}
 
 
-def brief_lines(snap, limit=BRIEF_LIMIT):
+def brief_lines(snap, limit=None):
     """The holdings in words for a planner's brief, at most ``limit`` numbers per sequence."""
+    limit = tunable('BRIEF_LIMIT') if limit is None else limit
     seqs = (snap or {}).get('sequences') or {}
     prs = (snap or {}).get('prs') or {}
     out = []
@@ -344,3 +345,17 @@ def brief_lines(snap, limit=BRIEF_LIMIT):
             line += f' +{total - shown} more'
         out.append(line)
     return out
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'BRIEF_LIMIT': 'brief.reservations_max',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

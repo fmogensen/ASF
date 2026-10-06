@@ -78,7 +78,7 @@ def _alive(claim, registered_keys, now):
     if not lifecycle.pid_alive(claim.get('pid')):
         return False
     age = _epoch(claim.get('at'))
-    if age is None or (now - age) > CLAIM_TTL_S:
+    if age is None or (now - age) > tunable('CLAIM_TTL_S'):
         return False
     if (claim.get('product'), claim.get('job')) in registered_keys:
         return False
@@ -148,10 +148,11 @@ class Ledger:
 
 
 @contextlib.contextmanager
-def held(wait_s=LOCK_WAIT_S):
+def held(wait_s=None):
     """The exclusive claim lock; yields a :class:`Ledger` already swept. Raises :class:`Busy`
     when the lock is not free inside ``wait_s``, or :class:`Unusable` when the state root cannot
     be created or its lock file cannot be opened — carrying the reason as its ``str`` (C6)."""
+    wait_s = tunable('LOCK_WAIT_S') if wait_s is None else wait_s
     try:
         os.makedirs(root(), exist_ok=True)
     except OSError as e:
@@ -182,3 +183,18 @@ def held(wait_s=LOCK_WAIT_S):
         except OSError:
             pass
         f.close()
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'CLAIM_TTL_S': 'worker_pool.seats.claim_ttl_s',
+    'LOCK_WAIT_S': 'worker_pool.seats.lock_wait_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

@@ -260,14 +260,14 @@ def refresh(product, slug, number, head, tip, names, out=print, now=None, red=No
     try:
         data = {k: v for k, v in load(sd).items()
                 if isinstance(v, dict)
-                and now - (v.get('at') or v.get('judged_at') or 0) < KEEP_S}
+                and now - (v.get('at') or v.get('judged_at') or 0) < tunable('KEEP_S')}
         rec = data.get(str(number))
         same = bool(rec) and rec.get('head') == head
         if same and rec.get('at'):
             fresh = red is not None and _shown_since(slug, red, rec['at'])
             if not fresh:
                 if rec.get('tip') == tip or red is not None:
-                    if now - rec['at'] < WAIT_S:
+                    if now - rec['at'] < tunable('WAIT_S'):
                         return 'waiting'
                     if not rec.get('gave_up'):
                         rec['gave_up'] = True
@@ -343,4 +343,19 @@ def in_flight(product, now=None):
     return sorted(int(k) for k, v in load(_sd(product)).items()
                   if isinstance(v, dict) and str(k).isdigit() and not v.get('gave_up')
                   and not v.get('capped') and not v.get('judged')
-                  and now - (v.get('at') or 0) < WAIT_S)
+                  and now - (v.get('at') or 0) < tunable('WAIT_S'))
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'WAIT_S': 'stale_ref.wait_s',
+    'KEEP_S': 'stale_ref.keep_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

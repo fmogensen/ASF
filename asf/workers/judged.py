@@ -71,7 +71,7 @@ def section(repo, branch, judged_head, main):
         lines.append(f'{judged_head[:9]} is no longer in the history (the branch was rewritten): '
                      f'read every point of the correction against {head[:9]} itself.')
     else:
-        shown = commits[:MAX_COMMITS]
+        shown = commits[:tunable('MAX_COMMITS')]
         lines.append(f'Commits since ({len(commits)}):')
         lines += [f'  - {c}' for c in shown]
         if len(commits) > len(shown):
@@ -100,3 +100,17 @@ def launch_section(path, repo, main, kind, item, branch):
         return section(repo, corr.get('branch') or branch, judged_head, main)
     except Exception:  # noqa: BLE001 — the launch goes on with the brief it has
         return ''
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'MAX_COMMITS': 'brief.judged_commits_max',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

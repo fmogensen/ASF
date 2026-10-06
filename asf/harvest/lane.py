@@ -2859,7 +2859,7 @@ class Lane:
         reset = lifecycle.resets(self.path).get(item) or {}
         if reset and reset.get('head') in (appr['head'], head):
             return None  # the operator reset this content: it restarts, it is not carried
-        if transplant_mod.count(self.state_dir, item, appr['head']) >= transplant_mod.CAP:
+        if transplant_mod.count(self.state_dir, item, appr['head']) >= transplant_mod.tunable('CAP'):
             return None
         why = (f"kind={corr.get('kind')}" if corr else prev.get('reason') or state)
         return appr, why

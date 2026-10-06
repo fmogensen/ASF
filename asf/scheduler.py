@@ -464,8 +464,8 @@ def _clock_refusal(name, entry, product, tick_steps, stale):
             secs = stale.limit_seconds(every)
         except ValueError:
             return f'every {every!r} is not a valid duration (<n><s|m|h|d>)'
-        if secs < MIN_EVERY_S:
-            return f'every {every} is under the {MIN_EVERY_S}s minimum'
+        if secs < tunable('MIN_EVERY_S'):
+            return f'every {every} is under the {tunable('MIN_EVERY_S')}s minimum'
     else:
         if not AT_RE.match(str(at).strip()):
             return f'at {at!r} is not HH:MM, 24h'
@@ -512,7 +512,7 @@ def clocks(product):
         from asf import ci_queue
         conv = getattr(product, 'conventions', None)
         if ci_queue.mode(product) != 'off' or (conv is not None and conv.merge_queue()):
-            built.append(Clock(QUEUE_CLOCK, [], False, QUEUE_EVERY_S, None, QUEUE_COMMAND))
+            built.append(Clock(QUEUE_CLOCK, [], False, tunable('QUEUE_EVERY_S'), None, QUEUE_COMMAND))
     return built
 
 
@@ -1622,3 +1622,18 @@ def main(argv=None):
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'MIN_EVERY_S': 'scheduler.min_every_s',
+    'QUEUE_EVERY_S': 'scheduler.queue_every_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

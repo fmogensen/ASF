@@ -92,9 +92,10 @@ class Series(list):
     entry is the latest one :func:`regressions` compares against the baseline."""
 
 
-def readings(events, now=None, window_days=WINDOW_DAYS):
+def readings(events, now=None, window_days=None):
     """``{(runner, kind): Series}`` from ``ci`` events in the window: every job with a ``runner``,
     its ``seconds`` (``minutes * 60`` when absent — D5), its conclusion, its ``queued_s``."""
+    window_days = tunable('WINDOW_DAYS') if window_days is None else window_days
     now = _now(now)
     start = now - datetime.timedelta(days=window_days)
     dated = []
@@ -151,7 +152,7 @@ def scores(readings):
 
     eligible = collections.defaultdict(list)
     for (kind, runner), vals in green_by.items():
-        if len(vals) >= MIN_READINGS:
+        if len(vals) >= tunable('MIN_READINGS'):
             eligible[kind].append(runner)
     fleet_best = {kind: min(medians[(kind, r)] for r in rs)
                   for kind, rs in eligible.items() if len(rs) >= 2}
@@ -167,7 +168,7 @@ def scores(readings):
         rated = [r for r in runner_all[runner] if r.conclusion in RATED]
         n = len(green)
         green_rate = round(len(green) / len(rated), 3) if rated else 0.0
-        flaky = green_rate < MIN_GREEN_RATE and n >= MIN_READINGS
+        flaky = green_rate < tunable('MIN_GREEN_RATE') and n >= tunable('MIN_READINGS')
         out[runner] = Score(runner=runner, medians=m, ratios=ratios, ratio=ratio,
                              n=n, green_rate=green_rate, flaky=flaky)
     return out
@@ -182,7 +183,7 @@ def baselines(readings, tiers):
         greens = [r.seconds for r in series if r.conclusion in MEASURED]
         if not greens:
             continue
-        if len(greens) >= MIN_READINGS:
+        if len(greens) >= tunable('MIN_READINGS'):
             per.setdefault(runner, {})[kind] = (_p50(greens), len(greens))
         t = tiers.get(runner)
         if t:
@@ -209,9 +210,10 @@ def regressions(readings, base):
     return sorted(out)
 
 
-def run_wall_p50(events, now=None, window_days=WINDOW_DAYS):
+def run_wall_p50(events, now=None, window_days=None):
     """The p50 of the window's ``wall_minutes`` over runs that have one (D5), or None — what I10
     paces off."""
+    window_days = tunable('WINDOW_DAYS') if window_days is None else window_days
     now = _now(now)
     start = now - datetime.timedelta(days=window_days)
     vals = []
@@ -247,7 +249,7 @@ def write_baselines(product, readings, tiers, now=None):
     doc = {
         'v': BASELINES_VERSION,
         'taken': _iso(now),
-        'window_days': WINDOW_DAYS,
+        'window_days': tunable('WINDOW_DAYS'),
         'per': {r: {k: {'p50_s': s, 'n': n} for k, (s, n) in kinds.items()}
                 for r, kinds in per.items()},
         'tier': {t: {k: {'p50_s': s, 'n': n} for k, (s, n) in kinds.items()}
@@ -325,3 +327,19 @@ def register(sub):
     p.add_argument('--json', action='store_true', help='print {"seconds", "n", "from"} instead')
     p.set_defaults(run=cmd_baseline)
     return p
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'WINDOW_DAYS': 'ci.measure.window_days',
+    'MIN_READINGS': 'ci.measure.min_readings',
+    'MIN_GREEN_RATE': 'ci.measure.min_green_rate',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

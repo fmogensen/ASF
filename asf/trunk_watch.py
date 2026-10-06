@@ -85,7 +85,7 @@ def watched(product):
 def window_days(product):
     raw = product.conventions.map_of('merge_queue') if hasattr(product.conventions, 'map_of') else {}
     v = (raw or {}).get('watch_days')
-    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else DEFAULT_DAYS
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else tunable('DEFAULT_DAYS')
 
 
 def _state_dir(product):
@@ -122,10 +122,11 @@ def _git(repo, args):
     return p.stdout if p.returncode == 0 else None
 
 
-def first_parent(repo, trunk, since=None, days=DEFAULT_DAYS):
+def first_parent(repo, trunk, since=None, days=None):
     """``[{sha, author, at, subject, body}]`` newest first: the first-parent commits on
     ``origin/<trunk>`` after ``since`` (a sha the trunk still contains), else of the last
     ``days`` days. None when git cannot read them."""
+    days = tunable('DEFAULT_DAYS') if days is None else days
     rng = [f'{since}..origin/{trunk}'] if since else [f'--since={days} days ago', f'origin/{trunk}']
     text = _git(repo, ['log', '--first-parent', f'--format=%H{_SEP}%an{_SEP}%ct{_SEP}%s{_SEP}%b{_END}',
                        *rng])
@@ -142,9 +143,10 @@ def first_parent(repo, trunk, since=None, days=DEFAULT_DAYS):
     return out
 
 
-def scan(repo, trunk, state, days=DEFAULT_DAYS, now=None):
+def scan(repo, trunk, state, days=None, now=None):
     """``(state, new)``: ``state`` advanced to the trunk's tip with the bypass commits it gained
     (older than ``days`` dropped), and ``new`` — the bypasses this look found. Pure but for git."""
+    days = tunable('DEFAULT_DAYS') if days is None else days
     now = time.time() if now is None else now
     tip = (_git(repo, ['rev-parse', f'origin/{trunk}']) or '').strip()
     if not tip:
@@ -253,7 +255,7 @@ def _refresh_ruleset(product, state, now, gh=None):
     (never when ``merge_queue.watch_since`` names it). Never raises."""
     if configured_since(product) is not None or not getattr(product, 'repo_slug', None):
         return
-    if now - (state.get('ruleset_read') or 0) < RULESET_READ_S and 'ruleset_since' in state:
+    if now - (state.get('ruleset_read') or 0) < tunable('RULESET_READ_S') and 'ruleset_since' in state:
         return
     try:
         at, rid = ruleset_since(product, gh)
@@ -423,3 +425,18 @@ def doctor_rows(product, now=None):
     if len(got) > DOCTOR_ROWS:
         rows.append((True, False, f'and {len(got) - DOCTOR_ROWS} more in {days}d'))
     return rows
+
+
+# ---- tunables ---------------------------------------------------------------
+
+#: The config key (``~/.ASF/config.yaml``) over each constant above; the constant is its default.
+TUNABLES = {
+    'DEFAULT_DAYS': 'trunk_watch.days',
+    'RULESET_READ_S': 'trunk_watch.ruleset_read_s',
+}
+
+
+def tunable(name):
+    """The constant ``name`` of :data:`TUNABLES` with its config key over it."""
+    from asf import config_keys
+    return config_keys.value(TUNABLES[name], globals()[name])

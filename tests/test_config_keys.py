@@ -288,12 +288,15 @@ def every_typed_key_config():
     """A ``config.yaml`` text setting every :data:`asf.config_keys.TYPED` key (a map kind as a
     one-row map), nested as block maps."""
     tree = {}
-    for key, (kind, _lo, _hi) in sorted(config_keys.TYPED.items()):
+    for key, (kind, _lo, hi) in sorted(config_keys.TYPED.items()):
         node = tree
         parts = key.split('.')
         for part in parts[:-1]:
             node = node.setdefault(part, {})
-        node[parts[-1]] = {'k': '1'} if kind == config_keys.MAP else _SAMPLE[kind]
+        sample = _SAMPLE[kind] if kind != config_keys.MAP else {'k': '1'}
+        if kind in (config_keys.INT, config_keys.NUM) and hi is not None:
+            sample = str(hi)
+        node[parts[-1]] = sample
     lines = []
 
     def emit(node, depth):
@@ -334,6 +337,46 @@ class PinnedReader(unittest.TestCase):
                 import json
                 out = json.loads(proc.stdout.strip().splitlines()[-1])
                 self.assertIn('git', out['keys'])
+
+
+def tunable_modules():
+    """``{module name: TUNABLES}`` for every asf module that routes constants through config."""
+    import importlib
+    out = {}
+    for here, _d, files in os.walk(os.path.join(ROOT, 'asf')):
+        for fn in files:
+            if not fn.endswith('.py'):
+                continue
+            path = os.path.join(here, fn)
+            with open(path, encoding='utf-8') as f:
+                if '\nTUNABLES = {' not in f.read():
+                    continue
+            name = os.path.relpath(path, ROOT)[:-3].replace(os.sep, '.')
+            out[name] = importlib.import_module(name)
+    return out
+
+
+class Tunables(unittest.TestCase):
+    """Each module's ``TUNABLES``: a registered key per constant, whose value is a valid default."""
+
+    def test_every_constant_maps_to_a_typed_key_its_value_satisfies(self):
+        mods = tunable_modules()
+        self.assertIn('asf.ci_queue', mods)
+        self.assertIn('asf.trunk_red', mods)
+        for name, mod in mods.items():
+            for const, key in mod.TUNABLES.items():
+                with self.subTest(module=name, const=const):
+                    self.assertIn(key, config_keys.TYPED)
+                    self.assertIsNone(config_keys.check(key, getattr(mod, const)))
+                    self.assertEqual(mod.tunable(const), getattr(mod, const))
+
+    def test_a_configured_value_reaches_the_reader(self):
+        cfg = {'trunk_red': {'max_tries': 5}, 'merge': {'timeout_s': 1800},
+               'changelog': {'branch': 'release/notes'}}
+        self.assertEqual(config_keys.value('trunk_red.max_tries', 2, cfg=cfg), 5)
+        self.assertEqual(config_keys.value('merge.timeout_s', 900, cfg=cfg), 1800)
+        self.assertEqual(config_keys.value('changelog.branch', 'asf/changelog', cfg=cfg),
+                         'release/notes')
 
 
 if __name__ == '__main__':
