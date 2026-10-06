@@ -159,7 +159,7 @@ def run_record_tail(root, product, due=None):
     if ci_provider(product) != 'none' and due('backfill'):
         ran.append('backfill')
         with timed('backfill'):
-            cmd_backfill(_ns(days=1, sessions=None, log=None, workflow=ci_workflow(product),
+            cmd_backfill(_ns(days=None, sessions=None, log=None, workflow=ci_workflow(product),
                              launch_dir=None, product=product.name), root)
     if product.repo_dir and due('plan-order'):
         # open Tasks minted before the minter wrote order: the plan's order lands as `after:`

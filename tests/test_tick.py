@@ -1096,6 +1096,7 @@ class Step0Tests(unittest.TestCase):
     def test_backfill_reads_the_products_workflow_and_no_launcher_dir(self):
         (a,) = self.step0(env.Product('p', {'ci': {'provider': 'gh-actions', 'workflow': 'build'}}))
         self.assertEqual((a.workflow, a.launch_dir, a.sessions, a.log), ('build', None, None, None))
+        self.assertIsNone(a.days)
         (a,) = self.step0(env.Product('p', {}))
         self.assertEqual(a.workflow, 'ci')
 
