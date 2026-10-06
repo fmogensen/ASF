@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.140 — 2026-10-06
+
+### Features landed
+
+- `asf scorecard` now shows eight throughput metrics (seat use, first-pass CI, false closes, time-to-detect, cloud outcomes, merge wait, runner use, quota burn) with a 7-day trend and alarms, and `asf release-readiness` gains "floor clean" and "seats used" and stops counting a Task's planned first review as repair (#774)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.140"`
+
 ## v0.1.139 — 2026-10-06
 
 ### Bugs fixed
