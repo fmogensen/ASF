@@ -30,7 +30,7 @@ import importlib
 import os
 
 #: The kinds, in the order ``asf doctor`` lists them.
-KINDS = ('forge', 'ci', 'quota', 'secrets')
+KINDS = ('forge', 'ci', 'runtime', 'quota', 'secrets')
 
 #: The entry-point group a third-party implementation of ``kind`` is published under.
 ENTRY_POINT_GROUP = 'asf.connectors.{kind}'
@@ -42,6 +42,7 @@ COMMAND = 'command'
 DEFAULTS = {
     'forge': 'github',
     'ci': 'github-actions',
+    'runtime': 'claude-code',
     'quota': 'none',
     'secrets': 'file',
 }
@@ -56,6 +57,10 @@ BUILTIN = {
         'github-actions': 'asf.connectors.ci_github:GitHubActionsCI',
         'fake': 'asf.connectors.fakes:FakeCI',
     },
+    'runtime': {
+        'claude-code': 'asf.connectors.claude_code:connector',
+        'fake': 'asf.connectors.claude_code:fake',
+    },
     'quota': {
         'none': 'asf.connectors.quota:none',
         'command': 'asf.connectors.quota:command',
@@ -69,7 +74,7 @@ BUILTIN = {
 
 #: The kinds whose command form is the generic JSON contract of :mod:`asf.connectors.command`
 #: (``quota`` and ``secrets`` keep their own one-line contracts; see their modules).
-GENERIC_COMMAND_KINDS = ('forge', 'ci')
+GENERIC_COMMAND_KINDS = ('forge', 'ci', 'runtime')
 
 _registered = {}
 _instances = {}
@@ -108,7 +113,9 @@ def _legacy(kind, cfg):
     cfg = cfg or {}
     pool = cfg.get('worker_pool') or {}
     if kind == 'runtime' and pool.get('backend'):
-        return str(pool['backend']).replace('_', '-'), 'worker_pool.backend'
+        # as before connectors: ``fake`` replays, any other backend is the coding-agent CLI
+        backend = str(pool['backend']).replace('_', '-')
+        return ('fake' if backend == 'fake' else DEFAULTS['runtime']), 'worker_pool.backend'
     if kind == 'scheduler':
         sched = cfg.get('scheduler') or {}
         if sched.get('kind') or sched.get('provider'):
@@ -192,6 +199,8 @@ def build(kind, cfg=None):
     name, _source, spec = configured(kind, cfg)
     if name == COMMAND and kind in GENERIC_COMMAND_KINDS and (kind, COMMAND) not in _registered:
         from asf.connectors import command
+        if kind == 'runtime':
+            return command.CommandRuntime(command.CommandConnector.from_spec(kind, spec))
         return command.CommandConnector.from_spec(kind, spec)
     return factory(kind, name)(cfg)
 
@@ -217,6 +226,11 @@ def forge(cfg=None):
 def ci(cfg=None):
     """The active ``ci`` connector (:class:`asf.connectors.protocols.CI`)."""
     return get('ci', cfg)
+
+
+def runtime(cfg=None):
+    """The active ``runtime`` connector (:class:`asf.connectors.protocols.Runtime`)."""
+    return get('runtime', cfg)
 
 
 def active(cfg=None):

@@ -21,9 +21,13 @@ import tempfile
 import threading
 
 from asf import budget, detach, env, hermetic, tokens
+from asf.connectors import claude_code
+from asf.connectors.claude_code import ClaudeCodeRuntime  # noqa: F401 — its old home
 from asf.workers import headroom, report
 
-DEFAULT_BINARY = 'claude'
+#: The session runtime's binary when ``worker_pool.binary`` names none — the runtime connector's
+#: (:mod:`asf.connectors.claude_code`).
+DEFAULT_BINARY = claude_code.DEFAULT_BINARY
 DEFAULT_PERMISSION_MODE = 'bypassPermissions'
 
 
@@ -340,7 +344,7 @@ def home_cli_problems(homes=None):
 RUNTIME_AUTH_VARS = ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY')
 
 #: The runtime's one-time command that prints a long-lived token for ``CLAUDE_CODE_OAUTH_TOKEN``.
-RUNTIME_TOKEN_COMMAND = 'claude setup-token'
+RUNTIME_TOKEN_COMMAND = claude_code.TOKEN_COMMAND
 
 #: The code host's token variable: when an account's ``auth_env`` sets it, git in the session
 #: pushes over HTTPS with it (:func:`git_credential_config`), and ``gh`` reads it as is.
@@ -678,51 +682,6 @@ class Runtime:
         return None
 
 
-class ClaudeCodeRuntime(Runtime):
-    name = 'claude_code'
-
-    def __init__(self, binary=DEFAULT_BINARY):
-        self.binary = binary
-
-    def run(self, job, wait=False):
-        log_path = job.log_path or job_log_path(job.product, job.name)
-        seed_home(job.account)
-        job_env, binary = guard_env(build_env(job), self.binary)
-        cmd = build_command(job, binary)
-        with open(session_brief(job), 'rb') as brief, open(log_path, 'ab') as log:
-            # a continued run is the writer's session: a second ``asf`` line would claim otherwise
-            line = None if job.resume else _session_line(job)
-            if line is not None:
-                log.write((line + '\n').encode('utf-8'))
-                log.flush()
-            if not wait:  # never the caller's child: no <defunct> left in a running tick
-                pid = detach.spawn(cmd, cwd=job.cwd,
-                                   env=job_env, stdin=brief, stdout=log,
-                                   stderr=subprocess.STDOUT)
-                return Result(pid=pid, log_path=log_path)
-            proc = subprocess.Popen(cmd, cwd=job.cwd,
-                                    env=job_env, stdin=brief, stdout=log,
-                                    stderr=subprocess.STDOUT, start_new_session=True)
-        rc = proc.wait()
-        rec = read_result(log_path)
-        return Result(ok=rc == 0 and result_ok(rec), pid=proc.pid, returncode=rc,
-                      text=(rec or {}).get('result', ''), log_path=log_path,
-                      reason=failure_reason(rec))
-
-    def continue_run(self, job, wait=False):
-        """:meth:`run` with ``job.resume`` set. None when the spawn raises, or (``wait=True``)
-        when the process exits non-zero having written no ``init`` line."""
-        log_path = job.log_path or job_log_path(job.product, job.name)
-        had = init_line(log_path)
-        try:
-            result = self.run(job, wait=wait)
-        except Exception:
-            return None
-        if wait and result.returncode and init_line(log_path) in (None, had):
-            return None
-        return result
-
-
 class FakeRuntime(Runtime):
     """Replays scripted results in order: each is a dict ``{"ok": bool, "result": str,
     "pid": int, "running": bool}``. ``running`` leaves the log without a result line (a session
@@ -776,10 +735,14 @@ class FakeRuntime(Runtime):
 
 
 def from_config(cfg):
-    """The runtime ``config.yaml worker_pool.backend`` names (``claude-code`` default)."""
+    """The local session runtime of the active ``runtime`` connector for ``cfg``
+    (``connectors.runtime``, else ``worker_pool.backend``; ``claude-code`` by default)."""
+    from asf import connectors
+    return connectors.get('runtime', cfg or {}).local()
+
+
+def fake_from_config(cfg):
+    """:class:`FakeRuntime` replaying ``worker_pool.fake_script`` (none: every run succeeds)."""
     pool = (cfg or {}).get('worker_pool') or {}
-    backend = str(pool.get('backend') or 'claude-code').replace('-', '_')
-    if backend == 'fake':
-        return FakeRuntime(path=os.path.expanduser(pool['fake_script'])
-                           if pool.get('fake_script') else None)
-    return ClaudeCodeRuntime(binary=pool.get('binary') or DEFAULT_BINARY)
+    return FakeRuntime(path=os.path.expanduser(pool['fake_script'])
+                       if pool.get('fake_script') else None)

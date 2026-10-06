@@ -442,23 +442,10 @@ def _step_dry_run(args):
 
 def _probe_plugin_command():
     """The runtime's own CLI, probed once at run time for a non-interactive plugin-install
-    subcommand (D8): a ``claude`` on ``PATH`` whose ``plugin --help`` names both ``install`` and
-    ``marketplace``. A probe that finds nothing supported is not a guess — the operator line
-    stays the answer."""
-    claude = shutil.which('claude')
-    if not claude:
-        return None
-    try:
-        result = subprocess.run([claude, 'plugin', '--help'], capture_output=True, text=True,
-                                timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    help_text = result.stdout + result.stderr
-    if 'install' in help_text and 'marketplace' in help_text:
-        return claude
-    return None
+    subcommand (D8) — the runtime connector's probe (:mod:`asf.connectors.claude_code`). A probe
+    that finds nothing supported is not a guess — the operator line stays the answer."""
+    from asf.connectors import claude_code
+    return claude_code.plugin_command()
 
 
 def _tail_lines(dest):
@@ -468,9 +455,8 @@ def _tail_lines(dest):
     if claude:
         # the runtime writes under this run's HOME: a config dir the caller left set outside it
         # (a worker session's, under a test's temp HOME) is never the target
-        child_env = hermetic.runtime_env()
-        subprocess.run([claude, 'plugin', 'marketplace', 'add', dest], check=False, env=child_env)
-        subprocess.run([claude, 'plugin', 'install', 'asf@asf'], check=False, env=child_env)
+        from asf.connectors import claude_code
+        claude_code.ClaudeCodeConnector().install_plugin(claude, dest, env=hermetic.runtime_env())
         return [f'install: ran {claude} plugin marketplace add {dest} and '
                f'{claude} plugin install asf@asf (the runtime CLI offered a non-interactive install)']
     return [

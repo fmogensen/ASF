@@ -221,6 +221,56 @@ class GitHubActionsCITest(RegistryCase):
         self.assertEqual(fake.calls, [('call', (['run', 'view', '1'],), {})])
 
 
+class RuntimeTest(RegistryCase):
+    def test_default_is_the_coding_agent_cli_with_the_configured_binary(self):
+        from asf.connectors import claude_code
+        c = connectors.runtime({})
+        self.assertIsInstance(c, protocols.Runtime)
+        self.assertIsInstance(c.local(), runtime_mod.ClaudeCodeRuntime)
+        self.assertEqual(c.local().binary, claude_code.DEFAULT_BINARY)
+        local = connectors.runtime({'worker_pool': {'binary': '/opt/agent'}}).local()
+        self.assertEqual(local.binary, '/opt/agent')
+
+    def test_from_config_keeps_the_backend_key(self):
+        self.assertIsInstance(runtime_mod.from_config({}), runtime_mod.ClaudeCodeRuntime)
+        self.assertIsInstance(runtime_mod.from_config(None), runtime_mod.ClaudeCodeRuntime)
+        self.assertIsInstance(runtime_mod.from_config({'worker_pool': {'backend': 'fake'}}),
+                              runtime_mod.FakeRuntime)
+        # any other backend was, and is, the CLI
+        self.assertIsInstance(runtime_mod.from_config({'worker_pool': {'backend': 'claude_code'}}),
+                              runtime_mod.ClaudeCodeRuntime)
+        self.assertIsInstance(runtime_mod.from_config({'connectors': {'runtime': 'fake'}}),
+                              runtime_mod.FakeRuntime)
+
+    def test_the_cloud_lane_runtime_follows_cloud_runtime(self):
+        from asf.workers import actions, cloud, remote
+
+        class S:
+            runtime = cloud.RUNTIME_REMOTE
+        with mock.patch.object(remote, 'RemoteRuntime', return_value='remote') as rr, \
+                mock.patch.object(actions, 'ActionsRuntime', return_value='actions'):
+            with tempfile.TemporaryDirectory() as home, mock.patch.object(env, 'ASF_HOME', home):
+                self.assertEqual(cloud.lane_runtime(S(), 'P'), 'remote')
+                S.runtime = cloud.RUNTIME_ACTIONS
+                self.assertEqual(cloud.lane_runtime(S(), 'P'), 'actions')
+        rr.assert_called_once()
+
+    def test_the_command_form_runs_a_job(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__('shutil').rmtree(d, ignore_errors=True))
+        script = os.path.join(d, 'rt.py')
+        with open(script, 'w') as f:
+            f.write('import json,sys\nreq=json.load(sys.stdin)\n'
+                    'print(json.dumps({"ok": True, "pid": 7, "result": req["args"][0]["name"]}))\n')
+        c = connectors.runtime({'connectors': {'runtime': {'command': f'{sys.executable} {script}'}}})
+
+        class Job:
+            def __init__(self):
+                self.name, self.log_path, self.brief_path = 'j1', None, '/b'
+        r = c.local().run(Job())
+        self.assertEqual((r.ok, r.pid, r.text), (True, 7, 'j1'))
+
+
 class CommandFormTest(RegistryCase):
     def _script(self, body):
         d = tempfile.mkdtemp()
