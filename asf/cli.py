@@ -424,6 +424,8 @@ def build_parser():
     plugin_build.register(sub)
     from asf import ci_pool
     ci_pool.register(sub)
+    from asf import docs
+    docs.register(sub)
     from asf.tick import network
     network.register(sub)
     from asf.workers import actions

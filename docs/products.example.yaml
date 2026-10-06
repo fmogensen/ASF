@@ -188,6 +188,11 @@ conventions:
   # globs that are documentation beside specs_dir/plans_dir/reviews_dir: a branch touching only
   # these lands as docs, and a trunk that moved only here does not re-gate (default []).
   doc_paths: [README.md, docs/guide/*]
+  # the pages `asf docs check` reads: every relative link and fragment on each must resolve
+  # (default: README.md, docs/README.md, docs/quickstart.md, docs/concepts.md, docs/operator.md,
+  # docs/troubleshooting.md, docs/guide/*.md). Not doc_paths above, whose job is classifying a
+  # landing branch, not the link check.
+  doc_pages: [README.md, docs/guide/*.md]
   # globs many Tasks touch without owning (lockfiles): no footprint overlap, one per merge (default []).
   shared_paths: [uv.lock]
   # append-only shared files every Task may add a row to (a registry, a band table): inside every

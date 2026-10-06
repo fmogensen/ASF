@@ -49,6 +49,24 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual(b.branch_prefixes['code'], 'worker/')
         self.assertEqual(b.stage_limits, {})
 
+    def test_doc_pages_defaults_to_the_four_documents_and_the_guide(self):
+        self.assertEqual(Conventions().doc_pages,
+                         ['README.md', 'docs/README.md', 'docs/quickstart.md',
+                          'docs/concepts.md', 'docs/operator.md', 'docs/troubleshooting.md',
+                          'docs/guide/*.md'])
+        self.assertEqual(conv_mod.DEFAULT_DOC_PAGES, tuple(Conventions().doc_pages))
+
+    def test_doc_pages_is_not_doc_paths(self):
+        # doc_pages (the link check's page set) and doc_paths (a landing branch's docs
+        # classification) are unset independently of each other.
+        self.assertEqual(Conventions().doc_paths, [])
+        self.assertNotEqual(Conventions().doc_pages, Conventions().doc_paths)
+
+    def test_two_instances_do_not_share_their_doc_pages_list(self):
+        a, b = Conventions(), Conventions()
+        a.doc_pages.append('docs/extra.md')
+        self.assertNotIn('docs/extra.md', b.doc_pages)
+
 
 class FromMappingTests(unittest.TestCase):
     def test_a_second_products_conventions_override_the_defaults(self):
@@ -68,6 +86,11 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual((c.readme, c.readme_facts), ('docs/README.md', 'readme.json'))
         self.assertEqual(Conventions.from_mapping({}).readme, 'README.md')
         self.assertEqual(Conventions.from_mapping({}).readme_facts, 'docs/readme-numbers.json')
+
+    def test_doc_pages_overrides_the_default(self):
+        c = Conventions.from_mapping({'doc_pages': ['README.md', 'docs/guide/*.md']})
+        self.assertEqual(c.doc_pages, ['README.md', 'docs/guide/*.md'])
+        self.assertEqual(Conventions.from_mapping({}).doc_pages, list(conv_mod.DEFAULT_DOC_PAGES))
 
     def test_the_harvest_block_names_the_gate_and_the_cap(self):
         """``harvest: {gate: per-branch, branches_per_tick: 3}`` is how a product yaml spells

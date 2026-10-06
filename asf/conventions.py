@@ -30,6 +30,10 @@ The product yaml carries the overrides::
                                                           # unset = the defaults in asf/amendable.py,
                                                           # [] = opt out (the set is empty)
       doc_paths: [README.md, docs/guide/*]   # more docs roots beside the specs/plans/reviews dirs
+      doc_pages: [README.md, docs/guide/*.md]  # the pages `asf docs check` reads (default:
+                                                # README.md, docs/README.md, docs/quickstart.md,
+                                                # docs/concepts.md, docs/operator.md,
+                                                # docs/troubleshooting.md, docs/guide/*.md)
       shared_paths: [uv.lock]                # lockfiles: no footprint overlap, one per merge
       shared_writes: [docs/registry.md]      # append-only registries: inside every Task's
                                              # writes:, no widening, no overlap
@@ -200,6 +204,11 @@ GIT_KEYS = {'push_timeout_s': 'push_timeout_s'}
 #: ``reviews_dir``: a branch touching only docs roots is the ``docs`` landing class
 #: (:func:`asf.harvest.lane.landing_class`), and a trunk that moved only there does not re-gate.
 DEFAULT_DOC_PATHS = ()
+#: The pages ``asf docs check`` (:mod:`asf.docs`) reads: every relative link and fragment on each
+#: must resolve. Not :data:`DEFAULT_DOC_PATHS`, whose job is classifying a landing branch — that
+#: would sweep every spec, plan and review into the link check too.
+DEFAULT_DOC_PAGES = ('README.md', 'docs/README.md', 'docs/quickstart.md', 'docs/concepts.md',
+                     'docs/operator.md', 'docs/troubleshooting.md', 'docs/guide/*.md')
 #: Paths (globs) many Tasks may touch without owning them — lockfiles. They are left out of
 #: footprint overlap in the feeder and serialised at merge in the lane (one per tick).
 DEFAULT_SHARED_PATHS = ()
@@ -829,6 +838,8 @@ class Conventions:
     amendable_paths: list = None
     #: More docs roots (globs) beside the specs/plans/reviews dirs (:data:`DEFAULT_DOC_PATHS`).
     doc_paths: list = field(default_factory=lambda: list(DEFAULT_DOC_PATHS))
+    #: The pages ``asf docs check`` reads (:data:`DEFAULT_DOC_PAGES`, :mod:`asf.docs`).
+    doc_pages: list = field(default_factory=lambda: list(DEFAULT_DOC_PAGES))
     #: Lockfile-like globs outside footprint overlap (:data:`DEFAULT_SHARED_PATHS`).
     shared_paths: list = field(default_factory=lambda: list(DEFAULT_SHARED_PATHS))
     #: Append-only shared files (a registry every Task may add a row to): inside every Task's
