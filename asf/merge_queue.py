@@ -147,7 +147,7 @@ import shutil
 import tempfile
 import time
 
-from asf import (attestation, ci_queue, connectors, env, flake, gh_limit, github, gitops, gitpush,
+from asf import (attestation, ci_queue, connectors, env, flake, gh_limit, gitops, gitpush,
                  refguard, run_cancel, stale_ref)
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
