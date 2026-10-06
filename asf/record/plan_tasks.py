@@ -54,14 +54,31 @@ def plan_ref(fev):
     return ref if ref and fev.get('plan_on_main') else None
 
 
-def own_lane_plan(fid, ref, ev):
-    """True when the plan at `ref` is the Feature's own lane document: named after its id
-    (`f-0047.md`), or landed by a merged spec/plan lane PR whose branch names it."""
+def plan_alias(ev, path):
+    """The id the plan at `path` declares in its own H1, as the evidence read it — the `alias`
+    of the features entry that carries this plan — or None."""
+    from asf.record.ingest import _path_only
+    for f in ((ev or {}).get('features') or {}).values():
+        if _path_only(f.get('plan')) == path:
+            return f.get('alias')
+    return None
+
+
+def own_plan(fid, ref, ev):
+    """True when the plan at `ref` declares this Feature, by any of the three routes the matcher
+    knows: named after its id (`f-0047.md`); landed by a merged spec/plan lane PR — or a
+    fast-forward lane the ledger records — whose branch names it; or headed `# F-0047 — …`,
+    whatever the file is called (F-0123).
+
+    These are the same three routes as :func:`asf.record.ingest._own_candidates`, read through
+    the same evidence: a plan that brings a Feature to plan-approved is a plan that mints."""
     path = ref.split(':', 1)[1] if ':' in ref else ref
     name = path.rsplit('/', 1)[-1]
     if evidence.doc_slug(name).lower() == fid.lower():
         return True
-    return path in (((ev or {}).get('lane_docs') or {}).get(fid.upper()) or {}).get('plan', [])
+    if path in (((ev or {}).get('lane_docs') or {}).get(fid.upper()) or {}).get('plan', []):
+        return True
+    return str(plan_alias(ev, path) or '').upper() == fid.upper()
 
 
 def _claim_view(root):
@@ -109,15 +126,18 @@ def _mint(root, product, ev, out=print, read_ref=None):
         ref = plan_ref(fev)
         if not ref:
             continue
+        plan_path = ref.split(':', 1)[1] if ':' in ref else ref
         # a plan the lane landed for this very id mints at once (B-0059/B-0060); a plan reached
         # through a typed link or a legacy match mints only for a decided card — a migrated
         # record links dozens of old milestone plans, and those are not work the operator ordered
-        if rec['meta'].get('decided') is not True and not own_lane_plan(fid, ref, ev):
+        if rec['meta'].get('decided') is not True and not own_plan(fid, ref, ev):
+            out(f'plan-tasks: {fid}: {plan_path} is on the trunk but names {fid} nowhere — '
+                f'not decided, so nothing minted')
             continue
         text = read_ref(ref)
         if not text:
+            out(f'plan-tasks: {fid}: {plan_path} could not be read — nothing minted')
             continue
-        plan_path = ref.split(':', 1)[1] if ':' in ref else ref
         records = plan_task_records(text)
         if not records and task_like_headings(text):
             out(f'plan-tasks: {fid}: {plan_path} has {len(task_like_headings(text))} Task-like '
