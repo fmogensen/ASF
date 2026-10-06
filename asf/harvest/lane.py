@@ -3694,7 +3694,7 @@ def gate_one_set(lane, group, to_merge):
     sent back at once; a branch red alone is sent back only once the trunk alone is seen green
     (checked once, and only when the bisection did not already show it)."""
     conv, trunk, out = lane.conv, lane.trunk, lane.out
-    asf_repo = H.is_asf_repo(lane.repo)
+    asf_repo = None     # the gate's extra checks are conventions.gate_checks, for every product
     announce = str(conv.harvest_gate).strip().lower() != H.GATE_PER_BRANCH
     timing = not lane.dry_run
     started = time.monotonic()

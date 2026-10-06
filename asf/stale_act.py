@@ -26,9 +26,9 @@ Never acted on: an item with a live session, an operator park, a lane state that
 
 **Who acts.** Every forge action goes through :mod:`asf.forge` (GitHub, or plain git where a
 product has no PR host — the ``pr`` kind is then not applicable). The tick's health step runs
-the pass every tick; it acts only where ``conventions.stale.act`` is true — by default only on
-ASF's own repository (:func:`acts`) — and elsewhere prints the ``would …`` lines (a dry run)
-until the operator turns it on per product. ``asf stale --act`` runs it by hand (``--dry-run``: the
+the pass every tick; it acts only where ``conventions.stale.act`` is true (default false, the
+same for every product, the factory's own included: :func:`acts`) and elsewhere prints the
+``would …`` lines (a dry run) until the operator turns it on per product. ``asf stale --act`` runs it by hand (``--dry-run``: the
 ``would …`` lines only). Each kind can be switched off (``conventions.stale.pr: false``,
 ``conventions.stale.task: false``); the other keys are ``pr_after``, ``task_factor`` and
 ``task_behind`` (:data:`DEFAULTS`).
@@ -42,7 +42,7 @@ LEDGER = 'stale-acts.jsonl'
 
 #: every ``conventions.stale`` key a product may set, with its default (a small repo's values)
 DEFAULTS = {
-    'act': None,           # None: on for ASF's own repository, off (dry run) for any other
+    'act': False,          # off (dry run) for every product until its own config turns it on
     'pr': True,            # the stale-PR kind
     'pr_after': '3d',      # a lane-STALE PR older than this is archived and closed
     'task': True,          # the stale-Task kind
@@ -82,20 +82,10 @@ def settings(product):
 
 
 def acts(product, knobs=None):
-    """True when the pass acts for ``product`` unasked: ``conventions.stale.act`` when set, else
-    only for ASF's own repository — every other product gets the dry run until its operator opts
-    in."""
+    """True when the pass acts for ``product`` unasked: ``conventions.stale.act`` — false by
+    default for every product (no repository is special); a product opts in in its own file."""
     knobs = knobs or settings(product)
-    if knobs['act'] is not None:
-        return knobs['act']
-    repo = getattr(product, 'repo_dir', None)
-    if not repo:
-        return False
-    from asf.harvest.harvest import is_asf_repo
-    try:
-        return bool(is_asf_repo(repo))
-    except Exception:  # noqa: BLE001 — unreadable: the safe answer is the dry run
-        return False
+    return bool(knobs['act'])
 
 
 # ---- the plan: pure over facts ---------------------------------------------------------------

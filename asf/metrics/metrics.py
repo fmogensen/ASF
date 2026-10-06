@@ -1080,11 +1080,19 @@ def release_items(items, new_sha, old_sha, repo=None, product=None):
     return found
 
 
-def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None, adopted=None, notes=None):
+def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None, adopted=None, notes=None,
+                   version=None, released=None):
     """A release note. `tag` marks a trunk release (B-0077): the note then carries a `version:`
     line (when the tag is a version), the tag, the legacy tag it adopted, and `notes` — the
-    human-readable release notes — under `## Notes`."""
-    if tag is None:
+    human-readable release notes — under `## Notes`. `version` with no `tag` marks a trunk
+    release the rollup cut no tag for: its own tag or short sha (:func:`own_version`)."""
+    if tag is None and version:
+        out = [f"# Release {day} · {new_sha[:7]}", '', f"version: {version}"]
+        out += [f"released: {released}", ''] if released else ['']
+        out += [
+               f"Trunk sha `{new_sha}` — the product deploys nothing, so its trunk is production (B-0077)."
+               + (f" Everything landed since `{old_sha[:7]}`." if old_sha else ''), '']
+    elif tag is None:
         out = [f"# Release {day} · {new_sha[:7]}", '',
                f"Deployed sha `{new_sha}` (deploy finished {deployed_at or 'unknown'})."
                + (f" Everything merged since `{old_sha[:7]}`." if old_sha else ''), '']
@@ -1134,11 +1142,11 @@ EPIC_VERSION_RE = re.compile(r'\b(\d+)\.(\d+)\b')
 LEGACY_TAG_RE = re.compile(r'^release-\d{4}-\d\d-\d\d-[0-9a-f]{7,40}$')
 #: A release note's file name: releases/<day>-<sha7>.md.
 NOTE_NAME_RE = re.compile(r'^(\d{4}-\d\d-\d\d)-([0-9a-f]{7,40})\.md$')
-#: The `version:` line of a versioned release note.
-NOTE_VERSION_RE = re.compile(r'(?m)^version: (v\d+\.\d+\.\d+)$')
+#: The `version:` line of a versioned release note: a tag of the product's scheme, or a short sha.
+NOTE_VERSION_RE = re.compile(r'(?m)^version: (\S+)$')
 #: The commit that files a version's notes in the product's changelog; never itself a note line.
 CHANGELOG_SUBJECT = 'docs(release): {tags} in {path}'
-CHANGELOG_SUBJECT_RE = re.compile(r'^docs\(release\): v\d+\.\d+\.\d+')
+CHANGELOG_SUBJECT_RE = re.compile(r'^docs\(release\): \S+.* in \S+$')
 #: The most item-less commits a version's notes list one by one.
 NOTES_MAX_COMMITS = 30
 #: `conventions.release_min_interval`: a count and a unit (none is minutes).
@@ -1199,6 +1207,64 @@ def improvement_commits(repo, items, new_sha, old_sha):
         if not any(i in items for i in COMMIT_ID_RE.findall(msg)):
             out.append(subject)
     return out
+
+
+def version_conf(product):
+    """``conventions.version`` — how the product is versioned, a map (empty when unset):
+
+    - ``tag_pattern``: a regex over tag names — the product's own version tags. The rollup cuts
+      none: a release's version is the newest such tag on the released sha, else its short sha.
+    - ``cut``: the rollup cuts its own ``v<major>.<minor>.<patch>`` tags (:func:`next_tag`;
+      ``version_file`` names the line it starts from). Off by default (opt-in).
+    - ``changelog``: the rollup files each version's notes in ``changelog_file``. Off by default
+      (opt-in); on with ``cut`` unless set false here.
+
+    With none of them a product's version is the released sha, short: no tag, no changelog
+    commit, nothing pushed to its repo but the work itself."""
+    conv = getattr(product, 'conventions', None)
+    v = conv.get('version') if conv is not None else None
+    return v if isinstance(v, dict) else {}
+
+
+def _truthy(v):
+    return v is True or (isinstance(v, str) and v.strip().lower() in ('true', 'on', 'yes', '1'))
+
+
+def cuts_tags(product):
+    """Does the rollup cut its own ``v<major>.<minor>.<patch>`` tags for ``product``?"""
+    return _truthy(version_conf(product).get('cut'))
+
+
+def tag_pattern(product):
+    """The compiled regex of the product's version tags: ``conventions.version.tag_pattern``,
+    else the rollup's own scheme when it cuts tags, else None (the version is the short sha)."""
+    pat = version_conf(product).get('tag_pattern')
+    if pat:
+        try:
+            return re.compile(str(pat))
+        except re.error:
+            return None
+    return SEMVER_TAG_RE if cuts_tags(product) else None
+
+
+def changelog_on(product):
+    """Does the rollup file release notes in the product's changelog? Opt-in (:func:`version_conf`)."""
+    conf = version_conf(product)
+    if 'changelog' in conf:
+        return _truthy(conf.get('changelog'))
+    return cuts_tags(product)
+
+
+def own_version(repo, sha, product):
+    """The version of the release at ``sha`` for a product the rollup cuts no tag for: the
+    newest tag matching :func:`tag_pattern` on it, else the short sha."""
+    pat = tag_pattern(product)
+    if pat is not None:
+        names = (_git(repo, 'tag', '--points-at', sha, '--sort=-creatordate') or '').split()
+        hit = next((n for n in names if pat.search(n)), None)
+        if hit:
+            return hit
+    return sha[:7]
 
 
 def product_version(repo, sha, product):
@@ -1421,6 +1487,20 @@ def released_at(repo, sha):
     return parse_ts(stamp) if stamp else None
 
 
+#: The `released:` line of a trunk release the rollup cut no tag for: when it was cut.
+NOTE_RELEASED_RE = re.compile(r'(?m)^released: (\S+)$')
+
+
+def _note_released(rdir, name):
+    """When the tag-less release note ``name`` was cut (its ``released:`` line), else None."""
+    try:
+        with open(os.path.join(rdir, name), encoding='utf-8') as f:
+            m = NOTE_RELEASED_RE.search(f.read())
+    except OSError:
+        return None
+    return parse_ts(m.group(1)) if m else None
+
+
 def _note_sha(repo, name):
     m = NOTE_NAME_RE.match(name)
     return (m and _git(repo, 'rev-parse', '--verify', '-q', f'{m.group(2)}^{{commit}}')) or None
@@ -1474,12 +1554,14 @@ def merge_changelog(current, entries):
     preamble = '' if parts[0].startswith('## ') else parts[0]
     have = {}
     for b in (p for p in parts if p.startswith('## ')):
-        m = re.match(r'## (v\d+\.\d+\.\d+)\b', b)
+        m = re.match(r'## (\S+)', b)
         have[m.group(1) if m else b] = b
     missing = [t for t in entries if t not in have]
     if not missing:
         return current
-    have.update({t: entries[t] for t in missing})
+    # entries come oldest first: a version that sorts as none (a sha, a foreign scheme) goes on
+    # top, newest first, and the stable sort below keeps that order
+    have = {**{t: entries[t] for t in reversed(missing)}, **have}
 
     def key(t):
         m = SEMVER_TAG_RE.match(t)
@@ -1587,17 +1669,16 @@ def write_trunk_release(root, day, items, product):
     releases/<day>-<sha7>.md with the version's notes; then the GitHub Release and the changelog
     entry. Legacy releases are adopted first (:func:`migrate_releases`). Returns the path
     written, or None."""
-    from asf import version
-    if version.is_factory_source(product.repo_dir):
-        # the factory's own repo is versioned by its release workflow (asf.version): one patch
-        # version per merge that changes the package, however it landed. A second cutter here
-        # raced it, and its changelog commit named record titles the redaction gate refuses —
-        # 644 refused pushes from v0.1.83 on.
-        return None
+    # No repository is special: a product versioned by its own release workflow (the factory's
+    # own among them: asf.version cuts one patch per merge) leaves `version.cut` and
+    # `version.changelog` off and names its tags in `version.tag_pattern` — a second cutter here
+    # would race that workflow (644 refused pushes from v0.1.83 on).
     _git(product.repo_dir, 'fetch', '-q', '--tags', 'origin')     # tags another machine cut
-    migrate_releases(root, items, product)
+    if cuts_tags(product):
+        migrate_releases(root, items, product)
     path = _cut_trunk_release(root, day, items, product)
-    sync_changelog(root, product)
+    if changelog_on(product):
+        sync_changelog(root, product)
     return path
 
 
@@ -1615,12 +1696,21 @@ def _cut_trunk_release(root, day, items, product):
         old = _note_sha(repo, prev[-1])
         if old == new or (old and old.startswith(new[:7])):
             return None
-        at = released_at(repo, old) if old else None
+        at = (released_at(repo, old) if old else None) or _note_released(rdir, prev[-1])
         if at is not None and (now_utc() - at).total_seconds() < release_min_interval_s(product):
             return None     # too soon after the last release: a rollup past the interval cuts it
     found = commit_items(repo, items, new, old)
     if not found:
         return None     # nothing landed that the record knows: a release of nothing is noise
+    if not cuts_tags(product):
+        # the product's own tag scheme, or its short sha: no tag cut, no GitHub Release
+        ver = own_version(repo, new, product)
+        notes = render_notes(items, found, improvement_commits(repo, items, new, old),
+                             install_line(product, ver) if ver != new[:7] else None)
+        path = os.path.join(rdir, f"{day}-{new[:7]}.md")
+        write_if_changed(path, render_release(day, new, old, None, items, found, notes=notes, version=ver,
+                                              released=iso(now_utc())))
+        return path
     tag = tags_at(repo, new)[0] or next_tag(repo, new, items, product)
     notes = render_notes(items, found, improvement_commits(repo, items, new, old), install_line(product, tag))
     if not cut_tag(repo, tag, new, tag_message(tag, day, new, notes)):

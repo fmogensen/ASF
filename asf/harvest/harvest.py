@@ -13,8 +13,7 @@ clauses of both sides, unioned). Anything else conflicting aborts the rebase and
 with one line naming the file — never a silent guess at someone's intent.
 
 The gate (:func:`product_gate`) is the product's ``conventions.test_command`` — leading
-``NAME=value`` tokens lifted into its environment (§12) — plus, on asf's own repo, its generic and
-conventions checks, each within ``harvest.gate_timeout_s`` (B-0072). Landing on the trunk is
+``NAME=value`` tokens lifted into its environment (§12) — plus its ``conventions.gate_checks`` commands, each within ``harvest.gate_timeout_s`` (B-0072). Landing on the trunk is
 fast-forward only: ``git push --force*`` is never used. Python 3 stdlib only.
 """
 import argparse
@@ -709,9 +708,6 @@ def run_harvest(repo, state_dir, dry_run, conv=None, session_source=None):
 LANDING_FF = 'fast-forward'
 LANDING_PR = 'pull-request'
 FAIL_LINE_RE = re.compile(r'^(FAIL|ERROR)\b|\b(failed|FAILED|error|Error|violation)\b')
-#: asf's own gate scripts, run on top of the test command only when the repo harvested is this
-#: package's own (under its ``tools`` directory) — no product carries them.
-ASF_GATE_SCRIPTS = ('check_generic', 'check_conventions')
 #: A leading ``NAME=value`` token of the test command: an environment assignment, not argv (§12).
 ENV_TOKEN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
@@ -767,21 +763,6 @@ def mark_session(state_dir, job, **fields):
     with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(dict(fields, job=job), sort_keys=True) + '\n')
 
-
-
-def is_asf_repo(repo):
-    """True when ``repo`` is this package's own repo (same real path, or the same git common
-    dir — a linked worktree of it counts)."""
-    import asf
-    own = os.path.dirname(os.path.dirname(os.path.realpath(asf.__file__)))
-    if os.path.realpath(repo) == own:
-        return True
-
-    def common(path):
-        d = sh(['git', 'rev-parse', '--git-common-dir'], cwd=path).stdout.strip()
-        return os.path.realpath(os.path.join(path, d)) if d else None
-    theirs = common(repo)
-    return theirs is not None and theirs == common(own)
 
 
 def first_failing_line(text):
@@ -856,9 +837,18 @@ def keep_red_output(text, verdict, only=None):
         return None
 
 
-def product_gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
-    """``(ok, first failing line, files, red modules)``: the product's test command, then — on
-    asf's own repo — its generic and conventions checks. Each within ``harvest.gate_timeout_s``
+def gate_checks(conv):
+    """``conventions.gate_checks``: commands the landing gate runs after the test command (the
+    product's own lint or structure checks), each a command string; default none. The same for
+    every product — no repository gets checks the others do not."""
+    v = conv.get('gate_checks') if conv is not None else None
+    v = [v] if isinstance(v, str) else v if isinstance(v, list) else []
+    return [shlex.split(str(c)) for c in v if str(c).strip()]
+
+
+def product_gate(tmp, conv, _unused=None, out=None, only=None, timing=True):
+    """``(ok, first failing line, files, red modules)``: the product's test command, then its
+    ``conventions.gate_checks`` (:func:`gate_checks`). Each within ``harvest.gate_timeout_s``
     (B-0072). With ``only`` (module names): just those modules of the test command, named in
     :data:`ONLY_VAR`, and no checks — a bisection's targeted re-run; the full gate confirms
     whatever lands. ``out`` gets one timing line per gate: ``gate: <n> modules, <s>s, red: …``.
@@ -875,8 +865,8 @@ def product_gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
         env.update(extra)
     if only:
         env[ONLY_VAR] = ' '.join(only)
-    elif asf_repo:
-        cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
+    else:
+        cmds += gate_checks(conv)
     timeout = gate_timeout(conv)
     started = time.monotonic()
     count = [len(only) if only else '?']

@@ -861,7 +861,7 @@ class TrunkReleases(Base):
         self.commit('pkg/a.py', 'a = 1\n', 'task(T-0001): plan door copy')
         self.product = env.Product('trunky', {
             'repo_dir': self.repo, 'repo_slug': 'x/y', 'main': 'main', 'ci': 'none',
-            'conventions': {'version_file': 'pkg/__init__.py'}})
+            'conventions': {'version_file': 'pkg/__init__.py', 'version': {'cut': True}}})
         # the rollup's clock: each release() runs later than the last, past the default interval
         self.now = metrics.now_utc()
         clock = mock.patch.object(metrics, 'now_utc', side_effect=lambda: self.now)
@@ -1063,6 +1063,81 @@ class TrunkReleases(Base):
         subject = _git(self.origin, 'log', '-1', '--format=%s', 'main')
         self.assertTrue(metrics.CHANGELOG_SUBJECT_RE.match(subject), subject)
         self.assertEqual(metrics.improvement_commits(self.repo, self.items, 'origin/main', 'origin/main~1'), [])
+
+    # ---- F-0248 amendment 7: the product's own version scheme -----------------
+
+    def unversioned(self, **version):
+        """The fixture product without a ``version_file``: the rollup cuts no tag by default."""
+        conv = {'version': version} if version else {}
+        self.product = env.Product('plain', {'repo_dir': self.repo, 'repo_slug': 'x/y', 'main': 'main',
+                                             'ci': 'none', 'conventions': conv})
+
+    def test_by_default_a_product_is_versioned_by_its_short_sha_with_nothing_pushed(self):
+        self.unversioned()
+        self.assertFalse(metrics.cuts_tags(self.product))
+        self.assertFalse(metrics.changelog_on(self.product))
+        before = _git(self.origin, 'rev-parse', 'main')
+        head = _git(self.repo, 'rev-parse', 'HEAD')
+        path = self.release()
+        text = self.read(os.path.relpath(path, self.root))
+        self.assertIn(f'\nversion: {head[:7]}\n', text)
+        self.assertNotIn('Tag `', text)
+        self.assertIn('Plan door copy', text)
+        self.assertEqual(self.origin_tags(), {})                       # no tag cut
+        self.assertEqual(_git(self.origin, 'rev-parse', 'main'), before)   # no changelog commit
+
+    def test_a_tag_pattern_names_the_products_own_tags(self):
+        self.unversioned(tag_pattern=r'^release/\d+$')
+        head = _git(self.repo, 'rev-parse', 'HEAD')
+        _git(self.repo, 'tag', 'release/7', head)
+        _git(self.repo, 'tag', 'unrelated', head)
+        path = self.release()
+        self.assertIn('\nversion: release/7\n', self.read(os.path.relpath(path, self.root)))
+        self.assertEqual(self.origin_tags(), {})                       # the rollup cut nothing
+        self.assertEqual(metrics.own_version(self.repo, 'f' * 40, self.product), 'fffffff')
+
+    def test_the_changelog_is_opt_in(self):
+        self.unversioned(changelog=True)
+        head = _git(self.repo, 'rev-parse', 'HEAD')
+        self.release()
+        self.assertIn(f'## {head[:7]} — {DAY}', self.changelog())
+        self.assertEqual(self.origin_tags(), {})
+        # idempotent: the sha-versioned entry is found again
+        before = _git(self.origin, 'rev-parse', 'main')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(metrics.sync_changelog(self.root, self.product))
+        self.assertEqual(_git(self.origin, 'rev-parse', 'main'), before)
+        # and a version_file product turns it off explicitly
+        self.product.conventions.extra['version'] = {'changelog': False}
+        self.assertFalse(metrics.changelog_on(self.product))
+
+    def test_a_version_file_alone_cuts_nothing(self):
+        self.product.conventions.extra['version'] = {}
+        self.assertFalse(metrics.cuts_tags(self.product))
+        self.assertFalse(metrics.changelog_on(self.product))
+
+    def test_the_interval_holds_without_a_tag(self):
+        self.unversioned()
+        self.assertIsNotNone(self.release())
+        self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        self.assertIsNone(self.release(later=dt.timedelta(minutes=30)))     # the released: line holds it
+        self.assertIsNotNone(self.release(later=dt.timedelta(minutes=31)))
+
+    def test_the_factorys_own_repo_releases_like_any_product(self):
+        # no repository is special: the factory's own source with the same config releases the same
+        with open(os.path.join(self.repo, 'pyproject.toml'), 'w') as f:
+            f.write('[project]\nname = "asf-factory"\n')
+        self.unversioned(tag_pattern=r'^v\d+\.\d+\.\d+$')
+        path = self.release()
+        self.assertIsNotNone(path)
+        self.assertEqual(self.origin_tags(), {})
+
+    def test_cut_opts_into_the_rollups_own_tags(self):
+        self.unversioned(cut=True)
+        head = _git(self.repo, 'rev-parse', 'HEAD')
+        self.release()
+        self.assertEqual(self.origin_tags(), {'v0.1.0': head})
+        self.assertIn('## v0.1.0', self.changelog())
 
     # ---- the migration --------------------------------------------------------
 

@@ -299,7 +299,7 @@ def branch_retention(ctx, items, out=print):
 def stale_acts(ctx, out=print):
     """Stale means act (:mod:`asf.stale_act`): a lane-STALE PR past its deadline archived and
     closed, a stuck Task far behind the trunk re-planned — acted on where
-    ``conventions.stale.act`` holds (by default ASF's own repo), the ``would …`` lines elsewhere.
+    ``conventions.stale.act`` holds (default false for every product), the ``would …`` lines elsewhere.
     Printed, never raised: the next tick tries again."""
     from asf import stale_act
     try:

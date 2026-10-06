@@ -230,6 +230,8 @@ capacity:
 #   trial_samples: 10         # a trial's runs before it is judged
 #   min_gain: 0.10            # the objective's rise a trial must show to be kept
 #   max_regress: 0.10         # the rise in repair or failure rate that reverts it
+#   required: false           # release readiness counts criterion 11 (self-tuning live) even
+#                             # while the loop is off; unset, it reads n/a then
 #   bounds:
 #     review:
 #       models: [heavy, light]
@@ -239,6 +241,7 @@ capacity:
 #   products:
 #     asf:
 #       enabled: true
+#       required: true
 
 # tick: a command step (a product's `steps: {<step>: "<command>"}`) is killed after this many
 # seconds and exits 124 (default 900).

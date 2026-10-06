@@ -523,6 +523,23 @@ def render_history(rows):
 
 # ------------------------------------------------------------ release criterion 11 --
 
+def required(product, cfg=None):
+    """``tune.required`` (``tune.products.<name>.required`` over it): release readiness counts
+    criterion 11 even while the loop is off — a product that makes self-tuning part of its own
+    release gate. Off by default for every product."""
+    if cfg is None:
+        try:
+            cfg = env.load_config()
+        except env.ConfigError:
+            cfg = {}
+    block = cfg.get('tune') if isinstance(cfg.get('tune'), dict) else {}
+    name = getattr(product, 'name', product)
+    per = ((block.get('products') or {}) if isinstance(block.get('products'), dict) else {}).get(name)
+    per = per if isinstance(per, dict) else {}
+    value = per.get('required', block.get('required'))
+    return value is True or (isinstance(value, str) and value.strip().lower() in ('true', 'on', 'yes'))
+
+
 def criterion(product, window_days, now=None, cfg=None, runs=None):
     """``(met, evidence)`` for release-readiness criterion 11, *Self-tuning live*: the loop is on,
     at least one change kept in the window (and not reverted since), and no unreverted

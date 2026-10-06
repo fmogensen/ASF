@@ -621,10 +621,9 @@ def intake_cell(root, product):
 
 def release_cell(root, product):
     """``Release``: the release-readiness verdict (:mod:`asf.release`; the full table is
-    ``asf release-readiness``) — only for the product whose repo is the factory's own source, or
-    one that sets a ``release:`` block."""
-    from asf.drift import is_factory_source
-    if not (getattr(product, 'release', None) or (product.repo_dir and is_factory_source(product.repo_dir))):
+    ``asf release-readiness``) — only for a product that sets a ``release:`` block (the same rule
+    for every product, the factory's own included)."""
+    if not getattr(product, 'release', None):
         return None
     from asf.release import cell
     return cell(root, product)

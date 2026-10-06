@@ -50,7 +50,7 @@ KNOWN_CONFIG_KEYS = frozenset({
     'cloud.*', 'upgrade.min_interval_min', 'upgrade.drain_wait_s',
     'upgrade.drain_marker_max_s', 'credentials.*',
     'tune.enabled', 'tune.window_days', 'tune.min_samples', 'tune.trial_samples', 'tune.min_gain',
-    'tune.max_regress', 'tune.bounds.*', 'tune.products.*',
+    'tune.max_regress', 'tune.bounds.*', 'tune.products.*', 'tune.required',
 })
 
 

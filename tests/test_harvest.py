@@ -1089,9 +1089,12 @@ class ProductHarvestTests(unittest.TestCase):
         log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout.splitlines()
         self.assertEqual(log[:2], ['fix(B-0001): the change', 'another change'])
 
-    def test_asf_own_repo_is_recognised(self):
-        self.assertTrue(harvest.is_asf_repo(REPO_ROOT))
-        self.assertFalse(harvest.is_asf_repo(self.repo))
+    def test_gate_checks_are_a_convention_for_every_product(self):
+        # no repository gets extra gate checks of its own: conventions.gate_checks, default none
+        self.assertEqual(harvest.gate_checks(Conventions.from_mapping({})), [])
+        conv = Conventions.from_mapping({'gate_checks': ['bash tools/check_a.sh', 'make lint']})
+        self.assertEqual(harvest.gate_checks(conv), [['bash', 'tools/check_a.sh'], ['make', 'lint']])
+        self.assertFalse(hasattr(harvest, 'is_asf_repo'))
 
     # -- B-0031: a tick gates only so many branches — the rest wait for the next -----------
     def test_b0031_caps_branches_gated_per_tick(self):
