@@ -49,6 +49,43 @@ CALLER_IDENTITY = ('ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION', 'BACKLOG_ID_RANGE', 
 GIT_HOOK = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX', 'GIT_OBJECT_DIRECTORY',
             'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH')
 
+#: The suite's hooks-dir confine (F-0143): an absolute root outside which
+#: :func:`asf.hooks.git_hooks_dir` refuses to resolve. Set by both suite entry points to the temp
+#: root; **unset in every operator install**, where the branch it drives is one comparison that
+#: never fires.
+#:
+#: review-b-0111: a fixture ``pre-commit`` naming a nonexistent ``/x/asf`` reached a hooks dir a
+#: worker's commit ran, and refused it. On a factory host ``core.hooksPath`` makes that one
+#: directory shared by every worktree and every lane, so a single stray file stops other sessions.
+#: The four tests that caused it were fixed one by one (``3d0d0bb8d``); this is the rail that makes
+#: the fifth impossible, and it constrains the *resolution* because a hand-built path cannot fake
+#: that step (D1).
+#:
+#: It is an environment variable, not a monkeypatch, because the tests most likely to install hooks
+#: run ``asf`` as a subprocess and only the environment crosses that boundary (D2). ``gate`` mode
+#: carries it; ``worker`` mode strips it with every other unlisted name, and stays unconfined (D8).
+HOOKS_CONFINE = 'ASF_HOOKS_CONFINE'
+
+
+def hooks_confine(env=None):
+    """The confine root in ``env`` (default the process's), ``realpath``'d — or None when unset.
+
+    Resolved, because the temp root is reached through a symlink on some platforms while
+    ``mkdtemp`` hands back the unresolved form: comparing raw strings passes by luck and refuses a
+    legitimate temp repo the moment either side is resolved (D4)."""
+    root = (os.environ if env is None else env).get(HOOKS_CONFINE)
+    return os.path.realpath(root) if root else None
+
+
+def confine_hooks_to_temp(env=None):
+    """Point :data:`HOOKS_CONFINE` at the temp root, and return it. Called by **both** suite entry
+    points — ``tests/__init__.py`` and its twin ``tests/test_00_home.py``, which cannot import each
+    other (D6, D7). ``tests/test_hermetic.py`` proves neither is missing it."""
+    env = os.environ if env is None else env
+    env[HOOKS_CONFINE] = tempfile.gettempdir()
+    return env[HOOKS_CONFINE]
+
+
 #: Config keys a child never inherits through the base's ``GIT_CONFIG_*`` — lowercase, the way
 #: git compares a section and a key. ``core.hooksPath`` is a caller session's own hook dir
 #: (:func:`asf.workers.githooks.ensure`, F-0076), and it binds *every* repo the child touches,

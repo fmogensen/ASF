@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 import asf
-from asf import cli, console_perms, conventions, env, hooks, init, install, release, schema, upgrade
+from asf import cli, console_perms, conventions, env, hermetic, hooks, init, install, release, schema, upgrade
 from tests.gitfixture import executable_asf
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1730,6 +1730,107 @@ class GitHookTests(unittest.TestCase):
         # with no commits that is an unknown revision, and git exits 128 (B-0038's class again)
         published = _git(['for-each-ref', '--format=%(refname)', 'refs/heads/'], origin)
         self.assertEqual(published, '')
+
+
+class GitHookDirConfineTests(unittest.TestCase):
+    """F-0143 S-34600: :data:`asf.hermetic.HOOKS_CONFINE` and the branch it drives in
+    :func:`asf.hooks.git_hooks_dir`. Every repo here is built under one of two `mkdtemp` trees —
+    never a path outside them — so "outside the confine" never means a real host path (PD2)."""
+
+    def setUp(self):
+        self.confine_root = tempfile.mkdtemp(prefix='confine_root_')
+        self.addCleanup(shutil.rmtree, self.confine_root, True)
+        self.outside_root = tempfile.mkdtemp(prefix='outside_root_')
+        self.addCleanup(shutil.rmtree, self.outside_root, True)
+
+    def _repo(self, root, name='repo'):
+        path = os.path.join(root, name)
+        _git(['init', '-q', '-b', 'main', path])
+        return path
+
+    def test_unset_changes_nothing(self):
+        repo = self._repo(self.outside_root)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(hermetic.HOOKS_CONFINE, None)
+            self.assertEqual(os.path.realpath(hooks.git_hooks_dir(repo)),
+                             os.path.realpath(os.path.join(repo, '.git', 'hooks')))
+
+    def test_inside_resolves(self):
+        repo = self._repo(self.confine_root)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: self.confine_root}):
+            self.assertEqual(os.path.realpath(hooks.git_hooks_dir(repo)),
+                             os.path.realpath(os.path.join(repo, '.git', 'hooks')))
+
+    def test_outside_raises_naming_repo_dir_and_root(self):
+        repo = self._repo(self.outside_root)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: self.confine_root}):
+            with self.assertRaises(hooks.HookDirOutsideConfine) as ctx:
+                hooks.git_hooks_dir(repo)
+        msg = str(ctx.exception)
+        self.assertIn(repo, msg)
+        self.assertIn(os.path.join(repo, '.git', 'hooks'), msg)
+        self.assertIn(self.confine_root, msg)
+
+    def test_a_sibling_whose_name_merely_starts_with_the_root_is_refused(self):
+        # the `+ os.sep` in the comparison: a root-prefixed name is not the root itself
+        sibling_root = self.confine_root + '-sibling'
+        os.makedirs(sibling_root)
+        self.addCleanup(shutil.rmtree, sibling_root, True)
+        repo = self._repo(sibling_root)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: self.confine_root}):
+            with self.assertRaises(hooks.HookDirOutsideConfine):
+                hooks.git_hooks_dir(repo)
+
+    def test_core_hooks_path_out_of_the_root_is_refused_even_though_the_repo_is_inside(self):
+        # the factory-host case: a repo's own path cannot catch this, only git's answer can
+        repo = self._repo(self.confine_root)
+        outside_hooks = os.path.join(self.outside_root, 'hooks')
+        os.makedirs(outside_hooks)
+        _git(['config', 'core.hooksPath', outside_hooks], repo)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: self.confine_root}):
+            with self.assertRaises(hooks.HookDirOutsideConfine):
+                hooks.git_hooks_dir(repo)
+
+    def test_confine_root_is_compared_resolved_not_raw(self):
+        # D4: tempfile.gettempdir() is the unresolved form on a platform reached through a
+        # symlink; a raw prefix compare against it would wrongly refuse a repo it in fact confines.
+        confine = tempfile.gettempdir()
+        repo = self._repo(tempfile.mkdtemp(dir=confine, prefix='confine_raw_'))
+        self.addCleanup(shutil.rmtree, os.path.dirname(repo), True)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: confine}):
+            hooks.git_hooks_dir(repo)  # must not raise
+
+    def test_dev_null_is_exempt(self):
+        # PD1: tests/gitfixture.py's own `core.hooksPath=/dev/null` idiom ("this repo runs no
+        # hooks", B-0073) must stay green even though /dev/null itself resolves outside the root
+        repo = self._repo(self.confine_root)
+        _git(['config', 'core.hooksPath', os.devnull], repo)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: self.confine_root}):
+            self.assertEqual(hooks.git_hooks_dir(repo), os.devnull)
+
+    def test_review_b_0111_reproduced_and_caught(self):
+        # tests/test_check_staged.py:365-386's fixture — a hand-written pre-commit naming
+        # /x/asf — pointed at a repo outside the confine: review-b-0111, reproduced and refused
+        # before the hook can ever be written.
+        repo = self._repo(self.outside_root)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: self.confine_root}):
+            with self.assertRaises(hooks.HookDirOutsideConfine):
+                hooks_dir = hooks.git_hooks_dir(repo)
+                os.makedirs(hooks_dir, exist_ok=True)
+                with open(os.path.join(hooks_dir, 'pre-commit'), 'w') as f:
+                    f.write('#!/bin/sh\nexec /x/asf redact --pre-commit\n')
+        self.assertFalse(os.path.exists(os.path.join(repo, '.git', 'hooks', 'pre-commit')))
+
+    def test_review_b_0111_same_fixture_inside_the_confine_stays_green(self):
+        repo = self._repo(self.confine_root)
+        with mock.patch.dict(os.environ, {hermetic.HOOKS_CONFINE: self.confine_root}):
+            hooks_dir = hooks.git_hooks_dir(repo)
+            os.makedirs(hooks_dir, exist_ok=True)
+            path = os.path.join(hooks_dir, 'pre-commit')
+            with open(path, 'w') as f:
+                f.write('#!/bin/sh\nexec /x/asf redact --pre-commit\n')
+            os.chmod(path, 0o755)
+        self.assertTrue(os.path.isfile(path))
 
 
 class NoCheckoutPathsTest(unittest.TestCase):
