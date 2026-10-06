@@ -1844,6 +1844,68 @@ class ParkedCorrectionTests(unittest.TestCase):
         self.assertEqual([r.action.split(' ')[0] for r in out], ['PARKED'])
 
 
+class AsfParkJobOrBranchScopeTests(unittest.TestCase):
+    """#45: ``asf park <job>`` (:mod:`asf.workers.unpark`) holds only that job's row — its own
+    message says so (``"{item}'s other rows go on"``) — never the item's other jobs or its
+    siblings. And a park whose cause (another item it names in its ``why``) has since landed
+    reads ``may be stale`` instead of silently staying parked on a reason that is no longer
+    true — an operator park never auto-lifts, so nothing else would ever say this."""
+
+    def index(self):
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active', 'decided': True,
+                       'stage': 'building 1/2', 'children': ['T-0001', 'T-0002']},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'New',
+                       'decided': True, 'writes': ['lib/a.py']},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'state': 'New',
+                       'decided': True, 'writes': ['lib/b.py']}}}
+
+    def park(self, **kw):
+        base = {'item': 'T-0001', 'scope': 'job', 'branch': '', 'on_job': 'task-t-0001',
+               'reason': 'operator park on job task-t-0001: testing', 'why': 'testing',
+               'at': '2026-10-01T00:00:00Z'}
+        base.update(kw)
+        return base
+
+    def test_a_job_park_holds_only_that_jobs_row(self):
+        out = rows.candidates(self.index(), product(), [], occupancy={'parks': [self.park()]})
+        by = {r.item_id: r for r in out}
+        self.assertEqual(by['T-0001'].action.split(' ')[0], 'PARKED')
+        self.assertFalse(by['T-0001'].launches)
+        self.assertTrue(by['T-0002'].launches, by['T-0002'])     # the sibling Task goes on
+        self.assertEqual(len(out), 2)                            # no third, item-wide row
+
+    def test_a_branch_park_holds_only_that_branchs_row(self):
+        park = self.park(scope='branch', branch='task/T-0001', on_job='')
+        out = rows.candidates(self.index(), product(), [], occupancy={'parks': [park]})
+        by = {r.item_id: r for r in out}
+        self.assertEqual(by['T-0001'].action.split(' ')[0], 'PARKED')
+        self.assertTrue(by['T-0002'].launches, by['T-0002'])
+
+    def test_a_park_naming_a_now_landed_item_reads_may_be_stale(self):
+        idx = self.index()
+        idx['items']['T-0002']['state'] = 'Closed'      # T-0002 landed since the park was written
+        park = self.park(reason='operator park on job task-t-0001: waiting on T-0002 to land',
+                         why='waiting on T-0002 to land')
+        out = rows.candidates(idx, product(), [], occupancy={'parks': [park]})
+        (row,) = [r for r in out if r.item_id == 'T-0001']
+        self.assertTrue(row.action.startswith('PARKED'), row.action)
+        self.assertIn('park on task-t-0001 may be stale: T-0002 landed', row.action)
+        self.assertFalse(row.launches)
+
+    def test_a_park_naming_a_still_open_item_is_not_flagged_stale(self):
+        park = self.park(reason='operator park on job task-t-0001: waiting on T-0002 to land',
+                         why='waiting on T-0002 to land')
+        out = rows.candidates(self.index(), product(), [], occupancy={'parks': [park]})
+        (row,) = [r for r in out if r.item_id == 'T-0001']
+        self.assertNotIn('may be stale', row.action)
+
+    def test_stale_park_cause_ignores_its_own_item(self):
+        items = {'T-0001': {'id': 'T-0001', 'state': 'Closed'}}
+        p = {'item': 'T-0001', 'reason': 'park on T-0001: self-reference', 'why': ''}
+        self.assertIsNone(rows.stale_park_cause(p, items))
+
+
 class CorrectionRowTest(unittest.TestCase):
     """B-0032: a held branch goes back to its session as a FIX → CORRECT row."""
 

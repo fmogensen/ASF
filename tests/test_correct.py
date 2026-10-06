@@ -43,8 +43,9 @@ class CorrectTests(unittest.TestCase):
         with open(self.path) as f:
             return f.read()
 
-    def run_cmd(self, why='widen the budgets', pr=None, item='T-0017', fetch=None, alive=None):
-        args = argparse.Namespace(item=item, why=why, from_pr=pr, product='sample')
+    def run_cmd(self, why='widen the budgets', pr=None, item='T-0017', fetch=None, alive=None,
+               drop=False):
+        args = argparse.Namespace(item=item, why=why, from_pr=pr, product='sample', drop=drop)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = correct.cmd_correct(args, fetch=fetch, alive=alive or (lambda pid: True))
@@ -312,6 +313,95 @@ class CorrectTests(unittest.TestCase):
         self.assertEqual(self.run_cmd(item='T-9999')[0], 1)
         self.assertEqual(self.run_cmd(why='  ')[0], 2)
         self.assertEqual(self.run_cmd(item='nope')[0], 2)
+
+
+class DropTests(CorrectTests):
+    """#46: ``asf correct <item> --drop --why TEXT`` releases a standing pending correction or
+    ruling without landing it — and the record drops one automatically once a different branch
+    of the same item lands, so carrying it out on its own (now-overtaken) branch never redoes
+    work that is already done."""
+
+    def test_drop_clears_a_pending_correction(self):
+        self.ledger(self.RUN)
+        self.run_cmd(why='widen the budgets')
+        self.assertIn('T-0017', lifecycle.corrections(self.path))
+        rc, out = self.run_cmd(why='superseded by a hand fix', drop=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped T-0017's correction", out)
+        self.assertIn('superseded by a hand fix', out)
+        self.assertNotIn('T-0017', lifecycle.corrections(self.path))
+
+    def test_drop_clears_a_ruling_too(self):
+        self.card()
+        self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP))
+        self.run_cmd(why='D12 stands: remove the provider entry; push once.')
+        self.assertTrue(lifecycle.corrections(self.path)['T-0017'].get('operator_ruling'))
+        rc, out = self.run_cmd(why='the provider entry is gone another way', drop=True)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dropped T-0017's ruling", out)
+        self.assertNotIn('T-0017', lifecycle.corrections(self.path))
+
+    def test_drop_with_nothing_pending_refuses(self):
+        self.ledger(self.RUN)
+        rc, out = self.run_cmd(why='nothing to drop', drop=True)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('no pending correction or ruling', out)
+
+    def test_drop_never_touches_an_item_park(self):
+        self.ledger(self.RUN)
+        lifecycle.note_park(self.path, 'T-0017', lifecycle.SCOPE_ITEM, 'r', 'w')
+        rc, out = self.run_cmd(why='try to drop the park', drop=True)
+        self.assertEqual(rc, 1, out)
+        self.assertIn('no pending correction or ruling', out)
+        # the park itself is untouched: only `asf unpark` releases it
+        self.assertTrue(lifecycle.item_park(self.path, 'T-0017'))
+
+    def test_drop_requires_why(self):
+        self.ledger(self.RUN)
+        self.run_cmd(why='widen the budgets')
+        self.assertEqual(self.run_cmd(why=' ', drop=True)[0], 2)
+
+
+class CorrectionAutoDropsOnASupersedingLandingTests(unittest.TestCase):
+    """The automatic half of #46: a correction or ruling written against one branch of an item
+    drops on its own once a *different* branch of the same item lands — never once its own
+    branch lands (that is simply done)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='correct_auto_drop_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.path = os.path.join(self.tmp, 'sessions.jsonl')
+
+    def ledger(self, *records):
+        with open(self.path, 'w') as f:
+            for r in records:
+                f.write(json.dumps(r) + '\n')
+
+    def test_a_different_landed_branch_supersedes_the_correction(self):
+        self.ledger(
+            {'job': 'review-t-0017', 'item': 'T-0017', 'branch': 'cloud/T-0017',
+             'started': '2026-09-01T09:00:00Z', 'ended': '2026-09-01T09:30:00Z',
+             'correction': {'kind': 'review', 'text': 'x', 'at': '2026-09-01T09:30:00Z'}},
+            {'job': 'coder-t-0017-2', 'item': 'T-0017', 'branch': 'cloud/T-0017-take2',
+             'started': '2026-09-02T09:00:00Z', 'ended': '2026-09-02T09:30:00Z',
+             'harvested': 'f00dface00'})
+        other = lifecycle.correction_superseded_by_landing(self.path, 'T-0017', 'cloud/T-0017')
+        self.assertEqual(other, 'cloud/T-0017-take2')
+
+    def test_its_own_branch_landing_is_not_a_supersede(self):
+        self.ledger(
+            {'job': 'review-t-0017', 'item': 'T-0017', 'branch': 'cloud/T-0017',
+             'started': '2026-09-01T09:00:00Z', 'ended': '2026-09-01T09:30:00Z',
+             'harvested': 'f00dface00',
+             'correction': {'kind': 'review', 'text': 'x', 'at': '2026-09-01T09:00:00Z'}})
+        self.assertIsNone(lifecycle.correction_superseded_by_landing(
+            self.path, 'T-0017', 'cloud/T-0017'))
+
+    def test_no_other_landed_branch_is_not_a_supersede(self):
+        self.ledger({'job': 'review-t-0017', 'item': 'T-0017', 'branch': 'cloud/T-0017',
+                    'started': '2026-09-01T09:00:00Z', 'ended': '2026-09-01T09:30:00Z'})
+        self.assertIsNone(lifecycle.correction_superseded_by_landing(
+            self.path, 'T-0017', 'cloud/T-0017'))
 
 
 

@@ -1468,7 +1468,9 @@ def next_state(prev, facts):
             return PR_OPEN, 'fast-forward: the branch is its own PR'
         if not f.get('host'):
             return PR_OPEN, 'no PR host: the product lands it'
-        if f.get('conflict'):  # T2c: GitHub runs no pull_request workflow on a conflicting PR
+        if f.get('conflict') or f.get('host_dirty'):
+            # T2c: GitHub runs no pull_request workflow on a conflicting PR — and none either
+            # on one it merely *reads* as conflicting while git merges it clean (#44)
             return BACK, 'kind=conflict'
         if pr.get('state') == 'OPEN':
             return PR_OPEN, f'PR #{n}'
@@ -1477,7 +1479,7 @@ def next_state(prev, facts):
         return keep
     if s in (PR_OPEN, REVIEW) and f.get('checks_red'):  # T5c: its exact head failed CI
         return BACK, 'kind=gate'
-    if s in (PR_OPEN, REVIEW) and f.get('mode') == 'pr' and f.get('conflict'):
+    if s in (PR_OPEN, REVIEW) and f.get('mode') == 'pr' and (f.get('conflict') or f.get('host_dirty')):
         return BACK, 'kind=conflict'  # T5e: no run will come, no review round is spent on it
     if s in (PR_OPEN, REVIEW):  # T3/T4/T5: a review of the head already there counts at once
         rv = f.get('review') or {}
@@ -1776,6 +1778,12 @@ class Lane:
             # T2c/T5e: GitHub runs no pull_request workflow on a PR that conflicts with the
             # trunk — no PR is opened on it, and an open one goes back before any review
             f['conflict'] = conflict_files(repo, trunk, b, fetch=False)
+            if not f['conflict']:
+                # #44: a `.gitattributes merge=union` file GitHub's own merge cannot apply makes
+                # it read `mergeable: CONFLICTING` on a PR `git merge-tree` (above) merges onto
+                # the trunk clean — GitHub starts no pull_request workflow on that PR either, so
+                # it would sit with no CI and no row; the lane refreshes the head itself instead
+                f['host_dirty'] = host_reads_dirty(self.slug, (pr or {}).get('number'), head)
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
             members = delivery_members(self.items, item)
             f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members)
@@ -3101,13 +3109,16 @@ class Lane:
                                                            red['names']), ())
             f['correction'] = {'kind': 'gate', 'text': text}
             return f.get('prev')
-        if kind == 'conflict' and f.get('conflict'):
-            text = conflict_text((f.get('pr') or {}).get('number'), self.trunk, f['conflict'])
+        if kind == 'conflict' and (f.get('conflict') or f.get('host_dirty')):
+            number = (f.get('pr') or {}).get('number')
+            files = f.get('conflict') or ()
+            text = conflict_text(number, self.trunk, files) if files \
+                else host_dirty_text(number, self.trunk)
             if self.dry_run:
                 self.out(f'DRY: would send {b} back: {text}')
                 self.results[b] = 'dry'
                 return None
-            if send_back(self, f, 'conflict', text, list(f['conflict'])) == 'held':
+            if send_back(self, f, 'conflict', text, list(files)) == 'held':
                 f['correction'] = {'kind': 'conflict', 'text': text}
             return f.get('prev')
         if kind == 'review':
@@ -3978,6 +3989,33 @@ def conflict_text(number, trunk, files):
             f'pull_request workflow on a conflicting PR, so its required checks never start; '
             f'rebase the branch onto origin/{trunk} (git rebase origin/{trunk}), never merge; '
             f'the factory publishes the rebased branch')
+
+
+def host_reads_dirty(slug, number, head):
+    """True when the repo's PR snapshot (:func:`asf.harvest.pr_graph.snapshot`, one GraphQL
+    query a tick — no added rate-limit cost) reads PR ``number`` as ``mergeable: CONFLICTING``
+    at exactly ``head``. Unreadable, another head, or any other value (including ``UNKNOWN``,
+    still computing): False — a PR this cannot vouch for is read the old way, by its own git
+    merge (:func:`conflict_files`), never guessed dirty."""
+    if not slug or not number or not head:
+        return False
+    got = (pr_graph.snapshot(slug) or {}).get(int(number))
+    return bool(got) and got.get('head') == head and got.get('mergeable') == 'CONFLICTING'
+
+
+def host_dirty_text(number, trunk):
+    """The correction for a branch GitHub's own merge reads as ``mergeable: CONFLICTING``
+    while git merges it onto ``trunk`` clean (#44: typically a ``.gitattributes merge=union``
+    register file GitHub's merge cannot apply) — never a session's to resolve. The lane rebases
+    it with the repo's own merge drivers and pushes the refreshed head itself
+    (:meth:`Lane.rebase_onto_trunk`, via :func:`send_back`), so GitHub re-reads a head it has
+    reason to call clean and starts the checks it never ran on the old one."""
+    what = f'PR #{number}' if number else 'the branch'
+    return (f'{what} reads mergeable: CONFLICTING on GitHub while git merges it onto '
+            f'origin/{trunk} clean (a merge driver GitHub\'s own merge cannot apply) — GitHub '
+            f'runs no pull_request workflow on it, so its required checks never start; the lane '
+            f'rebases it with the repo\'s own merge drivers and pushes the refreshed head — no '
+            f'session')
 
 
 def redaction_recheck(lane, f):

@@ -338,13 +338,52 @@ def check_worker_secrets(cfg, product=None):
 PUSH_AUTH_PROBE_REF = 'refs/heads/asf-doctor-push-probe'
 
 
+def _push_probe(job_env, repo_dir):
+    """``(ok, line)``: ``git ls-remote origin`` then, only once that succeeds, ``git push
+    --dry-run --no-verify origin HEAD:...`` under ``job_env`` — neither call touches a remote
+    ref or runs the product's own pre-push hook. ``line`` is git's own last non-blank line on
+    failure, else ''."""
+    job_env = dict(job_env, GIT_TERMINAL_PROMPT='0')  # a broken credential fails at once, never hangs
+    probe = subprocess.run(['git', 'ls-remote', 'origin'], cwd=repo_dir, env=job_env,
+                           capture_output=True, text=True, timeout=15)
+    if probe.returncode == 0:
+        probe = subprocess.run(
+            ['git', 'push', '--dry-run', '--no-verify', 'origin', f'HEAD:{PUSH_AUTH_PROBE_REF}'],
+            cwd=repo_dir, env=job_env, capture_output=True, text=True, timeout=15)
+    if probe.returncode == 0:
+        return True, ''
+    lines = [l for l in (probe.stderr or probe.stdout or '').splitlines() if l.strip()]
+    return False, lines[-1].strip() if lines else 'push auth failed'
+
+
+def _relaunch_job_env(product, cfg, acct, product_auth_env):
+    """The environment a correction's relaunch builds (:func:`asf.workers.stall.correct_once`),
+    reproduced with no live session: ``env=`` from :func:`asf.workers.githooks.item_env` (no
+    item or branch — the hook env it adds beyond identity needs neither to probe),
+    ``hooks_dir`` from :func:`asf.workers.githooks.ensure`, and ``passthrough`` from
+    ``worker_pool.env_passthrough`` — every field :func:`asf.workers.runtime.build_env` reads
+    beyond the bare first-launch Job (#47: a product's #845, the correction relaunch's git
+    losing the product's own credential, went uncaught because the doctor's probe never built
+    a Job this way)."""
+    from asf.workers import githooks, runtime
+    retry_env = githooks.item_env(getattr(product, 'conventions', None), None, None)
+    hooks_dir = githooks.ensure(product)
+    return runtime.build_env(runtime.Job(
+        product.name, 'doctor-probe-correction', product.repo_dir, None, None, account=acct,
+        env=retry_env, hooks_dir=hooks_dir, passthrough=env.env_passthrough(cfg),
+        product_auth_env=product_auth_env))
+
+
 def check_worker_push_auth(cfg, product):
     """(ok, detail) — the ``worker push auth`` row: ``git ls-remote origin`` and a
     ``git push --dry-run --no-verify origin HEAD:...`` against the product's own repo, run once
     per worker account under exactly the environment that account's sessions get
-    (:func:`asf.workers.runtime.build_env`) — never the operator's HOME or its keychain. Neither
-    call touches a remote ref (``--dry-run``) or runs the product's own pre-push hook
-    (``--no-verify``, the same skip a ref-only factory push takes, :mod:`asf.gitpush`).
+    (:func:`asf.workers.runtime.build_env`) — never the operator's HOME or its keychain —
+    **and** once more under the environment a correction's relaunch builds instead
+    (:func:`_relaunch_job_env`, :func:`asf.workers.stall.correct_once`): the two are not the
+    same Job (the relaunch's carries ``env=``, ``hooks_dir`` and ``passthrough`` the first
+    launch's bare probe never set), and a regression in one has already shipped invisibly to the
+    other (#47, following #845).
 
     Catches what ``worker secrets`` cannot: a file present and non-empty but a token expired,
     revoked or wrong for this repo, or an account with no ``GH_TOKEN`` at all silently falling
@@ -352,9 +391,9 @@ def check_worker_push_auth(cfg, product):
     local sessions failed to push with ``could not read Username for 'https://github.com': Device
     not configured`` — the osxkeychain helper unreachable from the launched process).
 
-    Red names each account whose probe fails, with git's own last line of output. No worker
-    accounts, no product repo, or the ``fake`` backend (no agent session ever pushes): nothing to
-    probe."""
+    Red names each account and env whose probe fails, with git's own last line of output. No
+    worker accounts, no product repo, or the ``fake`` backend (no agent session ever pushes):
+    nothing to probe."""
     from asf.workers import runtime
     accounts = pool.accounts_from_config(cfg)
     if not accounts or product is None or not product.repo_dir or not os.path.isdir(product.repo_dir):
@@ -367,26 +406,22 @@ def check_worker_push_auth(cfg, product):
     product_auth_env = env.product_auth_env(product)
     failures, oks = [], []
     for acct in accounts:
-        try:
-            job_env = runtime.build_env(runtime.Job(product.name, 'doctor-probe', product.repo_dir,
-                                                     None, None, account=acct,
-                                                     product_auth_env=product_auth_env))
-        except runtime.AuthEnvError as e:
-            failures.append(f'{acct.name}: {e}')
-            continue
-        job_env['GIT_TERMINAL_PROMPT'] = '0'  # a broken credential fails at once, never hangs
-        probe = subprocess.run(['git', 'ls-remote', 'origin'], cwd=product.repo_dir, env=job_env,
-                               capture_output=True, text=True, timeout=15)
-        if probe.returncode == 0:
-            probe = subprocess.run(
-                ['git', 'push', '--dry-run', '--no-verify', 'origin',
-                 f'HEAD:{PUSH_AUTH_PROBE_REF}'],
-                cwd=product.repo_dir, env=job_env, capture_output=True, text=True, timeout=15)
-        if probe.returncode != 0:
-            lines = [l for l in (probe.stderr or probe.stdout or '').splitlines() if l.strip()]
-            failures.append(f'{acct.name}: ' + (lines[-1].strip() if lines else 'push auth failed'))
-        else:
-            oks.append(acct.name)
+        for label, build in (
+                ('', lambda: runtime.build_env(runtime.Job(
+                    product.name, 'doctor-probe', product.repo_dir, None, None, account=acct,
+                    product_auth_env=product_auth_env))),
+                (' (correction relaunch)', lambda: _relaunch_job_env(product, cfg, acct,
+                                                                     product_auth_env))):
+            try:
+                job_env = build()
+            except runtime.AuthEnvError as e:
+                failures.append(f'{acct.name}{label}: {e}')
+                continue
+            ok, line = _push_probe(job_env, product.repo_dir)
+            if ok:
+                oks.append(f'{acct.name}{label}')
+            else:
+                failures.append(f'{acct.name}{label}: {line}')
     if failures:
         return False, '; '.join(failures)
     return True, 'authenticates for ' + ', '.join(oks)

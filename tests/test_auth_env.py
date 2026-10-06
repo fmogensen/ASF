@@ -489,6 +489,47 @@ class WorkerPushAuthDoctor(unittest.TestCase):
         self.assertIn('acct-a', detail)
         self.assertEqual(calls, [])
 
+    def test_both_the_first_launch_and_the_correction_relaunch_env_are_probed(self):
+        """#47: ``correct_once`` (:mod:`asf.workers.stall`) relaunches a correction under a
+        differently-built Job (its own ``env=``, ``hooks_dir``, ``passthrough``) than a session's
+        first launch — a product's #845 lost the product's own git credential on exactly that
+        relaunch path, and the doctor's probe, built only the first-launch way, never would have
+        caught it. A good account authenticates under both."""
+        token_file = os.path.join(self.repo, 'a.gh')
+        with open(token_file, 'w', encoding='utf-8') as f:
+            f.write(GH)
+        calls = []
+        with mock.patch.object(doctor.subprocess, 'run', side_effect=self.fake_git(calls)):
+            ok, detail = doctor.check_worker_push_auth(
+                self.cfg({'name': 'acct-a', 'auth_env': {'GH_TOKEN': token_file}}), self.product)
+        self.assertTrue(ok, detail)
+        ls_remotes = [e for c, e in calls if c[:2] == ['git', 'ls-remote']]
+        self.assertEqual(len(ls_remotes), 2, calls)      # one per env, not just the first launch
+        self.assertTrue(all(e.get('GH_TOKEN') == GH for e in ls_remotes), ls_remotes)
+        self.assertIn('correction relaunch', detail)
+
+    def test_a_credential_lost_only_on_the_correction_relaunch_env_is_caught(self):
+        """The regression #845 fixed, reproduced: the first-launch Job authenticates, but the
+        correction-relaunch Job (named by its ``doctor-probe-correction`` job name here) does
+        not — the row must still go red, naming which of the two failed."""
+        token_file = os.path.join(self.repo, 'a.gh')
+        with open(token_file, 'w', encoding='utf-8') as f:
+            f.write(GH)
+
+        def run(cmd, cwd=None, env=None, **kw):
+            if (env or {}).get('ASF_JOB') == 'doctor-probe-correction':
+                return subprocess.CompletedProcess(
+                    cmd, 128, '',
+                    "fatal: could not read Username for 'https://github.com': "
+                    "Device not configured\n")
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        with mock.patch.object(doctor.subprocess, 'run', side_effect=run):
+            ok, detail = doctor.check_worker_push_auth(
+                self.cfg({'name': 'acct-a', 'auth_env': {'GH_TOKEN': token_file}}), self.product)
+        self.assertFalse(ok, detail)
+        self.assertIn('correction relaunch', detail)
+        self.assertIn('Device not configured', detail)
+
 
 if __name__ == '__main__':
     unittest.main()

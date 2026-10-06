@@ -57,17 +57,42 @@ def instruction(why, branch, number=None, base=None, shas=()):
     return text
 
 
+def cmd_drop(product, path, item, why):
+    """``asf correct <item> --drop --why TEXT``: release the item's standing pending correction
+    or ruling without landing it — the operator decided it no longer applies (superseded,
+    overtaken by other work, simply wrong). Never an item park: ``asf unpark`` is its own release
+    (:mod:`asf.workers.unpark`), and a correction a branch or job park already holds for is not
+    the item's to drop either (:func:`asf.workers.lifecycle.correction_of`)."""
+    corr = lifecycle.correction_of(path, item)
+    if not corr or corr.get('parked'):
+        print(f'asf correct: {item} has no pending correction or ruling to drop')
+        return 1
+    job = corr.get('job')
+    if not job:
+        print(f'asf correct: {item}: its correction names no job — nothing to drop')
+        return 1
+    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    pool_mod.update_session(product, job, correction=None, dropped=now, drop_why=why)
+    kind = 'ruling' if corr.get('operator_ruling') else 'correction'
+    print(f"dropped {item}'s {kind} (job {job}): {why}")
+    return 0
+
+
 def cmd_correct(args, fetch=None, alive=None):
     product = env.load_product(getattr(args, 'product', None))
     why = str(getattr(args, 'why', '') or '').strip()
     item = (args.item or '').strip().upper()
     if not why:
-        print('asf correct: --why is required — it is the correction the session is given')
+        print('asf correct: --why is required — it is the reason recorded beside the drop' if
+              getattr(args, 'drop', False) else
+              'asf correct: --why is required — it is the correction the session is given')
         return 2
     if not ITEM_RE.fullmatch(item):
         print(f'asf correct: {args.item} is no item id')
         return 2
     path = pool_mod.sessions_path(product)
+    if getattr(args, 'drop', False):
+        return cmd_drop(product, path, item, why)
     runs = [r for r in lifecycle.item_runs(path, item) if r.get('job') and r.get('branch')]
     if not runs:
         print(f'asf correct: {item} has no run with a branch in the ledger — nothing to correct')
@@ -233,13 +258,19 @@ def attach_ruling(product, item, run, why):
 
 
 def register(sub):
-    """``asf correct <item> --why TEXT [--from-pr N] [--product P]``."""
+    """``asf correct <item> --why TEXT [--from-pr N] [--product P]`` and ``asf correct <item>
+    --drop --why TEXT [--product P]``."""
     p = sub.add_parser('correct', help='ask for one correction round on an item, with instructions '
-                                       '(--from-pr: cherry-pick that PR\'s commits)')
+                                       '(--from-pr: cherry-pick that PR\'s commits; --drop: '
+                                       'release its standing correction or ruling instead)')
     p.add_argument('item', help='the item id')
-    p.add_argument('--why', required=True, help='the instructions the correction session is given')
+    p.add_argument('--why', required=True, help='the instructions the correction session is '
+                                                 'given, or (with --drop) why it is released')
     p.add_argument('--from-pr', type=int, metavar='N',
                    help='a reference PR whose commits the session cherry-picks (never landed)')
+    p.add_argument('--drop', action='store_true',
+                   help='release the item\'s standing pending correction or ruling (never an '
+                        'item park — `asf unpark` releases that) instead of writing a new one')
     env.add_product_arg(p)
     p.set_defaults(func=cmd_correct)
 

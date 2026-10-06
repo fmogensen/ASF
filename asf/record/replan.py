@@ -25,6 +25,10 @@ lands it.
     writes: lib/c.py
     after: none
 
+    ### Task new 2: <title>         a Task the record mints, keyed explicitly as ``new 2`` —
+    writes: lib/d.py                 an ``after:`` or another section can name it as ``new 2``
+    after: new 1                     whether or not it is the second ``new`` heading on the page
+
     ### Drop T-0014: <why>          an open Task the replan removes
 
 Once it is on the trunk, the tick's record step applies it (:func:`apply_replans`) — the
@@ -39,6 +43,16 @@ dependency on an archived Feature's Tasks is exactly what a replan exists to mov
 Feature gets ``reshape_applied: <digest>`` and ``reshape_applied_at: <time>`` — the record that
 the reshape was carried out, which ends the row, and which lifts the parks on the Feature's
 Tasks (:func:`replanned_since`, read by :mod:`asf.workers.health`).
+
+A ``### Task new …`` heading that is not ``new`` plus an optional bare number (``new``, ``new 1``,
+``new 2``, …), or any other ``###`` line :func:`parse` cannot read as a Task/Drop section, used to
+be silently dropped from the document — its body (and any ``after:``/``Drop`` section below it
+that happened to read as its own match) still applied, so a Task could vanish into a ``new N``
+that was never minted. :func:`parse` now records every such line as a ``bad_sections`` entry, and
+every ``after:`` is checked against the Ns that line-up to an actual ``### Task new …`` heading;
+when either check fails, :func:`_apply` refuses the **whole** Feature's replan — no mint, no
+rewrite, no drop, no ``reshape_applied`` stamp — and prints one ``NEEDS OPERATOR:`` line instead,
+so the reshape stays pending for a human rather than a document being half-applied.
 
 Pure helpers first (:func:`digest`, :func:`pending`, :func:`doc_path`, :func:`parse`), then the
 record pass. No feeder import: the feeder imports this module.
@@ -56,8 +70,12 @@ DONE_STATES = ('Resolved', 'Closed')      # == asf.feeder.rows.DONE_STATES
 
 HEADER_RE = re.compile(r'^replan:\s*(?P<fid>[A-Z]+-\d{4})\s+(?P<digest>[0-9a-f]{6,64})\s*$',
                        re.MULTILINE)
-SECTION_RE = re.compile(r'^###\s+(?:Task\s+(?P<tid>[A-Z]+-\d{4}|new)|Drop\s+(?P<drop>[A-Z]+-\d{4}))'
-                        r'\s*:\s*(?P<rest>.*)$', re.MULTILINE | re.IGNORECASE)
+SECTION_RE = re.compile(r'^###\s+(?:Task\s+(?:(?P<tid>[A-Z]+-\d{4})|new\s*(?P<newnum>\d*))'
+                        r'|Drop\s+(?P<drop>[A-Z]+-\d{4}))\s*:\s*(?P<rest>.*)$',
+                        re.MULTILINE | re.IGNORECASE)
+#: any ``###`` line at all — used to catch a Task/Drop heading :data:`SECTION_RE` cannot read
+#: (``new`` not followed by a bare number, a typo in ``Task``/``Drop``, a stray ``###``)
+HEADING_RE = re.compile(r'^###[ \t]+\S.*$', re.MULTILINE)
 FIELD_RE = {k: re.compile(rf'^\s*{k}\s*:\s*(.*)$', re.MULTILINE | re.IGNORECASE)
             for k in ('writes', 'after', 'stories')}
 ID_RE = re.compile(r'\b[A-Z]-\d{4}\b')
@@ -99,14 +117,27 @@ def _field(body, key):
 
 
 def parse(text):
-    """``{'fid', 'digest', 'tasks': [...], 'drops': [(id, why)]}`` off a replan, or None when it
-    carries no ``replan:`` header. A task is ``{'id': T-… | None (new), 'title', 'writes',
-    'after': [id | ('new', n)] | None, 'stories': [...] | None, 'body'}``."""
+    """``{'fid', 'digest', 'tasks': [...], 'drops': [(id, why)], 'bad_sections': [...]}`` off a
+    replan, or None when it carries no ``replan:`` header. A task is ``{'id': T-… | None (new),
+    'new_num': int (only set for a new task — its explicit ``new N``, else the next N no heading
+    claimed, assigned in document order), 'title', 'writes', 'after': [id | ('new', n)] | None,
+    'stories': [...] | None, 'body'}``.
+
+    ``bad_sections`` is every ``###`` line that looks like a heading but that :data:`SECTION_RE`
+    could not read as a Task/Drop section, or whose ``new N`` repeats one already taken — the
+    record never guesses at one of these; :func:`_apply` refuses the whole document instead of
+    applying it with a Task silently missing."""
     head = HEADER_RE.search(text or '')
     if not head:
         return None
-    out = {'fid': head.group('fid'), 'digest': head.group('digest'), 'tasks': [], 'drops': []}
+    out = {'fid': head.group('fid'), 'digest': head.group('digest'), 'tasks': [], 'drops': [],
+           'bad_sections': []}
     matches = list(SECTION_RE.finditer(text))
+    starts = {m.start() for m in matches}
+    for hm in HEADING_RE.finditer(text):
+        if hm.start() not in starts:
+            out['bad_sections'].append(hm.group(0).strip())
+    seen_nums = set()
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[m.end():end]
@@ -115,6 +146,15 @@ def parse(text):
             out['drops'].append((m.group('drop').upper(), rest))
             continue
         tid = m.group('tid')
+        new_num = None
+        if tid is None:   # a new-Task heading, bare or with its own N
+            raw_num = m.group('newnum')
+            if raw_num:
+                new_num = int(raw_num)
+                if new_num in seen_nums:
+                    out['bad_sections'].append(m.group(0).strip())
+                    continue
+                seen_nums.add(new_num)
         after_raw = _field(body, 'after')
         after = None
         if after_raw is not None:
@@ -123,14 +163,40 @@ def parse(text):
         stories_raw = _field(body, 'stories')
         writes_raw = _field(body, 'writes')
         out['tasks'].append({
-            'id': None if tid.lower() == 'new' else tid.upper(),
+            'id': None if tid is None else tid.upper(),
+            'new_num': new_num,
             'title': rest,
             'writes': _list(writes_raw) if writes_raw is not None else None,
             'after': after,
             'stories': re.findall(r'\bS-\d{4}\b', stories_raw) if stories_raw is not None else None,
             'body': body.strip(),
         })
+    # a bare new-Task heading with no explicit number claims the next N no heading already took,
+    # in document order — the pre-#48 behaviour for a replan that never spells the number out
+    next_n = 1
+    for t in out['tasks']:
+        if t['id'] is None and t['new_num'] is None:
+            while next_n in seen_nums:
+                next_n += 1
+            t['new_num'] = next_n
+            seen_nums.add(next_n)
     return out
+
+
+def invalid(doc):
+    """``None`` when ``doc`` (:func:`parse`'s result) is whole — every heading read as a
+    Task/Drop section and every ``after:``'s ``new N`` names a Task the document itself mints —
+    else one line naming the first problem. A replan that fails this is refused in full
+    (:func:`_apply`): no mint, no rewrite, no drop, no ``reshape_applied`` stamp, rather than
+    dropping a Task into a ``new N`` that was never minted (#48)."""
+    if doc['bad_sections']:
+        return f"unreadable section(s): {'; '.join(doc['bad_sections'])}"
+    minted = {t['new_num'] for t in doc['tasks'] if t['id'] is None}
+    for t in doc['tasks']:
+        for a in t['after'] or ():
+            if isinstance(a, tuple) and a[1] not in minted:
+                return f"after: new {a[1]} names no Task this replan mints"
+    return None
 
 
 def replanned_since(items, item_id, at):
@@ -202,6 +268,11 @@ def _apply(root, product, read_plan, out=print):
         if not doc or doc['fid'].upper() != fid.upper() or doc['digest'] != d:
             out(f'replan: {fid}: {path} names another decision — not applied')
             continue
+        problem = invalid(doc)
+        if problem:
+            out(f'replan: {fid}: NEEDS OPERATOR: {path} is not applied — {problem} — '
+               f'fix the replan and land it again')
+            continue
         lines = []
 
         def live(i):
@@ -214,8 +285,9 @@ def _apply(root, product, read_plan, out=print):
                     and r['meta'].get('parent') == fid and not _done(r['meta'])
                     and not is_retired(r['meta']))
 
-        # new Tasks first, so `new N` resolves before any `after:` is written
-        new_ids = []
+        # new Tasks first, so `new N` resolves before any `after:` is written — keyed by each
+        # one's own N (explicit or assigned in parse()), never by its position on the page
+        new_by_num = {}
         for t in doc['tasks']:
             if t['id'] is not None:
                 continue
@@ -231,15 +303,14 @@ def _apply(root, product, read_plan, out=print):
                            f'replan {fid}')
             by_id, _e = load_items(root)
             canonical, _d = canonicalize(by_id)
-            new_ids.append(nid)
+            new_by_num[t['new_num']] = nid
             lines.append(f'{nid} new')
 
         def resolve(after, me):
             got = []
             for a in after:
-                a = new_ids[a[1] - 1] if isinstance(a, tuple) and 0 < a[1] <= len(new_ids) \
-                    else a
-                if isinstance(a, tuple) or a == me or a in got:
+                a = new_by_num.get(a[1]) if isinstance(a, tuple) else a
+                if a is None or a == me or a in got:
                     continue
                 if live(a):
                     got.append(a)
@@ -247,11 +318,9 @@ def _apply(root, product, read_plan, out=print):
                     lines.append(f'{me}: after {a} dropped (no such live card)')
             return got
 
-        k = 0
         for t in doc['tasks']:
             if t['id'] is None:
-                me = new_ids[k]
-                k += 1
+                me = new_by_num[t['new_num']]
                 if t['after']:
                     after = resolve(t['after'], me)
                     if after:

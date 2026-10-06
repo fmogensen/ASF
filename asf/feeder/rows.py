@@ -2090,12 +2090,38 @@ def hold_shelved(rows, items, parks=()):
     return out, aside
 
 
+#: another item a park's own `reason`/`why` text names as its cause
+PARK_MENTION_RE = re.compile(r'\b[A-Z]+-\d{4,}\b')
+
+
+def _park_target(p):
+    """The branch or job a scoped park names, for its own message (``on_job`` for job scope,
+    ``branch`` for branch scope) — else the item, for an item-scope park."""
+    return p.get('on_job') or p.get('branch') or p.get('item')
+
+
+def stale_park_cause(p, items):
+    """The id a park's own ``reason``/``why`` text names — some other item it is waiting on —
+    that has since landed (DONE in ``items``), or ``None``. An operator park never auto-lifts
+    (:mod:`asf.workers.unpark`'s own rule: only ``asf unpark`` releases one), so a park written
+    because ``T-0020`` had not landed yet stays standing, unchanged, after ``T-0020`` lands —
+    silently blocking its job on a cause that is no longer true (#45). This never lifts the
+    park itself (an operator decides that); it only says the row's reason may no longer hold."""
+    text = f"{p.get('reason') or ''} {p.get('why') or ''}"
+    for mid in PARK_MENTION_RE.findall(text):
+        if mid != p.get('item') and mid in items and not is_open(items[mid]):
+            return mid
+    return None
+
+
 def hold_parks(rows, items, parks):
     """A branch or job park (``asf park <branch|job>``, :func:`asf.workers.lifecycle.parks`)
     holds that branch's or that job's rows alone: each row of its item on the branch (or for the
     job, ``<brief kind>-<item>``) gives way to one ``PARKED`` row naming the scope, and the
     item's rows on its other branches go on. An item park is the item's correction instead
-    (:func:`correction_rows`)."""
+    (:func:`correction_rows`). A park naming another item as its cause that has since landed
+    (:func:`stale_park_cause`) reads ``PARKED park on <job|branch> may be stale: <id> landed``
+    instead of its own reason — never lifted here, only flagged for an operator to judge."""
     scoped = [p for p in parks or () if (p.get('scope') or 'item') in ('branch', 'job')
               and p.get('item') in items and is_open(items[p['item']])]
     if not scoped:
@@ -2110,9 +2136,12 @@ def hold_parks(rows, items, parks):
     for p in scoped:
         item = items.get(p['item']) or {}
         f = feature_of(items, item)
+        landed = stale_park_cause(p, items)
+        action = (f'{PARKED} park on {_park_target(p)} may be stale: {landed} landed' if landed
+                 else f'{PARKED} {p.get("reason") or p["scope"]}')
         out.append(Row(tier={'S1': 0, 'S2': 1}.get(item.get('severity'), 2), kind=FIX_CORRECT,
                        item_id=p['item'], feature_id=f['id'] if f else '',
-                       action=f'{PARKED} {p.get("reason") or p["scope"]}', brief_kind='correct',
+                       action=action, brief_kind='correct',
                        branch=p.get('branch') or '', reason=p.get('reason') or 'parked',
                        waits_on='operator'))
     return out

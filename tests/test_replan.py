@@ -428,6 +428,65 @@ after: new 1
         self.assertEqual(self.apply(self.doc.replace(self.d, 'abcdef012345')), {})
         self.assertIn('names another decision', ' '.join(self.lines))
 
+    def test_an_explicitly_numbered_new_task_heading_is_minted_and_resolved(self):
+        # 2026-10 (#48): "### Task new 1: ..." used to be silently skipped — SECTION_RE accepted
+        # only the bare "Task new:" heading — so no Task was ever minted for it
+        doc = f"""# F-0090 replan
+
+replan: F-0090 {self.d}
+
+### Task new 1: starter one
+writes: lib/starters/one.py
+after: none
+
+### Task new 2: starter two
+writes: lib/starters/two.py
+after: new 1
+
+### Task T-0030: propose_team over lib/plan.py
+writes: lib/plan.py
+after: new 2
+"""
+        done = self.apply(doc)
+        self.assertEqual(list(done), ['F-0090'], self.lines)
+        new = sorted(n[:-3] for n in os.listdir(os.path.join(self.root, 'tasks'))
+                     if n[:-3] not in {'T-0020', 'T-0026', 'T-0027', 'T-0030', 'T-0032', 'T-0037'})
+        self.assertEqual(len(new), 2, new)
+        one, two = (read_card(self.root, 'task', n) for n in new)
+        self.assertEqual(one['writes'], ['lib/starters/one.py'])
+        self.assertEqual(two['after'], [new[0]])
+        self.assertEqual(read_card(self.root, 'task', 'T-0030')['after'], [new[1]])
+        self.assertTrue(read_card(self.root, 'feature', 'F-0090')['reshape_applied'])
+
+    def test_a_dangling_new_n_reference_refuses_the_whole_apply(self):
+        # a replan whose `after:` names a `new N` nothing on the page mints — the record must
+        # not drop T-0037 or stamp reshape_applied while that reference goes nowhere (#48)
+        doc = f"""# F-0090 replan
+
+replan: F-0090 {self.d}
+
+### Task new 1: starter one
+writes: lib/starters/one.py
+after: none
+
+### Task T-0030: propose_team over lib/plan.py
+writes: lib/plan.py
+after: new 2
+
+### Drop T-0037: merged into new 1
+"""
+        done = self.apply(doc)
+        self.assertEqual(done, {})
+        reported = ' '.join(self.lines)
+        self.assertIn('NEEDS OPERATOR', reported)
+        self.assertIn('new 2', reported)
+        new = [n for n in os.listdir(os.path.join(self.root, 'tasks'))
+              if n[:-3] not in {'T-0020', 'T-0026', 'T-0027', 'T-0030', 'T-0032', 'T-0037'}]
+        self.assertEqual(new, [])                                      # nothing minted
+        self.assertEqual(read_card(self.root, 'task', 'T-0030')['writes'], ['lib/t-0030.py'])
+        self.assertNotIn('removed', read_card(self.root, 'task', 'T-0037'))   # nothing dropped
+        self.assertNotIn('reshape_applied', read_card(self.root, 'feature', 'F-0090'))  # no stamp
+
     def test_after_the_replan_the_feeder_launches_the_delivery_and_drops_the_hold(self):
         self.apply()
         idx = f0090_index(reshape_applied=self.d)
@@ -457,6 +516,59 @@ class ParseAndPending(unittest.TestCase):
         self.assertTrue(replan.replanned_since(items, 'T-0001', '2026-09-29T14:00:00Z'))
         self.assertFalse(replan.replanned_since(items, 'T-0001', '2026-09-29T16:00:00Z'))
         self.assertFalse(replan.replanned_since({'T-0001': items['T-0001']}, 'T-0001', ''))
+
+
+class ParseNewNumbering(unittest.TestCase):
+    """2026-10 (#48): ``### Task new 1: …`` read as no section at all — ``SECTION_RE`` accepted
+    only the bare ``Task new:`` heading — so the Task it describes was never minted, while a
+    ``Drop`` whose reason named it (``merged into new 1``) still applied."""
+
+    DOC = """replan: F-0001 abcdef012345
+
+### Task new 1: starter one
+writes: lib/one.py
+after: none
+
+### Task T-0030: rework
+writes: lib/plan.py
+after: new 1
+"""
+
+    def test_a_task_new_1_heading_is_no_longer_silently_skipped(self):
+        doc = replan.parse(self.DOC)
+        self.assertEqual(doc['bad_sections'], [])
+        news = [t for t in doc['tasks'] if t['id'] is None]
+        self.assertEqual([n['new_num'] for n in news], [1])
+        (existing,) = [t for t in doc['tasks'] if t['id'] == 'T-0030']
+        self.assertEqual(existing['after'], [('new', 1)])
+        self.assertIsNone(replan.invalid(doc))
+
+    def test_a_dangling_new_n_reference_is_invalid(self):
+        doc = replan.parse(self.DOC.replace('after: new 1', 'after: new 2'))
+        self.assertEqual(doc['bad_sections'], [])     # every heading still parses
+        problem = replan.invalid(doc)
+        self.assertIn('new 2', problem)
+
+    def test_an_unreadable_task_heading_is_recorded_as_a_bad_section(self):
+        text = self.DOC.replace('### Task new 1: starter one', '### Task newish: starter one')
+        doc = replan.parse(text)
+        self.assertEqual(len(doc['bad_sections']), 1)
+        self.assertIn('newish', doc['bad_sections'][0])
+        self.assertTrue(replan.invalid(doc))
+
+    def test_duplicate_explicit_new_numbers_are_a_bad_section(self):
+        text = self.DOC + '\n### Task new 1: starter one again\nwrites: lib/dup.py\nafter: none\n'
+        doc = replan.parse(text)
+        self.assertEqual(len(doc['tasks']), 2)         # the duplicate section is dropped
+        self.assertTrue(doc['bad_sections'])
+        self.assertTrue(replan.invalid(doc))
+
+    def test_an_unnumbered_new_task_still_numbers_in_document_order(self):
+        text = self.DOC.replace('### Task new 1: starter one', '### Task new: starter one')
+        doc = replan.parse(text)
+        (new_task,) = [t for t in doc['tasks'] if t['id'] is None]
+        self.assertEqual(new_task['new_num'], 1)
+        self.assertIsNone(replan.invalid(doc))
 
 
 if __name__ == '__main__':

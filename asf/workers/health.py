@@ -787,6 +787,22 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             s.pop('correction', None)
             found.append((job, 'released', f'{s.get("item")}: its Feature was re-planned — '
                                            'the park lifts'))
+        corr = s.get('correction') or {}
+        if corr.get('text') and not corr.get('parked'):
+            # the raw stored correction, not :func:`pending_correction`: a later run already
+            # answers it there (silently, nothing cleared) once one exists, whatever became of
+            # it — this checks the record's own landing fact instead, and clears the field for
+            # good so a later run that itself ends without landing does not resurrect it
+            other = lifecycle.correction_superseded_by_landing(
+                registry, s.get('item'), corr.get('branch') or s.get('branch'))
+            if other:
+                # the correction or ruling asked for work on this branch; a different branch of
+                # the same item landed instead — carrying it out here now would just redo it (#46)
+                pool_mod.update_session(product, job, correction=None,
+                                        dropped=pool_mod.now_iso(), drop_why=f'{other} landed instead')
+                s.pop('correction', None)
+                found.append((job, 'released', f'{s.get("item")}: {other} landed instead — '
+                                               'the correction drops'))
         if s.get('ended'):
             landed_sha = lifecycle.empty_on_a_landed_lane(registry, s)
             if landed_sha:
