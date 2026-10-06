@@ -24,6 +24,19 @@ each step without running anything.
 | `batch` | your own merge-queue script, if declared | `[command:batch] …` |
 | `daily` | once a day: `groom --apply` (the previous groom file's answers, the inbox, today's questions), stale items, Bugs, yesterday's rollup and release | `daily: <part> ok` |
 
+The wave runs right after `record` (`tick.wave_first`, default on), so health, the groom and the
+record's bookkeeping never delay a launch (a new inbox card has the groom run first on that tick,
+so it is launched by the same tick); the tick logs `tick: wave latency <s>s (tick start → wave
+start)`, `asf status` shows it as **Wave latency**, and past `conventions.watchdog.wave_latency`
+(default 2 min) it is a `watchdog: BREACH wave_latency` line. `record` itself runs only what the
+wave decides from (ingest, plan-tasks, replan, slice, index); its tail — backfill, plan-order,
+file-bugs, rollup — runs as `record-tail` before the harvest. When health ends, holds or corrects
+a run, the wave runs a second time after the groom, so the seat it freed is still this tick's. Each tail part, and any step but
+`record`, `wave` and `daily`, can run on every n-th tick only: `tick.every_n` in `config.yaml`
+(default: the four tail parts every 3rd tick) or `clocks.<name>.every_n` in the product file; a
+skipped one prints `tick: <name> deferred — …` and still runs at least every
+`tick.deferred_max_age_s` (default 3600).
+
 Each step ends with `[step:<name>] <seconds>s`; the tick ends with `tick: state committed and
 pushed`, `tick: total …`, then a summary: **IN FLIGHT** (the sessions running now) and **DONE
 since** the last tick on this clock (sessions that ended, with their result). A step that failed

@@ -112,6 +112,7 @@ conventions:
   #   record_behind: 15
   #   runner_offline: 10
   #   branch_no_pr: 10
+  #   wave_latency: 2          # the last tick's start → its wave's start (asf status: Wave latency)
   # prs_per_tick: 6
   # land_window_days: 7    # the window `asf status`'s Features row measures time-to-land over
   # the heading a plan uses to mark one task's section (default "### Task"; not read by the
@@ -459,6 +460,14 @@ steps:
 # clocks: each entry is one job labelled <prefix>.<product>.<name>.
 # Every entry needs steps: [..] or shadow: true,
 # and exactly one of every: <n><s|m|h|d> (at least 60s) or at: "HH:MM" (local time).
+# every_n: {<name>: <n>} runs a deferrable part on every n-th tick of that clock only, over
+# config.yaml's tick.every_n: a record part (backfill, plan-order, file-bugs, rollup — they run
+# after the wave) or a step other than record, wave and daily. Each still runs at least every
+# tick.deferred_max_age_s (default 3600). The wave runs right after record (tick.wave_first).
+#   record:
+#     steps: [record, health, groom, wave, prs, harvest]
+#     every: 5m
+#     every_n: {groom: 2, backfill: 6}
 clocks:
   record:
     steps: [record]

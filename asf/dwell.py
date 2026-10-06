@@ -21,6 +21,7 @@ ungrantable_hold       0      approvals    drop the hold
 record_behind          15     record step  alarm
 runner_offline         10     ci host      alarm
 branch_no_pr           10     lane         alarm
+wave_latency           2      tick         alarm (the last tick's start → wave start)
 =====================  =====  ===========  ==============================================
 
 Minutes; ``conventions.watchdog: {<state>: <minutes> | off}`` in the product file sets each one
@@ -55,6 +56,7 @@ STATES = (
     ('record_behind', 15, 'record step', None, 'a record checkout off its origin'),
     ('runner_offline', 10, 'ci host', None, 'a CI runner offline'),
     ('branch_no_pr', 10, 'lane', None, 'a pushed branch with no PR'),
+    ('wave_latency', 2, 'tick', None, "the last tick's start to its wave's start"),
 )
 NAMES = tuple(s[0] for s in STATES)
 BY_NAME = {s[0]: s for s in STATES}
@@ -548,12 +550,26 @@ def branch_no_pr(facts):
             if rec.get('state') == lane_mod.PUSHED and not rec.get('pr')]
 
 
+def wave_latency(facts):
+    """The last tick's start → wave start (:mod:`asf.tick.wave_latency`), aged as that span:
+    every session the wave launches waited it out first."""
+    from asf.tick import wave_latency as wl
+    data = wl.read(facts.product)
+    if not data:
+        return []
+    secs = float(data['seconds'])
+    return [Finding('wave_latency', 'tick',
+                    f"the tick at {data.get('at') or '?'} reached its wave {secs:.0f}s after its start",
+                    facts.now - secs)]
+
+
 PROBES = {
     'tick_running': tick_running, 'pr_green_not_landing': pr_green_not_landing,
     'check_cancelled': check_cancelled, 'green_batch_blocked': green_batch_blocked,
     'chain_no_cut': chain_no_cut, 'launchable_idle': launchable_idle,
     'ungrantable_hold': ungrantable_hold, 'record_behind': record_behind,
     'runner_offline': runner_offline, 'branch_no_pr': branch_no_pr,
+    'wave_latency': wave_latency,
 }
 
 

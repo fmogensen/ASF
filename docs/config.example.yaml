@@ -232,8 +232,20 @@ capacity:
 
 # tick: a command step (a product's `steps: {<step>: "<command>"}`) is killed after this many
 # seconds and exits 124 (default 900).
+# wave_first: the wave runs right after the record's fast parts (ingest, plan-tasks, replan,
+# slice, index); health, groom and the record's tail (backfill, plan-order, file-bugs, rollup)
+# run after it (default true). The span tick start → wave start is the dwell watchdog's
+# wave_latency (conventions.watchdog.wave_latency, default 2 min).
+# every_n: every product's cadence for the deferrable parts — a record tail part or a step other
+# than record, wave and daily runs on every n-th tick (a clock's own every_n overrides it;
+# defaults shown, anything unnamed every tick).
+# deferred_max_age_s: a deferred part whose last run is older than this runs on the next tick
+# whatever its every_n (default 3600: at least hourly).
 # tick:
 #   step_timeout_s: 900
+#   wave_first: true
+#   every_n: {backfill: 3, plan-order: 3, file-bugs: 3, rollup: 3}
+#   deferred_max_age_s: 3600
 
 # factory: the identity the tick's state commits are authored as (default "ASF <asf@localhost>").
 # factory:

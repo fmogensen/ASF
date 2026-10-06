@@ -69,7 +69,7 @@ DAILY_STEP = 'daily'
 
 CLOCK_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 AT_RE = re.compile(r'^([01]?\d|2[0-3]):([0-5]\d)$')
-_CLOCK_KEYS = {'steps', 'shadow', 'every', 'at'}
+_CLOCK_KEYS = {'steps', 'shadow', 'every', 'at', 'every_n'}
 MIN_EVERY_S = 60
 _CRON_HOUR_DIVISORS = (1, 2, 3, 4, 6, 8, 12)
 
@@ -375,7 +375,12 @@ def _clock_refusal(name, entry, product, tick_steps, stale):
         return f'must be a map, not {entry!r}'
     unknown = sorted(set(entry) - _CLOCK_KEYS)
     if unknown:
-        return f'unknown key {unknown[0]!r} (steps, shadow, every, at)'
+        return f'unknown key {unknown[0]!r} (steps, shadow, every, at, every_n)'
+    if entry.get('every_n') is not None:
+        from asf.tick import cadence
+        why = cadence.refusal(entry['every_n'])
+        if why:
+            return why
 
     shadow = bool(entry.get('shadow'))
     raw_steps = entry.get('steps')

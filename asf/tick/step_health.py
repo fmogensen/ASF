@@ -22,6 +22,8 @@ from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
 
 LOG_TAIL_LINES = 5
+#: health's findings that change what the wave may launch
+FREES = ('ended', 'held', 'parked', 'released', 'landed', 're-judged', 'quota')
 
 
 def _runtime():
@@ -222,16 +224,21 @@ def close_landed_parks(ctx, out=print):
 def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
     items = health_mod.record_items(product)
-    found = health_mod.health(product, fix=True, out=out, items=items)
+    spare, alive = spare_this_waves_runs(ctx)
+    found = health_mod.health(product, fix=True, out=out, items=items, alive=alive, spare=spare)
     reap_worktrees(ctx, out=out)
     file_rulings(ctx, out=out)  # B-0064
     rejudge(ctx, items, out=out)
     widen_footprints(ctx, items, out=out)
     close_landed_parks(ctx, out=out)
-    stalled = stall_mod.stall(product, out=out)
+    stalled = stall_mod.stall(product, out=out, alive=alive)
     ctx.counts['stalls'] += len(stalled)
     sessions = pool_mod.load_sessions(product)
     empty = {job for job, what, detail in found if what == 'reaped' and detail == 'empty'}
+    # a run ended, held, parked, released or re-judged: a seat or a correction row the wave
+    # launches on this tick when it ran before health (asf.tick.tick: the second wave)
+    ctx.health_freed = (bool(dead_jobs(found, stalled))
+                        or any(what in FREES for _j, what, _d in found))
     for job in dead_jobs(found, stalled):
         session = sessions.get(job)
         if session is not None:
@@ -242,6 +249,26 @@ def run(ctx, out=print, runtime_fn=_runtime):
     branch_retention(ctx, items, out=out)
     stale_acts(ctx, out=out)
     return 0
+
+
+def spare_this_waves_runs(ctx):
+    """What health and the stall check spare, when this tick's wave ran
+    before them (``tick.wave_first``): a run the wave launched seconds ago counts as alive, so it
+    is judged by the next tick — as it was when health ran first — never ended (or reaped) in the
+    tick that started it. ``(jobs, alive)``: the jobs health leaves alone and the pid reading
+    the stall check and the reaper go by; ``((), None)`` (the checks' own) when no wave ran first."""
+    before = getattr(ctx, 'runs_before_wave', None)
+    if not getattr(ctx, 'wave_started_at', None) or before is None:
+        return (), None
+    from asf.tick.tick import run_identity
+    sessions = pool_mod.load_sessions(ctx.product)
+    fresh = {job: s.get('pid') for job, s in sessions.items()
+             if not s.get('ended') and before.get(job) != run_identity(s)}
+    if not fresh:
+        return (), None
+    pids = {pid for pid in fresh.values() if pid}
+    base = health_mod.alive_for(ctx.product, list(sessions.values()))
+    return set(fresh), (lambda pid: pid in pids or base(pid))
 
 
 def reap_worktrees(ctx, out=print):
