@@ -1985,7 +1985,7 @@ def hold_parks(rows, items, parks):
     item's rows on its other branches go on. An item park is the item's correction instead
     (:func:`correction_rows`)."""
     scoped = [p for p in parks or () if (p.get('scope') or 'item') in ('branch', 'job')
-              and is_open(items.get(p.get('item')) or {})]
+              and p.get('item') in items and is_open(items[p['item']])]
     if not scoped:
         return rows
 
@@ -2004,6 +2004,16 @@ def hold_parks(rows, items, parks):
                        branch=p.get('branch') or '', reason=p.get('reason') or 'parked',
                        waits_on='operator'))
     return out
+
+
+def drop_gone(rows, items):
+    """``rows`` less every row of a card the record removed or closed: a removed or closed
+    item never renders a row (a product's T-0335, removed, still showed PARKED off a standing
+    branch park). A row naming an id the record does not hold at all — a PR opened outside the
+    factory — is kept."""
+    gone = set(_retired(items)) | {i for i, v in items.items()
+                                   if isinstance(v, dict) and (v.get('removed') or not is_open(v))}
+    return [r for r in rows if r.item_id not in gone]
 
 
 def hold_classes(rows, product):
@@ -2299,7 +2309,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     rows += unverified_rows(items, product, unverified_landed, busy | {r.item_id for r in rows})
     pushed = pushed_ids(items, occ)
     rows += pushed_rows(items, product, pushed, occ, live | {r.item_id for r in rows})
-    rows = hold_parks(rows, items, occ.get('parks'))
+    rows = drop_gone(hold_parks(rows, items, occ.get('parks')), items)
     rows = hold_unlanded(rows, items, landed_shas, product)
     rows = hold_replanning(rows, items)
     rows = hold_classes(rows, product)

@@ -90,6 +90,7 @@ REGISTRY = {
     'scorecard.jsonl': _s('asf.scorecard.loop', JSONL),
     'tune.json': _s('asf.tune'),
     'tune.jsonl': _s('asf.tune', JSONL),
+    'stale-acts.jsonl': _s('asf.stale_act', JSONL),
     'scorecard-queue.jsonl': _s('asf.scorecard.loop', JSONL),
     'scorecard-causes.json': _s('asf.scorecard.loop'),
     'facts-disagree.jsonl': _s('asf.facts.disagree', JSONL),

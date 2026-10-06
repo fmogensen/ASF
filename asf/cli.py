@@ -269,6 +269,11 @@ def build_parser():
     p_stale = sub.add_parser('stale', help="items over their stage limit (the product's stage_limits)")
     p_stale.add_argument('--json', action='store_true')
     p_stale.add_argument('--product')
+    p_stale.add_argument('--act', action='store_true',
+                         help='act on the stale leftovers: archive and close stale PRs, re-plan '
+                              'stuck Tasks (asf.stale_act); every action goes to the ledger')
+    p_stale.add_argument('--dry-run', action='store_true', dest='dry_run',
+                         help='with --act: print what it would do, change nothing')
 
     p_file_bugs = sub.add_parser('file-bugs', help='file/bump Bugs from ci, refusals and rule violations')
     p_file_bugs.add_argument('--default-bug-epic', help='the Epic a filed Bug is parented under')
