@@ -194,6 +194,14 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         p.publish()
         p.item("F-0026", "feature", parent="E-0001", stage="plan-approved", decided=False,
                typed_lines=["links:", "  plan: docs/plans/2026-09-03-m3-infra.md"])
+        # a legacy spec reached by its old alias, and a dated plan whose only id carrier is its
+        # own H1 — no lane branch, no PR: the header route is the only way to this Feature's plan
+        p.commit("docs: the P9-X spec", {"docs/specs/2026-09-16-p9-x-thing.md": "# P9-X — thing\n"})
+        p.commit("docs: the F-0301 plan", {"docs/plans/2026-09-26-thing-plan.md":
+                                           "# F-0301 — thing\n\n" + PLAN})
+        p.publish()
+        p.item("F-0301", "feature", parent="E-0001", stage="plan-approved", decided=False,
+               typed_lines=["legacy_id: P9-X"])
         # removed and moved-away cards, decided and linking a landed plan: never touched
         p.item("F-0010", "feature", parent="E-0001", stage="plan-approved",
                typed_lines=["moved_to: other:F-0049", 'removed: "moved"', "links:",
@@ -232,7 +240,8 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
             parents.setdefault(self.p.meta(tid, "task")["parent"], []).append(tid)
         # both date-prefixed plans — one through its lane PR, one through links.plan — mint
         self.assertEqual({f: len(t) for f, t in parents.items()},
-                         {"F-0003": 2, "F-0019": 2, "F-0037": 2, "F-0047": 2, "F-0061": 2})
+                         {"F-0003": 2, "F-0019": 2, "F-0037": 2, "F-0047": 2, "F-0061": 2,
+                          "F-0301": 2})
         # its old plan landed, but no spec is anywhere: a card, not plan-approved
         self.assertEqual(self.p.meta("F-0026")["stage"], "card")
         self.assertEqual(self.p.meta(parents["F-0019"][0], "task")["links"],
@@ -241,6 +250,25 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         self.assertEqual(self.p.meta("T-0900", "task")["state"], "Closed")
         self.assertEqual(self.p.meta("F-0077")["stage"], "landed")
         self.assertEqual(self.p.meta("F-0090")["stage"], "landed")
+
+    def test_a_dated_plan_whose_only_id_is_its_h1_mints_for_an_undecided_feature(self):
+        """S-38950: F-0301 is undecided, reached by its legacy alias P9-X, and its plan's only
+        id carrier is its own header — no lane branch, no PR. The discrimination PD3 asks for:
+        the matcher's alias is the legacy token, the gate's by-path lookup is the plan's own."""
+        ev = self.p.discover(self.prs)
+        from asf.record import ingest
+        _slug, fev = ingest.match_feature(self.p.meta("F-0301"), ev)
+        self.assertEqual(fev["alias"], "P9-X")
+        self.assertEqual(plan_tasks.plan_alias(ev, "docs/plans/2026-09-26-thing-plan.md"), "F-0301")
+        made = self.p.record_step(ev)
+        m = self.p.meta("F-0301")
+        self.assertEqual((m["state"], m["stage"]), ("Active", "plan-approved"))
+        tasks = sorted(t for t in made if self.p.meta(t, "task")["parent"] == "F-0301")
+        self.assertEqual(len(tasks), 2)
+        for t in tasks:
+            meta = self.p.meta(t, "task")
+            self.assertEqual(meta["links"], {"plan": "docs/plans/2026-09-26-thing-plan.md"})
+            self.assertEqual(meta["state"], "New")
 
     def test_a_non_conforming_squash_subject_leaves_the_feature_launchable(self):
         """B-0114's acceptance: F-0061's plan PR squash-merged under a subject in no lane form
