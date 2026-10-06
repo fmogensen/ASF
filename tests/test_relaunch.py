@@ -272,8 +272,9 @@ class WaveCapTests(_Ledger):
                 mock.patch.object(pool_mod, 'update_session',
                                   lambda _p, job, **f: writes.append((job, f))):
             self.assertTrue(step_wave.relaunch_capped(product, row, wrow, lines.append))
-        self.assertTrue(lines[0].startswith('parked   reshape-t-0332'))
-        self.assertTrue(writes[0][1]['correction']['parked'])
+        self.assertTrue(any(l.startswith('parked   reshape-t-0332') for l in lines), lines)
+        self.assertTrue(any(l.startswith('ALARM loop') for l in lines), lines)
+        self.assertTrue(writes[-1][1]['correction']['parked'])
         self.assertTrue(wrow.cause)
 
     def test_the_wave_launches_a_first_row(self):
@@ -282,6 +283,100 @@ class WaveCapTests(_Ledger):
         wrow = pool_mod.Row(self.JOB, self.ITEM, branch='cloud/plan-T-0332', card_digest=CARD)
         with mock.patch.object(pool_mod, 'sessions_path', lambda _p: self.path):
             self.assertFalse(step_wave.relaunch_capped(product, row, wrow, lambda _l: None))
+
+
+class LoopGuardTests(_Ledger):
+    """``relaunch.loop_guard``: the job's runs since the item's latest unpark, read off the
+    ledger (:mod:`asf.workers.loops`'s two rules, over the real ledger this time). Each prior
+    run's own ``report_key`` is stamped by hand here, exactly as :func:`asf.tick.step_wave.
+    _stamp_report_key` would have left it on the ledger before the next launch — the shared
+    per-job log in :class:`_Ledger` only ever holds the newest run's own result (loop_guard
+    reads an older run off the ledger field, never its log, by the same rule the module's own
+    docstring states)."""
+
+    GUARD = {'same_report': 2, 'daily_cap': 6}
+
+    def run_with_key(self, text, **kw):
+        from asf.workers import loops
+        self.run_once(text, **kw)
+        self.write({'job': self.JOB, 'report_key': loops.report_key(text)})
+
+    def test_two_runs_on_the_same_report_park_the_third(self):
+        self.run_with_key(report('done', 'nothing more'))
+        self.run_once(report('done', 'nothing more'))
+        reason = relaunch.loop_guard(self.path, self.JOB, self.ITEM, card=CARD, guard=self.GUARD)
+        self.assertIsNotNone(reason)
+        self.assertIn('same report', reason)
+        self.assertIn(self.ITEM, reason)
+
+    def test_a_different_report_each_time_does_not_park(self):
+        self.run_with_key(report('done', 'the first thing'))
+        self.run_once(report('done', 'a second, different thing'))
+        reason = relaunch.loop_guard(self.path, self.JOB, self.ITEM, card=CARD, guard=self.GUARD)
+        self.assertIsNone(reason)
+
+    def test_a_card_change_does_not_park(self):
+        self.run_with_key(report('done', 'nothing more'), card='cardAAAAAAAAAAAA')
+        self.run_once(report('done', 'nothing more'), card='cardBBBBBBBBBBBB')
+        reason = relaunch.loop_guard(self.path, self.JOB, self.ITEM, card='cardBBBBBBBBBBBB',
+                                     guard=self.GUARD)
+        self.assertIsNone(reason)
+
+    def test_no_item_is_never_parked(self):
+        self.assertIsNone(relaunch.loop_guard(self.path, self.JOB, '', card=CARD,
+                                              guard=self.GUARD))
+
+    def test_an_unpark_resets_the_streak(self):
+        self.run_with_key(report('done', 'nothing more'))
+        self.run_once(report('done', 'nothing more'))
+        self.write({'job': self.JOB, 'item': self.ITEM, 'unparked': '2026-09-30T05:10:00Z'})
+        reason = relaunch.loop_guard(self.path, self.JOB, self.ITEM, card=CARD, guard=self.GUARD)
+        self.assertIsNone(reason)
+
+    def test_the_six_launches_in_24h_cap_parks_even_with_different_reports(self):
+        from asf.workers import loops
+        for i in range(5):
+            self.run_with_key(report('done', f'thing number {i}'))
+        self.run_once(report('done', 'thing number 5'))
+        now = loops._ts('2026-09-30T05:10:00Z')
+        reason = relaunch.loop_guard(self.path, self.JOB, self.ITEM, card=CARD, now=now,
+                                     guard={'same_report': None, 'daily_cap': 6})
+        self.assertIsNotNone(reason)
+        self.assertIn('daily cap', reason)
+
+
+class AlarmDedupeTests(_Ledger):
+    """``relaunch.loop_key``/``relaunch.alarmed``: one alarm per loop, not one per re-park."""
+
+    def test_counts_and_shas_do_not_change_the_key(self):
+        a = relaunch.loop_key(f'reshape launched 2 time(s) on {HEAD[:9]} — close T-0332')
+        b = relaunch.loop_key(f'reshape launched 7 time(s) on {"a" * 9} — close T-0332')
+        self.assertEqual(a, b)
+
+    def test_a_different_reason_is_a_different_key(self):
+        a = relaunch.loop_key('reshape launched 2 time(s) — the same report twice')
+        b = relaunch.loop_key('reshape launched 2 time(s) — the daily cap of 6')
+        self.assertNotEqual(a, b)
+
+    def test_not_alarmed_with_no_prior_park(self):
+        self.assertFalse(relaunch.alarmed(self.path, self.JOB, self.ITEM, 'somekey'))
+
+    def test_alarmed_once_a_park_already_carried_the_key(self):
+        self.write({'job': self.JOB, 'item': self.ITEM,
+                   'correction': {'loop_key': 'somekey', 'at': '2026-09-30T05:00:00Z'}})
+        self.assertTrue(relaunch.alarmed(self.path, self.JOB, self.ITEM, 'somekey'))
+        self.assertFalse(relaunch.alarmed(self.path, self.JOB, self.ITEM, 'otherkey'))
+
+    def test_an_unpark_resets_the_alarm(self):
+        self.write({'job': self.JOB, 'item': self.ITEM,
+                   'correction': {'loop_key': 'somekey', 'at': '2026-09-30T05:00:00Z'}})
+        self.write({'job': self.JOB, 'item': self.ITEM, 'unparked': '2026-09-30T05:30:00Z'})
+        self.assertFalse(relaunch.alarmed(self.path, self.JOB, self.ITEM, 'somekey'))
+
+    def test_park_fields_carry_the_loop_key(self):
+        fields = relaunch.park_fields('reshape launched 2 time(s) on abc1234', CARD, '2026-09-30T05:00:00Z')
+        self.assertEqual(fields['correction']['loop_key'],
+                         relaunch.loop_key('reshape launched 2 time(s) on abc1234'))
 
 
 class PerLaunchIngestTests(_Ledger):

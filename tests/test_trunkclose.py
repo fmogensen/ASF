@@ -222,7 +222,9 @@ class ParkClosesTests(_Repo):
         lines = []
         self.assertTrue(step_wave.relaunch_capped(self.product, row, wrow, lines.append))
         self.assertTrue(self.writes[-1][1]['correction']['parked'])
-        self.assertTrue(lines[0].startswith('parked'))
+        # the first park of a new loop also raises one ALARM line (asf.workers.relaunch.alarmed)
+        self.assertTrue(any(l.startswith('ALARM loop') for l in lines), lines)
+        self.assertTrue(any(l.startswith('parked') for l in lines), lines)
 
     def test_a_standing_park_with_verified_evidence_closes_its_card(self):
         self.run_once(report('done', f'on origin/main under {self.sha[:9]}'))

@@ -72,6 +72,7 @@ from asf.record import plan_order
 from asf.workers import cloud as cloud_mod
 from asf.workers import host as host_mod
 from asf.workers import lifecycle
+from asf.workers import loops
 from asf.workers import pool as pool_mod
 from asf.workers import relaunch
 from asf.workers import landing
@@ -651,21 +652,35 @@ def relaunch_assessment(product, row, wrow):
                                      card=wrow.card_digest, cause=wrow.cause,
                                      repo=product.repo_dir, main=product.main,
                                      writes=landing.item_writes(product, wrow.item),
-                                     product=product)
+                                     product=product, guard=loops.settings(product))
     hit = trunkclose.evidence(path, wrow.item, product.repo_dir, product.main,
                               landing.item_writes(product, wrow.item), product=product) \
         if reason and landed else None
     return reason, landed, hit
 
 
+def _stamp_report_key(product, path, item, job):
+    """Writes ``report_key`` on ``job``'s newest ended run when the ledger has none yet, so the
+    loop guard's same-report rule reads it off the record on every later tick — never off a log
+    a later run has since overwritten (:mod:`asf.workers.loops`)."""
+    runs = [r for r in lifecycle.item_runs(path, item) if r.get('job') == job and r.get('ended')]
+    newest = max(runs, key=lambda r: r.get('started') or '', default=None)
+    if newest is not None and not newest.get('report_key'):
+        text = str((lifecycle.result_of(newest) or {}).get('result') or '')
+        pool_mod.update_session(product, job, report_key=loops.report_key(text))
+
+
 def relaunch_capped(product, row, wrow, out=print):
     """True when ``wrow`` is not launched: the same job was handed the same state (head, card,
     cause) :data:`asf.workers.relaunch.CAP` times, or once with a terminal report
-    (:func:`asf.workers.relaunch.verdict`). The job's newest run is parked instead — the feeder
+    (:func:`asf.workers.relaunch.verdict`), or the loop guard's same-report or daily-cap rule
+    refused it (:mod:`asf.workers.loops`). The job's newest run is parked instead — the feeder
     shows it ``PARKED`` from the next read on — unless the last report names a commit git
     verifies on the trunk and the branch holds nothing past it: then the run is closed on that
     sha (:func:`asf.workers.trunkclose.close`), never parked. ``wrow.cause`` is set for the
-    ledger either way."""
+    ledger either way. Before parking, its newest ended run's ``report_key`` is persisted (so a
+    later tick's same-report rule reads it off the record) and, unless the same loop already
+    raised one (:func:`asf.workers.relaunch.alarmed`), one ``ALARM loop`` line is printed."""
     try:
         reason, landed, hit = relaunch_assessment(product, row, wrow)
     except Exception as e:  # noqa: BLE001 — the cap never blocks a wave by failing
@@ -673,6 +688,8 @@ def relaunch_capped(product, row, wrow, out=print):
         return False
     if not reason:
         return False
+    path = pool_mod.sessions_path(product)
+    _stamp_report_key(product, path, wrow.item, wrow.job)
     if isinstance(landed, landing.Unknown):
         # the host could not say whether the item's own PR holds its work: neither a park nor a
         # close this tick (a park on an unknown would wait for a person)
@@ -686,6 +703,9 @@ def relaunch_capped(product, row, wrow, out=print):
         out(f'closed   {wrow.job:<24} {wrow.item:<10} — landed: {sha[:9]} (verified on '
             f'origin/{product.main}); not relaunched, not parked')
         return True
+    key = relaunch.loop_key(reason)
+    if not relaunch.alarmed(path, wrow.job, wrow.item, key):
+        out(f'ALARM loop {wrow.job} {wrow.item} — {reason}')
     pool_mod.update_session(product, wrow.job,
                             **relaunch.park_fields(reason, wrow.card_digest, pool_mod.now_iso()))
     out(f'parked   {wrow.job:<24} {wrow.item:<10} — {reason}')

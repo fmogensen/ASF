@@ -24,6 +24,7 @@ from asf.capacity import DEFAULT_SESSIONS as DEFAULT_CAPACITY
 from asf.conventions import DEFAULT_AREA_DEPTH, DEFAULT_BATCH_MAX_GLOBS
 from asf.evidence import closing
 from asf.groom import shape
+from asf.groom import sticky
 from asf.groom.shape import SHAPE_LINE_RE
 from asf.views import index_reader
 from asf.workers import lifecycle, pool
@@ -407,7 +408,8 @@ def _parse_proposal(m):
 
 
 def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, event=None,
-                        sections=None, intake_dir=None, derived=None):
+                        sections=None, intake_dir=None, derived=None, answered=None,
+                        product=None):
     """Read `prev_path`'s answered lines, write each as a typed field, append one History line
     each. A no-op line (blank/`____`, or a field already at the target value) changes nothing —
     this is what makes re-running `--apply` for the same date idempotent.
@@ -419,7 +421,18 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
     `event` (§4), when given, gets one `groom_answer` call per applied answer: `item`, `section`
     (`sections.get(item, '')` — the `{item: section key}` map :func:`_line_sections` builds off
     the file the question was asked in), `field`, `value`, `by` (`rule:<policy>` /
-    `adjudicator:<job>` / `operator`)."""
+    `adjudicator:<job>` / `operator`).
+
+    `answered` (a list, when given) gets one `(iid, section, by)` per single-card field written
+    by a person — the adjudicator or the operator, never `controller:` — for the caller to feed
+    :func:`asf.groom.sticky.record_answers`: a question a person answered is the one a sticky
+    window holds out of the next file, and a rule's own answer is never sticky (it would answer
+    itself again the moment its own fact changes back).
+
+    Under `flags.groom.rank_owner: code` (the default), a `rank <n>` answer is skipped — the
+    feeder's own order (Epic rank, Feature rank, id, `priority: later`, blockers) owns it — and
+    printed the same way any other answer outside the grammar is."""
+    code_owns_rank = sticky.rank_owner(product) == 'code'
     with open(prev_path, encoding='utf-8') as f:
         lines = f.read().split('\n')
 
@@ -481,6 +494,10 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
                          'budget <n> [$<usd>])')
             continue
 
+        if field == 'rank' and code_owns_rank:
+            _skipped(iid, raw_answer, 'rank is owned by code (flags.groom.rank_owner)')
+            continue
+
         typed, _machine = frontmatter.split_machine(rec['meta'])
         section = (sections or {}).get(iid, '')
         if (field == 'severity' and section in policy.DECISION_SECTIONS
@@ -490,6 +507,8 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
             # at that severity — otherwise the card stays undecided with its severity set
             _write_card(rec, {'decided': True}, f"- {date} groom: decided → true {who}")
             applied += 1
+            if answered is not None and not str(by or '').startswith('rule:'):
+                answered.append((iid, section, by))
             if event:
                 event('groom_answer', item=iid, section=section, field='decided', value='true',
                       by=by)
@@ -513,6 +532,8 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
             else:
                 rec['meta'].pop('blockedBy', None)
             applied += 1
+            if answered is not None and not str(by or '').startswith('rule:'):
+                answered.append((iid, section, by))
             if event:
                 event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),
                      field=field, value=hist_value, by=by)
@@ -531,6 +552,8 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
                      else []) + ([f"${value['budget_usd']}"] if 'budget_usd' in value else [])
             _write_card(rec, value, f"- {date} groom: budget → {' / '.join(parts)} {who}")
             applied += 1
+            if answered is not None and not str(by or '').startswith('rule:'):
+                answered.append((iid, section, by))
             if event:
                 event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),
                      field='budget', value=' / '.join(parts), by=by)
@@ -573,6 +596,8 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
         if drop_delivers:
             rec['meta'].pop('delivers', None)
         applied += 1
+        if answered is not None and not str(by or '').startswith('rule:'):
+            answered.append((iid, section, by))
         if event:
             event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),
                  field=field, value=_fmt_history_value(value), by=by)
@@ -1115,8 +1140,10 @@ def render_groom_file(date, sections):
 #: one regex, in one place, matched by every reader.
 ANSWERS_FILE_RE = re.compile(r'^(?P<date>\d{4}-\d{2}-\d{2})(?:\.(?P<half>[a-z]+))?\.answers$')
 
-#: A groom line's item token: an id, or ``inbox:<file>``.
-_LINE_TOKEN_RE = re.compile(r'^- \[[ xX]\]\s+(\S+)')
+#: A groom line's item token: an id, or ``inbox:<file>``. The checkbox is optional: a
+#: ``flags.groom.structural: report`` line (:func:`asf.groom.sticky.to_report_line`) carries
+#: none, and still dedupes by its id across incremental ticks.
+_LINE_TOKEN_RE = re.compile(r'^- (?:\[[ xX]\]\s+)?(\S+)')
 #: A conflicts block's own token is the pair, not its lead id: one rule can conflict with
 #: several decisions, and ``_LINE_TOKEN_RE``'s first token would collapse those pairs into one
 #: line. Aliased from :data:`asf.groom.conflicts.CONFLICT_RE` (PD7) so the grammar has one home.
@@ -1198,6 +1225,8 @@ def cmd_groom(args, root):
 
     event = getattr(args, 'event', None)
     intake_dir = product.conventions.intake_dir if product else None
+    state_dir = env.state_dir(product) if product is not None else None
+    answered = []
 
     applied = 0
     if args.apply:
@@ -1211,7 +1240,8 @@ def cmd_groom(args, root):
             with open(prev, encoding='utf-8') as f:
                 prev_sections = _line_sections(f.read())
             applied += apply_groom_answers(root, canonical, prev, date, event=event,
-                                           sections=prev_sections, intake_dir=intake_dir)
+                                           sections=prev_sections, intake_dir=intake_dir,
+                                           product=product, answered=answered)
 
     answers_file = getattr(args, 'answers_file', None)
     answers_text = None
@@ -1229,8 +1259,12 @@ def cmd_groom(args, root):
             answers_text = f.read()
         applied += apply_groom_answers(root, canonical, answers_file, date,
                                        adjudicator_job=adj_job, event=event,
-                                       sections=adj_sections, intake_dir=intake_dir)
+                                       sections=adj_sections, intake_dir=intake_dir,
+                                       product=product, answered=answered)
         os.rename(answers_file, answers_file + '.done')
+    if state_dir is not None and answered:
+        sticky.record_answers(state_dir, answered, canonical)
+        answered = []
 
     default_bug_parent = getattr(args, 'default_bug_epic', None)
     if default_bug_parent is None and product is not None:
@@ -1257,6 +1291,16 @@ def cmd_groom(args, root):
     sections[REFUSED_QUESTIONS[1]] = groom_refused_section(canonical, product)
     sections[OVER_BUDGET_QUESTIONS[1]] = groom_over_budget_section(canonical, derived, product)
     sections[STALE_PARK_QUESTIONS[1]] = policy.stale_park_section(product, root, canonical)
+
+    if sticky.structural(product) == 'report':
+        # G1: a Feature/Story shape gap is reported, never asked — an undecided Feature still
+        # surfaces under undecided_new/undecided3 on its own
+        sections = dict(sections, **{k: [sticky.to_report_line(l) for l in sections.get(k) or []]
+                                     for k in ('no_stories', 'no_tasks')})
+    sticky_count = 0
+    if state_dir is not None:
+        sections, sticky_count = sticky.filter_sticky(sections, state_dir, canonical,
+                                                       sticky.reask_days(product))
 
     auto = policy.groom_auto(product)
     by_rule = 0
@@ -1291,14 +1335,18 @@ def cmd_groom(args, root):
         print(line)
     if incremental:
         return _write_incremental(root, date, groom_path, text, sections, auto, created_ids,
-                                  asked, intake_dir, canonical, event)
+                                  asked, intake_dir, canonical, event, product, state_dir,
+                                  sticky_count)
     os.makedirs(groom_dir, exist_ok=True)
     with open(groom_path, 'w', encoding='utf-8') as f:
         f.write(text)
 
     if auto:
         by_rule = apply_groom_answers(root, canonical, groom_path, date, event=event,
-                                      sections=_line_sections(text), intake_dir=intake_dir)
+                                      sections=_line_sections(text), intake_dir=intake_dir,
+                                      product=product, answered=answered)
+        if state_dir is not None and answered:
+            sticky.record_answers(state_dir, answered, canonical)
         canonical, _dupes = canonicalize(load_items(root)[0])
         derived = compute_derived(canonical)
         cap = policy.adjudicate_attempts(product)
@@ -1310,18 +1358,22 @@ def cmd_groom(args, root):
     rc = do_index(root)
     counts = ', '.join(f"{title}: {len(sections.get(key) or [])}" for title, key in GROOM_SECTIONS)
     open_count = len(policy.open_questions(text))
+    sticky_note = f", sticky {sticky_count}" if sticky_count else ""
     if auto:
         print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s), "
-             f"by rule {by_rule}, spoken for {spoken_for}, open {open_count} — {counts}")
+             f"by rule {by_rule}, spoken for {spoken_for}, open {open_count}{sticky_note} "
+             f"— {counts}")
     else:
-        print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s) — {counts}")
+        print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s)"
+             f"{sticky_note} — {counts}")
     if event:
         event('groom_open', count=open_count, barred=barred_count)
     return rc
 
 
 def _write_incremental(root, date, groom_path, text, sections, auto, created_ids, asked,
-                       intake_dir, canonical, event):
+                       intake_dir, canonical, event, product=None, state_dir=None,
+                       sticky_count=0):
     """The every-tick groom (``incremental``): today's file gains the lines that are new since
     the last pass (:func:`merge_groom_text`) instead of being written afresh — the questions and
     answers it already carries stay. No file yet today: it is written whole, but only when
@@ -1344,11 +1396,17 @@ def _write_incremental(root, date, groom_path, text, sections, auto, created_ids
         with open(groom_path, 'w', encoding='utf-8') as f:
             f.write(merged)
         if auto:
+            answered = []
             by_rule = apply_groom_answers(root, canonical, groom_path, date, event=event,
-                                          sections=_line_sections(merged), intake_dir=intake_dir)
+                                          sections=_line_sections(merged), intake_dir=intake_dir,
+                                          product=product, answered=answered)
+            if state_dir is not None and answered:
+                sticky.record_answers(state_dir, answered, canonical)
     if merged == existing and not created_ids and not asked:
         return 0
     rc = do_index(root)
+    sticky_note = f", sticky {sticky_count}" if sticky_count else ""
     print(f"groom {date} (tick): inbox {len(created_ids)} card(s), asked {len(asked)}, "
-          f"added {added} line(s), by rule {by_rule}, open {len(policy.open_questions(merged))}")
+          f"added {added} line(s), by rule {by_rule}, "
+          f"open {len(policy.open_questions(merged))}{sticky_note}")
     return rc

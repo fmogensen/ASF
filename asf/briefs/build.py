@@ -36,6 +36,7 @@ from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
 from asf.conventions import HEAVY, LIGHT
 from asf.feeder import rows as feeder_rows
+from asf.groom import sticky as sticky_mod
 from asf.views import index_reader as ix
 from asf.workers.stall import CORRECTION_HEAD
 
@@ -474,6 +475,8 @@ def context(product, row, kind, facts):
         'groom_file': getattr(row, 'groom_file', '') or '—',
         'answers_file': getattr(row, 'answers_file', '') or '—',
         'open_questions': '\n'.join(getattr(row, 'open_questions', ()) or ()) or '(none)',
+        'rank_grammar': ('`rank <n>`, ' if sticky_mod.rank_owner(product) == 'adjudicator'
+                         else ''),
         **replan_context(product, feature, facts.get('items') or {}),
     }
 

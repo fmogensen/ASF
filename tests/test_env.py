@@ -673,6 +673,8 @@ _PLANNED_FLAG_VALUES = {
     'queue_store': 'on', 'store_shared': 'on', 'docs_review': 'skip', 'id_claim': 'push',
     'correction_rebase_behind': '300', 'stale_ref_reopens': '1', 'stale_ref_job_paths': '{}',
     'flake_skip_reproduced': 'on', 'trunk_red_trunk_runs': 'on',
+    'relaunch_same_report': '2', 'relaunch_daily_cap': '6',
+    'groom.reask_days': '7', 'groom.rank_owner': 'code', 'groom.structural': 'report',
 }
 PLANNED_PRODUCT = _dedent("""
     product: sample

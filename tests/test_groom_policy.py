@@ -633,7 +633,7 @@ class GroomAutoTestCase(unittest.TestCase):
         else:
             os.environ['ASF_HOME'] = self._orig_asf_home
 
-    def write_product(self, approvals=None, groom_cfg=None, stage_limits=None):
+    def write_product(self, approvals=None, groom_cfg=None, stage_limits=None, flags=None):
         lines = ['repo_slug: x/y', f'backlog_dir: {self.root}']
         if approvals:
             lines.append('approvals:')
@@ -645,8 +645,23 @@ class GroomAutoTestCase(unittest.TestCase):
         if stage_limits:
             lines.append('stage_limits:')
             lines.extend(f'  {k}: {v}' for k, v in stage_limits.items())
+        if flags:
+            lines.append('conventions:')
+            lines.append('  flags:')
+            lines.extend(self._yaml_lines(flags, 2))
         with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
+
+    @staticmethod
+    def _yaml_lines(mapping, depth):
+        lines = []
+        for k, v in mapping.items():
+            if isinstance(v, dict):
+                lines.append(f"{'  ' * depth}{k}:")
+                lines.extend(GroomAutoTestCase._yaml_lines(v, depth + 1))
+            else:
+                lines.append(f"{'  ' * depth}{k}: {v}")
+        return lines
 
     def run_groom(self, extra_args=()):
         return run(['groom', '--product', 'sample', *extra_args], self.root)
@@ -768,7 +783,10 @@ class SuppressionTests(GroomAutoTestCase):
     """T6: a question the feeder already has a row for is asked of nobody."""
 
     def test_a_feature_with_a_card_spec_row_is_spoken_for(self):
-        self.write_product(approvals={'groom': 'auto'})
+        # structural:ask keeps "no Stories" an open question here (its default, report, is
+        # tested on its own in test_groom.py's GroomStructuralTests) so this exercises
+        # suppression the way it did before G1
+        self.write_product(approvals={'groom': 'auto'}, flags={'groom': {'structural': 'ask'}})
         write_item(self.root, 'F-0001', 'feature', 'Lonely feature', parent='E-0009',
                   typed_lines=['decided: true'])
         run(['index'], self.root)
@@ -787,7 +805,11 @@ class SuppressionTests(GroomAutoTestCase):
         # the suppression read index.json from before the answers were applied: 52 Features the
         # adjudicator had just decided were asked again under "no Stories", and a second Opus
         # session was queued to answer them `yes` a second time
-        self.write_product(approvals={'groom': 'auto'})
+        # reask_days:off turns off G1's sticky rule too — this test's own card is exactly what
+        # sticky would now hold out (answered, unchanged since), which is covered on its own in
+        # tests/test_groom_sticky.py; here the point is still suppression off a fresh apply
+        self.write_product(approvals={'groom': 'auto'},
+                           flags={'groom': {'structural': 'ask', 'reask_days': 'off'}})
         write_item(self.root, 'F-0001', 'feature', 'Lonely feature', parent='E-0009',
                    typed_lines=['decided: false'])
         run(['index'], self.root)

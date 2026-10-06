@@ -110,7 +110,7 @@ def _groom_row():
     r.groom_file = 'groom/2026-09-22.md'
     r.answers_file = '~/.ASF/state/sample/groom/2026-09-22.answers'
     r.open_questions = (
-        '- [ ] F-0002 Per-customer rate limits on the public API — no Stories → answer: ____',
+        '- [ ] F-0002 Per-customer rate limits on the public API — undecided 21d → answer: ____',
         '- [ ] B-0001 Checkout returns 500 when the payment provider times out — duplicate of '
         'B-0002? → answer: ____',
     )

@@ -1,4 +1,4 @@
-"""asf.workers.loops — the loop guard's two rules past the relaunch cap, and the caps' one reader.
+"""asf.workers.loops — the loop guard's two rules past the relaunch cap.
 
 The relaunch cap (:mod:`asf.workers.relaunch`) parks a job handed the same head, card and cause
 twice. A job whose head keeps moving under it — the lane rebasing a branch onto a newer trunk,
@@ -15,12 +15,13 @@ between them. Two rules close that gap, both read off the session ledger, both p
   since the latest unpark park the row whatever changed between them — the hard ceiling a loop
   no rule foresaw still stops at.
 
-The caps are product flags (:meth:`asf.conventions.Conventions.flag`), each read here and only
-here: ``relaunch_cap`` (the relaunch cap's streak length, default
-:data:`asf.workers.relaunch.CAP`), ``loop_cap`` (the hold's same-head loop guard, default
-:data:`asf.workers.lifecycle.LOOP_CAP`), ``relaunch_same_report`` (default
-:data:`SAME_REPORT`) and ``relaunch_daily_cap`` (default :data:`DAILY_CAP`). ``off`` on a
-rule's flag turns that rule off; a value that is not a positive integer is its default.
+The two caps are product flags (:meth:`asf.conventions.Conventions.flag`), read here and only
+here, by :func:`settings`: ``relaunch_same_report`` (default :data:`SAME_REPORT`) and
+``relaunch_daily_cap`` (default :data:`DAILY_CAP`). ``off`` on a rule's flag turns that rule
+off; a value that is not a positive integer is its default. (The relaunch cap's own streak
+length and the hold's same-head loop guard are config keys, not flags —
+``worker_pool.caps.relaunch`` and ``worker_pool.caps.same_head_loop``, read by
+:mod:`asf.workers.relaunch` and :mod:`asf.workers.lifecycle` themselves.)
 """
 import datetime
 import hashlib
@@ -56,22 +57,6 @@ def _int_flag(conv, name, default):
 
 def _conv(product_or_conv):
     return getattr(product_or_conv, 'conventions', product_or_conv)
-
-
-def relaunch_cap(product):
-    """``flags.relaunch_cap``: runs of one job on one state before the relaunch cap parks it.
-    ``off`` is no streak park (the terminal-report park at one still stands)."""
-    from asf.workers import relaunch
-    n = _int_flag(_conv(product), 'relaunch_cap', relaunch.CAP)
-    return n if n is not None else 10 ** 6
-
-
-def loop_cap(product):
-    """``flags.loop_cap``: holds on one unmoved head before the item parks
-    (:func:`asf.workers.lifecycle.same_head_loop`). ``off`` is no loop park."""
-    from asf.workers import lifecycle
-    n = _int_flag(_conv(product), 'loop_cap', lifecycle.LOOP_CAP)
-    return n if n is not None else 10 ** 6
 
 
 def settings(product):
