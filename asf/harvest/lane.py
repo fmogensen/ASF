@@ -2670,15 +2670,27 @@ class Lane:
         return True
 
     def pre_push_ok(self, sha):
-        """``(ok, line)``: the product's ``conventions.pre_push_check`` on ``sha``
-        (:func:`pre_push_check_at`) — the check a session runs before its push, run by the lane
-        before a push of its own that changes what the branch builds on. No check configured:
-        ``(True, '')``."""
+        """``(ok, line)``: the product's ``conventions.pre_push_check`` on ``sha`` — the check a
+        session runs before its push, judged before a push of the lane's own that changes what
+        the branch builds on, never run inside the pass (``lane.rebuild_check``): ``background``
+        hands it to a detached job and says ``None`` (deferred) until a later pass finds its
+        result; ``session`` says False (the branch's session rebuilds and checks); ``off`` says
+        True. No check configured: ``(True, '')``."""
         command = approvals.pre_push_check(self.product)
         if not command:
             return True, ''
-        return pre_push_check_at(self.repo, self.state_dir, sha, command,
-                                 getattr(self.conv, 'worktree_setup', None))
+        setup = getattr(self.conv, 'worktree_setup', None)
+        mode = self.conv.rebuild_check() if hasattr(self.conv, 'rebuild_check') else 'background'
+        if mode == 'off':
+            return True, ''
+        if mode == 'session':
+            return False, (f'`{command}` was not run by the lane on {sha[:9]} '
+                           f'(lane.rebuild_check: session) — the session runs it')
+        # never inside the tick (lane.rebuild_check: background): a detached job runs it, the
+        # next pass reads its result (asf.harvest.rebuild_check)
+        from asf.harvest import rebuild_check
+        return rebuild_check.check(self.product, self.repo, self.state_dir, sha, command, setup,
+                                   dry_run=self.dry_run)
 
     def publish_rebuilt(self, f, old, new, tag, what):
         """Publish ``new`` — ``f``'s branch rebuilt by the lane — in ONE push: the old tip
@@ -2719,7 +2731,8 @@ class Lane:
         Git decides, never a session: a host that calls a branch conflicting which git merges
         clean (a ``merge=union`` file, a stale ``mergeable``) is rebased here. A dict —
         ``{'pushed': sha}``; ``{'conflict': (sha, files)}`` (a real textual conflict, nothing
-        pushed); ``{'check': line}`` (the check failed, nothing pushed) — or None when the lane
+        pushed); ``{'check': line}`` (the check failed, nothing pushed); ``{'deferred': line}``
+        (the check on the rebuilt head runs in the background: a later pass) — or None when the lane
         does not rebase it (not a factory branch, a live session, a draft, a dry run, a
         protected ref, a branch that moved or needs nothing, a push that went nowhere)."""
         b, old = f.get('branch'), f.get('head')
@@ -2746,8 +2759,8 @@ class Lane:
         if ok is False:
             return {'check': line}
         if ok is None:
-            self.out(f'rebase {b}: {line} — not rebased by the lane')
-            return None
+            self.out(f'rebase {b}: {line} — not rebased yet')
+            return {'deferred': line}
         archive = self.publish_rebuilt(f, old, new, 'rebase', 'rebase')
         if not archive:
             return None
@@ -3055,7 +3068,15 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
     H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
     try:
         found = lane.gather(prs=True)
-        for b in sorted(found):
+        budget = pass_budget_s(lane)
+        started = time.monotonic()
+        order = sorted(found)
+        for i, b in enumerate(order):
+            if budget and time.monotonic() - started >= budget:
+                rest = order[i:]
+                lane.out(f'lane: pass budget {budget:g}s spent — {len(rest)} branch(es) wait for '
+                         f'the next pass ({", ".join(rest[:5])}{" …" if len(rest) > 5 else ""})')
+                break
             lane.advance(found[b])
     finally:
         lane.finish_ref_pushes()
@@ -3067,6 +3088,13 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
                            dry_run=lane.dry_run) is None:
         lane.out('ci queue: its own pass is running — the lane leaves the queue to it')
     return lane.results, found
+
+
+def pass_budget_s(lane):
+    """``lane.pass_budget_s`` (default 300; 0: none): one pass advances branches for at most this
+    long — a pass that ran one branch's checks after another held the tick for an hour."""
+    conv = getattr(lane, 'conv', None)
+    return conv.pass_budget_s() if hasattr(conv, 'pass_budget_s') else 0
 
 
 def push_deferred(lane):
@@ -3448,6 +3476,17 @@ def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, announce=Tru
     return None, None, deferred, candidates
 
 
+#: the WAITING reason of a branch whose rebuilt head's pre-push check runs in the background
+REBUILD_CHECK_WAIT = 'rebuild-check'
+
+
+def rebuild_waits(lane, f):
+    """The rebuilt head's pre-push check runs in the background (``lane.rebuild_check``): the
+    branch waits for the pass that reads its result — no session round on a check not judged."""
+    wait(lane, f, REBUILD_CHECK_WAIT)
+    return 'waiting'
+
+
 def send_back(lane, f, kind, text, files, rebase=True):
     """Hand a branch the gate refused (the trunk alone green) back to a session. Code: its
     session, a round (:func:`hold_with_correction`). Docs: a :data:`LANDING_GATE` correction,
@@ -3467,12 +3506,16 @@ def send_back(lane, f, kind, text, files, rebase=True):
         got = mechanical.apply(lane, f, {'kind': kind, 'text': text, 'files': list(files or ())})
         if got is not None and got.resolved:
             return 'mechanical'
+        if got is not None and got.deferred:
+            return rebuild_waits(lane, f)
         if got is not None and got.why:
             text = f'{text}. {got.why}'
             files = list(got.files) or list(files or ())
     elif kind == 'conflict' and rebase and getattr(lane, 'repo', None) \
             and not getattr(lane, 'dry_run', False):
         got = lane.rebase_onto_trunk(f) or {}
+        if got.get('deferred'):
+            return rebuild_waits(lane, f)
         if got.get('pushed'):
             if f.get('run') is None:
                 lane.write(f, lane.record(f, PUSHED, 'adopted'))

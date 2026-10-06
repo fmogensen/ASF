@@ -147,8 +147,8 @@ import shutil
 import tempfile
 import time
 
-from asf import (attestation, ci_queue, flake, gh_limit, github, gitops, gitpush, refguard,
-                 run_cancel, stale_ref)
+from asf import (attestation, ci_queue, env, flake, gh_limit, github, gitops, gitpush,
+                 refguard, run_cancel, stale_ref)
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.state import store
@@ -568,6 +568,34 @@ def regate_holds(lane, heads, trunk_sha):
                  f"gated again")
         out.append(b)
     return out
+
+
+def own_pass(product, items=None, out=print, lane_cls=None):
+    """The queue's pass on its own cadence (the product's queue job, every
+    :data:`asf.scheduler.QUEUE_EVERY_S` seconds — :func:`asf.ci_queue.apply`), never tied to the
+    tick: 2026-10-06 a green batch waited for the next detached harvest, which only a main tick
+    starts, so landing took as long as a tick ran (25–60 min). Judges the batches in flight —
+    lands the green, drops or splits the red — and cuts from what waits (:func:`run` with nothing
+    new from a gate), under the product's harvest lock, so it never races a harvest: one that
+    holds the lock runs this same pass itself. Returns True when it ran, None when skipped."""
+    if not product.conventions.merge_queue() or not product.repo_dir:
+        return None
+    state_dir = os.path.abspath(env.state_dir(product))
+    lock = H.try_lock(state_dir)
+    if lock is None:
+        out('merge queue: a harvest holds the lock — its gate pass judges the batches')
+        return None
+    try:
+        lane = (lane_cls or lane_mod.Lane)(product, state_dir, out, False, items)
+        if not lane_mod.merge_queued(lane):
+            return None
+        try:
+            run(lane, [])
+        finally:
+            lane.finish_ref_pushes()
+        return True
+    finally:
+        lock.close()
 
 
 def run(lane, ready):

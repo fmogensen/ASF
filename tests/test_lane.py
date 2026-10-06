@@ -22,7 +22,7 @@ from unittest import mock
 
 from asf import env
 from asf.feeder import rows as feeder_rows
-from asf.harvest import harvest, lane
+from asf.harvest import harvest, lane, rebuild_check
 from asf.workers import host, lifecycle
 
 NOW = 1_800_000_000.0
@@ -366,12 +366,22 @@ def sh(cmd, cwd=None, env_=None):
                           env=dict(harvest.clean_env(), **(env_ or {})))
 
 
+def _check_in_place(product, sha, k, state_dir=None):
+    rebuild_check.run_job(product, sha, k, out=lambda _l: None, state_dir=state_dir)
+    return 0
+
+
 class LaneFixture(unittest.TestCase):
     """A bare origin, the product's checkout, and a worker clone that pushes lane branches."""
 
     def setUp(self):
         self.base = tempfile.mkdtemp(prefix='lane_')
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        # the rebuilt head's pre-push check, run in place of its background job: these tests
+        # judge what the lane does with its result (tests/test_lane_off_tick.py: where it runs)
+        patcher = mock.patch.object(rebuild_check, 'spawn', _check_in_place)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.origin = os.path.join(self.base, 'origin.git')
         self.repo = os.path.join(self.base, 'repo')
         self.worker = os.path.join(self.base, 'worker')

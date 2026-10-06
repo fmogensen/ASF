@@ -90,6 +90,9 @@ class Outcome:
     head: str = ''
     why: str = ''
     files: tuple = ()
+    #: nothing judged yet: the pre-push check on the rebuilt head runs in the background
+    #: (``lane.rebuild_check``) — the branch waits for a later pass, never a session round
+    deferred: bool = False
 
 
 def enabled(product):
@@ -120,6 +123,8 @@ def rebase(lane, f, cause):
                        f'The lane tried the rebase itself and git stops at {sha[:9]}: '
                        f'conflicts in {", ".join(files) or "?"} — resolve exactly those files',
                        tuple(files or ()))
+    if got.get('deferred'):
+        return Outcome(kind, False, head, got['deferred'], deferred=True)
     if got.get('check'):
         return Outcome(kind, False, head,
                        f'The lane rebased it onto origin/{lane.trunk} cleanly, but the '
@@ -509,6 +514,8 @@ def apply(lane, f, cause):
         lane.results[b] = 'mechanical'
         lane.out(f'{EVENT}:{kind} {b}: resolved — {out.why} '
                  f'({out.head[:9]}, no session; the gate runs on the new head)')
+    elif out.deferred:  # the check on the rebuilt head runs in the background: no try counted
+        lane.out(f'{EVENT}:{kind} {b}: deferred — {out.why}')
     else:
         if run.get('job') or b:
             ev = event(out, trunk=trunk_of(lane))
