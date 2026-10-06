@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.135 — 2026-10-06
+
+### Features landed
+
+- A launch never re-pushes a branch whose CI run is in flight (#773)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.135"`
+
 ## v0.1.134 — 2026-10-06
 
 ### Features landed
