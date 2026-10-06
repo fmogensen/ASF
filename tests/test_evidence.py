@@ -498,7 +498,7 @@ class ProductRepo:
                 "conventions": {"branch_prefixes": prefixes} if prefixes else {}}
         return env.Product("sample", data)
 
-    def discover(self, product, green=None, prs=None):
+    def discover(self, product, green=None, prs=None, checked_file=None):
         green = [self.head] if green is None else green
         with open(PRS_FIXTURE) as f:
             pr_stub = prs if prs is not None else json.load(f)
@@ -511,8 +511,9 @@ class ProductRepo:
 
         with mock.patch.object(evidence, "pr_list", return_value=pr_stub), \
                 mock.patch.object(evidence, "_gh_json", side_effect=fake_gh):
-            return evidence.discover(product=product,
-                                     checked_file=os.path.join(self.tmp, "none.txt"))
+            return evidence.discover(
+                product=product,
+                checked_file=checked_file or os.path.join(self.tmp, "none.txt"))
 
     def item(self, id_, type_, parent=None, typed_lines=()):
         lines = [f"id: {id_}", f"type: {type_}", f"title: {id_} item"]
@@ -1208,6 +1209,54 @@ class LandedProvesTests(unittest.TestCase):
             "Proves: S-18754 line 1 - tests.test_evidence")
         ev = self.r.discover(self.r.product(), prs=[])
         self.assertEqual(ev["proves"]["S-18754"][0]["sha"], sha)
+
+
+class CheckedIsStringsOnTheWire(unittest.TestCase):
+    """F-0233 Task 1, D6: `ev['checked']` is a set of `str` on the wire and in memory — fresh
+    from `discover`, and normalised on read back out of a cache a pre-change `load` wrote with
+    ints in it. `asf.evidence.evidence.feature_state` is untouched by D6 (PD16) and is not
+    exercised here."""
+
+    def test_discover_checked_is_a_set_of_str(self):
+        r = ProductRepo()
+        self.addCleanup(r.close)
+        tmp = tempfile.mkdtemp(prefix="checked_wire_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        checked_file = os.path.join(tmp, "checked.txt")
+        with open(checked_file, "w") as f:
+            f.write("#869 ticked\n")
+        ev = r.discover(r.product(), checked_file=checked_file)
+        self.assertEqual(ev["checked"], {"869"})
+        self.assertTrue(all(isinstance(t, str) for t in ev["checked"]))
+
+    def test_load_over_an_int_cache_normalises_to_str(self):
+        product = env.Product("checked-wire-int", {})
+        cache = evidence._cache_file("evidence.json", product)
+        with open(cache, "w") as f:
+            json.dump({"checked": [869, 871]}, f)
+        data = evidence.load(product=product)
+        self.assertEqual(data["checked"], {"869", "871"})
+
+    def test_load_over_a_str_cache_stays_str(self):
+        product = env.Product("checked-wire-str", {})
+        cache = evidence._cache_file("evidence.json", product)
+        with open(cache, "w") as f:
+            json.dump({"checked": ["869"]}, f)
+        data = evidence.load(product=product)
+        self.assertEqual(data["checked"], {"869"})
+
+    def test_load_writes_the_cache_as_a_sorted_list_of_str(self):
+        product = env.Product("checked-wire-write", {})
+        cache = evidence._cache_file("evidence.json", product)
+        if os.path.exists(cache):
+            os.remove(cache)
+        with mock.patch.object(evidence, "discover",
+                               return_value={"checked": {"901", "869"}, "x": 1}):
+            evidence.load(fresh=True, product=product)
+        with open(cache) as f:
+            on_disk = json.load(f)
+        self.assertEqual(on_disk["checked"], ["869", "901"])
+        self.assertTrue(all(isinstance(t, str) for t in on_disk["checked"]))
 
 
 if __name__ == "__main__":

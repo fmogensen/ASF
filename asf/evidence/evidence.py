@@ -40,10 +40,8 @@ from asf import env, gh_limit, proves, reviews
 from asf.conventions import Conventions
 from asf.evidence import review
 from asf.evidence import review_store
+from asf.evidence import checked as checked_mod
 
-# An evidence-file path, not per-product config — no obvious Product field for it.
-# TODO(config): no Product field for this yet.
-CHECKED_FILE = os.path.join(env.ASF_HOME, "checked.txt")
 PR_TTL = 180
 EVIDENCE_TTL = 180
 
@@ -880,15 +878,6 @@ def discover(product=None, checked_file=None):
     dev = (_newest_with_job(ci_workflow, ci_dev_job, branch=product.main, product=product)
            if ci_workflow and ci_dev_job else None)
 
-    checked_file = checked_file if checked_file is not None else CHECKED_FILE
-    checked = set()
-    if os.path.exists(checked_file):
-        with open(checked_file) as f:
-            for line in f:
-                m = re.match(r"\s*#?(\d+)", line)
-                if m:
-                    checked.add(int(m.group(1)))
-
     main_sha = sh(f"git rev-parse {main_ref}", product=product)
     commits = main_commits(product)
     merges = merge_facts(product)
@@ -902,7 +891,7 @@ def discover(product=None, checked_file=None):
         "prod_deploys": bool(deploy_workflow),
         "prod_mode": _prod_mode(product),
         "dev_sha": dev["headSha"] if dev else None,
-        "checked": checked,
+        "checked": checked_mod.read(product, checked_file=checked_file),
         "main_sha": main_sha or None,
         "merged": merged,
         "branches": sorted(branches),
@@ -1814,7 +1803,7 @@ def load(fresh=False, product=None, checked_file=None):
         if time.time() - os.path.getmtime(cache) < EVIDENCE_TTL:
             with open(cache) as f:
                 data = json.load(f)
-            data["checked"] = set(data["checked"])
+            data["checked"] = {str(x) for x in data["checked"]}
             return data
 
     data = discover(product=product, checked_file=checked_file)
