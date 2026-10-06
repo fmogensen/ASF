@@ -1466,3 +1466,158 @@ class TokenCaps(unittest.TestCase):
         findings, rows = self._rows({'spec': {'cache_read': 'off'}})
         self.assertTrue(any(not ok and 'spec.cache_read' in d for ok, d in findings), findings)
         self.assertFalse(doctor.is_red(rows))
+
+
+class CiMeasureRows(unittest.TestCase):
+    """`doctor.check_ci_measure` — the slow box, the flaky box and the baseline that grew, off
+    the `ci` stream and two local state files, no CI host call at all (PD8). Every row advisory
+    (D19); every missing or broken state file silent — a diagnostic command that dies on a state
+    file is worse than one that says nothing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.root = tempfile.mkdtemp()
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+        self.product = env.Product('p', {})
+        from asf import ci_pool
+        self._backend_patch = mock.patch.object(
+            ci_pool, 'backend_for', side_effect=AssertionError('ci_pool.backend_for called'))
+        self._backend_patch.start()
+        self._subprocess_patch = mock.patch(
+            'subprocess.run', side_effect=AssertionError('subprocess.run called'))
+        self._subprocess_patch.start()
+
+    def tearDown(self):
+        self._subprocess_patch.stop()
+        self._backend_patch.stop()
+        env.ASF_HOME = self.home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _ts(self, days_ago=1):
+        return (self.now - datetime.timedelta(days=days_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def _job(self, name, conclusion, runner_name, seconds):
+        return {'name': name, 'conclusion': conclusion, 'runner': runner_name, 'seconds': seconds}
+
+    def _ev(self, jobs, days_ago=1):
+        return {'ts': self._ts(days_ago), 'jobs': jobs}
+
+    def _write_stream(self, events):
+        import json
+        from asf.metrics import metrics
+        by_day = {}
+        for e in events:
+            by_day.setdefault(e['ts'][:10], []).append(e)
+        for day, evs in by_day.items():
+            path = metrics.stream_path(self.root, 'ci', day)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                for e in evs:
+                    f.write(json.dumps(e) + '\n')
+
+    def _write_census(self, runners):
+        import json
+        from asf import ci_census
+        path = os.path.join(env.state_dir(self.product), ci_census.CENSUS_FILE)
+        doc = {'v': 1, 'taken': self._ts(days_ago=0),
+               'runners': [{'runner': r, 'tier': t} for r, t in runners]}
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(doc, f)
+
+    def _write_baselines(self, per):
+        import json
+        from asf import ci_measure
+        path = os.path.join(env.state_dir(self.product), ci_measure.BASELINES_FILE)
+        doc = {'v': 1, 'taken': self._ts(days_ago=0), 'window_days': 14, 'per': per, 'tier': {}}
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(doc, f)
+
+    def test_no_census_gives_no_rows(self):
+        self._write_stream([self._ev([self._job('gate', 'success', 'ci-1', 100.0)])])
+        self._write_baselines({'ci-1': {'gate': {'p50_s': 100.0, 'n': 10}}})
+        self.assertEqual(doctor.check_ci_measure(self.product, now=self.now, root=self.root), [])
+
+    def test_no_state_at_all_gives_no_rows_and_raises_nothing(self):
+        missing_root = os.path.join(self.tmp, 'no-such-record-dir')
+        self.assertEqual(
+            doctor.check_ci_measure(self.product, now=self.now, root=missing_root), [])
+
+    def test_truncated_census_gives_no_rows(self):
+        from asf import ci_census
+        path = os.path.join(env.state_dir(self.product), ci_census.CENSUS_FILE)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('{not json')
+        self._write_stream([self._ev([self._job('gate', 'success', 'ci-1', 100.0)])])
+        self.assertEqual(doctor.check_ci_measure(self.product, now=self.now, root=self.root), [])
+
+    def test_missing_record_root_gives_no_rows(self):
+        self._write_census([('ci-1', 'asf-fast')])
+        missing_root = os.path.join(self.tmp, 'no-such-record-dir')
+        self.assertEqual(
+            doctor.check_ci_measure(self.product, now=self.now, root=missing_root), [])
+
+    def test_slow_runner_row_names_the_worst_kind_and_tier_none_for_the_fleet_best(self):
+        self._write_census([('ci-1', 'asf-fast'), ('ci-3', 'asf-bulk')])
+        events = [self._ev([self._job('gate', 'success', 'ci-1', 100.0)], days_ago=d)
+                  for d in range(1, 12)]
+        events += [self._ev([self._job('gate', 'success', 'ci-3', 210.0)], days_ago=d)
+                   for d in range(1, 12)]
+        self._write_stream(events)
+        rows = doctor.check_ci_measure(self.product, now=self.now, root=self.root)
+        self.assertEqual(len(rows), 1)
+        required, ok, detail = rows[0]
+        self.assertFalse(required)
+        self.assertFalse(ok)
+        self.assertEqual(detail, 'ci measure: ci-3 runs gate at 210s, 2.1× the fleet best '
+                                  '(11 green readings, 14 d) — asf-bulk')
+
+    def test_flaky_runner_row_and_no_row_under_min_readings(self):
+        self._write_census([('ci-1', 'asf-fast')])
+        # 18 green + 7 red (within a 7-day span, well inside the 14 d window) => green rate
+        # 18 / 25 == 0.72, n == 18 (D14, the green count, not the rated total).
+        events = [self._ev([self._job('flaky_job', 'success', 'ci-6', 50.0)], days_ago=1 + i % 7)
+                  for i in range(18)]
+        events += [self._ev([self._job('flaky_job', 'failure', 'ci-6', 50.0)], days_ago=1 + i % 7)
+                   for i in range(7)]
+        events += [self._ev([self._job('flaky_job', 'success', 'ci-9', 50.0)], days_ago=1 + i)
+                   for i in range(4)]
+        events += [self._ev([self._job('flaky_job', 'failure', 'ci-9', 50.0)], days_ago=1)]
+        self._write_stream(events)
+        rows = doctor.check_ci_measure(self.product, now=self.now, root=self.root)
+        self.assertEqual(len(rows), 1)
+        required, ok, detail = rows[0]
+        self.assertFalse(required)
+        self.assertFalse(ok)
+        self.assertEqual(detail,
+                          'ci measure: ci-6 green 0.72 over 18 readings — flaky, never asf-fast')
+
+    def test_baseline_regression_row_and_no_row_under_threshold(self):
+        self._write_census([('ci-1', 'asf-fast')])
+        self._write_baselines({
+            'ci-4': {'gate2': {'p50_s': 318.0, 'n': 8}},
+            'ci-5': {'gate3': {'p50_s': 300.0, 'n': 8}},
+        })
+        events = [self._ev([self._job('gate2', 'success', 'ci-4', 512.0)], days_ago=1)]
+        events += [self._ev([self._job('gate3', 'success', 'ci-5', 420.0)], days_ago=1)]
+        self._write_stream(events)
+        rows = doctor.check_ci_measure(self.product, now=self.now, root=self.root)
+        self.assertEqual(len(rows), 1)
+        required, ok, detail = rows[0]
+        self.assertFalse(required)
+        self.assertFalse(ok)
+        self.assertEqual(detail, 'ci baseline: gate2 on ci-4 last ran 512s against its 318s '
+                                  'baseline (1.6×) — 8 green readings')
+
+    def test_every_row_is_advisory_never_required(self):
+        self._write_census([('ci-1', 'asf-fast'), ('ci-3', 'asf-bulk')])
+        events = [self._ev([self._job('gate', 'success', 'ci-1', 100.0)], days_ago=d)
+                  for d in range(1, 12)]
+        events += [self._ev([self._job('gate', 'success', 'ci-3', 210.0)], days_ago=d)
+                   for d in range(1, 12)]
+        self._write_stream(events)
+        rows = doctor.check_ci_measure(self.product, now=self.now, root=self.root)
+        self.assertTrue(rows)
+        self.assertTrue(all(required is False for required, _ok, _detail in rows))
