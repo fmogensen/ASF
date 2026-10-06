@@ -79,7 +79,9 @@ class Product:
         return env.Product("sample", {
             "repo_dir": self.repo, "repo_slug": "sample/product", "main": "main",
             "backlog_dir": self.backlog, "ci": "none",
-            "conventions": {"branch_prefixes": PREFIXES}})
+            "conventions": {"branch_prefixes": PREFIXES,
+                            # no Story in the fixture: the stories-first gate is off
+                            "feeder": {"stories_before_plan": False}}})
 
     def discover(self, prs):
         with mock.patch.object(evidence, "pr_list", return_value=prs), \

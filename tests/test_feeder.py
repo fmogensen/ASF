@@ -27,9 +27,16 @@ NOW = dt.datetime(2026, 1, 1, 10, 0, tzinfo=dt.timezone.utc)
 S1_SESSION = {'item': 'B-0001', 'kind': 'fix-bug', 'account': 'w1', 'age': '5m'}
 
 
+#: these suites pin the rows of Features whose fixtures carry no Story: the stories-first gate
+#: (``feeder.stories_before_plan``, tests/test_stories_first.py) is off unless a test sets it
+GATE_OFF = {'stories_before_plan': False}
+
+
 def product(**extra):
     conv = {'branch_prefixes': {'spec': 'spec', 'plan': 'plan', 'task': 'task'}}
-    conv.update(extra.pop('conventions', {}))
+    given = extra.pop('conventions', {})
+    conv.update(given)
+    conv['feeder'] = dict(GATE_OFF, **(given.get('feeder') or {}))
     return Product('sample', dict({'conventions': conv}, **extra))
 
 
@@ -2807,7 +2814,7 @@ class TableTests(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
-    def run_next(self, argv, ledger=()):
+    def run_next(self, argv, ledger=(), gate=False):
         with tempfile.TemporaryDirectory() as home:
             os.makedirs(os.path.join(home, 'products'))
             if ledger:
@@ -2816,7 +2823,8 @@ class CliTest(unittest.TestCase):
                     f.writelines(json.dumps(r) + '\n' for r in ledger)
             with open(os.path.join(home, 'products', 'sample.yaml'), 'w') as f:
                 f.write(f"product: sample\nbacklog_dir: {FIXTURES}\nconventions:\n"
-                        "  branch_prefixes:\n    spec: spec\n    plan: plan\n    task: task\n")
+                        "  branch_prefixes:\n    spec: spec\n    plan: plan\n    task: task\n"
+                        + ('' if gate else "  feeder:\n    stories_before_plan: false\n"))
             inflight = os.path.join(home, 'inflight.json')
             with open(inflight, 'w') as f:
                 json.dump({'inflight': [S1_SESSION]}, f)
@@ -2840,6 +2848,21 @@ class CliTest(unittest.TestCase):
         # F-0195: the Features in build against the cap, under the table
         self.assertRegex(load, r'^Features in build 2 / \d+ \(auto: sessions \d+, '
                                r'quota-stopped \S+, CI free \S+\)\n$')
+
+    def test_next_shows_the_no_stories_rows_under_the_default(self):
+        """Stories first (tests/test_stories_first.py): the fixture's Features carry no Story;
+        under the product's default `asf next` names the spec-amend rows — the mid-build
+        F-0002's beside its coders, the spec-approved F-0005's in place of its plan."""
+        rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'],
+                                gate=True)
+        self.assertEqual(rc, 0)
+        got = json.loads(out)
+        no_stories = [d['item_id'] for d in got if d['kind'] == rows.NO_STORIES]
+        self.assertIn('F-0002', no_stories)
+        self.assertIn('F-0005', no_stories)
+        self.assertNotIn(rows.STARVED_PLAN, [d['kind'] for d in got])
+        self.assertTrue(any(d['kind'] == rows.PLAN_CODE and d['feature_id'] == 'F-0002'
+                            for d in got))
 
     def test_next_json(self):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'])

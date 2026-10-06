@@ -114,6 +114,10 @@ SPEC_PLAN_KIND = 'spec-plan'
 DIRECT = 'direct'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
+#: a Feature with no Story may not be planned (``feeder.stories_before_plan``): its next step is a
+#: ``spec-amend`` session that derives the Stories from its spec, plan and landed Tasks
+NO_STORIES = 'NO STORIES → SPEC-AMEND'
+STORIES_BEFORE_PLAN = True  #: ``conventions.feeder.stories_before_plan``
 PUSHED_LAND = 'PUSHED → LAND'
 #: an approved spec that sits on a branch, not the trunk: the lane adopts the branch
 #: (:mod:`asf.tick.land_spec`) and lands it — a row that launches nothing
@@ -180,12 +184,13 @@ MIN_FEATURES_IN_BUILD = 2
 BUILD_STAGES = ('plan-approved', 'building')
 #: the rows that start a new document — or a whole direct Feature: what the finish-first cap
 #: counts and holds
-NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD, REPLAN)
+NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD, REPLAN,
+                 NO_STORIES)
 #: the session kinds (a run's brief kind) the finish-first cap counts as in flight
 NEW_DOC_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND, DIRECT, REPLAN_KIND)
 FINISH = 'WAITS ON finish'
 #: the rows that write a spec or a plan: what ``flags.plan_ahead`` meters (:func:`plan_ahead_cap`)
-SPEC_PLAN_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN)
+SPEC_PLAN_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, NO_STORIES)
 #: the session kinds :func:`plan_ahead_cap` counts as spec/plan work already in flight
 SPEC_PLAN_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND)
 #: the action of a spec/plan row :func:`plan_ahead_cap` holds
@@ -194,7 +199,8 @@ WAITS_BUILD_SLOT = 'WAITS ON build slot'
 #: Not here: ``BUG → FIX`` (``bug_rows`` caps it itself), ``FIX → CORRECT`` (it carries its own
 #: ``CORRECTION_ROUNDS``, and a correction is an answer the harvest asked for, not an attempt the
 #: factory chose), ``STALEMATE`` and ``GROOM → ADJUDICATE`` (already the adjudicate row).
-CAPPED_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, CONFLICT, STALE})
+CAPPED_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, CONFLICT, STALE,
+                          NO_STORIES})
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 PR_RE = re.compile(r'\bPR #\d+\b')
@@ -390,6 +396,37 @@ def max_replans_in_flight(product):
     v = feeder.get('max_replans_in_flight') if isinstance(feeder, dict) else None
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 \
         else MAX_REPLANS_IN_FLIGHT
+
+
+def stories_before_plan(product):
+    """``conventions.feeder.stories_before_plan`` (default true): a Feature is planned — a plan,
+    replan or delivery-plan row — only once it has a Story; until then its next step is a
+    :data:`NO_STORIES` row. Only an explicit ``false`` turns the gate off."""
+    feeder = _conventions(product).get('feeder')
+    v = feeder.get('stories_before_plan') if isinstance(feeder, dict) else None
+    return v if isinstance(v, bool) else STORIES_BEFORE_PLAN
+
+
+def has_stories(items, feature):
+    """Does ``feature`` carry a Story the record still holds? A Story enters the record only
+    with its acceptance list (``asf new story --acceptance``; ``asf check`` refuses a Story card
+    without one), so a Story child is a Story with checkbox acceptance lines."""
+    return any(not ix.retired(s) for s in ix.children(items, feature or {}, 'story'))
+
+
+def needs_stories(items, product, feature):
+    """The stories-first gate holds ``feature``: the gate is on and it has no Story."""
+    return bool(feature) and feature.get('type') == 'feature' and stories_before_plan(product) \
+        and not has_stories(items, feature)
+
+
+def no_stories_row(feature, product, occupancy, stage):
+    """A Story-less Feature's next step (:data:`NO_STORIES`): one ``spec-amend`` session on the
+    spec branch that derives Stories with checkbox acceptance lines from the Feature's spec, plan
+    and landed Tasks — or PUSHED → LAND while that branch waits on the lane."""
+    return _doc_row(NO_STORIES, feature['id'], 'spec', product,
+                    f"{stage}: no Story with acceptance lines — derive the Stories before any "
+                    f"plan (feeder.stories_before_plan)", occupancy)
 
 
 def max_features_in_build(product):
@@ -1233,7 +1270,7 @@ def _doc_row(kind, fid, doc, product, reason, occupancy, branch=None):
                    action=f"{WAITS_LANDING}: {waiting}", brief_kind=doc, branch=branch,
                    reason=waiting)
     # F-0093 §2.6: a starved spec already exists on its branch — the run amends it in place
-    brief = 'spec-amend' if kind == STARVED_SPEC else doc
+    brief = 'spec-amend' if kind in (STARVED_SPEC, NO_STORIES) else doc
     return Row(tier=2, kind=kind, item_id=fid, feature_id=fid, action=LAUNCH, brief_kind=brief,
                branch=branch, reason=reason)
 
@@ -1343,6 +1380,8 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                                brief_kind=brief, branch=branch,
                                reason=f'{what}, footprint free'))
                 running.append((lid, union))
+        elif needs_stories(items, product, lead):
+            out.append(no_stories_row(lead, product, None, stage))
         else:
             reason = (f"{len(open_members)} items, no plan yet" if word == 'card'
                       else f"{stage}, no session")
@@ -1436,7 +1475,11 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
                            brief_kind='adjudicate', branch=branch_for(product, doc, fid),
                            reason=f"{doc}-review r{rnd} >= r{limit}: adjudicate, no further round"))
         return out
+    gate = needs_stories(items, product, f)
     if fid in busy:
+        if gate and word in BUILD_STAGES and not plan_carrier(f) and not replan_mod.pending(f):
+            # the Feature's own spec-amend session is running: its Tasks still build
+            out.extend(task_rows(items, product, f, busy, running, landed_shas))
         return out
     waits = (occupancy,)
     if is_direct(f) and word not in BUILD_STAGES:
@@ -1462,19 +1505,29 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
                                 *waits))
     elif word == 'spec-approved' and spec_carrier(f):
         out.append(land_spec_row(f, product, *waits))
+    elif word in ('spec-approved', 'plan-draft', 'plan-review') and gate:
+        out.append(no_stories_row(f, product, occupancy, stage))
     elif word in ('spec-approved', 'plan-draft', 'plan-review'):
         out.append(_doc_row(STARVED_PLAN, fid, 'plan', product,
                             f"{stage}, no session" if word != 'spec-approved'
                             else 'spec approved, no plan', *waits))
     elif word in ('plan-approved', 'building') and plan_carrier(f):
+        if gate:
+            out.append(no_stories_row(f, product, occupancy, stage))
         out.append(land_plan_row(f, product, *waits))
     elif word in ('plan-approved', 'building') and replan_mod.pending(f):
         # the Feature's plan is being replaced: its Tasks' rows wait on the replan, and claim
-        # no footprint (a copy of ``running``) — the replan may move or drop every one of them
-        out.append(replan_row(f, product, occupancy, items))
+        # no footprint (a copy of ``running``) — the replan may move or drop every one of them.
+        # A Story-less Feature derives its Stories first: no replan before them.
+        out.append(no_stories_row(f, product, occupancy, stage) if gate
+                   else replan_row(f, product, occupancy, items))
         out.extend(replan_wait(r, fid) if r.launches else r
                    for r in task_rows(items, product, f, busy, copy.copy(running), landed_shas))
     elif word in ('plan-approved', 'building'):
+        # mid-build and Story-less: the spec-amend row goes next to the build rows, never
+        # instead of them
+        if gate:
+            out.append(no_stories_row(f, product, occupancy, stage))
         out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
 
@@ -1754,7 +1807,7 @@ def undecided_rows(items, product, busy, limit=None):
 
 
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, GROOM_CLERK: 2,
-              RESHAPE: 3, REPLAN: 3, DELIVERY_PLAN: 4, DELIVERY_CODE: 4}
+              RESHAPE: 3, REPLAN: 3, NO_STORIES: 3, DELIVERY_PLAN: 4, DELIVERY_CODE: 4}
 
 
 def _token(line):

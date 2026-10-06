@@ -33,7 +33,10 @@ FOLDER_OF = {'epic': 'epics', 'feature': 'features', 'story': 'stories', 'task':
 
 
 def product(**conv):
-    return Product('sample', {'conventions': dict({'delivery': 'feature'}, **conv)})
+    # the fixtures carry no Story: the stories-first gate (tests/test_stories_first.py) is off
+    return Product('sample', {'conventions': dict({'delivery': 'feature',
+                                                   'feeder': {'stories_before_plan': False}},
+                                                  **conv)})
 
 
 def read_meta(root, type_, iid):
@@ -280,7 +283,8 @@ class NotOptedInTests(RecordFixture):
                             'writes': ['a.py']},
                  'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'state': 'New',
                             'writes': ['b.py']}}
-        out = rows.candidates({'items': items}, Product('sample', {}), [])
+        out = rows.candidates({'items': items}, Product('sample', {'conventions': {
+            'feeder': {'stories_before_plan': False}}}), [])
         self.assertEqual([(r.kind, r.item_id, r.launches) for r in out],
                          [(rows.PLAN_CODE, 'T-0001', True), (rows.PLAN_CODE, 'T-0002', True)])
         self.assertEqual(slice_mod.plan_slices({i: dict(v) for i, v in items.items()}, 'F-0001',

@@ -683,6 +683,10 @@ def validate_mapping(data):
                     isinstance(wip, bool) or not isinstance(wip, int) or wip < 1):
                 problems.append(('feeder.max_features_in_build',
                                  f'must be auto or a whole number >= 1, not {wip!r}'))
+            sbp = feeder.get('stories_before_plan')
+            if sbp is not None and not isinstance(sbp, bool):
+                problems.append(('feeder.stories_before_plan',
+                                 f'must be true or false, not {sbp!r}'))
             per = feeder.get('features_per_session')
             if per is not None and (isinstance(per, bool) or not isinstance(per, (int, float))
                                     or per <= 0):
