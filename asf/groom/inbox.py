@@ -298,6 +298,7 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
     if not os.path.isdir(inbox_dir):
         return []
     created = []
+    retired = None
     for name in sorted(os.listdir(inbox_dir)):
         path = os.path.join(inbox_dir, name)
         if not name.endswith('.md') or not os.path.isfile(path):
@@ -307,6 +308,12 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
         body, prior = _split_question(text) if _has_question(text) else (text, '')
 
         card = declared(signed(graded(scrub_title(parse_inbox_file(body), root))))
+        if retired is None:
+            retired = retired_keys(canonical, inbox_dir)
+        gone = retired_as(card, retired)
+        if gone:  # retired once already (`asf retire`): never minted again
+            move_to_done(inbox_dir, name, f"→ already retired as {gone} (groom {date})", text)
+            continue
         result = derive(card, canonical, default_bug_parent=default_bug_parent)
 
         if isinstance(result, Question):
@@ -341,6 +348,98 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             f.write(f"→ {new_id}\n\n{text}")
         os.remove(path)
     return created
+
+
+# ---- retiring: a note or a card that landed by hand (`asf retire`) -------------------------
+
+#: The first words of what ``asf retire`` writes — a card's ``removed:`` and a retired note's
+#: ``done/`` header — so intake knows the item was retired and never mints it again.
+RETIRED = 'retired'
+_RETIRED_NOTE = '→ ' + RETIRED
+
+
+def move_to_done(inbox_dir, name, header, text, free=True):
+    """Move the note ``<inbox_dir>/<name>`` to ``<inbox_dir>/done/`` as ``header``, a blank line,
+    then its ``text`` — the one way a note leaves intake unminted (a ``close`` answer, ``asf
+    retire``, a note retired once already). ``free``: a name ``done/`` already holds gets a
+    ``-2``, ``-3`` … suffix rather than overwriting what is there. The path written."""
+    done_dir = os.path.join(inbox_dir, 'done')
+    os.makedirs(done_dir, exist_ok=True)
+    stem, out, n = name[:-3] if name.endswith('.md') else name, name, 2
+    while free and os.path.exists(os.path.join(done_dir, out)):
+        out = f"{stem}-{n}.md"
+        n += 1
+    target = os.path.join(done_dir, out)
+    with open(target, 'w', encoding='utf-8') as f:
+        f.write(f"{header}\n\n{text}")
+    os.remove(os.path.join(inbox_dir, name))
+    return target
+
+
+def find_note(root, intake_dir, ref):
+    """The file name of the inbox note ``ref`` names — its file name, with or without ``.md``,
+    or its path from the record root — or ``None``."""
+    d = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
+    name = os.path.basename(str(ref or '').strip().rstrip('/'))
+    if not name:
+        return None
+    for cand in (name, name + '.md'):
+        if cand.endswith('.md') and os.path.isfile(os.path.join(d, cand)):
+            return cand
+    return None
+
+
+def retire_note(root, intake_dir, name, removal, date):
+    """``asf retire`` on a note nobody groomed: it moves to ``done/`` with ``removal`` (the
+    reason and its landing refs) in its header, so the groom neither mints it nor, filed
+    again, mints its twin (:func:`retired_keys`). The path written."""
+    d = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
+    with open(os.path.join(d, name), encoding='utf-8') as f:
+        text = f.read()
+    return move_to_done(d, name, f"→ {removal} ({date})", text)
+
+
+def _fold(title):
+    return ' '.join(str(title or '').lower().split())
+
+
+def retired_keys(canonical, inbox_dir):
+    """``{('title' | 'signature', folded value): what retired it}`` over every card ``asf retire``
+    removed (its ``removed:`` opens with :data:`RETIRED`) and every note it moved to ``done/``."""
+    out = {}
+
+    def add(title, signature, ref):
+        if _fold(title):
+            out.setdefault(('title', _fold(title)), ref)
+        if _fold(signature):
+            out.setdefault(('signature', _fold(signature)), ref)
+
+    for iid, rec in sorted((canonical or {}).items()):
+        meta = rec.get('meta') or {}
+        if str(meta.get('removed') or '').startswith(RETIRED):
+            add(meta.get('title'), meta.get('signature'), iid)
+    done_dir = os.path.join(inbox_dir, 'done')
+    if os.path.isdir(done_dir):
+        for name in sorted(os.listdir(done_dir)):
+            path = os.path.join(done_dir, name)
+            if not name.endswith('.md') or not os.path.isfile(path):
+                continue
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+            head, _sep, rest = text.partition('\n\n')
+            if not head.startswith(_RETIRED_NOTE):
+                continue
+            note = parse_inbox_file(rest)
+            add(note.title, note.headers.get('signature'), f"{os.path.basename(inbox_dir)}/done/{name}")
+    return out
+
+
+def retired_as(card, keys):
+    """What retired ``card`` already (:func:`retired_keys`): a card or note with its title or its
+    signature, else ``None``."""
+    return (keys.get(('signature', _fold(card.headers.get('signature'))))
+            if _fold(card.headers.get('signature')) else None) \
+        or keys.get(('title', _fold(card.title)))
 
 
 # ---- the questions intake leaves, put to the groom (F-0085 under approvals.groom: auto) ------
@@ -453,10 +552,7 @@ def apply_answer(root, name, answer, date, who, intake_dir=None):
         text = f.read()
     body, _question = _split_question(text)
     if parsed == 'close':
-        os.makedirs(os.path.join(d, 'done'), exist_ok=True)
-        with open(os.path.join(d, 'done', name), 'w', encoding='utf-8') as f:
-            f.write(f"→ closed (groom {date}, {who})\n\n{text}")
-        os.remove(path)
+        move_to_done(d, name, f"→ closed (groom {date}, {who})", text, free=False)
         return True, None
     lines = body.split('\n')
     idx = next((i for i, l in enumerate(lines) if l.strip()), 0)

@@ -47,7 +47,7 @@ class TableTests(unittest.TestCase):
         # COMMANDS is a dict literal: a duplicate key silently overwrites the first, so this
         # checks the count against the 49 the spec tabulates, plus `park` (the counterpart of
         # `unpark`), `correct` and `reset`, rather than trusting len(dict).
-        self.assertEqual(len(surface.COMMANDS), 57)  # + `facts` (W6-PR2), `untick`, `audit-proofs` (S6)
+        self.assertEqual(len(surface.COMMANDS), 58)  # + `facts` (W6-PR2), `untick`, `audit-proofs` (S6), `retire`
 
     def test_no_description_contains_the_marker_text(self):
         for name, (text, effect, flag) in surface.COMMANDS.items():

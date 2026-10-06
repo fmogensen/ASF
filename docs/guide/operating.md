@@ -519,12 +519,18 @@ missed one; a key the row could not read misses any numeric target.
 ## Clearing a card that does not belong
 
 A card that is not this product's work — a Bug filed against the wrong product, a Feature nobody
-wants — is retired with `removed:`, never deleted:
+wants, an item that landed by hand outside the factory — is retired with `removed:`, never
+deleted, and never by a hand edit:
 
-1. Pull your record checkout.
-2. In the card's typed block (above the `# ---- machine ----` line), add
-   `removed: <why, in a few words>`. `asf set` cannot write this field; edit the file.
-3. Run `asf index` in the checkout, then commit and push the card and `index.json`.
+    asf retire <item> --why "<reason>" [--landed <pr|sha|url>...]
+
+`<item>` is a card id, or a note in the intake directory no groom has typed yet (its file name,
+with or without `.md`, or its path). A card gets `removed: retired: <reason> (landed …)`, a
+`landed:` sha when a ref is one, and a History line; a note moves to `inbox/done/` with the same
+words in its header. Either way it goes through the `asf set` publish path (one signed-off commit
+with `index.json`, retried when another lands meanwhile, then pushed), and the groom never mints
+it again — not from a note, and not from the same title or signature filed a second time.
+`asf set <id> removed=<reason>` writes the bare field.
 
 On the next tick the card leaves the tables and the wave: nothing is started on it, and a session
 already on it is ended and its worktree reaped rather than sent back. An S1 Bug retired this way
