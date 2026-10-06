@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.188 — 2026-10-06
+
+### Features landed
+
+- The trunk is asked before a Task is minted, and a typed `landed:` finally closes one (#461)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.188"`
+
 ## v0.1.187 — 2026-10-06
 
 ### Bugs fixed
