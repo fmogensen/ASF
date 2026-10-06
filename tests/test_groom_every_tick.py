@@ -17,6 +17,7 @@ from asf.groom import answers
 from asf.tick import step_groom, step_wave, tick
 from tests.test_feeder import fixture_index, product
 from tests.test_inbox_shape import make_record, seed
+from tests.test_tick import _git
 from tests.test_tick_steps import StepsTestCase
 
 DEFECT_Q = 'This reads as a defect.'
@@ -271,6 +272,43 @@ class GroomStateTests(StepsTestCase):
         self.session(job='groom-2026-01-01', ended='t2', end_reason='finished')
         moved = answers.carry_staged_answers(self.product, out=self.lines.append)
         self.assertEqual(moved, [os.path.join(d, '2026-01-01.answers')])
+
+
+class GroomPublishesEveryTickTests(StepsTestCase):
+    """F-0133 §1: the groom's own commit runs on the tick path too, through the same
+    ``cmd_groom`` the console calls — before ``finish``, not after it (P3, P4, P5)."""
+
+    def seed_inbox_card(self, root):
+        # StepsTestCase's seeded features/F-0001.md (TickTestCase.build_repos) carries no
+        # `type:` line, which every other test of this fixture only ever reaches through a
+        # mocked cmd_groom; a real groom pass walks every open Epic (groom_over_budget_section)
+        # and needs one.
+        with open(os.path.join(root, 'features', 'F-0001.md'), 'w', encoding='utf-8') as f:
+            f.write('---\nid: F-0001\ntype: feature\ntitle: sample\n---\n')
+        os.makedirs(os.path.join(root, 'inbox'), exist_ok=True)
+        with open(os.path.join(root, 'inbox', 'pay.md'), 'w', encoding='utf-8') as f:
+            f.write('# Checkout is broken\nsignature: test_pay\n\nCustomers cannot pay.\n')
+
+    def test_the_tick_s_groom_publishes_before_the_tick_commits(self):
+        ctx = self.ctx()
+        root = ctx.record_root()
+        self.seed_inbox_card(root)
+        self.assertEqual(step_groom.run(ctx, out=self.lines.append), 0)
+        on_origin = _git(['ls-tree', '-r', '--name-only', 'main'], self.origin)
+        self.assertIn(f'groom/{today()}.md', on_origin.splitlines())
+
+    def test_another_step_s_writes_are_left_for_finish(self):
+        ctx = self.ctx()
+        root = ctx.record_root()
+        self.seed_inbox_card(root)
+        os.makedirs(os.path.join(root, 'state'), exist_ok=True)
+        with open(os.path.join(root, 'state', 'rollup.md'), 'w', encoding='utf-8') as f:
+            f.write('derived\n')
+        self.assertEqual(step_groom.run(ctx, out=self.lines.append), 0)
+        status = _git(['status', '--porcelain', 'state/rollup.md'], root)
+        self.assertIn('rollup.md', status)
+        on_origin = _git(['ls-tree', '-r', '--name-only', 'main'], self.origin)
+        self.assertNotIn('state/rollup.md', on_origin.splitlines())
 
 
 if __name__ == '__main__':
