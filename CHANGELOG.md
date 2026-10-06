@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.185 — 2026-10-06
+
+### Features landed
+
+- Read-only commands never denied; harvest runs product checks (#839)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.185"`
+
 ## v0.1.184 — 2026-10-06
 
 ### Features landed
