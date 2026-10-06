@@ -2404,8 +2404,12 @@ def _capped(row, attempts, limit, product, adjudicated=None):
                f"another attempt")
 
 
-#: the over-limit kinds whose ruling a document session carries out, not a code correction
-DOC_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN})
+#: the over-limit kinds whose ruling a document session carries out, not a code correction.
+#: NO_STORIES belongs here for the same reason it joins SPEC_PLAN_KINDS (:data:`SPEC_PLAN_KINDS`)
+#: and NEW_DOC_KINDS: its brief is a spec session (:func:`no_stories_row`'s ``brief_kind='spec'``)
+#: that writes the spec and mints Story cards — never a ``correct``/``asf-fixer`` session, which
+#: has no business doing either (F-0120).
+DOC_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, NO_STORIES})
 
 
 def ruling_row(row, ruling, n, limit):
