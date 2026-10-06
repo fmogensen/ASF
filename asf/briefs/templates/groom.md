@@ -6,7 +6,7 @@ lines a policy could not answer. The open questions it still carries, exactly as
 {open_questions}
 
 FOR EACH ONE, one of two outcomes — never "noted", never a question back:
-- an answer in the grammar: `yes`, `no`, `rank <n>`, `parent <id>`, `S1`, `S2`, `S3`, or
+- an answer in the grammar: `yes`, `no`, {rank_grammar}`parent <id>`, `S1`, `S2`, `S3`, or
   `unblock <id>`, each followed by ` — ` and one sentence of why. A card awaiting a decision
   gets `yes` or `no`; on a Bug, `S1`/`S2`/`S3` decides it at that severity;
 - for a `refused on repeat:` line — a card the approvals hook refused the same action on run

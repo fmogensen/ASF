@@ -46,8 +46,12 @@ class ForYouEndToEndTests(GroomAutoTestCase):
             return f.read()
 
     def test_the_ordinary_day_is_zero_for_you(self):
+        # structural:ask keeps the fixture's no-Stories/no-Tasks gaps as questions, so this
+        # still exercises the full housekeeping/spoken-for pipeline (G1's default, report,
+        # drops them before any of this runs — tested on its own in test_groom.py)
         self.write_product(approvals={'groom': 'auto', 'spend_money': 'human-now',
-                                      'touch_security': 'human-now', 'touch_legal': 'human-now'})
+                                      'touch_security': 'human-now', 'touch_legal': 'human-now'},
+                           flags={'groom': {'structural': 'ask'}})
         self.fixture()
         r = self.run_groom(['--date', DATE])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -59,7 +63,8 @@ class ForYouEndToEndTests(GroomAutoTestCase):
 
     def test_the_duplicate_is_removed_in_the_record_not_merely_flagged(self):
         self.write_product(approvals={'groom': 'auto', 'spend_money': 'human-now',
-                                      'touch_security': 'human-now', 'touch_legal': 'human-now'})
+                                      'touch_security': 'human-now', 'touch_legal': 'human-now'},
+                           flags={'groom': {'structural': 'ask'}})
         self.fixture()
         r = self.run_groom(['--date', DATE])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -73,7 +78,8 @@ class ForYouEndToEndTests(GroomAutoTestCase):
 
     def test_no_groom_line_reads_barred(self):
         self.write_product(approvals={'groom': 'auto', 'spend_money': 'human-now',
-                                      'touch_security': 'human-now', 'touch_legal': 'human-now'})
+                                      'touch_security': 'human-now', 'touch_legal': 'human-now'},
+                           flags={'groom': {'structural': 'ask'}})
         self.fixture()
         r = self.run_groom(['--date', DATE])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -83,7 +89,8 @@ class ForYouEndToEndTests(GroomAutoTestCase):
 
     def test_the_housekeeping_is_spoken_for_under_the_cap(self):
         self.write_product(approvals={'groom': 'auto', 'spend_money': 'human-now',
-                                      'touch_security': 'human-now', 'touch_legal': 'human-now'})
+                                      'touch_security': 'human-now', 'touch_legal': 'human-now'},
+                           flags={'groom': {'structural': 'ask'}})
         self.fixture()
         r = self.run_groom(['--date', DATE])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -96,7 +103,8 @@ class ForYouEndToEndTests(GroomAutoTestCase):
     def test_past_the_cap_the_housekeeping_has_its_own_section(self):
         self.write_product(approvals={'groom': 'auto', 'spend_money': 'human-now',
                                       'touch_security': 'human-now', 'touch_legal': 'human-now'},
-                           groom_cfg={'adjudicate_attempts': 1})
+                           groom_cfg={'adjudicate_attempts': 1},
+                           flags={'groom': {'structural': 'ask'}})
         self.fixture()
         r1 = self.run_groom(['--date', DATE])
         self.assertEqual(r1.returncode, 0, r1.stderr)

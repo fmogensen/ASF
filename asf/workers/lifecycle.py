@@ -2875,7 +2875,7 @@ def hold(path, run, kind, text, now, empty_cap=None, head=None, finding=None, ma
     spawning another. A different finding goes back to a correct session, whatever the rounds.
     An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round,
     and so does the loop guard (:func:`same_head_loop`): the same kind handed the same head
-    :data:`LOOP_CAP` times — ``head``, when the caller knows it, is where the branch sits now;
+    :func:`loop_cap` times — ``head``, when the caller knows it, is where the branch sits now;
     ``main``, when given, lets a worktree rebased onto a newer trunk count as a moved head."""
     if empty_cap is None:
         empty_cap = empty_ends_cap()

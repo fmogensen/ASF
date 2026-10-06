@@ -1,0 +1,51 @@
+[
+ {
+  "p": "a",
+  "day": "2026-09-29",
+  "id": "F-0001",
+  "t": "undecided3",
+  "verb": "yes"
+ },
+ {
+  "p": "a",
+  "day": "2026-09-30",
+  "id": "F-0001",
+  "t": "undecided3",
+  "verb": "yes"
+ },
+ {
+  "p": "a",
+  "day": "2026-10-01",
+  "id": "F-0001",
+  "t": "undecided3",
+  "verb": "yes"
+ },
+ {
+  "p": "a",
+  "day": "2026-10-02",
+  "id": "F-0001",
+  "t": "undecided3",
+  "verb": "yes"
+ },
+ {
+  "p": "a",
+  "day": "2026-09-29",
+  "id": "B-0001",
+  "t": "auto_bugs",
+  "verb": "open"
+ },
+ {
+  "p": "a",
+  "day": "2026-10-07",
+  "id": "B-0001",
+  "t": "auto_bugs",
+  "verb": "open"
+ },
+ {
+  "p": "b",
+  "day": "2026-09-29",
+  "id": "F-0003",
+  "t": "undecided_new",
+  "verb": "no: stale idea"
+ }
+]

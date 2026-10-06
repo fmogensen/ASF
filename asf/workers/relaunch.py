@@ -178,7 +178,7 @@ def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main
 
 
 def assess(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=None,
-           writes=(), product=None):
+           writes=(), product=None, guard=None, now=None):
     """``(reason, landed)``: :func:`verdict`'s reason (or None), and the sha of the commit the
     last report names that git verified on ``origin/<main>`` ('' when none) — the evidence a
     park closes its card on instead of waiting for a person (:mod:`asf.workers.trunkclose`).
@@ -186,10 +186,43 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
     host that could not answer makes ``landed`` :class:`asf.workers.landing.Unknown` — no
     decision this pass, neither a park nor a close.
     Under ``product``'s ``flags.facts: shadow`` the ``landed`` half is compared with the landing
-    fact (:func:`asf.facts.landing.landed`); the answer is always this one."""
+    fact (:func:`asf.facts.landing.landed`); the answer is always this one.
+    ``guard``: :func:`asf.workers.loops.settings`' caps — when the streak rules let the launch
+    go, the loop guard's same-report and daily rules (:func:`loop_guard`) still may refuse it."""
     if cap is None:
         from asf import config_keys
         cap = config_keys.value('worker_pool.caps.relaunch', CAP)
+    reason, landed = _assess(path, job, item, head, card, cause, repo, main, cap, writes, product)
+    if reason is None and guard is not None:
+        reason = loop_guard(path, job, item, card, guard, now)
+    return reason, landed
+
+
+def loop_guard(path, job, item, card='', guard=None, now=None):
+    """The park reason :func:`asf.workers.loops.judge` gives the job's runs since the item's
+    latest unpark, or None. A run whose record carries no ``report_key`` yet is read off its
+    log (only the newest run's log is still the job's own)."""
+    from asf.workers import loops
+    if not item:
+        return None
+    guard = guard or {}
+    all_runs = lifecycle.item_runs(path, item)
+    since = _since_unpark(all_runs)
+    runs = [r for r in all_runs if r.get('job') == job and not lifecycle.quota_exhausted(r)
+            and (r.get('started') or '') > since]
+    newest = max(runs, key=lambda r: r.get('started') or '', default=None)
+    if newest is not None and newest.get('ended') and not newest.get('report_key'):
+        newest['report_key'] = loops.report_key(_result_text(newest))
+    got = loops.judge(runs, card=card, now=now, same_report=guard.get('same_report'),
+                      daily_cap=guard.get('daily_cap'))
+    if not got:
+        return None
+    rule, why = got
+    return (f'{job} {why}. Not relaunched ({rule}): the row is parked until the card changes '
+            f'or `asf unpark {item}`')
+
+
+def _assess(path, job, item, head, card, cause, repo, main, cap, writes, product):
     runs = streak(path, job, item, head, card, cause)
     on_head = head_streak(path, job, item, head, card)
     if len(on_head) >= cap and len(on_head) > len(runs):
@@ -265,5 +298,29 @@ def _held(product, repo, main, path, item, sha, writes, branches):
 def park_fields(reason, card, now):
     """The update that parks the job's newest run (read by the feeder as ``PARKED``)."""
     return {'correction': {'kind': RELAUNCH_CAP, 'text': reason, 'at': now, 'parked': True,
-                           'reason': reason, 'card': card},
+                           'reason': reason, 'card': card, 'loop_key': loop_key(reason)},
             'operator_flagged': 1}
+
+
+#: what a park reason says that changes from tick to tick (counts, shas, cause digests)
+_VOLATILE_RE = re.compile(r'\b[0-9a-f]{7,40}\b|\d+')
+
+
+def loop_key(reason):
+    """A park reason with its counts and shas taken out: one loop re-parked tick after tick
+    (the lane's new correction lifting the park, the cap laying it again) keeps one key."""
+    return hashlib.sha256(_VOLATILE_RE.sub('#', reason or '').encode('utf-8')).hexdigest()[:12]
+
+
+def alarmed(path, job, item, key):
+    """True when a park of ``job`` since the item's latest unpark already carried ``key`` —
+    its alarm was raised then, and a re-park of the same loop raises none."""
+    if not item or not key:
+        return False
+    since = _since_unpark(lifecycle.item_runs(path, item))
+    for rec in lifecycle.read_lines(path):
+        corr = rec.get('correction')
+        if rec.get('job') == job and isinstance(corr, dict) and corr.get('loop_key') == key \
+                and (corr.get('at') or '') > since:
+            return True
+    return False

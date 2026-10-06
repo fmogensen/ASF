@@ -333,6 +333,24 @@ conventions:
   #                              # trunk's tip confirms trunk red on its red jobs (asf.trunk_red):
   #                              # no landing is sent to a correct round for it. off: only ASF's own
   #                              # dispatched full run confirms
+  #   relaunch_same_report: 2  # asf.workers.loops.SAME_REPORT (default 2): ended runs of one
+  #                            # job since the item's latest unpark that end on the same report
+  #                            # (shas masked) with the card unchanged before the loop guard
+  #                            # parks it — a moving head alone buys no more rounds. off: rule
+  #                            # disabled
+  #   relaunch_daily_cap: 6    # asf.workers.loops.DAILY_CAP (default 6): launches of one job in
+  #                            # the trailing 24h since the latest unpark before the loop guard
+  #                            # parks it, whatever changed between them. off: rule disabled
+  #   groom:
+  #     reask_days: 7     # asf.groom.sticky (default 7): days an answered groom question's
+  #                       # digest stays sticky — unchanged, it is dropped from the report
+  #                       # instead of asked again. off: never sticky, always re-asked
+  #     rank_owner: code  # code (default) | adjudicator: under code, `rank <n>` answers are
+  #                       # skipped (the feeder's own order owns rank); under adjudicator, the
+  #                       # groom brief asks for it as before
+  #     structural: report  # report (default) | ask: a no_stories/no_tasks line is printed as
+  #                         # a report line, not asked — an undecided new/3-day Feature is still
+  #                         # asked either way
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:
