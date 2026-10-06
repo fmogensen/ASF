@@ -283,6 +283,12 @@ conventions:
   #                    # BACKLOG_ID_RANGE block, is taken by a create-only ref
   #                    # refs/asf/ids/<P>-<nnnn> on the record's origin; a cloud session reads
   #                    # its block from its brief. off: the host-local reservation only
+  #   stale_ref_reopens: 1     # a PR red on a merge ref from before the trunk moved is reopened
+  #                            # for a fresh run (asf.stale_ref) at most this often per head (0: never)
+  #   stale_ref_job_paths: {}  # job → globs it reads, e.g. {e2e: ["web/*"]}: reopen only when the
+  #                            # trunk changed one; unset: the files the failing log names, else any
+  #   flake_skip_reproduced: on  # a red reproduced on two merge refs (same check, same failing
+  #                              # test) is a defect: no blind flake re-run (asf.flake). off: re-run
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

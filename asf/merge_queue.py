@@ -2536,7 +2536,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             # red, never re-run (a re-run replays the old ref): a fresh run on today's trunk
             old = stale_ref.stale(lane.product, lane.slug, failed, trunk_sha, lane.repo)
             if old and stale_ref.refresh(lane.product, lane.slug, n, head, trunk_sha, old,
-                                         out=lane.out):
+                                         out=lane.out, red=failed, repo=lane.repo):
                 lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — a fresh run on '
                          f'{lane.trunk} {trunk_sha[:9]} (its red {", ".join(old)} ran on a merge '
                          f'ref from before {lane.trunk} moved)')

@@ -16,12 +16,23 @@ before any flake re-run, any correct round, any trunk-red count (:mod:`asf.trunk
 * :func:`refresh` — such a PR is closed and reopened (``gh pr close`` / ``gh pr reopen``): the
   ``reopened`` event starts a fresh run on a **new merge ref** with the current trunk, on the same
   head — no commit on anyone's branch, and the newest run per check is what the gate reads
-  (:func:`asf.harvest.lane.latest_checks`, :func:`asf.merge_queue.newest`). Once per PR, head and
-  trunk tip; while its fresh run has not shown the PR waits (pending, never red). A reopen that
-  starts no run within :data:`WAIT_S` is given up on: the red is judged as it stands.
+  (:func:`asf.harvest.lane.latest_checks`, :func:`asf.merge_queue.newest`). While its fresh run
+  has not shown the PR waits (pending, never red). A reopen that starts no run within
+  :data:`WAIT_S` is given up on: the red is judged as it stands.
+
+A reopen is a replay of every workflow on the head, so it is spent sparingly (2026-10-05: one PR
+reopened 4 times in 35 min, red on the same deterministic test each time, because the trunk moves
+every few minutes):
+
+* **at most** ``conventions.flags.stale_ref_reopens`` (:data:`REOPENS_PER_HEAD`, 1) reopens per PR head commit —
+  past that, a red on an older merge ref is judged as it stands; a new head starts afresh;
+* **only when the trunk changed what the failing job reads** since the red run was created
+  (:func:`trunk_touched`): the job's own globs in ``conventions.flags.stale_ref_job_paths`` (``{job: [glob]}``)
+  when set, else the files the failing log names (``path:line``); with neither readable, any
+  trunk change counts (as before).
 
 Only a red on a fresh merge ref is a verdict. State: ``state/<product>/stale-ref.json``
-(``{"<pr>": {head, tip, at}}``). Never raises.
+(``{"<pr>": {head, tip, at, reopens, links, …}}``). Never raises.
 
 ``gh`` goes through :mod:`asf.github`, ``git`` through :mod:`asf.gitops`. A run's ``(event,
 created)`` is read once a **pass** — kept in :mod:`asf.facts.cache`, which the tick, the detached
@@ -29,6 +40,7 @@ harvest and the ci-queue pass each clear at their entry — never once a process
 (nor an Unknown one) outlives the pass that read it.
 """
 import datetime
+import fnmatch
 import json
 import os
 import time
@@ -43,6 +55,32 @@ WAIT_S = 1800
 KEEP_S = 3 * 86400
 #: the :mod:`asf.facts.cache` fact a run's ``(event, created epoch)`` is kept under, a pass
 RUN_FACT = 'workflow_run'
+#: ``conventions.flags.stale_ref_reopens`` default: reopens for a fresh merge ref per PR head commit
+REOPENS_PER_HEAD = 1
+
+
+def _conv_flag(product, name, default):
+    conv = getattr(product, 'conventions', None)
+    try:
+        return conv.flag(name, default) if conv is not None else default
+    except AttributeError:
+        return default
+
+
+def settings(product):
+    """``(reopens per head, {job: [glob]})`` from ``conventions.flags.stale_ref_reopens``
+    (default :data:`REOPENS_PER_HEAD`; 0 turns reopening off) and
+    ``conventions.flags.stale_ref_job_paths``."""
+    n = _conv_flag(product, 'stale_ref_reopens', REOPENS_PER_HEAD)
+    try:
+        n = int(n) if not isinstance(n, bool) else REOPENS_PER_HEAD
+    except (TypeError, ValueError):
+        n = REOPENS_PER_HEAD
+    n = n if n >= 0 else REOPENS_PER_HEAD
+    paths = _conv_flag(product, 'stale_ref_job_paths', None)
+    paths = {str(k): [str(g) for g in (v if isinstance(v, (list, tuple)) else [v]) if g]
+             for k, v in paths.items()} if isinstance(paths, dict) else {}
+    return n, paths
 
 
 def _sd(product):
@@ -107,6 +145,72 @@ def stale(product, slug, red, tip, repo):
     return list(dict.fromkeys(out))
 
 
+def _job(name):
+    return str(name or '').split(' ', 1)[0]
+
+
+def _matches(changed, globs):
+    for f in changed:
+        for g in globs:
+            if fnmatch.fnmatch(f, g) or (g.endswith('/') and f.startswith(g)):
+                return True
+    return False
+
+
+def trunk_changes(repo, tip, since):
+    """The files the trunk changed from its last first-parent commit before epoch ``since`` up
+    to ``tip``, or None when git cannot tell (no such commit, a read refused)."""
+    r = gitops.git(['rev-list', '-1', '--first-parent', f'--before=@{int(since)}', tip], repo)
+    base = r.data.strip() if r.ok else ''
+    if not base:
+        return None
+    r = gitops.git(['diff', '--name-only', base, tip], repo)
+    return [l for l in r.data.splitlines() if l.strip()] if r.ok else None
+
+
+def trunk_touched(product, slug, repo, tip, red, names, findings=None):
+    """True when, since a stale red's run was created, the trunk changed a file its job reads:
+    a ``stale_ref_job_paths`` glob of the job, else a file the failing log names. True too
+    when that cannot be told (fail-open: the reopen goes as before); False only when every stale
+    red was read and the trunk touched none of what it reads. ``findings``: a stand-in for
+    :func:`asf.merge_queue.failure_findings`."""
+    _n, job_paths = settings(product)
+    for c in red or ():
+        if (c.get('name') or '?') not in names:
+            continue
+        got = run_of(slug, c.get('link') or c.get('html_url'))
+        changed = trunk_changes(repo, tip, got[1]) if got and got[1] is not None else None
+        if changed is None:
+            return True
+        globs = job_paths.get(_job(c.get('name')))
+        if globs:
+            if _matches(changed, globs):
+                return True
+            continue
+        if findings is None:
+            from asf import merge_queue
+            findings = merge_queue.failure_findings
+        found = findings(slug, [{'name': c.get('name'),
+                                 'link': c.get('link') or c.get('html_url')}])
+        named = {p for item in found or () for p, _l, _t in item.get('paths') or ()}
+        if not named:
+            return True
+        from asf import trunk_red
+        if trunk_red._touches(changed, named):
+            return True
+    return False
+
+
+def _shown_since(slug, red, at):
+    """True when one of the ``red`` checks' runs was created at or after epoch ``at``: the
+    fresh run a reopen asked for has shown."""
+    for c in red or ():
+        got = run_of(slug, c.get('link') or c.get('html_url'))
+        if got and got[1] is not None and got[1] >= at:
+            return True
+    return False
+
+
 def path(state_dir):
     return os.path.join(state_dir, STATE_FILE)
 
@@ -141,27 +245,49 @@ def in_flight_run(slug, head):
     return None
 
 
-def refresh(product, slug, number, head, tip, names, out=print, now=None):
+def refresh(product, slug, number, head, tip, names, out=print, now=None, red=None,
+            repo=None):
     """A fresh run on a new merge ref for PR ``number`` red at ``head`` on ``names`` judged
     against an older trunk: ``'fresh'`` (closed and reopened now), ``'waiting'`` (reopened for
-    this head and tip already, its run not shown yet — or a run on the head is still going,
-    :func:`in_flight_run`, and the reopen waits for its verdict), or None — not refreshed (the reopen was
-    refused, or its run never showed within :data:`WAIT_S`): the caller judges the red as it
-    stands. Never raises."""
+    this head already, its run not shown yet — or a run on the head is still going,
+    :func:`in_flight_run`, and the reopen waits for its verdict), or None — not refreshed: the
+    reopen was refused, its run never showed within :data:`WAIT_S`, this head has had its
+    ``stale_ref_reopens`` already, or (``red`` — the red check dicts — and ``repo`` given) the
+    trunk changed nothing the failing job reads since its run (:func:`trunk_touched`). The
+    caller then judges the red as it stands. Never raises."""
     now = time.time() if now is None else now
     sd = _sd(product)
     try:
         data = {k: v for k, v in load(sd).items()
-                if isinstance(v, dict) and now - (v.get('at') or 0) < KEEP_S}
+                if isinstance(v, dict)
+                and now - (v.get('at') or v.get('judged_at') or 0) < KEEP_S}
         rec = data.get(str(number))
-        if rec and rec.get('head') == head and rec.get('tip') == tip:
-            if now - (rec.get('at') or 0) < WAIT_S:
-                return 'waiting'
-            if not rec.get('gave_up'):
-                rec['gave_up'] = True
+        same = bool(rec) and rec.get('head') == head
+        if same and rec.get('at'):
+            fresh = red is not None and _shown_since(slug, red, rec['at'])
+            if not fresh:
+                if rec.get('tip') == tip or red is not None:
+                    if now - rec['at'] < WAIT_S:
+                        return 'waiting'
+                    if not rec.get('gave_up'):
+                        rec['gave_up'] = True
+                        save(sd, data)
+                        out(f'stale merge ref: PR #{number} reopened '
+                            f'{int((now - rec["at"]) // 60)} min ago and no fresh run showed — '
+                            f'its red is judged as it stands')
+                    return None
+        cap, _paths = settings(product)
+        done = int(rec.get('reopens', 1 if rec.get('at') else 0)) if same else 0
+        if same and rec.get('judged') == tip:
+            return None
+        if done >= cap:
+            if same and rec.get('capped') != tip:
+                rec['capped'] = tip
+                rec['judged_at'] = int(now)
                 save(sd, data)
-                out(f'stale merge ref: PR #{number} reopened {int((now - rec["at"]) // 60)} min '
-                    f'ago and no fresh run showed — its red is judged as it stands')
+                out(f'stale merge ref: PR #{number} red on {", ".join(names)} at {head[:9]} was '
+                    f'reopened {done}× for this head already (flags.stale_ref_reopens {cap}) — '
+                    f'judged as it stands, no reopen')
             return None
         if getattr(product, 'conventions', None) is None:
             return None
@@ -170,6 +296,18 @@ def refresh(product, slug, number, head, tip, names, out=print, now=None):
             out(f'stale merge ref: PR #{number} waits — run {live[0]} on {head[:9]} is still '
                 f'{live[1]}; a reopen now would supersede it before its verdict')
             return 'waiting'
+        links = {c.get('name'): c.get('link') or c.get('html_url') for c in red or ()
+                 if c.get('name') in names}
+        if red is not None and repo and not trunk_touched(product, slug, repo, tip, red, names):
+            keep = dict(rec) if same else {'head': head, 'reopens': 0}
+            keep.update({'judged': tip, 'judged_at': int(now), 'links': links,
+                         'names': list(names)})
+            data[str(number)] = keep
+            save(sd, data)
+            out(f'stale merge ref: PR #{number} red on {", ".join(names)} at {head[:9]} — the '
+                f'trunk changed nothing the failing job reads since its run: judged as it '
+                f'stands, no reopen')
+            return None
         trunk = product.conventions.main
         why = (f'ASF: the red {", ".join(names)} ran on a merge ref of {trunk} from before '
                f'{trunk} moved to {tip[:9]}; a re-run would replay it. Closed and reopened for a '
@@ -186,7 +324,8 @@ def refresh(product, slug, number, head, tip, names, out=print, now=None):
             out(f'stale merge ref: PR #{number} closed but its reopen was refused — '
                 f'{(r.stderr or r.reason).strip()[-200:]}; reopen it')
             return None
-        data[str(number)] = {'head': head, 'tip': tip, 'at': int(now), 'names': list(names)}
+        data[str(number)] = {'head': head, 'tip': tip, 'at': int(now), 'names': list(names),
+                             'reopens': done + 1, 'links': links}
         save(sd, data)
         out(f'stale merge ref: PR #{number} red on {", ".join(names)} at {head[:9]} ran on a '
             f'merge ref from before {trunk} moved to {tip[:9]} — closed and reopened for a fresh '
@@ -203,4 +342,5 @@ def in_flight(product, now=None):
     now = time.time() if now is None else now
     return sorted(int(k) for k, v in load(_sd(product)).items()
                   if isinstance(v, dict) and str(k).isdigit() and not v.get('gave_up')
+                  and not v.get('capped') and not v.get('judged')
                   and now - (v.get('at') or 0) < WAIT_S)
