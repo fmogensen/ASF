@@ -26,6 +26,24 @@ def _literal_head(glob):
     return glob
 
 
+def _literal_tail(glob):
+    """The part of a glob after its last wildcard: ``migrations/*_a.sql`` → ``_a.sql``."""
+    for i in range(len(glob) - 1, -1, -1):
+        if glob[i] in WILDCARDS or glob[i] == ']':
+            return glob[i + 1:]
+    return glob
+
+
+def _tails_disjoint(a, b):
+    """True when no path can match both globs because their literal tails differ: every path a
+    glob matches ends with its tail, so one tail must end the other. Undecided (False) for ``**``
+    and character classes — those stay a conservative overlap."""
+    if '**' in a or '**' in b or '[' in a or '[' in b:
+        return False
+    ta, tb = _literal_tail(a), _literal_tail(b)
+    return not (ta.endswith(tb) or tb.endswith(ta))
+
+
 def globs_overlap(a, b):
     if writes_intersect(a, b):  # asf check's own test, then the gate's wider reach
         return True
@@ -35,7 +53,9 @@ def globs_overlap(a, b):
         return True
     # two globs, each open-ended, whose literal heads nest (`apps/web/**` vs `apps/web/*.ts`):
     # they may name a common file — the gate errs on waiting, a false overlap costs one tick
-    return ha != a and hb != b and (ha.startswith(hb) or hb.startswith(ha))
+    # — unless their literal tails rule a common file out (`migrations/*_a.sql` vs `*_b.sql`)
+    return (ha != a and hb != b and (ha.startswith(hb) or hb.startswith(ha))
+            and not _tails_disjoint(a, b))
 
 
 def shared_globs(product):
