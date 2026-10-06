@@ -963,6 +963,63 @@ class TestSpawn(Home):
         self.assertEqual(rec['job'], 'failsamp')
         self.assertNotIn('progress_pid', pool_mod.load_sessions(self.product)['failsamp'])
 
+    def test_a_broken_push_credential_refuses_the_launch_before_anything_is_spent(self):
+        # B-0040: the account's git push credential is probed before a worktree, an id range or
+        # a session is spent — a broken one refuses this launch outright, no worktree left behind.
+        from asf.workers import account_auth
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        err = io.StringIO()
+        with mock.patch('asf.doctor.probe_account_push_auth',
+                        return_value=(False, 'could not read Username')) as probe, \
+                contextlib.redirect_stderr(err):
+            with self.assertRaises(spawn_mod.SpawnError):
+                spawn_mod.spawn(self.product, s1_row(), self.acct(), 'fix\n', runtime=rt,
+                                cfg=self.cfg)
+        probe.assert_called_once()
+        self.assertNotIn('fix-b-0001', pool_mod.load_sessions(self.product))
+        self.assertFalse(os.path.exists(os.path.join(env.ASF_HOME, 'state', 'sample',
+                                                      'worktrees', 'fix-b-0001')))
+        self.assertIn('ALARM', err.getvalue())
+        self.assertIn('acct-a', account_auth.blocked())
+
+    def test_a_blocked_account_is_refused_with_no_second_probe(self):
+        # once blocked, the account is unusable for every later launch until an operator clears
+        # it — a second attempt costs no new network round trip and prints no second ALARM.
+        from asf.workers import account_auth
+        account_auth.block_now('acct-a', self.product, 'could not read Username')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        with mock.patch('asf.doctor.probe_account_push_auth') as probe:
+            with self.assertRaises(spawn_mod.SpawnError):
+                spawn_mod.spawn(self.product, s1_row(), self.acct(), 'fix\n', runtime=rt,
+                                cfg=self.cfg)
+        probe.assert_not_called()
+
+    def test_a_working_push_credential_launches_normally(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        with mock.patch('asf.doctor.probe_account_push_auth', return_value=(True, 'authenticates')) as probe:
+            rec = spawn_mod.spawn(self.product, s1_row(), self.acct(), 'fix\n', runtime=rt,
+                                  cfg=self.cfg)
+        probe.assert_called_once()
+        self.assertEqual(rec['job'], 'fix-b-0001')
+
+    def test_a_cloud_lane_launch_probes_nothing_it_pushes_from_the_runner(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        rt.lane = 'cloud'
+        with mock.patch('asf.detach.spawn', side_effect=lambda argv: 1), \
+                mock.patch('asf.doctor.probe_account_push_auth') as probe:
+            spawn_mod.spawn(self.product, feature_row('cloudy2'), self.acct(), 'b', runtime=rt,
+                            cfg=self.cfg)
+        probe.assert_not_called()
+
+    def test_conventions_flags_push_auth_preflight_false_opts_out(self):
+        product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                         'job_grants': [self.grant],
+                                         'conventions': {'flags': {'push_auth_preflight': False}}})
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        with mock.patch('asf.doctor.probe_account_push_auth') as probe:
+            spawn_mod.spawn(product, s1_row(), self.acct(), 'fix\n', runtime=rt, cfg=self.cfg)
+        probe.assert_not_called()
+
 
 class LaunchRebaseDefersMidRun(Home):
     """F-0203 — a launch never re-pushes a branch whose CI run is in flight: the launch rebase
@@ -2113,6 +2170,71 @@ class TestHealth(Home):
         self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
                          git('rev-parse', 'HEAD', cwd=wt))
 
+    def test_a_finished_republish_opens_the_items_pr_in_the_same_pass(self):
+        # B-0039: the park's only cause was the failed push (kind: UNPUSHED) — once health
+        # publishes it this pass, it must also open (or adopt) the item's PR right here, not
+        # leave the branch pushed with no PR until some later pass happens to notice.
+        rec = self.spawn('stuck', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'fix')
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(self.product, 'stuck', ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1,
+                                correction={'kind': lifecycle.UNPUSHED,
+                                            'text': lifecycle.unpushed_text(reason),
+                                            'at': '2026-09-27T07:00:45Z'})
+        with mock.patch('asf.ci_queue._open_pr', return_value=(42, '')) as opened:
+            found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                      out=lambda s: None)
+        self.assertEqual(opened.call_args[0][:3], (self.product, branch, 'F-0001'))
+        run = pool_mod.load_sessions(self.product)['stuck']
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertIsNone(run.get('correction'))
+        self.assertIn(('stuck', 'pr-opened', '#42'), found)
+
+    def test_conventions_flags_health_opens_pr_false_opts_out(self):
+        product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                         'job_grants': [self.grant],
+                                         'conventions': {'flags': {'health_opens_pr': False}}})
+        rt = runtime_mod.FakeRuntime([{'ok': True}])
+        wt = spawn_mod.spawn(product, feature_row('stuck3'), self.acct(), 'b', runtime=rt,
+                             cfg=self.cfg)['worktree']
+        self.commit(wt, 'fix')
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(product, 'stuck3', ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1,
+                                correction={'kind': lifecycle.UNPUSHED,
+                                            'text': lifecycle.unpushed_text(reason),
+                                            'at': '2026-09-27T07:00:45Z'})
+        with mock.patch('asf.ci_queue._open_pr') as opened:
+            found = health_mod.health(product, fix=True, alive=lambda pid: False,
+                                      out=lambda s: None)
+        opened.assert_not_called()
+        run = pool_mod.load_sessions(product)['stuck3']
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertIsNone(run.get('correction'))
+        self.assertFalse(any(j == 'stuck3' and w.startswith('pr-') for j, w, _d in found), found)
+
+    def test_a_finished_republish_with_no_pr_host_still_clears_the_park(self):
+        # the sample product here lands with no PR host (no repo_slug): opening the PR cannot
+        # succeed, but the park whose only cause was the push must still clear — the item is
+        # never left parked again just because there was nothing to open.
+        rec = self.spawn('stuck2', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'fix')
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(self.product, 'stuck2', ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1,
+                                correction={'kind': lifecycle.UNPUSHED,
+                                            'text': lifecycle.unpushed_text(reason),
+                                            'at': '2026-09-27T07:00:45Z'})
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None)
+        run = pool_mod.load_sessions(self.product)['stuck2']
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertIsNone(run.get('correction'))
+        self.assertTrue(any(j == 'stuck2' and w == 'pr-not-opened' for j, w, _d in found), found)
+
     def _t0338_shape(self, job):
         """A run whose worktree is the lane's rebase arriving (a product's T-0338): origin/<branch>
         holds its own commit and a copy of a trunk commit on an old base; the trunk landed that
@@ -2714,6 +2836,31 @@ class ABlockedRunIsParkedUntilTheCardChanges(Home):
         self.assertFalse([f for f in found if f[1] == 'parked'], found)
         after = pool_mod.load_sessions(self.product)['parked']['correction']
         self.assertEqual(after, before)
+
+    def test_a_needs_operator_line_with_a_readonly_command_is_run_and_attached(self):
+        # B-0042: the NEEDS OPERATOR question names its exact command in backticks; health runs
+        # it itself (it reads only) and attaches the output to the park.
+        items = self.card()
+        rec = self.spawn('parked2', {'ok': True, 'pid': 74, 'result':
+                         'NEEDS OPERATOR: which commit is this — `git log -1 --format=%s`?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        parked = [d for j, w, d in found if w == 'parked']
+        self.assertEqual(len(parked), 1, found)
+        self.assertIn('git log -1 --format=%s', parked[0])
+        corr = pool_mod.load_sessions(self.product)['parked2']['correction']
+        self.assertEqual(corr['probe']['command'], 'git log -1 --format=%s')
+        self.assertTrue(corr['probe']['output'])
+
+    def test_a_needs_operator_line_with_a_mutating_command_is_parked_with_no_probe(self):
+        items = self.card()
+        rec = self.spawn('parked3', {'ok': True, 'pid': 75, 'result':
+                         'NEEDS OPERATOR: should this merge — `git push origin main --force`?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None, items=items)
+        corr = pool_mod.load_sessions(self.product)['parked3']['correction']
+        self.assertNotIn('probe', corr)
 
     def test_the_card_gaining_writes_releases_the_park(self):
         items = self.card()

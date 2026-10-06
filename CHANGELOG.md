@@ -2,6 +2,18 @@
 
 One entry per released version, newest first.
 
+## Unreleased
+
+### Bugs fixed
+
+- An overlap (`writes:`) hold no longer falls on the Task that already has a pushed branch or an open PR — the unstarted sibling yields instead; `asf set <id> after+=<other>` now flips a standing hold the wrong way round rather than leaving a cycle behind (#37)
+- `asf doctor` no longer warns that `release.gate` is not a field of the product file; `release.floor` and `release.seats` are registered too (#38)
+- Health now opens or refreshes an item's PR in the same pass it republishes a parked session's finished work, and clears the park when the failed push was its only cause (#39)
+- Launch now probes a worker account's git push credential before spending a session on it; a broken one blocks the account for every launch, with one `ALARM`, until it passes again (#40)
+- A session ending on an account/auth-level error (an organization that disabled subscription access, `oauth_org_not_allowed`, 401/403) no longer counts toward delivery-incomplete, relaunch or loop parks (#41)
+- A `NEEDS OPERATOR` line now carries the exact command in backticks; when it reads only, harvest runs it itself and attaches the output to the park (#42)
+- Every `WAITS ON <id>` row's target must itself have a row or be done — tested over the feeder; a PR with a green gate but skipped heavy CI (missing its heavy-ci label) now gets a `PUSHED → LAND` row that names the label and requests it, instead of reading as if nothing were wrong (#43)
+
 ## v0.1.195 — 2026-10-06
 
 ### Features landed

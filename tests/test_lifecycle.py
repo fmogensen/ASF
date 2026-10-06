@@ -1268,6 +1268,20 @@ class BlockedParkTests(unittest.TestCase):
         self.assertIn('asf unpark T-0001', reason)
         self.assertIn('RESHAPE → PLAN', reason)
 
+    def test_a_probe_is_attached_to_the_correction_and_named_in_the_reason(self):
+        # B-0042: a read-only command harvest ran itself over the NEEDS OPERATOR question is
+        # attached to the park — the operator opens it already answered.
+        probe = {'command': 'git status --short', 'output': 'M a.py'}
+        fields, line = lc.blocked_park('check `git status --short`', 'T-0001', 'card1', 't1',
+                                       probe=probe)
+        self.assertEqual(fields['correction']['probe'], probe)
+        self.assertIn('git status --short', fields['correction']['reason'])
+        self.assertIn('git status --short', line)
+
+    def test_no_probe_is_the_same_six_keys_as_before(self):
+        fields, _ = lc.blocked_park('why is this stuck?', 'T-0001', 'card1', 't1', probe=None)
+        self.assertEqual(set(fields['correction']), {'kind', 'text', 'at', 'parked', 'reason', 'card'})
+
     def test_card_fingerprint_is_stable_and_reacts_to_writes_and_after(self):
         product = self.product()
         card = {'id': 'T-0001', 'title': 'a task', 'writes': ['a.py'], 'after': 'none'}

@@ -42,6 +42,18 @@ NO_QUESTION_RE = re.compile(r'^[\s`*_]*(none|nothing|omit(ted)?|n/a|-|—)(?![\w
 NO_SPLIT_RE = re.compile(
     r'^\s*(?:NO SPLIT|NEEDS OPERATOR)\s*:\s*(?P<what>.*\bdoes not split\b.*)$', re.M | re.I)
 BLOCKED = 'blocked'
+#: The exact command a ``NEEDS OPERATOR:`` line names, backtick-fenced in its own text (B-0042):
+#: the one piece of it harvest can act on itself when the command reads only
+#: (:func:`asf.harvest.harvest.operator_readonly`), instead of waiting on a person to run it
+#: and paste the output back.
+OPERATOR_COMMAND_RE = re.compile(r'`([^`\n]+)`')
+
+
+def operator_command(question):
+    """The last backtick-fenced command ``question`` (a declared ``NEEDS OPERATOR:`` question,
+    :func:`needs_input`) names, or ``''`` when it names none."""
+    found = OPERATOR_COMMAND_RE.findall(str(question or ''))
+    return found[-1].strip() if found else ''
 
 
 def parse(text):

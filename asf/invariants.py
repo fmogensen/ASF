@@ -220,13 +220,33 @@ def _after_of(meta):
 
 
 def overlap_tasks(metas):
-    """``{id: {'type', 'state', 'writes', 'after', 'removed'}}`` — a record's metas (whichever of
-    typed or machine block each field lives in) normalised into the shape :func:`unordered_overlaps`
-    takes, ``state`` read through :func:`_state` so a machine-block value and a plain dict's
-    top-level one are read alike."""
+    """``{id: {'type', 'state', 'writes', 'after', 'removed', 'evidence'}}`` — a record's metas
+    (whichever of typed or machine block each field lives in) normalised into the shape
+    :func:`unordered_overlaps` takes, ``state`` read through :func:`_state` so a machine-block
+    value and a plain dict's top-level one are read alike."""
     return {iid: {'type': m.get('type'), 'state': _state(m), 'writes': _flat_writes(m.get('writes')),
-                  'after': m.get('after') or (), 'removed': m.get('removed')}
+                  'after': m.get('after') or (), 'removed': m.get('removed'),
+                  'evidence': m.get('evidence') or ()}
             for iid, m in metas.items()}
+
+
+#: A Task's own evidence line once it has a branch (B-0037: ``asf.record.ingest`` writes
+#: ``branch <b> exists`` / ``branch <b>, PR #<n> <state>``; never ``…, no branch yet``).
+_BRANCH_EVIDENCE_RE = re.compile(r'^branch \S')
+#: ...and once a PR is open on it (the same text :func:`asf.feeder.rows.open_pr_of` reads).
+_OPEN_PR_EVIDENCE_RE = re.compile(r'\bPR #(\d+) OPEN\b')
+
+
+def has_pushed_work(task):
+    """True when ``task`` (:func:`overlap_tasks`'s shape) already has a pushed branch or an open
+    PR, read off its own ``evidence`` lines — never git, never the forge: the invariant stays
+    pure. An unstarted Task (state New, no branch) is never mistaken for one with real progress
+    (B-0037): :func:`unordered_overlaps` yields the overlap hold to this Task, not away from it."""
+    for e in task.get('evidence') or ():
+        s = str(e)
+        if _BRANCH_EVIDENCE_RE.match(s) or _OPEN_PR_EVIDENCE_RE.search(s):
+            return True
+    return False
 
 
 def _after_edges(tasks):
@@ -260,13 +280,19 @@ def ordered(edges, a, b):
 
 
 def unordered_overlaps(tasks, shared=()):
-    """``[(a, b, glob_a, glob_b)]`` — every pair of Active, non-``removed:`` Tasks carrying
-    ``writes:`` whose globs intersect (``core.writes_intersect``) that the record has **not**
-    ordered (:func:`ordered`), ``a`` < ``b``, the first intersecting glob pair. ``tasks`` is
-    every Task, Active or not: a Closed or removed one is no pair of its own but may still be a
-    link in an ``after:`` chain. ``shared``: the product's ``conventions.shared_paths`` — a glob
-    either side of the pair covers is skipped, so two Tasks whose only common glob is a declared
-    lockfile are no pair at all (the feeder does not serialise them either).
+    """``[(owner, held, glob_owner, glob_held)]`` — every pair of Active, non-``removed:`` Tasks
+    carrying ``writes:`` whose globs intersect (``core.writes_intersect``) that the record has
+    **not** ordered (:func:`ordered`), the first intersecting glob pair. ``tasks`` is every Task,
+    Active or not: a Closed or removed one is no pair of its own but may still be a link in an
+    ``after:`` chain. ``shared``: the product's ``conventions.shared_paths`` — a glob either side
+    of the pair covers is skipped, so two Tasks whose only common glob is a declared lockfile are
+    no pair at all (the feeder does not serialise them either).
+
+    ``owner`` is the one of the pair that already has a pushed branch or an open PR
+    (:func:`has_pushed_work`) — the hold never falls on it: a Task mid-build, its PR open, is
+    never told to wait on one the record shows no sign of starting (B-0037). Neither carries
+    progress, or both do (two live branches that happen to overlap): the lower id is ``owner``,
+    the same tie-break this always made, so an already-ordered pair stays ordered.
 
     Reachability runs only for a pair whose globs already intersect, so the cost is the number
     of intersecting pairs, not the square of the record."""
@@ -292,7 +318,11 @@ def unordered_overlaps(tasks, shared=()):
                 if glob:
                     break
             if glob and not ordered(edges, a, b):
-                out.append((a, b, glob[0], glob[1]))
+                a_progress, b_progress = has_pushed_work(tasks[a]), has_pushed_work(tasks[b])
+                if b_progress and not a_progress:
+                    out.append((b, a, glob[1], glob[0]))
+                else:
+                    out.append((a, b, glob[0], glob[1]))
     return out
 
 
@@ -1339,3 +1369,27 @@ def check_i13(declared, minted):
 
 #: The invariants the tick never runs (R13): I6 daily/deep only, I12 and I13 in the tests.
 TEST_ONLY = {'I6': check_i6, 'I12': check_i12, 'I13': check_i13}
+
+
+def waits_on_without_a_row(rows, items):
+    """B-0043 — every ``[(item_id, target)]`` where a feeder row's ``waits_on`` names another
+    item (:data:`asf.record.core.ID_RE` — a real id, never a keyword like ``landing`` or
+    ``decision``) that the pass gave no row of its own, and the record does not show it done
+    (removed, or :data:`DONE_STATES`: a card the index carries no entry for at all is neither —
+    never read as done just for being absent): a ``WAITS ON <target>`` row the operator opens
+    and finds nothing behind it, open work with no row at all. A test over the feeder's output,
+    never a tick check (R13) — the feeder already drops a row for a reason (a correction speaks
+    for it, a delivery absorbs it); this only says the *target* must still be answered for
+    somewhere."""
+    from asf.record.core import ID_RE
+    present = {r.item_id for r in rows}
+    out = []
+    for r in rows:
+        target = r.waits_on
+        if not target or not ID_RE.match(str(target)) or target in present:
+            continue
+        card = (items or {}).get(target)
+        if card is not None and (card.get('removed') or card.get('state') in DONE_STATES):
+            continue
+        out.append((r.item_id, target))
+    return out

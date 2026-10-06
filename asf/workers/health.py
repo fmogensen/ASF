@@ -601,7 +601,7 @@ def refusal_text(branch, line):
             f'what it names and commit; the factory publishes, never a push of your own')
 
 
-def republish_steps(product, registry, job, run, alive, found):
+def republish_steps(product, registry, job, run, alive, found, items=None):
     """A product's F-0094: a run judged ``failed: not pushed`` whose publish the factory refused
     (its rebase conflicted, a redaction, a hook) kept its commits in its worktree, and no later
     pass ever tried again — the refusal's cause fixed, the worktree publishable, the item still
@@ -609,7 +609,16 @@ def republish_steps(product, registry, job, run, alive, found):
     (:func:`publish_gap`), while the run still owns it and no live session is in it. Published,
     the run is re-judged and a ``finished`` one drops its correction; refused again, a pending
     unpushed correction carries the refusal (:func:`refusal_text`), and a refusal already
-    recorded is not printed again."""
+    recorded is not printed again.
+
+    B-0039: a ``finished`` republish is the park's only cause (its one ``correction`` was
+    :data:`lifecycle.UNPUSHED` — nothing else was ever wrong with the item) cleared the moment
+    the branch is on origin, so this same pass also opens the branch's PR, or adopts the open one
+    already naming it (:func:`asf.ci_queue._open_pr`) — the item is never left pushed with an
+    unopened PR until some later pass happens to notice (``items``: the record's index, for the
+    item the PR's title and body are rendered from; no PR host, or a conflict with the trunk, is
+    one more finding, never a reason to leave the correction parked again). ``conventions.flags.
+    health_opens_pr: false`` opts a product out (default on)."""
     reason = run.get('end_reason') or ''
     wt, branch = run.get('worktree'), run.get('branch')
     if not (reason.startswith(UNPUSHED_REASON_PREFIXES) or ruling_ready(run)) \
@@ -628,11 +637,19 @@ def republish_steps(product, registry, job, run, alive, found):
         found.append((job, 'published', line))
         fields = {'end_reason': reason, 'rc': 0 if reason == lifecycle.FINISHED else 1,
                   'publish_refused': None}
+        was_unpushed_park = isinstance(run.get('correction'), dict) \
+            and run['correction'].get('kind') == lifecycle.UNPUSHED
         if reason == lifecycle.FINISHED:
             fields['correction'] = None
         pool_mod.update_session(product, job, **fields)
         run.update(end_reason=reason)
         found.append((job, 're-judged', reason))
+        if reason == lifecycle.FINISHED and was_unpushed_park \
+                and product.conventions.flag('health_opens_pr', True) is not False:
+            from asf.ci_queue import _open_pr
+            number, why = _open_pr(product, branch, run.get('item'), items)
+            found.append((job, 'pr-opened', f'#{number}') if number
+                         else (job, 'pr-not-opened', why))
         return
     if line == run.get('publish_refused'):
         return
@@ -839,7 +856,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                     if lifecycle.quota_exhausted(s):
                         found.append(account_fault(product, job, s, ev))
             if not closed:
-                yield from republish_steps(product, registry, job, s, alive, found)
+                yield from republish_steps(product, registry, job, s, alive, found, items)
             return
         ev = lifecycle.gather(product, s, alive=alive, liveness=liveness)
         ev = file_review(product, job, s, ev, alive, found)
@@ -902,8 +919,16 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             # with commits or files in its worktree has something to land — never this park (a
             # product's T-0349: an approved transplant parked "nothing to land" because its
             # report asked a person to publish it); it is held below with its work as the input
+            probe = None
+            command = report_mod.operator_command(question)
+            if command:
+                from asf.harvest import harvest as harvest_mod
+                ran, output = harvest_mod.run_operator_command(command, product.repo_dir, product)
+                if ran:
+                    probe = {'command': command, 'output': output}
             fields, line = lifecycle.blocked_park(
-                question, s.get('item'), lifecycle.card_fingerprint(product, s.get('item'), items), now)
+                question, s.get('item'), lifecycle.card_fingerprint(product, s.get('item'), items),
+                now, probe=probe)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'parked', line))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.delivered_off_branch(

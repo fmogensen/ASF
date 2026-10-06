@@ -58,9 +58,22 @@ class TestClassification(HomeCase):
                      'HTTP 403 Forbidden: subscription disabled',
                      'Your subscription has been disabled',
                      'Invalid API key · Please run /login',
-                     'authentication_error: invalid bearer token'):
+                     'authentication_error: invalid bearer token',
+                     # B-0041: "disabled" before "subscription", not after — the two patterns
+                     # above only match "subscription ... disabled", never this order
+                     'Error: your organization has disabled this workspace\'s subscription access'):
             with self.subTest(text=text):
                 self.assertEqual(runtime_mod.failure_reason(result(text)), account_auth.AUTH)
+
+    def test_the_organization_disabled_subscription_text_matches_in_log_too(self):
+        # B-0041: the dead-pid path reads a run's raw log through account_auth.in_log — the same
+        # MATCHER failure_reason uses — so a session that died with no result line still blocks
+        # its account on this phrasing, not just a live result.
+        log = os.path.join(self.tmp, 'died.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+            f.write('This organization has disabled the subscription access for this seat\n')
+        self.assertTrue(account_auth.in_log(log))
 
     def test_prose_that_only_mentions_the_words_is_not(self):
         for text in ('the forbidden list grew by one', 'unauthorized edits are reverted',

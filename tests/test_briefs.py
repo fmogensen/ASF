@@ -237,7 +237,8 @@ class GoldenBriefTest(unittest.TestCase):
     def test_the_tail_carries_the_typed_report_and_the_operator_marker(self):
         text = briefs.build(product(), ROWS['spec'], index(), [], REPO_FACTS).text
         self.assertIn('\nREPORT\nitem: F-0001\nkind: spec\n', text)
-        self.assertIn('NEEDS OPERATOR: <what> — <the command or the answer needed>', text)
+        self.assertIn('NEEDS OPERATOR: <what you could not check or do> — ', text)
+        self.assertIn('the exact command in', text)
 
     def test_every_kind_ends_with_the_forbid_background_paragraph(self):
         # B-0052: a session that backgrounds the suite and returns before it ends leaves no

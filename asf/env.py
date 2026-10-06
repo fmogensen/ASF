@@ -548,12 +548,14 @@ IMPROVE_FIELDS = {'thresholds': _MAP, 'epic': _STR, 'window_days': None, 'premiu
                   # verify_weeks, min_move, file_to, epic
                   'scorecard': _MAP}
 # `release:` is a map: the release-readiness gate's thresholds (asf.release.DEFAULTS).
+# ``gate`` (asf.release_preview.gate_for) picks the printed gate; ``floor``/``seats`` are
+# criteria 9 and 10's own limits (asf.release.FLOOR_DEFAULTS, asf.metrics.throughput.SEAT_DEFAULTS)
+# — all three are read by code and now declared, so a product file that sets one is no longer an
+# unknown key the doctor's product row names in yellow (B-0038).
 RELEASE_FIELDS = {'window_days': None, 'max_hand_fixes': None, 'max_repair_per_feature': None,
                   'ci_runs': None, 'min_upgrades': None, 'hand_types': _LIST,
-                  'readme_sections': _LIST, 'ci_steps': _MAP, 'requires': _MAP, 'blocking': _LIST}
-# ``release.floor`` and ``release.seats`` (criteria 9 and 10) are read by asf.release but not
-# listed here while a pinned reader (tools/pinned-readers.txt) predates them: a product file that
-# sets one loads, and the doctor's product row names it as unknown until that reader is dropped.
+                  'readme_sections': _LIST, 'ci_steps': _MAP, 'requires': _MAP, 'blocking': _LIST,
+                  'gate': _STR, 'floor': _MAP, 'seats': _MAP}
 # every product-file section whose own keys are checked, keyed by its own field table.
 NESTED_FIELDS = {
     'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS, 'improve': IMPROVE_FIELDS,

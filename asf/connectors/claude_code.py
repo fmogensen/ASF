@@ -28,6 +28,9 @@ DEFAULT_AUTH_ERROR_PATTERNS = (
     r'\b(?:unauthori[sz]ed|forbidden)\b.{0,80}\b40[13]\b',
     r'subscription (?:is |has been |was )?(?:disabled|inactive|suspended|cancell?ed|expired)',
     r'account (?:is |has been |was )?(?:disabled|suspended|deactivated)',
+    # B-0041: the disabled word before "subscription", not after it — "organization has
+    # disabled ... subscription access" (a real refusal text the two patterns above miss)
+    r'organi[sz]ation.{0,80}disabled.{0,80}subscription',
 )
 
 

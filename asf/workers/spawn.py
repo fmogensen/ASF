@@ -1125,24 +1125,52 @@ def _discard(product, path):
     return trash.discard(product.repo_dir, env.state_dir(product), path, check_clean=False)
 
 
+def _preflight_push_auth(product, account, product_auth_env):
+    """B-0040: the account's git push credential (credential helper, SSH or token, however it
+    is configured) probed before a worktree, an id range or a session is spent
+    (:func:`asf.doctor.probe_account_push_auth` — the same probe doctor's ``worker push auth``
+    row runs). Already blocked (this probe failed before, or a run's auth error did,
+    :mod:`asf.workers.account_auth`): refused at once, no second probe wasted on a launch that
+    cannot happen anyway. A missing or broken credential blocks the account the same way an auth
+    error on a run does — one ``ALARM``, unusable for every product until ``asf workers enable
+    <account>`` (or a manual probe on it finishes, :func:`asf.workers.account_auth.proved`).
+    ``conventions.flags.push_auth_preflight: false`` opts a product out (default on)."""
+    from asf import doctor
+    from asf.workers import account_auth
+    if product.conventions.flag('push_auth_preflight', True) is False:
+        return
+    if account.name in account_auth.blocked():
+        raise SpawnError(f'{account.name}: {account_auth.stop_reason(account.name)}',
+                         clear=account_auth.enable_hint(account.name))
+    ok, detail = doctor.probe_account_push_auth(account, product, product_auth_env)
+    if ok:
+        return
+    line = account_auth.block_now(account.name, product, detail)
+    print(line, file=sys.stderr)
+    raise SpawnError(f'{account.name}: git push credential failed — {detail}',
+                     clear=account_auth.enable_hint(account.name))
+
+
 def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     """Launch one row on ``account``. Returns the session record written to the ledger."""
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
     passthrough = env.env_passthrough(cfg)
     runtime = runtime or runtime_mod.from_config(cfg)
+    cloud = getattr(runtime, 'lane', 'local') == 'cloud'
     product_auth_env = env.product_auth_env(product)
     try:  # the account's credential files, read before anything is made: a refusal leaves nothing
         runtime_mod.auth_env_values(account, product_auth_env)
     except runtime_mod.AuthEnvError as e:
         raise SpawnError(str(e), clear=e.clear) from None
+    if not cloud:  # a cloud session pushes from the runner, never this host — nothing to probe
+        _preflight_push_auth(product, account, product_auth_env)
     model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
     refusal = spawn_refusal(product, row, branch)
     if refusal:  # before anything is made: a refused launch leaves nothing behind
         raise SpawnError(refusal)
     worktree = make_worktree(product, row.job, branch, kind=row.kind, severity=row.severity)
-    cloud = getattr(runtime, 'lane', 'local') == 'cloud'
     setup_s = None
     if cloud:
         # the session runs off this host (asf.workers.cloud): nothing is set up or built here,
