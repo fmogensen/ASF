@@ -1,7 +1,7 @@
 """asf.tick.file_bugs — file/bump Bugs from ci, refusals, rule violations and the record's own
 standing errors (``asf file-bugs``).
 
-The learning loop: four sources file or bump a Bug, keyed on the typed `signature` field so
+The learning loop: these sources file or bump a Bug, keyed on the typed `signature` field so
 "same signature = same Bug" needs no id lookup table of its own:
   - metrics/ci: a `failed_step` seen >= 2 times in the last 24h
   - metrics/ticks: a file refused >= 2 times in the last 24h
@@ -11,6 +11,10 @@ The learning loop: four sources file or bump a Bug, keyed on the typed `signatur
   - `asf check` over the record: one Bug per error CLASS (``record_error_signatures``)
   - the CI logs of ``conventions.ci_workflow``: one counted Bug per flaky e2e test
     (:mod:`asf.tick.flaky`, keyed and counted in ``state/<p>/flaky.json``)
+  - metrics/sessions: a failing outcome class over ``conventions.outcome_share_pct`` of the last
+    24h's ended sessions (``outcome_signatures``)
+  - metrics/sessions: the same item (or job, when it names none) ending the same failing class
+    ``conventions.repeat_failure_n`` times or more in that window (``repeat_signatures``)
 A signature is left alone while it is still inside its own refile window — `refile_days` on the
 info dict, defaulting to one day — so a second run inside that window is a no-op instead of
 double-counting a still-open problem.
@@ -33,11 +37,19 @@ from asf.record.ids import mint_id, write_new_item
 from asf.record.ingest import append_history_lines
 from asf.tick.migrate import truncate
 from asf.tick.stale import parse_iso
+from asf.workers import lifecycle
 
 CI_REFUSAL_WINDOW_H = 24
 #: A CI failure's Bug title opens with this, then its ``<job>: <failed step>`` signature — the
 #: groom's ``decide_or_close_ci_red`` reads the job back off it.
 CI_RED_TITLE = 'CI red: '
+
+#: The rate and the repeat read the last day of `metrics/sessions`, not the rollup's week — a
+#: rate over a week hides a bad day and files late.
+SESSION_WINDOW_H = 24
+#: Evidence for a `metrics/sessions` source is capped at this many lines, newest kept — a repeat
+#: group or a bad day is otherwise unbounded from above.
+EVIDENCE_CAP = 20
 
 #: The conventions a caller with no Product reads: the trunk is `main`, no batch lane, no
 #: default Bug Epic. The Epic a filed Bug is parented under is `conventions.default_bug_epic`;
@@ -307,6 +319,92 @@ def record_error_signatures(root, findings=None, canonical=None, shared=()):
     return out
 
 
+def _session_events(root, now):
+    """One pass over ``metrics/sessions/*.jsonl``, in stream order — the window and the
+    classification :func:`outcome_signatures` and :func:`repeat_signatures` both need, read and
+    classified once. Keeps lines inside :data:`SESSION_WINDOW_H` of ``now`` (``stale.parse_iso``
+    on ``ts``, as the other sources do); drops what is outside the window, unparseable, or whose
+    ``result`` describes no outcome at all (``lifecycle.outcome_class`` returns None for
+    ``running``, ``unknown``, empty). Yields ``(ts, ev, cls)``."""
+    cutoff = now - datetime.timedelta(hours=SESSION_WINDOW_H)
+    for ev in _jsonl_lines(os.path.join(root, 'metrics', 'sessions', '*.jsonl')):
+        ts = parse_iso(ev.get('ts'))
+        if ts is None or ts < cutoff:
+            continue
+        cls = lifecycle.outcome_class(ev.get('result'))
+        if cls is None:
+            continue
+        yield ts, ev, cls
+
+
+def _session_evidence_line(ev):
+    item = f" ({ev.get('item')})" if ev.get('item') else ''
+    return (f"{ev.get('ts')} {ev.get('task') or ''}{item} on {ev.get('branch') or ''}: "
+            f"{ev.get('result')}")
+
+
+def outcome_signatures(root, now, conv=None):
+    """A failing outcome class over ``conv.outcome_share_pct`` of the last
+    :data:`SESSION_WINDOW_H` of ended sessions — the factory losing sessions a whole way, caught
+    the day it starts rather than the week after. Below ``conv.outcome_min_sessions`` no rate is
+    computed at all: one bad session out of two on a quiet night is 50% and means nothing. The
+    signature carries the class and nothing else: the rate moves every tick, the Bug must not."""
+    conv = conv or DEFAULTS
+    total = 0
+    by_class = {}
+    for _ts, ev, cls in _session_events(root, now):
+        total += 1
+        by_class.setdefault(cls, []).append(ev)
+
+    out = {}
+    if total < conv.outcome_min_sessions:
+        return out
+    for cls in lifecycle.FAILING_CLASSES:
+        events = by_class.get(cls) or []
+        n = len(events)
+        if n == 0:
+            continue
+        pct = 100 * n / total
+        if pct <= conv.outcome_share_pct:
+            continue
+        sig = f'outcome: {cls}'
+        out[sig] = {
+            'title': truncate(f'{round(pct)} % of sessions end "{cls}" '
+                              f'(threshold {conv.outcome_share_pct} %, {n} of {total} in '
+                              f'{SESSION_WINDOW_H}h)', 120),
+            'severity': 'S2', 'found_in': 'dev', 'runs': [],
+            'evidence': [_session_evidence_line(ev) for ev in events[-EVIDENCE_CAP:]],
+        }
+    return out
+
+
+def repeat_signatures(root, now, conv=None):
+    """The same item (or job, when the event names none) ending the same failing class
+    ``conv.repeat_failure_n`` times or more in the window — the same problem come back, not a new
+    one each time. Both the key and the class are in the signature, so one Task failing two
+    different ways is two Bugs, and the same failure tomorrow bumps the one Bug already filed."""
+    conv = conv or DEFAULTS
+    groups = {}
+    for _ts, ev, cls in _session_events(root, now):
+        if cls not in lifecycle.FAILING_CLASSES:
+            continue
+        key = ev.get('item') or ev.get('task') or ''
+        groups.setdefault((key, cls), []).append(ev)
+
+    out = {}
+    for (key, cls), events in groups.items():
+        n = len(events)
+        if n < conv.repeat_failure_n:
+            continue
+        sig = f'repeat: {key}: {cls}'
+        out[sig] = {
+            'title': truncate(f'{key} has ended "{cls}" {n} times in {SESSION_WINDOW_H}h', 120),
+            'severity': 'S3', 'found_in': 'dev', 'runs': [],
+            'evidence': [_session_evidence_line(ev) for ev in events[-EVIDENCE_CAP:]],
+        }
+    return out
+
+
 #: A rule check that failed this many runs in a row is surfaced once as a factory-side problem.
 CHECK_FAILURE_RUNS_TO_SURFACE = 3
 LEDGER_NAME = 'rule-check-failures.json'
@@ -431,7 +529,7 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
         return 'bumped'
 
     typed = {
-        'title': info['title'], 'severity': info['severity'], 'found_in': 'ci',
+        'title': info['title'], 'severity': info['severity'], 'found_in': info.get('found_in', 'ci'),
         'signature': sig, 'count': 1, 'last_filed': date,
         # B-0089: an S1/S2 is decided by its severity — BUG → FIX must not wait for the daily groom
         'decided': info['severity'] in ('S1', 'S2'),
@@ -646,6 +744,8 @@ def cmd_file_bugs(args, root):
     signatures.update(rule_violation_signatures(root, rule_data))
     signatures.update(record_error_signatures(root, canonical=canonical,
                                               shared=footprint.shared_globs(conv)))
+    signatures.update(outcome_signatures(root, now, conv))
+    signatures.update(repeat_signatures(root, now, conv))
     if rule_data is not None:
         report_check_failures(rule_data.get('broken') or [], ledger,
                               now.strftime('%Y-%m-%dT%H:%M:%SZ'))

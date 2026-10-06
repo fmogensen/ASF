@@ -34,6 +34,7 @@ def make_repo():
     os.makedirs(os.path.join(root, 'tools', 'checks'))
     os.makedirs(os.path.join(root, 'metrics', 'ci'))
     os.makedirs(os.path.join(root, 'metrics', 'ticks'))
+    os.makedirs(os.path.join(root, 'metrics', 'sessions'))
     shutil.copy(LIMITS_FIXTURE, os.path.join(root, 'tools', 'limits.json'))
     return root
 
@@ -64,6 +65,12 @@ def write_ci_line(root, day, obj):
 
 def write_tick_line(root, day, obj):
     path = os.path.join(root, 'metrics', 'ticks', f"{day}.jsonl")
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(obj) + '\n')
+
+
+def write_session_line(root, day, obj):
+    path = os.path.join(root, 'metrics', 'sessions', f"{day}.jsonl")
     with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(obj) + '\n')
 
@@ -506,6 +513,176 @@ class RecordErrorSignatureTests(unittest.TestCase):
                          ['record error: bare decision reference …; write it as [[D-nnnn]]'])
         second = run(['file-bugs'], self.root)
         self.assertIn('0 filed', second.stdout)
+
+
+class OutcomeRateTests(unittest.TestCase):
+    def setUp(self):
+        self.root = make_repo()
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    NOT_PUSHED_RESULT = 'failed: not pushed: 2 uncommitted file(s), 1 unpushed commit(s)'
+
+    def _write_events(self, n_total, n_failing, result=NOT_PUSHED_RESULT):
+        for i in range(n_total):
+            write_session_line(self.root, today(), {
+                'task': f'coder-t-{i:04d}', 'account': 'accta', 'item': f'T-{i:04d}',
+                'branch': f'worker/T-{i:04d}',
+                'result': result if i < n_failing else 'finished',
+                'ts': iso(self.now - datetime.timedelta(minutes=i)),
+            })
+
+    def test_outcome_class_over_share_files_one_bug(self):
+        self._write_events(49, 7)
+        sigs = file_bugs.outcome_signatures(self.root, self.now)
+        self.assertEqual(list(sigs), ['outcome: not pushed'])
+        d = sigs['outcome: not pushed']
+        self.assertEqual(d['severity'], 'S2')
+        self.assertEqual(d['found_in'], 'dev')
+        self.assertEqual(d['runs'], [])
+        self.assertIn('14 %', d['title'])
+        self.assertIn('threshold 10 %', d['title'])
+        self.assertIn('7 of 49', d['title'])
+        self.assertLessEqual(len(d['evidence']), 20)
+
+    def test_four_of_fortynine_is_under_the_share(self):
+        self._write_events(49, 4)
+        self.assertEqual(file_bugs.outcome_signatures(self.root, self.now), {})
+
+    def test_seventy_percent_under_the_session_floor_files_nothing(self):
+        self._write_events(10, 7)
+        self.assertEqual(file_bugs.outcome_signatures(self.root, self.now), {})
+
+    def test_event_older_than_the_window_counts_in_neither_numerator_nor_denominator(self):
+        self._write_events(49, 7)
+        write_session_line(self.root, today(), {
+            'task': 'coder-t-9999', 'account': 'accta', 'item': 'T-9999',
+            'branch': 'worker/T-9999', 'result': self.NOT_PUSHED_RESULT,
+            'ts': iso(self.now - datetime.timedelta(hours=30)),
+        })
+        sigs = file_bugs.outcome_signatures(self.root, self.now)
+        self.assertIn('7 of 49', sigs['outcome: not pushed']['title'])
+
+    def test_running_lines_move_no_percentage(self):
+        self._write_events(49, 7)
+        for i in range(5):
+            write_session_line(self.root, today(), {
+                'task': f'coder-running-{i}', 'account': 'accta', 'result': 'running',
+                'ts': iso(self.now),
+            })
+        sigs = file_bugs.outcome_signatures(self.root, self.now)
+        self.assertIn('7 of 49', sigs['outcome: not pushed']['title'])
+
+    def test_second_run_same_day_is_a_no_op_then_the_next_day_bumps(self):
+        self._write_events(49, 7)
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        run(['index'], self.root)
+        info = file_bugs.outcome_signatures(self.root, self.now)['outcome: not pushed']
+
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        self.assertEqual(
+            file_bugs._file_or_bump_bug(self.root, canonical, 'outcome: not pushed', info, today()),
+            'filed')
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        rec = file_bugs._find_bug_by_signature(canonical, 'outcome: not pushed')
+        with open(rec['path'], encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read(), path=rec['relpath'])
+        self.assertEqual(meta['found_in'], 'dev')
+        self.assertEqual(meta['severity'], 'S2')
+        first_title = meta['title']
+
+        self.assertEqual(
+            file_bugs._file_or_bump_bug(self.root, canonical, 'outcome: not pushed', info, today()),
+            'skipped')
+
+        tomorrow = (datetime.date.fromisoformat(today()) + datetime.timedelta(days=1)).isoformat()
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        self.assertEqual(
+            file_bugs._file_or_bump_bug(self.root, canonical, 'outcome: not pushed', info, tomorrow),
+            'bumped')
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        rec2 = file_bugs._find_bug_by_signature(canonical, 'outcome: not pushed')
+        with open(rec2['path'], encoding='utf-8') as f:
+            meta2, body2 = frontmatter.parse(f.read(), path=rec2['relpath'])
+        self.assertEqual(meta2['count'], 2)
+        self.assertEqual(meta2['title'], first_title)
+        history = body2.split('## History\n', 1)[1].split('\n## ', 1)[0]
+        history_lines = [l for l in history.splitlines() if l.strip()]
+        self.assertEqual(len(history_lines), 2)
+
+
+class RepeatFailureTests(unittest.TestCase):
+    def setUp(self):
+        self.root = make_repo()
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_two_dead_pid_events_for_the_same_task_file_one_bug(self):
+        for i in range(2):
+            write_session_line(self.root, today(), {
+                'task': f'coder-t-0091-r{i}', 'account': 'accta', 'item': 'T-0091',
+                'branch': 'worker/T-0091', 'result': 'dead pid',
+                'ts': iso(self.now - datetime.timedelta(hours=i)),
+            })
+        sigs = file_bugs.repeat_signatures(self.root, self.now)
+        self.assertEqual(list(sigs), ['repeat: T-0091: dead pid'])
+        d = sigs['repeat: T-0091: dead pid']
+        self.assertEqual(d['severity'], 'S3')
+        self.assertEqual(d['found_in'], 'dev')
+        self.assertEqual(d['runs'], [])
+        self.assertNotIn('links', d)
+        self.assertIn('T-0091', d['title'])
+        self.assertIn('dead pid', d['title'])
+        self.assertEqual(len(d['evidence']), 2)
+
+    def test_one_event_files_nothing(self):
+        write_session_line(self.root, today(), {
+            'task': 'coder-t-0091-r1', 'account': 'accta', 'item': 'T-0091',
+            'branch': 'worker/T-0091', 'result': 'dead pid', 'ts': iso(self.now),
+        })
+        self.assertEqual(file_bugs.repeat_signatures(self.root, self.now), {})
+
+    def test_two_different_failing_classes_on_the_same_task_do_not_combine(self):
+        write_session_line(self.root, today(), {
+            'task': 'coder-t-0091-r1', 'account': 'accta', 'item': 'T-0091',
+            'branch': 'worker/T-0091', 'result': 'dead pid',
+            'ts': iso(self.now - datetime.timedelta(hours=2)),
+        })
+        write_session_line(self.root, today(), {
+            'task': 'coder-t-0091-r2', 'account': 'accta', 'item': 'T-0091',
+            'branch': 'worker/T-0091',
+            'result': 'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)',
+            'ts': iso(self.now - datetime.timedelta(hours=1)),
+        })
+        self.assertEqual(file_bugs.repeat_signatures(self.root, self.now), {})
+
+    def test_event_with_no_item_groups_on_and_is_named_by_its_task(self):
+        for i in range(2):
+            write_session_line(self.root, today(), {
+                'task': 'spec-f-0096', 'account': 'accta', 'result': 'dead pid',
+                'ts': iso(self.now - datetime.timedelta(hours=i)),
+            })
+        sigs = file_bugs.repeat_signatures(self.root, self.now)
+        self.assertEqual(list(sigs), ['repeat: spec-f-0096: dead pid'])
+        self.assertIn('spec-f-0096', sigs['repeat: spec-f-0096: dead pid']['title'])
+
+    def test_raising_repeat_failure_n_turns_the_two_event_case_into_nothing_filed(self):
+        for i in range(2):
+            write_session_line(self.root, today(), {
+                'task': f'coder-t-0091-r{i}', 'account': 'accta', 'item': 'T-0091',
+                'branch': 'worker/T-0091', 'result': 'dead pid',
+                'ts': iso(self.now - datetime.timedelta(hours=i)),
+            })
+        conv = Conventions.from_mapping({'repeat_failure_n': 3})
+        self.assertEqual(file_bugs.repeat_signatures(self.root, self.now, conv), {})
 
 
 class RefileWindowTests(unittest.TestCase):
