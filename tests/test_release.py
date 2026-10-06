@@ -41,6 +41,7 @@ def good_facts(**over):
                      ('tests', 'the sample product, end to end', 'success')],
         'docs': {'headings': ['Install', 'Quick start', 'Configuration', 'Upgrade'], 'tag': 'v0.1.0',
                  'changelog_section': True, 'changelog_notes': True},
+        'seats': [seat_tick(m, 8, 8, 3) for m in (0, 5, 10)],   # seats in use: criterion 10 has data
     }
     f.update(over)
     return f
@@ -204,6 +205,34 @@ class CiTest(unittest.TestCase):
         out = {x.key: x for x in release.evaluate(good_facts(ci_steps=steps), cfg())}
         self.assertIn(f"'{pat}' green", out['install'].evidence)
 
+    def test_a_cancelled_trunk_run_is_a_non_verdict(self):
+        runs = [{'status': 'completed', 'conclusion': 'cancelled', 'headSha': 'c' * 40}] \
+            + [{'status': 'completed', 'conclusion': 'success'}] * 12
+        got = release.ci_runs('o/r', 'main', 10, lambda a: runs)
+        self.assertEqual(len(got), 10)
+        self.assertNotIn('cancelled', [r['conclusion'] for r in got])
+        out = {x.key: x for x in release.evaluate(good_facts(ci_runs=got), cfg())}
+        self.assertTrue(out['ci'].met)
+
+    def test_steps_come_from_the_newest_run_that_ran_them(self):
+        """The trunk's newest commit (a release/changelog commit) gets a light run only: criteria 4
+        and 6 read the newest run that ran the named steps, not 'absent'."""
+        runs = [{'databaseId': 2, 'conclusion': 'success'}, {'databaseId': 1, 'conclusion': 'success'}]
+        jobs = {2: {'jobs': [{'name': 'release', 'steps': [{'name': 'tag it', 'conclusion': 'success'}]}]},
+                1: {'jobs': [{'name': 'tests', 'steps': [
+                    {'name': 'check generic', 'conclusion': 'success'},
+                    {'name': 'the sample product, end to end', 'conclusion': 'success'},
+                    {'name': 'asf install, zero to green', 'conclusion': 'success'}]}]}}
+        c = cfg()
+        steps = release.step_run_steps('o/r', runs, list(c['ci_steps'].values()),
+                                       lambda a: jobs[int(a[2])])
+        out = {x.key: x for x in release.evaluate(good_facts(ci_steps=steps), c)}
+        self.assertIn("'asf install, zero to green' green", out['install'].evidence)
+        self.assertIn("'check generic' green", out['generic'].evidence)
+        none = release.step_run_steps('o/r', runs[:1], list(c['ci_steps'].values()),
+                                      lambda a: jobs[int(a[2])])
+        self.assertEqual(none, [('release', 'tag it', 'success')])   # nothing ran them: the newest
+
     def test_steps_and_state(self):
         data = {'jobs': [{'name': 't (3.12)', 'steps': [{'name': 'check generic', 'conclusion': 'success'}]},
                          {'name': 't (3.13)', 'steps': [{'name': 'check generic', 'conclusion': 'failure'}]}]}
@@ -316,13 +345,14 @@ class GatherTest(unittest.TestCase):
             self.assertFalse(out['ready'])
             self.assertEqual(met, {'stability': True, 'repair': False, 'ci': True, 'install': False,
                                    'upgrade': False, 'generic': False, 'docs': False, 'blocking': False,
-                                   'floor': True, 'seats': True, 'tune': False})
+                                   'floor': True, 'seats': False, 'tune': False,
+                                   'pr_ci': False})
             ev = {c['key']: c['evidence'] for c in out['criteria']}
             self.assertIn('1 auto-upgrade(s)', ev['upgrade'])       # dated 2026-09-24 12:00 UTC: in the window
             self.assertIn('F-0002 card', ev['blocking'])
             self.assertIn('CHANGELOG has v0.1.0 notes', ev['docs'])
             text = release.render(out)
-            self.assertIn('NOT READY — 4/11 met', text)
+            self.assertIn('NOT READY — 3/12 met', text)
             self.assertEqual(ev['tune'], 'tune.enabled is off')
             self.assertIn('| 1 | Stability (no hand hotfix for 7 d) | yes |', text)
 
@@ -476,15 +506,17 @@ class SeatsTest(unittest.TestCase):
         self.assertFalse(self.crit([seat_tick(m, 0, 1, 1) for m in range(0, 35, 5)]).met)
         self.assertTrue(self.crit([seat_tick(m, 1, 1, 1) for m in range(0, 35, 5)]).met)
 
-    def test_no_reading_is_na(self):
+    def test_no_reading_is_pending_never_met(self):
         out = self.crit([{'ts': '2026-09-24T10:00:00Z', 'tick': 1}])
-        self.assertTrue(out.met)
-        self.assertIn('n/a', out.evidence)
+        self.assertFalse(out.met)
+        self.assertIn('pending', out.evidence)
+        self.assertNotIn('n/a', out.evidence)
 
     def test_a_reading_before_the_window_is_not_read(self):
         f = good_facts(seats=[seat_tick(m, 2, 8, 3) for m in range(0, 40, 5)], since='2026-09-24T11:00:00Z')
         out = {x.key: x for x in release.evaluate(f, cfg(blocking=['F-0001']))}['seats']
-        self.assertTrue(out.met)
+        self.assertFalse(out.met)                  # the red stretch is not read: nothing in the window
+        self.assertIn('pending', out.evidence)
 
     def test_the_row_is_printed(self):
         d = {'product': 'p', 'as_of': 'x', 'ready': False, 'criteria': [

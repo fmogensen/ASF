@@ -517,7 +517,18 @@ clocks:
 #   scorecard:
 #     throughput:
 #       false_close_max: 0          # reopened / landed in the window, a fraction
-#       first_pass_min: off         # PRs green on the first CI attempt / PRs, a fraction
+#       first_pass_min: 0.9         # PRs green on the first CI run, over the last first_pass_window PRs
+#       first_pass_window: 50       # … the PRs it is measured over (also release criterion 12)
+#       runner_reds_max: 0          # runner-class reds (runner loss, OOM, timeout) allowed …
+#       runner_reds_window: 100     # … in the last this many CI runs
+#       trunk_green_window: 20      # the last this many trunk runs of the required check: all green
+#       reds_window: 100            # visible reds (asf status `CI reds`) over the last this many PR runs
+#       check_patterns: [dco, sign-off, signoff, rules, notes, conventions, lint, format]
+#                                   # a failed job/step naming one of these is a deterministic check
+#       infra_steps: [set up job, out of memory, oom, no space left, lost communication, runner]
+#                                   # a failed step naming one of these is the runner's, not the code's
+#       own_cancel_causes: [relief, stall, duplicate-push, merged-pr, mq-dropped, mq-reaped, superseded]
+#                                   # cancel-ledger causes that count as ASF's own cancel ("ours")
 #       detect_p90_max_min: off     # watchdog time-to-detect p90, minutes
 #       merge_wait_p90_max_min: off # PR green → landed p90, minutes
 #       runner_queue_p90_max_min: off  # CI queue wait p90 of any runner class, minutes
