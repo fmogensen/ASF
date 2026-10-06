@@ -165,9 +165,17 @@ class TestLimitDeathStopsAtOnce(HomeCase):
 
     def test_a_dead_run_on_other_grounds_stops_nothing(self):
         from asf.workers import lifecycle
-        self.write_run('other', 'coder-t-2', 'Invalid API key · Please run /login')
+        self.write_run('other', 'coder-t-2', 'There is an issue with the selected model')
         self.assertEqual(lifecycle.note_spent_windows(alive=lambda _pid: False), [])
         self.assertEqual(headroom.active_limits(), {})
+
+    def test_a_dead_run_on_an_auth_error_blocks_its_account_not_its_window(self):
+        from asf.workers import account_auth, lifecycle
+        self.write_run('other', 'coder-t-2', 'Invalid API key · Please run /login')
+        self.assertEqual(lifecycle.note_spent_windows(alive=lambda _pid: False),
+                         ['w1 unusable: auth error'])
+        self.assertEqual(headroom.active_limits(), {})
+        self.assertIn('w1', account_auth.blocked())
 
     def test_the_pool_reads_the_stop_the_death_left(self):
         self.write_run('other', 'coder-t-3', f"You've hit your weekly limit · resets {_hours_ahead(3)} (UTC)")

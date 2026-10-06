@@ -54,6 +54,7 @@ import time
 from asf import gitpush, refguard
 from asf.evidence import review_store
 from asf.record import replan as replan_mod
+from asf.workers import account_auth
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import headroom
@@ -422,6 +423,16 @@ def worktree_empty(worktree, main):
     reap would lose (B-0025, B-0049)."""
     st = _git(['status', '--porcelain'], worktree)
     return st.returncode == 0 and not st.stdout.strip() and in_trunk(worktree, main)
+
+
+def account_fault(product, job, run, ev):
+    """The ``found`` entry for a run its account cut short (:func:`lifecycle.quota_exhausted`):
+    an auth error blocks the account (:func:`asf.workers.account_auth.note`, the one ALARM),
+    a spent window stops it until its reset (:func:`asf.workers.headroom.note_exhausted`)."""
+    if lifecycle.auth_failed(run):
+        text = str((ev.result or {}).get('result') or '') or account_auth.log_text(run.get('log'))
+        return job, 'auth', account_auth.note(product, run, text)
+    return job, 'quota', headroom.note_exhausted(product, run, ev.result)
 
 
 #: The kinds whose session writes a review: filed off the branch when the run ends.
@@ -810,7 +821,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                     s.update(end_reason=reason, rc=0 if ok else 1)
                     found.append((job, 're-judged', reason))
                     if lifecycle.quota_exhausted(s):
-                        found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
+                        found.append(account_fault(product, job, s, ev))
             if not closed:
                 yield from republish_steps(product, registry, job, s, alive, found)
             return
@@ -837,6 +848,10 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                 dead_class=dead_class)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
+        if reason == lifecycle.FINISHED:
+            back = account_auth.proved(s)
+            if back:
+                found.append((job, 'auth', back))
         pushes, defect = pushlog.defect(product, s)
         if pushes:  # one push per correction round: a second one is this run's defect
             extra = {'defect': defect} if defect else {}
@@ -845,9 +860,10 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 found.append((job, 'defect', defect))
         question = report_mod.needs_input(str((ev.result or {}).get('result') or ''))
         if lifecycle.quota_exhausted(s):
-            # the account's window, not the work: its account stops until the reset, and the
-            # item relaunches — no hold, no round (asf.workers.headroom)
-            found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
+            # the account's window or its auth, not the work: its account stops (until the
+            # reset, or until re-enabled), and the item relaunches — no hold, no round
+            # (asf.workers.headroom, asf.workers.account_auth)
+            found.append(account_fault(product, job, s, ev))
             return
         if closed:
             return  # nothing to send back: the worktree is reaped below when it is empty

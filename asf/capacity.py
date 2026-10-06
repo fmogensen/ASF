@@ -271,8 +271,10 @@ def active_products(name):
 def usable_slots(cfg, quota_source=None):
     """The slots the pool can take now: per account ``0`` at stop, ``1`` in cooldown, ``cap``
     when free. An account a session limit stopped (``quota-limits.json``) is at stop until its
-    reset, whatever its reading says — the pool's own band (:meth:`asf.workers.pool.Pool.band`).
+    reset, whatever its reading says, and one an auth error took out (``account-auth.json``)
+    until it is re-enabled — the pool's own band (:meth:`asf.workers.pool.Pool.band`).
     ``None`` when no pool account is configured."""
+    from asf.workers import account_auth
     from asf.workers import headroom as headroom_mod
     from asf.workers import pool as pool_mod
     from asf.workers import quota as quota_mod
@@ -282,7 +284,8 @@ def usable_slots(cfg, quota_source=None):
     source = quota_source or quota_mod.source_from_config(cfg)
     pool = pool_mod.Pool(accounts, quota_source=source,
                          guards=quota_mod.guards_from_config(cfg),
-                         limits=headroom_mod.active_limits())
+                         limits=headroom_mod.active_limits(),
+                         blocked=account_auth.blocked())
     total = 0
     for a in accounts:
         state, _why = pool.band(a)
@@ -293,6 +296,7 @@ def usable_slots(cfg, quota_source=None):
 def quota_stopped(cfg, quota_source=None):
     """``(accounts, stopped)``: the pool's accounts, and how many sit at their quota stop now
     (the band :func:`usable_slots` reads). ``(None, None)`` when no pool account is configured."""
+    from asf.workers import account_auth
     from asf.workers import headroom as headroom_mod
     from asf.workers import pool as pool_mod
     from asf.workers import quota as quota_mod
@@ -302,7 +306,8 @@ def quota_stopped(cfg, quota_source=None):
     source = quota_source or quota_mod.source_from_config(cfg)
     pool = pool_mod.Pool(accounts, quota_source=source,
                          guards=quota_mod.guards_from_config(cfg),
-                         limits=headroom_mod.active_limits())
+                         limits=headroom_mod.active_limits(),
+                         blocked=account_auth.blocked())
     return len(accounts), sum(1 for a in accounts if pool.band(a)[0] == quota_mod.STOP)
 
 

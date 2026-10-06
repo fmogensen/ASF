@@ -30,7 +30,14 @@ whose verdict counts as the reference; each entry records it and the runner the 
 
 Fail-open: a state directory that cannot be written, a refused re-run or an unreadable check
 list is no triage — the red goes to its correct round exactly as before. A re-run refused because
-the run is still in progress waits for the next pass (the rest of the matrix is still judging).
+the run is still in progress waits for the next pass (the rest of the matrix is still judging) —
+read off the run's own status when the host's words are none :data:`_RUNNING` knows: a refusal on
+a live run is never a second red (2026-10-06: a batch dropped on one, its stacked chain with it).
+
+A **deterministic** red — a registers or pre-cut check (the merge queue names them:
+``merge_queue.deterministic_jobs`` and the jobs running ``merge_queue.precut_check``) — answers the
+same on every run: it is a defect at once, never re-run (2026-10-06: a duplicate-row red re-run
+twice, ~45 min of heavy runs for the same answer).
 
 ``gh`` goes through :mod:`asf.github` (a test's own ``gh`` — ``(rc, stdout, stderr)`` or an
 :class:`asf.github.Result` — stands in for it); a read that does not answer is Unknown, and
@@ -217,11 +224,43 @@ def infra_red(slug, job_id, gh=None):
     return fails[0].strip().splitlines()[0] if is_infra(fails) else None
 
 
-def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh=None):
+def run_live(slug, run_id, gh=None):
+    """True when workflow run ``run_id`` is still queued or in progress (one ``gh api`` call);
+    False when it completed or cannot be read."""
+    if not slug or not run_id:
+        return False
+    r = _call(gh, ['api', f'repos/{slug}/actions/runs/{run_id}'])
+    try:
+        got = json.loads(r.data) if r.ok and r.data else None
+    except (ValueError, TypeError):
+        return False
+    status = str((got or {}).get('status') or '') if isinstance(got, dict) else ''
+    return bool(status) and status != 'completed'
+
+
+def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh=None,
+           deterministic=()):
     """Split the red checks ``red`` (dicts with ``name`` and ``link``) on ``sha`` into
     ``(defects, rerun)``: names that go to a correct round now, and names held for a re-run
     (started this pass, or one still running). Never raises: anything unreadable is a defect
-    (today's behaviour)."""
+    (today's behaviour).
+
+    ``deterministic``: the names (or job keys) whose red is deterministic — a registers or
+    pre-cut check answers the same on every run: a defect at once, never re-run. A re-run the
+    host refuses while the job's workflow run is still live (:func:`run_live`) waits for the
+    next pass, whatever words the refusal used: it is never read as a second red."""
+    fixed = {str(n) for n in deterministic or ()}
+    if fixed:
+        hard = [c for c in red or () if (c.get('name') or '?') in fixed
+                or job_key(c.get('name')) in fixed]
+        if hard:
+            rest = [c for c in red or () if c not in hard]
+            d, h = triage(product, state_dir, slug, sha, rest, where, out, now, gh) if rest \
+                else ([], [])
+            for c in hard:
+                out(f"flake triage: {where} {c.get('name') or '?'} @ {(sha or '')[:9]} is "
+                    'deterministic — a defect at once, never re-run')
+            return list(dict.fromkeys([c.get('name') or '?' for c in hard] + d)), h
     names = list(dict.fromkeys(c.get('name') or '?' for c in red or ()))
     cfg = settings(product)
     if not names or not sha or not cfg['on'] or not state_dir or not os.path.isdir(state_dir):
@@ -265,7 +304,7 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
         r = _call(gh, ['run', 'rerun', '--job', job_id, '-R', slug])
         if not r.ok:
             text = f'{r.stdout}\n{r.stderr}\n{r.reason}'.lower()
-            if any(w in text for w in _RUNNING) or lost:
+            if any(w in text for w in _RUNNING) or lost or run_live(slug, run_id, gh):
                 held.append(name)   # still judging the rest, or infra: the next pass asks again
                 continue
             defects.append(name)

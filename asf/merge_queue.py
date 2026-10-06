@@ -69,7 +69,15 @@ without it. A base already red on it judges nobody. Unset, the cut is as it alwa
 merged by union (``merge=union``) merges clean in git even when two members add rows claiming the
 same id: only a check over the merged tree sees that, and here it is seen before any heavy run.
 When such a red reaches CI anyway, a log line that names a file but no line is mapped by the rows
-it names to the member whose diff added them (:func:`blame`).
+it names to the member whose diff added them (:func:`blame`). Such a red is deterministic: a job
+``merge_queue.deterministic_jobs`` names, or one whose failed step runs a ``precut_check`` command
+(:func:`deterministic`), is never re-run by flake triage — the member its log names goes back at
+once and the rest are cut again (2026-10-06: a duplicate-row red re-run twice, ~45 min).
+
+**A red the triage will re-run keeps the chain.** A required job red while its workflow run is
+still live cannot be re-run yet: the batch stays pending — never red on the host's refusal — and
+every batch stacked on it stays in flight. Only the re-run's own red drops the batch, and the
+chain with it (2026-10-06: one such red dropped a stacked chain, ~1.5 h of heavy runs).
 
 **A drop cancels its run.** Whenever a batch is dropped or replaced (moved, stale, red, timed
 out, re-cut), its ref's runs still queued or in progress at its sha are cancelled in the same
@@ -162,7 +170,8 @@ QUEUE_FILE = 'merge-queue.json'
 #: wait for its checks before it is dropped and cut again (a saturated runner pool is slow, not
 #: red: the default is generous).
 DEFAULTS = {'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 2, 'timeout_min': 360,
-            'stuck_min': 90, 'start_kind': 'trunk', 'precut_check': (), 'precut_check_timeout_s': 120}
+            'stuck_min': 90, 'start_kind': 'trunk', 'precut_check': (), 'precut_check_timeout_s': 120,
+            'deterministic_jobs': ()}
 #: the conclusions of a required check that judged no code (:func:`_nonverdict`): a cancel (an
 #: operator, a superseding workflow, a timeout the host turned into one), a check the host gave
 #: up on (``timed_out``/``stale``), a workflow that never started its jobs. Never red, never green.
@@ -246,6 +255,38 @@ def settings(conv):
     t = raw.get('precut_check_timeout_s')
     if isinstance(t, int) and not isinstance(t, bool) and t >= 1:
         out['precut_check_timeout_s'] = t
+    jobs = raw.get('deterministic_jobs')
+    if isinstance(jobs, str):
+        jobs = [jobs]
+    if isinstance(jobs, (list, tuple)):
+        out['deterministic_jobs'] = tuple(j.strip() for j in jobs if isinstance(j, str) and j.strip())
+    return out
+
+
+def deterministic(lane, st, failed):
+    """The names of the ``failed`` checks whose red is deterministic — never re-run by flake
+    triage: each job ``merge_queue.deterministic_jobs`` names, and each whose failed step runs a
+    ``merge_queue.precut_check`` command (the product's cheap tree check: the same tree answers the
+    same). The step is read only when a pre-cut check is set; an unreadable one is not deterministic."""
+    named = set(st.get('deterministic_jobs') or ())
+    cmds = [c for c in st.get('precut_check') or () if c]
+    out = []
+    for c in failed or ():
+        name = c.get('name') or '?'
+        if name in named or flake.job_key(name) in named:
+            out.append(name)
+            continue
+        if not cmds:
+            continue
+        job = flake._ids(c.get('link'))[1]
+        if not job:
+            continue
+        try:
+            _step, cmd = lane_mod.red_step(lane.slug, job)
+        except Exception:   # noqa: BLE001 — an unreadable step is judged as before
+            continue
+        if cmd and any(k in cmd for k in cmds):
+            out.append(name)
     return out
 
 
@@ -490,7 +531,8 @@ _BATCH_SHA_RE = re.compile(r'@ ([0-9a-f]{7,40})\b')
 def _hold_regate_why(lane, run, head, trunk_sha):
     """Why the landing-gate hold of ``run`` is no document defect (a sentence), or None when it
     stands: every job it names must be unrequired, lost with its runner, or never re-run by the
-    flake triage on the batch sha it names."""
+    flake triage on the batch sha it names. A required ``merge_queue.deterministic_jobs`` job is
+    never re-run: its hold stands."""
     corr = (run or {}).get('correction') or {}
     jobs = [flake.job_key(str(n).split(' (')[0]) for n in corr.get('finding') or ()]
     m = _BATCH_SHA_RE.search(corr.get('text') or '')
@@ -507,7 +549,10 @@ def _hold_regate_why(lane, run, head, trunk_sha):
             triaged.add(name)
     runs = None
     reasons = []
+    fixed = set(settings(lane.conv).get('deterministic_jobs') or ())
     for job in dict.fromkeys(jobs):
+        if job in fixed and job in required:
+            return None     # deterministic: never re-run, its red is the defect it names
         if job not in required:
             reasons.append(f'{job} is not a required check')
             continue
@@ -934,7 +979,8 @@ def judge(lane, batch, members, heads, trunk_sha, st):
         if causes:      # the needs: graph named the upstream: no unrelated red rides along
             failed = [c for c in failed if c.get('name') in causes]
         defects, held = flake.triage(lane.product, lane.state_dir, lane.slug, sha, failed,
-                                     where=f'batch {ref}', out=lane.out)
+                                     where=f'batch {ref}', out=lane.out,
+                                     deterministic=deterministic(lane, st, failed))
         explained = {flake.job_key(c['name']) for c in failed} | (
             _skipped(why) if failed else set())
         other = [n for n in red if n not in explained]

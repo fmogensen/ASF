@@ -23,7 +23,7 @@ KNOWN_CONFIG_KEYS = frozenset({
     'worker_pool.id_range_prefixes', 'worker_pool.id_range_size', 'worker_pool.id_range_start',
     'worker_pool.launch_concurrency', 'worker_pool.worktree_buffer',
     'worker_pool.progress_sampler', 'worker_pool.reserve_for_s1', 'worker_pool.quota_guard.*',
-    'worker_pool.caps.cloud_max_inflight',
+    'worker_pool.caps.cloud_max_inflight', 'worker_pool.auth_error_patterns',
     'worker_pool.accounts[].name', 'worker_pool.accounts[].role', 'worker_pool.accounts[].cap',
     'worker_pool.accounts[].caps', 'worker_pool.accounts[].home',
     'worker_pool.accounts[].config_dir', 'worker_pool.accounts[].home_seed',

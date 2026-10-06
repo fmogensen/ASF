@@ -63,6 +63,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 
 from asf import env
@@ -225,6 +226,32 @@ def tool_calls(stdout, tool='RemoteTrigger'):
     return [(inp, results.get(uid)) for uid, inp in uses]
 
 
+def result_text(stdout):
+    """The text of the last ``result`` record of a ``stream-json`` log — where the CLI writes why
+    it stopped (an API refusal, an auth error) when it printed nothing on stderr; '' when none."""
+    text = ''
+    for line in (stdout or '').splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get('type') == 'result':
+            text = str(rec.get('result') or rec.get('terminal_reason') or '').strip()
+    return text
+
+
+def _auth_note(product, account, job, err):
+    """A helper refused on an auth error marks ``account`` unusable at once (the one ALARM,
+    :func:`asf.workers.account_auth.note`), as a local session's does; the line, or None."""
+    from asf.workers import account_auth
+    if not account or not account_auth.MATCHER.search(str(err)):
+        return None
+    line = account_auth.note(product, {'account': account, 'job': getattr(job, 'name', '')},
+                             str(err))
+    print(line, file=sys.stderr)
+    return line
+
+
 def read_saved(text):
     """A result the CLI saved to a file (``<persisted-output>``): the file's content."""
     m = SAVED_RE.search(text or '') if '<persisted-output>' in (text or '') else None
@@ -299,7 +326,7 @@ class TriggerClient:
         calls = [(inp, res) for inp, res in tool_calls(p.stdout)
                  if inp.get('action') == action]
         if not calls or calls[0][1] is None:
-            tail = (p.stderr or '').strip().splitlines()
+            tail = (p.stderr or '').strip().splitlines() or result_text(p.stdout).splitlines()
             raise HelperError(f'helper {action}: no RemoteTrigger call made (exit {p.returncode}'
                               f'{"; " + tail[-1][:200] if tail else ""})')
         sent, result = calls[0]
@@ -465,6 +492,7 @@ class RemoteRuntime(runtime_mod.Runtime):
             tid, link = client.create(body)
         except HelperError as e:
             actions.delete_brief(job.cwd, ref)
+            _auth_note(product, acct_name, job, e)
             raise SpawnError(f'cloud lane: {e}') from None
         try:
             sid = client.fire(tid)
@@ -474,6 +502,7 @@ class RemoteRuntime(runtime_mod.Runtime):
             except HelperError:
                 pass
             actions.delete_brief(job.cwd, ref)
+            _auth_note(product, acct_name, job, e)
             raise SpawnError(f'cloud lane: routine {tid}: {e}') from None
         tok = token(tid)
         where = session_url(sid) or link

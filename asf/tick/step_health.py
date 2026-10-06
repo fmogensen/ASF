@@ -23,7 +23,7 @@ from asf.workers import stall as stall_mod
 
 LOG_TAIL_LINES = 5
 #: health's findings that change what the wave may launch
-FREES = ('ended', 'held', 'parked', 'released', 'landed', 're-judged', 'quota')
+FREES = ('ended', 'held', 'parked', 'released', 'landed', 're-judged', 'quota', 'auth')
 
 
 def _runtime():

@@ -52,6 +52,7 @@ import threading
 
 from asf import env
 from asf import capacity as capacity_mod
+from asf.workers import account_auth
 from asf.workers import headroom as headroom_mod
 from asf.workers import lifecycle
 from asf.workers import observe
@@ -312,7 +313,7 @@ class Pool:
     is base + claims: ``_base`` is the list it was given, kept as given across a ``take``."""
 
     def __init__(self, accounts, quota_source=None, guards=None, reserve=None, live=(),
-                 unreadable='', costs=None, limits=None):
+                 unreadable='', costs=None, limits=None, blocked=None):
         self.accounts = list(accounts)
         self.quota = quota_source or quota_mod.NoQuotaSource()
         self.guards = guards or quota_mod.guards_from_config({})
@@ -331,6 +332,9 @@ class Pool:
         self.costs = costs or headroom_mod.CostTable()
         #: ``{account: {until, …}}`` — accounts a session limit stopped until their reset
         self.limits = dict(limits or {})
+        #: ``{account: {at, …}}`` — accounts an auth error took out until re-enabled
+        #: (:mod:`asf.workers.account_auth`)
+        self.blocked = dict(blocked or {})
         self._usage = {}
         self._committed = {}
 
@@ -386,7 +390,7 @@ class Pool:
                    quota_source=quota_source or quota_mod.source_from_config(cfg),
                    guards=quota_mod.guards_from_config(cfg), reserve=reserve_from_config(cfg),
                    live=live, unreadable=why, costs=headroom_mod.table_from_config(cfg),
-                   limits=headroom_mod.active_limits())
+                   limits=headroom_mod.active_limits(), blocked=account_auth.blocked())
         pool.seats_degraded = seats_why
         # ``observe.read`` is not re-run: the re-read keeps the ps-observed ``extras`` frozen from
         # this build and only re-walks the registries (C3)
@@ -406,6 +410,8 @@ class Pool:
         return rec.get('until') if until is not None and until > headroom_mod.now_utc() else None
 
     def band(self, account):
+        if account.name in self.blocked:
+            return quota_mod.STOP, account_auth.stop_reason(account.name)
         until = self.limit(account)
         if until:
             return quota_mod.STOP, f'session limit until {headroom_mod.reset_label(until)}'
@@ -568,6 +574,10 @@ class Pool:
             return None, min(over)[1]       # the account closest to fitting
         if held:
             return None, REASON_COOLDOWN
+        refused = [a for a in stopped if a.name in self.blocked]
+        if refused and len(refused) == len(stopped):
+            return None, 'quota: ' + '; '.join(f'{a.name} {account_auth.stop_reason(a.name)}'
+                                               for a in refused)
         if limited:
             first = min(limited, key=lambda a: self.limit(a))
             return None, (f'quota: {first.name} stopped until '
