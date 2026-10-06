@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.145 — 2026-10-06
+
+### Features landed
+
+- CI reads and actions (run lists, reruns, run reads, the CI start queue and runner pool) now go through the `ci` connector — `connectors.ci` in config.yaml; GitHub Actions stays the default with no change in behaviour (#776)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.145"`
+
 ## v0.1.144 — 2026-10-06
 
 ### Features landed
