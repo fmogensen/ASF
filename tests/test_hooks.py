@@ -99,5 +99,44 @@ class HooksInstallWritesTheDispatcher(unittest.TestCase):
         self.assertNotIn('dispatcher', msg)
 
 
+class PrePushHookTests(unittest.TestCase):
+    """``hooks.pre_push_hook`` (F-0235): whether a repo's ``pre-push`` exists, whether asf wrote
+    it, and its path — the fact ``asf.briefs.facts.repo_facts`` carries into every brief."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-pre-push-')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        subprocess.run(['git', 'init', '-q', self.repo], check=True)
+
+    def _write_hook(self, text):
+        hooks_dir = hooks.git_hooks_dir(self.repo)
+        os.makedirs(hooks_dir, exist_ok=True)
+        path = os.path.join(hooks_dir, 'pre-push')
+        with open(path, 'w') as f:
+            f.write(text)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_asfs_own_hook_is_present_and_ours(self):
+        # written through _git_hook_body, never a hand-copied string: a body that drifts from
+        # what asf actually writes is a test that passes while the product breaks
+        path = self._write_hook(hooks._git_hook_body('pre-push', '/opt/p/bin/asf', 'demo'))
+        self.assertEqual(hooks.pre_push_hook(self.repo), (True, True, path))
+
+    def test_a_foreign_hook_is_present_and_not_ours(self):
+        path = self._write_hook('#!/bin/sh\necho mine\n')
+        self.assertEqual(hooks.pre_push_hook(self.repo), (True, False, path))
+
+    def test_no_hook_at_all(self):
+        self.assertEqual(hooks.pre_push_hook(self.repo), (False, False, ''))
+
+    def test_not_a_git_repo_returns_the_same_triple_and_does_not_raise(self):
+        not_repo = os.path.join(self.tmp, 'not-a-repo')
+        os.makedirs(not_repo)
+        self.assertEqual(hooks.pre_push_hook(not_repo), (False, False, ''))
+
+
 if __name__ == '__main__':
     unittest.main()

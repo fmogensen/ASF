@@ -49,6 +49,7 @@ left out: the retry itself, F-0001 owns it
 - Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`.
 - Every commit subject names the item: `review(T-0001): <what>`. Harvest holds a branch whose commits do not name it; the id inside the branch name does not count.
 - Never write a worker account name or a machine path into the product; refer to a lane as `lane-N`. Run the redaction check before you push.
+- A push your pre-push hook refuses is not the end of your turn: it printed what is wrong and where — fix that, commit, and push again, then report `pushed: yes <sha>`. Only if the hook refuses the *same* thing a second time do you stop, and then the report reads `pushed: no — hook refused twice: <what it said>`.
 
 ## Your job: review T-0001 — round 1
 

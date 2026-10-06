@@ -119,6 +119,41 @@ REDACTION_RULE = ("- Never write a worker account name or a machine path into th
                   "to a lane as `lane-N`. Run the redaction check before you push.")
 
 
+#: Carried by every brief whose product has a pre-push hook (F-0235): the command that runs what
+#: that hook runs, without a push — so the hook's verdict arrives at minute one, not at the last
+#: minute of the run, when a session has nothing left to do with it but write it down as its
+#: ending. asf's own hook has a push-free twin (``redact --unpublished``, at least as strict as
+#: ``--pre-push``); a hook asf did not write is named by path and never run by the factory.
+PRE_PUSH_GATE_OURS = ("- Before your first push, run `asf redact --unpublished` and make it clean: "
+                      "it scans exactly the commits your push would add, and it is what your "
+                      "pre-push hook will run. A finding it names is a finding the hook will "
+                      "refuse.")
+PRE_PUSH_GATE_THEIRS = ("- Before your first push, run this repo's own pre-push check — `{path}` "
+                        "is the hook that will judge it. A refusal at push time is the same "
+                        "refusal, bought a whole run later.")
+
+
+def pre_push_rule(facts):
+    """The pre-push gate line for a brief, or None when the repo has no ``pre-push`` hook or the
+    fact was never filled. Pure: reads ``facts['pre_push']``, never git (P8)."""
+    pre_push = facts.get('pre_push') or {}
+    if not pre_push or not pre_push.get('present'):
+        return None
+    return PRE_PUSH_GATE_OURS if pre_push.get('ours') else \
+        PRE_PUSH_GATE_THEIRS.format(path=pre_push.get('path', ''))
+
+
+#: Carried by every brief, whatever ``rules_tail`` says (F-0235): 39 runs in 14 days ended because
+#: a session treated its hook's refusal as its ending. The hook prints a file and a line; fixing it
+#: is a handful of tool calls inside a run that already has the context, and a whole session
+#: otherwise. The second clause is what the factory reads back (:func:`asf.workers.report.hook_retried`).
+HOOK_REFUSAL_RULE = ("- A push your pre-push hook refuses is not the end of your turn: it printed "
+                     "what is wrong and where — fix that, commit, and push again, then report "
+                     "`pushed: yes <sha>`. Only if the hook refuses the *same* thing a second "
+                     "time do you stop, and then the report reads "
+                     "`pushed: no — hook refused twice: <what it said>`.")
+
+
 #: Carried beside :data:`EXTERNAL_CI_RULE` by a product that names its full-suite commands
 #: (``conventions.full_suite_commands``): a plan's verification step ("run the full check") is
 #: followed to the letter otherwise, and one such run on the host is dozens of test processes.
@@ -233,7 +268,7 @@ STORY_KINDS = ('spec', 'spec-amend', 'plan', 'review', 'adjudicate', 'spec-plan'
 #: equal — the drift between what a caller fills and what the preamble reads is the defect that
 #: left every brief printing ``(not known here)``.
 REPO_FACT_KEYS = ('head', 'branch_exists', 'files', 'tests', 'last_report', 'outlines',
-                  'commits', 'progress', 'relaunch', 'reservations')
+                  'commits', 'progress', 'relaunch', 'reservations', 'pre_push')
 
 
 def _strip_rev(value):
@@ -447,6 +482,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'plan_lines': _line_count(repo_facts, plan_path),
         'writes': list(item.get('writes') or []),
         'outlines': dict((repo_facts or {}).get('outlines') or {}),
+        'pre_push': dict((repo_facts or {}).get('pre_push') or {}),
         'merged': list(item.get('merged') or []),
         'delivers': delivers,
         'members': [member_facts(product, items, i) for i in delivers],
@@ -709,6 +745,7 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
                 trimmable=not facts['relaunch'], marker='…truncated'),
         Section('rules', '### Standing rules',
                 rules_block(product, main).splitlines() + [subject_rule(row, facts['item'])]
-                + [REDACTION_RULE] + ci_rules(product)),
+                + [REDACTION_RULE] + [r for r in (pre_push_rule(facts), HOOK_REFUSAL_RULE) if r]
+                + ci_rules(product)),
     ]
     return '\n'.join(fit(sections, max_lines(product)))
