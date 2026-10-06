@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.174 — 2026-10-06
+
+### Bugs fixed
+
+- PR runs stop going red for reasons the PR didn't cause. The release-notes check runs the trunk's tooling, a PR head is reopened for a fresh merge ref at most once, and a red that reproduced on two merge refs is never blindly re-run (#830)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.174"`
+
 ## v0.1.173 — 2026-10-06
 
 ### Features landed
