@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.192 — 2026-10-06
+
+### Bugs fixed
+
+- A correction relaunch carries the product's git credential (#845)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.192"`
+
 ## v0.1.191 — 2026-10-06
 
 ### Features landed
