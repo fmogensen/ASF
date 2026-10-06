@@ -363,12 +363,19 @@ class Drift(unittest.TestCase):
                 raise AssertionError('called')
         self.assertEqual(ci_pool.doctor_rows(product(pool=[]), backend=Boom()), [])
 
-    def test_an_unreadable_host_is_one_unknown_row(self):
+
+class DriftDoctorRows(Home):
+    """``doctor_rows`` touches the state dir (B-0178's heartbeat rows), unlike plain
+    :func:`ci_pool.drift` above — isolated under :class:`Home` like every other state-dir test."""
+
+    def test_an_unreadable_host_is_one_unknown_row_plus_the_heartbeat_rows(self):
         class Down(ci_pool.Backend):
             def runners(self):
                 raise ci_pool.BackendError('401')
         rows = ci_pool.doctor_rows(product(), backend=Down())
-        self.assertEqual([(r, ok) for r, ok, _d in rows], [(False, None)])
+        # the host row, plus one red heartbeat row per box with no beat recorded (box-1, box-9)
+        self.assertEqual([(r, ok) for r, ok, _d in rows],
+                         [(False, None), (True, False), (True, False)])
 
 
 def discovered(reserve=None, name='p'):

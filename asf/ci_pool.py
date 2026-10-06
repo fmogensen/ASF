@@ -1110,24 +1110,31 @@ def drift(pool, runners, runs_on, owned=frozenset(), why=None, product=None):
 def doctor_rows(product, backend=None):
     """``[(required, ok, detail)]`` for the doctor's ``ci pool`` rows; ``[]`` without a pool —
     no CI host call at all then. A host that cannot be read is one unknown row. The class rows
-    (:func:`class_rows`) follow, advisory (not required)."""
+    (:func:`class_rows`) follow, advisory (not required). The heartbeat rows
+    (:func:`asf.ci_heartbeat.doctor_rows`, B-0178) need no host call either — they read
+    ``ci.pool`` for the box list and a state-dir file for each box's last beat — so they are
+    checked even when the CI host itself cannot be reached."""
     pool = load_pool(product)
     if not pool:
         return []
+    from asf import ci_heartbeat
     classes = [(False, ok, detail) for ok, detail in class_rows(pool)]  # no host call needed
+    heartbeat = [(required, ok, detail)
+                 for required, ok, detail in ci_heartbeat.doctor_rows(pool, product)]
     backend = backend or backend_for(product)
     if backend is None:
         return [(False, None, f"ci.pool: no runner backend for ci.provider "
-                              f"{(product.ci or {}).get('provider')!r} in this release")] + classes
+                              f"{(product.ci or {}).get('provider')!r} in this release")] \
+            + classes + heartbeat
     try:
         runners, runs_on = backend.runners(), backend.runs_on()
     except BackendError as e:
-        return [(False, None, f'ci.pool: cannot read the CI host — {e}')] + classes
+        return [(False, None, f'ci.pool: cannot read the CI host — {e}')] + classes + heartbeat
     rows = [(True, ok, detail) for ok, detail in drift(pool, runners, runs_on,
                                                        owned=reserve_labels(product),
                                                        why=getattr(backend, 'vars_error', None),
                                                        product=product)]
-    return rows + reserve_rows(product, runners, pool) + classes
+    return rows + reserve_rows(product, runners, pool) + classes + heartbeat
 
 
 def reserve_rows(product, runners, pool=None):
@@ -1588,4 +1595,17 @@ def register(subparsers):
                     help='never fetch an unresolvable head sha from origin')
     c.add_argument('--json', action='store_true', help='the rows as a list of objects')
     c.set_defaults(run=ci_cancels.cmd_cancels)
+    from asf import ci_heartbeat
+    b = sub.add_parser('boxes', help="every box ci.pool declares, one per line — the one list "
+                                     "a watchdog or an installer reads instead of its own "
+                                     "hand-kept copy (B-0178)")
+    env.add_product_arg(b)
+    b.set_defaults(run=ci_heartbeat.cmd_boxes)
+    h = sub.add_parser('heartbeat', help="record a box's beat now (asf ci heartbeat <box>) — "
+                                        "the one write a box's agent makes; the doctor goes red "
+                                        "on a box silent for more than "
+                                        f"{ci_heartbeat.STALE_AFTER_MIN} min")
+    env.add_product_arg(h)
+    h.add_argument('box', help='the box name, as declared in ci.pool')
+    h.set_defaults(run=ci_heartbeat.cmd_heartbeat)
     return p
