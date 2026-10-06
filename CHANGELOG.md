@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.164 — 2026-10-06
+
+### Features landed
+
+- The wave raises one line per held Epic, on a busy tick too, and records it (#811)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.164"`
+
 ## v0.1.163 — 2026-10-06
 
 ### Features landed
