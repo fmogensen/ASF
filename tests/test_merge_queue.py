@@ -1172,6 +1172,57 @@ def run_check(name, conclusion='success', status_='completed', run=500001, compl
             'completed_at': completed or stamp(-3600)}
 
 
+class LiveRunGH(FakeGH):
+    """:class:`FakeGH` plus a refused ``gh run rerun`` and a workflow run's own jobs
+    (:func:`asf.flake.run_live`, ``required`` narrowed) — B-0274."""
+
+    def __init__(self):
+        super().__init__()
+        self.refuse_rerun = {}     # job id -> rc, err
+        self.run_jobs = {}         # run id -> [{name, status}]
+
+    def __call__(self, args):
+        if args[:2] == ['run', 'rerun'] and args[3] in self.refuse_rerun:
+            self.calls.append(list(args))
+            rc, err = self.refuse_rerun[args[3]]
+            return rc, '', err
+        if args[0] == 'api' and '/actions/runs/' in args[1] and args[1].endswith(
+                '/jobs?per_page=100'):
+            self.calls.append(list(args))
+            run = args[1].split('/actions/runs/')[1].split('/')[0]
+            return 0, json.dumps({'jobs': self.run_jobs.get(run, [])}), ''
+        return super().__call__(args)
+
+
+class LiveRunBlocksTheChain(QueueRepo):
+    """A required job red while its workflow run is still live only because of a non-required
+    job (a ``site`` job, say) is dropped at once, never held waiting on a job the batch does not
+    require (2026-10-06: ``gate-tests`` red, ``site`` still in progress — the batch, and every
+    batch stacked above it, held the queue for hours)."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.gh = LiveRunGH()
+        patch = mock.patch.object(github, 'call', side_effect=contracts.as_call(self.gh))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+
+    def test_a_non_required_job_still_live_never_holds_the_batch_pending(self):
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('gate'), job_run('gate-tests', '12')]
+        self.gh.refuse_rerun = {'12': (1, 'run 7 cannot be rerun; This workflow is already '
+                                           'running')}
+        self.gh.run_jobs = {'7': [{'name': 'gate-tests', 'status': 'completed'},
+                                  {'name': 'site', 'status': 'in_progress'}]}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])                   # dropped at once, never pending
+        self.assertEqual([(b, k) for b, k, _t, _f in self.backs], [('worker/T-0001', 'gate')])
+        self.assertNotIn(batch['ref'], self.heads())
+
+
 class NoVerdict(QueueRepo):
     """A cancelled (timed out, stale, never started) required check on a batch is a terminal
     non-verdict: re-run once per (batch sha, job), then cut again with an ALARM — never waited on

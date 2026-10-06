@@ -74,10 +74,14 @@ it names to the member whose diff added them (:func:`blame`). Such a red is dete
 (:func:`deterministic`), is never re-run by flake triage — the member its log names goes back at
 once and the rest are cut again (2026-10-06: a duplicate-row red re-run twice, ~45 min).
 
-**A red the triage will re-run keeps the chain.** A required job red while its workflow run is
-still live cannot be re-run yet: the batch stays pending — never red on the host's refusal — and
-every batch stacked on it stays in flight. Only the re-run's own red drops the batch, and the
-chain with it (2026-10-06: one such red dropped a stacked chain, ~1.5 h of heavy runs).
+**A red the triage will re-run keeps the chain.** A required job red while one of the run's own
+*required* jobs is still live cannot be re-run yet: the batch stays pending — never red on the
+host's refusal — and every batch stacked on it stays in flight. Only the re-run's own red drops
+the batch, and the chain with it (2026-10-06: one such red dropped a stacked chain, ~1.5 h of
+heavy runs). A non-required job alone still running (a ``site`` job, say) never counts: the
+triage (:func:`asf.flake.triage`, given the batch's own ``required`` set) drops the batch at
+once instead of waiting on a job nobody is gating on (B-0274: an unrelated job alone kept a red
+``gate-tests`` — and every batch stacked above it — pending for hours).
 
 **A drop cancels its run.** Whenever a batch is dropped or replaced (moved, stale, red, timed
 out, re-cut), its ref's runs still queued or in progress at its sha are cancelled in the same
@@ -1060,7 +1064,8 @@ def judge(lane, batch, members, heads, trunk_sha, st):
             failed = [c for c in failed if c.get('name') in causes]
         defects, held = flake.triage(lane.product, lane.state_dir, lane.slug, sha, failed,
                                      where=f'batch {ref}', out=lane.out,
-                                     deterministic=deterministic(lane, st, failed))
+                                     deterministic=deterministic(lane, st, failed),
+                                     required=required)
         explained = {flake.job_key(c['name']) for c in failed} | (
             _skipped(why) if failed else set())
         other = [n for n in red if n not in explained]

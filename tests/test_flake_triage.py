@@ -39,10 +39,13 @@ class FakeGH:
     """``gh`` as head_red calls it: the PR's checks (one list per pass), a re-run that is taken
     or refused, the failed job's steps and log."""
 
-    def __init__(self, rollup, rerun_rc=0, rerun_err='', annotations=None):
+    def __init__(self, rollup, rerun_rc=0, rerun_err='', annotations=None, run_jobs=None):
         self.rollup, self.rerun_rc, self.rerun_err, self.calls = rollup, rerun_rc, rerun_err, []
         #: ``{job id: [annotation message]}``: the failure annotations a job carries
         self.annotations = annotations or {}
+        #: ``{run id: [{name, status}]}``: a workflow run's own jobs (:func:`flake.run_live`,
+        #: ``required`` narrowed)
+        self.run_jobs = run_jobs or {}
 
     def __call__(self, args):
         self.calls.append(list(args))
@@ -52,6 +55,15 @@ class FakeGH:
             job = args[1].split('/check-runs/')[1].split('/')[0]
             return 0, json.dumps([{'annotation_level': 'failure', 'message': m}
                                   for m in self.annotations.get(job, ())]), ''
+        if args[0] == 'api' and '/actions/runs/' in args[1] and '/jobs' in args[1]:
+            run = args[1].split('/actions/runs/')[1].split('/')[0]
+            return 0, json.dumps({'jobs': self.run_jobs.get(run, [])}), ''
+        if args[0] == 'api' and '/actions/runs/' in args[1]:
+            # the aggregate status a caller with no ``required`` of its own still reads: live
+            # whenever this run has jobs recorded (:attr:`run_jobs`), for a test to narrow
+            run = args[1].split('/actions/runs/')[1].split('/')[0].split('?')[0]
+            return 0, json.dumps({'status': 'in_progress' if run in self.run_jobs
+                                  else 'completed'}), ''
         if args[0] == 'api' and '/check-runs' in args[1]:
             return 0, json.dumps({'check_runs': []}), ''
         if args[:2] == ['run', 'rerun']:
@@ -198,6 +210,44 @@ class Triage(unittest.TestCase):
         gh = FakeGH([check('gate-tests', 'fail', 12)])
         self.assertEqual(self.head_red(gh)['names'], ['gate-tests'])
         self.assertEqual(gh.reruns(), [])
+
+
+class RequiredJobsOnly(unittest.TestCase):
+    """A caller that names its batch's own ``required`` jobs (the merge queue) is never held
+    waiting on a job it does not require (B-0274): a ``site`` job, left running alone in the
+    same workflow run, kept a red ``gate-tests`` — and the queue — pending for hours."""
+
+    def setUp(self):
+        self.state_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state_dir, True)
+        self.product = env.Product('p', {'repo_slug': 'o/p'})
+
+    def triage(self, run_jobs, required):
+        gh = FakeGH([check('gate-tests', 'fail', 12)], rerun_rc=1, rerun_err='HTTP 422: Conflict',
+                    run_jobs=run_jobs)
+        return flake.triage(self.product, self.state_dir, 'o/p', HEAD,
+                            [check('gate-tests', 'fail', 12)], out=lambda *_: None, gh=gh,
+                            required=required)
+
+    def test_a_non_required_job_still_live_is_never_waited_on(self):
+        defects, held = self.triage(
+            {'100': [{'name': 'gate-tests', 'status': 'completed'},
+                     {'name': 'site', 'status': 'in_progress'}]}, required=('gate', 'gate-tests'))
+        self.assertEqual((defects, held), (['gate-tests'], []))
+
+    def test_a_required_job_still_live_is_waited_on_as_before(self):
+        defects, held = self.triage(
+            {'100': [{'name': 'gate-tests', 'status': 'completed'},
+                     {'name': 'gate', 'status': 'in_progress'}]}, required=('gate', 'gate-tests'))
+        self.assertEqual((defects, held), ([], ['gate-tests']))
+
+    def test_with_no_required_named_the_whole_run_still_decides(self):
+        # the default (PR head, trunk): with no required set to narrow it, the run's own
+        # aggregate status decides, unfiltered — live on ``site`` alone still holds, as before
+        defects, held = self.triage(
+            {'100': [{'name': 'gate-tests', 'status': 'completed'},
+                     {'name': 'site', 'status': 'in_progress'}]}, required=None)
+        self.assertEqual((defects, held), ([], ['gate-tests']))
 
 
 def reruns(gh):
