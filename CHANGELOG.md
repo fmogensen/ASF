@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.171 — 2026-10-06
+
+### Features landed
+
+- The scorecard names the cause (#818)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.171"`
+
 ## v0.1.170 — 2026-10-06
 
 ### Features landed
