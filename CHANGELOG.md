@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.154 — 2026-10-06
+
+### Features landed
+
+- The pass reaches its own watermark, buys nothing twice, says what it did — and one function parses the facts (#794)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.154"`
+
 ## v0.1.153 — 2026-10-06
 
 ### Features landed
