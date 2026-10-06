@@ -15,6 +15,7 @@ import time
 import unittest
 from unittest import mock
 
+from asf import ci_flight
 from asf import env
 from asf import hooks as hooks_mod
 from asf import progress
@@ -113,6 +114,38 @@ class Home(unittest.TestCase):
 
     def acct(self):
         return pool_mod.Account('acct-a', cap=2, config_dir='/cfg/acct-a')
+
+    def _held_branch_behind_main(self, name, text_on_main='main\n', shape='plain'):
+        """``fix/<name>`` on origin with one commit of its own, and ``main`` one commit past its
+        base. ``shape``: ``plain``; ``merge`` — the branch merged the trunk in; ``copy`` — the
+        branch carries a cherry-picked copy of a trunk commit; ``conflict`` — main's commit
+        rewrites the branch's own file. Returns the clone the pushes were made from."""
+        def commit(cwd, fname, text, msg):
+            with open(os.path.join(cwd, fname), 'w') as f:
+                f.write(text)
+            git('add', '.', cwd=cwd)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-m', msg,
+                cwd=cwd)
+        other = os.path.join(self.tmp, f'other-{name}')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        branch = f'fix/{name}'
+        git('checkout', '-q', '-b', branch, cwd=other)
+        commit(other, 'a.txt', 'branch\n', 'held work')
+        git('checkout', '-q', 'main', cwd=other)
+        commit(other, 'a.txt' if shape == 'conflict' else f'b-{name}.txt', text_on_main,
+               'main moves on')
+        git('push', '-q', 'origin', 'main', cwd=other)
+        git('checkout', '-q', branch, cwd=other)
+        if shape == 'merge':
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'merge', '-q',
+                '--no-edit', 'main', cwd=other)
+        elif shape == 'copy':
+            main_sha = git('rev-parse', 'main', cwd=other)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'cherry-pick', main_sha,
+                cwd=other)
+            commit(other, 'c.txt', 'more\n', 'more held work')
+        git('push', '-q', 'origin', branch, cwd=other)
+        return other, branch
 
 
 class TestRuntime(unittest.TestCase):
@@ -590,38 +623,6 @@ class TestSpawn(Home):
                          held)
         self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), held)
 
-    def _held_branch_behind_main(self, name, text_on_main='main\n', shape='plain'):
-        """``fix/<name>`` on origin with one commit of its own, and ``main`` one commit past its
-        base. ``shape``: ``plain``; ``merge`` — the branch merged the trunk in; ``copy`` — the
-        branch carries a cherry-picked copy of a trunk commit; ``conflict`` — main's commit
-        rewrites the branch's own file. Returns the clone the pushes were made from."""
-        def commit(cwd, fname, text, msg):
-            with open(os.path.join(cwd, fname), 'w') as f:
-                f.write(text)
-            git('add', '.', cwd=cwd)
-            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-m', msg,
-                cwd=cwd)
-        other = os.path.join(self.tmp, f'other-{name}')
-        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
-        branch = f'fix/{name}'
-        git('checkout', '-q', '-b', branch, cwd=other)
-        commit(other, 'a.txt', 'branch\n', 'held work')
-        git('checkout', '-q', 'main', cwd=other)
-        commit(other, 'a.txt' if shape == 'conflict' else f'b-{name}.txt', text_on_main,
-               'main moves on')
-        git('push', '-q', 'origin', 'main', cwd=other)
-        git('checkout', '-q', branch, cwd=other)
-        if shape == 'merge':
-            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'merge', '-q',
-                '--no-edit', 'main', cwd=other)
-        elif shape == 'copy':
-            main_sha = git('rev-parse', 'main', cwd=other)
-            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'cherry-pick', main_sha,
-                cwd=other)
-            commit(other, 'c.txt', 'more\n', 'more held work')
-        git('push', '-q', 'origin', branch, cwd=other)
-        return other, branch
-
     def test_a_held_branch_carrying_trunk_history_is_rebased_and_published(self):
         # what a rebase alone clears still gets it: a merge of the trunk, or a copy of a trunk
         # commit, on the branch (the lane would hold it, B-0056)
@@ -957,6 +958,133 @@ class TestSpawn(Home):
                                   runtime=rt, cfg=_cfg_with_sampler(self.cfg))
         self.assertEqual(rec['job'], 'failsamp')
         self.assertNotIn('progress_pid', pool_mod.load_sessions(self.product)['failsamp'])
+
+
+class LaunchRebaseDefersMidRun(Home):
+    """F-0203 — a launch never re-pushes a branch whose CI run is in flight: the launch rebase
+    asks :func:`asf.ci_flight.verdict` before it rebases, and leaves the branch exactly as origin
+    holds it (byte-identical, un-re-dated) when the verdict defers."""
+
+    class _Flight:
+        """A :class:`asf.ci_flight.Flight`-shaped fake answering ``answer`` for every branch."""
+
+        def __init__(self, answer):
+            self.answer = answer
+
+        def read(self, product, branch):
+            return self.answer
+
+    def test_a_branch_carrying_trunk_history_with_a_run_in_flight_is_left_untouched(self):
+        # the card's own incident: a rebase re-dates every commit it replays even when the
+        # branch's own content does not change — the deferral must leave the head, and every
+        # commit's date, exactly as origin holds them
+        for shape in ('copy', 'merge'):
+            with self.subTest(shape=shape):
+                name = f'B-defer-{shape}'
+                other, branch = self._held_branch_behind_main(name, shape=shape)
+                held = git('rev-parse', branch, cwd=other)
+                dates = git('log', '--format=%cI', branch, cwd=other)
+                flight = self._Flight({'id': 36262385912, 'status': 'in_progress'})
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    wt = spawn_mod.make_worktree(self.product, f'correct-{name.lower()}', branch,
+                                                 kind='correct', flight=flight)
+                self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), held)
+                self.assertEqual(git('log', '--format=%cI', 'HEAD', cwd=wt), dates)
+                self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
+                                 held)
+                self.assertIn(f'rebase deferred: {branch} CI in flight (run 36262385912)',
+                             buf.getvalue())
+
+    def test_with_nothing_in_flight_the_rebase_and_publish_are_unchanged(self):
+        name = 'B-nodefer-copy'
+        other, branch = self._held_branch_behind_main(name, shape='copy')
+        flight = self._Flight(None)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            wt = spawn_mod.make_worktree(self.product, f'correct-{name.lower()}', branch,
+                                         kind='correct', flight=flight)
+        self.assertEqual(git('rev-list', '--merges', 'origin/main..HEAD', cwd=wt), '')
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
+        self.assertNotIn('deferred', buf.getvalue())
+
+    def test_a_conflicting_branch_is_rebased_at_once_run_in_flight_or_not(self):
+        for severity in (None, 'S1'):
+            with self.subTest(severity=severity):
+                name = f'B-conflict-{severity}'
+                other, branch = self._held_branch_behind_main(name, f'main-{severity}\n',
+                                                               'conflict')
+                flight = self._Flight({'id': 1, 'status': 'queued'})
+                buf = io.StringIO()
+                with mock.patch.object(ci_flight, 'verdict', wraps=ci_flight.verdict) as v, \
+                     contextlib.redirect_stderr(buf):
+                    spawn_mod.make_worktree(self.product, f'correct-{name.lower()}', branch,
+                                            kind='correct', severity=severity, flight=flight)
+                self.assertNotIn('rebase deferred', buf.getvalue())
+                v.assert_called_once()
+                self.assertEqual(v.call_args.kwargs['needed'], ci_flight.CONFLICT)
+
+    def test_an_s1_branch_carrying_trunk_history_with_a_run_in_flight_still_defers(self):
+        # C4: for an S1/hotfix branch, only CONFLICT survives — a copy of a trunk commit claims
+        # no exception, so an S1 held branch waits for the run exactly like any other
+        name = 'B-s1-copy'
+        other, branch = self._held_branch_behind_main(name, shape='copy')
+        held = git('rev-parse', branch, cwd=other)
+        flight = self._Flight({'id': 36262385912, 'status': 'in_progress'})
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            wt = spawn_mod.make_worktree(self.product, f'correct-{name.lower()}', branch,
+                                         kind='correct', severity='S1', flight=flight)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), held)
+        self.assertIn(f'rebase deferred: {branch} CI in flight (run 36262385912)', buf.getvalue())
+
+    def test_urgent_read_off_the_branch_name_alone_still_defers_a_copy(self):
+        # C5: urgent() off the branch name needs no severity and no record
+        other, branch = self._held_branch_behind_main('hotfix-B-name', shape='copy')
+        held = git('rev-parse', branch, cwd=other)
+        flight = self._Flight({'id': 36262385912, 'status': 'in_progress'})
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            wt = spawn_mod.make_worktree(self.product, 'correct-hotfix', branch, kind='correct',
+                                         severity=None, flight=flight)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), held)
+        self.assertIn('deferred', buf.getvalue())
+
+    def test_a_fresh_branch_not_on_origin_is_never_asked(self):
+        row = s1_row(job='fresh-not-on-origin', item='B-9999')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 1}])
+        with mock.patch.object(ci_flight, 'run_in_flight',
+                               side_effect=AssertionError('asked')):
+            rec = spawn_mod.spawn(self.product, row, self.acct(), 'fix\n', runtime=rt,
+                                  cfg=self.cfg)
+        self.assertEqual(rec['job'], 'fresh-not-on-origin')
+
+    def test_product_none_reaches_the_gate_without_raising(self):
+        other, branch = self._held_branch_behind_main('B-none-product', shape='copy')
+        git('fetch', '-q', 'origin', cwd=other)
+        git('checkout', '-q', branch, cwd=other)
+        spawn_mod._rebase_onto_trunk(other, branch, 'main', product=None)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=other).split()[0],
+                         git('rev-parse', 'HEAD', cwd=other))
+
+    def test_severity_is_threaded_from_the_row_through_spawn(self):
+        # the only row that proves severity=row.severity is actually passed (every other test
+        # here calls make_worktree directly and would pass with the thread missing)
+        other, branch = self._held_branch_behind_main('B-thread-s1', shape='copy')
+        held = git('rev-parse', branch, cwd=other)
+        row = pool_mod.Row('correct-thread', 'B-thread-s1', kind='correct', branch=branch,
+                           severity='S1')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 1}])
+        buf = io.StringIO()
+        with mock.patch.object(ci_flight, 'run_in_flight',
+                               return_value={'id': 1, 'status': 'queued'}), \
+             contextlib.redirect_stderr(buf):
+            rec = spawn_mod.spawn(self.product, row, self.acct(), 'fix it\n', runtime=rt,
+                                  cfg=self.cfg)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=rec['worktree']).split()[0],
+                         held)
+        self.assertIn('rebase deferred', buf.getvalue())
 
 
 class TestReclaimDeadWorktree(Home):
