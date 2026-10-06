@@ -567,7 +567,7 @@ def _sets_guarded_config(command):
 _READ_ONLY_PROGRAMS = frozenset((
     'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ls', 'cat', 'head', 'tail', 'wc', 'less', 'more',
     'stat', 'file', 'diff', 'cmp', 'cut', 'tr', 'nl', 'echo', 'printf', 'pwd', 'true', 'test',
-    'basename', 'dirname', 'realpath', 'readlink', 'which', 'jq',
+    'basename', 'dirname', 'realpath', 'readlink', 'which', 'jq', 'printenv',
 ))
 
 #: ``find``'s actions that run or write something.
