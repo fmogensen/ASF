@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.165 — 2026-10-06
+
+### Features landed
+
+- One retirement rule — a moved card is retired to the index reader too (#810)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.165"`
+
 ## v0.1.164 — 2026-10-06
 
 ### Features landed
