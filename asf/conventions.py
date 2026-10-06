@@ -419,6 +419,7 @@ DEFAULT_REPORTS_DIR = None       # a directory of hotfix / diagnostic reports `a
 DEFAULT_REPORT_PATTERN = None    # regex over a file name in reports_dir; None → every .md
 DEFAULT_CI_WORKFLOW = None       # the workflow whose runs on the trunk are the green evidence
 DEFAULT_CI_DEV_JOB = None        # the job in that workflow whose success marks the dev sha
+DEFAULT_CI_WORKFLOWS = ()        # extra workflows the ci stream backfill always keeps (metrics.py)
 DEFAULT_DEPLOY_WORKFLOW = None   # the workflow whose newest success marks the prod sha
 #: A product with no deploy (B-0077): the file in its repo the rollup files each version's
 #: release notes in, newest first. Read from the yaml's ``changelog_file:``.
@@ -795,6 +796,10 @@ class Conventions:
     reports_dir: str = DEFAULT_REPORTS_DIR
     report_pattern: str = DEFAULT_REPORT_PATTERN
     ci_workflow: str = DEFAULT_CI_WORKFLOW
+    #: Extra workflow names/files the metrics backfill always keeps, matched against a run's
+    #: display name or its workflow file's basename, beside the generic pull-request/trunk/batch
+    #: selection every workflow already gets (:func:`asf.metrics.metrics._relevant_run`).
+    ci_workflows: list = field(default_factory=lambda: list(DEFAULT_CI_WORKFLOWS))
     ci_dev_job: str = DEFAULT_CI_DEV_JOB
     deploy_workflow: str = DEFAULT_DEPLOY_WORKFLOW
     #: ``readme`` / ``readme_facts``: the README's own path and its committed facts file, relative
