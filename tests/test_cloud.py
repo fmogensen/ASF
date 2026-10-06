@@ -419,6 +419,7 @@ class Lanes(Home):
 
     def run_wave(self, rows, live=(), local_hold='', cfg=None, ready=(True, ''), **kw):
         accounts = pool_mod.accounts_from_config(cfg or self.cfg)
+        accounts_by_name = {a.name: a for a in accounts}
         pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource({}), live=live)
         self.crt = FakeCloudRuntime()
         lines = []
@@ -427,6 +428,13 @@ class Lanes(Home):
             runtime=runtime_mod.FakeRuntime([{'running': True}] * 5), cfg=cfg or self.cfg,
             out=lines.append, local_hold=local_hold, cloud_runtime=self.crt, cloud_ready=ready,
             **kw)
+        # each launched row's claim is released here, not left for the next ``run_wave`` call in
+        # the same test to trip over (C1): a same-pid claim survives a pool rebuild on purpose
+        # (PD2), so two placements in one test need their own free seats, not a stale one of ours.
+        for row, rec in launched:
+            lane = rec.get('runtime_lane') if rec.get('runtime_lane') == 'cloud' else None
+            pool.untake(accounts_by_name[rec['account']], rec['model'], job=row.job,
+                        product=self.product.name, kind=row.kind, lane=lane)
         return launched, waits, lines
 
 
