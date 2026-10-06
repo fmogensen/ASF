@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.153 — 2026-10-06
+
+### Features landed
+
+- The help names the forms, and the guide stops being wrong about what `asf set` does (#791)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.153"`
+
 ## v0.1.152 — 2026-10-06
 
 ### Features landed
