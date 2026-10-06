@@ -415,6 +415,23 @@ class HookTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(_pushes_trunk(cmd, 'main'), want)
 
+    def test_printenv_is_read_only_and_env_is_not(self):
+        # C8: `env NAME=value <program>` runs a program, so `env` stays out of the register —
+        # a single rule or register entry for it would allow everything behind it
+        self.assertTrue(approvals._read_only(['printenv']))
+        self.assertFalse(approvals._read_only(['env', 'NAME=value', 'printenv']))
+
+    def test_printenv_piped_to_grep_is_not_a_run_of_its_pattern(self):
+        # F-0042's own shape, one hop over: an item id or a rule name inside the grep pattern
+        # is text the session searched for in its own environment, never a command it ran
+        self.assertEqual(approvals._run_text("printenv | grep -iE 'backlog|ASF'"), '')
+
+    def test_printenv_redirected_to_a_file_is_still_a_write(self):
+        # the register's contract is "writes no file but through a redirection" — `printenv`
+        # is read-only, but `_REDIRECTS` still catches where it sends its output
+        self.assertTrue(approvals._read_only(['printenv', '>', '/tmp/x']))
+        self.assertEqual(approvals.written_words('printenv > /tmp/x'), ['/tmp/x'])
+
     # the example patterns a product names: its unscoped full-suite and full-gate forms only
     FULL_SUITE = ("conventions:\n  landing: pull-request\n  landing_checks: [gate]\n"
                   "  full_suite_commands:\n"
