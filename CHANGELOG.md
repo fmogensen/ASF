@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.175 — 2026-10-06
+
+### Bugs fixed
+
+- Release readiness, versioning and the stale/gate policies read only the product's own config — no repository is special, and a minimal product (one account, no cloud, no queue, hosted CI, no quota reader, no prices) passes doctor, release-readiness and a full tick with n/a for what does not apply (#823)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.175"`
+
 ## v0.1.174 — 2026-10-06
 
 ### Bugs fixed
