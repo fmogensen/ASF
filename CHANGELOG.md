@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.203 — 2026-10-06
+
+### Features landed
+
+- The rate and the repeat — two sources over the `sessions` stream (#863)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.203"`
+
 ## v0.1.202 — 2026-10-06
 
 ### Features landed
