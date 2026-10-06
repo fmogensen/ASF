@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.181 — 2026-10-06
+
+### Features landed
+
+- About 47 more hardcoded policy values — worktree orphan grace, the model fallback table, CI window/readiness thresholds, trunk-watch and trunk-red polling intervals, flaky-card windows, dry-run free-space floor, token/stall grace, progress sampler intervals, seat/reservation/brief limits, groom near-duplicate overlap, the scheduler's minimum clock interval and queue interval, and the changelog rollup settings — are now `~/.ASF/config.yaml` keys with today's values as defaults, the same way slice 1 (#821) wired the top tunables (#831)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.181"`
+
 ## v0.1.180 — 2026-10-06
 
 ### Bugs fixed
