@@ -1,6 +1,7 @@
 """asf.cli.main — a refused product file is one NEEDS OPERATOR line and exit 2, never a traceback
 (B-0045); a record command uses the product's record, not the cwd, even when the cwd is a
 product repo (B-0050)."""
+import argparse
 import contextlib
 import dataclasses
 import datetime
@@ -488,6 +489,29 @@ class ReadmeParserTests(unittest.TestCase):
                                               '--check', '--json'])
         self.assertEqual((args.command, args.product, args.refresh, args.check, args.json),
                          ('readme', 'sample', True, True, True))
+
+
+class SetHelpTests(unittest.TestCase):
+    """T-0501: `asf set --help` names the list fields and their add/remove forms, read off the
+    real parser rather than a hand-kept string — the same idiom `tests/test_readme.py`'s
+    `_install_parser` uses to reach a subparser off `cli.build_parser()`."""
+
+    def _set_parser(self):
+        parser = cli.build_parser()
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                return action.choices['set']
+        raise AssertionError('no set subcommand')
+
+    def test_set_help_exits_0(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.build_parser().parse_args(['set', '--help'])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_set_help_names_the_list_fields_and_their_forms(self):
+        help_text = self._set_parser().format_help()
+        for needle in ('writes', 'after', '+=', '-='):
+            self.assertIn(needle, help_text, help_text)
 
 
 class LineBufferedOutputTests(unittest.TestCase):

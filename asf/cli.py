@@ -208,10 +208,14 @@ def build_parser():
     p_inbox.add_argument('--parent')
     p_inbox.add_argument('--product')
 
-    p_set = sub.add_parser('set', help='write typed fields of a card through the parser')
+    p_set = sub.add_parser('set', help="write typed fields of a card through the parser "
+                                       "(a Task's writes:/after: with =, += and -=)")
     p_set.add_argument('id', help='the card; more ids may follow, then FIELD=VALUE…: '
                                   'one commit sets the fields on all of them')
-    p_set.add_argument('assignments', nargs='+', metavar='[ID…] FIELD=VALUE')
+    p_set.add_argument('assignments', nargs='+', metavar='[ID…] FIELD=VALUE',
+                       help="repeatable; a Task's list fields writes: and after: also take "
+                            "FIELD+=VALUE to add and FIELD-=VALUE to remove, and VALUE may be "
+                            "[a, b]")
     p_set.add_argument('--product')
 
     p_reopen = sub.add_parser(
