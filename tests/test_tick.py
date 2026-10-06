@@ -3,6 +3,7 @@ import argparse
 import contextlib
 import datetime
 import io
+import json
 import os
 import re
 import shutil
@@ -428,6 +429,408 @@ class RecordHealthStaleStatusTests(TickTestCase):
         product = env.load_product('sample')
         self.assertIsNone(record_health.line(product))
         self.assertIsNone(status.stale_cell(self.operator, product))
+
+
+def _write_index(root, generated):
+    """``index.json`` with no live items — only ``generated`` matters to :func:`stale_cell`."""
+    with open(os.path.join(root, 'index.json'), 'w', encoding='utf-8') as f:
+        json.dump({'items': {}, 'generated': generated}, f)
+
+
+def _append_tick_line(root, day, **fields):
+    """One ``metrics/ticks/<day>.jsonl`` line, the stream's own shape plus ``fields``."""
+    path = os.path.join(root, 'metrics', 'ticks', f'{day}.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(fields, sort_keys=True, ensure_ascii=False) + '\n')
+
+
+def _record_step(ok=True, seconds=1.0):
+    return {'step': 'record', 'ok': ok, 'seconds': seconds}
+
+
+class StaleRowCadenceTests(TickTestCase):
+    """F-0221/S-38100: the Stale row's threshold is one full measured cadence, twice over — and
+    S-38103's floor, that a real stall still fires and a checkout with no readable cadence keeps
+    exactly today's ``2 x`` the clock."""
+
+    product_yaml = 'clocks:\n  record:\n    steps: [record]\n    every: 5m\n'
+
+    def test_duration_term_contributes_nothing_for_none_zero_negative_and_non_numeric(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        for duration_s in (None, 0, -5, 'x', True):
+            with self.subTest(duration_s=duration_s):
+                self.assertEqual(status._stale_after_s(product, duration_s), 600.0)
+        self.assertEqual(status._stale_after_s(product, 798), 2196.0)
+
+    def test_the_threshold_moves_with_the_clocks_block(self):
+        from asf.views import status
+        self.write_product('clocks:\n  record:\n    steps: [record]\n    every: 10m\n')
+        product = env.load_product('sample')
+        self.assertEqual(status._stale_after_s(product, 798), 2796.0)
+
+    def test_no_clocks_block_falls_back_to_the_default_record_clock(self):
+        from asf.views import status
+        self.write_product('')
+        product = env.load_product('sample')
+        self.assertEqual(status._record_period_s(product), status.DEFAULT_RECORD_CLOCK_S)
+        self.assertEqual(status._stale_after_s(product, 798), 2 * (300 + 798))
+
+    def test_a_13_3m_tick_silences_the_row_through_20m_and_it_still_stales_at_40m(self):
+        """Today both 20m and 40m are ``STALE`` (``2 x _record_period_s`` alone is 10m) — the
+        false positive this Feature removes, and the real stall it keeps (S-38100, S-38103)."""
+        from asf.views import index_reader as ix
+        from asf.views import status
+        product = env.load_product('sample')
+
+        def at(age_minutes):
+            now = datetime.datetime.now(datetime.timezone.utc)
+            ts = now - datetime.timedelta(minutes=age_minutes)
+            ts_str = ts.strftime('%Y-%m-%dT%H:%M:%SZ')
+            day = ts.strftime('%Y-%m-%d')
+            path = os.path.join(self.operator, 'metrics', 'ticks', f'{day}.jsonl')
+            if os.path.exists(path):
+                os.remove(path)
+            _write_index(self.operator, ts_str)
+            _append_tick_line(self.operator, day, ts=ts_str, duration_s=798.0, product='sample',
+                               steps=[_record_step()])
+            return status.stale_cell(self.operator, product), ts_str
+
+        result, _ = at(20)
+        self.assertIsNone(result)
+        result, ts_str = at(40)
+        self.assertEqual(result, f"STALE since {ix.local_stamp(ts_str, '%H:%M')} — no fresh record in 40m")
+
+    def test_a_real_stall_fires(self):
+        """S-38103: nothing having finished a record for an hour, with a 13-minute last tick."""
+        from asf.views import index_reader as ix
+        from asf.views import status
+        product = env.load_product('sample')
+        now = datetime.datetime.now(datetime.timezone.utc)
+        tick_at = now - datetime.timedelta(hours=1, minutes=3)
+        ts_str = tick_at.strftime('%Y-%m-%dT%H:%M:%SZ')
+        day = tick_at.strftime('%Y-%m-%d')
+        _write_index(self.operator, ts_str)
+        _append_tick_line(self.operator, day, ts=ts_str, duration_s=780.0, product='sample',
+                           steps=[_record_step(seconds=780.0)])
+        age_s = (datetime.datetime.now(datetime.timezone.utc) - tick_at).total_seconds()
+        self.assertEqual(status.stale_cell(self.operator, product),
+                          f"STALE since {ix.local_stamp(ts_str, '%H:%M')} — no fresh record in {ix.span(age_s)}")
+
+
+class StaleRowRecordSignalTests(TickTestCase):
+    """F-0221/S-38101: "a tick finished a record" is read from the newest ``metrics/ticks`` line
+    whose ``steps`` carry a landed ``record``, falling back to ``index.json``'s ``generated`` —
+    and the row takes whichever of the two is fresher, never the older (D2, D10)."""
+
+    product_yaml = 'clocks:\n  record:\n    steps: [record]\n    every: 5m\n'
+
+    def _now(self):
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    def test_the_newer_signal_wins_when_the_tick_line_is_fresher(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        now = self._now()
+        tick_ts = now - datetime.timedelta(minutes=4)
+        generated_ts = now - datetime.timedelta(minutes=17)
+        _write_index(self.operator, generated_ts.strftime('%Y-%m-%dT%H:%M:%SZ'))
+        _append_tick_line(self.operator, tick_ts.strftime('%Y-%m-%d'),
+                           ts=tick_ts.strftime('%Y-%m-%dT%H:%M:%SZ'), duration_s=60.0,
+                           product='sample', steps=[_record_step()])
+        self.assertIsNone(status.stale_cell(self.operator, product))
+
+    def test_the_newer_signal_wins_when_generated_is_fresher_and_since_names_it(self):
+        from asf.views import index_reader as ix
+        from asf.views import status
+        product = env.load_product('sample')
+        now = self._now()
+        tick_ts = now - datetime.timedelta(minutes=50)
+        generated_ts = now - datetime.timedelta(minutes=15)
+        generated_str = generated_ts.strftime('%Y-%m-%dT%H:%M:%SZ')
+        _write_index(self.operator, generated_str)
+        _append_tick_line(self.operator, tick_ts.strftime('%Y-%m-%d'),
+                           ts=tick_ts.strftime('%Y-%m-%dT%H:%M:%SZ'), duration_s=60.0,
+                           product='sample', steps=[_record_step()])
+        result = status.stale_cell(self.operator, product)
+        self.assertEqual(result,
+                          f"STALE since {ix.local_stamp(generated_str, '%H:%M')} — no fresh record in 15m")
+
+    def test_a_tick_with_no_record_step_or_a_failed_one_does_not_count(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        now = self._now()
+        day = now.strftime('%Y-%m-%d')
+        no_record = now - datetime.timedelta(minutes=1)
+        failed_record = now - datetime.timedelta(minutes=2)
+        _append_tick_line(self.operator, day, ts=no_record.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=798.0, product='sample',
+                           steps=[{'step': 'health', 'ok': True, 'seconds': 1.0},
+                                  {'step': 'wave', 'ok': True, 'seconds': 1.0}])
+        _append_tick_line(self.operator, day, ts=failed_record.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=798.0, product='sample', steps=[_record_step(ok=False)])
+        self.assertIsNone(status._last_record_tick(self.operator, product))
+        # neither line counts, so the duration term is 0 and today's `2 x` the clock is the floor
+        generated_ts = now - datetime.timedelta(minutes=11)
+        _write_index(self.operator, generated_ts.strftime('%Y-%m-%dT%H:%M:%SZ'))
+        self.assertIsNotNone(status.stale_cell(self.operator, product))
+
+    def test_another_products_line_does_not_count_and_an_absent_product_does(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        now = self._now()
+        day = now.strftime('%Y-%m-%d')
+        other_ts = now - datetime.timedelta(minutes=1)      # fresher, but not this product's
+        ours_ts = now - datetime.timedelta(minutes=50)       # older, but ours (product absent)
+        _append_tick_line(self.operator, day, ts=other_ts.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=798.0, product='other', steps=[_record_step()])
+        _append_tick_line(self.operator, day, ts=ours_ts.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=798.0, steps=[_record_step()])  # product absent: ours
+        _write_index(self.operator, (now - datetime.timedelta(minutes=55)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        last = status._last_record_tick(self.operator, product)
+        self.assertEqual(last[0], ours_ts.strftime('%Y-%m-%dT%H:%M:%SZ'))
+        # ours is 50m old against a 36.6m threshold (2 x (300 + 798)): past it
+        self.assertIsNotNone(status.stale_cell(self.operator, product))
+
+    def test_yesterdays_file_is_read_when_todays_does_not_exist_and_a_third_day_back_is_not(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        now = self._now()
+        # today's file never gets created, so three day files sit on disk: day-3, day-2 and
+        # day-1 (yesterday) — STALE_TICK_DAYS=2 must keep only the newest two of those three
+        day3, day2, day1 = ((now - datetime.timedelta(days=3)).strftime('%Y-%m-%d'),
+                             (now - datetime.timedelta(days=2)).strftime('%Y-%m-%d'),
+                             (now - datetime.timedelta(days=1)).strftime('%Y-%m-%d'))
+        day0 = now.strftime('%Y-%m-%d')
+        # the third day back carries a line that would win if it were read at all: very fresh,
+        # and a huge duration that would silence the row outright
+        cheat_ts = now - datetime.timedelta(seconds=1)
+        _append_tick_line(self.operator, day3, ts=cheat_ts.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=999999.0, product='sample', steps=[_record_step()])
+        # the middle day (two days back) has no landed record of its own
+        _append_tick_line(self.operator, day2, ts=(now - datetime.timedelta(hours=44)).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=60.0, product='sample',
+                           steps=[{'step': 'health', 'ok': True, 'seconds': 1.0}])
+        # yesterday's real, landed tick — this is the one the row should read; today's file
+        # (day0) never gets created
+        legit_ts = now - datetime.timedelta(hours=2)
+        _append_tick_line(self.operator, day1, ts=legit_ts.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=60.0, product='sample', steps=[_record_step()])
+        self.assertFalse(os.path.exists(os.path.join(self.operator, 'metrics', 'ticks', f'{day0}.jsonl')))
+        _write_index(self.operator, (now - datetime.timedelta(hours=3)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        last = status._last_record_tick(self.operator, product)
+        self.assertEqual(last, (legit_ts.strftime('%Y-%m-%dT%H:%M:%SZ'), 60.0))
+        # if the cheat line had been read, the row would be silent (it is ~0s old); it is not
+        self.assertIsNotNone(status.stale_cell(self.operator, product))
+
+    def test_an_absent_metrics_directory_reads_as_no_line(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        self.assertFalse(os.path.exists(os.path.join(self.operator, 'metrics')))
+        self.assertIsNone(status._last_record_tick(self.operator, product))
+
+    def test_an_unreadable_day_file_reads_as_no_line(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        day = self._now().strftime('%Y-%m-%d')
+        path = os.path.join(self.operator, 'metrics', 'ticks', f'{day}.jsonl')
+        os.makedirs(path)  # a directory where a file is expected: open() raises OSError
+        self.assertIsNone(status._last_record_tick(self.operator, product))
+
+    def test_a_non_json_line_is_skipped_and_leaves_todays_behaviour(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        day = self._now().strftime('%Y-%m-%d')
+        path = os.path.join(self.operator, 'metrics', 'ticks', f'{day}.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('not json at all\n')
+        self.assertIsNone(status._last_record_tick(self.operator, product))
+
+    def test_a_torn_last_line_leaves_the_fresh_line_above_it_readable(self):
+        """PD7: ``_last_record_tick`` guards each line of its own, so a kill mid-append that
+        tears the last line never costs the valid lines around it."""
+        from asf.views import status
+        product = env.load_product('sample')
+        now = self._now()
+        fresh_ts = now - datetime.timedelta(minutes=5)
+        day = now.strftime('%Y-%m-%d')
+        path = os.path.join(self.operator, 'metrics', 'ticks', f'{day}.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fresh_line = json.dumps(dict(ts=fresh_ts.strftime('%Y-%m-%dT%H:%M:%SZ'), duration_s=798.0,
+                                      product='sample', steps=[_record_step()]), sort_keys=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(fresh_line + '\n')
+            f.write('{"ts": "2026-09-27T23:18:00Z", "product": "sam')  # truncated, no newline
+        last = status._last_record_tick(self.operator, product)
+        self.assertEqual(last, (fresh_ts.strftime('%Y-%m-%dT%H:%M:%SZ'), 798.0))
+
+    def test_a_line_with_no_ts_does_not_count(self):
+        from asf.views import status
+        product = env.load_product('sample')
+        day = self._now().strftime('%Y-%m-%d')
+        _append_tick_line(self.operator, day, duration_s=798.0, product='sample',
+                           steps=[_record_step()])  # no `ts` key at all
+        self.assertIsNone(status._last_record_tick(self.operator, product))
+
+
+class StaleRowUpgradeHoldTests(TickTestCase):
+    """F-0221/S-38102: while an upgrade marker holds this product's ticks, past the threshold,
+    the row names the hold instead of calling it a stall — except for the marker's own owner,
+    whose ticks go on by design (D7), and except while the age is still inside the threshold,
+    where the row says nothing at all (D8)."""
+
+    product_yaml = 'clocks:\n  record:\n    steps: [record]\n    every: 5m\n'
+
+    def setUp(self):
+        super().setUp()
+        from asf import upgrade
+        self.upgrade = upgrade
+        now = datetime.datetime.now(datetime.timezone.utc)
+        tick_ts = now - datetime.timedelta(minutes=15)
+        _write_index(self.operator, (now - datetime.timedelta(minutes=20)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        _append_tick_line(self.operator, tick_ts.strftime('%Y-%m-%d'),
+                           ts=tick_ts.strftime('%Y-%m-%dT%H:%M:%SZ'), duration_s=1.0,
+                           product='sample', steps=[_record_step()])
+        self.product = env.load_product('sample')
+
+    def _write_marker(self, **data):
+        path = self.upgrade.pending_path('sample')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+
+    def test_a_marker_owned_by_another_product_names_the_hold(self):
+        from asf.views import status
+        at = time.time() - 300  # 5m old: inside PENDING_TTL_S
+        self._write_marker(sha='f5aa236abcdef', owner='other', at=at)
+        result = status.stale_cell(self.operator, self.product)
+        expected = f"{self.upgrade.held_label({'sha': 'f5aa236abcdef', 'at': at, 'owner': 'other'})} — no fresh record in 15m"
+        self.assertEqual(result, expected)
+        self.assertNotIn('STALE', result)
+
+    def test_the_markers_own_owner_still_reads_stale(self):
+        from asf.views import status
+        self._write_marker(sha='f5aa236abcdef', owner='sample', at=time.time() - 300)
+        result = status.stale_cell(self.operator, self.product)
+        self.assertIn('STALE', result)
+
+    def test_a_future_at_reads_stale(self):
+        from asf.views import status
+        self._write_marker(sha='f5aa236abcdef', owner='other', at=time.time() + 3600)
+        self.assertIn('STALE', status.stale_cell(self.operator, self.product))
+
+    def test_an_at_past_the_ttl_reads_stale(self):
+        from asf.views import status
+        self._write_marker(sha='f5aa236abcdef', owner='other',
+                            at=time.time() - self.upgrade.PENDING_TTL_S - 60)
+        self.assertIn('STALE', status.stale_cell(self.operator, self.product))
+
+    def test_a_dead_operators_wait_reads_stale(self):
+        from asf.views import status
+        self._write_marker(sha='f5aa236abcdef', owner=None, at=time.time() - 300, pid=999999999)
+        self.assertIn('STALE', status.stale_cell(self.operator, self.product))
+
+    def test_a_pending_marker_inside_the_threshold_produces_no_row_at_all(self):
+        from asf.views import status
+        now = datetime.datetime.now(datetime.timezone.utc)
+        tick_ts = now - datetime.timedelta(minutes=5)      # inside the 10m threshold
+        day = tick_ts.strftime('%Y-%m-%d')
+        path = os.path.join(self.operator, 'metrics', 'ticks', f'{day}.jsonl')
+        if os.path.exists(path):
+            os.remove(path)
+        _write_index(self.operator, (now - datetime.timedelta(minutes=6)).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        _append_tick_line(self.operator, day, ts=tick_ts.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                           duration_s=1.0, product='sample', steps=[_record_step()])
+        self._write_marker(sha='f5aa236abcdef', owner='other', at=time.time() - 60)
+        self.assertIsNone(status.stale_cell(self.operator, self.product))
+
+
+class StaleRow20260927ReplayTests(TickTestCase):
+    """F-0221/S-38104: the day of 2026-09-27 replays — every healthy stretch silent (including
+    the two moments the spec itself expected to name the upgrade hold, which this Feature's own
+    rules make silent instead — PD1) — and the one real stall of the day still fires (PD2)."""
+
+    product_yaml = 'clocks:\n  record:\n    steps: [record]\n    every: 5m\n'
+
+    FIXTURE = os.path.join(os.path.dirname(__file__), 'fixtures', 'ticks', '2026-09-27.jsonl')
+
+    @classmethod
+    def _fixture_rows(cls):
+        rows = []
+        with open(cls.FIXTURE, encoding='utf-8') as f:
+            for raw in f:
+                raw = raw.strip()
+                if raw:
+                    rows.append(json.loads(raw))
+        return rows
+
+    @staticmethod
+    def _landed(row):
+        return any(isinstance(s, dict) and s.get('step') == 'record' and s.get('ok') is True
+                   for s in row.get('steps', []))
+
+    def _replay(self, moment):
+        """Write every fixture row at or before ``moment`` into ``self.operator``, ``ts`` shifted
+        onto the real clock by one constant ``delta`` (PD3(b)); ``index.json``'s ``generated`` is
+        the last landed record tick's start, shifted the same way. Returns that tick's original
+        (unshifted) ``ts`` string, for building the expected ``since``."""
+        from asf.views import index_reader as ix
+        shutil.rmtree(os.path.join(self.operator, 'metrics', 'ticks'), ignore_errors=True)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        delta = now - moment
+        due = [r for r in self._fixture_rows() if ix.parse_ts(r['ts']) <= moment]
+        for row in due:
+            ts = ix.parse_ts(row['ts']) + delta
+            shifted = dict(row, ts=ts.strftime('%Y-%m-%dT%H:%M:%SZ'))
+            _append_tick_line(self.operator, shifted['ts'][:10], **shifted)
+        landed = [r for r in due if self._landed(r)]
+        last = max(landed, key=lambda r: ix.parse_ts(r['ts']))
+        start = ix.parse_ts(last['ts']) - datetime.timedelta(seconds=last['duration_s'])
+        _write_index(self.operator, (start + delta).strftime('%Y-%m-%dT%H:%M:%SZ'))
+        return last['ts']
+
+    def _pre_f0221_was_stale(self, moment, last_ts):
+        """The expression this Feature replaces: ``generated`` alone against ``2 x`` the clock —
+        measured on the *unshifted* day, since the shift preserves every interval exactly."""
+        from asf.views import index_reader as ix
+        from asf.views import status
+        product = env.load_product('sample')
+        rows = {r['ts']: r for r in self._fixture_rows()}
+        last_row = rows[last_ts]
+        start = ix.parse_ts(last_ts) - datetime.timedelta(seconds=last_row['duration_s'])
+        age_s = (moment - start).total_seconds()
+        self.assertGreater(age_s, 2 * status._record_period_s(product))
+
+    def test_every_healthy_stretch_and_both_upgrade_wait_moments_are_silent(self):
+        """S-38104, PD1: 13:24, 14:14 and 23:26 are the healthy stretches this Feature was built
+        to silence; 23:31 and 23:36 are the moments the spec expected to name the upgrade hold —
+        this Feature's own rules (D1, D8) leave them silent instead, for reasons PD1 measures."""
+        from asf.views import status
+        product = env.load_product('sample')
+        for hh, mm in ((13, 24), (14, 14), (23, 26), (23, 31), (23, 36)):
+            with self.subTest(moment=f'{hh:02d}:{mm:02d}'):
+                moment = datetime.datetime(2026, 9, 27, hh, mm, tzinfo=datetime.timezone.utc)
+                last_ts = self._replay(moment)
+                self.assertIsNone(status.stale_cell(self.operator, product))
+                self._pre_f0221_was_stale(moment, last_ts)
+
+    def test_the_one_real_stall_of_the_day_still_fires(self):
+        """PD2: the stall moment is 00:10 the next day — 12s short of the threshold at 00:05 (the
+        spec's own figure), and four minutes clear of it here."""
+        from asf.views import index_reader as ix
+        from asf.views import status
+        product = env.load_product('sample')
+        moment = datetime.datetime(2026, 9, 28, 0, 10, tzinfo=datetime.timezone.utc)
+        self._replay(moment)
+        # the "since" the row prints is whatever stamp the checkout actually holds — the shifted
+        # tick line's own ts, read back through the same function stale_cell calls (PD13: no
+        # wall-clock string is hardcoded)
+        shifted_last = status._last_record_tick(self.operator, product)
+        result = status.stale_cell(self.operator, product)
+        self.assertEqual(result,
+                          f"STALE since {ix.local_stamp(shifted_last[0], '%H:%M')} — no fresh record in 1h")
 
 
 class GroomStepOrderTests(TickTestCase):
