@@ -1134,10 +1134,12 @@ def _preflight_push_auth(product, account, product_auth_env):
     cannot happen anyway. A missing or broken credential blocks the account the same way an auth
     error on a run does — one ``ALARM``, unusable for every product until ``asf workers enable
     <account>`` (or a manual probe on it finishes, :func:`asf.workers.account_auth.proved`).
-    ``conventions.flags.push_auth_preflight: false`` opts a product out (default on)."""
+    ``conventions.flags.push_auth_preflight: false`` opts a product out (default on). No account
+    resolved yet: nothing to probe — the caller's own refusal (:func:`spawn_refusal`) is what
+    stops the launch."""
     from asf import doctor
     from asf.workers import account_auth
-    if product.conventions.flag('push_auth_preflight', True) is False:
+    if account is None or product.conventions.flag('push_auth_preflight', True) is False:
         return
     if account.name in account_auth.blocked():
         raise SpawnError(f'{account.name}: {account_auth.stop_reason(account.name)}',

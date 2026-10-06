@@ -548,19 +548,25 @@ IMPROVE_FIELDS = {'thresholds': _MAP, 'epic': _STR, 'window_days': None, 'premiu
                   # verify_weeks, min_move, file_to, epic
                   'scorecard': _MAP}
 # `release:` is a map: the release-readiness gate's thresholds (asf.release.DEFAULTS).
-# ``gate`` (asf.release_preview.gate_for) picks the printed gate; ``floor``/``seats`` are
-# criteria 9 and 10's own limits (asf.release.FLOOR_DEFAULTS, asf.metrics.throughput.SEAT_DEFAULTS)
-# — all three are read by code and now declared, so a product file that sets one is no longer an
-# unknown key the doctor's product row names in yellow (B-0038).
+# ``release.floor`` and ``release.seats`` (criteria 9 and 10) are read by asf.release but not
+# listed here while a pinned reader (tools/pinned-readers.txt) predates them: a product file that
+# sets one loads, and the doctor's product row names it as unknown until that reader is dropped.
 RELEASE_FIELDS = {'window_days': None, 'max_hand_fixes': None, 'max_repair_per_feature': None,
                   'ci_runs': None, 'min_upgrades': None, 'hand_types': _LIST,
-                  'readme_sections': _LIST, 'ci_steps': _MAP, 'requires': _MAP, 'blocking': _LIST,
-                  'gate': _STR, 'floor': _MAP, 'seats': _MAP}
+                  'readme_sections': _LIST, 'ci_steps': _MAP, 'requires': _MAP, 'blocking': _LIST}
 # every product-file section whose own keys are checked, keyed by its own field table.
 NESTED_FIELDS = {
     'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS, 'improve': IMPROVE_FIELDS,
     'release': RELEASE_FIELDS,
 }
+# ``gate`` (asf.release_preview.gate_for), ``floor`` and ``seats`` (criteria 9 and 10, same as
+# above) are read by code and documented, but — unlike a field added to NESTED_FIELDS — never
+# registered there, because the oldest pinned reader would then refuse a file that sets one
+# (tests.test_env.PinnedReader.test_no_product_key_the_pinned_reader_would_refuse). Named here
+# instead so *this* release's own doctor still stops naming them unknown (B-0038); the pinned
+# reader's own copy of this code doesn't know the list and keeps warning, which is fine — a
+# warning never refuses a load, only a reader that predates the whole key does.
+DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats'})
 
 
 def _shape_ok(value, shape):
@@ -694,7 +700,8 @@ def product_problems(text):
         for key, value in mapping.items():
             dotted = prefix + key
             if key not in fields:
-                warnings.append((lines.get(dotted, 0), dotted, UNKNOWN_KEY))
+                if dotted not in DOCUMENTED_UNCHECKED_FIELDS:
+                    warnings.append((lines.get(dotted, 0), dotted, UNKNOWN_KEY))
             elif not _shape_ok(value, fields[key]):
                 problems.append((lines.get(dotted, 0), dotted, f'must be {fields[key]}, not {value!r}'))
 
