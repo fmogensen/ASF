@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.159 — 2026-10-06
+
+### Features landed
+
+- An absent `steps.batch` is off, both refusals go, and the five pinned expectations are corrected (#806)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.159"`
+
 ## v0.1.158 — 2026-10-06
 
 ### Features landed
