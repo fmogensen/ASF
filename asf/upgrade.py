@@ -36,6 +36,22 @@ names what it waits on. A marker that outlives :data:`PENDING_TTL_S` says so in 
 ``NEEDS OPERATOR`` line when it is removed, and no new marker parks the other products for as
 long again (``state/upgrade-expired.json``): the parked products resume, whatever the install.
 
+An install may also be *owed* rather than pending: ``state/upgrade-due.json`` records a sha a
+tick's deferral left behind, with the owning product and how many passes have counted against it
+(:func:`bump_due`). Paid by an install — any install, by anyone — that carries the sha or an
+ancestor of it (:func:`due`); cancelled by a refusal or a failure, with a ``NEEDS OPERATOR`` line
+(:func:`settle_due`); never cleared by age. It is deliberately not the park: the pending marker's
+TTL exists because parking the other products is expensive, and owing an install is not, so the
+debt outlives the marker and its cool-down instead of being forgotten with them.
+
+The attempt is made again at the emptiest moment the factory has, not only at a tick's fullest:
+the last act of a tick (:func:`asf.tick.tick.cmd_tick`) and of the detached background harvest
+(:func:`asf.tick.step_harvest.main`), each handing the debt to :func:`install_due` as it exits a
+floor one process smaller than when it started. ``state/upgrade.lock`` (:func:`install_lock`)
+serialises the install itself, so two exits never both install and no new tick starts under one
+(:func:`installing`, read by :func:`waiting`). Nothing here parks a product for the debt — the
+background harvest's own suppression still reads the pending marker, not this record.
+
 Every upgrade pauses every product's ticks, so the tick's upgrades are batched: after one
 installs (``state/upgrade-last.json``), no tick starts another until ``upgrade.min_interval_min``
 (``~/.ASF/config.yaml``, default :data:`DEFAULT_MIN_INTERVAL_MIN`) has passed — by then several
@@ -46,6 +62,8 @@ A pinned product (:mod:`asf.installs`) moves only by ``asf upgrade --product <p>
 (:func:`move`): its own venv per sha, positive CI evidence, a quiesced switch, ``--rollback``
 offline. While any product is pinned, the shared reinstall above refuses.
 """
+import contextlib
+import fcntl
 import glob
 import json
 import os
@@ -273,10 +291,14 @@ def held_label(data):
 
 
 def waiting(product_name, out=print, now=None, installed=None, run=subprocess.run):
-    """True when this tick must not start: an upgrade owned by another product is pending, and
-    this tick's running would only keep the gap the upgrade needs from coming. The owner's ticks
-    go on — the owner drains and retries the upgrade at its start. A product with a
-    merge-queue batch in flight is never held (#25): the batch lands first."""
+    """True when this tick must not start: an install is running right now (C8), or an upgrade
+    owned by another product is pending, and this tick's running would only keep the gap the
+    upgrade needs from coming. The owner's ticks go on — the owner drains and retries the upgrade
+    at its start. A product with a merge-queue batch in flight is never held (#25): the batch
+    lands first."""
+    if installing():
+        out('tick: waiting — an install is running')
+        return True
     data = pending(product_name, now, installed, out=out, run=run)
     if data is None or data.get('owner') == product_name:
         return False
@@ -302,6 +324,150 @@ def read_last():
 
 def record_last(sha, now=None):
     _write_json(last_path(), {'sha': sha or '', 'at': now or time.time()})
+
+
+def due_path():
+    return os.path.join(env.ASF_HOME, 'state', 'upgrade-due.json')
+
+
+def read_due():
+    """The install this factory owes, as written — no clearing, no git (a view would read this
+    directly, as it reads :func:`read_pending`)."""
+    try:
+        with open(due_path(), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get('sha') and data.get('at') else None
+
+
+def clear_due():
+    try:
+        os.remove(due_path())
+    except OSError:
+        pass
+
+
+def _write_due(data):
+    _write_json(due_path(), data)
+    return data
+
+
+def bump_due(sha, owner, now=None):
+    """Record that an install of ``sha`` is owed by product ``owner``, or count one more pass
+    against the record already there. Keeps the first ``at`` — the debt's age is what a drain
+    window would read — and starts a fresh record when the sha moved: a newer head is a new debt,
+    and the passes the old one waited say nothing about this one. The record carries exactly
+    ``sha``, ``owner``, ``at`` and ``passes`` and nothing else: no ``parked_at``, no ``loud`` —
+    those belong to a drain window this card does not add, and the day one does, it must derive
+    its stretch from ``at`` rather than carry a mutable field here, or a lost update between two
+    writers would turn a bounded park into an unbounded one.
+
+    Unlike :func:`write_pending` it is never refused. A cool-down suppresses the *park*; the debt
+    is not a park (F-0207: the debt was thrown away with the marker and forgotten)."""
+    old = read_due()
+    if old is not None and old.get('sha') == sha:
+        return _write_due(dict(old, owner=owner, passes=int(old.get('passes') or 0) + 1))
+    return _write_due({'sha': sha, 'owner': owner, 'at': now or time.time(), 'passes': 1})
+
+
+def due(installed=None, out=print, run=subprocess.run):
+    """The debt, or ``None``. Removed when it is paid — the sha is the installed build's own
+    commit or an ancestor of it (:func:`_installed`: a later install carried it). Never removed by
+    age: a debt is not a park, and this record exists because the last one was forgotten after ten
+    minutes.
+
+    Cheap on every exit but the one that pays it: an in-process read of the installed build's
+    metadata (:func:`asf.drift.installed_commit`) and, only when the sha is neither equal to nor a
+    prefix of it, one ``git merge-base``. Runs before the owner check on purpose in
+    :func:`install_due` — it is also what removes a debt the running build already carries."""
+    data = read_due()
+    if data is None:
+        return None
+    if installed is None:
+        from asf import drift
+        installed = drift.installed_commit()
+    if _installed(data['sha'], installed, run):
+        clear_due()
+        return None
+    return data
+
+
+def settle_due(rc, ref, out=print):
+    """Pay off or cancel the debt after an install that actually ran. 0 pays it. ``DEFERRED`` from
+    :func:`_install` cancels it — a red or unreadable head is refused, and the next green head
+    becomes due on its own (B-0141). Any other code cancels it with a ``NEEDS OPERATOR`` line: a
+    broken install is an operator's problem, and nothing may keep attempting it on its own."""
+    data = read_due()
+    if data is None or data['sha'] != ref:
+        return
+    clear_due()
+    if rc not in (0, DEFERRED):
+        out(f'NEEDS OPERATOR: the install of {ref[:7]} failed (exit {rc}) — the ticks resume; '
+            f'rerun asf upgrade --to {ref} --wait once it is fixed')
+
+
+def lock_path():
+    return os.path.join(env.ASF_HOME, 'state', 'upgrade.lock')
+
+
+@contextlib.contextmanager
+def install_lock():
+    """``flock`` over :func:`lock_path` for the length of one install: yields the open file, or
+    ``None`` when another process holds it. Never waits, and dies with its process, so a killed
+    install parks nobody."""
+    os.makedirs(os.path.dirname(lock_path()), exist_ok=True)
+    f = open(lock_path(), 'a+', encoding='utf-8')
+    try:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield None
+            return
+        yield f
+    finally:
+        f.close()
+
+
+def installing():
+    """True when an install is running right now — the one thing a starting tick must never run
+    under. Read by :func:`waiting`, which narrows that window rather than closing it: a tick that
+    read this a moment before the lock was taken still starts, and for a process already running
+    it is the floor check, not this, that protects it."""
+    with install_lock() as f:
+        return f is None
+
+
+def install_due(product_name, run=subprocess.run, out=print, sleep=time.sleep):
+    """The last-one-out attempt: take the install this factory owes, if the floor is empty now.
+
+    ``None`` when nothing is owed, when this product does not own it (C7) or while an install is
+    already running; :data:`DEFERRED` when the floor was still busy, which counts one pass and
+    says so; else :func:`install`'s own code.
+
+    Called as the last act of a process that was itself on the floor
+    (:func:`asf.tick.tick.cmd_tick`, :func:`asf.tick.step_harvest.main`). Every clock fires on the
+    minute, so a tick's start is the fullest the floor ever is and its exit the emptiest — and the
+    exiting process is the one that knows the floor just lost a member.
+
+    Writes no pending marker: :func:`install` writes one only inside its own floor deferral when
+    there is an ``owner`` or a ``wait_s``, and this call reaches :func:`install` only once the
+    floor is already empty, so that branch never runs from here. A marker written at an exit would
+    be a ten-minute park for a thirty-second install. Nor does this consult :func:`batch_hold`:
+    the debt exists because the batching interval already cleared this head once and the floor
+    refused the install — re-checking it here would re-hold a head the factory already decided to
+    take."""
+    data = due(run=run, out=out)
+    if data is None or data.get('owner') != product_name or installing():
+        return None
+    others = other_ticks(run)
+    if others:
+        data = bump_due(data['sha'], product_name)
+        out(f'upgrade: due {data["sha"][:7]} — pass {data["passes"]}, the floor is busy '
+            f'(pid {", ".join(str(p) for p in others)})')
+        return DEFERRED
+    out(f'upgrade: the floor is empty at this exit — installing {data["sha"][:7]}')
+    return install(data['sha'], run=run, out=out, owner=product_name, wait_s=0, sleep=sleep)
 
 
 def _config_number(key, default, cfg=None):
@@ -347,10 +513,10 @@ def batch_hold(repo, installed, head, now=None, cfg=None):
     last = read_last()
     if last is None:
         return None
-    due = last['at'] + min_interval_s(cfg)
-    if (now or time.time()) >= due or urgent(repo, installed, head):
+    at = last['at'] + min_interval_s(cfg)
+    if (now or time.time()) >= at or urgent(repo, installed, head):
         return None
-    return due
+    return at
 
 
 def _git(root, *args, run=subprocess.run):
@@ -692,13 +858,21 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
             f'(pid {", ".join(str(p) for p in others)})')
         for line in describe(others, run):
             out(f'  {line}')
+        if owner and ref:
+            data = bump_due(ref, owner)   # the debt outlives the park and its cool-down (C1)
+            out(f'upgrade: due {ref[:7]} — pass {data["passes"]}, owed by {owner}')
         if not owner:
             _clear(marked)
             out('upgrade: NOT installed — rerun with --wait [SECONDS] to wait for them to end')
         return DEFERRED
-    rc = _install(ref, run, out, pin=pin) if pin != ref else _install(ref, run, out)
+    with install_lock() as lock:
+        if lock is None:   # C8: another process is installing; this one is not a second one
+            out('upgrade: another install is running — nothing done here')
+            return DEFERRED
+        rc = _install(ref, run, out, pin=pin) if pin != ref else _install(ref, run, out)
     if rc == 0:
         record_last(ref)
+    settle_due(rc, ref, out)               # paid, refused, or failed: never left owed (C6)
     if owner:
         _clear(n for n in marked_products(owner)
                if (read_pending(n) or {}).get('owner') == owner)

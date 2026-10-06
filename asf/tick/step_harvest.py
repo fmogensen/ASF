@@ -212,8 +212,13 @@ def main(argv=None):
     product = env.load_product(args.product)
     os.environ['ASF_PRODUCT'] = product.name
     print(f'harvest: {_stamp()} start (pid {os.getpid()})')
-    return background(product, args.items,
-                      out=lambda line: print(f'{_stamp()} {line}'))
+    rc = background(product, args.items, out=lambda line: print(f'{_stamp()} {line}'))
+    from asf import upgrade
+    try:
+        upgrade.install_due(product.name)   # C3: this exit is very often the last one
+    except Exception as e:  # noqa: BLE001 — the landing already happened
+        print(f'upgrade: the exit install did not run ({type(e).__name__}: {e})')
+    return rc
 
 
 if __name__ == '__main__':

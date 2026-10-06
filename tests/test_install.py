@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import datetime
+import fcntl
 import glob
 import hashlib
 import importlib.util
@@ -1196,6 +1197,305 @@ class DrainTest(HomeCase):
         self.assertEqual(p.parse_args(['upgrade', '--wait']).wait, upgrade.DEFAULT_MANUAL_WAIT_S)
         self.assertEqual(p.parse_args(['upgrade', '--wait', '90']).wait, 90)
         self.assertIsNone(p.parse_args(['upgrade']).wait)
+
+
+class DueRecordTest(HomeCase):
+    """F-0207: a tick's floor-deferred install becomes a durable debt
+    (``state/upgrade-due.json``) that outlives the ten-minute pending marker and its cool-down."""
+    SHA = 'b' * 40
+    OTHER_SHA = 'c' * 40
+
+    def setUp(self):
+        super().setUp()
+        self.write(env.product_path('other'), 'backlog_dir: /nonexistent\n')
+
+    def test_bump_due_starts_a_record_at_one_pass(self):
+        data = upgrade.bump_due(self.SHA, 'factory', now=1000.0)
+        self.assertEqual(data, {'sha': self.SHA, 'owner': 'factory', 'at': 1000.0, 'passes': 1})
+        self.assertEqual(upgrade.read_due(), data)
+
+    def test_a_second_bump_for_the_same_sha_counts_a_pass_and_keeps_the_first_at(self):
+        upgrade.bump_due(self.SHA, 'factory', now=1000.0)
+        data = upgrade.bump_due(self.SHA, 'factory', now=2000.0)
+        self.assertEqual(data['passes'], 2)
+        self.assertEqual(data['at'], 1000.0)
+
+    def test_a_bump_for_a_moved_head_starts_a_fresh_record(self):
+        upgrade.bump_due(self.SHA, 'factory', now=1000.0)
+        upgrade.bump_due(self.SHA, 'factory', now=2000.0)
+        data = upgrade.bump_due(self.OTHER_SHA, 'factory', now=3000.0)
+        self.assertEqual(data, {'sha': self.OTHER_SHA, 'owner': 'factory', 'at': 3000.0,
+                                'passes': 1})
+
+    def test_a_floor_deferred_owner_install_writes_the_debt_beside_the_marker(self):
+        run = FakeRun(ticks='4242\n')
+        out = []
+        rc = upgrade.install(self.SHA, run=run, out=out.append, owner='factory')
+        self.assertEqual(rc, upgrade.DEFERRED)
+        data = upgrade.read_due()
+        self.assertEqual((data['sha'], data['owner'], data['passes']), (self.SHA, 'factory', 1))
+        self.assertLess(abs(data['at'] - time.time()), 60)
+        self.assertNotIn('parked_at', data)
+        self.assertNotIn('loud', data)
+        self.assertTrue(os.path.exists(upgrade.pending_path('other')))  # beside the marker
+        self.assertIn(f'upgrade: due {self.SHA[:7]} — pass 1, owed by factory', out)
+
+    def test_the_debt_is_written_even_while_the_marker_is_cooling_down(self):
+        """The hole the incident restarted through: a cooling floor wrote no pending mark, and
+        the debt is what keeps that from losing the install for good."""
+        for name in ('factory', 'other'):
+            upgrade._write_json(upgrade.expired_path(name), {'sha': self.SHA, 'at': time.time()})
+        run = FakeRun(ticks='4242\n')
+        out = []
+        rc = upgrade.install(self.SHA, run=run, out=out.append, owner='factory')
+        self.assertEqual(rc, upgrade.DEFERRED)
+        text = '\n'.join(out)
+        self.assertIn('no pending mark until', text)
+        self.assertIn(f'upgrade: due {self.SHA[:7]}', text)
+        self.assertEqual(upgrade.read_due()['sha'], self.SHA)
+
+    def test_due_is_never_removed_by_age(self):
+        upgrade.bump_due(self.SHA, 'factory', now=time.time() - 10 * upgrade.PENDING_TTL_S)
+        data = upgrade.due(installed='d' * 40)
+        self.assertEqual(data['sha'], self.SHA)
+        self.assertTrue(os.path.exists(upgrade.due_path()))
+
+    def test_due_clears_on_an_exact_or_prefix_match_and_is_never_cleared_otherwise(self):
+        upgrade.bump_due(self.SHA, 'factory')
+        self.assertIsNone(upgrade.due(installed=self.SHA))
+        self.assertFalse(os.path.exists(upgrade.due_path()))
+        upgrade.bump_due(self.SHA, 'factory')
+        self.assertIsNone(upgrade.due(installed=self.SHA[:10]))
+        self.assertFalse(os.path.exists(upgrade.due_path()))
+        upgrade.bump_due(self.SHA, 'factory')
+        self.assertIsNotNone(upgrade.due(installed=self.OTHER_SHA))
+        self.assertTrue(os.path.exists(upgrade.due_path()))
+
+    def test_settle_due_pays_the_debt_silently_on_success(self):
+        upgrade.bump_due(self.SHA, 'factory')
+        out = []
+        upgrade.settle_due(0, self.SHA, out.append)
+        self.assertIsNone(upgrade.read_due())
+        self.assertEqual(out, [])
+
+    def test_settle_due_cancels_silently_on_deferred(self):
+        upgrade.bump_due(self.SHA, 'factory')
+        out = []
+        upgrade.settle_due(upgrade.DEFERRED, self.SHA, out.append)
+        self.assertIsNone(upgrade.read_due())
+        self.assertEqual(out, [])
+
+    def test_settle_due_cancels_loudly_on_any_other_code_naming_the_full_sha(self):
+        upgrade.bump_due(self.SHA, 'factory')
+        out = []
+        upgrade.settle_due(1, self.SHA, out.append)
+        self.assertIsNone(upgrade.read_due())
+        self.assertEqual(len(out), 1)
+        self.assertIn(f'NEEDS OPERATOR: the install of {self.SHA[:7]} failed (exit 1)', out[0])
+        self.assertIn(f'--to {self.SHA} --wait', out[0])  # the full sha, not the short one (RD7)
+
+    def test_settle_due_for_a_different_target_leaves_the_record_alone(self):
+        upgrade.bump_due(self.SHA, 'factory')
+        upgrade.settle_due(0, self.OTHER_SHA, lambda _l: None)
+        self.assertEqual(upgrade.read_due()['sha'], self.SHA)
+
+    def test_a_successful_cmd_upgrade_leaves_neither_record(self):
+        run = FakeRun()  # empty pgrep: the floor is idle, and pipx succeeds
+        rc, _out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+            skip_pipx=False, ref=None, owner='factory'), run=run)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(upgrade.due_path()))
+        self.assertFalse(os.path.exists(upgrade.pending_path('other')))
+
+    def test_a_refused_red_head_leaves_neither_record(self):
+        run = FakeRun(ci=json.dumps([{'conclusion': 'failure'}]))  # idle floor, red CI
+        rc, _out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+            skip_pipx=False, ref=self.SHA, owner='factory'), run=run)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertFalse(os.path.exists(upgrade.due_path()))
+        self.assertFalse(os.path.exists(upgrade.pending_path('other')))
+
+
+class ExitInstallTest(HomeCase):
+    """F-0207: the last-one-out attempt (:func:`asf.upgrade.install_due`), the install lock, and
+    the exit hooks that call it (:func:`asf.tick.tick.cmd_tick`, :func:`asf.tick.step_harvest.main`)."""
+    SHA = 'b' * 40
+
+    def setUp(self):
+        super().setUp()
+        # `due()`'s own check against the running build's commit is not this Task's to drive —
+        # it is pinned by DueRecordTest. 'z' * 40 never matches or is an ancestor of SHA.
+        patch_ic = mock.patch('asf.drift.installed_commit', return_value='z' * 40)
+        patch_ic.start()
+        self.addCleanup(patch_ic.stop)
+        patch_root = mock.patch('asf.drift.factory_root', return_value=None)
+        patch_root.start()
+        self.addCleanup(patch_root.stop)
+
+    def _product(self):
+        return env.Product('asf', {'repo_dir': self.tmp, 'main': 'main', 'ci': {'provider': 'none'}})
+
+    # ---- install_due ------------------------------------------------------------------------
+
+    def test_against_an_empty_floor_it_installs_and_clears_both_records(self):
+        upgrade.bump_due(self.SHA, 'asf', now=1000.0)
+        upgrade.write_pending(self.SHA, 'asf', 'asf')
+        run = FakeRun(installed=self.SHA)
+        out = []
+        rc = upgrade.install_due('asf', run=run, out=out.append)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(run.installs()), 1)
+        self.assertIsNone(upgrade.read_due())
+        self.assertIsNone(upgrade.read_pending('asf'))
+        self.assertIn(f'upgrade: the floor is empty at this exit — installing {self.SHA[:7]}', out)
+
+    def test_against_a_busy_floor_it_installs_nothing_and_counts_a_pass(self):
+        upgrade.bump_due(self.SHA, 'asf', now=1000.0)
+        run = FakeRun(ticks='4242\n')
+        out = []
+        rc = upgrade.install_due('asf', run=run, out=out.append)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(run.installs(), [])
+        data = upgrade.read_due()
+        self.assertEqual(data['passes'], 2)
+        self.assertIn(f'upgrade: due {self.SHA[:7]} — pass 2, the floor is busy (pid 4242)', out)
+
+    def test_a_debt_owned_by_another_product_is_left_for_its_owner(self):
+        upgrade.bump_due(self.SHA, 'other', now=1000.0)
+        run = FakeRun()
+        rc = upgrade.install_due('asf', run=run, out=lambda _l: None)
+        self.assertIsNone(rc)
+        self.assertEqual(run.installs(), [])
+        self.assertEqual(upgrade.read_due()['owner'], 'other')
+
+    def test_while_the_lock_is_held_it_runs_nothing_and_waiting_reads_it(self):
+        upgrade.bump_due(self.SHA, 'asf', now=1000.0)
+        os.makedirs(os.path.dirname(upgrade.lock_path()), exist_ok=True)
+        held = open(upgrade.lock_path(), 'a+', encoding='utf-8')
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a second open: its own file description
+        run = FakeRun()
+        rc = upgrade.install_due('asf', run=run, out=lambda _l: None)
+        self.assertIsNone(rc)
+        self.assertEqual(run.installs(), [])
+        out = []
+        self.assertTrue(upgrade.waiting('asf', out=out.append, installed='c' * 40))
+        self.assertEqual(out, ['tick: waiting — an install is running'])
+
+    def test_install_called_while_the_lock_is_held_defers_and_leaves_the_debt(self):
+        upgrade.bump_due(self.SHA, 'asf', now=1000.0)
+        os.makedirs(os.path.dirname(upgrade.lock_path()), exist_ok=True)
+        held = open(upgrade.lock_path(), 'a+', encoding='utf-8')
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        run = FakeRun()
+        out = []
+        rc = upgrade.install(self.SHA, run=run, out=out.append, owner='asf')
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(run.installs(), [])
+        self.assertIn('upgrade: another install is running — nothing done here', out)
+        self.assertEqual(upgrade.read_due()['sha'], self.SHA)
+
+    # ---- cmd_tick's exit ----------------------------------------------------------------------
+
+    def test_cmd_tick_calls_install_due_once_after_the_tick_whatever_it_returns(self):
+        from asf.tick import tick as tick_mod
+        product = self._product()
+        for rc_in in (0, 2):
+            with self.subTest(rc_in=rc_in):
+                order = []
+
+                def _work(*a, **k):
+                    order.append('work')
+                    return rc_in
+                with mock.patch('asf.env.load_product', return_value=product), \
+                        mock.patch.object(tick_mod, '_tick', side_effect=_work), \
+                        mock.patch('asf.upgrade.install_due',
+                                  side_effect=lambda name: order.append('install_due')) as due:
+                    rc = tick_mod.cmd_tick(argparse.Namespace(
+                        product='asf', dry_run=False, shadow=False, fresh=False,
+                        with_venv=None, state_copy=None))
+                self.assertEqual(rc, rc_in)
+                due.assert_called_once_with('asf')
+                self.assertEqual(order, ['work', 'install_due'])
+
+    def test_cmd_tick_calls_install_due_even_when_the_tick_raises(self):
+        from asf.tick import tick as tick_mod
+        product = self._product()
+        order = []
+
+        def _raise(*a, **k):
+            order.append('work')
+            raise RuntimeError('boom')
+        with mock.patch('asf.env.load_product', return_value=product), \
+                mock.patch.object(tick_mod, '_tick', side_effect=_raise), \
+                mock.patch('asf.upgrade.install_due',
+                          side_effect=lambda name: order.append('install_due')) as due:
+            with self.assertRaises(RuntimeError):
+                tick_mod.cmd_tick(argparse.Namespace(
+                    product='asf', dry_run=False, shadow=False, fresh=False,
+                    with_venv=None, state_copy=None))
+        due.assert_called_once_with('asf')
+        self.assertEqual(order, ['work', 'install_due'])
+
+    def test_cmd_tick_dry_run_makes_no_install_attempt(self):
+        from asf.tick import tick as tick_mod
+        product = self._product()
+        with mock.patch('asf.env.load_product', return_value=product), \
+                mock.patch('asf.tick.dry_run.run', return_value=0) as dr, \
+                mock.patch('asf.upgrade.install_due') as due:
+            rc = tick_mod.cmd_tick(argparse.Namespace(
+                product='asf', dry_run=True, shadow=False, fresh=False,
+                with_venv=None, state_copy=None))
+        self.assertEqual(rc, 0)
+        dr.assert_called_once()
+        due.assert_not_called()
+
+    def test_cmd_tick_shadow_wins_over_dry_run_and_still_attempts(self):
+        """RD6: ``--shadow`` has always won over ``--dry-run``; the exit attempt still runs since
+        the shadow path is inside the wrapper's ``try``, not above it."""
+        from asf.tick import tick as tick_mod
+        product = self._product()
+        order = []
+        with mock.patch('asf.env.load_product', return_value=product), \
+                mock.patch.object(tick_mod, 'run_shadow',
+                                  side_effect=lambda *a, **k: order.append('work') or 0) as rs, \
+                mock.patch('asf.upgrade.install_due',
+                          side_effect=lambda name: order.append('install_due')) as due:
+            rc = tick_mod.cmd_tick(argparse.Namespace(
+                product='asf', dry_run=True, shadow=True, fresh=False,
+                with_venv=None, state_copy=None))
+        self.assertEqual(rc, 0)
+        rs.assert_called_once()
+        due.assert_called_once_with('asf')
+        self.assertEqual(order, ['work', 'install_due'])
+
+    # ---- step_harvest's exit ------------------------------------------------------------------
+
+    def test_step_harvest_main_calls_install_due_once_after_background_returns(self):
+        from asf.tick import step_harvest
+        order = []
+        with mock.patch('asf.env.load_product', return_value=self._product()), \
+                mock.patch.object(step_harvest, 'background',
+                                  side_effect=lambda *a, **k: order.append('work') or 7) as bg, \
+                mock.patch('asf.upgrade.install_due',
+                          side_effect=lambda name: order.append('install_due')) as due, \
+                mock.patch('asf.cli.line_buffered'):
+            rc = step_harvest.main(['--product', 'asf'])
+        self.assertEqual(rc, 7)
+        bg.assert_called_once()
+        due.assert_called_once_with('asf')
+        self.assertEqual(order, ['work', 'install_due'])
+
+    def test_step_harvest_main_survives_install_due_raising(self):
+        from asf.tick import step_harvest
+        with mock.patch('asf.env.load_product', return_value=self._product()), \
+                mock.patch.object(step_harvest, 'background', return_value=3), \
+                mock.patch('asf.upgrade.install_due', side_effect=RuntimeError('boom')), \
+                mock.patch('asf.cli.line_buffered'):
+            rc, out, _err = _quiet(step_harvest.main, ['--product', 'asf'])
+        self.assertEqual(rc, 3)
+        self.assertIn('upgrade: the exit install did not run (RuntimeError: boom)', out)
 
 
 class EnvRun(FakeRun):

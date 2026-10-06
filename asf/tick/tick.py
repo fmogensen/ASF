@@ -412,24 +412,42 @@ class Locks:
 
 
 def cmd_tick(args, root=None):
-    started = time.monotonic()  # the tick's start, for wave_latency_s
     product = env.load_product(getattr(args, 'product', None))
-    fresh = getattr(args, 'fresh', False)
-
-    if getattr(args, 'shadow', False):
-        return run_shadow(product, fresh=fresh)  # record only, never a command step
-
     if getattr(args, 'with_venv', None) or getattr(args, 'state_copy', None):
         if not getattr(args, 'dry_run', False):
             print('tick: --with-venv and --state-copy go with --dry-run')
             return 2
-    if getattr(args, 'dry_run', False):
+    # --shadow wins over --dry-run, as it has since both flags existed: the shadow guard is
+    # _tick's own first statement. Only the dry-run path returns above the try — it installs
+    # nothing, ever, and must make no attempt.
+    if getattr(args, 'dry_run', False) and not getattr(args, 'shadow', False):
         from asf.tick import dry_run
+        fresh = getattr(args, 'fresh', False)
         if getattr(args, 'with_venv', None):  # that venv's own rehearsal, on the same snapshot
             return dry_run.run_with_venv(product, args.with_venv, fresh=fresh,
                                          state_copy=getattr(args, 'state_copy', None))
         return dry_run.run(product, fresh=fresh,  # a throwaway copy; never pushes or launches
                            state_copy=getattr(args, 'state_copy', None))
+    try:
+        return _tick(args, product, root=root)
+    finally:
+        # F-0207: the tick's last act. Every clock fires on the minute, so this exit is the
+        # emptiest the floor gets — emptier than the start, where the install is tried today. It
+        # runs after every step, the state commit and the summary, and nothing in the tick imports
+        # after it: the package may be a new one by the time it returns.
+        from asf import upgrade
+        try:
+            upgrade.install_due(product.name)
+        except Exception as e:  # noqa: BLE001 — an install at the exit never fails a tick
+            print(f'upgrade: the exit install did not run ({type(e).__name__}: {e})')
+
+
+def _tick(args, product, root=None):
+    started = time.monotonic()  # the tick's start, for wave_latency_s
+    fresh = getattr(args, 'fresh', False)
+
+    if getattr(args, 'shadow', False):
+        return run_shadow(product, fresh=fresh)  # record only, never a command step
 
     try:
         chosen = steps.parse_steps(args.steps) if getattr(args, 'steps', None) else None
