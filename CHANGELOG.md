@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.157 — 2026-10-06
+
+### Features landed
+
+- The gate's third route, and the four skips that speak (#802)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.157"`
+
 ## v0.1.156 — 2026-10-06
 
 ### Features landed
