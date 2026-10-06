@@ -1318,6 +1318,18 @@ class KindModelGrantTest(unittest.TestCase):
         brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
         self.assertIn('inbox', brief.add_dirs)
 
+    def test_a_spec_amend_brief_grants_the_record_root_for_asf_new_story(self):
+        brief = briefs.build(product(), ROWS['spec-amend'], index(), [], REPO_FACTS)
+        self.assertIn(RECORD, brief.add_dirs)
+
+    def test_a_plain_spec_brief_grants_no_record_root(self):
+        brief = briefs.build(product(), ROWS['spec'], index(), [], REPO_FACTS)
+        self.assertNotIn(RECORD, brief.add_dirs)
+
+    def test_add_dirs_for_spec_amend_needs_no_row_and_degrades_without_a_product(self):
+        self.assertEqual(build_mod.add_dirs_for(None, kind='spec-amend'), [])
+        self.assertEqual(build_mod.add_dirs_for(Product('bare', {}), kind='spec-amend'), [])
+
 
 class ModelMapThroughTheProductFileTests(unittest.TestCase):
     """F-0211, P11: a ``conventions.models`` map reaches :func:`model_for` through a *product
