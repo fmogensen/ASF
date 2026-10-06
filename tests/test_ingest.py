@@ -381,8 +381,10 @@ class MatchBugTests(unittest.TestCase):
 
 class IngestFieldsTests(unittest.TestCase):
     def test_no_change_is_a_true_no_op(self):
+        # `opened` already seeded (§2.5): a card with none yet is never a true no-op, the first
+        # ingest writes it.
         machine = {'state': 'New', 'stage_since': '2026-01-01T00:00:00Z',
-                  'updated': '2026-01-01T00:00:00Z'}
+                  'opened': '2026-01-01T00:00:00Z', 'updated': '2026-01-01T00:00:00Z'}
         ordered, history = ingest._ingest_fields(machine, 'New', None, None, (False, []),
                                                   '2026-01-01T00:00:00Z')
         self.assertIsNone(ordered)
@@ -426,6 +428,58 @@ class IngestFieldsTests(unittest.TestCase):
         self.assertEqual(ordered['stage'], 'spec-approved')
         self.assertEqual(len(history), 1)
         self.assertIn('stage spec-draft → spec-approved', history[0])
+
+
+class MergeableTests(unittest.TestCase):
+    """§2.4/§3.4: `mergeable` lands in the machine block in `MACHINE_KEY_ORDER` position, and is
+    popped once the PR merges or closes (a merged/closed PR has no mergeable state)."""
+
+    def test_mergeable_lands_in_machine_key_order_position(self):
+        machine = {'state': 'Active', 'stage_since': 'x', 'opened': 'x', 'updated': 'x'}
+        ordered, _h = ingest._ingest_fields(machine, 'Active', None, ['x'], (False, []), 'y',
+                                            mergeable='CONFLICTING')
+        self.assertEqual(ordered['mergeable'], 'CONFLICTING')
+        self.assertEqual(list(ordered), [k for k in ingest.MACHINE_KEY_ORDER if k in ordered])
+
+    def test_mergeable_is_popped_once_the_pr_merges(self):
+        machine = {'state': 'Active', 'stage_since': 'x', 'opened': 'x', 'updated': 'x',
+                  'mergeable': 'CONFLICTING'}
+        ordered, history = ingest._ingest_fields(machine, 'Closed', None, ['merged'], (False, []),
+                                                 'y', mergeable=None)
+        self.assertNotIn('mergeable', ordered)
+        self.assertEqual(len(history), 1)  # the state change still writes its own History line
+
+
+class OpenedTests(unittest.TestCase):
+    """§2.5: the immutable timestamp the incident clock reads — written once, from the typed
+    `created` when there is one, else from the `stage_since` the same call computes, and never
+    moved again while `stage_since` keeps tracking every state/stage change."""
+
+    def test_no_opened_yet_seeds_from_typed_created_when_present(self):
+        machine = {'state': 'New', 'stage_since': '2026-01-01T00:00:00Z', 'updated': 'x'}
+        ordered, _h = ingest._ingest_fields(machine, 'New', None, None, (False, []),
+                                            '2026-02-02T00:00:00Z',
+                                            typed={'created': '2026-01-01T09:00:00Z'})
+        self.assertEqual(ordered['opened'], '2026-01-01T09:00:00Z')
+
+    def test_no_opened_yet_and_no_typed_created_falls_back_to_stage_since(self):
+        machine = {'state': 'New', 'stage_since': '2026-01-01T00:00:00Z', 'updated': 'x'}
+        ordered, _h = ingest._ingest_fields(machine, 'Active', None, ['x'], (False, []),
+                                            '2026-02-02T00:00:00Z')
+        self.assertEqual(ordered['opened'], '2026-02-02T00:00:00Z')  # the stage_since this call set
+
+    def test_opened_never_moves_across_a_new_active_resolved_walk(self):
+        machine = {'state': 'New', 'stage_since': '2026-01-01T00:00:00Z',
+                  'opened': '2026-01-01T09:00:00Z', 'updated': 'x'}
+        ordered, _h = ingest._ingest_fields(machine, 'Active', None, ['x'], (False, []),
+                                            '2026-02-02T00:00:00Z')
+        self.assertEqual(ordered['opened'], '2026-01-01T09:00:00Z')
+        self.assertEqual(ordered['stage_since'], '2026-02-02T00:00:00Z')
+        machine = dict(machine, state='Active', stage_since=ordered['stage_since'])
+        ordered, _h = ingest._ingest_fields(machine, 'Resolved', None, ['y'], (False, []),
+                                            '2026-03-03T00:00:00Z')
+        self.assertEqual(ordered['opened'], '2026-01-01T09:00:00Z')
+        self.assertEqual(ordered['stage_since'], '2026-03-03T00:00:00Z')
 
 
 class AppendHistoryLinesTests(unittest.TestCase):
@@ -583,6 +637,9 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         write(self.root, 'E-0009', 'epic', 'Factory', 'epics', typed_lines=['legacy_id: GOAL 9'],
               machine_lines=('schema_version: 1', 'state: New', 'stage_since: 2026-01-01T00:00:00Z',
                              'updated: 2026-01-01T00:00:00Z'))
+        # the first ingest seeds `opened` from `stage_since` (§2.5) — a real, one-time change;
+        # idempotence is asked of every ingest after that.
+        self.run_ingest(EMPTY_EV)
         before = open(os.path.join(self.root, 'epics', 'E-0009.md'), encoding='utf-8').read()
         self.run_ingest(EMPTY_EV)
         after = open(os.path.join(self.root, 'epics', 'E-0009.md'), encoding='utf-8').read()
@@ -1135,7 +1192,7 @@ class ReconciledTests(unittest.TestCase):
         self.assertEqual(typed.get('landed'), self.on_trunk)
         self.assertNotIn('landed', machine)
         self.assertEqual(set(machine) - {'landing'}, {'schema_version', 'state', 'evidence',
-                                                       'stage_since', 'updated'})
+                                                       'stage_since', 'opened', 'updated'})
 
     def test_a_typed_landed_sha_closes_a_bug_by_reconciled_too(self):
         """§2.5's last paragraph names no type: a Bug with no fixer link closes the same way a
@@ -1302,12 +1359,12 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
         product = types.SimpleNamespace(main='main')
         ev = dict(EMPTY_EV, branches=['main', 'old/widgets'])
         with mock.patch.object(ingest.evidence, 'resolve',
-                               side_effect=lambda refs, product=None: {
+                               side_effect=lambda refs, product=None, sources=None: {
                                    r: ('abc' if r.startswith('origin/old/widgets:') else None)
                                    for r in refs}):
             self.assertEqual(ingest._spec_home(meta, fev, ev, product), (False, 'old/widgets'))
         with mock.patch.object(ingest.evidence, 'resolve',
-                               side_effect=lambda refs, product=None: {
+                               side_effect=lambda refs, product=None, sources=None: {
                                    r: ('abc' if r.startswith('origin/main:') else None)
                                    for r in refs}):
             self.assertEqual(ingest._spec_home(meta, fev, ev, product), (True, ''))
@@ -1329,7 +1386,7 @@ class APlanReachedOnlyByItsLink(unittest.TestCase):
         return out
 
     def resolving(self, found_prefix):
-        return lambda refs, product=None: {
+        return lambda refs, product=None, sources=None: {
             r: ('abc' if r.startswith(found_prefix) else None) for r in refs}
 
     def test_found_only_on_a_pre_lane_branch(self):
@@ -1353,7 +1410,7 @@ class APlanReachedOnlyByItsLink(unittest.TestCase):
         ev = dict(EMPTY_EV, branches=['main', 'zzz/plan', 'aaa/plan'])
         with mock.patch.object(
                 ingest.evidence, 'resolve',
-                side_effect=lambda refs, product=None: {
+                side_effect=lambda refs, product=None, sources=None: {
                     r: ('abc' if r.startswith(('origin/zzz/plan:', 'origin/aaa/plan:')) else None)
                     for r in refs}):
             self.assertEqual(
@@ -1807,12 +1864,25 @@ class InProdAsksOneRevList(unittest.TestCase):
         return ingest.derive(canonical, ev, self.product)
 
     def test_one_git_call_answers_every_task(self):
-        import subprocess
-        real = subprocess.run
-        with mock.patch.object(ingest.evidence.subprocess, 'run', side_effect=real) as run:
+        # `ancestry`'s one `rev-list` now runs through the git provider
+        # (`asf.evidence.sources.LocalGit`), not a direct `subprocess.run` in `evidence.py` —
+        # count calls through `evidence._default_sources` instead of patching `subprocess`.
+        calls = []
+        real_default = ingest.evidence._default_sources
+        LocalGit = ingest.evidence.sources_mod.LocalGit
+
+        class CountingGit(LocalGit):
+            def run(self, args, timeout=120, cwd=None):
+                calls.append(args)
+                return super().run(args, timeout=timeout, cwd=cwd)
+
+        def counting_default(product, need_host=False):
+            s = real_default(product, need_host=need_host)
+            return ingest.evidence.sources_mod.Sources(CountingGit(product), s.host, s.deploy)
+
+        with mock.patch.object(ingest.evidence, '_default_sources', side_effect=counting_default):
             new_state = self.derive()[0]
-        git_calls = [c for c in run.call_args_list if c.args and c.args[0][:1] == ['git']]
-        self.assertEqual(len(git_calls), 1, git_calls)
+        self.assertEqual(len(calls), 1, calls)
         self.assertEqual(new_state['F-0001'], 'Closed')    # all six merges are deployed
         self.assertEqual(new_state['F-0002'], 'Resolved')  # its one merge is not
 

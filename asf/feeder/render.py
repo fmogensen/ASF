@@ -42,7 +42,7 @@ def incidents(index, inflight, now, product=None):
         sev = b.get('severity')
         if sev not in ('S1', 'S2') or not R.is_open(b):
             continue
-        since = ix.parse_ts(b.get('stage_since') or b.get('created') or '')
+        since = ix.parse_ts(b.get('opened') or b.get('stage_since') or b.get('created') or '')
         age_s = (now - since).total_seconds() if since else 0
         s = R.session_of(inflight, b['id'])
         session = (s.get('account') or s.get('kind') or 'session') if s else 'no session'

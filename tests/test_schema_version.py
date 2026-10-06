@@ -121,5 +121,78 @@ class IngestKeepsTheStamp(unittest.TestCase):
         self.assertIsNone(card_version(self.root, 'epics', 'E-0001'))
 
 
+class MigrateToTwoTests(unittest.TestCase):
+    """§2.5/§3.5: ``MIGRATIONS[2]`` seeds ``opened`` from ``stage_since`` for every card that has
+    one and none yet, in `MACHINE_KEY_ORDER` position, with no ``## History`` line and no other
+    key touched; idempotent, and a card already at schema 2 is left alone."""
+
+    N = 10
+
+    def setUp(self):
+        self.root = make_repo()
+        for f in STREAM_FOLDERS:
+            os.makedirs(os.path.join(self.root, f))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.ids = []
+        for n in range(self.N):
+            iid = f'T-{n + 1:04d}'
+            self.ids.append(iid)
+            write_item(self.root, iid, 'task',
+                      f'card {n}', parent=None,
+                      machine_lines=('schema_version: 1', 'state: New',
+                                     f'stage_since: 2026-01-0{(n % 9) + 1}T00:00:00Z',
+                                     'updated: 2026-01-01T00:00:00Z'))
+
+    def read(self, iid):
+        path = os.path.join(self.root, 'tasks', f'{iid}.md')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        meta, body = frontmatter.parse(text, path=path)
+        return meta, body, text
+
+    def test_every_card_gains_opened_equal_to_its_stage_since(self):
+        schema._migrate_to_2(self.root)
+        for iid in self.ids:
+            meta, _body, _text = self.read(iid)
+            self.assertEqual(meta['opened'], meta['stage_since'], iid)
+
+    def test_opened_lands_in_machine_key_order_position_after_stage_since(self):
+        from asf.record.ingest import MACHINE_KEY_ORDER
+        schema._migrate_to_2(self.root)
+        _meta, _body, text = self.read(self.ids[0])
+        block = text.split('# ---- machine ----', 1)[1]
+        keys = [ln.split(':', 1)[0].strip() for ln in block.splitlines() if ':' in ln]
+        present = [k for k in MACHINE_KEY_ORDER if k in keys]
+        self.assertEqual([k for k in keys if k in present], present)
+
+    def test_no_history_line_added_and_no_other_key_touched(self):
+        before = {iid: self.read(iid) for iid in self.ids}
+        schema._migrate_to_2(self.root)
+        for iid in self.ids:
+            meta0, body0, _t0 = before[iid]
+            meta1, body1, _t1 = self.read(iid)
+            self.assertEqual(body0, body1, iid)  # the body (History included) is untouched
+            self.assertEqual(set(meta1) - set(meta0), {'opened'}, iid)
+
+    def test_a_card_already_at_schema_2_is_not_rewritten(self):
+        iid = self.ids[0]
+        path = os.path.join(self.root, 'tasks', f'{iid}.md')
+        frontmatter.merge_machine(path, {'schema_version': 2, 'opened': '2026-05-05T00:00:00Z'},
+                                  order=('schema_version', 'state', 'stage_since', 'opened'))
+        before = self.read(iid)[2]
+        schema._migrate_to_2(self.root)
+        after = self.read(iid)[2]
+        self.assertEqual(before, after)
+        meta, _b, _t = self.read(iid)
+        self.assertEqual(meta['opened'], '2026-05-05T00:00:00Z')  # not overwritten by stage_since
+
+    def test_running_it_twice_is_a_no_op(self):
+        schema._migrate_to_2(self.root)
+        snapshot = {iid: self.read(iid)[2] for iid in self.ids}
+        schema._migrate_to_2(self.root)
+        for iid in self.ids:
+            self.assertEqual(snapshot[iid], self.read(iid)[2], iid)
+
+
 if __name__ == '__main__':
     unittest.main()

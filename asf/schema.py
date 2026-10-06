@@ -28,7 +28,7 @@ import time
 
 from asf import env
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXIT_MISMATCH = 3
 DRAIN_POLL_S = 30
 DRAIN_TIMEOUT_S = 3600
@@ -39,8 +39,26 @@ def _migrate_to_1(record_dir):
     ``index.json`` and on every card, see :func:`stamp_cards`) is the change."""
 
 
+def _migrate_to_2(record_dir):
+    """1 → 2: ``opened`` seeded for every card that already carries a machine ``stage_since``
+    and none yet — the immutable timestamp the incident clock reads (F-0010 §2.5), written once
+    and never moved again. A migration is not a derivation: no ``## History`` line, no other key
+    touched, idempotent (a card already carrying ``opened`` is left alone)."""
+    from asf.record import frontmatter
+    from asf.record.core import load_items
+    from asf.record.ingest import MACHINE_KEY_ORDER
+    by_id, _errors = load_items(record_dir)
+    for recs in by_id.values():
+        for rec in recs:
+            _typed, machine = frontmatter.split_machine(rec['meta'])
+            if 'opened' in machine or 'stage_since' not in machine:
+                continue
+            frontmatter.merge_machine(rec['path'], {'opened': machine['stage_since']},
+                                      order=MACHINE_KEY_ORDER)
+
+
 # target version -> fn(record_dir). A new schema adds one entry and bumps SCHEMA_VERSION.
-MIGRATIONS = {1: _migrate_to_1}
+MIGRATIONS = {1: _migrate_to_1, 2: _migrate_to_2}
 
 
 # ---- reading the three numbers ----------------------------------------------

@@ -1607,6 +1607,33 @@ class CapOverEveryLaunchingKindTest(unittest.TestCase):
                 self.assertEqual([r for r in out if r.item_id in ('T-0001', 'F-0001')], [])
 
 
+class ConflictRowTests(unittest.TestCase):
+    """§2.4/§3.4: `_pr_conflicting` fires `CONFLICT → REBASE` off the typed `mergeable` key alone
+    — asserted with the evidence line carrying nothing that says CONFLICTING, so a hand-written
+    evidence string cannot be what is firing the row."""
+
+    def task_index(self, mergeable):
+        t = {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+            'mergeable': mergeable, 'evidence': ['branch task/T-0001, PR #9 OPEN'],
+            'links': {'branches': ['task/T-0001'], 'prs': [9]}, 'writes': ['a.py']}
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'rank': 1,
+                       'state': 'Active', 'stage': 'building 0/1', 'children': ['T-0001']},
+            'T-0001': t}}
+
+    def test_conflicting_raises_exactly_one_conflict_row(self):
+        out = [r for r in rows.candidates(self.task_index('CONFLICTING'), product(), [])
+               if r.item_id == 'T-0001']
+        self.assertEqual(len(out), 1, out)
+        self.assertEqual(out[0].kind, rows.CONFLICT)
+        self.assertEqual(out[0].brief_kind, 'rebase')
+
+    def test_mergeable_raises_no_conflict_row(self):
+        out = [r for r in rows.candidates(self.task_index('MERGEABLE'), product(), [])
+               if r.item_id == 'T-0001']
+        self.assertNotIn(rows.CONFLICT, [r.kind for r in out])
+
+
 class EpicOverBudgetHoldTests(unittest.TestCase):
     """F-0052 §2.3/§3.2: an Epic whose subtree has spent past its typed ``budget_usd`` holds
     every launching row of ``BUDGET_HELD_KINDS`` beneath it, and nothing that finishes, rules or
@@ -2989,6 +3016,51 @@ class IncidentsTest(unittest.TestCase):
     def test_s1_hours_from_stage_limits(self):
         got = render.incidents(fixture_index(), [], NOW, product(stage_limits={'s1_hours': 4}))
         self.assertFalse(got[0].starved)
+
+
+class IncidentClockTests(unittest.TestCase):
+    """F-0010 §2.5: the S1 clock reads `opened`, the immutable timestamp a launch never moves —
+    not `stage_since`, which `asf.record.ingest` moves on every state change (so launching a fix
+    for an S1 Bug must not reset the clock that exists to catch a launch that failed, F-0071 D7).
+    The fallback chain: no `opened` → `stage_since`; neither → `created`; none of the three →
+    age `—`, not a raise."""
+
+    def index_with(self, **bug_fields):
+        idx = copy.deepcopy(fixture_index())
+        idx['items']['B-0001'].update(bug_fields)
+        return idx
+
+    def one(self, idx):
+        got = render.incidents(idx, [], NOW, product())
+        return next(i for i in got if i.bug_id == 'B-0001')
+
+    def test_opened_drives_the_clock_not_the_moved_stage_since(self):
+        b1 = self.one(self.index_with(opened='2026-01-01T07:00:00Z',
+                                      stage_since='2026-01-01T09:59:00Z'))
+        self.assertTrue(b1.starved)
+        self.assertEqual(b1.age, '3h')
+
+    def test_no_opened_falls_back_to_stage_since(self):
+        idx = self.index_with(stage_since='2026-01-01T07:00:00Z')
+        idx['items']['B-0001'].pop('opened', None)
+        b1 = self.one(idx)
+        self.assertEqual(b1.age, '3h')
+        self.assertTrue(b1.starved)
+
+    def test_no_opened_or_stage_since_falls_back_to_created(self):
+        idx = self.index_with(created='2026-01-01T07:00:00Z')
+        idx['items']['B-0001'].pop('opened', None)
+        idx['items']['B-0001'].pop('stage_since', None)
+        b1 = self.one(idx)
+        self.assertEqual(b1.age, '3h')
+
+    def test_none_of_the_three_is_age_dash_not_a_raise(self):
+        idx = self.index_with()
+        for k in ('opened', 'stage_since', 'created'):
+            idx['items']['B-0001'].pop(k, None)
+        b1 = self.one(idx)
+        self.assertEqual(b1.age, '—')
+        self.assertFalse(b1.starved)
 
 
 class TableTests(unittest.TestCase):

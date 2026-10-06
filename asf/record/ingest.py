@@ -29,8 +29,8 @@ EVIDENCE_TYPES = {'epic', 'feature', 'story', 'task', 'bug'}
 LANDING_CHILD_TYPES = {'story', 'task', 'bug'}
 # the keys ingest derives, in the order it writes them; any other machine key (schema_version,
 # spend_usd, ...) is someone else's and is carried through untouched — ingest never drops a key
-MACHINE_KEY_ORDER = ['schema_version', 'state', 'stage', 'stage_since', 'cost', 'evidence',
-                     'blocked', 'blocked_by_open', 'updated']
+MACHINE_KEY_ORDER = ['schema_version', 'state', 'stage', 'stage_since', 'opened', 'cost',
+                     'evidence', 'mergeable', 'blocked', 'blocked_by_open', 'updated']
 RULE_PREFIX = 'rule: '
 # the `metrics/events` kind written when a Feature's stage enters `on-prod`, the durable record
 # read by the rollup's first line (F-0044)
@@ -400,9 +400,14 @@ def _phrase(ev_lines):
     return '; '.join(rules[-1:] + [l for l in ev_lines if not l.startswith(RULE_PREFIX)])
 
 
-def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now, landing=_KEEP):
+def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now, landing=_KEEP,
+                   mergeable=None, typed=None):
     """(ordered_machine_or_None, [history_line, ...]) — None means "no change, skip the write".
-    ``landing`` is :func:`_landing_update`'s answer: keep the stamp, drop it, or write this one."""
+    ``landing`` is :func:`_landing_update`'s answer: keep the stamp, drop it, or write this one.
+    ``mergeable`` is the id's current PR `mergeable` (§2.4): written when truthy, popped
+    otherwise — a merged or closed PR has no mergeable state. ``typed`` is the card's typed
+    block (:func:`asf.record.frontmatter.split_machine`'s first half), read for its ``created``
+    when `opened` is seeded for the first time (§2.5)."""
     old_state = machine.get('state', 'New')
     old_stage = machine.get('stage')
     fields = dict(machine)
@@ -419,6 +424,10 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now, landi
         fields['evidence'] = ev_lines
     else:
         fields.pop('evidence', None)
+    if mergeable:
+        fields['mergeable'] = mergeable
+    else:
+        fields.pop('mergeable', None)
     blocked, open_blockers = blocked_pair
     if blocked:
         fields['blocked'] = True
@@ -429,6 +438,9 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now, landi
 
     tracked_changed = (stage != old_stage) if stage is not None else (new_state != old_state)
     fields['stage_since'] = now if (tracked_changed or 'stage_since' not in machine) else machine['stage_since']
+    # `opened` never moves once written (D13/F-0071 D7): the incident clock a launch resets must
+    # not restart because the same card's `stage_since` just did.
+    fields['opened'] = machine.get('opened') or (typed or {}).get('created') or fields['stage_since']
 
     old_cmp = {k: v for k, v in machine.items() if k != 'updated'}
     new_cmp = {k: v for k, v in fields.items() if k != 'updated'}
@@ -1520,7 +1532,9 @@ def ingest_into(root, ev, product=None):
         landing = (_landing_update(machine, new_state[iid], now, reverts, closes(iid))
                    if type_ in LANDING_TYPES else _KEEP)
         ordered, history = _ingest_fields(machine, new_state[iid], stage_val.get(iid), lines,
-                                          blocked_pair, now, landing)
+                                          blocked_pair, now, landing,
+                                          mergeable=(ev.get('ids') or {}).get(iid, {}).get('mergeable'),
+                                          typed=_typed)
         if ordered is None:
             continue
         write_fields(rec['path'], machine, ordered)
