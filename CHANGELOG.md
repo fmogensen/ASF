@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.197 — 2026-10-06
+
+### Features landed
+
+- The census row, the slow box, the flaky box and the baseline that grew — four doctor rows off two files and no host call (#850)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.197"`
+
 ## v0.1.196 — 2026-10-06
 
 ### Bugs fixed
