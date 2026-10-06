@@ -14,6 +14,8 @@ import datetime
 import json
 import os
 
+from asf.views import header
+
 
 def _today_and_yesterday():
     today = datetime.datetime.now(datetime.timezone.utc).date()
@@ -141,10 +143,11 @@ def render(root, product=None, alive=None, cfg=None, session_source=None):
     working, finished, dead = live_groups(product, effective_alive)
     other = [] if why else _other_rows(observed, product)
     other_label = f'unreadable ({why})' if why else f'{len(other)} other'
-    out = [f"**SESSIONS** — {len(working)} working · "
-           + (f"{len(finished)} finished (awaiting harvest) · " if finished else "")
-           + f"{len(dead)} dead · {len(ended)} ended · {other_label}", ""]
-    header = ('Job', 'Item', 'Kind', 'Account', 'Model', 'Branch', 'Started')
+    out = [header.head('sessions', product.name if product else '',
+                        f"{len(working)} working · "
+                        + (f"{len(finished)} finished (awaiting harvest) · " if finished else "")
+                        + f"{len(dead)} dead · {len(ended)} ended · {other_label}"), ""]
+    cols_header = ('Job', 'Item', 'Kind', 'Account', 'Model', 'Branch', 'Started')
     groups = (('Working', working),) + ((('Finished', finished),) if finished else ()) \
         + (('Dead', dead),)
     for name, rows in groups:
@@ -154,7 +157,7 @@ def render(root, product=None, alive=None, cfg=None, session_source=None):
             continue
         out.append(f"**{name}**")
         out.append("")
-        out.extend(_table(rows, LIVE_COLUMNS, header))
+        out.extend(_table(rows, LIVE_COLUMNS, cols_header))
         out.append("")
     if why:
         out.append(f"Other: unreadable ({why})")

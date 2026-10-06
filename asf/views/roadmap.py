@@ -4,7 +4,8 @@ Read off the record's ``index.json`` only: every Epic is a card there. A product
 goals in a file of its own brings them in once with ``asf migrate`` (``conventions.goals_file``);
 the roadmap never reads the product repo for them.
 """
-from asf import budget
+from asf import budget, env
+from asf.views import header
 from asf.views import index_reader as ix
 from asf.views.pr_annotate import annotator, pr_states, table
 
@@ -67,7 +68,11 @@ def render(root, product=None):
             spend_cell,
         ])
 
-    out = [f"**ROADMAP** (index.json generated {ix.local_stamp(generated)})", ""]
+    try:
+        p = product.name if product else env.default_product_name()
+    except env.ConfigError:
+        p = ''
+    out = [header.head('roadmap', p, f"index.json generated {ix.local_stamp(generated)}"), ""]
     out.append(table(rows, ["#", "Epic", "State", "On prod", "Next", "Blocked", "Spend / budget"]))
     out.append("")
     out.append(f"{len(named)} PRs named: {tally['merged']} merged · {tally['in CI']} in CI · {tally['open']} open")

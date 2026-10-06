@@ -15,6 +15,7 @@ from asf import env, invariants
 from asf.env import Product
 from asf.feeder import footprint, register, render, rows, tiers
 from asf.tick import step_wave
+from asf.views import header
 from asf.workers import lifecycle
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
     from occfixture import occ
@@ -2993,11 +2994,11 @@ class IncidentsTest(unittest.TestCase):
 
 class TableTests(unittest.TestCase):
     def test_golden_s1_unheld(self):
-        out = render.table(rows.plan_rows(fixture_index(), product(), [], 10))
+        out = render.table(rows.plan_rows(fixture_index(), product(), [], 10), product=product())
         self.assertEqual(out, golden('next-s1-unheld.md'))
 
     def test_golden_s1_held(self):
-        out = render.table(rows.plan_rows(fixture_index(), product(), [S1_SESSION], 10))
+        out = render.table(rows.plan_rows(fixture_index(), product(), [S1_SESSION], 10), product=product())
         self.assertEqual(out, golden('next-s1-held.md'))
 
     def test_empty(self):
@@ -3128,7 +3129,7 @@ class NextAllTests(unittest.TestCase):
         self.assertEqual(out.count('NEEDS DECISION'), 5)
         self.assertIn('| 2 | UNDECIDED → DECIDE | F-0005 |', out)
         self.assertNotIn('F-0006', out)
-        self.assertIn('**NEXT** — 5 rows · 0 would launch', out)
+        self.assertIn(header.head('next', 'sample', '5 rows · 0 would launch'), out)
         self.assertEqual(out.splitlines()[-1], self.FOOTER)
 
     def test_all_prints_every_undecided_card_and_no_footer(self):
@@ -3136,7 +3137,7 @@ class NextAllTests(unittest.TestCase):
         self.assertEqual(out.count('NEEDS DECISION'), 8)
         self.assertIn('| F-0008 |', out)
         self.assertNotIn('await a decision', out)
-        self.assertIn('**NEXT** — 8 rows · 0 would launch', out)
+        self.assertIn(header.head('next', 'sample', '8 rows · 0 would launch'), out)
 
     def test_json_carries_the_rows_the_table_showed_footer_or_not(self):
         for flags, ids in (((), ['F-000%d' % i for i in range(1, 6)]),

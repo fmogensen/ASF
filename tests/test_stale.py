@@ -9,6 +9,7 @@ import unittest
 
 from asf import env as asf_env
 from asf.tick import stale
+from asf.views import header
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
@@ -143,34 +144,40 @@ class StaleCommandTests(unittest.TestCase):
     def stale(self, *args, home=None):
         return run(['stale'] + list(args), self.root, home or self.home)
 
+    def body(self, stdout):
+        """``stdout`` past the header line (B-xxxx: ``head()`` is tested on its own)."""
+        return [l for l in stdout.splitlines() if l.strip()][1:]
+
     def test_product_stage_limits_are_read(self):
         home = make_home({'spec-draft': '48h'})
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         r = self.stale(home=home)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), '', r.stdout)
+        self.assertEqual(r.stdout.strip(),
+                         header.head('stale', 'sample', '0 over the stage limit'), r.stdout)
 
     def test_product_stage_limits_can_tighten(self):
         home = make_home({'spec-draft': '1h'})
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        ids = {l.split()[0] for l in self.stale(home=home).stdout.splitlines() if l.strip()}
+        ids = {l.split()[0] for l in self.body(self.stale(home=home).stdout)}
         self.assertEqual(ids, {'F-0001'})
         home2 = make_home({'spec-draft': '30s'})
         self.addCleanup(shutil.rmtree, home2, ignore_errors=True)
-        ids = {l.split()[0] for l in self.stale(home=home2).stdout.splitlines() if l.strip()}
+        ids = {l.split()[0] for l in self.body(self.stale(home=home2).stdout)}
         self.assertEqual(ids, {'F-0001', 'F-0002'})
 
     def test_a_limits_json_in_the_record_is_never_read(self):
         os.makedirs(os.path.join(self.root, 'tools'))
         with open(os.path.join(self.root, 'tools', 'limits.json'), 'w') as f:
             json.dump({'spec-draft': '1m'}, f)
-        ids = {l.split()[0] for l in self.stale().stdout.splitlines() if l.strip()}
+        ids = {l.split()[0] for l in self.body(self.stale().stdout)}
         self.assertEqual(ids, {'F-0001'})
 
     def test_only_the_stale_feature_is_reported(self):
         r = self.stale()
         self.assertEqual(r.returncode, 0, r.stderr)
-        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        self.assertTrue(r.stdout.splitlines()[0].startswith('**STALE'), r.stdout)
+        lines = self.body(r.stdout)
         self.assertEqual(len(lines), 1, r.stdout)
         self.assertTrue(lines[0].startswith('F-0001 spec-draft'), lines[0])
         self.assertIn('> 24h', lines[0])

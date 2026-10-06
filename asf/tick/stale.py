@@ -14,6 +14,7 @@ import sys
 from asf import env
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items
+from asf.views import header
 
 DURATION_RE = re.compile(r'^(\d+)([smhd])$')
 _DURATION_SECS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
@@ -171,8 +172,9 @@ def cmd_stale(args, root):
         for f, line, why in parse_errors:
             print(f"{f}:{line}: {why}", file=sys.stderr)
         return 1
+    product = product_of(args)
     canonical, _dupes = canonicalize(by_id)
-    limits = load_limits(product_of(args))
+    limits = load_limits(product)
     now = datetime.datetime.now(datetime.timezone.utc)
     rows = find_stale(canonical, limits, now)
 
@@ -182,6 +184,8 @@ def cmd_stale(args, root):
         print(json.dumps(payload, indent=2))
         return 0
 
+    print(header.head('stale', product.name if product else '',
+                       f'{len(rows)} over the stage limit'))
     for iid, label, age, _key, limit in rows:
         print(f"{iid} {label} {format_age(age)} > {limit}")
     return 0

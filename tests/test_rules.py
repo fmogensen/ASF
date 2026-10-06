@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from asf.rules import rules
+from asf.views import header
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
@@ -134,7 +135,8 @@ class RulesCheckTests(unittest.TestCase):
         proc = run_rules(self.root, ['check'])
         self.assertEqual(proc.returncode, 1, proc.stderr)
         lines = proc.stdout.strip().split('\n')
-        self.assertEqual(lines[0], '== RULES 2 checked, 1 violations, 1 unenforced')
+        self.assertEqual(lines[0], header.head('rules check', '',
+                                               '2 checked, 1 violations, 1 unenforced'))
         self.assertEqual(
             lines[1],
             'R-0002 merge without a gate sha=abc1234 2026-09-21T06:00:00Z')
@@ -164,7 +166,7 @@ class RulesCheckTests(unittest.TestCase):
         proc = run_rules(self.root, ['check'])
         self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertEqual(proc.stdout.strip(),
-                         '== RULES 1 checked, 0 violations, 1 unenforced')
+                         header.head('rules check', '', '1 checked, 0 violations, 1 unenforced'))
 
     def test_runs_from_an_unrelated_cwd(self):
         """factory-health.sh calls rules.py by absolute path from elsewhere; the packaged
@@ -175,7 +177,7 @@ class RulesCheckTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, '-m', 'asf.rules.rules', 'check'],
                               cwd=tempfile.gettempdir(), env=env,
                               capture_output=True, text=True)
-        self.assertIn('== RULES 2 checked, 1 violations, 1 unenforced',
+        self.assertIn(header.head('rules check', '', '2 checked, 1 violations, 1 unenforced'),
                       proc.stdout)
 
 
@@ -435,7 +437,8 @@ class SupersededRuleTests(unittest.TestCase):
         proc = run_rules(self.root, ['check'])
         self.assertEqual(proc.returncode, 1, proc.stderr)
         lines = proc.stdout.strip().split('\n')
-        self.assertEqual(lines[0], '== RULES 1 checked, 1 violations, 0 unenforced')
+        self.assertEqual(lines[0], header.head('rules check', '',
+                                               '1 checked, 1 violations, 0 unenforced'))
         self.assertIn("R-0001 successor violation sha=abc1234 2026-09-21T06:00:00Z",
                       proc.stdout)
         self.assertNotIn("R-0002", proc.stdout)
@@ -481,7 +484,7 @@ class CoreRulesTests(unittest.TestCase):
         proc = self._run(['check'])
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertEqual(proc.stdout.strip().split('\n'),
-                         ['== RULES 1 checked, 1 violations, 0 unenforced',
+                         [header.head('rules check', '', '1 checked, 1 violations, 0 unenforced'),
                           'R-0001 core rule broken here since today'])
 
     def test_a_rule_with_no_script_anywhere_is_a_violation(self):
@@ -502,4 +505,5 @@ class CoreRulesTests(unittest.TestCase):
             f.write(f"product: p\nbacklog_dir: {self.root}\n")
         proc = self._run(['check', '--product', 'p'], root='/nonexistent')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(proc.stdout.strip(), '== RULES 1 checked, 0 violations, 0 unenforced')
+        self.assertEqual(proc.stdout.strip(),
+                         header.head('rules check', 'p', '1 checked, 0 violations, 0 unenforced'))

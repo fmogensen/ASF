@@ -8,7 +8,7 @@ one line per violation, then one
 ``rule check timed out: R-nnnn`` / ``rule check failed: R-nnnn`` line per check that
 could say neither pass nor violation (``broken`` in ``--json``; never a violation):
 
-    == RULES <n> checked, <v> violations, <u> unenforced
+    **RULES <product>** — <n> checked, <v> violations, <u> unenforced
     R-0042 <what> <where> <since>
 
 Exit 1 when there are violations or broken checks, 0 when there are none. `--verbose` adds the
@@ -226,9 +226,11 @@ def cmd_check(args, root):
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 1 if violations or failures else 0
 
+    from asf.views import header
     broken_part = f", {len(failures)} checks broken" if failures else ''
-    print(f"== RULES {len(enforced)} checked, {len(violations)} violations, "
-          f"{len(unenforced)} unenforced{broken_part}")
+    print(header.head('rules check', getattr(args, 'product', None) or '',
+                      f"{len(enforced)} checked, {len(violations)} violations, "
+                      f"{len(unenforced)} unenforced{broken_part}"))
     for line in violations:
         print(line)
     for b in failures:

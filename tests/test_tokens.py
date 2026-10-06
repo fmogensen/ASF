@@ -14,6 +14,7 @@ from asf import env
 from asf import tokens as tk
 from asf.env import Product
 from asf.metrics import metrics
+from asf.views import header
 from asf.views import tokens
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -75,7 +76,7 @@ class TokensViewTests(unittest.TestCase):
         r = self.by_kind()['code']
         self.assertIsNone(r['after_in'])
         self.assertIsNone(r['delta_pct'])
-        out = tokens.render(tokens.compute(self.root, '2026-09-23', 14), '2026-09-23', 14)
+        out = tokens.render(tokens.compute(self.root, '2026-09-23', 14), 'p', '2026-09-23', 14)
         self.assertIn('| code | 1 | 100 | 0 | — | — | 1 → — |', out)
 
     def test_zero_before_has_no_delta(self):
@@ -97,8 +98,10 @@ class TokensViewTests(unittest.TestCase):
     def test_table_shape(self):
         write_day(self.root, '2026-09-20', [row('code', 4118000, 78)])
         write_day(self.root, '2026-09-24', [row('code', 1050000, 31)])
-        out = tokens.render(tokens.compute(self.root, '2026-09-23', 14), '2026-09-23', 14)
-        self.assertTrue(out.startswith('TOKENS — input tokens per session, 14 d either side of 2026-09-23\n'))
+        out = tokens.render(tokens.compute(self.root, '2026-09-23', 14), 'p', '2026-09-23', 14)
+        self.assertTrue(out.startswith(
+            header.head('tokens', 'p', 'input tokens per session, 14 d either side of 2026-09-23')
+            + '\n'))
         self.assertIn('| code | 1 | 4,118,000 | 1 | 1,050,000 | −75 % | 78 → 31 |', out)
 
     def test_json_is_unformatted(self):

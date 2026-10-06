@@ -14,6 +14,7 @@ from asf import env
 from asf.metrics import throughput
 from asf.scorecard import diagnose, loop, score
 from asf.scorecard.facts import load, state_file
+from asf.views import header
 
 
 def _m(v):
@@ -59,7 +60,7 @@ def compute(root, product, weeks=4, facts=None):
 
 
 def render(d):
-    out = [f"**SCORECARD {d['product']}** — {d['as_of']}", '',
+    out = [header.head('scorecard', d['product'], d['as_of']), '',
            f"Value: {score.headline_line(d['headline'], d['clutter'])}",
            score.denials_line(d['headline']), '',
            '| Week of | Landed | On prod | Lead (card→landed) | Lead (→prod) | Task lead | $ all-in | $/feature all-in '

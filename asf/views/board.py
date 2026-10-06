@@ -4,6 +4,8 @@ Ported from the operator's Feature-table script's index-backed path.
 """
 import collections
 
+from asf import env
+from asf.views import header
 from asf.views import index_reader as ix
 
 STAGE_ORDER = ["card", "spec-draft", "spec-review", "spec-approved", "plan-draft", "plan-review",
@@ -65,12 +67,13 @@ def render(root, product=None):
 
     epics = sorted(ix.of_type(items, 'epic'), key=lambda e: (ix.rank(e), e['id']))
     n_spec, n_plan = tot['spec'], tot['plan']
-    out = [f"**BOARD {time.strftime('%H:%M')}** — {len(feats)} Features · "
+    p = product.name if product else env.default_product_name()
+    out = [header.head('backlog', p, f"{time.strftime('%H:%M')} · {len(feats)} Features · "
            f"specs: {n_spec['approved']} approved / {n_spec['review']} in review / "
            f"{n_spec['draft'] + n_spec['linked']} draft · "
            f"plans: {n_plan['approved']} approved / {n_plan['review']} in review / "
            f"{n_plan['draft'] + n_plan['linked']} draft · "
-           f"Tasks: {task_done} Closed / {task_n} · index.json generated {ix.local_stamp(generated)}"]
+           f"Tasks: {task_done} Closed / {task_n} · index.json generated {ix.local_stamp(generated)}")]
     groups = [(epic_title(e), e['id']) for e in epics] + [("No Epic (needs a parent Epic)", None)]
     for title, eid in groups:
         group = sorted(((f, cells) for e, f, cells in rows if e == eid), key=lambda r: (ix.rank(r[0]), r[0]['id']))

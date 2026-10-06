@@ -12,7 +12,7 @@ from unittest import mock
 from asf import budget, env
 from asf.views import capacity as capacity_view
 from asf.views import index_reader as ix
-from asf.views import board, prod, roadmap, sessions, status
+from asf.views import board, header, prod, roadmap, sessions, status
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 
@@ -439,8 +439,8 @@ class CapacityTable(ViewsTestCase):
         cfg = {'capacity': {'per_product': {'sessions': 2}}}
         text = capacity_view.render([asf, web], cfg)
         lines = [ln for ln in text.splitlines() if ln]
-        header = next(ln for ln in lines if ln.startswith('CAPACITY'))
-        self.assertIn('operator total: sessions ?, ci ?', header)
+        head_line = next(ln for ln in lines if ln.startswith(f"**{header.TITLES['capacity']}"))
+        self.assertIn('operator total: sessions ?, ci ?', head_line)
         col_header = next(ln for ln in lines if ln.startswith('product'))
         for col in ('product', 'sessions', 'in flight', 'free', 'bound by', 'ci', 'runs', 'batch'):
             self.assertIn(col, col_header)
@@ -638,7 +638,7 @@ class RetirementRuleTests(ViewsTestCase):
                        'folder': 'features', 'parent': 'E-0001', 'state': 'Active',
                        'decided': True, 'rank': 3, 'stage': 'card'},
         })
-        text = board.render(self.root)
+        text = board.render(self.root, self.product)
         self.assertIn('1 Features', text)
         self.assertNotIn('F-0002', text)
         self.assertNotIn('F-0001', text)

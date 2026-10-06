@@ -12,6 +12,7 @@ import re
 import subprocess
 
 from asf.evidence import sources
+from asf.views import header
 
 STRIP_PREFIX = re.compile(r'^[a-z]+(\([^)]*\))?[!]?:\s*')
 
@@ -206,8 +207,9 @@ def render(root, product):
     repo_dir = product.repo_dir
     main_sha = _sh(['git', 'rev-parse', '--short=9', f'origin/{product.main}'], cwd=repo_dir) or '?'
     if not deploy_configured(product):
-        return (f"**PROD** no deploy configured (`deploy_sha: none`) · **{product.main}** "
-                f"`{main_sha}`\n")
+        return header.head('prod', getattr(product, 'name', ''),
+                            f"no deploy configured (`deploy_sha: none`) · **{product.main}** "
+                            f"`{main_sha}`") + "\n"
     prod_sha, prod_ts = _deploy_sha(product, 'prod')
     dev_sha, dev_ts = _deploy_sha(product, 'dev')
 
@@ -227,7 +229,8 @@ def render(root, product):
         behind = '?' if f['relevant'] is None else f['relevant']
         head.append(f"**{e.capitalize()}** `{short(f['deployed'])}` {behind} {rel}behind"
                     f" ({f['mode']})")
-    out = [' · '.join(head + [f"**{product.main}** `{main_sha}`"])]
+    out = [header.head('prod', getattr(product, 'name', ''),
+                        ' · '.join(head + [f"**{product.main}** `{main_sha}`"]))]
     for e, f in states:
         out += ["", f"**{deploy.view_line(product, e, f)}**"]
     out.append("")

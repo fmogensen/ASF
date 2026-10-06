@@ -10,6 +10,8 @@ import json
 import os
 import statistics
 
+from asf.views import header
+
 DASH = '—'
 MINUS = '−'
 
@@ -92,9 +94,10 @@ def _delta_text(d):
     return sign + str(abs(round(d))) + ' %'
 
 
-def render(rows, split, days):
-    lines = ['TOKENS — input tokens per session, ' + str(days) + ' d either side of ' + split, '',
-             '| kind | before | in/session | after | in/session | Δ | turns |',
+def render(rows, product, split, days):
+    lines = [header.head('tokens', product,
+                         'input tokens per session, ' + str(days) + ' d either side of ' + split),
+             '', '| kind | before | in/session | after | in/session | Δ | turns |',
              '| --- | --- | --- | --- | --- | --- | --- |']
     for r in rows:
         cells = [r['kind'], str(r['before']), _n(r['before_in']), str(r['after']), _n(r['after_in']),
@@ -109,5 +112,7 @@ def cmd_tokens(args, root):
     if args.json:
         print(json.dumps(rows, indent=2))
     else:
-        print(render(rows, split, args.days), end='')
+        from asf import env
+        product = env.load_product(getattr(args, 'product', None))
+        print(render(rows, product.name, split, args.days), end='')
     return 0

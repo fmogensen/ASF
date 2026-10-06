@@ -2193,8 +2193,8 @@ class TestModes(Base):
                 ci_queue.cmd_queue(types.SimpleNamespace(product='p'),
                                    source=ci_queue.GitHubSource(p, run=FakeGh()), out=lines.append)
             heads[m] = lines[0]
-        self.assertEqual(heads['on'], '== CI QUEUE p (mode on, 0 waiting; view only — nothing '
-                                      'written)')
+        self.assertEqual(heads['on'], '**CI QUEUE p** — mode on, 0 waiting; view only — nothing '
+                                      'written')
         self.assertNotIn('DRY RUN', heads['on'])
         self.assertIn('mode DRY RUN', heads['dry-run'])
         self.assertIn('view only', heads['dry-run'])

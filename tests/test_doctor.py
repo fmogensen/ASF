@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from asf import console_perms, doctor, env, hooks
+from asf.views import header
 from tests.gitfixture import executable_asf
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
@@ -814,7 +815,7 @@ class TestCmdDoctorSubprocess(unittest.TestCase):
                         'backlog_dir: /no/such/backlog\n')
             result = self._run(home)
             self.assertEqual(result.returncode, 1)
-            self.assertIn('== DOCTOR sample', result.stdout)
+            self.assertIn(header.head('doctor', 'sample'), result.stdout)
             self.assertIn('RED', result.stdout)
 
     def test_config_repo_backlog_rows_ok_when_sound(self):
@@ -1110,7 +1111,7 @@ class TestSchedulerSection(SchedulerSectionFixture):
                 (doctor.RED, 'asf.sample.dispatch', 'last-exit=1'),
                 (doctor.YELLOW, '/opt/legacy', 'still in use by old.dispatch')]
         out = doctor.format_scheduler('sample', rows)
-        self.assertIn('== SCHEDULER sample', out)
+        self.assertIn('**SCHEDULER sample**', out)
         self.assertEqual(len(out.splitlines()), 4)
         self.assertIn('RED', out)
         self.assertIn('YELLOW', out)

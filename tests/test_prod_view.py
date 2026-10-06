@@ -8,7 +8,7 @@ from asf.views import prod
 
 def _product(paths):
     return types.SimpleNamespace(
-        repo_dir='.', main='main', repo_slug='o/r', customer_paths=paths,
+        name='p', repo_dir='.', main='main', repo_slug='o/r', customer_paths=paths,
         deploy_sha={'prod': {'source': 'vercel'}})
 
 

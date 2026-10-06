@@ -1,4 +1,4 @@
-**NEXT** — 13 rows · 9 would launch
+**NEXT sample** — 13 rows · 9 would launch
 
 | Tier | Row | Item | Feature | Action |
 |---|---|---|---|---|

@@ -53,6 +53,7 @@ import re
 import subprocess
 
 from asf import config_keys, env, gh_limit
+from asf.views import header
 
 #: ``ci.pool: discover`` — the pool is every runner the host reports, not a declared list
 DISCOVER = 'discover'
@@ -1514,7 +1515,7 @@ def cmd_reconcile(args):
     steps = plan(pool, runners, runs_on, trials=load_trials(product.name),
                  reserves=load_reserve(product))
     mode = 'APPLY' if args.apply else 'DRY RUN — nothing changed; --apply writes the labels'
-    print(f"== CI RECONCILE {product.name} ({mode})")
+    print(header.head('ci reconcile', product.name, mode))
     print(plan_table(steps))
     for _ok, detail in unresolved_rows(runs_on, getattr(backend, 'vars_error', None)):
         print(detail)
@@ -1544,7 +1545,7 @@ def cmd_reserve(args, backend=None, out=print):
         return 2
     plans = reserve_plans(product, runners, held=_held(product, runners))
     mode = 'APPLY' if args.apply else 'DRY RUN — nothing changed; --apply writes the labels'
-    out(f"== CI RESERVE {product.name} ({mode})")
+    out(header.head('ci reserve', product.name, mode))
     out(reserve_table(plans, runners))
     trunk = getattr(product, 'main', None) or 'main'
     for p in plans:

@@ -315,6 +315,7 @@ import subprocess
 import time
 
 from asf import attestation, ci_pool, config_keys, connectors, env, gh_limit, mutation_guard, run_cancel
+from asf.views import header as view_header
 
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
@@ -4508,7 +4509,8 @@ def header(name, m, waiting):
     kept for the queue's own ``dry-run`` mode (it says what would wait and holds nothing), so a
     queue that holds starts (``on``) never reads as a dry run."""
     what = 'mode DRY RUN — the queue holds nothing' if m == 'dry-run' else f'mode {m}'
-    return f'== CI QUEUE {name} ({what}, {waiting} waiting; view only — nothing written)'
+    return view_header.head('ci queue', name,
+                             f'{what}, {waiting} waiting; view only — nothing written')
 
 
 def cmd_queue(args, source=None, out=print):

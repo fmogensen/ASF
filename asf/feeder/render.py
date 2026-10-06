@@ -12,6 +12,7 @@ import re
 from asf import env
 from asf.feeder import rows as R
 from asf.views import index_reader as ix
+from asf.views.header import head as make_head
 
 S1_HOURS = 2
 
@@ -70,12 +71,13 @@ def action_cell(row):
     return row.action
 
 
-def table(rows, header=None, hidden=0, load=None):
+def table(rows, product=None, header=None, hidden=0, load=None):
     """The rows table — markdown, like every other ``asf`` view. ``hidden``: the undecided cards
     the decision-row cap left out; the footer is a line of the table, not a row. ``load``:
     :func:`asf.feeder.rows.build_state`'s ``(X, N, why[, binds])``, said under the table."""
-    out = [header or f"**NEXT** — {len(rows)} rows · "
-                     f"{sum(1 for r in rows if r.launches)} would launch"]
+    out = [header or make_head('next', product.name if product else '',
+                               f"{len(rows)} rows · "
+                               f"{sum(1 for r in rows if r.launches)} would launch")]
     out.append('')
     out.append('| Tier | Row | Item | Feature | Action |')
     out.append('|---|---|---|---|---|')
@@ -134,7 +136,7 @@ def cmd_next(args, root=None):
                              gate=inputs.get('gate'), adjudicated=inputs.get('adjudicated'),
                              unverified_landed=inputs.get('unverified_landed'),
                              unverified_on_trunk=inputs.get('unverified_on_trunk'))
-        print(table(rows, hidden=hidden, load=load), end='')
+        print(table(rows, product=product, hidden=hidden, load=load), end='')
     return 0
 
 

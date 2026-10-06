@@ -70,6 +70,7 @@ import subprocess
 import time
 
 from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
+from asf.views import header
 from asf.workers import lifecycle, pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -1493,7 +1494,7 @@ def check_clock_steps(product):
 
 
 def format_scheduler(product_name, rows):
-    lines = [f'== SCHEDULER {product_name}']
+    lines = [f'**SCHEDULER {product_name}**']
     width = max((len(r[1]) for r in rows), default=8)
     for level, label, detail in rows:
         lines.append(f'{level.ljust(6)}  {label.ljust(width)}  {detail}')
@@ -2050,7 +2051,7 @@ def check_token_caps(cfg, product):
 
 
 def format_table(product_name, rows):
-    lines = [f'== DOCTOR {product_name}']
+    lines = [header.head('doctor', product_name)]
     width = max((len(r[0]) for r in rows), default=8)
     for name, required, ok, detail in rows:
         if ok is None:

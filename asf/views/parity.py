@@ -7,6 +7,8 @@ import datetime
 import re
 import sys
 
+from asf import env
+from asf.views import header
 from asf.views import index_reader as ix
 
 STATE_STATUS = {"Closed": "done", "Resolved": "doing", "Active": "doing", "New": "todo"}
@@ -52,7 +54,7 @@ def area_key(a):
     return (tuple(int(x) for x in m.group(1).split('.')), a) if m else ((10 ** 6,), a)
 
 
-def render(root, full=False):
+def render(root, product=None, full=False):
     items, generated = ix.load(root)
     rows = story_rows(items)
     broken = [r for r in rows if r['broken']]
@@ -65,10 +67,15 @@ def render(root, full=False):
     now = datetime.datetime.now().strftime('%H:%M')
     landing = sum(1 for rs in groups.values() if rs[0]['status'] != LATER)
     later = f", {n[LATER]} later (priority: later — not parity work in progress)" if n[LATER] else ""
-    out = [f"**PARITY {now}** — {n['done']} of {len(rows)} Stories done; {n['doing']} doing, {n['todo']} todo{later}, "
+    try:
+        p = product.name if product else env.default_product_name()
+    except env.ConfigError:
+        p = ''
+    out = [header.head('parity', p, f"{now} — {n['done']} of {len(rows)} Stories done; {n['doing']} doing, "
+           f"{n['todo']} todo{later}, "
            f"across {landing} Features still landing. Needs you: 0. Source: `index.json` "
            f"(generated {ix.local_stamp(generated)}); done = the Story is Closed (impl + tests cited on disk), "
-           f"not tests green."]
+           f"not tests green.")]
     out.append("")
     out.append("**BY AREA**")
     out.append("")
@@ -106,5 +113,6 @@ def render(root, full=False):
 
 def cmd_parity(args, root):
     full = 'full' in sys.argv[1:]
-    print(render(root, full=full), end='')
+    product = env.load_product(getattr(args, 'product', None))
+    print(render(root, product, full=full), end='')
     return 0

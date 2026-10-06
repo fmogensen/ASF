@@ -46,6 +46,7 @@ import re
 import subprocess
 
 from asf import connectors, env
+from asf.views import header
 
 
 def not_configured(key):
@@ -734,7 +735,7 @@ def i14_cell(product, now=None):
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
-    out = [f"**FACTORY STATUS {now}**", ""]
+    out = [header.head('status', product.name if product else '', now), ""]
     out.append("| Metric | Now |")
     out.append("|---|---|")
     for name, cell in (('Stale', lambda: stale_cell(root, product)),

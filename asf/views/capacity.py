@@ -15,6 +15,7 @@ script-generated (R-0109), never hand-typed.
 import json
 
 from asf import capacity, env
+from asf.views import header
 
 HEADERS = ('product', 'sessions', 'in flight', 'free', 'bound by', 'ci', 'runs', 'free', 'ci from',
            'batch')
@@ -93,8 +94,10 @@ def _table(headers, rows):
 
 def render(products, cfg):
     dep = capacity.deprecations(cfg)
-    header = (f"CAPACITY — operator total: sessions {_fmt(capacity.total_sessions(cfg))}, "
-             f"ci {_fmt(capacity.total_ci(cfg))}")
+    p = products[0].name if len(products) == 1 else None
+    head_line = header.head('capacity', p or 'all',
+                            f"operator total: sessions {_fmt(capacity.total_sessions(cfg))}, "
+                            f"ci {_fmt(capacity.total_ci(cfg))}")
     rows = []
     for p in products:
         row = _row(p, cfg)
@@ -106,7 +109,7 @@ def render(products, cfg):
         rows.append((row['product'], s['ceiling'], s['inflight'], _fmt(s['free']), bound,
                     _fmt(ci['ceiling']), _fmt(ci['inflight']), _fmt(ci['free']),
                     ci['bound_by'] or '—', _batch_cell(row['batch'])))
-    lines = [header, ''] + _table(HEADERS, rows)
+    lines = [head_line, ''] + _table(HEADERS, rows)
     clouds = [(p.name, _row(p, cfg).get('cloud')) for p in products]
     clouds = [(name, c) for name, c in clouds if c]
     if clouds:  # the cloud lane, beside the local seats above

@@ -68,6 +68,8 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass
 
+from asf.views import header
+
 DEFAULTS = {
     'window_days': 7,
     # None: off — the stability criterion reads n/a until the product's own release block sets it
@@ -891,7 +893,7 @@ def verdict(d):
 
 def render(d):
     gate = f" (gate {d['gate']})" if d.get('gate') else ''
-    out = [f"**RELEASE READINESS {d['product']}**{gate} — {d['as_of']}", '',
+    out = [header.head('release-readiness', d['product']) + f"{gate} — {d['as_of']}", '',
            f"Verdict: {verdict(d)}", '',
            '| # | Criterion | Met | Evidence |', '|---|---|---|---|']
     for i, c in enumerate(d['criteria'], 1):
