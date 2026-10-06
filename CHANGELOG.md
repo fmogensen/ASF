@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.189 — 2026-10-06
+
+### Features landed
+
+- The Stale row reads the cadence the tick measured, and an upgrade hold names itself (#829)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.189"`
+
 ## v0.1.188 — 2026-10-06
 
 ### Features landed
