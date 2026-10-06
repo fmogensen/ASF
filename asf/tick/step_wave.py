@@ -864,6 +864,45 @@ def would_start(product, root, items=None):
                    bypass_open, act=False), seats, running)
 
 
+def trunk_preflight(ctx, planned, items, out=print):
+    """The launching code rows whose Task the trunk already carries — refused, and closed by trunk
+    (F-0106). Returns the rows that survive.
+
+    The minting check (:mod:`asf.record.trunk_check`) answers a plan at the moment it lands; this
+    answers the seat. Three gaps it and it alone covers: a Task minted before that check existed,
+    a trunk that moved between the mint and the seat (a sibling landing the surface), and a Task
+    whose own id a trunk commit already names — the fact `landed_shas` was meant to carry and no
+    production caller ever passes (P6). Nothing is written but the typed sha (C12); the state and
+    its History line are the next ingest's, by ``closing``'s ``reconciled`` rule."""
+    from asf.harvest import lane
+    from asf.record import trunk_check
+    product = ctx.product
+    if not product.repo_dir:
+        return planned
+    root = ctx.record_root()
+    kept = []
+    for row in planned:
+        card = items.get(row.item_id) or {}
+        if not (row.launches and row.brief_kind == 'task' and card.get('type') == 'task'):
+            kept.append(row)
+            continue
+        sha = lane.item_on_trunk(product.repo_dir, product.main, row.item_id)
+        why = f'a commit on origin/{product.main} names {row.item_id}'
+        if not sha:
+            found = trunk_check.satisfied_on_trunk(product, trunk_check.card_body(root, card),
+                                                   card.get('writes') or ())
+            sha, _subject, why = found if found else ('', '', '')
+        if not sha:
+            kept.append(row)
+            continue
+        trunk_check.close_by_trunk(root, row.item_id, sha, product=product, out=out)
+        line = f'on trunk {row.item_id:<10} — {sha[:12]}: {why} — closed by trunk, not launched'
+        ctx.event('on_trunk', item=row.item_id, sha=sha, text=line)
+        ctx.counts['refusals'] += 1
+        out(line)
+    return kept
+
+
 def host_hold(planned):
     """``(held, why, reading)`` of the host-pressure guard (:func:`asf.workers.host.pressure`,
     ``config.yaml host_guards``) — read only when a row would launch; the tick and ``asf tick
@@ -1113,6 +1152,7 @@ def launch(ctx, out=print):
                              r.sessions + extra):
         waits.append(why)
         out(f'waits    {row_job(row):<24} {row.item_id:<10} — {why}')
+    planned = trunk_preflight(ctx, planned, items, out=out)
     host_held, host_why, reading = host_hold(planned)
     note_seats(ctx, r.sessions, cloud, running, wanted_n,
                host_why if host_held else top_cause(waits))

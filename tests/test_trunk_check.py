@@ -12,8 +12,11 @@ import unittest
 from unittest import mock
 
 from asf.env import Product
+from asf.feeder import rows as feeder_rows
+from asf.harvest import lane
 from asf.record import frontmatter, ingest, plan_tasks, trunk_check
 from asf.record.core import canonicalize, load_items
+from asf.tick import step_wave
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
     from tests import gitfixture
@@ -271,6 +274,132 @@ class TypedLandedCloses(unittest.TestCase):
             new_state2 = ingest.derive(self.canonical(), dict(EMPTY_EV, main_sha=self.sha, ci=True),
                                        product=self.product)[0]
         self.assertNotEqual(new_state2['T-0001'], 'Closed')
+
+
+class WavePreflight(unittest.TestCase):
+    """F-0106 Task 3: the wave's own call to the same predicate, at the seat
+    (`step_wave.trunk_preflight`). A real trunk (`tests.gitfixture.publish`) carrying
+    `tests/test_empty_ends.py::EmptyEndsTests` from its one commit, same as `TrunkPredicate`."""
+
+    class Ctx:
+        def __init__(self, product, root):
+            self.product = product
+            self._root = root
+            self.events = []
+            self.counts = {'refusals': 0}
+
+        def record_root(self):
+            return self._root
+
+        def event(self, kind, **fields):
+            self.events.append((kind, fields))
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='wave_preflight_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.root = os.path.join(self.tmp, 'backlog')
+        for f in FOLDERS:
+            os.makedirs(os.path.join(self.root, f))
+        tree = os.path.join(self.tmp, 'tree')
+        origin = os.path.join(self.tmp, 'origin.git')
+        os.makedirs(os.path.join(tree, 'tests'))
+        with open(os.path.join(tree, 'tests', 'test_empty_ends.py'), 'w', encoding='utf-8') as f:
+            f.write('class EmptyEndsTests:\n    def test_cap(self):\n        pass\n')
+        with mock.patch.dict(os.environ, GIT_ENV):
+            gitfixture.publish(tree, origin, message='add EmptyEndsTests')
+        self.sha = _git(tree, 'rev-parse', 'HEAD')
+        self.product = Product('wave-preflight-test', {'repo_dir': tree, 'main': 'main'})
+        self.lines = []
+
+    def ctx(self):
+        return self.Ctx(self.product, self.root)
+
+    def row(self, item_id, brief_kind='task', launches=True, feature_id='F-0001'):
+        action = f'would launch {item_id.lower()}' if launches else f'WAITS ON {item_id}'
+        return feeder_rows.Row(tier=1, kind='PLAN → CODE', item_id=item_id, feature_id=feature_id,
+                               action=action, brief_kind=brief_kind, branch=f'task/{item_id}',
+                               reason='')
+
+    def write_task(self, id_, desc=''):
+        lines = [f'id: {id_}', 'type: task', f'title: {id_} item',
+                 '# ---- machine ----', 'state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                 'updated: 2026-09-01T00:00:00Z']
+        path = os.path.join(self.root, 'tasks', f'{id_}.md')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('---\n' + '\n'.join(lines) + '\n---\n## Description\n\n' + desc
+                    + '\n\n## History\n- 2026-09-01: created\n')
+
+    def test_a_row_the_trunk_already_names_is_closed_and_not_launched(self):
+        self.write_task('T-0001')
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'writes': []}}
+        ctx = self.ctx()
+        with mock.patch.object(lane, 'item_on_trunk', return_value=self.sha):
+            kept = step_wave.trunk_preflight(ctx, [self.row('T-0001')], items,
+                                             out=self.lines.append)
+        self.assertEqual(kept, [])
+        meta, _body = read(self.root, 'task', 'T-0001')
+        self.assertEqual(meta['landed'], self.sha)
+        self.assertEqual([kind for kind, _fields in ctx.events], ['on_trunk'])
+        self.assertEqual(ctx.events[0][1]['item'], 'T-0001')
+        self.assertEqual(ctx.events[0][1]['sha'], self.sha)
+        self.assertEqual(ctx.counts['refusals'], 1)
+        self.assertEqual(len(self.lines), 1)
+        self.assertIn('on trunk T-0001', self.lines[0])
+        self.assertIn('closed by trunk, not launched', self.lines[0])
+
+    def test_a_row_whose_own_tests_are_on_the_trunk_is_closed_through_the_second_question(self):
+        self.write_task('T-0002', desc='`tests.test_empty_ends.EmptyEndsTests`')
+        items = {'T-0002': {'id': 'T-0002', 'type': 'task', 'writes': []}}
+        ctx = self.ctx()
+        # no commit on the trunk names T-0002 — the first question is empty, and the second
+        # (satisfied_on_trunk, reading the card's own body) is what closes it
+        kept = step_wave.trunk_preflight(ctx, [self.row('T-0002')], items, out=self.lines.append)
+        self.assertEqual(kept, [])
+        meta, _body = read(self.root, 'task', 'T-0002')
+        self.assertEqual(meta['landed'], self.sha)
+        self.assertEqual([kind for kind, _fields in ctx.events], ['on_trunk'])
+        self.assertIn('already carries', self.lines[0])
+
+    def test_a_spec_row_a_waiting_row_and_an_uncarried_row_all_pass_through_unchanged(self):
+        self.write_task('T-0003')  # no test id in its body — the trunk cannot carry it
+        items = {'T-0003': {'id': 'T-0003', 'type': 'task', 'writes': []}}
+        path = os.path.join(self.root, 'tasks', 'T-0003.md')
+        with open(path, encoding='utf-8') as f:
+            before = f.read()
+        before_mtime = os.path.getmtime(path)
+        spec_row = self.row('F-0001', brief_kind='spec')
+        waiting_row = self.row('T-0004', launches=False)
+        code_row = self.row('T-0003')
+        planned = [spec_row, waiting_row, code_row]
+        ctx = self.ctx()
+        kept = step_wave.trunk_preflight(ctx, planned, items, out=self.lines.append)
+        self.assertEqual(kept, planned)
+        with open(path, encoding='utf-8') as f:
+            after = f.read()
+        self.assertEqual(before, after)
+        self.assertEqual(before_mtime, os.path.getmtime(path))
+        self.assertEqual(self.lines, [])
+        self.assertEqual(ctx.events, [])
+        self.assertEqual(ctx.counts['refusals'], 0)
+
+    def test_closing_by_trunk_is_idempotent(self):
+        self.write_task('T-0005')
+        items = {'T-0005': {'id': 'T-0005', 'type': 'task', 'writes': []}}
+        ctx = self.ctx()
+        with mock.patch.object(lane, 'item_on_trunk', return_value=self.sha):
+            step_wave.trunk_preflight(ctx, [self.row('T-0005')], items, out=self.lines.append)
+        path = os.path.join(self.root, 'tasks', 'T-0005.md')
+        with open(path, encoding='utf-8') as f:
+            once = f.read()
+        meta, _body = frontmatter.parse(once, path='T-0005.md')
+        self.assertEqual(meta['landed'], self.sha)
+        self.assertEqual(meta['state'], 'New')
+        again = trunk_check.close_by_trunk(self.root, 'T-0005', self.sha, out=self.lines.append,
+                                           product=self.product)
+        self.assertTrue(again)
+        with open(path, encoding='utf-8') as f:
+            twice = f.read()
+        self.assertEqual(once, twice)  # state, evidence: and the machine block untouched
 
 
 if __name__ == '__main__':
