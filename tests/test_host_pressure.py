@@ -4,10 +4,16 @@ Incident: a 15-minute load of 99 and swap 12.6/13.3 GB — two full suites at on
 The tick must not start another session into that; the sessions already running are left alone.
 """
 import os
+import re
 import unittest
 from unittest import mock
 
 from asf.workers import host
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+#: a call site of the host guard — the alternation is the point: either spelling is a call site,
+#: and a plain-text match (not an import graph) catches a local rebind just as fast
+CALL_RE = re.compile(r'from asf\.workers import host|asf\.workers\.host')
 
 
 class GuardsFromConfig(unittest.TestCase):
@@ -155,3 +161,33 @@ class MemoryPressureReading(unittest.TestCase):
                                {'load_per_core': 3.0, 'swap_pct': 85})
         self.assertTrue(held)
         self.assertIn('swap 90%', why)
+
+
+class GuardScope(unittest.TestCase):
+    """F-0216 C13: the host guard covers the local lane only — a fence on its call sites, so a
+    fourth one appearing on a cloud path is caught rather than silently passed. A set equality,
+    not a subset: the regression this guards is one more site calling the guard, not one fewer."""
+
+    def call_sites(self):
+        found = set()
+        for dirpath, _dirs, files in os.walk(os.path.join(REPO_ROOT, 'asf')):
+            for name in files:
+                if not name.endswith('.py'):
+                    continue
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, REPO_ROOT).replace(os.sep, '/')
+                if rel == 'asf/workers/host.py':
+                    continue
+                with open(path, encoding='utf-8') as f:
+                    if CALL_RE.search(f.read()):
+                        found.add(rel)
+        return found
+
+    def test_the_guard_has_three_call_sites_and_none_is_a_cloud_one(self):
+        found = self.call_sites()
+        self.assertTrue(found)  # a broken pattern fails loudly, not on an empty match
+        self.assertEqual(found, {'asf/harvest/lane.py', 'asf/tick/step_wave.py',
+                                 'asf/tick/steps.py'})
+        for cloud_path in ('asf/workers/cloud.py', 'asf/workers/actions.py',
+                           'asf/workers/remote.py', 'asf/workers/wave.py'):
+            self.assertNotIn(cloud_path, found)

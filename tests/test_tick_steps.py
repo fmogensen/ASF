@@ -575,6 +575,33 @@ class WaveStepTests(StepsTestCase):
                       '(S1: passes host load hold)', self.lines)
         self.assertEqual(ctx.counts['launches'], 1)
 
+    def test_an_open_cloud_lane_does_not_retire_the_bypass(self):
+        # F-0216 C11/RD5: before step 7's fix `s1_bypass_open` was computed from `host_held`
+        # *after* `split_hold` had already zeroed it for an open lane — False here, where it
+        # must be True: the bypass is the LOCAL lane's, decided from the hold the host reported.
+        captured = []
+
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
+            captured.extend(rows)
+            bypass = ' (S1: passes host load hold)' if rows[0].host_load_bypass else ''
+            out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1{bypass}')
+            return [(rows[0], {'account': 'acct-a', 'model': 'opus', 'pid': 1})], []
+        reading = {'load15': 25.0, 'load1': 25.0, 'cores': 12, 'swap_pct': 10.0}
+        self.write_config('cloud:\n  enabled: true\n  max_inflight: 1\n')
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: self.rows), \
+                mock.patch.object(step_wave, '_wave', wave), \
+                mock.patch.object(step_wave, 'cloud_readiness', lambda *a, **kw: (True, '')), \
+                mock.patch.object(step_wave.host_mod, 'pressure',
+                                  return_value=(True, 'host pressure load 25 (1m 25)/cores 12, '
+                                                      'swap 10%', reading)):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].host_load_bypass)
+        self.assertIn('launched fix-bug-b-0001           B-0001     → acct-a (opus) pid 1 '
+                      '(S1: passes host load hold)', self.lines)
+        self.assertEqual(ctx.counts['launches'], 1)
+
     def test_a_second_s1_bypass_waits_while_one_is_already_live(self):
         # at most one S1 load-hold bypass at a time, across every product — the live ledger
         # already carries one, so this tick's S1 row waits like any other under load pressure.

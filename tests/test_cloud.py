@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - import shape only
     from tests.test_workers import Home, feature_row, git
 
 ON = {'enabled': True, 'runtime': 'actions', 'max_inflight': 2, 'rows': 'any',
-      'accounts': ['acct-c'], 'launch_wait_s': 0}
+      'accounts': ['acct-c'], 'launch_wait_s': 0, 'default': False}
 
 
 class FakeGh:
@@ -200,6 +200,23 @@ class Settings(unittest.TestCase):
         self.assertIn('checked out on branch `task/t-0001` (base `main`)', text)
         self.assertIn('ASF-Session: sid-1', text)
         self.assertIn('ASF-Report: task-t-0001', text)
+
+    def test_an_unwritten_default_is_cloud_first(self):
+        # F-0216 C5: `cloud.default` is true unless the config writes a value — an absent key
+        # and a written `default: null` both take DEFAULT_CLOUD_FIRST, only a written `false`
+        # (or `true`) is read as itself
+        self.assertTrue(cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1}}).default)
+        self.assertFalse(cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1,
+                                                   'default': False}}).default)
+        self.assertTrue(cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1,
+                                                  'default': None}}).default)
+
+    def test_a_product_file_turns_the_default_off(self):
+        # raw()'s key-by-key override, in the direction that matters: a product file can turn
+        # the cloud-first default off even when the operator wrote `default: true`
+        cfg = {'cloud': {'enabled': True, 'max_inflight': 1, 'default': True}}
+        product = env.Product('sample', {'cloud': {'default': False}})
+        self.assertFalse(cloud.settings(cfg, product).default)
 
 
 class LocalKinds(unittest.TestCase):
@@ -453,6 +470,24 @@ class Placement(Lanes):
         self.assertEqual(self.crt.jobs[0].branch, rec['branch'])
         self.assertNotIn('setup_s', rec)
 
+    def test_the_bypassed_row_passes_the_local_hold(self):
+        # F-0216 C11: the wave step's one `host_load_bypass` row passes `local_hold` — an
+        # identical row without the field waits on the host exactly as before
+        cfg = dict(self.cfg, cloud=dict(ON, rows='cloud-ok'))
+        bypassed = feature_row('spec-1')
+        bypassed.host_load_bypass = True
+        launched, waits, _ = self.run_wave([bypassed], cfg=cfg,
+                                           local_hold='host pressure load 50/cores 10')
+        self.assertEqual(waits, [])
+        (row, rec), = launched
+        self.assertEqual(rec['account'], 'acct-a')
+        self.assertNotEqual(rec.get('runtime_lane'), 'cloud')
+        plain = feature_row('spec-2', item='F-0002')
+        launched, waits, _ = self.run_wave([plain], cfg=cfg,
+                                           local_hold='host pressure load 50/cores 10')
+        self.assertEqual(launched, [])
+        self.assertEqual(waits[0][1], 'held: host pressure load 50/cores 10')
+
     def test_the_default_lane_runtime_is_actions(self):
         rt = cloud.lane_runtime(cloud.settings(self.cfg, self.product), self.product)
         self.assertIsInstance(rt, actions.ActionsRuntime)
@@ -556,8 +591,10 @@ class DefaultPlacement(Lanes):
         return [(r.job, rec.get('runtime_lane') or 'local') for r, rec in launched]
 
     def test_settings_read_the_keys(self):
+        # an unwritten `default` is cloud-first (F-0216 C5) — DefaultSettings.test_* below covers
+        # the shape of the flip; this test is the rest of settings()'s read of the block
         s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1}})
-        self.assertEqual((s.default, s.local_only), (False, ()))
+        self.assertEqual((s.default, s.local_only), (True, ()))
         s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'default': True,
                                       'local_only': ['groom', 'review']}})
         self.assertEqual((s.default, s.local_only), (True, ('groom', 'review')))
@@ -601,6 +638,25 @@ class DefaultPlacement(Lanes):
                 {'job': 'c2', 'account': 'acct-c', 'runtime_lane': 'cloud'}]
         launched, waits, _ = self.run_wave([feature_row('spec-1')], live=live)
         self.assertEqual((self.lanes(launched), waits), ([('spec-1', 'local')], []))
+
+    def test_a_cloud_launch_writes_no_bypass_field(self):
+        # F-0216 C12: `host_load_bypass` is written only for a local launch — the field's one
+        # reader asks whether a session that passed the load hold is running HERE, and a cloud
+        # run runs nothing here
+        cloud_row = feature_row('spec-1')
+        cloud_row.host_load_bypass = True
+        launched, _waits, _ = self.run_wave([cloud_row])
+        (_row, rec), = launched
+        self.assertEqual(rec['runtime_lane'], 'cloud')
+        self.assertNotIn('host_load_bypass', rec)
+        live = [{'job': 'c1', 'account': 'acct-c', 'runtime_lane': 'cloud'},
+                {'job': 'c2', 'account': 'acct-c', 'runtime_lane': 'cloud'}]
+        local_row = feature_row('spec-2', item='F-0002')
+        local_row.host_load_bypass = True
+        launched, _waits, _ = self.run_wave([local_row], live=live)
+        (_row, rec), = launched
+        self.assertNotEqual(rec.get('runtime_lane'), 'cloud')
+        self.assertTrue(rec['host_load_bypass'])
 
     def test_cloud_first_up_to_max_inflight_then_local(self):
         rows = [feature_row(f'spec-{n}', item=f'F-000{n}') for n in (1, 2, 3)]
@@ -966,14 +1022,18 @@ if __name__ == '__main__':
 
 
 class ModeKeys(unittest.TestCase):
-    """``cloud.mode``: overflow (default; ``local`` its alias), primary, off — ``default: true``
-    the older spelling of primary, a written mode winning; the config check refuses the rest."""
+    """``cloud.mode``: primary (the default, F-0216 C5), overflow (``local`` its alias), off —
+    ``default: true``/``false`` the older spelling of primary/overflow, a written mode winning;
+    the config check refuses the rest. ``ON`` writes ``default: False`` (overflow), so every
+    ``self.mode()`` call below without an override reads that written value, not the unwritten
+    default — :class:`tests.test_cloud.Settings`'s ``test_an_unwritten_default_is_cloud_first``
+    is the one that drives ``settings()`` with no ``cloud.default`` key at all."""
 
     def mode(self, **block):
         return cloud.settings({'cloud': dict(ON, **block)}).mode
 
     def test_the_values(self):
-        self.assertEqual(self.mode(), 'overflow')
+        self.assertEqual(self.mode(), 'overflow')          # ON's own 'default': False
         self.assertEqual(self.mode(mode='local'), 'overflow')
         self.assertEqual(self.mode(mode='primary'), 'primary')
         self.assertEqual(self.mode(mode='Primary '), 'primary')
@@ -1157,7 +1217,8 @@ class PrimaryMode(Lanes):
             'sessions 5 (auto: min(ceiling 8, 10 cores/2, 32 GB/4)), cloud max_inflight 2, '
             'local only: groom, groom-clerk, close and cards marked local_only'), line)
         off = cloud.lane_split({}, self.product)
-        self.assertIn('mode overflow (local first; the cloud takes what local cannot)', off)
+        self.assertIn('mode primary (cloud first; local takes local-only rows and the '
+                      'fallback)', off)
         self.assertIn('cloud lane off', off)
         from asf import doctor
         self.assertEqual(doctor.check_lane_split(self.cfg, self.product),
