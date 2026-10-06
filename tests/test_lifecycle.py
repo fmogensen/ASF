@@ -331,6 +331,87 @@ class RegistryReadOnceInvariants(unittest.TestCase):
         self.assertLessEqual(parse.call_count, 1)
 
 
+class LingerGraceTests(unittest.TestCase):
+    """T-0196/F-0227: the grace, the predicate and the index that reads it instead of its own
+    arithmetic — one number, so the stop (:func:`asf.workers.health.settle_ended`) and the
+    pool's reader (:func:`asf.workers.lifecycle.spent_sessions`) can never disagree about when a
+    leftover process starts."""
+
+    ENDED = '2026-01-01T00:00:00Z'
+
+    def setUp(self):
+        self.ended_ts = lc.headroom.parse_ts(self.ENDED).timestamp()
+
+    def _root(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    @staticmethod
+    def _write(root, product, lines):
+        d = os.path.join(root, product)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'sessions.jsonl'), 'w') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    def test_a_live_run_is_never_spent(self):
+        self.assertFalse(lc.linger_spent({'job': 'j', 'pid': 1},
+                                          now=self.ended_ts + lc.LINGER_GRACE_S * 10))
+
+    def test_false_one_second_after_ended(self):
+        run = {'ended': self.ENDED, 'session': 's'}
+        self.assertFalse(lc.linger_spent(run, now=self.ended_ts + 1))
+
+    def test_false_one_second_short_of_the_grace(self):
+        run = {'ended': self.ENDED, 'session': 's'}
+        self.assertFalse(lc.linger_spent(run, now=self.ended_ts + lc.LINGER_GRACE_S - 1))
+
+    def test_true_at_exactly_the_grace(self):
+        run = {'ended': self.ENDED, 'session': 's'}
+        self.assertTrue(lc.linger_spent(run, now=self.ended_ts + lc.LINGER_GRACE_S))
+
+    def test_true_well_past_the_grace(self):
+        run = {'ended': self.ENDED, 'session': 's'}
+        self.assertTrue(lc.linger_spent(run, now=self.ended_ts + lc.LINGER_GRACE_S * 10))
+
+    def test_false_for_an_unreadable_ended_stamp(self):
+        for bad in ('', None, 'not a stamp'):
+            with self.subTest(ended=bad):
+                run = {'ended': bad, 'session': 's'}
+                self.assertFalse(lc.linger_spent(run, now=self.ended_ts + lc.LINGER_GRACE_S * 10))
+
+    def test_grace_s_none_reads_the_module_constant(self):
+        run = {'ended': self.ENDED, 'session': 's'}
+        with mock.patch.object(lc, 'LINGER_GRACE_S', 10):
+            self.assertTrue(lc.linger_spent(run, now=self.ended_ts + 10, grace_s=None))
+            self.assertFalse(lc.linger_spent(run, now=self.ended_ts + 9, grace_s=None))
+
+    def test_spent_sessions_over_two_products_registries(self):
+        root = self._root()
+        grace = 100
+        ended_inside_grace = '2026-01-01T00:00:50Z'
+        self._write(root, 'sample', [
+            {'job': 'j1', 'ended': self.ENDED, 'session': 'sample/j1@A'},
+            {'job': 'j2', 'pid': 1},
+            {'job': 'j3', 'ended': ended_inside_grace, 'session': 'sample/j3@A'},
+            {'job': 'j4', 'ended': self.ENDED},
+        ])
+        self._write(root, 'other', [
+            {'job': 'k1', 'ended': self.ENDED, 'session': 'other/k1@A'},
+        ])
+        got = lc.spent_sessions(root, now=self.ended_ts + grace, grace_s=grace)
+        self.assertEqual(got, {'sample/j1@A', 'other/k1@A'})
+
+    def test_spent_sessions_on_a_missing_root_is_empty(self):
+        root = self._root()
+        self.assertEqual(lc.spent_sessions(os.path.join(root, 'does-not-exist')), set())
+
+    def test_health_keeps_one_number(self):
+        from asf.workers import health
+        self.assertEqual(health.LINGER_GRACE_S, lc.LINGER_GRACE_S)
+
+
 class LaneOfInvariants(unittest.TestCase):
     """``lane_of`` is the one guard every reader of ``run['lane']`` takes (F-lane-collision): a
     cloud runtime's launch line written before its own marker moved to ``runtime_lane`` still

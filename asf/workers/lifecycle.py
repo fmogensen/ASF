@@ -58,6 +58,8 @@ Every other module asks this one:
 * the feeder, the wave, the pool and capacity — :func:`occupies` (live on the ledger AND the pid
   answers: a dead run is no load even before health records its end), :func:`inflight`,
   :func:`attempts`, :func:`corrections`;
+* the pool — :func:`spent_sessions` (an ended run's own process, past its grace, is a leftover
+  that names no running job; F-0227);
 * the PR step — :func:`finished`;
 * every reader of a session's own state — :func:`state_of` and :func:`classify` (F-0098).
 """
@@ -718,6 +720,49 @@ def live_all(state_root, alive=None):
         if not os.path.isfile(path):
             continue
         out += [r for r in latest(path).values() if occupies(r, alive)]
+    return out
+
+
+#: Seconds an ended run's own process gets to exit by itself. Until it is up, the process is
+#: still the run's — it may be flushing, committing or pushing, and it still holds the run's
+#: worktree open. After it, the run is spent: the factory stops believing the process
+#: (:func:`spent_sessions`, read by the pool) and stops the process itself
+#: (:func:`asf.workers.health.settle_ended`). One number, so the two can never disagree about
+#: when (T-0196, F-0227).
+LINGER_GRACE_S = 300
+
+
+def linger_spent(run, now=None, grace_s=None):
+    """True when ``run`` has an ``ended`` line and its grace has run out: the run is finished on
+    the ledger (:func:`is_live` is already false) *and* enough time has passed that a process
+    still answering for it is a leftover, not the run.
+
+    False for a live run, for one whose ``ended`` stamp cannot be read, and for one still inside
+    the grace — all three are "not yet", never "no"."""
+    ended = headroom.parse_ts((run or {}).get('ended'))
+    if ended is None:
+        return False
+    grace = LINGER_GRACE_S if grace_s is None else grace_s
+    return (time.time() if now is None else now) - ended.timestamp() >= grace
+
+
+def spent_sessions(state_root, now=None, grace_s=None):
+    """``{ASF_SESSION id}`` for every spent run (:func:`linger_spent`) under every product's
+    registry — the ids a process may still carry that name no running job.
+
+    The mirror of :func:`live_all`, over the same files and the same fold cache, and matched on
+    the session id alone: the id is unique per launch, where a pid is a number the kernel hands
+    out again (F-0227 C2). A run that recorded no ``session`` contributes nothing."""
+    out = set()
+    if not state_root or not os.path.isdir(state_root):
+        return out
+    for name in sorted(os.listdir(state_root)):
+        path = os.path.join(state_root, name, 'sessions.jsonl')
+        if not os.path.isfile(path):
+            continue
+        for r in latest(path).values():
+            if r.get('session') and linger_spent(r, now, grace_s):
+                out.add(r.get('session'))
     return out
 
 
