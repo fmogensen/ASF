@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.156 — 2026-10-06
+
+### Features landed
+
+- An `S1:` title is a severity, and a body error line is the signature the card was asked for (#797)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.156"`
+
 ## v0.1.155 — 2026-10-06
 
 ### Features landed
