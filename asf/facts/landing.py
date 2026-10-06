@@ -54,6 +54,8 @@ REVERT_SCAN = 2000
 #: An open-PR list this long may be cut short (:data:`asf.workers.landing.PR_LIMIT`).
 PR_LIMIT = 300
 REVERT_RE = re.compile(r'This reverts commit ([0-9a-f]{7,40})')
+#: A card id as a decision's key: the item a close would close.
+_ITEM_RE = re.compile(r'[A-Z]-\d{4,}')
 #: A disagreement already logged within this many hours is not logged again.
 DEDUPE_HOURS = 24
 
@@ -462,12 +464,30 @@ def _key(decider, key, old, new, rendered=False):
                       sort_keys=True, default=str)
 
 
-def shadow(product, decider, key, old, new_fn, *, agree=agree_tri, view=None):
+def _ledger(product, decider, key, shown, new, same, item):
+    """Every decision to the shadow ledger (:mod:`asf.shadow`), agreement or not: one case per
+    ``(decider, key, the decider's answer)``, judged later against its outcome."""
+    from asf import shadow as ledger
+    try:
+        code = disagree.render(new) if not isinstance(new, str) else new
+        if item is None and isinstance(key, str) and _ITEM_RE.fullmatch(key):
+            item = key
+        ledger.decide(product, 'facts', f"{decider}|{key}|{json.dumps(disagree.render(shown), sort_keys=True, default=str)}",
+                      code=code, incumbent=disagree.render(shown),
+                      verdict=ledger.SAME if same else ledger.DIFF, stratum=decider,
+                      code_says='error' if isinstance(new, str) and new.startswith('error:')
+                      else outcome(new), item=item)
+    except Exception:  # noqa: BLE001 — the ledger never takes a decider down
+        pass
+
+
+def shadow(product, decider, key, old, new_fn, *, agree=agree_tri, view=None, item=None):
     """``old`` — always. Under ``flags.facts`` ``shadow`` (or ``new``: the workers' deciders
     have not cut over) the fact ``new_fn()`` runs beside it; whatever it raises is logged as
-    ``error:<Type>``, and a disagreement (``agree(old, new)`` false) is logged to
+    ``error:<Type>``. Every decision goes to the shadow ledger (:mod:`asf.shadow`, a countable
+    N over distinct cases); a disagreement (``agree(old, new)`` false) is also logged to
     ``facts-disagree.jsonl`` — once a day per ``(decider, key, old, new)``. ``view(old)`` is
-    what the log shows of the decider's answer."""
+    what the log shows of the decider's answer; ``item`` the card the decision closes."""
     from asf import facts
     if product is None or facts.mode(product) == facts.OLD:
         return old
@@ -479,9 +499,11 @@ def shadow(product, decider, key, old, new_fn, *, agree=agree_tri, view=None):
     else:
         try:
             if agree(old, new):
+                _ledger(product, decider, key, shown, new, True, item)
                 return old
         except Exception as e:  # noqa: BLE001
             new = f'error:{type(e).__name__} (agree)'
+    _ledger(product, decider, key, shown, new, False, item)
     try:
         sig, seen = _key(decider, key, shown, new), _seen(product)
         if sig in seen:
@@ -513,7 +535,7 @@ def shadow_run(run, old):
     return shadow(product, LIFECYCLE, key, old,
                   lambda: _memo(product, 'landing.run', key, '',
                                 lambda: landed_run(product, run, path)),
-                  agree=agree_closes)
+                  agree=agree_closes, item=run.get('item'))
 
 
 def shadow_earlier(path, run, old):
@@ -532,7 +554,7 @@ def shadow_earlier(path, run, old):
     return shadow(product, EARLIER, key, old,
                   lambda: landed_earlier_run(product, path, run),
                   agree=lambda o, n: (o or None) == (None if is_unknown(n) else n)
-                  or (is_unknown(n) and not o))
+                  or (is_unknown(n) and not o), item=(run or {}).get('item'))
 
 
 # ---- the offline replay ------------------------------------------------------------------------

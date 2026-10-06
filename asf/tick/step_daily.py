@@ -28,12 +28,15 @@ def parts(product, root, event=None):
     from asf.metrics.metrics import cmd_rollup
     from asf.tick.stale import cmd_stale
     from asf.scorecard.loop import daily as scorecard_daily
+    from asf.shadow import settle as shadow_settle
     return [
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
                                           product=product.name), root)),
         # the value loop: measure, snapshot, file a card per cause over threshold, verify landed ones
         ('scorecard', lambda: scorecard_daily(product, root)),
+        # the shadow deciders: each due close judged against what happened to its card
+        ('deciders', lambda: shadow_settle(product, root)),
     ]
 
 

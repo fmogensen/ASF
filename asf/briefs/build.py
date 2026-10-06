@@ -248,7 +248,24 @@ def model_for(product, kind, item=None, item_id=None):
         override = None
     if isinstance(override, str):
         return override.strip()
+    if cls != 'S1' and kind in cheap_kinds(product):
+        return (override and _pick(override, cls)) or CHEAP
     return (override and _pick(override, cls)) or _pick(builtin, cls)
+
+
+def cheap_kinds(product):
+    """``conventions.flags.models.cheap_kinds``: the brief kinds that run on the ``cheap`` label
+    (a list, or one string of names split on commas/spaces/brackets). An S1 row never does, and a
+    ``conventions.models.<kind>`` override still wins. Unset: none — the built-in table stands."""
+    try:
+        v = preamble_mod.conventions(product).flag('models.cheap_kinds')
+    except Exception:  # noqa: BLE001 — an unreadable flag is unset
+        v = None
+    if isinstance(v, str):
+        v = re.split(r'[\s,\[\]]+', v)
+    if not isinstance(v, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(KIND_ALIASES.get(str(k).strip(), str(k).strip()) for k in v if str(k).strip())
 
 
 def model_table(product):
