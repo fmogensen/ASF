@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.219 — 2026-10-07
+
+### Features landed
+
+- Watchdog: an approval hold no grant can release past 0 min — F-0024/touch_amendable_set (#926)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.219"`
+
 ## v0.1.218 — 2026-10-07
 
 ### Features landed
