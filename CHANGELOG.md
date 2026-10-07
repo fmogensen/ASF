@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.241 — 2026-10-07
+
+### Features landed
+
+- A factory publish is recorded on the run it belongs to, and the loop guard counts it (#1034)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.241"`
+
 ## v0.1.240 — 2026-10-07
 
 ### Features landed
