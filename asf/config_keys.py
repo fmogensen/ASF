@@ -115,6 +115,7 @@ TYPED = {
     'tick.watchdog.default_s': (NUM, 60, None),
     # the CI queue's timings (asf.ci_queue)
     'ci.stuck_retry_s': (NUM, 1, None),
+    'ci.stuck_max_s': (NUM, 1, None),
     'ci.stale_s': (NUM, 1, None),
     'ci.pickup_s': (NUM, 1, None),
     'ci.urgent_hold_s': (NUM, 0, None),

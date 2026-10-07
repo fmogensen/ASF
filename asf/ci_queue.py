@@ -353,6 +353,9 @@ RERUN_REFUSALS_MAX = 3
 #: a cancelled run whose re-run and fresh dispatch were both refused (``stuck``) is tried again
 #: this often, not every pass; the status row names it meanwhile (:func:`stuck_lines`)
 STUCK_RETRY_S = 30 * 60
+#: a cancelled run the queue could neither re-run nor start fresh for this long is dropped: the
+#: refusals are not going to stop, and a dead record is a red row and a place in a line (F-0267)
+STUCK_MAX_S = 2 * 60 * 60
 #: an entry not asked about again in this long has left the line (its caller moved on)
 STALE_S = 30 * 60
 #: a run admitted this recently still holds its runners: its jobs queue before a runner is busy
@@ -395,7 +398,8 @@ STALL_GAP_S = 10 * 60
 MAX_STALL_RERUNS = 2
 #: The config key over each timing above (``~/.ASF/config.yaml``): GitHub-hosted runners pick up
 #: and start in other times than a self-hosted pool, and each automatic rerun costs money.
-TUNABLES = {'STUCK_RETRY_S': 'ci.stuck_retry_s', 'STALE_S': 'ci.stale_s', 'PICKUP_S': 'ci.pickup_s',
+TUNABLES = {'STUCK_RETRY_S': 'ci.stuck_retry_s', 'STUCK_MAX_S': 'ci.stuck_max_s',
+            'STALE_S': 'ci.stale_s', 'PICKUP_S': 'ci.pickup_s',
             'URGENT_HOLD_S': 'ci.urgent_hold_s', 'EXPECT_TTL_S': 'ci.expect_ttl_s',
             'PHANTOM_GAP_S': 'ci.phantom.gap_s', 'PHANTOM_RED_S': 'ci.phantom.red_s',
             'STALL_GAP_S': 'ci.stall.gap_s', 'MAX_STALL_RERUNS': 'ci.stall.rerun_max'}
@@ -769,6 +773,52 @@ def workflow_for(product, kind, default=None):
         return str(wf[kind])
     ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
     return default or ci.get('workflow') or None
+
+
+#: the kinds a run of a watched workflow can be: the trunk's own push run, a PR run, a
+#: merge-queue batch, and a push (or dispatch) on an ordinary branch
+TRUNK_KIND, PR_KIND, BATCH_KIND, PUSH_KIND = 'trunk', 'pr', 'batch', 'push'
+#: a run of one branch's work: sized, swept, guarded and started alike (:func:`fit_applies`,
+#: :func:`starved`, :func:`sweep`, :func:`start_admitted`)
+BRANCH_KINDS = frozenset({PR_KIND, PUSH_KIND})
+
+
+def declared_batch_workflow(product):
+    """``ci.queue.workflows.batch`` when the product declares one of its own — a workflow whose
+    non-PR runs are batches by declaration — else None. The bare ``ci.workflow`` fallback is not
+    a declaration: it is the same file the PR and trunk runs use (F-0267)."""
+    wf = _qcfg(product).get('workflows')
+    batch = str(wf['batch']) if isinstance(wf, dict) and wf.get('batch') else None
+    return batch if batch and batch != workflow_for(product, PR_KIND) else None
+
+
+def run_kind(product, branch, event, workflow):
+    """What a run of a watched workflow is, read off the run and the product's declarations:
+
+    * ``trunk`` — a ``push`` run on the product's trunk branch;
+    * ``pr`` — a ``pull_request`` run (or, its event unread, a run of the PR workflow as before);
+    * ``batch`` — a run on a merge-queue batch ref (:func:`_batch_ref`), or a non-PR run of a
+      batch workflow the product declares for itself (:func:`declared_batch_workflow`);
+    * ``push`` — everything else: a push or dispatch on an ordinary branch, in a file the
+      product also runs its PR runs from.
+
+    Never by elimination: before F-0267 every non-PR, non-trunk run of the batch workflow was a
+    ``batch``, and with no ``ci.queue.workflows`` declared that is every push run on every
+    branch — one of them held a queue head for 204 min as a batch that did not exist.
+    """
+    trunk = getattr(product, 'main', None) or 'main'
+    if event == 'push' and branch == trunk:
+        return TRUNK_KIND
+    if event == 'pull_request':
+        return PR_KIND
+    if _batch_ref(product, branch):
+        return BATCH_KIND
+    declared = declared_batch_workflow(product)
+    if declared and workflow == declared:
+        return BATCH_KIND
+    if not event:
+        return PR_KIND
+    return PUSH_KIND
 
 
 def config_problems(ci):
@@ -1242,7 +1292,7 @@ class GitHubSource(Source):
             runs.update((r['id'], r) for r in got)
         return [{'id': r['id'], 'status': r['status'], 'headBranch': r.get('head_branch'),
                  'headSha': r.get('head_sha'), 'createdAt': r.get('created_at'),
-                 'workflow': os.path.basename(r['path'])}
+                 'event': r.get('event'), 'workflow': os.path.basename(r['path'])}
                 for r in runs.values()]
 
     def _repo_jobs(self, repo, run_id):
@@ -1863,15 +1913,13 @@ def runner_rows(product, now=None):
 # ---- the step-silence watch, across passes -----------------------------------------------------
 
 def _stall_kind(product, run):
-    """A stalled run's kind, for its line and its relief record: ``trunk`` for a run on the
-    product's own trunk branch, ``batch`` for one of the batch workflow, ``pr`` for everything
-    else — no exemption inherited, unlike the relief's own derivation (D6)."""
+    """A stalled run's kind, for its line and its relief record: ``trunk`` for any run on the
+    product's own trunk branch, else :func:`run_kind` — the one classifier the relief scan
+    reads too (F-0267) — with no exemption inherited, unlike the relief's own derivation (D6)."""
     trunk = getattr(product, 'main', None) or 'main'
     if run.get('headBranch') == trunk:
-        return 'trunk'
-    if run.get('workflow') and run.get('workflow') == workflow_for(product, 'batch'):
-        return 'batch'
-    return 'pr'
+        return TRUNK_KIND
+    return run_kind(product, run.get('headBranch'), run.get('event'), run.get('workflow'))
 
 
 def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
@@ -2135,7 +2183,7 @@ def fit_applies(entry):
     flight must never hold the trunk run every deploy waits on, and the host queues an exempt
     run's jobs itself."""
     entry = entry or {}
-    return entry.get('kind') in ('pr', 'batch') and entry.get('prio', OTHER) > TRUNK
+    return entry.get('kind') in BRANCH_KINDS | {BATCH_KIND} and entry.get('prio', OTHER) > TRUNK
 
 
 def ceiling_applies(entry):
@@ -2183,7 +2231,7 @@ def shortfall(key, order, needs_of, free, half=False, skip=()):
 def starved(entry, now, wait_min):
     """Has an ordinary PR start waited in line past ``wait_min`` minutes? (the starvation guard)"""
     entry = entry or {}
-    if now is None or wait_min is None or entry.get('kind') != 'pr':
+    if now is None or wait_min is None or entry.get('kind') not in BRANCH_KINDS:
         return False
     if _parse(entry.get('since')) is None:
         return False
@@ -2271,6 +2319,30 @@ def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
     return frozenset(k for k in order if ceiling_applies(entries.get(k)))
 
 
+def park(entries, key, why, now):
+    """Mark the line entry ``key`` parked: it cannot start whatever is free, so it sets nothing
+    aside, is never the head and never the status row's head — and it keeps its ``since``, so
+    its place in line is waiting for it when it can start again (F-0267)."""
+    e = entries.get(key)
+    if e is not None:
+        e['stuck'] = {'at': _iso(now), 'why': why}
+
+
+def parked(order, entries):
+    """The keys of entries the queue has given up on starting (:func:`park`)."""
+    return frozenset(k for k in order if (entries.get(k) or {}).get('stuck'))
+
+
+def parked_reason(entry, now=None):
+    """A parked entry's hold: ``parked — its cancelled run could not be re-run (stuck 45 min);
+    it holds no runners`` — never the ceiling's reason (F-0267 C6)."""
+    st = (entry or {}).get('stuck')
+    st = st if isinstance(st, dict) else {}
+    age = _age(st.get('at'), now) if now is not None and st.get('at') else math.inf
+    held = f' (stuck {max(0, int(age // 60))} min)' if age != math.inf else ''
+    return f'parked — its cancelled run could not be re-run{held}; it holds no runners'
+
+
 def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0,
            now=None, pr_wait_min=None, head_wait_max_min=None, head_wait_source='',
            urgent=''):
@@ -2293,8 +2365,11 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
     if not fit_applies(e):
         return True, ''
     ceiling = ceiling_gate(ceiling, free)
-    skip = ceiling_held(order, entries, ceiling, inflight, admitted)
+    held = ceiling_held(order, entries, ceiling, inflight, admitted)
+    skip = held | parked(order, entries)
     if key in skip:
+        if key not in held:
+            return False, parked_reason(e, now)
         return False, ceiling_reason(inflight, ceiling, admitted)
     if free is None:
         return True, ''
@@ -2533,7 +2608,7 @@ class Queue:
         what a PR run can reach when ``ci.reserve`` keeps runners free for the trunk — it can
         never be sized past the runners it may land on."""
         n = self.needs(entry.get('workflow'), entry.get('run', FULL))
-        if entry.get('kind') == 'pr' and self.reserves:
+        if entry.get('kind') in BRANCH_KINDS and self.reserves:
             self._read_host()
             n = {c: min(v, self._pr_fit_cap(c)) if self._pr_fit_cap(c) is not None else v
                  for c, v in n.items()}
@@ -2650,7 +2725,8 @@ class Queue:
         on its wait in line. A file that never recorded a head (``head``, a file from before the
         guard) counts the head's wait from ``since``."""
         entries = self.data['entries']
-        head = head_of(line_order(entries), entries)
+        order = line_order(entries)
+        head = head_of(order, entries, parked(order, entries))
         for k, e in entries.items():
             if k != head:
                 e.pop('head_since', None)
@@ -2679,6 +2755,7 @@ class Queue:
         workflow = workflow or workflow_for(self.product, kind)
         entries = self.data['entries']
         e = entries.get(key) or {'since': _iso(self.now)}
+        e.pop('stuck', None)                    # asking for its start: no longer parked
         e.update(kind=kind, item=item or key, prio=prio, label=label, workflow=workflow,
                  run=run if run in RUN_TYPES else FULL, seen=_iso(self.now))
         if sha:
@@ -3146,6 +3223,16 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
                 f"not re-run within {RELIEF_TTL_S // 3600}h")
             entries.pop(_rerun_key(rec), None)
             continue
+        stuck = rec.get('stuck') if isinstance(rec.get('stuck'), dict) else None
+        if stuck and _age(stuck.get('since'), now) > tunable('STUCK_MAX_S'):
+            # the refusals are not going to stop: the record and its entry leave together, the
+            # ci-cancels claim stays (the run was still cancelled by relief — F-0267 C8)
+            out(f"ci queue: drop {_rerun_key(rec)} — cancelled {rec.get('kind')} run {rid} "
+                f"({rec.get('item')}) on {rec.get('branch') or '?'} could not be re-run or "
+                f"started fresh for {int(_age(stuck.get('since'), now) // 60)} min (last: "
+                f"{stuck.get('why')}); {_then(rec)}")
+            entries.pop(_rerun_key(rec), None)
+            continue
         if _batch_ref(product, rec.get('branch')):
             why = _batch_gone_stale(src, product, rec, blobs)
             if why:                         # never waited out: the merge queue rebuilds it
@@ -3224,6 +3311,13 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
         n += _rerun_refused(rec, src, product, out, now, listing, blobs, keep, q=q)
     q.data['relief'] = keep
     return n
+
+
+def _then(rec):
+    """What gives a dropped stuck record's branch a run next (F-0267 P11)."""
+    if rec.get('kind') == PR_KIND:
+        return 'its open PR starts again from the lane'
+    return "the branch's next push runs fresh"
 
 
 def _batch_ref(product, branch):
@@ -3360,6 +3454,8 @@ def _rerun_refused(rec, src, product, out, now, listing, blobs, keep, q=None):
             f"tried again every {tunable('STUCK_RETRY_S') // 60} min")
     rec['stuck'] = {'since': (stuck or {}).get('since') or _iso(now), 'tried': _iso(now),
                     'why': why}
+    if q is not None:                       # it holds no place in the line meanwhile (F-0267)
+        park(q.data['entries'], _rerun_key(rec), why, now)
     keep.append(rec)
     return 0
 
@@ -3455,7 +3551,7 @@ def sweep(q, src, listed, out=print, dry_run=False):
         wf = rec.get('workflow')
         byid.update({str(r.get('databaseId')): r for r in (listed(wf) if wf else None) or ()})
     for rec in relief:
-        if rec.get('branch') or rec.get('kind') != 'pr':
+        if rec.get('branch') or rec.get('kind') not in BRANCH_KINDS:
             continue
         r = byid.get(str(rec.get('id'))) or src.run_head(rec.get('id'))
         if r and r.get('headBranch'):
@@ -3478,14 +3574,14 @@ def sweep(q, src, listed, out=print, dry_run=False):
     if prs is not None:
         newest = {}
         for rec in relief:
-            if rec.get('kind') == 'pr' and rec.get('branch') and rec.get('sha'):
+            if rec.get('kind') in BRANCH_KINDS and rec.get('branch') and rec.get('sha'):
                 k = (rec['branch'], rec['sha'])
                 if int(rec.get('id') or 0) > int(newest.get(k) or 0):
                     newest[k] = rec.get('id')
     for rec in relief:
         b, sha, rid = rec.get('branch'), rec.get('sha'), rec.get('id')
         why = None
-        if prs is not None and rec.get('kind') == 'pr' and b and sha:
+        if prs is not None and rec.get('kind') in BRANCH_KINDS and b and sha:
             pr = open_.get(b)
             me = byid.get(str(rid)) or {}
             # only a run created after the cancelled one replaces it: an older run on the same
@@ -3495,12 +3591,17 @@ def sweep(q, src, listed, out=print, dry_run=False):
                      and (r.get('status') != 'completed'
                           or str(r.get('conclusion') or '') not in NO_VERDICT)]
             if pr is None:
-                gone = closed.get(b)
-                why = (f"PR #{gone.get('number')} {_pr_state(gone)}" if gone else 'no open PR')
+                # "no open PR" judges a PR run only: a push record is judged by its runs (F-0267)
+                if rec.get('kind') == PR_KIND:
+                    gone = closed.get(b)
+                    why = (f"PR #{gone.get('number')} {_pr_state(gone)}" if gone
+                           else 'no open PR')
             elif pr.get('isDraft'):
                 why = f"PR #{pr.get('number')} is a draft, parked by its owner"
             elif pr.get('headRefOid') and pr['headRefOid'] != sha:
                 why = f"superseded, head is now {pr['headRefOid'][:9]}"
+            if why is not None:
+                pass
             elif (me.get('status') and me.get('status') != 'completed'
                   and _attempt(me) > int(rec.get('attempt') or 1)):
                 # a later attempt is live; the cancelled attempt itself, still listed queued
@@ -3951,11 +4052,13 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                 continue
             if rc >= created and not starved:   # queued behind the protected run: not in its way
                 continue
-            if ev == 'pull_request' and wf == pr_wf:
-                kind = 'pr'
-            elif wf == batch_wf and ev != 'pull_request' and not (ev == 'push' and branch == trunk):
-                kind = 'batch'
-            else:
+            # the candidate set is today's (a PR run of the PR workflow, any other non-trunk run
+            # of the batch one); its kind is read, never inferred (F-0267)
+            if not ((ev == 'pull_request' and wf == pr_wf)
+                    or (wf == batch_wf and ev != 'pull_request')):
+                continue
+            kind = run_kind(product, branch, ev, wf)
+            if kind == TRUNK_KIND:
                 continue                        # a trunk run is never cancelled
             item = _item_of_run(branch, r.get('displayTitle'), items)
             prio, label = priority(item, items, branch, product=product)
@@ -3985,8 +4088,8 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
             if _touches(exempt_files[head] or (), exempt_globs):
                 out(f'relief: exempt {branch} — changes CI config')
                 continue
-            if kind == 'batch':
-                group, label, item = 3, 'batch', 'batch'
+            if kind == BATCH_KIND:
+                group, label, item = 3, 'batch', item or 'batch'   # a fallback, not an overwrite
             else:                               # the line's order reversed: other, ranked, S2
                 group = {OTHER: 0, RANKED: 1}.get(prio, 2)
             jobs, sunk, on_reserved = None, 0.0, False
@@ -4197,7 +4300,7 @@ def start_admitted(product, items=None, source=None, out=print, dry_run=False, n
                 return n                        # runners unreadable: nothing is known to fit
             needs = {k: q.entry_needs(entries[k]) for k in order}
             key = next((k for k in order if k.split(':', 1)[0] in ('pr', 'rerun')
-                        and k not in tried and entries[k].get('kind') == 'pr'
+                        and k not in tried and entries[k].get('kind') in BRANCH_KINDS
                         and not (k.startswith('pr:') and opened >= cap)
                         and decide(k, order, entries, needs.get, q.free('pr'), q.ceiling(),
                                    q._inflight, q.admitted_here, now=q.now,
@@ -4436,13 +4539,16 @@ def _status_clause(product, now, inflight, ceiling, source):
     if line is not None and (not line.order or line.free is not None):
         if not line.order:
             return f'ci queue empty{tag}'
-        key, ok, why = line.decisions[0]
+        # the head named is one that can start: a parked entry (F-0267) is passed over
+        stuck = parked(line.order, line.entries)
+        key, ok, why = next((d for d in line.decisions if d[0] not in stuck),
+                            line.decisions[0])
         head = line.entries[key]
         pos = f" ({head.get('label') or 'other'}, 1st in line)"
         # the guard's clock, beside the in-line wait, for the entry the guard governs: a batch
         # the ceiling holds is printed as the head but is in `skip`, and no wait admits it
         skip = ceiling_held(line.order, line.entries, ceiling_gate(line.ceiling, line.free),
-                            line.inflight)
+                            line.inflight) | stuck
         guarded = key == head_of(line.order, line.entries, skip)
         said = 'would start' if ok else (
             f'{_waits(head, line.queue.now, head_wait_s(head, line.queue.now) if guarded else None, head_wait_max_min(product))} — {why}')

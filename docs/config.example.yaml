@@ -490,6 +490,7 @@ capacity:
 # times than a self-hosted pool; each automatic rerun costs money.
 # ci:
 #   stuck_retry_s: 1800       # a stuck cancelled run is tried again this often
+#   stuck_max_s: 7200         # a stuck cancelled run is dropped after this long
 #   stale_s: 1800             # a queue entry not asked about in this long has left the line
 #   pickup_s: 180             # a run admitted this recently still holds its runners
 #   urgent_hold_s: 2700       # how long a priority batch holds PR starts behind it
