@@ -195,6 +195,31 @@ exit 0
 '''
 
 
+#: A session's report commit — its end marker (:func:`report_subject`): ``asf(<ID>): report
+#: <job>``, the older unnamed ``asf: report <job>``, or either after a commit-msg hook stacked an
+#: item scope onto it (``plan(F-0116): asf(F-0116): report …``). It lands no work: the lane never
+#: refuses it for naming, nor counts it — or any empty commit — as a copy of a trunk commit (F-0278).
+REPORT_SUBJECT_RE = re.compile(r"^(?:[A-Za-z][\w-]*\([^)]*\)!?:\s*)*asf(?:\([^)]*\))?!?:\s*report\s")
+
+#: an item id token in a job name (``plan-f-1131``) — the ``commit-msg`` hook's fallback
+_JOB_ID_RE = re.compile(r'[A-Za-z]+-[0-9]{4,}')
+
+
+def is_report_subject(subject):
+    """True for a session's report commit subject (:data:`REPORT_SUBJECT_RE`), either form."""
+    return bool(REPORT_SUBJECT_RE.match((subject or '').strip()))
+
+
+def report_subject(job_name, item=None):
+    """The subject a session's report commit carries: ``asf(<ID>): report <job>`` — ``item``,
+    else the first id token in ``job_name`` as the hook reads ``ASF_JOB`` — so the lane's naming
+    check holds with no reword; ``asf: report <job>`` when neither names an item."""
+    if not item:
+        m = _JOB_ID_RE.search(job_name or '')
+        item = m.group(0).upper() if m else ''
+    return f'asf({item}): report {job_name}' if item else f'asf: report {job_name}'
+
+
 #: A lane branch kind → the commit kind its subjects open with (:func:`name_subject`).
 COMMIT_KIND = {'code': 'task', 'fix': 'fix', 'spec': 'spec', 'plan': 'plan'}
 

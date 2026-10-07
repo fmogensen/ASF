@@ -38,6 +38,7 @@ import time
 
 from asf import env, gh_limit, proves, reviews
 from asf.conventions import Conventions
+from asf.workers import githooks
 from asf.evidence import review
 from asf.evidence import review_store
 
@@ -964,12 +965,13 @@ BRANCH_ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4,})\b", re.IGNORECASE)
 #: that is the lane's subject convention, not because the item's work landed (B-0059: the
 #: landing of eight specs closed four Features).
 DOC_LANE_SUBJECT = re.compile(r"^(spec|plan|review|adjudicate)\(|^docs\((spec|plan|review)\)")
-#: A session's end marker — `asf: report <job>` (asf.workers.spawn.REPORT_SUBJECT), also after a
+#: A session's end marker — `asf(<ID>): report <job>` or the older `asf: report <job>`
+#: (asf.workers.githooks.REPORT_SUBJECT_RE, the one pattern), also after a
 #: product's commit-msg hook stacked an item scope onto it (`asf(F-1131): report plan-f-1131`,
 #: `plan(F-0116): asf(F-0116): report …`). It names the item its session ran for and lands none
 #: of its work: a product's F-1131 closed as landed on its plan session's empty report commit,
 #: with no plan on the trunk and not one Task built.
-REPORT_SUBJECT = re.compile(r"^(?:[A-Za-z][\w-]*\([^)]*\)!?:\s*)*asf(?:\([^)]*\))?!?:\s*report\s")
+REPORT_SUBJECT = githooks.REPORT_SUBJECT_RE
 
 
 def lands_nothing(subject):

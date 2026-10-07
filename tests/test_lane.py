@@ -3156,5 +3156,65 @@ class CheckCommandsFact(LaneFixture):
         ensure.assert_not_called()
 
 
+class ReportCommitsAreNoCopies(LaneFixture):
+    """F-0278 (a product's T-0659, 2026-10-07): ``git cherry`` matched the branch's EMPTY report
+    commits to the empty report commits on the trunk, so the copies check fired on every branch
+    carrying one, the lane's naming reword bailed, and each new session's report moved the head
+    and dropped the batch. An empty or report commit is never a trunk copy, and never refused
+    for naming, in either subject form."""
+
+    B, AUTHOR = NamingRepair.B, NamingRepair.AUTHOR
+    tip = NamingRepair.tip
+    commit = TrunkCommitsNeverReworded.commit
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def branch(self, subject):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit(subject, {'a.txt': 'a\n'})
+        for s in ('asf: report coder-t-0001', 'asf(T-0001): report coder-t-0001'):
+            sh(['git', 'commit', '-q', '--allow-empty', '-m', s], cwd=self.worker,
+               env_=self.AUTHOR)
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        # meanwhile the trunk landed another session's empty report commit
+        sh(['git', 'checkout', '-q', '-B', 'tmp-main', 'origin/main'], cwd=self.worker)
+        sh(['git', 'commit', '-q', '--allow-empty', '-m', 'asf: report coder-t-0000'],
+           cwd=self.worker, env_=self.AUTHOR)
+        sh(['git', 'push', '-q', 'origin', 'tmp-main:main'], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return self.tip()
+
+    def test_one_fix_and_two_empty_reports_carry_no_copies(self):
+        self.branch('fix(T-0001): the hinge')
+        cherry = sh(['git', 'cherry', 'origin/main', f'origin/{self.B}'], cwd=self.repo).stdout
+        self.assertEqual(cherry.count('- '), 2, cherry)  # what git itself says: two "copies"
+        _base, shas, why = lane.own_commits(self.repo, 'main', self.B)
+        self.assertEqual((len(shas or []), why), (3, ''))
+        self.assertEqual(lane.trunk_history(self.repo, 'main', self.B), ([], []))
+        self.assertEqual(lane.drop_trunk_copies(self.repo, 'main', self.B)['copies'], [])
+
+    def test_the_naming_check_passes_report_commits_in_either_form(self):
+        self.branch('fix(T-0001): the hinge')
+        self.assertTrue(lane.commits_name_item(self.repo, 'main', self.B, 'T-0001'))
+        self.assertIsNone(lane.lane_refusal(self.repo, 'main', self.B, 'T-0001'))
+        self.assertFalse(lane.commits_name_item(self.repo, 'main', self.B, 'T-0002'))
+
+    def test_an_unnamed_commit_beside_empty_reports_is_reworded_not_sent_back(self):
+        old = self.branch('tidy up')
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        self.assertEqual(sh(['git', 'log', '--format=%s', f'main..{new}'],
+                            cwd=self.origin).stdout.splitlines(),
+                         ['asf(T-0001): report coder-t-0001'] * 2 + ['task(T-0001): tidy up'])
+        self.assertEqual(lifecycle.corrections(os.path.join(self.state_dir, 'sessions.jsonl')),
+                         {})
+        self.assertFalse(any('back to its session' in l for l in self.lines), self.lines)
+
+
 if __name__ == '__main__':
     unittest.main()

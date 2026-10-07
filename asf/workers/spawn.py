@@ -848,12 +848,13 @@ def _catch_up(path, branch, remote_sha, kind=None, main=None):
     return False
 
 
-#: The subject a cloud session's report commit carries (asf.workers.cloud.cloud_brief).
-REPORT_SUBJECT = 'asf: report '
+#: A cloud session's report commit subject (asf.workers.cloud.cloud_brief), either form:
+#: ``asf(<ID>): report <job>`` or the older ``asf: report <job>`` (F-0278).
+REPORT_SUBJECT = githooks.REPORT_SUBJECT_RE
 
 
 def _past_reports(path, sha):
-    """``sha`` peeled past its trailing empty ``asf: report`` commits (first parent): a report
+    """``sha`` peeled past its trailing empty report commits (:data:`REPORT_SUBJECT`) (first parent): a report
     commit is a session's end marker, never a base to rebase onto. One that carries work is a
     commit like any other."""
     for _ in range(20):
@@ -861,7 +862,7 @@ def _past_reports(path, sha):
                            capture_output=True, text=True)
         subject, tree, parents = (p.stdout.split('\n') + ['', '', ''])[:3]
         parent = parents.split()[0] if parents.split() else ''
-        if p.returncode != 0 or not subject.startswith(REPORT_SUBJECT) or not parent:
+        if p.returncode != 0 or not REPORT_SUBJECT.match(subject) or not parent:
             return sha
         ptree = subprocess.run(['git', 'rev-parse', f'{parent}^{{tree}}'], cwd=path,
                                capture_output=True, text=True).stdout.strip()

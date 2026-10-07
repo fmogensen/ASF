@@ -522,11 +522,42 @@ def _subjects(repo, trunk, branch):
                 cwd=repo).stdout.splitlines()
 
 
+def _commit_rows(repo, rev_args):
+    """``[(sha, subject, empty)]`` for ``git log --no-merges <rev_args>`` — ``empty``: the commit
+    changes no file against its parent."""
+    from asf import gitops
+    r = gitops.git(['log', '--no-merges', '--format=%x1e%H%x00%s', '--name-only', *rev_args],
+                   repo)
+    rows = []
+    for rec in ((r.stdout or '').split('\x1e') if r.ok else []):
+        head, _, files = rec.partition('\n')
+        if '\x00' not in head:
+            continue
+        sha, subject = head.split('\x00', 1)
+        rows.append((sha.strip(), subject, not files.strip()))
+    return rows
+
+
+def marker_commits(repo, shas):
+    """The shas of ``shas`` that carry no work of their own: an empty commit, or a session's
+    report commit (:func:`asf.workers.githooks.is_report_subject`). ``git cherry`` and
+    ``--cherry-mark`` match an empty patch to every empty commit on the trunk, so each empty
+    report commit read as a copy of trunk history and blocked the lane's reword (F-0278): never
+    a trunk copy."""
+    if not shas:
+        return set()
+    return {sha for sha, subject, empty in _commit_rows(repo, ['--no-walk=unsorted', *shas])
+            if empty or githooks.is_report_subject(subject)}
+
+
 def commits_name_items(repo, trunk, branch, ids):
     """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names at
-    least one id of ``ids`` — a delivery's branch carries a commit per member."""
-    subjects = _subjects(repo, trunk, branch)
-    return bool(subjects) and all(any(githooks.names_item(s, i) for i in ids) for s in subjects)
+    least one id of ``ids`` — a delivery's branch carries a commit per member. A report commit
+    (either subject form) or an empty commit is never refused: it lands no work (F-0278)."""
+    rows = _commit_rows(repo, [f'origin/{trunk}..origin/{branch}'])
+    return bool(rows) and all(any(githooks.names_item(s, i) for i in ids)
+                              for _, s, empty in rows
+                              if not (empty or githooks.is_report_subject(s)))
 
 
 def commits_name_item(repo, trunk, branch, item):
@@ -655,6 +686,8 @@ def own_commits(repo, trunk, branch):
     if cherry.returncode != 0:
         return None, None, 'git cherry failed'
     dup = [l.split()[1] for l in cherry.stdout.splitlines() if l.startswith('- ')]
+    markers = marker_commits(repo, dup)
+    dup = [d for d in dup if d not in markers]
     if dup:
         return None, None, (f'{len(dup)} commit(s) on it are copies of origin/{trunk} commits '
                             f'(first {dup[0][:9]}) — trunk history under the branch: rebase '
@@ -788,6 +821,8 @@ def trunk_history(repo, trunk, branch):
               f'origin/{trunk}...origin/{branch}'], cwd=repo)
     copies = [l.split()[1] for l in r.stdout.splitlines()
               if r.returncode == 0 and l.startswith('= ')]
+    markers = marker_commits(repo, copies)
+    copies = [c for c in copies if c not in markers]
     m = H.sh(['git', 'rev-list', '--merges', f'origin/{trunk}..origin/{branch}'], cwd=repo)
     return copies, (m.stdout.split() if m.returncode == 0 else [])
 
@@ -824,13 +859,14 @@ def drop_trunk_copies(repo, trunk, branch, always=False):
         res['why'] = 'git log failed'
         return res
     rows = [l.split() for l in r.stdout.splitlines() if l.strip()]
-    res['copies'] = [row[1] for row in rows if row[0] == '=']
+    markers = marker_commits(repo, [row[1] for row in rows if row[0] == '='])
+    res['copies'] = [row[1] for row in rows if row[0] == '=' and row[1] not in markers]
     m = H.sh(['git', 'rev-list', '--merges', f'{base}..{tip}'], cwd=repo)
     res['merges'] = m.stdout.split() if m.returncode == 0 else []
     if not (res['copies'] or res['merges'] or always):
         res['why'] = 'no copy of a trunk commit and no merge on the branch'
         return res
-    own = [row for row in rows if row[0] != '=']
+    own = [row for row in rows if row[0] != '=' or row[1] in markers]
     parent = base
     for row in own:
         sha, parents = row[1], row[2:]

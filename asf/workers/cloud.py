@@ -92,6 +92,7 @@ import subprocess
 import time
 
 from asf.workers import cloudpid
+from asf.workers import githooks
 
 RUNTIME_ACTIONS = 'actions'
 RUNTIME_REMOTE = 'claude-remote'
@@ -418,6 +419,9 @@ def cloud_brief(text, job, setting=None, product=None, runtime_liveness=False):
             'new S-/T-/B- id you write (a card, a spec, a plan) is the next free number of '
             'this block for its prefix; never invent one outside it — the record refuses an '
             'id no claim covers when the work lands.')
+    # the subject names the item: a cloud session runs no commit-msg hook (F-0278)
+    report_subject = githooks.report_subject(
+        job.name, ((getattr(job, 'env', None) or {}).get('ASF_ITEM') or '').strip())
     lines = ['', '', 'CLOUD SESSION', *setting,
              f'- Every commit message carries the trailer `{SESSION_TRAILER}: {sid}` '
              f'(`git commit --trailer "{SESSION_TRAILER}: {sid}"`).',
@@ -426,7 +430,7 @@ def cloud_brief(text, job, setting=None, product=None, runtime_liveness=False):
              'report commit: off the factory host the branch is the only way back.',
              *_pre_push_lines(product),
              f'- Your last act: one commit — `--allow-empty` only when there is nothing else to '
-             f'commit — whose message is the subject `asf: report {job.name}`, then your REPORT '
+             f'commit — whose message is the subject `{report_subject}`, then your REPORT '
              f'block as the body, then the trailers `{SESSION_TRAILER}: {sid}` and '
              f'`{REPORT_TRAILER}: {job.name}`; push `{job.branch}`. The factory reads that commit '
              'as the end of this session; without it the session counts as failed.', '']
