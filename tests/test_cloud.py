@@ -1117,8 +1117,8 @@ class PrimaryMode(Lanes):
         self.assertEqual(launched, [])
         trip = [l for l in lines if l.startswith('cloud lane: cloud launches erroring')]
         self.assertEqual(len(trip), 1, lines)
-        self.assertIn('2 failed creates in 30 min (last: remote create refused (HTTP 500))',
-                      trip[0])
+        self.assertIn('2 failed creates in 30 min (create; last: remote create refused '
+                      '(HTTP 500))', trip[0])
         # the next tick: a free cloud seat, and the row still goes local, saying why
         launched, _waits, lines = self.run_wave([feature_row('spec-3', item='F-0003')], cfg=cfg)
         self.assertEqual(self.lanes(launched), [('spec-3', 'local')])
@@ -1126,6 +1126,59 @@ class PrimaryMode(Lanes):
         clause = cloud.capacity_clause(cfg, self.product)
         self.assertIn('primary (fallback: cloud launches erroring', clause)
         self.assertIn('cloud launches erroring', cloud.lane_split(cfg, self.product))
+
+    def raising_spawn(self, make_err):
+        def spawn(product, row, acct, brief, runtime=None, cfg=None):
+            if runtime is self.crt:
+                raise make_err(row)
+            return spawn_mod.spawn(product, row, acct, brief, runtime=runtime, cfg=cfg)
+        return spawn
+
+    def two_rows(self):  # the lane's two seats (max_inflight 2)
+        return [feature_row(f'spec-{i}', item=f'F-000{i}') for i in (1, 2)]
+
+    def test_f0276_stray_branch_refusals_never_trip_the_breaker(self):
+        # one job's leftover local branch is its own state, not the lane failing: three such
+        # refusals in the window leave the breaker closed and every other row on the cloud
+        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], fallback_failures=3))
+        stray = self.raising_spawn(lambda row: spawn_mod.BranchState(
+            f'branch spec/{row.item} exists locally with 1 commit(s) not on origin/main and no '
+            f'worktree — look before relaunching'))
+        for _ in range(2):  # two ticks of two refusals: four in the window
+            launched, _waits, lines = self.run_wave(self.two_rows(), cfg=cfg, spawn_fn=stray)
+            self.assertEqual(launched, [])
+            self.assertFalse([l for l in lines if 'erroring' in l], lines)
+        s = cloud.settings(cfg, self.product)
+        self.assertEqual(cloud.Breaker(self.product, s).tripped(), '')
+        self.assertEqual(cloud.fallback_state(self.product, s), '')
+        launched, _waits, _lines = self.run_wave([feature_row('spec-4', item='F-0004')], cfg=cfg)
+        self.assertEqual(self.lanes(launched), [('spec-4', 'cloud')])
+
+    def test_f0276_three_api_create_failures_trip_it_and_name_the_class(self):
+        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], fallback_failures=3))
+        api = self.raising_spawn(lambda row: spawn_mod.SpawnError(
+            'remote create refused: HTTP 401 Unauthorized'))
+        lines = []
+        for _ in range(2):  # two ticks of two failures: the third trips it
+            launched, _waits, got = self.run_wave(self.two_rows(), cfg=cfg, spawn_fn=api)
+            self.assertEqual(launched, [])
+            lines += got
+        trip = [l for l in lines if l.startswith('cloud lane: cloud launches erroring')]
+        self.assertEqual(len(trip), 1, lines)
+        self.assertIn('3 failed creates in 30 min (auth; last: remote create refused', trip[0])
+        self.assertIn('(auth; last:', cloud.capacity_clause(cfg, self.product))
+
+    def test_f0276_failure_classes(self):
+        self.assertEqual(cloud.failure_class(spawn_mod.BranchState('x')), cloud.BRANCH_STATE)
+        for text, kind in (('HTTP 403 forbidden', 'auth'), ('429 rate limit', 'quota'),
+                           ('connection reset by peer', 'transport'),
+                           ('remote create refused (HTTP 500)', 'create')):
+            self.assertEqual(cloud.failure_class(spawn_mod.SpawnError(text)), kind, text)
+        s = cloud.settings({'cloud': dict(ON, mode='primary', fallback_failures=1)})
+        b = cloud.Breaker(self.product, s)
+        self.assertIsNone(b.fail(spawn_mod.BranchState('branch x exists locally')))
+        self.assertEqual(b.tripped(), '')
+        self.assertIn('(transport; last: timed out)', b.fail('timed out'))
 
     def test_the_breaker_counts_consecutive_failures_in_its_window_and_cools_down(self):
         s = cloud.settings({'cloud': dict(ON, mode='primary', fallback_failures=2,

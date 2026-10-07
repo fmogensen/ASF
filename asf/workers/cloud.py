@@ -762,6 +762,31 @@ def _clock(ts):
     return time.strftime('%H:%M', time.localtime(ts))
 
 
+#: :func:`failure_class`'s classes, first match wins: (class, words in the error, lower-cased)
+FAILURE_CLASSES = (
+    ('auth', ('401', '403', 'unauthori', 'forbidden', 'authenticat', 'credential', 'token')),
+    ('quota', ('429', 'quota', 'rate limit', 'rate-limit', 'usage limit', 'exhausted')),
+    ('transport', ('timed out', 'timeout', 'connection', 'network', 'unreachable', '502', '503',
+                   '504', 'resolve host', 'tls', 'ssl')),
+)
+#: the class of a refusal the job's own branch caused — never counted (F-0276)
+BRANCH_STATE = 'branch state'
+
+
+def failure_class(err):
+    """The class of a failed create, named on the breaker's line: ``branch state`` for a
+    refusal the job's own branch caused (:class:`asf.workers.spawn.BranchState` — never
+    counted), else ``auth``, ``quota``, ``transport`` or ``create`` (the runtime refused)."""
+    from asf.workers import spawn  # local: spawn imports the pool, which imports this module
+    if isinstance(err, spawn.BranchState):
+        return BRANCH_STATE
+    text = str(err).lower()
+    for name, words in FAILURE_CLASSES:
+        if any(w in text for w in words):
+            return name
+    return 'create'
+
+
 class Breaker:
     """Primary mode's launch-error fallback, in ``<state>/cloud-breaker.json``: a cloud create
     that fails is noted; ``cloud.fallback_failures`` of them within ``cloud.fallback_window_min``
@@ -784,12 +809,19 @@ class Breaker:
         until = float(self.data.get('until') or 0)
         if until <= self.clock():
             return ''
+        kind = self.data.get('class') or 'create'
         return (f'cloud launches erroring — {self.data.get("count")} failed creates in '
-                f'{self.s.fallback_window_min:g} min (last: {self.data.get("why")}); local lane '
-                f'until {_clock(until)}')
+                f'{self.s.fallback_window_min:g} min ({kind}; last: {self.data.get("why")}); '
+                f'local lane until {_clock(until)}')
 
     def fail(self, why):
-        """Note one failed create. The trip line when this one trips the breaker, else None."""
+        """Note one failed create. The trip line when this one trips the breaker, else None.
+        A refusal of the job's own branch state (:data:`BRANCH_STATE`) is not the lane failing
+        and is never counted (F-0276): one job's leftover branch must not take the cloud from
+        every job."""
+        kind = failure_class(why)
+        if kind == BRANCH_STATE:
+            return None
         now = self.clock()
         horizon = now - self.s.fallback_window_min * 60
         fails = [t for t in self.data.get('fails') or () if isinstance(t, (int, float))
@@ -797,10 +829,11 @@ class Breaker:
         why = ' '.join(str(why).split())[:200]
         if len(fails) >= self.s.fallback_failures:
             until = now + self.s.fallback_cooldown_min * 60
-            self.data = {'fails': [], 'until': until, 'count': len(fails), 'why': why}
+            self.data = {'fails': [], 'until': until, 'count': len(fails), 'why': why,
+                         'class': kind}
             _write_json(self.path, self.data)
             return self.tripped()
-        self.data = dict(self.data, fails=fails, why=why)
+        self.data = dict(self.data, fails=fails, why=why, **{'class': kind})
         _write_json(self.path, self.data)
         return None
 

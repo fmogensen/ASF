@@ -851,7 +851,11 @@ count) trip a `fallback_cooldown_min` cool-down in which every row goes local. A
 silent: its tick-log line ends `— cloud fallback: <why>` (a trip prints `cloud lane: cloud launches
 erroring — …; local lane until HH:MM`), and the `asf status` capacity row's cloud clause reads
 `cloud 2/4 primary (last fallback 3m ago: <job> local — <why>)` for an hour after, or `(fallback:
-…)` while a cool-down holds.
+…)` while a cool-down holds. The trip line names the failure class (`auth`, `quota`,
+`transport` or `create`). A refusal caused by the job's own branch (a stray local branch with
+commits origin lacks) is never counted: the launch first pushes that branch's tip to
+`refs/asf/recovered/<branch>/<UTC ts>` on origin, drops it locally and cuts the job fresh, and
+refuses only when that push fails.
 
 `cloud.default: true` is the older spelling of `mode: primary`; a written `mode` wins. An unknown
 mode, or a fallback number that is not above 0, refuses the file at `asf product check`.
