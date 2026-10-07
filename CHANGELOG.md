@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.239 — 2026-10-07
+
+### Bugs fixed
+
+- A batch is cut after the verdict; infra reds re-run once; relaunch only what changed (#1042)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.239"`
+
 ## v0.1.238 — 2026-10-07
 
 ### Bugs fixed
