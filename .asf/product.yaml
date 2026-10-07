@@ -1,0 +1,21 @@
+# .asf/product.yaml — the conventions this repository's CI must read for itself.
+#
+# `conventions.merge.factory_only` is enforced by a CI step (tools/check_factory_only.sh), and a
+# GitHub runner cannot see the operator's ~/.ASF/products/<product>.yaml. So the inputs the rule
+# needs live here, in the repository, and nothing machine-, account- or product-specific does:
+# no repo_slug, no repo_dir, no backlog_dir, no product name. The operator's own product file
+# stays the tick's source of truth for everything else.
+main: main
+conventions:
+  branch_prefixes:
+    code: worker/
+    fix: fix/
+    spec: spec/
+    plan: plan/
+    direct: cloud/direct-
+    legacy: []
+  merge:
+    mode: auto
+    factory_only: true
+    require_item_id: true
+    bot_paths: [CHANGELOG.md]
