@@ -1014,7 +1014,7 @@ class WiringTests(unittest.TestCase):
     def test_the_daily_step_runs_the_loop(self):
         from asf.tick import step_daily
         names = [n for n, _ in step_daily.parts(Prod(), '/nonexistent')]
-        self.assertEqual(names, ['stale', 'rollup', 'scorecard', 'deciders'])
+        self.assertEqual(names, ['stale', 'rollup', 'scorecard', 'credentials', 'deciders'])
 
     def test_the_product_file_accepts_the_scorecard_block(self):
         text = ('repo_slug: x/y\nrepo_dir: /tmp\nimprove:\n  scorecard:\n    verify_weeks: 3\n'
