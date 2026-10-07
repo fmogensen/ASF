@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.213 — 2026-10-07
+
+### Features landed
+
+- The plan readers' per-plan reads become one batch each (#934)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.213"`
+
 ## v0.1.212 — 2026-10-07
 
 ### Bugs fixed
