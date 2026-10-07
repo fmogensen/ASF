@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.210 — 2026-10-07
+
+### Features landed
+
+- Review sessions cannot end — the unpushed-work Stop hook does not exempt the review kind, so green PRs never get an approval (#913)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.210"`
+
 ## v0.1.209 — 2026-10-07
 
 ### Features landed
