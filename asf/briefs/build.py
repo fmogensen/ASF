@@ -702,6 +702,13 @@ Use the id that command prints, and only that id. NO INVENTED IDS: never write a
 never take one from the spec's text, never reuse an id the record already carries. Stories the
 record already holds for this Feature: {stories}
 
+IF `asf new` CANNOT REACH THE RECORD (a cloud session), declare each Story in the spec instead,
+under its `## Stories` section, as a heading with an id from this session's `BACKLOG_ID_RANGE`
+and its acceptance lines under it — `### S-nnnnn: <title>`, then `- [ ] <line>` per line. The
+record mints those cards from the claimed block when the plan lands. A Story id written anywhere
+without its own `### S-nnnnn:` heading or a card is never minted: the plan citing it is refused,
+and a `Proves:` line naming it proves nothing (`Not proved: unknown story`).
+
 EACH ACCEPTANCE LINE IS TESTABLE: one observable behaviour a named test can assert, not a goal
 or a quality. A landed test that already proves a line is cited on that line as
 `<the line> — proven by <path>` (the test file's path in the repo); a line nothing proves yet

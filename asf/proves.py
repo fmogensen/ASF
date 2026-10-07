@@ -36,6 +36,9 @@ PARTIAL_MARKERS = ('only', 'partial', 'partly', 'half', 'except', 'not yet', 'mi
 #: Why a line with a refused claim against it is unproved — the fourth member of the ``why``
 #: vocabulary beside :data:`NO_PROOF`, :data:`PATH_MISSING` and :data:`NAME_MISSING`.
 PARTIAL_CLAIM = 'partial claim'
+#: Why a claim on an id the record holds no Story card for proves nothing (F-0285): a spec that
+#: cited Story ids nobody minted, and a Task that then wrote ``Proves:`` lines against them.
+UNKNOWN_STORY = 'unknown story'
 
 
 def partial_markers():
@@ -98,13 +101,15 @@ class Claim:
     refusal: str = ''   # '' when the claim counts; else why this line is not proved
 
 
-def parse_all(text, markers=None):
+def parse_all(text, markers=None, known=None):
     """``(counted, refused)`` — every claim in ``text``, in first-seen order, duplicates
     collapsed on ``(story, line, test)``. A claim whose prose carries a partial marker
     (:func:`partial_marker`) goes in ``refused`` with ``refusal`` set to
     ``'partial claim: "<marker>"'`` and never in ``counted``: a line is proved whole or it is not
     proved (F-0257). A line that says ``Proves`` but names no id, no line or no test is in
-    neither and raises nothing."""
+    neither and raises nothing. ``known``: the record's Story ids (or ``{id: meta}``) — given,
+    a claim on any other id goes in ``refused`` as :data:`UNKNOWN_STORY` and renders as
+    ``Not proved: … — unknown story`` (F-0285)."""
     seen = set()
     counted, refused = [], []
     for m in CLAIM_RE.finditer(text):
@@ -116,10 +121,19 @@ def parse_all(text, markers=None):
             continue
         seen.add(key)
         marker = partial_marker(test, markers)
-        claim = Claim(story=story, line=line, test=test, raw=m.group(0),
-                      refusal=f'{PARTIAL_CLAIM}: "{marker}"' if marker else '')
-        (refused if marker else counted).append(claim)
+        refusal = f'{PARTIAL_CLAIM}: "{marker}"' if marker else ''
+        if not refusal and known is not None and not _is_story(story, known):
+            refusal = UNKNOWN_STORY
+        claim = Claim(story=story, line=line, test=test, raw=m.group(0), refusal=refusal)
+        (refused if refusal else counted).append(claim)
     return counted, refused
+
+
+def _is_story(iid, known):
+    """True when ``known`` (a set of ids, or ``{id: meta}``) holds ``iid`` as a Story."""
+    if isinstance(known, dict):
+        return iid in known and ((known.get(iid) or {}).get('type') or 'story') == 'story'
+    return iid in {str(k).upper() for k in known}
 
 
 def parse(text, markers=None):
@@ -205,7 +219,7 @@ def validate(claims, task, items, root, tree=None):
     for claim in claims:
         story_item = (items or {}).get(claim.story)
         if not story_item or story_item.get('type') != 'story':
-            problems.append(f'unknown story: {claim.raw}')
+            problems.append(f'{UNKNOWN_STORY}: {claim.raw}')
             continue
         if claim.story not in task_stories:
             problems.append(f"not this Task's: {claim.raw}")

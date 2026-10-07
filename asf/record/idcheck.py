@@ -81,3 +81,55 @@ def duplicate_task(canonical, parent, stories, writes, extra=None):
         if task_key(meta.get('parent'), meta.get('stories'), meta.get('writes')) == key:
             return iid
     return None
+
+
+# ---- Stories a doc cites, declares, and never minted (F-0285) --------------------------------
+
+#: a ``### S-29501: <title>`` heading — the Story the doc declares, from its session's claimed
+#: block, for the record to mint (:func:`declared_stories`)
+STORY_DECL = re.compile(r'^[ \t]*#{1,6}[ \t]+\**[ \t]*(?P<id>S-\d{4,})\b[:.\s—-]*\**[ \t]*'
+                        r'(?P<title>[^\n]*)$', re.MULTILINE)
+STORY_TOKEN = re.compile(r'\bS-\d{4,}\b')
+#: a ``## Stories`` (``## 7. Story coverage``) section: every S- id in it is a citation
+STORIES_HEADING = re.compile(r'^##[ \t]+(?:[\d.]+[ \t]*)?Stor(?:y|ies)\b', re.IGNORECASE)
+HEADING = re.compile(r'^#{1,6}[ \t]+\S', re.MULTILINE)
+CHECKBOX = re.compile(r'^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*(?P<line>\S.*?)[ \t]*$')
+
+
+def declared_stories(text):
+    """``{S-id: {'title', 'acceptance': [line, …]}}`` — every ``### S-…: <title>`` heading in
+    ``text`` (code left out), with the checkbox lines under it up to the next heading."""
+    prose = _prose(text)
+    bounds = [h.start() for h in HEADING.finditer(prose)]
+    out = {}
+    for m in STORY_DECL.finditer(prose):
+        end = next((b for b in bounds if b > m.start()), len(prose))
+        lines = [c.group('line') for c in map(CHECKBOX.match, prose[m.end():end].splitlines()) if c]
+        out.setdefault(m.group('id'), {'title': m.group('title').strip(' *'), 'acceptance': lines})
+    return out
+
+
+def cited_stories(text):
+    """The S- ids ``text`` cites in its ``## Stories`` section(s) (``## 7. Story coverage``),
+    first-seen order, code left out — the doc's own statement of which Stories it delivers. A
+    Task's ``stories:`` line is not read here: one naming no card is dropped from the card the
+    record mints (:func:`asf.record.plan_tasks.stories_of`)."""
+    prose = _prose(text)
+    out = []
+    inside = False
+    for line in prose.splitlines():
+        if line.startswith('## '):
+            inside = bool(STORIES_HEADING.match(line))
+            continue
+        if inside:
+            out += STORY_TOKEN.findall(line)
+    return list(dict.fromkeys(out))
+
+
+def phantom_stories(text, canonical, declared=()):
+    """The S- ids ``text`` cites (:func:`cited_stories`) that are neither a card in
+    ``canonical`` nor declared — by a ``### S-…`` heading in ``text`` itself, or in ``declared``
+    (the ids a sibling doc of the same Feature declares). A Story nobody minted proves nothing,
+    and a ``Proves:`` line naming it later is a claim against no card (F-0285)."""
+    decl = set(declared) | set(declared_stories(text))
+    return [s for s in cited_stories(text) if s not in canonical and s not in decl]
