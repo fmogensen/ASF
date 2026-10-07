@@ -12,10 +12,11 @@ decided here. A branch no run holds at all (an orphan) is the lane's to close or
   CONFLICT → REBASE  <branch> (<item>) PR #<n> — back to its session (conflict)
 
     pr_hygiene.py            print the rows
-    pr_hygiene.py --lanes    the PR numbers in either lane, one per line
+    pr_hygiene.py --lanes    one JSON object per PR in a lane: {pr, branch, lane, since, action}
     pr_hygiene.py --close    the lane closes nothing itself: one line saying so
     pr_hygiene.py --product <name>   which product's lane to read (default: see asf.env)
 """
+import json
 import sys
 
 from asf import env
@@ -86,17 +87,19 @@ def main(argv):
     if '--product' in argv:
         i = argv.index('--product')
         product_name = argv[i + 1] if i + 1 < len(argv) else None
+    listing = '--lanes' in argv
     try:
         product = env.load_product(product_name)
         found = rows(product)
+        if listing:
+            for entry in _entries(found):
+                print(json.dumps(entry, sort_keys=True))
+            return 0
     except (OSError, ValueError, KeyError, env.ConfigError) as e:
         print(f'pr_hygiene: {e}', file=sys.stderr)
-        return 0
-    if '--lanes' in argv:
-        for r in found:
-            if r.get('pr'):
-                print(r['pr'])
-        return 0
+        # a listing's caller must be able to tell "ASF owns nothing" from "ASF could not be
+        # read": 2 is a *check failure* to the rule contract, never a pass (F-0119, D7/D8)
+        return 2 if listing else 0
     if '--close' in argv:
         print('pr_hygiene: the lane closes nothing itself — a STALE branch waits for its row')
         return 0
