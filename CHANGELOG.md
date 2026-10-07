@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.245 — 2026-10-08
+
+### Bugs fixed
+
+- Refusals name the dead reason; worktrees ensured; asf stop; heartbeat refusals uncounted (#1044)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.245"`
+
 ## v0.1.244 — 2026-10-07
 
 ### Features landed
