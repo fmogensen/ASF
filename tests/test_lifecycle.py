@@ -2921,7 +2921,9 @@ class _RebaseShape(unittest.TestCase):
         self.base = base
         self.origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
         self.sh(['init', '-q', '--bare', '-b', 'main', self.origin], base)
-        self.sh(['clone', '-q', self.origin, self.repo], base)
+        self._no_housekeeping(self.origin)  # B-0403: a detached gc on a push would otherwise
+        self.sh(['clone', '-q', self.origin, self.repo], base)  # still be repacking origin.git
+        self._no_housekeeping(self.repo)    # when push_from_elsewhere clones it moments later
         self.identity(self.repo)
         self.commit('c', 'base c\n', 'base c')
         self.commit('b', 'b v0\n', 'base b')
@@ -2931,6 +2933,14 @@ class _RebaseShape(unittest.TestCase):
 
     def identity(self, repo, email='t@example.com'):
         for k, v in (('user.name', 'Test'), ('user.email', email), ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], repo)
+
+    def _no_housekeeping(self, repo):
+        """Turn off git's own background writer on ``repo`` (B-0403): a detached ``gc --auto``
+        a push starts can still be repacking ``self.origin`` when ``push_from_elsewhere`` clones
+        it moments later, and the clone's own copy of a pack file git is mid-rename on then
+        fails — confirmed live in CI (docs/reviews/1-b-0356.md's I list)."""
+        for k, v in (('gc.auto', '0'), ('gc.autoDetach', 'false'), ('maintenance.auto', 'false')):
             self.sh(['config', k, v], repo)
 
     def commit(self, name, text, msg, repo=None):
@@ -2959,6 +2969,7 @@ class _RebaseShape(unittest.TestCase):
         """A commit on origin/<branch> made by someone else, from another clone."""
         other = os.path.join(self.base, 'other-' + name)
         self.sh(['clone', '-q', '-b', self.branch, self.origin, other], self.base)
+        self._no_housekeeping(other)
         self.identity(other, email)
         sha = self.commit(name, text, msg, repo=other)
         self.sh(['push', '-q', 'origin', self.branch], other)
@@ -3372,6 +3383,28 @@ class PublishRewrittenOwnCommitsTest(_RebaseShape):
         text = lc.rebase_conflict_text(self.branch, line)
         self.assertIn(f'Rebase onto origin/{self.branch}', text)
         self.assertNotIn('rebase onto origin/main', text)
+
+
+def _git_config(repo, key):
+    return subprocess.run(['git', 'config', key], cwd=repo, capture_output=True,
+                          text=True).stdout.strip()
+
+
+class RebaseShapeHousekeepingOffTests(_RebaseShape):
+    """B-0403: CI red, 'the suite is hermetic' — ``push_from_elsewhere`` clones ``self.origin``
+    right after ``setUp``'s own ``push_branch`` pushed into it; with housekeeping left on its
+    defaults, that push can start a detached ``git gc --auto`` on the bare origin that is still
+    repacking when the clone runs, and the clone's own copy of a pack file git is mid-rename on
+    then fails (confirmed-live in CI run 37432074961: ``fatal: failed to copy file to
+    '.../other-d/.git/objects/pack/.tmp-236278-pack-f9cc3cfba....pack': No such file or
+    directory``, flagged non-blocking in docs/reviews/1-b-0356.md's I list since this shape,
+    unlike :mod:`tests.gitfixture`'s ``_no_housekeeping``, never turns it off)."""
+
+    def test_the_bare_origin_and_the_clone_never_start_background_housekeeping(self):
+        for repo in (self.origin, self.repo):
+            for key, value in (('gc.auto', '0'), ('gc.autoDetach', 'false'),
+                               ('maintenance.auto', 'false')):
+                self.assertEqual(_git_config(repo, key), value, f'{repo} {key}')
 
 
 def _build_unpublished(root):
