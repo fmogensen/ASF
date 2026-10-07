@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.220 — 2026-10-07
+
+### Features landed
+
+- `asf credentials check` — the cache, the CREDENTIALS table, `--json`, and `--quiet` as the rule contract (#878)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.220"`
+
 ## v0.1.219 — 2026-10-07
 
 ### Features landed
