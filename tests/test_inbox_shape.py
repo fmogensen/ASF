@@ -365,6 +365,30 @@ class IntakeTest(unittest.TestCase):
         self.assertIn('created (inbox) — shape: signature → bug', text)
         self.assertEqual(os.listdir(os.path.join(self.root, 'inbox')), ['done'])
 
+    def test_moved_from_header_is_read_off_the_intake_file(self):
+        """F-0120 T-0448: `moved_from:` joins `INBOX_KV_RE`'s alternation — a read header, same
+        as `signature:` or `writes:`, not one `_UNREAD_HEADER_KEYS` merely knows of."""
+        from asf.groom import inbox
+        text = "# Feature from elsewhere\nmoved_from: acme:F-0031\nparent: E-0001\n\nSome description.\n"
+        c = inbox.parse_inbox_file(text)
+        self.assertEqual(c.headers.get('moved_from'), 'acme:F-0031')
+        self.assertEqual(c.description, 'Some description.')
+
+    def test_moved_from_header_lands_on_the_minted_card(self):
+        """F-0120 D14: the dedupe ref `asf move --to` files into the target's intake survives
+        the target's groom minting the card — it reaches the typed block, and from there
+        `index.json` (P6), which is what every future dedupe reads."""
+        with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
+            f.write("# Feature from elsewhere\nmoved_from: acme:F-0031\nparent: E-0001\n\n"
+                    "Some description.\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        features = [n for n in os.listdir(os.path.join(self.root, 'features')) if n.endswith('.md')]
+        self.assertEqual(sorted(features), ['F-0001.md', 'F-0002.md'])
+        with open(os.path.join(self.root, 'features', 'F-0002.md'), encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read(), path='features/F-0002.md')
+        self.assertEqual(meta.get('moved_from'), 'acme:F-0031')
+
     def test_i13_an_explicit_type_bug_without_a_signature_is_minted_a_bug(self):
         """I13 (intake-silently-ignores-an-explicit-type-line): `type: bug` decides the type — the
         signature comes from the title, and the card is never minted as a Feature."""

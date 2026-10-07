@@ -12,7 +12,8 @@ from asf.record.ids import mint_id, write_new_item
 from asf.record.publish import publish
 from asf.conventions import DEFAULT_INTAKE_DIR
 
-INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
+INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories|moved_from):\s*(.+?)\s*$',
+                         re.IGNORECASE)
 
 #: A title may open with its severity: `S1: p1-e2e is failing on main` (C4). Case-insensitive,
 #: and the match must leave a non-empty title behind — `S3: the third option` is a title, so the
@@ -356,6 +357,8 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
         type_, rule, parent = result.type, result.rule, result.parent
         new_id = mint_id(root, canonical, type_)
         typed = {'title': card.title, 'parent': parent, 'decided': False}
+        if card.headers.get('moved_from'):
+            typed['moved_from'] = card.headers['moved_from']   # F-0120 D14: the dedupe ref survives
         if type_ == 'bug':
             typed['severity'] = severity_of(card)
             typed['found_in'] = 'dev'

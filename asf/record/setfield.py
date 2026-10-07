@@ -318,7 +318,7 @@ def _flip_reverse_holds(root, item_id, added, product):
                  f"{item_id} now holds the overlap with {other}")
 
 
-def set_typed(rec, updates, writer='set', product=None, history=()):
+def set_typed(rec, updates, writer='set', product=None, history=(), apply=True):
     """Write ``updates`` (typed fields) onto the card ``rec`` (a ``load_items`` record) through the
     parser: rendered on a scratch copy, parsed back, written only when every field round-trips.
     ``history``: lines appended to the card's ``## History`` in the same write (``asf retire``,
@@ -328,7 +328,12 @@ def set_typed(rec, updates, writer='set', product=None, history=()):
     ``product``: passed to the record stage's I3 check, so a ``writes:`` update that only adds a
     path ``product``'s ``conventions.shared_paths`` covers is never refused as intersecting
     another Active Task's footprint. Returns None on success, else the reason the card is
-    unchanged."""
+    unchanged.
+    ``apply=False`` (F-0120 D10/PD9) runs the same scratch render and round-trip check and
+    returns their reason or None, but stops there — before ``record_root``, ``stage.guarded``
+    and the ``rec['text']`` assignment, so nothing reaches disk and the loaded record is
+    untouched. That is what lets a bulk command (``asf move``) check every card first and write
+    none of them unless every one would come back as asked."""
     # write to a scratch copy first: the card is replaced only if it parses back to the ask
     fd, scratch = tempfile.mkstemp(suffix='.md')
     os.close(fd)
@@ -356,6 +361,8 @@ def set_typed(rec, updates, writer='set', product=None, history=()):
                         f"(it reads back as {meta.get(key)!r}); {rec['relpath']} is unchanged")
     finally:
         os.unlink(scratch)
+    if not apply:
+        return None
     root = record_root(rec)
     if root is None:  # a card outside any record layout: nothing to validate it against
         _write(None, rec['path'], new_text)

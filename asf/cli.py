@@ -231,6 +231,12 @@ def build_parser():
                                'repeatable')
     p_retire.add_argument('--product')
 
+    p_move = sub.add_parser(
+        'move', help="write each card off to another product or out of this record, and file "
+                     "it in the target's inbox")
+    from asf.record.move import add_arguments as add_move_arguments
+    add_move_arguments(p_move)
+
     p_reopen = sub.add_parser(
         'reopen', help='correct a falsely derived Resolved/Closed by re-deriving it from '
                        'current evidence, the terminal hold lifted for this one item')
@@ -588,6 +594,18 @@ def _main(argv=None):
         label = args.id if len(ids) == 1 else f"{ids[0]} +{len(ids) - 1} more"
         return _published(cmd_set, args, resolve_record(args, announce=_announce_stderr),
                           f"record: set {label}")
+    if args.command == 'move':
+        from asf.record.move import cmd_move, select
+        from asf.record.core import canonicalize, load_items
+        record = resolve_record(args, announce=_announce_stderr)
+        if args.dry_run:
+            return cmd_move(args, record)
+        by_id, _errors = load_items(record)
+        canonical, _dupes = canonicalize(by_id)
+        selection, _err = select(canonical, args.ids, args.query or [])
+        return _published(cmd_move, args, record,
+                          f"move: {len(selection)} cards "
+                          f"{'moved to ' + args.to if args.to is not None else 'removed'}")
     if args.command == 'retire':
         from asf.record.retire import cmd_retire
         return _published(cmd_retire, args, resolve_record(args, announce=_announce_stderr),

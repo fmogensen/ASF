@@ -82,6 +82,8 @@ COMMANDS = {
     'net-probe':            ('probe how this host reaches the forge and log which layer fails', HOST, None),
     'cloud':                ("install or check the cloud lane's CI workflow", REPO, 'install'),
     'deploy':               ('record the sha a deploy target now runs', RECORD, None),
+    'move':                 ("write each card off to another product or out of this record, and "
+                             "file it in the target's inbox", RECORD, None),
 }
 
 #: A name that was retired, and the name that replaced it (F-0084).
