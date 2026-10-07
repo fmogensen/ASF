@@ -173,14 +173,17 @@ def staged_paths(repo, prefix=''):
 
 
 def cmd_check(args, root):
-    shared = footprint.shared_globs(product_of(args))
+    product = product_of(args)
+    shared = footprint.shared_globs(product)
     if getattr(args, 'staged', False):
         return cmd_check_staged(root, shared)
     paths = args.paths or None
     restrict = None
     if paths:
         restrict = {os.path.relpath(os.path.abspath(p), root) for p in paths}
-    findings, warnings, _index_wrong = record_findings(root, shared=shared)
+    from asf.record import decisions
+    findings, warnings, _index_wrong = record_findings(
+        root, shared=shared, docs_decisions=decisions.docs_ids(decisions.repo_dir(product)))
     if restrict is not None:
         findings = [f for f in findings
                     if f[0] in restrict or f[0] == 'index.json' or f[0] in LAYOUT]
@@ -200,7 +203,7 @@ INDEX_STALE = 'index.json is stale (run `asf index`)'
 INDEX_MISSING = 'index.json is missing (run `asf index`)'
 
 
-def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
+def record_findings(root, scrub=None, layout=True, shared=(), pats=None, docs_decisions=()):
     """Every check over the record at ``root``: ``(findings, warnings, index_wrong)`` — findings
     and warnings as ``(relpath, line, message)``; ``index_wrong`` the ``index.json`` entries that
     differ from what the cards derive, one ``(id, expected, on disk)`` key each (a card that fails
@@ -213,7 +216,9 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
     its own. ``layout`` False skips the layout folders (a scratch copy of the record has only its
     cards). ``shared``: the product's ``conventions.shared_paths``, passed to the Active-Task
     overlap check so a lockfile the product declares never reads as two Tasks' footprints
-    intersecting."""
+    intersecting. ``docs_decisions``: the ids the product's own ``docs/decisions`` carries
+    (:func:`asf.record.decisions.docs_ids`) — a bare ``D<n>`` that resolves to one of them is
+    a citation of that register, never a link gone bare."""
     by_id, parse_errors = load_items(root)
     canonical, dupes = canonicalize(by_id)
     derived = compute_derived(canonical)
@@ -336,7 +341,8 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
             for m in BARE_DECISION_RE.finditer(scan_l):
                 # only a number the record has a D-card for is a link gone bare; any other D<n> is
                 # the product's own register (a plan citing its docs), which ASF itself mints
-                if f'D-{int(m.group(0)[1:]):04d}' not in canonical:
+                rid = f'D-{int(m.group(0)[1:]):04d}'
+                if rid not in canonical or rid in docs_decisions:
                     continue
                 add(rec, header_offset + i + 1,
                     f"bare decision reference {m.group(0)!r}; write it as [[D-nnnn]]")

@@ -70,14 +70,27 @@ APPLIED_AT = 'reshape_applied_at'
 SUBDIR = 'replans'
 DONE_STATES = ('Resolved', 'Closed')      # == asf.feeder.rows.DONE_STATES
 
-HEADER_RE = re.compile(rf'^replan:\s*(?P<fid>[A-Z]+-{ID_DIGITS})\s+(?P<digest>[0-9a-f]{{6,64}})\s*$',
-                       re.MULTILINE)
+HEADER_RE = re.compile(
+    rf'^replan:\s*(?P<fid>[A-Z]+-{ID_DIGITS})\s+(?P<digest>[0-9a-f]{{6,64}})\s*$', re.MULTILINE)
 SECTION_RE = re.compile(rf'^###\s+(?:Task\s+(?:(?P<tid>[A-Z]+-{ID_DIGITS})|new\s*(?P<newnum>\d*))'
                         rf'|Drop\s+(?P<drop>[A-Z]+-{ID_DIGITS}))\s*:\s*(?P<rest>.*)$',
                         re.MULTILINE | re.IGNORECASE)
 #: any ``###`` line at all — used to catch a Task/Drop heading :data:`SECTION_RE` cannot read
-#: (``new`` not followed by a bare number, a typo in ``Task``/``Drop``, a stray ``###``)
+#: (``new`` not followed by a bare number, a typo in ``Task``/``Drop``)
 HEADING_RE = re.compile(r'^###[ \t]+\S.*$', re.MULTILINE)
+#: a heading that means to be a Task or Drop section: one :data:`SECTION_RE` cannot read is a
+#: ``bad_sections`` entry; any other ``###`` heading (``### Why``, ``### Order``) is a note
+TASKISH_RE = re.compile(r'^###[ \t]+\**[ \t]*(?:task|drop)\b', re.IGNORECASE)
+#: where a section's body ends: the next ``##`` or ``###`` heading of any kind
+BOUNDARY_RE = re.compile(r'^#{2,3}[ \t]+\S', re.MULTILINE)
+#: the second shape: a Feature plan's own ``## … reshaped from <id>`` section (a reshape session
+#: that rewrote the plan instead of writing ``replans/``), its Tasks as ``### <id>: <title>``
+PLAN_SECTION_RE = re.compile(
+    rf'^##[ \t]+[^\n]*?\breshaped from\s+[*`]*(?P<src>[A-Z]-{ID_DIGITS})', re.MULTILINE | re.IGNORECASE)
+H2_RE = re.compile(r'^##[ \t]+\S', re.MULTILINE)
+DECL_HEADING_RE = re.compile(rf'^###([ \t]+)\**[ \t]*(?P<id>T-{ID_DIGITS})\**[ \t]*:', re.MULTILINE)
+#: the field a landed replan the record cannot apply leaves on the Feature: ``<digest>: <why>``
+UNREADABLE = 'reshape_unreadable'
 FIELD_RE = {k: re.compile(rf'^\s*{k}\s*:\s*(.*)$', re.MULTILINE | re.IGNORECASE)
             for k in ('writes', 'after', 'stories')}
 ID_RE = ID_TOKEN_RE
@@ -97,6 +110,19 @@ def pending(feature):
         return ''
     d = digest(how)
     return '' if str((feature or {}).get(APPLIED) or '') == d else d
+
+
+def task_pending(task):
+    """The digest of an open Task's ``reshape:`` (the groom's split, RESHAPE → PLAN) that no
+    reshape section has carried out yet, else ''. The record applies it from the Feature plan's
+    ``## … reshaped from <task>`` section (:func:`parse_plan`) when the session that wrote it
+    could not reach the record (a cloud session) — never from a ``replans/`` document."""
+    t = task or {}
+    how = t.get('reshape')
+    if not how or t.get('type') != 'task' or t.get('removed') or t.get('state') in DONE_STATES:
+        return ''
+    d = digest(how)
+    return '' if str(t.get(APPLIED) or '') == d else d
 
 
 def doc_path(plans_dir, fid, d):
@@ -125,23 +151,29 @@ def parse(text):
     claimed, assigned in document order), 'title', 'writes', 'after': [id | ('new', n)] | None,
     'stories': [...] | None, 'body'}``.
 
-    ``bad_sections`` is every ``###`` line that looks like a heading but that :data:`SECTION_RE`
-    could not read as a Task/Drop section, or whose ``new N`` repeats one already taken — the
-    record never guesses at one of these; :func:`_apply` refuses the whole document instead of
-    applying it with a Task silently missing."""
+    ``bad_sections`` is every ``### Task …``/``### Drop …`` line :data:`SECTION_RE` could not
+    read, or whose ``new N`` repeats one already taken — the record never guesses at one of these;
+    :func:`_apply` refuses the whole document instead of applying it with a Task silently
+    missing. Any other ``###`` heading (``### Why``, ``### Order``) is a ``notes`` entry: prose
+    the record reads past, never a refusal. A section's body ends at the next heading."""
     head = HEADER_RE.search(text or '')
     if not head:
         return None
-    out = {'fid': head.group('fid'), 'digest': head.group('digest'), 'tasks': [], 'drops': [],
-           'bad_sections': []}
+    return _parse_sections(text, head.group('fid'), head.group('digest'))
+
+
+def _parse_sections(text, fid, d):
+    out = {'fid': fid, 'digest': d, 'tasks': [], 'drops': [], 'bad_sections': [], 'notes': []}
     matches = list(SECTION_RE.finditer(text))
     starts = {m.start() for m in matches}
     for hm in HEADING_RE.finditer(text):
         if hm.start() not in starts:
-            out['bad_sections'].append(hm.group(0).strip())
+            (out['bad_sections'] if TASKISH_RE.match(hm.group(0)) else out['notes']).append(
+                hm.group(0).strip())
+    bounds = [b.start() for b in BOUNDARY_RE.finditer(text)]
     seen_nums = set()
-    for i, m in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+    for m in matches:
+        end = next((b for b in bounds if b > m.start()), len(text))
         body = text[m.end():end]
         rest = m.group('rest').strip()
         if m.group('drop'):
@@ -183,6 +215,34 @@ def parse(text):
             t['new_num'] = next_n
             seen_nums.add(next_n)
     return out
+
+
+def parse_plan(text, fid, d):
+    """The second shape, off a Feature plan: one doc per ``## … reshaped from <id>`` section, in
+    page order, each ``### T-…: <title>`` heading in it read as ``### Task T-…: <title>``
+    (``### Task new:`` and ``### Drop <id>:`` read as they do in a replan). ``fid`` and ``d``
+    stand in for the header the plan has none of; ``source`` is the id the section was reshaped
+    from. ``[]`` when the plan has no such section."""
+    text = text or ''
+    heads = [h.start() for h in H2_RE.finditer(text)]
+    out = []
+    for m in PLAN_SECTION_RE.finditer(text):
+        nxt = next((h for h in heads if h > m.start()), len(text))
+        section = DECL_HEADING_RE.sub(lambda h: f"###{h.group(1)}Task {h.group('id')}:",
+                                      text[m.end():nxt])
+        doc = _parse_sections(section, fid, d)
+        doc['source'] = m.group('src').upper()
+        out.append(doc)
+    return out
+
+
+def unreadable(feature):
+    """Why the landed replan of ``feature``'s pending ``reshape:`` cannot be applied (its
+    :data:`UNREADABLE` field, while it names the pending digest), else ''. The feeder's answer
+    to it is a NEEDS DECISION row, never a second replan session."""
+    d = pending(feature) or task_pending(feature)
+    raw = str((feature or {}).get(UNREADABLE) or '')
+    return raw.split(':', 1)[1].strip() if d and raw.startswith(f'{d}:') else ''
 
 
 def invalid(doc):
@@ -246,36 +306,119 @@ def apply_replans(root, product, read_plan, out=print):
     return made or {}
 
 
+def plan_paths(plans_dir, fid, meta):
+    """Where a Feature's own plan may be: its ``links.plan``, then ``<plans_dir>/<fid>.md``."""
+    out = []
+    link = ((meta or {}).get('links') or {}).get('plan')
+    if isinstance(link, str) and link.strip():
+        out.append(link.strip())
+    out.append(f"{str(plans_dir).strip('/')}/{fid.lower()}.md")
+    return list(dict.fromkeys(out))
+
+
+def find_doc(plans_dir, fid, meta, d, read_plan, canonical=None):
+    """``(path, doc, problem)`` for the pending reshape ``d`` of Feature ``fid``: the replan at
+    :func:`doc_path` (the first shape), else the ``## … reshaped from`` section of the Feature's
+    own plan (:func:`parse_plan`). ``(None, None, None)`` while neither has landed. ``problem``:
+    one line when the landed document cannot be applied (:func:`invalid`, another decision's
+    replan, a reshape section with no Task in it). A section an earlier reshape already carried
+    out (:func:`_settled`) is not this decision's and is passed over."""
+    path = doc_path(plans_dir, fid, d)
+    text = read_plan(path)
+    if text:
+        doc = parse(text)
+        if not doc or doc['fid'].upper() != fid.upper() or doc['digest'] != d:
+            return path, None, f'{path} names another decision'
+        return path, doc, invalid(doc)
+    return _plan_doc(plan_paths(plans_dir, fid, meta), fid, d, read_plan, canonical)
+
+
+def _plan_doc(paths, fid, d, read_plan, canonical, source=None):
+    for path in paths:
+        text = read_plan(path)
+        for doc in parse_plan(text, fid, d) if text else ():
+            if source is not None and doc['source'] != source.upper():
+                continue
+            if not doc['tasks'] and not doc['drops']:
+                return path, None, (f"{path}: its reshaped-from-{doc['source']} section has no "
+                                    f"`### <id>: <title>` Task heading")
+            if _settled(doc, canonical or {}):
+                continue
+            return path, doc, invalid(doc)
+    return None, None, None
+
+
+def find_task_doc(plans_dir, tid, feature, task, d, read_plan, canonical=None):
+    """``(path, doc, problem)`` for an open Task's pending ``reshape:`` (:func:`task_pending`):
+    the ``## … reshaped from <tid>`` section of its Feature's plan (or of the plan the Task
+    links). ``(None, None, None)`` while no plan carries that section."""
+    link = ((task or {}).get('links') or {}).get('plan')
+    paths = plan_paths(plans_dir, feature.get('id') or '', feature)
+    if isinstance(link, str) and link.strip() and link.strip() not in paths:
+        paths.append(link.strip())
+    return _plan_doc(paths, feature.get('id') or '', d, read_plan, canonical, source=tid)
+
+
+def _settled(doc, canonical):
+    """True when a plan-shape reshape section was carried out already: every Task it names is
+    a card and every Drop is gone — an older reshape's section, not this decision's."""
+    if doc.get('source') is None:
+        return False
+    if any(t['id'] is None or t['id'] not in canonical for t in doc['tasks']):
+        return False
+    return all((canonical.get(i) or {}).get('meta', {}).get('removed') for i, _w in doc['drops'])
+
+
+def _refuse(rec, d, path, problem, out, set_typed):
+    """Leave ``<digest>: <why>`` on the Feature and say NEEDS OPERATOR — once: a Feature that
+    already carries this very line is not reported again on the next tick."""
+    fid = rec['meta'].get('id') or ''
+    line = f'{d}: {path or "the replan"} is not applied — {problem}'
+    if str(rec['meta'].get(UNREADABLE) or '') == line:
+        return
+    out(f'replan: {fid}: NEEDS OPERATOR: {path} is not applied — {problem} — fix the replan and '
+        f'land it again, or `asf set {fid} reshape_applied=current --why "<what was done>"`')
+    err = set_typed(rec, {UNREADABLE: line}, writer='replan')
+    if err:
+        out(f'replan: {fid}: {UNREADABLE} not written — {err}')
+
+
 def _apply(root, product, read_plan, out=print):
+    from asf.record import decisions
     from asf.record.core import canonicalize, is_retired, load_items, now_iso, today
     from asf.record.ids import mint_id, write_new_item
     from asf.record.setfield import set_typed
     plans_dir = product.conventions.plans_dir
     by_id, _errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
+    known = None   # the decision register, read once and only when a replan is about to apply
     done = {}
-    for fid in sorted(canonical):
-        rec = canonical[fid]
+    for iid in sorted(canonical):
+        rec = canonical[iid]
         meta = rec['meta']
-        if meta.get('type') != 'feature' or _done(meta) or is_retired(meta):
+        if meta.get('type') not in ('feature', 'task') or _done(meta) or is_retired(meta):
             continue
-        d = pending(meta)
-        if not d:
+        if meta['type'] == 'feature':
+            fid, d = iid, pending(meta)
+            if not d:
+                continue
+            path, doc, problem = find_doc(plans_dir, fid, meta, d, read_plan, canonical)
+        else:
+            fid, d = str(meta.get('parent') or ''), task_pending(meta)
+            owner = canonical.get(fid)
+            if (not d or owner is None or owner['meta'].get('type') != 'feature'
+                    or _done(owner['meta']) or is_retired(owner['meta'])):
+                continue
+            path, doc, problem = find_task_doc(plans_dir, iid, owner['meta'], meta, d,
+                                               read_plan, canonical)
+        if path is None:
             continue
-        path = doc_path(plans_dir, fid, d)
-        text = read_plan(path)
-        if not text:
-            continue
-        doc = parse(text)
-        if not doc or doc['fid'].upper() != fid.upper() or doc['digest'] != d:
-            out(f'replan: {fid}: {path} names another decision — not applied')
-            continue
-        problem = invalid(doc)
         if problem:
-            out(f'replan: {fid}: NEEDS OPERATOR: {path} is not applied — {problem} — '
-               f'fix the replan and land it again')
+            _refuse(rec, d, path, problem, out, set_typed)
             continue
-        lines = []
+        if known is None:
+            known = decisions.register(canonical, product)
+        lines = [f"note: {n}" for n in doc['notes']]
 
         def live(i):
             r = canonical.get(i)
@@ -286,6 +429,16 @@ def _apply(root, product, read_plan, out=print):
             return (r is not None and r['meta'].get('type') == 'task'
                     and r['meta'].get('parent') == fid and not _done(r['meta'])
                     and not is_retired(r['meta']))
+
+        # a plan-shape section's `### T-…:` the record does not hold yet is a Task the reshape
+        # session declared from its claimed block: minted under that very id, so the plan's
+        # `after:` and a PR's `Proves:` name the card that exists
+        declared = {}
+        if doc.get('source') is not None:
+            for t in doc['tasks']:
+                if t['id'] and t['id'] not in canonical:
+                    declared[t['id']] = t
+                    t['new_num'], t['declared'], t['id'] = -len(declared), t['id'], None
 
         # new Tasks first, so `new N` resolves before any `after:` is written — keyed by each
         # one's own N (explicit or assigned in parse()), never by its position on the page
@@ -300,18 +453,20 @@ def _apply(root, product, read_plan, out=print):
             stories = [s for s in t['stories'] or () if s in canonical]
             if stories:
                 typed['stories'] = stories
-            nid = mint_id(root, canonical, 'task')
-            write_new_item(root, canonical, 'task', nid, typed, t['body'][:4000], today(),
-                           f'replan {fid}')
+            want = t.get('declared')
+            nid = want if want and want.startswith('T-') else mint_id(root, canonical, 'task')
+            body = decisions.normalise(t['body'], known)[:4000]
+            write_new_item(root, canonical, 'task', nid, typed, body, today(), f'replan {fid}')
             by_id, _e = load_items(root)
             canonical, _d = canonicalize(by_id)
             new_by_num[t['new_num']] = nid
             lines.append(f'{nid} new')
+        by_decl = {t['declared']: new_by_num[t['new_num']] for t in declared.values()}
 
         def resolve(after, me):
             got = []
             for a in after:
-                a = new_by_num.get(a[1]) if isinstance(a, tuple) else a
+                a = new_by_num.get(a[1]) if isinstance(a, tuple) else by_decl.get(a, a)
                 if a is None or a == me or a in got:
                     continue
                 if live(a):
@@ -320,6 +475,7 @@ def _apply(root, product, read_plan, out=print):
                     lines.append(f'{me}: after {a} dropped (no such live card)')
             return got
 
+        named = set()
         for t in doc['tasks']:
             if t['id'] is None:
                 me = new_by_num[t['new_num']]
@@ -329,6 +485,7 @@ def _apply(root, product, read_plan, out=print):
                         set_typed(canonical[me], {'after': after}, writer='replan')
                 continue
             tid = t['id']
+            named.add(tid)
             if not own_open(tid):
                 lines.append(f'{tid}: not an open Task of {fid} — kept as it is')
                 continue
@@ -347,7 +504,12 @@ def _apply(root, product, read_plan, out=print):
                 updates['stories'] = [s for s in t['stories'] if s in canonical]
             err = set_typed(canonical[tid], updates, writer='replan')
             lines.append(f'{tid}: {err}' if err else f'{tid} rewritten')
-        for tid, why in doc['drops']:
+        drops = list(doc['drops'])
+        src = doc.get('source')
+        if src and src not in named and own_open(src) and src not in {i for i, _w in drops}:
+            # the Task the section was reshaped from is what its new Tasks replace
+            drops.append((src, f"reshaped into {', '.join(new_by_num.values()) or 'the plan'}"))
+        for tid, why in drops:
             if not own_open(tid):
                 lines.append(f'{tid}: not an open Task of {fid} — not dropped')
                 continue
@@ -356,9 +518,9 @@ def _apply(root, product, read_plan, out=print):
             lines.append(f'{tid}: {err}' if err else f'{tid} dropped')
         by_id, _e = load_items(root)
         canonical, _d = canonicalize(by_id)
-        err = set_typed(canonical[fid], {APPLIED: d, APPLIED_AT: now_iso()}, writer='replan')
+        err = set_typed(canonical[iid], {APPLIED: d, APPLIED_AT: now_iso()}, writer='replan')
         if err:
-            lines.append(f'{fid}: {err}')
-        done[fid] = lines
-        out(f"replan: {fid}: applied {path} — {'; '.join(lines) or 'nothing to change'}")
+            lines.append(f'{iid}: {err}')
+        done[iid] = lines
+        out(f"replan: {iid}: applied {path} — {'; '.join(lines) or 'nothing to change'}")
     return done

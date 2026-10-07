@@ -1600,6 +1600,15 @@ def replan_row(feature, product, occupancy, items=None):
     ``reshape_applied``, which ends it."""
     fid = feature['id']
     branch = replan_branch(product, fid)
+    stuck = replan_mod.unreadable(feature)
+    if stuck:
+        # the replan landed and the record cannot apply it: the operator's input, never a
+        # second replan session writing the same unreadable document again
+        return Row(tier=2, kind=REPLAN, item_id=fid, feature_id=fid, action=NEEDS_DECISION,
+                   brief_kind=REPLAN_KIND, branch=branch,
+                   reason=f"{replan_mod.UNREADABLE}: {stuck} — fix the replan and land it, or "
+                          f"`asf set {fid} reshape_applied=current --why \"<what was done>\"`",
+                   waits_on='decision')
     in_flight = _tasks_in_flight(items or {}, feature, occupancy)
     if in_flight:
         names = ', '.join(f'{tid} #{pr}' for tid, pr in in_flight)
@@ -1637,6 +1646,23 @@ def hold_replanning(rows, items):
         f = items.get(r.feature_id) or {}
         if r.launches and r.kind in REPLAN_HELD and replan_mod.pending(f):
             r = replan_wait(r, f['id'])
+        out.append(r)
+    return out
+
+
+def hold_unreadable(rows, items):
+    """A launching RESHAPE → PLAN row of a Task whose reshape section landed and that the record
+    cannot apply (``reshape_unreadable:``, :func:`asf.record.replan.unreadable`) becomes the
+    operator's NEEDS DECISION row — a fresh reshape session would write the same section again."""
+    out = []
+    for r in rows:
+        why = replan_mod.unreadable(items.get(r.item_id) or {}) if r.kind == RESHAPE else ''
+        if r.launches and why:
+            r = dataclasses.replace(
+                r, action=NEEDS_DECISION, waits_on='decision',
+                reason=f"{replan_mod.UNREADABLE}: {why} — fix the plan's reshape section and "
+                       f"land it, or `asf set {r.item_id} reshape_applied=current --why "
+                       f"\"<what was done>\"`")
         out.append(r)
     return out
 
@@ -2517,6 +2543,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     rows = drop_gone(hold_parks(rows, items, occ.get('parks')), items)
     rows = hold_unlanded(rows, items, landed_shas, product)
     rows = hold_replanning(rows, items)
+    rows = hold_unreadable(rows, items)
     rows = hold_classes(rows, product)
     rows = over_budget_epics(rows, items)          # F-0052
     rows, aside = hold_shelved(rows, items, occ.get('parks'))

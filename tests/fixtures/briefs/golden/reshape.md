@@ -61,6 +61,19 @@ in <sha> — verified by <test>"`. A report that only says so closes nothing.
 
 Final message: the pushed sha, the part ids with their writes, the coverage line.
 
+IF `asf new` CANNOT REACH THE RECORD (a cloud session), write the cut into `docs/plans/t-0050.md` itself, in
+exactly this shape, and the record mints the cards once it lands — T-0050 is removed then:
+
+    ## <n>. The Tasks — reshaped from T-0050
+
+    ### T-nnnnn: <title>        (one per part, the id from BACKLOG_ID_RANGE)
+    stories: <Story ids>
+    writes: <path globs, comma-separated>
+    after: <Task ids — the parts' own ids too — or none>
+
+The section runs to the next `## ` heading. Every `### T-nnnnn:` heading in it is a part; any
+other `### ` heading is read as a note, never as a Task.
+
 ## The heartbeat, the marker, and the report
 
 Print a progress line as you go — what you are doing, not that you are doing something. A session

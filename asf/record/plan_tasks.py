@@ -142,10 +142,11 @@ def _mint(root, product, ev, out=print, read_ref=None):
         candidates.append((fid, ref, plan_path))
 
     # one batch for the lot; the injected `read_ref` (the tests' seam) stays per-ref, as before
+    refs = [ref for _fid, ref, _plan_path in candidates]
     if read_ref is not None:
-        texts = {ref: read_ref(ref) for _fid, ref, _plan_path in candidates}
+        texts = {ref: read_ref(ref) for ref in refs}
     else:
-        texts = evidence.read_refs([ref for _fid, ref, _plan_path in candidates], product=product)
+        texts = evidence.read_refs(refs, product=product)
 
     for fid, ref, plan_path in candidates:
         rec = canonical[fid]
@@ -184,8 +185,9 @@ def _mint(root, product, ev, out=print, read_ref=None):
         ids = []
         keys = {}
         for t in records:
-            typed = {'title': t['title'] or f"{fid} {t['tid']}", 'parent': fid, 'decided': True,
-                     'links': {'plan': plan_path}}
+            # a bare `D7` the register holds is written as the record's `D-0007` on the card
+            typed = {'title': decisions.normalise(t['title'], known) or f"{fid} {t['tid']}",
+                     'parent': fid, 'decided': True, 'links': {'plan': plan_path}}
             writes = writes_lines(t['body'])
             if writes:
                 typed['writes'] = writes
@@ -213,7 +215,7 @@ def _mint(root, product, ev, out=print, read_ref=None):
                     f'"{subject[:60]}" — minted Closed ({reason})')
             new_id = mint_id(root, canonical, 'task')
             keys[new_id] = idcheck.task_key(fid, typed.get('stories'), typed.get('writes'))
-            body = t['body'].strip()[:DESCRIPTION_CHARS]
+            body = decisions.normalise(t['body'].strip(), known)[:DESCRIPTION_CHARS]
             write_new_item(root, canonical, 'task', new_id, typed, body, today(), why,
                            state=state)
             ids.append(new_id)

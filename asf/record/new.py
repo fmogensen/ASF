@@ -31,8 +31,14 @@ SETTABLE['bug'] |= {'severity'}
 #: into one session and lets its small Tasks skip the review; ``ab_pair`` names the experiment
 #: pair the scorecard compares it in (``asf scorecard --by-lane``).
 SETTABLE['feature'] |= {'lane', 'size', 'ab_pair'}
+#: ``reshape_applied=current`` (with ``--why``) records a Feature's or a Task's pending
+#: ``reshape:`` as carried out by hand — the digest of the text on the card, its time and a
+#: History line (:func:`asf.record.setfield.reshape_applied`); its one value is ``current``.
+SETTABLE['feature'] |= {'reshape_applied'}
+SETTABLE['task'] |= {'reshape_applied'}
 #: The values a word-valued settable field takes; any other is refused before the card is touched.
-FIELD_WORDS = {'lane': ('direct', 'full'), 'size': ('s', 'm', 'l'), 'severity': SEVERITIES}
+FIELD_WORDS = {'lane': ('direct', 'full'), 'size': ('s', 'm', 'l'), 'severity': SEVERITIES,
+               'reshape_applied': ('current',)}
 #: The word fields whose value is case-folded to the canonical form before the check and on the
 #: way in — the inbox's answer grammar reads a severity case-insensitively and uppercases it
 #: (``asf/groom/inbox.py:577``), so the console must too (D7). ``lane`` and ``size`` are

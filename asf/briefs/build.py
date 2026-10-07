@@ -530,6 +530,31 @@ def replan_context(product, feature, items):
     }
 
 
+#: The document a ``reshape`` session writes when it cannot write the cards itself (a session
+#: that cannot reach the record): the exact file and headings the record's replan pass reads
+#: (:func:`asf.record.replan.parse_plan`) — any other shape is read as nothing, and the Task's
+#: reshape row comes back as the operator's NEEDS DECISION (``reshape_unreadable:``).
+RESHAPE_DOC = """
+
+IF `asf new` CANNOT REACH THE RECORD (a cloud session), write the cut into `{plan_path}` itself, in
+exactly this shape, and the record mints the cards once it lands — {item_id} is removed then:
+
+    ## <n>. The Tasks — reshaped from {item_id}
+
+    ### T-nnnnn: <title>        (one per part, the id from BACKLOG_ID_RANGE)
+    stories: <Story ids>
+    writes: <path globs, comma-separated>
+    after: <Task ids — the parts' own ids too — or none>
+
+The section runs to the next `## ` heading. Every `### T-nnnnn:` heading in it is a part; any
+other `### ` heading is read as a note, never as a Task."""
+
+
+def reshape_doc_text(kind, ctx):
+    """:data:`RESHAPE_DOC` for a ``reshape`` brief, else ''."""
+    return render(RESHAPE_DOC, ctx) if kind == 'reshape' else ''
+
+
 #: The one-push rule a correction round's brief ends with (:mod:`asf.workers.pushlog`).
 ONE_PUSH_RULE = ('\n\nONE PUSH: this is a correction round. Answer every point above in this one '
                  'session, commit as you go, and push once — `git push` is your last act, never '
@@ -775,7 +800,8 @@ def build(product, row, index, inflight=None, repo_facts=None):
              render(job_template(row, kind), ctx).rstrip() + correction_text(row, kind)
              + checks_section(product, kind, facts['head'])
              + customer_section(product, kind, facts['branch'])
-             + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id'])
+             + foreign_review_text(kind, ctx) + reshape_doc_text(kind, ctx)
+             + refusal_section(product, ctx['item_id'])
              + answer_section(product, ctx['item_id'])
              + rulings_section(product, kind, facts['item'])
              + stored_review_section(product, kind, facts['branch'], ctx['item_id']),
