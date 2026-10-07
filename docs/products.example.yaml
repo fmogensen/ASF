@@ -67,10 +67,13 @@ conventions:
   # again; a red batch splits in two, a red batch of one goes back to its session).
   # merge: manual
   # The same key as a map adds the opt-in factory-only rule (default off): a CI check
-  # (`python3 -m asf.factory_only --product-file <this file>` on pull requests) refuses a PR into
-  # the trunk whose head branch is under none of branch_prefixes. Escapes: a release tag, and a
-  # PR touching nothing but bot_paths (default [CHANGELOG.md]).
-  # merge: {mode: manual, factory_only: false, bot_paths: [CHANGELOG.md]}
+  # (`bash tools/check_factory_only.sh`, which runs `python3 -m asf.factory_only --product-file
+  # .asf/product.yaml`) refuses a PR into the trunk whose head branch is under none of
+  # branch_prefixes. Escapes: a release tag, and a PR touching nothing but bot_paths (default
+  # [CHANGELOG.md]). require_item_id also asks that the name after the prefix be a card's id, so a
+  # hand `fix/typo` cannot pass on the fix lane's prefix. CI cannot read THIS file — it is the
+  # operator's; the rule's inputs are committed to the product's own repo as .asf/product.yaml.
+  # merge: {mode: manual, factory_only: false, require_item_id: false, bot_paths: [CHANGELOG.md]}
   # the queue's shape under `merge: queue` (defaults shown): the ref prefix the product's CI runs
   # its full matrix on, PRs per batch, batches in flight (each stacked on the one before), and how
   # long a batch may wait for its checks before it is cut again.
