@@ -1158,6 +1158,53 @@ class IndexTitleScrubTests(unittest.TestCase):
             data = build_index_data(canonical, derived, title_scrub(self.root))
         self.assertEqual(data['items']['F-0001']['title'], 'Pay for Zorblax account')
 
+    def test_a_writer_without_the_name_lists_keeps_the_scrubbed_titles(self):
+        # F-0273: a session whose environment lacks the name lists re-rendered every scrubbed
+        # title raw, and the record push was refused for names index.json never held
+        from asf.record.core import canonicalize, compute_derived, load_items
+        from asf.record.index import write_index_json
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Pay for Zorblax account', parent='E-0001')
+        write_item(self.root, 'F-0002', 'feature', 'Zorblax plan', parent='E-0001')
+        run(['index'], self.root)
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            before = f.read()
+        write_item(self.root, 'F-0002', 'feature', 'Zorblax plan, renamed', parent='E-0001')
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        derived = compute_derived(canonical)
+        write_index_json(self.root, canonical, derived, scrub=None)
+        items = self._index()['items']
+        self.assertIn('"Pay for [redacted] account"', before)
+        self.assertEqual(items['F-0001']['title'], 'Pay for [redacted] account')
+        self.assertEqual(items['F-0002']['title'], 'Zorblax plan, renamed')  # a changed title is new
+        self.assertFalse(write_index_json(self.root, canonical, derived, scrub=None))
+
+    def test_shuffled_load_orders_render_byte_identical_index_json(self):
+        # F-0273: the pre-commit, `asf index` and the tick each load the cards their own way
+        import random
+        from asf.record.core import (
+            build_index_data, canonicalize, compute_derived, load_items, render_index_json,
+        )
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'E-0002', 'epic', 'Ops, see E-0001')
+        for n in range(1, 9):
+            write_item(self.root, f'F-000{n}', 'feature', f'Feature {n} for Zorblax',
+                       parent='E-0001' if n % 2 else 'E-0002',
+                       body=f"## Description\nSee F-000{9 - n} and E-0001.\n\n"
+                            "## Children\n\n## Backlinks\n")
+        write_item(self.root, 'B-0001', 'bug', 'A bug on F-0003', parent='E-0002')
+        by_id, _errors = load_items(self.root)
+        renders = set()
+        for seed in (1, 2, 3):
+            ids = list(by_id)
+            random.Random(seed).shuffle(ids)
+            canonical, _dupes = canonicalize({iid: by_id[iid] for iid in ids})
+            data = build_index_data(canonical, compute_derived(canonical), str.upper)
+            data['generated'] = 'fixed'
+            renders.add(render_index_json(data))
+        self.assertEqual(len(renders), 1)
+
 
 class CheckOverlapTests(unittest.TestCase):
     """The spec's acceptance 2: `asf check`'s Active×Active loop reads the same

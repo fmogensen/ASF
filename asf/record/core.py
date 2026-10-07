@@ -370,11 +370,28 @@ def expected_body(rec, canonical, derived, scrub=None):
     return render_sections(preamble, new_sections)
 
 
-def build_index_data(canonical, derived, scrub=None):
+def _kept_scrub(prior_title, title):
+    """``prior_title`` when it is ``title`` with more of it scrubbed — each scrub token standing
+    for some text of ``title`` — else ``title``. A writer whose environment carries fewer name
+    lists than the last one (another session's ``ASF_HOME``, a cloud seat) would otherwise
+    un-scrub every title a better-informed writer scrubbed, and the record push is refused for
+    names ``index.json`` never held (F-0273). A title never comes back un-scrubbed this way."""
+    from asf.redact import SCRUB_TOKEN
+    if not isinstance(prior_title, str) or SCRUB_TOKEN not in prior_title \
+            or prior_title == title:
+        return title
+    shape = '.+?'.join(re.escape(part) for part in prior_title.split(SCRUB_TOKEN))
+    return prior_title if re.fullmatch(shape, title, re.S) else title
+
+
+def build_index_data(canonical, derived, scrub=None, prior=None):
     """… ``scrub``: the title scrub every reader of ``index.json`` inherits (F-0132) — the
     release notes, the daily rollup, the roadmap, the board and the budget lines all read the
-    title from here, so this is the one place they are all covered."""
+    title from here, so this is the one place they are all covered. ``prior``: the items of the
+    ``index.json`` being replaced; a title it holds scrubbed past what ``scrub`` scrubs is kept
+    (:func:`_kept_scrub`), so every writer renders the same index whatever its name lists."""
     scrub = scrub or _plain
+    prior = prior if isinstance(prior, dict) else {}
     items = {}
     for iid, rec in canonical.items():
         typed, machine = frontmatter.split_machine(rec['meta'])
@@ -382,6 +399,9 @@ def build_index_data(canonical, derived, scrub=None):
         entry.update(machine)
         if entry.get('title'):
             entry['title'] = scrub(entry['title'])
+            old = prior.get(iid)
+            if isinstance(old, dict):
+                entry['title'] = _kept_scrub(old.get('title'), entry['title'])
         entry['folder'] = rec['folder']
         entry['children'] = list(derived[iid]['children'])
         entry['backlinks'] = list(derived[iid]['backlinks'])

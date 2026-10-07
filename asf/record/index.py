@@ -52,18 +52,21 @@ def write_index_json(root, canonical, derived, keep=(), scrub=None):
     as it stands: the one card that cannot be read never takes the rest of the index with it.
     ``scrub``: the same title scrub the cards' own derived sections use (F-0132) — passed
     straight through to :func:`build_index_data`."""
-    data = build_index_data(canonical, derived, scrub)
     index_path = os.path.join(root, 'index.json')
-    old_items = None
-    # a record's first index is stamped with this package's schema; an existing one keeps its own
-    data['schema_version'] = SCHEMA_VERSION
+    old = None
     if os.path.isfile(index_path):
         with open(index_path, encoding='utf-8') as f:
             try:
                 old = json.load(f)
             except json.JSONDecodeError:
                 old = {}
-        old_items = old.get('items')
+        if not isinstance(old, dict):
+            old = {}
+    old_items = old.get('items') if old is not None else None
+    data = build_index_data(canonical, derived, scrub, prior=old_items)
+    # a record's first index is stamped with this package's schema; an existing one keeps its own
+    data['schema_version'] = SCHEMA_VERSION
+    if old is not None:
         # the schema stamp is the record's, not the items': a rewrite carries it over (asf schema)
         if 'schema_version' in old:
             data['schema_version'] = old['schema_version']

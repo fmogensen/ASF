@@ -432,8 +432,8 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
     # index.json staleness
     index_wrong = set()  # (id, expected entry, entry on disk) for every entry out of date
     index_path = os.path.join(root, 'index.json')
-    expected_index = build_index_data(canonical, derived, scrub)
     if not os.path.isfile(index_path):
+        expected_index = build_index_data(canonical, derived, scrub)
         findings.append(('index.json', 1, INDEX_MISSING))
         # an index the record does not have is an index that gets every entry wrong: the
         # pre-commit derives it exactly as it derives a stale one (`cmd_check_staged`), rather
@@ -446,10 +446,11 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
                 on_disk = json.load(f)
             except json.JSONDecodeError:
                 on_disk = None
-        exp_items = expected_index['items']
-        cur_items = (on_disk or {}).get('items', {})
+        cur_items = on_disk.get('items', {}) if isinstance(on_disk, dict) else {}
         if not isinstance(cur_items, dict):
             cur_items = {}
+        # judged as the writer renders it: a title the index holds scrubbed further is kept
+        exp_items = build_index_data(canonical, derived, scrub, prior=cur_items)['items']
         broken = {f for f, _line, _why in parse_errors}
         for iid in set(exp_items) | set(cur_items):
             if exp_items.get(iid) == cur_items.get(iid):
