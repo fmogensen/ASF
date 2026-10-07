@@ -519,7 +519,9 @@ def publish_gap(product, run, ev, reason, alive=pid_alive, status=None):
             run['mechanical'] = mechanical.event(out)
             pool_mod.update_session(product, run['job'], mechanical=run['mechanical'])
     else:
-        ok, line = lifecycle.publish(wt, branch, ev.remote_sha, **publish_args)
+        conventions = product.conventions
+        prefixes = conventions.launch_prefixes() if hasattr(conventions, 'launch_prefixes') else ()
+        ok, line = lifecycle.publish(wt, branch, ev.remote_sha, prefixes=prefixes, **publish_args)
     if not ok:
         # the refusal may have moved HEAD before refusing — a rebase that succeeded, an
         # account-name rewrite — so the evidence is re-read: the caller remembers this pair
@@ -709,7 +711,10 @@ def republish_steps(product, registry, job, run, alive, found, items=None, statu
               else refusal_heads(ev)}            # a blip is never remembered (D5)
     corr = run.get('correction')
     held = None
-    if isinstance(corr, dict) and corr.get('kind') == lifecycle.UNPUSHED:
+    if lifecycle.NOT_A_LANE_BRANCH in line:
+        pass  # refusal_text's tail ("the factory publishes, never a push of your own") is false
+        # for a branch the factory has just declined to publish — the correction stands as it was
+    elif isinstance(corr, dict) and corr.get('kind') == lifecycle.UNPUSHED:
         fields['correction'] = dict(corr, text=refusal_text(branch, line))
     elif lifecycle.pending_correction(run, registry) is None and cls != lifecycle.NETWORK_ERROR:
         # nothing pending carries this refusal, and with the retry gone nothing else will

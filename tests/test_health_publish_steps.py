@@ -3,10 +3,19 @@
 A factory publish is a push the product's pre-push hook gates; one after another they were most
 of a tick's health step. Runs on different branches, worktrees and items publish side by side;
 runs sharing any of them go strictly in the ledger's order, each seeing the one before it."""
+import os
+import sys
 import threading
 import unittest
 
+sys.path.insert(0, os.path.dirname(__file__))
+from test_workers import Home, feature_row, git  # noqa: E402
+
 from asf.workers import health
+from asf.workers import lifecycle
+from asf.workers import pool as pool_mod
+from asf.workers import runtime as runtime_mod
+from asf.workers import spawn as spawn_mod
 
 
 def _pass(job, log):
@@ -81,6 +90,73 @@ class RunStepsTest(unittest.TestCase):
         entries = [(j, {'branch': j}, _pass(j, [])) for j in ('a', 'b')]
         with self.assertRaises(OSError):
             health.run_steps(entries, boom, workers=2)
+
+
+class StrayBranchTests(Home):
+    """B-0056's lane-prefix guard, PD2/PD13: an ended unpushed run whose worktree sits on a
+    branch under no launch prefix — a hand-made stray, never the factory's — is refused free,
+    before any push, and its pending correction is left exactly as it was."""
+
+    def spawn(self, job, row, step):
+        rt = runtime_mod.FakeRuntime([step])
+        return spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+
+    def commit(self, wt, name='x'):
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, name), 'w') as f:
+            f.write(name)
+        git('add', name, cwd=wt)
+        git('commit', '-q', '-m', name, cwd=wt)
+
+    def _park(self, job):
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        correction = {'kind': lifecycle.UNPUSHED, 'text': lifecycle.unpushed_text(reason),
+                     'at': '2026-09-27T07:00:45Z'}
+        pool_mod.update_session(self.product, job, ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1, correction=dict(correction))
+        return reason, correction
+
+    def test_a_stray_branch_is_refused_free_a_lane_branch_publishes_in_the_same_pass(self):
+        # the label is a worker-account name and is never written down (PD13): `x` stands in
+        # for it, `worktree-<label>-...` is the shape in prose — this is the one literal form
+        row = pool_mod.Row('stray-run', 'F-0001', kind='spec', branch='worktree-x-hotfix-v3')
+        rec = self.spawn('stray-run', row, {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.assertEqual(branch, 'worktree-x-hotfix-v3')
+        self.commit(wt, 'fix')
+        reason, correction = self._park('stray-run')
+
+        normal = self.spawn('normal', feature_row('normal'), {'ok': True})
+        self.commit(normal['worktree'], 'fix')
+        self._park('normal')
+
+        found = health.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+
+        self.assertTrue(any(j == 'stray-run' and w == 'published' and 'is not a lane branch' in d
+                            for j, w, d in found), found)
+        self.assertFalse(any(j == 'stray-run' and w == 're-judged' for j, w, _d in found), found)
+        stray = pool_mod.load_sessions(self.product)['stray-run']
+        self.assertEqual(stray['end_reason'], reason)             # not re-judged
+        self.assertEqual(stray['correction'], correction)          # byte for byte, untouched
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=self.repo), '')
+
+        normal_run = pool_mod.load_sessions(self.product)['normal']
+        self.assertEqual(normal_run['end_reason'], 'finished')
+        self.assertIsNone(normal_run.get('correction'))
+        self.assertEqual(git('ls-remote', '--heads', 'origin', normal['branch'],
+                             cwd=self.repo).split()[0],
+                         git('rev-parse', 'HEAD', cwd=normal['worktree']))
+
+    def test_the_refusal_prints_once(self):
+        row = pool_mod.Row('stray-run', 'F-0001', kind='spec', branch='worktree-x-hotfix-v3')
+        rec = self.spawn('stray-run', row, {'ok': True})
+        self.commit(rec['worktree'], 'fix')
+        self._park('stray-run')
+        first = health.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertTrue(any(j == 'stray-run' and w == 'published' for j, w, _d in first), first)
+        second = health.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse(any(j == 'stray-run' and w == 'published' for j, w, _d in second), second)
 
 
 if __name__ == '__main__':

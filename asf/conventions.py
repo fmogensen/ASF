@@ -112,6 +112,16 @@ DEFAULT_BRANCH_PREFIXES = {
 #: direct lane, under the default prefix).
 RECOGNISED_KINDS = ('direct',)
 
+#: Kinds this factory mints a branch for that :data:`DEFAULT_BRANCH_PREFIXES` does not name:
+#: every groom and groom-clerk session's branch (``asf/feeder/rows.py``'s ``branch_for(product,
+#: 'groom', date)``), and a correction row's ``'fix'``/``'task'`` fallback. A kind added to
+#: ``spawn.branch_for`` and not to this tuple is a branch the factory can mint and will then
+#: refuse to publish (:meth:`Conventions.launch_prefixes`). Not a ``DEFAULT_…`` name and not a
+#: prefix literal: a tuple of kind names adds no pattern for ``tools/check_conventions.sh`` to
+#: fence (:func:`forbidden_patterns` walks :data:`DEFAULT_BRANCH_PREFIXES` and module-level
+#: ``DEFAULT_*`` strings only).
+LAUNCH_KINDS = ('groom', 'task')
+
 #: The operator's two model labels. worker_pool.models maps them onto real model ids
 #: (asf.workers.spawn.model_arg), so no vendor's model id is written down in this repo.
 HEAVY = 'heavy'
@@ -1231,6 +1241,37 @@ class Conventions:
         out = []
         for kind in self.kinds():
             out.append(self.prefix(kind))
+        out.extend(self.legacy_prefixes())
+        return tuple(sorted(dict.fromkeys(out), key=lambda p: (-len(p), p)))
+
+    def launch_prefixes(self):
+        """Every prefix a branch this factory would actually mint can carry — what
+        :func:`asf.workers.lifecycle.publish`'s lane-prefix guard (B-0056) checks a branch
+        against before any push, so the refusal is free: it costs nothing and runs before any
+        push and before any rebase.
+
+        Wider than :meth:`all_prefixes`, which is the pruner's own list and stays untouched
+        (D8): a product renaming ``code:`` away from ``worker/`` still gets its groom and task
+        branches published, and a product naming nothing still gets every default kind. It is
+        not a superset of ``all_prefixes()`` either — a product naming ``{code: feature/}`` has
+        no ``worker/`` in either list, because ``worker/`` is not a branch this factory would
+        mint for that product (the guard's whole point; the regression D8 exists to prevent is
+        the other direction, a product's own renamed kind — ``spec/`` here — being refused).
+
+        The kinds: :data:`DEFAULT_BRANCH_PREFIXES`'s (less ``legacy``), :data:`RECOGNISED_KINDS`,
+        :data:`LAUNCH_KINDS`, and the product's own ``branch_prefixes`` (less ``legacy``) — each
+        resolved through :meth:`prefix`, never a literal (PD15) — plus :meth:`legacy_prefixes`.
+        Longest first and deduplicated, exactly the shape :meth:`all_prefixes` returns.
+
+        A product whose branches carry a shape it never declared in ``branch_prefixes`` has two
+        ways to be covered: name it as a ``legacy:`` prefix (``branch_prefixes: {legacy:
+        [cloud/]}``), recognised but never minted, or as a named kind of its own. A ``legacy:``
+        prefix hands the branch pruner (:func:`asf.workers.health._lane_branches`) nothing new,
+        because :meth:`all_prefixes` already extends :meth:`legacy_prefixes`."""
+        named = set(self.branch_prefixes) if isinstance(self.branch_prefixes, dict) else set()
+        kinds = (set(DEFAULT_BRANCH_PREFIXES) | set(RECOGNISED_KINDS) | set(LAUNCH_KINDS)
+                 | named) - {'legacy'}
+        out = [self.prefix(kind) for kind in kinds]
         out.extend(self.legacy_prefixes())
         return tuple(sorted(dict.fromkeys(out), key=lambda p: (-len(p), p)))
 

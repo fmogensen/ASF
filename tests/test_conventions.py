@@ -152,6 +152,44 @@ class BranchTests(unittest.TestCase):
         self.assertTrue(Conventions(main='trunk').is_trunk('trunk'))
 
 
+class LaunchPrefixesTests(unittest.TestCase):
+    def test_a_product_naming_nothing_gets_every_default_kind_plus_groom_and_task(self):
+        c = Conventions.from_mapping({})
+        self.assertEqual(c.launch_prefixes(),
+                         ('cloud/direct-', 'worker/', 'groom/', 'plan/', 'spec/', 'task/', 'fix/'))
+
+    def test_a_renamed_product_still_gets_its_own_unrenamed_defaults_and_groom_and_task(self):
+        # P8: all_prefixes() holds only what this product names (plus RECOGNISED_KINDS), and
+        # branch_kind('spec/f-0164') is None for it — launch_prefixes() is not that list
+        c = Conventions.from_mapping({'branch_prefixes': {'code': 'feature/', 'fix': 'bugfix/'}})
+        self.assertEqual(c.all_prefixes(), ('cloud/direct-', 'feature/', 'bugfix/'))
+        self.assertIsNone(c.branch_kind('spec/f-0164'))
+        self.assertEqual(c.launch_prefixes(),
+                         ('cloud/direct-', 'feature/', 'bugfix/', 'groom/', 'plan/', 'spec/',
+                          'task/'))
+
+    def test_a_legacy_prefix_is_kept_in_the_launch_list_too(self):
+        c = Conventions.from_mapping({'branch_prefixes': {'code': 'feature/', 'legacy': ['old/']}})
+        self.assertEqual(c.launch_prefixes(),
+                         ('cloud/direct-', 'feature/', 'groom/', 'plan/', 'spec/', 'task/',
+                          'fix/', 'old/'))
+
+    def test_longest_first_and_deduplicated(self):
+        c = Conventions.from_mapping({})
+        prefixes = c.launch_prefixes()
+        self.assertEqual(len(prefixes), len(set(prefixes)))
+        self.assertEqual(list(prefixes),
+                         sorted(prefixes, key=lambda p: (-len(p), p)))
+
+    def test_all_prefixes_is_unchanged_by_this_method_existing(self):
+        for mapping in ({}, {'branch_prefixes': {'code': 'feature/', 'fix': 'bugfix/'}},
+                        {'branch_prefixes': {'code': 'feature/', 'legacy': ['old/']}}):
+            c = Conventions.from_mapping(mapping)
+            before = c.all_prefixes()
+            c.launch_prefixes()
+            self.assertEqual(c.all_prefixes(), before)
+
+
 class PathTests(unittest.TestCase):
     def test_review_path_substitutes_the_reviews_dir_the_round_and_the_slug(self):
         self.assertEqual(Conventions().review_path('add-login', 2), 'docs/reviews/2-add-login.md')

@@ -24,6 +24,7 @@ import unittest
 from unittest import mock
 
 from asf import env, redact
+from asf.conventions import Conventions
 from asf.scorecard import score
 from asf.workers import lifecycle as lc
 from asf.workers import observe
@@ -1990,6 +1991,46 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
 
     def test_a_branch_never_pushed_is_counted_against_the_trunk(self):
         self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
+
+
+class PublishLanePrefixTests(UnpushedAfterARebaseTest):
+    """B-0056's lane-prefix guard (T-0756): ``publish``'s first refusal, prefix-aware. Over the
+    same real-git fixture the existing publish tests use (``UnpushedAfterARebaseTest.setUp``)."""
+
+    def test_a_branch_under_no_launch_prefix_is_refused_free(self):
+        self.sh(['checkout', '-q', '-b', 'worktree-x-hotfix-v3'], self.repo)
+        prefixes = Conventions.from_mapping({}).launch_prefixes()
+        ok, line = lc.publish(self.repo, 'worktree-x-hotfix-v3', '', main='main', prefixes=prefixes)
+        self.assertFalse(ok, line)
+        self.assertIn(lc.NOT_A_LANE_BRANCH, line)
+        self.assertEqual(
+            self.sh(['ls-remote', '--heads', 'origin', 'worktree-x-hotfix-v3'], self.repo), '')
+
+    def test_the_same_branch_publishes_when_prefixes_is_empty(self):
+        # spawn's own two callers pass no prefixes at all (PD4) — unaffected by the guard
+        self.sh(['checkout', '-q', '-b', 'worktree-x-hotfix-v3'], self.repo)
+        ok, line = lc.publish(self.repo, 'worktree-x-hotfix-v3', '', main='main', prefixes=())
+        self.assertTrue(ok, line)
+        remote = self.sh(['ls-remote', '--heads', 'origin', 'worktree-x-hotfix-v3'],
+                         self.repo).split()[0]
+        self.assertEqual(remote, self.sh(['rev-parse', 'HEAD'], self.repo))
+
+    def test_a_renamed_products_own_spec_branch_is_still_published(self):
+        # D8, the regression this Task must not cause: a product naming only code:/fix: still
+        # gets its own spec/ branch published, even though branch_kind('spec/f-0164') is None
+        # for it and all_prefixes() for it holds only what it named
+        c = Conventions.from_mapping({'branch_prefixes': {'code': 'feature/', 'fix': 'bugfix/'}})
+        self.assertIsNone(c.branch_kind('spec/f-0164'))
+        self.sh(['checkout', '-q', '-b', 'spec/f-0164'], self.repo)
+        ok, line = lc.publish(self.repo, 'spec/f-0164', '', main='main',
+                              prefixes=c.launch_prefixes())
+        self.assertTrue(ok, line)
+
+    def test_publish_never_targets_the_trunk_whatever_prefixes_says(self):
+        prefixes = Conventions.from_mapping({}).launch_prefixes()
+        ok, line = lc.publish(self.repo, 'main', '', main='main', prefixes=prefixes)
+        self.assertFalse(ok)
+        self.assertIn(lc.NOT_A_LANE_BRANCH, line)
 
 
 class GitErrorTests(unittest.TestCase):

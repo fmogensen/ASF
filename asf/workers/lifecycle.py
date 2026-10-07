@@ -2106,8 +2106,13 @@ def _rewrite_account_names(wt, remote_sha, findings):
     return bool(new) and _git(['reset', '-q', '--hard', new], wt).returncode == 0
 
 
+#: The refusal text B-0056's lane-prefix guard shares with the one reader of it
+#: (:func:`asf.workers.health.republish_steps`), so the writer and the reader cannot drift apart.
+NOT_A_LANE_BRANCH = 'is not a lane branch'
+
+
 def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None,
-            droppable=None, transplant=False):
+            droppable=None, transplant=False, prefixes=()):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -2160,12 +2165,18 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     decides it): the run's own report declared this head a rebase the factory publishes, and
     origin's tip is the one its worktree held — a branch cut fresh and the approved content
     carried over. Every commit origin holds that the head lacks is then dropped the same way:
-    the old tip archived, the head pushed over it under the lease. ``(ok, line)``."""
+    the old tip archived, the head pushed over it under the lease.
+
+    ``prefixes`` (B-0056's lane-prefix guard — :meth:`asf.conventions.Conventions.
+    launch_prefixes`): a branch outside it is refused free, before any push and before any
+    rebase, because the hook's run is what a publish actually costs. Empty (the default) means
+    no such check — what leaves ``spawn``'s own two callers, which mint a branch directly and
+    pass no ``prefixes``, untouched. ``(ok, line)``."""
     if transplant:
         droppable = _any_path
     what = TRANSPLANT_DROPS if transplant else 'review/notes round(s)'
-    if not branch or branch == main:
-        return False, f'publish refused: {branch or "no branch"} is not a lane branch'
+    if not branch or branch == main or (prefixes and not any(branch.startswith(p) for p in prefixes)):
+        return False, f'publish refused: {branch or "no branch"} {NOT_A_LANE_BRANCH}'
     from asf import gitpush, redact, refguard
     limit = push_timeout_s or gitpush.push_timeout()
     guard = refguard.refusal(branch, f'publish {branch}', main, protected)
