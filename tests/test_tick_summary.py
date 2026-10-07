@@ -1,4 +1,5 @@
 """asf.tick.summary — the two tables the tick ends with, over the ledger and the index."""
+import datetime
 import json
 import os
 import shutil
@@ -70,11 +71,12 @@ class ShapeTests(SummaryTestCase):
             self.assertIn(cell, row)
         self.assertTrue(row.endswith('  a feature'), row)   # what is last, never padded
 
-    def test_dead_pid_is_named_in_flight(self):
+    def test_an_exit_with_no_log_at_all_is_dead(self):
         self.launch('spec-f-0001')
         text = self.render(alive=lambda pid: False)
         row = [ln for ln in text.split('\n') if ln.startswith('spec-f-0001')][0]
-        self.assertIn('dead pid', row)
+        self.assertIn('dead', row)
+        self.assertNotIn('dead pid', row)
 
     def test_columns_pad_to_the_widest_cell(self):
         self.launch('spec-f-0001')
@@ -227,3 +229,97 @@ class TickDigestTests(SummaryTestCase):
         self.assertIn('TICK — record ok, harvest FAILED', text)
         self.assertIn('launches 2, merges 1, relaunches 1', text)
         self.assertNotIn('stalls', text)
+
+
+OK_RESULT = {'type': 'result', 'subtype': 'success', 'is_error': False,
+             'result': 'REPORT\nitem: F-0001\nstatus: done\npushed: yes abc1234\n'}
+BAD_RESULT = {'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+              'result': 'boom'}
+
+
+class LogRows:
+    """A log file at a chosen exit time, and the one row of the IN FLIGHT table it renders."""
+
+    def log(self, name, *recs, at=None):
+        path = os.path.join(self.tmp, name)
+        with open(path, 'w') as f:
+            for rec in recs:
+                f.write(json.dumps(rec) + '\n')
+        if at:
+            ts = datetime.datetime.strptime(at, summary.LEDGER_FORMAT).replace(
+                tzinfo=datetime.timezone.utc).timestamp()
+            os.utime(path, (ts, ts))
+        return path
+
+    def row(self, text, job='spec-f-0001'):
+        return [ln for ln in text.split('\n') if ln.startswith(job)][0]
+
+
+class ExitedNotDeadTests(LogRows, SummaryTestCase):
+    """F-0199: `ended` is health's line, not the session's. A session that exited cleanly is
+    live on the ledger until the next health pass, and the IN FLIGHT table called all seven of
+    them `dead pid` on 2026-09-26."""
+
+    def test_a_clean_exit_with_a_result_record_is_finished_not_dead(self):
+        self.launch('spec-f-0001', log=self.log('ok.jsonl', OK_RESULT))
+        row = self.row(self.render(alive=lambda pid: False))
+        self.assertIn('finished', row)
+        self.assertNotIn('dead', row)
+
+    def test_an_exit_on_a_failing_result_is_exited_awaiting_harvest_not_dead(self):
+        self.launch('spec-f-0001', log=self.log('bad.jsonl', BAD_RESULT))
+        row = self.row(self.render(alive=lambda pid: False))
+        self.assertIn('exited — awaiting harvest', row)
+        self.assertNotIn('dead', row)
+
+    def test_an_exit_with_no_result_record_is_dead(self):
+        # the log exists and the run opened, but nothing closed it: this one really did vanish
+        self.launch('spec-f-0001', log=self.log('open.jsonl',
+                                                {'type': 'system', 'subtype': 'init'}))
+        row = self.row(self.render(alive=lambda pid: False))
+        self.assertIn('dead', row)
+        self.assertNotIn('exited', row)
+
+    def test_a_live_pid_is_working_whatever_its_log_says(self):
+        self.launch('spec-f-0001', log=self.log('ok2.jsonl', OK_RESULT))
+        row = self.row(self.render(alive=lambda pid: True))
+        self.assertIn('working', row)
+
+    def test_the_done_tables_words_are_unchanged(self):
+        # the ledger's own vocabulary: health's `dead pid` still reads `dead pid` in DONE
+        self.launch('a', started='2026-09-22T11:00:00Z')
+        pool_mod.update_session(self.product, 'a', ended='2026-09-22T11:31:00Z',
+                                end_reason='dead pid')
+        done = self.render().split('DONE')[1]
+        self.assertIn('dead pid', done)
+
+
+class ExitAgeTests(LogRows, SummaryTestCase):
+    """F-0199: `dead pid 17m` never meant "it died 17 minutes ago" — it meant "it was launched
+    17 minutes ago". For a process that is gone, the number that matters is since the exit."""
+
+    def test_the_age_is_since_the_exit_not_since_the_launch(self):
+        # launched 11:48, exited 11:57, rendered at 12:00: the row says 3m, not 12m
+        self.launch('spec-f-0001', log=self.log('ok.jsonl', OK_RESULT,
+                                                at='2026-09-22T11:57:00Z'))
+        row = self.row(self.render(alive=lambda pid: False))
+        self.assertIn('  3m', row)
+        self.assertNotIn('12m', row)
+
+    def test_a_working_session_counts_from_its_launch(self):
+        self.launch('spec-f-0001', log=self.log('ok.jsonl', OK_RESULT,
+                                                at='2026-09-22T11:57:00Z'))
+        self.assertIn('  12m', self.row(self.render(alive=lambda pid: True)))
+
+    def test_an_unreadable_log_renders_the_age_unknown_never_the_launch_age(self):
+        self.launch('spec-f-0001', log=os.path.join(self.tmp, 'gone.jsonl'))
+        row = self.row(self.render(alive=lambda pid: False))
+        self.assertIn('  ?', row)
+        self.assertNotIn('12m', row)
+
+    def test_exited_at_is_the_logs_mtime(self):
+        log = self.log('x.jsonl', OK_RESULT, at='2026-09-22T11:57:00Z')
+        self.assertEqual(summary.exited_at({'log': log}), '2026-09-22T11:57:00Z')
+        self.assertIsNone(summary.exited_at({'log': '/nonexistent/x.jsonl'}))
+        self.assertIsNone(summary.exited_at({}))
+        self.assertIsNone(summary.exited_at(None))
