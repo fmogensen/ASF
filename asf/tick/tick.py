@@ -292,10 +292,31 @@ def run_record_step(product, fresh=False, ctx=None):
 
 
 def commit_and_push(ctx):
-    """Commit the record clone as ``tick: state <ts>`` and push it; one line saying which (two when
-    origin moved during the tick and the clone was rebased onto it first — B-0030). Returns
-    0 (nothing to commit, or pushed) or 1 (push refused — re-derived next run)."""
-    from asf.tick import shadow
+    """Probe the operator's record checkout first — before anything commits, because that is the
+    only place the finding survives (F-0260 PD1: every record step resets this clone at the top,
+    so anything written after this tick's own commit reaches origin never) — then commit the
+    record clone as ``tick: state <ts>`` and push it; one line saying which (two when origin moved
+    during the tick and the clone was rebased onto it first — B-0030). The checkout is then
+    fast-forwarded to what the push just landed. Returns 0 (nothing to commit, or pushed) or 1
+    (push refused — re-derived next run)."""
+    from asf.tick import record_health, shadow
+    product = ctx.product
+    sync = shadow.probe_operator_checkout(product, out=print)
+    ctx.checkout_sync = sync
+    if sync.why:
+        paths = ', '.join(sync.paths) if sync.paths else 'its tree'
+        if sync.why == 'local-changes':
+            why_text = f'local changes in {paths}'
+        elif sync.why == 'off-trunk':
+            why_text = f'off the trunk, on {sync.detail}'
+        else:
+            why_text = sync.why
+        print(f"NEEDS OPERATOR: the record checkout is {sync.behind} commits behind origin and "
+              f"the tick cannot fast-forward it — {why_text}; the board every read view shows "
+              'is that old — `git -C "$(asf prod --record-dir)" status --porcelain && '
+              'git -C "$(asf prod --record-dir)" log --oneline HEAD..origin/main`')
+        ctx.event('record_checkout_stale', why=sync.why, behind=sync.behind, paths=sync.paths)
+    record_health.update(product, checkout=sync if sync.why else None)
     path = ctx.record_root()
     if not shadow.commit_local(path, f"tick: state {_stamp()}"):
         print(f"tick: no change ({path})")
@@ -307,7 +328,7 @@ def commit_and_push(ctx):
         print(f"tick: state committed, push refused — re-derived next run ({path})")
         rc = 1
     # the read views read the operator's checkout: bring it up to what origin now holds
-    shadow.sync_operator_checkout(ctx.product, out=print)
+    shadow.sync_operator_checkout(product, out=print, probe=sync)
     ctx.record_drift = shadow.checkout_drift(ctx.product)  # the TICK line's record word (F-0260)
     return rc
 
