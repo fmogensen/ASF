@@ -123,7 +123,7 @@ class SeamTests(unittest.TestCase):
             want = host.runs[r['id']]
             self.assertEqual(r, {'id': want['id'], 'status': want['status'],
                                  'headBranch': want['head_branch'], 'headSha': want['head_sha'],
-                                 'createdAt': want['created_at'],
+                                 'createdAt': want['created_at'], 'event': want.get('event'),
                                  'workflow': os.path.basename(want['path'])})
 
     def test_live_runs_carries_the_runs_workflow_basename(self):

@@ -490,6 +490,7 @@ capacity:
 # times than a self-hosted pool; each automatic rerun costs money.
 # ci:
 #   stuck_retry_s: 1800       # a stuck cancelled run is tried again this often
+#   stuck_max_s: 7200         # a stuck cancelled run is dropped after this long
 #   stale_s: 1800             # a queue entry not asked about in this long has left the line
 #   pickup_s: 180             # a run admitted this recently still holds its runners
 #   urgent_hold_s: 2700       # how long a priority batch holds PR starts behind it
@@ -500,6 +501,12 @@ capacity:
 #   stall:
 #     gap_s: 600
 #     rerun_max: 2            # stalls on one branch and sha before the run is not re-run
+#   stall_watch:              # the heartbeat stall watch (asf.ci_stall, asf ci stall-watch)
+#     silence_s: 300          # a busy slot silent this long may be stalled
+#     heartbeat_stale_s: 150  # a heartbeat file older than this is a dead heartbeat
+#     factor: 2               # a job's max is its measured p95 times this
+#     default_max_s: 3600     # the max of a job kind with too few readings
+#     cpu_floor: 0.05         # cores: a job using at least this much CPU is never a stall
 #   job_timeout_min: 360      # a job with no timeout-minutes of its own (the host's default)
 #   measure:                  # runner scores (asf.ci_measure)
 #     window_days: 14

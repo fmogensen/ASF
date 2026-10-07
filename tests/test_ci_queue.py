@@ -4047,3 +4047,342 @@ class TestPriorityBatchRelief(ReliefBase):
         self.assertNotIn('201', self.cancels(gh))
         self.assertTrue(any('relief: exempt main — priority batch' in l for l in self.lines),
                         self.lines)
+
+
+# ---- F-0267: a run's kind is read, a push run is a branch run, a stuck record leaves the line ---
+
+RID = 37532396976
+ITEMS_0484 = dict(ITEMS, **{'T-0484': {'id': 'T-0484', 'type': 'task'}})
+
+
+class F0267Base(ReliefBase):
+    """P2's fixture: a product with one workflow file for every kind (no ``ci.queue.workflows``),
+    a trunk push run on main queued 25 min, and a push run on ``cloud/T-0484`` before it."""
+
+    def shared(self, **conv):
+        ci = {'provider': 'github-actions', 'workflow': 'ci.yml', 'pool': pool_data(),
+              'queue': {}}
+        data = {'repo_slug': 'o/r', 'ci': ci}
+        if conv:
+            data['conventions'] = conv
+        return env.Product('p', data)
+
+    def declared(self):
+        return product(queue={'workflows': {'pr': 'pr.yml', 'trunk': 'ci.yml',
+                                            'batch': 'batch.yml'}})
+
+    def shared_runs(self, extra=()):
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        return {'ci.yml': [
+            {'databaseId': 900, 'status': 'queued', 'event': 'push', 'headBranch': 'main',
+             'headSha': 'f' * 40, 'createdAt': t(-25), 'startedAt': None},
+            {'databaseId': RID, 'status': 'queued', 'event': 'push',
+             'headBranch': 'cloud/T-0484', 'headSha': 'a' * 40, 'createdAt': t(-40)},
+            *extra]}
+
+    def seed_shared(self):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        ci_queue.save('p', {'expect': {'ci.yml': {'at': self.at(self.t0), 'needs': {'heavy': 3},
+                                                  'v': ci_queue.EXPECT_VERSION}}})
+
+    def relieve_items(self, p, run, items, minutes=0, now=None):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        return ci_queue.relieve_trunk(
+            p, items=items, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append,
+            now=now if now is not None else self.t0 + datetime.timedelta(minutes=minutes))
+
+
+class ARunsKindIsReadNotInferred(F0267Base):
+    def test_the_classifier_over_the_table(self):
+        shared, declared = self.shared(), self.declared()
+        mq = self.shared(merge='queue', merge_queue={'ref_prefix': 'batch/'})
+        self.assertEqual(ci_queue.run_kind(shared, 'main', 'push', 'ci.yml'), 'trunk')
+        self.assertEqual(ci_queue.run_kind(declared, 'worker/x', 'pull_request', 'pr.yml'), 'pr')
+        self.assertEqual(ci_queue.run_kind(declared, 'main', 'workflow_dispatch', 'batch.yml'),
+                         'batch')
+        self.assertEqual(ci_queue.run_kind(shared, 'cloud/T-0484', 'workflow_dispatch', 'ci.yml'),
+                         'push')
+        self.assertEqual(ci_queue.run_kind(shared, 'cloud/T-0484', 'push', 'ci.yml'), 'push')
+        self.assertEqual(ci_queue.run_kind(mq, 'batch/20261007-0101-abc', 'push', 'ci.yml'),
+                         'batch')
+        # the bare ci.workflow fallback is no declaration of a batch workflow
+        self.assertIsNone(ci_queue.declared_batch_workflow(shared))
+        self.assertEqual(ci_queue.declared_batch_workflow(declared), 'batch.yml')
+
+    def test_the_stall_watch_reads_the_same_classifier(self):
+        shared, declared = self.shared(), self.declared()
+        mq = self.shared(merge='queue', merge_queue={'ref_prefix': 'batch/'})
+
+        def k(p, b, e, w):
+            return ci_queue._stall_kind(p, {'headBranch': b, 'event': e, 'workflow': w})
+        self.assertEqual(k(shared, 'main', 'push', 'ci.yml'), 'trunk')
+        self.assertEqual(k(declared, 'worker/x', 'pull_request', 'pr.yml'), 'pr')
+        self.assertEqual(k(declared, 'feat/x', 'workflow_dispatch', 'batch.yml'), 'batch')
+        self.assertEqual(k(shared, 'cloud/T-0484', 'push', 'ci.yml'), 'push')
+        self.assertEqual(k(mq, 'batch/20261007-0101-abc', 'push', 'ci.yml'), 'batch')
+
+    def test_relief_records_a_shared_workflows_push_run_as_the_branch_run_it_is(self):
+        p = self.shared()
+        self.seed_shared()
+        gh, run = self.gh(self.shared_runs())
+        self.relieve_items(p, run, ITEMS_0484)
+        self.assertEqual(self.cancels(gh), [str(RID)])
+        rec = ci_queue.load('p')['relief'][0]
+        self.assertEqual((rec['kind'], rec['item'], rec['branch']),
+                         ('push', 'T-0484', 'cloud/T-0484'))
+        self.assertTrue(rec['label'].startswith('Task'), rec)
+        self.assertTrue(any(l.startswith(f'ci queue: cancelled queued push run {RID} '
+                                         f'(T-0484, Task') for l in self.lines), self.lines)
+        self.assertFalse([l for l in self.lines if 'batch' in l], self.lines)
+
+    def test_a_declared_batch_workflows_record_keeps_batch_as_its_fallback_item(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        rec = next(r for r in ci_queue.load('p')['relief'] if r['id'] == 201)
+        self.assertEqual((rec['kind'], rec['item'], rec['label']), ('batch', 'batch', 'batch'))
+        # a batch run on a branch that names an item keeps that item
+        data = ci_queue.load('p')
+        data['relief'] = []
+        ci_queue.save('p', data)
+        runs = self.runs()
+        runs['batch.yml'][0].update(headBranch='task/T-0341', event='push')
+        gh, run = self.gh(runs)
+        self.relieve(p, run, minutes=1)
+        rec = next(r for r in ci_queue.load('p')['relief'] if r['id'] == 201)
+        self.assertEqual((rec['kind'], rec['item'], rec['label']), ('batch', 'T-0341', 'batch'))
+
+
+class APushRunIsABranchRunEverywhere(F0267Base):
+    def test_fit_ceiling_and_starvation_read_branch_kinds(self):
+        e = {'kind': 'push', 'prio': ci_queue.OTHER,
+             'since': self.at(self.t0 - datetime.timedelta(minutes=60))}
+        self.assertTrue(ci_queue.fit_applies(e))
+        self.assertFalse(ci_queue.ceiling_applies(e))
+        self.assertTrue(ci_queue.starved(e, self.t0, 45))
+        self.assertFalse(ci_queue.starved(e, self.t0, 90))
+        order, entries = ['push:x'], {'push:x': e}
+        ok, why = ci_queue.decide('push:x', order, entries, lambda k: {'heavy': 2},
+                                  {'heavy': 1}, now=self.t0, pr_wait_min=45)
+        self.assertTrue(ok)
+        self.assertIn('starvation guard', why)
+
+    def test_the_start_pass_starts_a_held_push_reruns_entry(self):
+        p = self.product()
+        TestAdmittedStarts.cancel_for_main(self, p)
+        TestAdmittedStarts.hold_at_head(self, 'rerun:task/T-0341', rid=102)
+        data = ci_queue.load('p')
+        data['entries']['rerun:task/T-0341']['kind'] = 'push'
+        next(r for r in data['relief'] if r['id'] == 102)['kind'] = 'push'
+        ci_queue.save('p', data)
+        gh, run = self.gh(TestAdmittedStarts.cancelled_runs(self, 'queued'))
+        TestAdmittedStarts.apply(self, p, run)
+        self.assertEqual(self.cancels(gh, 'rerun'), ['102'])
+        data = ci_queue.load('p')
+        self.assertNotIn('rerun:task/T-0341', data['entries'])
+        self.assertNotIn(102, [r['id'] for r in data['relief']])
+
+    def _sweep(self, p, kind, prs, listing=()):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        rec = {'id': RID, 'kind': kind, 'item': 'T-0484', 'prio': ci_queue.RANKED,
+               'label': 'Task', 'workflow': 'ci.yml', 'at': self.at(self.t0),
+               'branch': 'cloud/T-0484', 'sha': 'a' * 40}
+        ci_queue.save('p', {'relief': [rec], 'entries': {'rerun:cloud/T-0484': {
+            'kind': kind, 'item': 'T-0484', 'prio': ci_queue.RANKED, 'since': self.at(self.t0),
+            'workflow': 'ci.yml', 'seen': self.at(self.t0)}}})
+        q = self.queue(p, FakeGh())
+        src = mock.Mock()
+        src.prs.return_value = prs
+        lines = []
+        ci_queue.sweep(q, src, lambda wf: list(listing), out=lines.append)
+        return q.data, lines
+
+    def test_the_sweep_keeps_a_push_record_with_no_pr_and_drops_a_pr_one(self):
+        p = self.shared()
+        data, lines = self._sweep(p, 'push', [])
+        self.assertEqual([r['id'] for r in data['relief']], [RID])
+        self.assertIn('rerun:cloud/T-0484', data['entries'])
+        data, lines = self._sweep(p, 'pr', [])
+        self.assertEqual(data['relief'], [])
+        self.assertTrue(any('no open PR' in l for l in lines), lines)
+
+    def test_the_sweep_judges_a_push_record_by_its_pr_and_runs(self):
+        p = self.shared()
+        pr = {'number': 7, 'headRefName': 'cloud/T-0484', 'state': 'OPEN', 'headRefOid': 'a' * 40}
+        _, lines = self._sweep(p, 'push', [dict(pr, isDraft=True)])
+        self.assertTrue(any('is a draft' in l for l in lines), lines)
+        _, lines = self._sweep(p, 'push', [dict(pr, headRefOid='b' * 40)])
+        self.assertTrue(any('superseded' in l for l in lines), lines)
+        newer = {'databaseId': RID + 1, 'status': 'in_progress', 'headBranch': 'cloud/T-0484',
+                 'headSha': 'a' * 40}
+        _, lines = self._sweep(p, 'push', [], listing=[newer])
+        self.assertTrue(any(f'run {RID + 1} covers' in l for l in lines), lines)
+        again = {'databaseId': RID, 'status': 'in_progress', 'attempt': 2,
+                 'headBranch': 'cloud/T-0484', 'headSha': 'a' * 40}
+        _, lines = self._sweep(p, 'push', [], listing=[again])
+        self.assertTrue(any('runs again already' in l for l in lines), lines)
+
+    def test_relief_cancels_an_unranked_pr_run_before_a_ranked_push_run(self):
+        p = self.shared()
+        self.seed_shared()
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        pr = {'databaseId': 555, 'status': 'queued', 'event': 'pull_request',
+              'headBranch': 'worker/plan-measure', 'headSha': 'c' * 40, 'createdAt': t(-30)}
+        runs = self.shared_runs(extra=[pr])
+        runs['ci.yml'][1]['headBranch'] = 'task/T-0341'          # a ranked item's push run
+        gh, run = self.gh(runs)
+        self.relieve_items(p, run, ITEMS)
+        self.assertEqual(self.cancels(gh), ['555'])              # it frees enough on its own
+        gh, run = self.gh({'ci.yml': [r for r in runs['ci.yml'] if r['databaseId'] != 555]})
+        self.relieve_items(p, run, ITEMS, minutes=1)
+        self.assertEqual(self.cancels(gh), [str(RID)])
+
+
+class AStuckRecordHoldsNoPlaceInTheLine(F0267Base):
+    NEEDS = {'rerun:cloud/T-0484': {'heavy': 3}, 'pr:worker/T-0999': {'heavy': 1}}
+
+    def entries(self, stuck=True):
+        def since(m):
+            return self.at(self.t0 - datetime.timedelta(minutes=m))
+        e = {'rerun:cloud/T-0484': {'kind': 'push', 'prio': ci_queue.OTHER, 'item': 'T-0484',
+                                    'since': since(200), 'workflow': 'ci.yml', 'label': 'other',
+                                    'seen': since(0)},
+             'pr:worker/T-0999': {'kind': 'pr', 'prio': ci_queue.OTHER, 'item': 'T-0999',
+                                  'since': since(10), 'workflow': 'pr.yml', 'label': 'other',
+                                  'seen': since(0)}}
+        if stuck:
+            ci_queue.park(e, 'rerun:cloud/T-0484', 'fresh run refused too',
+                          self.t0 - datetime.timedelta(minutes=45))
+        return e
+
+    def test_a_parked_entry_sets_nothing_aside_and_is_never_the_head(self):
+        e = self.entries(stuck=False)
+        order = ci_queue.line_order(e)
+        self.assertEqual(order, ['rerun:cloud/T-0484', 'pr:worker/T-0999'])
+        self.assertEqual(ci_queue.decide('pr:worker/T-0999', order, e, self.NEEDS.get,
+                                         {'heavy': 3}), (False, 'heavy 0 free, needs 1'))
+        self.assertEqual(ci_queue.parked(order, e), frozenset())     # not stuck: never parked
+        e = self.entries()
+        self.assertEqual(ci_queue.decide('pr:worker/T-0999', order, e, self.NEEDS.get,
+                                         {'heavy': 3}), (True, ''))
+        skip = ci_queue.parked(order, e)
+        self.assertEqual(ci_queue.head_of(order, e, skip), 'pr:worker/T-0999')
+        self.assertEqual(ci_queue.shortfall('pr:worker/T-0999', order, self.NEEDS.get,
+                                            {'heavy': 3}, skip=skip), [])
+        ok, why = ci_queue.decide('rerun:cloud/T-0484', order, e, self.NEEDS.get, {'heavy': 3},
+                                  now=self.t0)
+        self.assertFalse(ok)
+        self.assertTrue(why.startswith('parked'), why)
+        self.assertIn('stuck 45 min', why)
+        self.assertNotIn('ci ceiling', why)
+
+    def _file(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        stamp = self.at(self.t0)
+        ci_queue.save('p', {'entries': self.entries(), 'expect': {
+            'ci.yml': {'at': stamp, 'needs': {'heavy': 3}, 'v': ci_queue.EXPECT_VERSION},
+            'pr.yml': {'at': stamp, 'needs': {'heavy': 1}, 'v': ci_queue.EXPECT_VERSION}}})
+        return p
+
+    def test_the_head_stamp_and_the_status_row_pass_over_a_parked_entry(self):
+        p = self._file()
+        q = self.queue(p, FakeGh(busy=()))
+        q._mark_head()
+        self.assertEqual(q.data['head'], 'pr:worker/T-0999')
+        self.assertIn('head_since', q.data['entries']['pr:worker/T-0999'])
+        self.assertNotIn('head_since', q.data['entries']['rerun:cloud/T-0484'])
+        src = ci_queue.GitHubSource(p, run=FakeGh(busy=()))
+        clause = ci_queue._status_clause(p, self.t0, 0, None, src)
+        self.assertIn('head T-0999', clause)
+        line = ci_queue.live_line(p, source=src, inflight=0, now=self.t0)
+        self.assertEqual(line.order, ['rerun:cloud/T-0484', 'pr:worker/T-0999'])
+        self.assertTrue(line.decisions[0][2].startswith('parked'), line.decisions)
+
+    def test_an_admit_releases_the_park_and_keeps_the_place(self):
+        p = self._file()
+        before = ci_queue.load('p')['entries']['rerun:cloud/T-0484']['since']
+        q = self.queue(p, FakeGh())
+        with mock.patch.object(ci_queue, 'decide', return_value=(False, 'held')):  # kept in line
+            q.admit('rerun:cloud/T-0484', 'push', item='T-0484', workflow='ci.yml')
+        e = q.data['entries']['rerun:cloud/T-0484']
+        self.assertNotIn('stuck', e)
+        self.assertEqual(e['since'], before)
+
+    def test_a_refused_record_parks_its_entry(self):
+        p = self._file()
+        q = self.queue(p, FakeGh())
+        rec = {'id': RID, 'kind': 'push', 'item': 'T-0484', 'branch': 'cloud/T-0484',
+               'sha': 'a' * 40, 'workflow': 'ci.yml', 'refusals': ci_queue.RERUN_REFUSALS_MAX,
+               'refused_why': 'HTTP 503'}
+        q.data['entries']['rerun:cloud/T-0484'].pop('stuck')
+        keep = []
+        with mock.patch.object(ci_queue, '_start_run', return_value=(None, 'HTTP 503')):
+            ci_queue._rerun_refused(rec, mock.Mock(), p, self.lines.append, self.t0, {}, {},
+                                    keep, q=q)
+        self.assertEqual(keep, [rec])
+        e = q.data['entries']['rerun:cloud/T-0484']
+        self.assertIn('fresh run refused too', e['stuck']['why'])
+        self.assertIn('rerun:cloud/T-0484',
+                      ci_queue.parked(ci_queue.line_order(q.data['entries']), q.data['entries']))
+
+
+class AStuckRecordLeavesOnItsBound(F0267Base):
+    def _stuck(self, p, kind, age_s):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        since = self.t0 - datetime.timedelta(seconds=age_s)
+        rec = {'id': RID, 'kind': kind, 'item': 'T-0484', 'prio': ci_queue.RANKED,
+               'label': 'Task', 'workflow': 'ci.yml', 'at': self.at(since),
+               'branch': 'cloud/T-0484', 'sha': 'a' * 40, 'refusals': 3,
+               'refused_why': 'HTTP 503',
+               'stuck': {'since': self.at(since), 'tried': self.at(self.t0),
+                         'why': 're-run refused 3 times (last: HTTP 503); fresh run refused too '
+                                '— HTTP 503'}}
+        ci_queue.save('p', {'relief': [rec], 'entries': {'rerun:cloud/T-0484': {
+            'kind': kind, 'item': 'T-0484', 'prio': ci_queue.RANKED, 'since': self.at(since),
+            'workflow': 'ci.yml', 'seen': self.at(self.t0),
+            'stuck': {'at': self.at(self.t0), 'why': 'x'}}}})
+        ci_queue.claim_cancel(env.state_dir('p'), RID, 'relief', now=since)
+        q = self.queue(p, FakeGh())
+        lines = []
+        ci_queue._rerun_cancelled(q, mock.Mock(), p, lambda rec: ({}, 'main'), False,
+                                  lines.append, self.t0, items=ITEMS_0484)
+        ci_queue.save('p', q.data)
+        return q.data, lines
+
+    def test_a_record_inside_its_bound_is_kept(self):
+        p = self.shared()
+        data, lines = self._stuck(p, 'push', ci_queue.STUCK_MAX_S - 1)
+        self.assertEqual([r['id'] for r in data['relief']], [RID])
+        self.assertEqual(len(ci_queue.stuck_lines(p, now=self.t0)), 1)
+
+    def test_past_its_bound_it_leaves_with_its_entry_and_its_claim_stays(self):
+        p = self.shared()
+        data, lines = self._stuck(p, 'push', ci_queue.STUCK_MAX_S + 1)
+        self.assertEqual(data['relief'], [])
+        self.assertEqual(data['entries'], {})
+        self.assertTrue(any(l.startswith(
+            f'ci queue: drop rerun:cloud/T-0484 — cancelled push run {RID} (T-0484) on '
+            f'cloud/T-0484 could not be re-run or started fresh for 120 min (last: ')
+            and l.endswith("; the branch's next push runs fresh") for l in lines), lines)
+        self.assertEqual(ci_queue.stuck_lines(p, now=self.t0), [])
+        self.assertNotIn(False, [ok for _, ok, _ in ci_queue.runner_rows(p, now=self.t0)])
+        with open(os.path.join(env.state_dir('p'), 'ci-cancels.json')) as fh:
+            self.assertIn(str(RID), fh.read())
+
+    def test_a_pr_records_drop_names_the_lane(self):
+        p = self.shared()
+        _, lines = self._stuck(p, 'pr', ci_queue.STUCK_MAX_S + 1)
+        self.assertTrue(any(l.endswith('its open PR starts again from the lane') for l in lines),
+                        lines)
+
+    def test_the_bound_is_the_config_keys(self):
+        with open(env.config_path(), 'w') as fh:
+            fh.write('ci:\n  stuck_max_s: 60\n')
+        p = self.shared()
+        data, _ = self._stuck(p, 'push', 59)
+        self.assertEqual(len(data['relief']), 1)
+        data, lines = self._stuck(p, 'push', 61)
+        self.assertEqual(data['relief'], [])
