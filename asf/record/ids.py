@@ -71,15 +71,52 @@ def _claims_enabled(root):
     return idclaim.enabled(product)
 
 
+def origin_top(root, prefix, remote='origin'):
+    """The highest number ``origin/<trunk>``'s tree holds for ``prefix`` — the floor a mint must
+    clear whatever the working tree says.
+
+    ``record_top`` reads the checkout, and a checkout behind origin reads a lower top: on
+    2026-10-06 a record 28 commits behind minted B-0268, B-0269 and B-0270, each already a card
+    on origin (F-0260 P9). One ``fetch`` and one ``ls-tree``; 0 when there is no origin, no
+    trunk, or the fetch fails — a floor that cannot be read is no floor, never a refusal.
+
+    Returns ``(top, reachable)`` — ``reachable`` is the fetch's own ``ok`` (F-0260 PD6)."""
+    from asf import env, gitops
+    try:
+        name = env.product_of_dir(root)
+        product = env.load_product(name) if name else None
+    except Exception:  # noqa: BLE001 — an unresolvable product keeps the default trunk name
+        product = None
+    trunk = product.main if product is not None else 'main'
+    if not gitops.git(['fetch', '--quiet', '--no-tags', remote, trunk], root).ok:
+        return 0, False
+    top = 0
+    for folder, p in set(TYPES.values()):
+        if p != prefix:
+            continue
+        lt = gitops.git(['ls-tree', '-r', '--name-only', f'{remote}/{trunk}', '--', folder], root)
+        if not lt.ok:
+            continue
+        for name in (lt.data or '').splitlines():
+            m = re.match(rf'^{prefix}-(\d+)\.md$', os.path.basename(name))
+            if m:
+                top = max(top, int(m.group(1)))
+    return top, True
+
+
 def mint_id(root, canonical, type_, claim=False, claimant=None):
     """The next id for ``type_``. Inside ``BACKLOG_ID_RANGE``: the next free number of the
     job's claimed block — one above the highest number of the block the record holds, and the
     block's ``lo`` when it holds none. The record's tip outside the block is read nowhere: a
     block claimed later lands its ids above this one's ``hi``, and that must take no number
-    away from a block nobody has used. Otherwise, with ``claim`` (``asf new``) or in a worktree,
-    and the record repo has an ``origin``: a single id claimed by push
-    (:mod:`asf.record.idclaim`) — the same allocator a job's block comes from. Otherwise the
-    record's top + 1, stepping over every block the local claim mirror shows taken."""
+    away from a block nobody has used. Otherwise, with the record repo holding an ``origin`` and
+    claims on (``conventions.flags.id_claim``, default on): a single id claimed by push
+    (:mod:`asf.record.idclaim`), its floor cleared against both the working tree's own top and
+    :func:`origin_top` — a checkout behind origin must never remint an id origin already holds.
+    An unreachable origin falls back to the local path for every caller but ``asf new``
+    (``claim=True``), which keeps today's refusal (F-0260 PD6). Otherwise, or with no origin: the
+    record's top + 1, cleared against origin's own top where there is one to read, and stepping
+    over every block the local claim mirror shows taken."""
     from asf.record import idclaim
     folder, prefix = TYPES[type_]
     rng = _id_range(prefix)
@@ -104,17 +141,24 @@ def mint_id(root, canonical, type_, claim=False, claimant=None):
                               f"of the block is in the record")
         return f"{prefix}-{n:04d}"
     worktree = _in_worktree(root)
-    if (claim or worktree) and idclaim.has_origin(root) and _claims_enabled(root):
-        who = claimant or os.environ.get('ASF_SESSION') or os.environ.get('ASF_JOB') or 'asf new'
-        try:
-            return idclaim.claim_one(root, prefix, who, floor=max_n)
-        except idclaim.ClaimError as e:
-            raise SystemExit(f"new: {prefix}-id claim on origin failed: {e}") from None
+    has_git = worktree or os.path.isdir(os.path.join(root, '.git'))
+    top = None
+    if has_git and idclaim.has_origin(root) and _claims_enabled(root):
+        top, reachable = origin_top(root, prefix)
+        if reachable or claim:
+            who = claimant or os.environ.get('ASF_SESSION') or os.environ.get('ASF_JOB') or 'asf new'
+            try:
+                return idclaim.claim_one(root, prefix, who, floor=max(max_n, top))
+            except idclaim.ClaimError as e:
+                raise SystemExit(f"new: {prefix}-id claim on origin failed: {e}") from None
+        print(f'ids: origin unreachable — {prefix}-id minted locally, may collide')
     if worktree and not os.environ.get('BACKLOG_ALLOW_MINT'):
         raise SystemExit(f"new: minting {prefix}-ids in a worktree needs BACKLOG_ID_RANGE (e.g. {prefix}:0300-0349) "
                          f"or an origin to claim on — parallel writers collide otherwise")
-    n = max_n + 1
-    blocks = idclaim.claims(root) if os.path.isdir(os.path.join(root, '.git')) or worktree else []
+    if top is None:
+        top, _reachable = origin_top(root, prefix) if has_git else (0, False)
+    n = max(max_n, top) + 1
+    blocks = idclaim.claims(root) if has_git else []
     c = idclaim.covers(blocks, f"{prefix}-{n}")
     while c is not None:  # a number inside a block a job holds is that job's, never ours
         n = c.hi + 1
