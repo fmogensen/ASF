@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.217 — 2026-10-07
+
+### Bugs fixed
+
+- Name the report commit's item and never count an empty or report commit as a trunk copy (#962)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.217"`
+
 ## v0.1.216 — 2026-10-07
 
 ### Bugs fixed
