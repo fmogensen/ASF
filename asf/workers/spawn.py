@@ -450,6 +450,22 @@ def _commit_leftovers(holder):
                    cwd=holder, capture_output=True)
 
 
+def _recheck_busy_alive(product, registry, job, candidate, what, why):
+    """A :data:`lifecycle.BUSY` verdict reread with the identity check (:func:`asf.workers.
+    health.alive_for`, already how ``asf correct`` tells a stale run from a live one) instead of
+    the bare pid answer :func:`lifecycle.launch_verdict` used by default: a pid the OS has handed
+    to an unrelated process answers ``kill(pid, 0)`` same as the run that recorded it, and a
+    worktree with no process actually holding it refused every tick for ever (B-0380) — a worker,
+    not a corpse, cuts the other way too (F-0234). Local import: :mod:`asf.workers.health` imports
+    this module. Only called when the cheap check already says ``BUSY``, so the one ``ps`` scan
+    this costs is never paid on the common, uncontested launch."""
+    if what != lifecycle.BUSY:
+        return what, why
+    from asf.workers import health
+    alive = health.alive_for(product, list(lifecycle.latest(registry).values()))
+    return lifecycle.launch_verdict(registry, job, candidate, alive=alive)
+
+
 def _reclaim(product, repo, job, holder, branch, now=None):
     """Free ``branch`` from ``holder``, a worktree whose run is dead: archive its commits not on
     origin (:func:`_archive_unpushed`), abort a rebase or merge in progress, move the tree to the
@@ -461,6 +477,7 @@ def _reclaim(product, repo, job, holder, branch, now=None):
     registry = pool_mod.sessions_path(product)
     if os.path.exists(holder):
         what, why = lifecycle.launch_verdict(registry, job, holder)
+        what, why = _recheck_busy_alive(product, registry, job, holder, what, why)
         if what == lifecycle.BUSY:
             raise WorktreeBusy(why)
         orphan = what == lifecycle.ORPHAN
@@ -713,6 +730,7 @@ def _place_worktree(product, repo, job, branch):
         held = None  # the dead branch's worktrees and refs are gone: cut fresh below
     for candidate in dict.fromkeys(p for p in (path, held) if p and os.path.exists(p)):
         what, why = lifecycle.launch_verdict(registry, job, candidate)
+        what, why = _recheck_busy_alive(product, registry, job, candidate, what, why)
         if what == lifecycle.BUSY:
             raise WorktreeBusy(why)
         if what == lifecycle.ORPHAN and _stale_orphan(candidate):

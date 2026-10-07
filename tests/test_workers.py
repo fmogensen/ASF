@@ -713,8 +713,9 @@ class TestSpawn(Home):
     def test_existing_worktree_refuses(self):
         rt = runtime_mod.FakeRuntime([{'running': True, 'pid': os.getpid()}])
         spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
-        with self.assertRaises(spawn_mod.SpawnError):
-            spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        with mock.patch.object(health_mod, 'alive_for', lambda *a, **k: (lambda pid: True)):
+            with self.assertRaises(spawn_mod.SpawnError):
+                spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
 
     def test_b0051_ended_sessions_worktree_is_reused_not_refused(self):
         # a session that ended 'finished' without pushing (B-0051) must not permanently block
@@ -801,8 +802,9 @@ class TestSpawn(Home):
         rt = runtime_mod.FakeRuntime([{'running': True, 'pid': os.getpid()}])
         row = feature_row('again')
         spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
-        with self.assertRaises(spawn_mod.SpawnError):
-            spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        with mock.patch.object(health_mod, 'alive_for', lambda *a, **k: (lambda pid: True)):
+            with self.assertRaises(spawn_mod.SpawnError):
+                spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
 
     def test_f0087_a_correction_takes_over_the_ended_jobs_worktree_with_its_uncommitted_work(self):
         # a fix session ends "done" with files it never committed (B-0051/B-0052); health holds
@@ -846,9 +848,10 @@ class TestSpawn(Home):
         self.assertTrue(os.path.isdir(wt))
         self.assertFalse([f for f in found if f[1] in ('reaped', 'reapable')], found)
         # a third session on the same branch while the correction is live: refused
-        with self.assertRaises(spawn_mod.SpawnError):
-            spawn_mod.spawn(self.product, s1_row('fix-bug-b-0001'), self.acct(), 'b',
-                            runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
+        with mock.patch.object(health_mod, 'alive_for', lambda *a, **k: (lambda pid: True)):
+            with self.assertRaises(spawn_mod.SpawnError):
+                spawn_mod.spawn(self.product, s1_row('fix-bug-b-0001'), self.acct(), 'b',
+                                runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
 
     def test_f0087_an_empty_reaped_branch_never_blocks_the_next_launch_on_it(self):
         rec = spawn_mod.spawn(self.product, feature_row('spec-f-0001'), self.acct(), 'b',
@@ -1229,7 +1232,8 @@ class TestReclaimDeadWorktree(Home):
 
     def test_a_live_sessions_stuck_worktree_is_never_touched(self):
         wt, branch, wip, _tip = self._stuck()
-        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: True):
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: True), \
+                mock.patch.object(health_mod, 'alive_for', lambda *a, **k: (lambda pid: True)):
             with self.assertRaises(spawn_mod.WorktreeBusy):
                 spawn_mod.spawn(self.product, self._adjudicate(branch), self.acct(), 'b',
                                 runtime=runtime_mod.FakeRuntime([{'running': True}]),
@@ -1308,6 +1312,44 @@ class TestReclaimOrphanHolder(TestReclaimDeadWorktree):
         with self.assertRaises(spawn_mod.SpawnError) as cm:
             self._spawn(branch, time.time())
         self.assertIn('no run recorded it', str(cm.exception))
+        self.assertTrue(os.path.exists(wt))
+
+
+class TestReclaimRecycledPidHolder(TestReclaimDeadWorktree):
+    """B-0380: a worktree a run recorded (``ended`` never written) whose pid the OS has since
+    handed to an unrelated process answers ``kill(pid, 0)`` exactly like a run still at work —
+    the bare pid check (:func:`lifecycle.launch_verdict`'s default) reads it as BUSY for ever,
+    with no run ever ending it and no process actually holding it. The identity check
+    (:func:`asf.workers.health.alive_for`, already how ``asf correct`` tells a stale run from a
+    live one) says no session of this run's own sits at that pid, and the worktree is reclaimed
+    instead of refusing every tick."""
+
+    def test_a_worktree_held_by_a_recycled_pid_is_reclaimed(self):
+        wt, branch, _wip, _tip = self._stuck(job='coder-t-0349')
+        err = io.StringIO()
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: True), \
+                mock.patch.object(health_mod, 'alive_for',
+                                  lambda *a, **k: (lambda pid: False)), \
+                contextlib.redirect_stderr(err):
+            rec = spawn_mod.spawn(self.product, self._adjudicate(branch), self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'running': True,
+                                                                    'pid': os.getpid()}]),
+                                  cfg=self.cfg)
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(os.path.realpath(spawn_mod._holding_worktree(self.repo, branch)),
+                         os.path.realpath(rec['worktree']))
+        self.assertIn('reclaimed', err.getvalue())
+
+    def test_a_truly_live_run_is_never_touched_even_with_the_identity_check(self):
+        wt, branch, _wip, _tip = self._stuck(job='coder-t-0349')
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: True), \
+                mock.patch.object(health_mod, 'alive_for',
+                                  lambda *a, **k: (lambda pid: True)):
+            with self.assertRaises(spawn_mod.WorktreeBusy):
+                spawn_mod.spawn(self.product, self._adjudicate(branch), self.acct(), 'b',
+                                runtime=runtime_mod.FakeRuntime([{'running': True,
+                                                                  'pid': os.getpid()}]),
+                                cfg=self.cfg)
         self.assertTrue(os.path.exists(wt))
 
 
@@ -1626,11 +1668,12 @@ class TestWave(Home):
         os.makedirs(wt)
         pool_mod.append_session(self.product, {'job': 'correct-9', 'pid': os.getpid(),
                                                'started': 't', 'worktree': wt})
-        for _ in range(3):
-            _, waits, lines = self.run_wave([feature_row('spec-9')], 5, [acct])
-            self.assertIn('already running: worktree already exists', waits[0][1])
-            self.assertIn('held by live run correct-9', lines[0])
-            self.assertNotIn('NEEDS OPERATOR', lines[0])
+        with mock.patch.object(health_mod, 'alive_for', lambda *a, **k: (lambda pid: True)):
+            for _ in range(3):
+                _, waits, lines = self.run_wave([feature_row('spec-9')], 5, [acct])
+                self.assertIn('already running: worktree already exists', waits[0][1])
+                self.assertIn('held by live run correct-9', lines[0])
+                self.assertNotIn('NEEDS OPERATOR', lines[0])
 
     def test_b0142_a_branch_held_by_an_external_worktree_waits_not_needs_operator(self):
         acct = pool_mod.Account('acct-a', role='local', cap=3)
