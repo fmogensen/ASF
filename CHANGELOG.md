@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.221 — 2026-10-07
+
+### Features landed
+
+- The release an operator can write, and the park that reads it (#967)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.221"`
+
 ## v0.1.220 — 2026-10-07
 
 ### Features landed
