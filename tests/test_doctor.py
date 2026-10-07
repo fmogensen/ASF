@@ -573,6 +573,69 @@ class GhAuth(unittest.TestCase):
             self.assertEqual(doctor._gh_auth(), (False, 'You are not logged in'))
 
 
+class CredentialsRowTests(unittest.TestCase):
+    """`doctor.check_credentials` — spec F-0042 §2.5, the doctor's `credentials` row: a view
+    over the cache, never a probe."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='doctor_credentials_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.addCleanup(self._restore_home)
+
+    def _restore_home(self):
+        env.ASF_HOME = self._orig_home
+
+    def cfg(self):
+        return {'credentials': {'providers': {
+            'provider-a': {'probe': 'check-a', 'renew': 'renew-a'}}}}
+
+    def product(self, names=('provider-a',)):
+        return env.Product('sample', {'credentials': list(names)})
+
+    def test_red_when_the_cache_holds_an_invalid_provider(self):
+        from asf import credentials
+        product = self.product()
+        credentials.write_cache(product, [credentials.Result(provider='provider-a',
+                                                               state='invalid')])
+        with mock.patch('asf.credentials.subprocess.run') as run:
+            ok, detail = doctor.check_credentials(self.cfg(), product)
+        run.assert_not_called()
+        self.assertFalse(ok)
+        self.assertIn('renew-a', detail)
+
+    def test_red_when_the_cache_holds_an_expiring_provider(self):
+        from asf import credentials
+        product = self.product()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        expiry = (now + datetime.timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        credentials.write_cache(product, [credentials.Result(provider='provider-a',
+                                                               state='valid', expires=expiry)])
+        with mock.patch('asf.credentials.subprocess.run') as run:
+            ok, detail = doctor.check_credentials(self.cfg(), product)
+        run.assert_not_called()
+        self.assertFalse(ok)
+        self.assertIn('renew-a', detail)
+
+    def test_red_on_a_config_problem_names_the_dotted_key(self):
+        cfg = {'credentials': {'providers': {'provider-a': {'probe': 'check-a'}}}}  # no renew
+        ok, detail = doctor.check_credentials(cfg, self.product())
+        self.assertFalse(ok)
+        self.assertIn('credentials.providers.provider-a.renew', detail)
+
+    def test_no_providers_configured_is_ok(self):
+        self.assertEqual(doctor.check_credentials(self.cfg(), self.product(names=())),
+                         (True, 'no providers configured'))
+
+    def test_the_row_runs_no_probe(self):
+        with mock.patch('asf.credentials.subprocess.run') as run:
+            ok, detail = doctor.check_credentials(self.cfg(), self.product())
+        run.assert_not_called()
+        self.assertTrue(ok, detail)
+        self.assertIn('not probed yet', detail)
+
+
 class NotConfiguredRowsTests(unittest.TestCase):
     """F-0109 / the clean install: a row that waits on a login no install can make reads
     ``not configured`` (skip), never RED — and a login that is there but broken stays red."""

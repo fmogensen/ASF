@@ -445,6 +445,50 @@ def check_worker_push_auth(cfg, product):
     return True, 'authenticates for ' + ', '.join(oks)
 
 
+def check_credentials(cfg, product):
+    """(ok, detail) — the ``credentials`` row: every provider this product needs, from the
+    cache (never a fresh probe: the doctor is a view). Red when any is invalid or inside its
+    window, and its detail carries the renew command.
+
+    Config problems from :func:`asf.credentials.config_problems` are reported first and red,
+    naming each dotted key — a misconfigured section cannot be judged. A
+    :class:`asf.env.ConfigError` from :func:`asf.credentials.for_product` (a product names a
+    provider ``config.yaml`` does not define) is caught and is the red detail. A provider with
+    no cache entry reads as ``not probed yet`` and is not red — an empty cache is a factory that
+    has not ticked, not a bad credential. No providers configured, or a product that names
+    none: ``(True, 'no providers configured')``."""
+    from asf import credentials
+    problems = credentials.config_problems(cfg)
+    if problems:
+        return False, '; '.join(f'{key}: {why}' for key, why in problems)
+    try:
+        wanted = credentials.for_product(product, cfg)
+    except env.ConfigError as e:
+        return False, str(e)
+    if not wanted:
+        return True, 'no providers configured'
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cache = credentials.read_cache(product)
+    notes, bad = [], []
+    for provider in wanted:
+        result = cache.get(provider.name)
+        if result is None:
+            notes.append(f'{provider.name} not probed yet')
+            continue
+        v = credentials.verdict(result, now, provider.window_days)
+        if v == 'expiring':
+            left = credentials.days_left(result, now)
+            bad.append(f'{provider.name} expires {result.expires} ({int(left)}d) — renew: '
+                       f'{provider.renew}')
+        elif v == 'invalid':
+            bad.append(f'{provider.name} is not valid — renew: {provider.renew}')
+        else:
+            notes.append(provider.name)
+    if bad:
+        return False, '; '.join(bad)
+    return True, '; '.join(notes) if notes else 'ok'
+
+
 def check_clock_code(product):
     """(ok, detail) — the code the product's clock runs: the snapshot sha it last ticked from,
     the checkout's HEAD (the next tick takes that), how many snapshots the code dir holds, and
@@ -1539,6 +1583,8 @@ def run(product_name):
     rows.append(('worker secrets', True, ok, detail))
     ok, detail = check_worker_push_auth(cfg, product)
     rows.append(('worker push auth', True, ok, detail))
+    ok, detail = check_credentials(cfg, product)
+    rows.append(('credentials', True, ok, detail))
     for ok, detail in check_install_checkout(product):
         rows.append(('install checkout', True, ok, detail))
     ok, detail = check_clock_code(product)
