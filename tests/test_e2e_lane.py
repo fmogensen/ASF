@@ -213,33 +213,44 @@ class HappyPath:
     def test_r19_s1_card_to_merge_resolves_the_feature(self):
         f = self.f
 
+        def minted_task():
+            """F-0001's own Task child, once the landed plan has minted and indexed it — never
+            assumed to be T-0001: the mint now floors against every claimed id block too (D6),
+            so a parallel job's reservation can push it well past the record's own top (P9)."""
+            children = (f.snapshot().record.get('F-0001') or {}).get('children') or []
+            return next((c for c in children if c.startswith('T-')), None)
+
+        self.until(minted_task, 6, 'the plan mints its Task')
+        tid = minted_task()
+        self.assertIsNotNone(tid, 'the plan mints its Task')
+
         def feature_not_done_early(t):  # fault 2: a merged spec/plan is not a landed Feature
-            if not self.done('T-0001'):
+            if not self.done(tid):
                 self.assertNotIn(t.snap.state('F-0001'), DONE, f'tick {t.n}: F-0001 done early')
                 self.assertNotEqual(t.snap.stage('F-0001'), 'landed', f'tick {t.n}')
-        self.until(lambda: self.harvested('T-0001'), 11, 'T-0001 lands',
-                   each=feature_not_done_early)
+        self.until(lambda: self.harvested(tid), 11, f'{tid} lands', each=feature_not_done_early)
         # fault 4 / T3: the code is reviewed, once, before it lands
-        self.assertEqual([c['item'] for c in self.launches(kind='review')], ['T-0001'],
+        self.assertEqual([c['item'] for c in self.launches(kind='review')], [tid],
                          'the code lane reviews the Task once (lane.review.code: required)')
         self.until(lambda: self.done('F-0001'), 2, 'F-0001 is done', each=feature_not_done_early)
         snap = f.snapshot()
         self.assertEqual([c['job'] for c in self.launches(kind='spec')], ['spec-f-0001'])
         self.assertEqual([c['job'] for c in self.launches(kind='plan')], ['plan-f-0001'],
                          'a merged plan is never written again (fault 2: STARVED relaunch)')
-        self.assertEqual([c['job'] for c in self.launches(kind='coder')], ['coder-t-0001'])
-        self.assertEqual(self.rounds('T-0001'), [])
+        self.assertEqual([c['job'] for c in self.launches(kind='coder')], [f'coder-{tid.lower()}'])
+        self.assertEqual(self.rounds(tid), [])
         self.assertEqual(self.rounds('F-0001'), [])
-        landed = self.harvested('T-0001')
+        landed = self.harvested(tid)
         self.assertTrue(f.is_ancestor(landed[-1], 'main'), landed)
         self.assertIn('lines.py', _git_ls(f.repo_origin, 'main', 'src'))
-        self.assertIn(snap.state('T-0001'), DONE)
+        self.assertIn(snap.state(tid), DONE)
         self.assertEqual([r for r in f.next_rows() if r.feature_id == 'F-0001' and r.launches],
                          [], 'a done Feature plans no more work')
         if self.landing == PR:
             prs = f.prs()
             self.assertEqual(sorted(p['headRefName'] for p in prs),
-                             ['feature/T-0001', 'plan/F-0001', 'spec/F-0001'], 'one PR a branch')
+                             sorted([f'feature/{tid}', 'plan/F-0001', 'spec/F-0001']),
+                             'one PR a branch')
             self.assertEqual({(p['state'], p.get('mergeMethod')) for p in prs},
                              {('MERGED', 'squash')})
 
