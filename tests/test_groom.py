@@ -175,6 +175,71 @@ class InboxAnswerGrammarTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_an_unfilled_inbox_slot_is_not_an_answer(self):
+        root = make_repo()
+        try:
+            for name, title in (('bare.md', 'Bare'), ('settled.md', 'Settled'),
+                                 ('barred.md', 'Barred')):
+                with open(os.path.join(root, 'inbox', name), 'w', encoding='utf-8') as f:
+                    f.write(f"# {title}\n\n## Question\nFeature or bug?\n")
+            groom_path = os.path.join(root, 'groom', '2026-09-20.md')
+            with open(groom_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "# Groom 2026-09-20\n\n## Inbox cards with a question\n"
+                    "- [ ] inbox:bare.md Bare — Feature or bug? → answer: ____\n"
+                    "- [ ] inbox:settled.md Settled — Feature or bug? "
+                    "→ answer: ____ (settled: the card left the inbox)\n"
+                    "- [ ] inbox:barred.md Barred — Feature or bug? "
+                    "→ answer: ____ (barred: approvals.groom)\n"
+                )
+            events = []
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                applied = groom.apply_groom_answers(
+                    root, {}, groom_path, '2026-09-21',
+                    event=lambda kind, **kw: events.append((kind, kw)))
+            self.assertEqual(applied, 0)
+            self.assertEqual(events, [])
+            self.assertEqual(out.getvalue(), '')  # unfilled, not refused: no line at all
+
+            for name in ('bare.md', 'settled.md', 'barred.md'):
+                with open(os.path.join(root, 'inbox', name), encoding='utf-8') as f:
+                    self.assertIn('## Question', f.read())  # untouched
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_an_unfilled_inbox_slot_beside_a_real_answer_still_applies_the_real_one(self):
+        root = make_repo()
+        try:
+            for name, title in (('barred.md', 'Barred'), ('onboarding.md', 'Onboarding flow')):
+                with open(os.path.join(root, 'inbox', name), 'w', encoding='utf-8') as f:
+                    f.write(f"# {title}\n\n## Question\nFeature or bug?\n")
+            groom_path = os.path.join(root, 'groom', '2026-09-20.md')
+            with open(groom_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "# Groom 2026-09-20\n\n## Inbox cards with a question\n"
+                    "- [ ] inbox:barred.md Barred — Feature or bug? "
+                    "→ answer: ____ (barred: approvals.groom)\n"
+                    "- [ ] inbox:onboarding.md Onboarding flow — Feature or bug? "
+                    "→ answer: feature\n"
+                )
+            events = []
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                applied = groom.apply_groom_answers(
+                    root, {}, groom_path, '2026-09-21',
+                    event=lambda kind, **kw: events.append((kind, kw)))
+            self.assertEqual(applied, 1)
+            self.assertEqual([e[1]['item'] for e in events], ['inbox:onboarding.md'])
+            self.assertEqual(out.getvalue(), '')
+
+            with open(os.path.join(root, 'inbox', 'barred.md'), encoding='utf-8') as f:
+                self.assertIn('## Question', f.read())  # unanswered: untouched
+            with open(os.path.join(root, 'inbox', 'onboarding.md'), encoding='utf-8') as f:
+                self.assertNotIn('## Question', f.read())  # answered: applied
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_a_second_apply_of_an_already_closed_card_stays_silent(self):
         root = make_repo()
         try:

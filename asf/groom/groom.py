@@ -440,6 +440,8 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
     for line in lines:
         im = INBOX_ANSWER_RE.match(line)
         if im:  # an inbox card intake asked about: the answer edits the card, intake re-reads it
+            if unanswered(im.group('answer')):
+                continue  # nobody filled this slot: not a bad answer, not an answer at all
             word, who, by = _attribution(im.group('answer').strip(), adjudicator_job)
             applied_ok, reason = inbox_mod.apply_answer(root, im.group('name'), word, date,
                                                          who.strip('()'), intake_dir=intake_dir)
