@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.229 — 2026-10-07
+
+### Features landed
+
+- One `git status` per worktree per version of that worktree, and the mid-pass commit is still seen (#986)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.229"`
+
 ## v0.1.228 — 2026-10-07
 
 ### Features landed
