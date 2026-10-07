@@ -18,6 +18,7 @@ from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
 from asf.metrics import metrics as metrics_mod
+from asf.evidence import rulings
 from asf.groom import answers
 from asf.tick import shadow, step_daily, step_groom, step_harvest, step_health, step_prs, step_wave, steps, tick
 from asf.workers import lifecycle
@@ -280,6 +281,54 @@ class HealthStepTests(StepsTestCase):
         self.assertEqual(step_health.file_rulings(ctx, out=self.lines.append), [])
         with open(card) as f:
             self.assertEqual(f.read().count('adjudicate (adjudicate-b-0001)'), 1)
+
+    def test_f0262_the_rulings_history_line_carries_the_precedent_it_cited(self):
+        # the same fixture as test_b0064_…, with one more REPORT line
+        ctx = self.ctx()
+        root = ctx.record_root()
+        os.makedirs(os.path.join(root, 'bugs'), exist_ok=True)
+        card = os.path.join(root, 'bugs', 'B-0001.md')
+        with open(card, 'w') as f:
+            f.write('---\nid: B-0001\ntype: bug\ntitle: x\nseverity: S1\n# ---- machine ----\nstate: Active\n---\n'
+                    '## Symptom\ns\n\n## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n')
+        log = os.path.join(self.tmp, 'adj.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': 'REPORT\nitem: B-0001\nkind: adjudicate\nstatus: done\n'
+                                          'branch: fix/B-0001\npushed: yes abc\ncommits: none\ntests: none\n'
+                                          'left out: none\nruling: upheld; the call goes through the job\n'
+                                          'precedent: D-0004, workers/jobs/claim.py\n```\n'}) + '\n')
+        self.session(job='adjudicate-b-0001', item='B-0001', kind='adjudicate', pid=DEAD_PID, log=log,
+                     started='2026-09-22T10:00:00Z', ended='2026-09-22T10:30:00Z', end_reason='finished')
+        self.assertEqual(step_health.file_rulings(ctx, out=self.lines.append), ['adjudicate-b-0001'])
+        body = open(card).read()
+        self.assertIn('adjudicate (adjudicate-b-0001): upheld; the call goes through the job '
+                      '[precedent: D-0004, workers/jobs/claim.py]', body)
+        # and it reads back as a standing ruling, citation and all (P12, C13)
+        self.assertIn('precedent: D-0004', rulings.parse(body)[-1]['text'])
+
+    def test_f0262_a_run_with_no_ruling_files_no_precedent_line(self):      # C14
+        ctx = self.ctx()
+        root = ctx.record_root()
+        os.makedirs(os.path.join(root, 'bugs'), exist_ok=True)
+        card = os.path.join(root, 'bugs', 'B-0001.md')
+        with open(card, 'w') as f:
+            f.write('---\nid: B-0001\ntype: bug\ntitle: x\nseverity: S1\n# ---- machine ----\nstate: Active\n---\n'
+                    '## Symptom\ns\n\n## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n')
+        log = os.path.join(self.tmp, 'adj.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': 'REPORT\nitem: B-0001\nkind: adjudicate\nstatus: done\n'
+                                          'branch: fix/B-0001\npushed: yes abc\ncommits: none\ntests: none\n'
+                                          'left out: none\nprecedent: D-0004\n```\n'}) + '\n')
+        self.session(job='adjudicate-b-0001', item='B-0001', kind='adjudicate', pid=DEAD_PID, log=log,
+                     started='2026-09-22T10:00:00Z', ended='2026-09-22T10:30:00Z', end_reason='finished')
+        self.assertEqual(step_health.file_rulings(ctx, out=self.lines.append), ['adjudicate-b-0001'])
+        self.assertNotIn('precedent', open(card).read())
+        self.assertEqual(pool_mod.load_sessions(self.product)['adjudicate-b-0001']['adjudicated'],
+                         'none')
 
     def test_b0062_failed_correction_holds_the_run(self):
         self.dead_session()
