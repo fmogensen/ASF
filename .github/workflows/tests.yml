@@ -20,6 +20,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - name: the factory-only merge rule (a hand branch into main is refused)
+        run: bash tools/check_factory_only.sh
       - name: install with pipx
         run: |
           python -m pip install --upgrade pipx

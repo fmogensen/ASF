@@ -2,15 +2,17 @@
 import io
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 
-from asf import env, factory_only
+from asf import env, factory_only, hermetic
 from asf.conventions import Conventions
 from asf.env import Product
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CHECK_SCRIPT = os.path.join(REPO, 'tools', 'check_factory_only.sh')
 
 PREFIXES = {'code': 'worker/', 'fix': 'fix/', 'spec': 'spec/', 'plan': 'plan/',
             'legacy': ['old/']}
@@ -127,6 +129,73 @@ class CliTests(unittest.TestCase):
         rc, out = self.run_cli('auto', 'hand/fix')
         self.assertEqual(rc, 0)
         self.assertIn('off', out)
+
+
+class CiEntryPoint(unittest.TestCase):
+    """``tools/check_factory_only.sh``, run as the CI step itself runs it — against the
+    committed ``.asf/product.yaml``, ``--files`` always supplied so no git and no network is
+    touched."""
+
+    def run_script(self, args=(), **env_extra):
+        base = hermetic.build()
+        for var in ('GITHUB_BASE_REF', 'GITHUB_HEAD_REF', 'GITHUB_SHA'):
+            base.pop(var, None)
+        base.update(env_extra)
+        out = subprocess.run(['bash', CHECK_SCRIPT, *args], cwd=REPO, env=base,
+                             capture_output=True, text=True)
+        return out.returncode, out.stdout + out.stderr
+
+    def test_a_hand_branch_is_refused(self):
+        rc, out = self.run_script(['--head', 'feat/round-j', '--base', 'main',
+                                   '--files', 'asf/cli.py'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('is not a factory branch', out)
+
+    def test_require_item_id_refuses_an_unnamed_factory_branch(self):
+        rc, out = self.run_script(['--head', 'fix/exact-path-overlap', '--base', 'main',
+                                   '--files', 'asf/cli.py'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('merge.require_item_id', out)
+
+    def test_every_committed_prefix_with_an_item_id_passes(self):
+        for prefix in ('worker/', 'fix/', 'spec/', 'plan/', 'cloud/direct-'):
+            head = f'{prefix}T-0001'
+            with self.subTest(head=head):
+                rc, out = self.run_script(['--head', head, '--base', 'main', '--files', 'a.py'])
+                self.assertEqual(rc, 0, out)
+                self.assertIn('is a factory branch', out)
+
+    def test_bot_paths_escape(self):
+        rc, out = self.run_script(['--head', 'release-bot', '--base', 'main',
+                                   '--files', 'CHANGELOG.md'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('bot paths', out)
+
+    def test_bot_paths_escape_needs_every_file_to_match(self):
+        rc, out = self.run_script(['--head', 'release-bot', '--base', 'main',
+                                   '--files', 'CHANGELOG.md', 'asf/cli.py'])
+        self.assertEqual(rc, 1, out)
+
+    def test_a_release_tag_passes(self):
+        rc, out = self.run_script(['--ref', 'refs/tags/v0.1.214'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('release tag', out)
+
+    def test_a_pr_into_another_branch_passes(self):
+        rc, out = self.run_script(['--head', 'feat/x', '--base', 'next', '--files', 'asf/cli.py'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('not the trunk', out)
+
+    def test_no_arguments_and_no_pull_request_passes(self):
+        rc, out = self.run_script([])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('not a pull request', out)
+
+    def test_a_missing_product_file_exits_2_never_0(self):
+        rc, out = self.run_script([], FACTORY_ONLY_PRODUCT_FILE='/no/such/file.yaml')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('missing', out)
+        self.assertNotEqual(rc, 0)
 
 
 class CommittedProductFile(unittest.TestCase):
