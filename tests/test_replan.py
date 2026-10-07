@@ -147,6 +147,25 @@ class APendingFeatureReshapeIsReplanned(unittest.TestCase):
 
     def test_a_running_replan_session_is_the_features_one_session(self):
         out = rows.candidates(f0090_index(), product(), [{'item': 'F-0090', 'kind': 'replan'}])
+        # no second replan row; the one row says what holds the Feature (F-0274)
+        got = [r for r in out if r.item_id == 'F-0090']
+        self.assertEqual([(r.kind, r.launches) for r in got], [(rows.FEATURE_HELD, False)])
+        self.assertIn('T-0030', got[0].reason)
+
+    def test_a_held_feature_names_the_session_and_its_kind(self):
+        # F-0274 (a product's F-0003, 2026-10-07): its replan session ran and every open Task
+        # row vanished from `asf next` with no reason
+        occ = {'busy': {'F-0090': 'session replan-f-0090 running'}}
+        got = [r for r in rows.candidates(f0090_index(), product(), [], occupancy=occ)
+               if r.item_id == 'F-0090']
+        self.assertEqual([r.action for r in got], ['WAITS ON replan-f-0090 (replan)'])
+        self.assertEqual(got[0].waits_on, 'replan-f-0090')
+
+    def test_a_feature_holding_no_open_task_gets_no_held_row(self):
+        idx = f0090_index()
+        for t in ('T-0027', 'T-0030', 'T-0032', 'T-0037'):
+            idx['items'][t]['state'] = 'Closed'
+        out = rows.candidates(idx, product(), [{'item': 'F-0090', 'kind': 'replan'}])
         self.assertFalse([r for r in out if r.item_id == 'F-0090'])
 
     def test_a_feature_not_in_build_gets_no_replan_row(self):

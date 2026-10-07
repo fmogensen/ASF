@@ -107,7 +107,9 @@ TAIL = """## The heartbeat, the marker, and the report
 Print a progress line as you go — what you are doing, not that you are doing something. A session
 whose output has gone quiet is read as stalled and may be relaunched on top of you, which throws
 away everything you have not pushed. Never run a command in the background and never end your
-turn waiting for one.
+turn waiting for one. The heartbeat belongs to the runtime, never to a loop you must keep alive:
+if a HEARTBEAT command above cannot start (the sandbox refuses it), say so in one line and carry
+on with the job — it is never a reason to stop, to end `needs input`, or a `NEEDS OPERATOR`.
 
 Run the gate in the foreground and wait for it. Your last act is `git push`. Never start a
 background task you do not wait for. A result with uncommitted or unpushed work is a failed

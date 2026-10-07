@@ -44,8 +44,8 @@ DEFAULT_RULES = """- Commit with `git commit -s`; the sign-off is the record tha
 - Never push to `{main}`, never force-push, never `--no-verify`, never open a pull request.
 - Push your own branch before your turn ends — after every commit, and once at the end even if
   nothing changed. A Stop gate refuses your exit while your work is off origin.
-- Keep a heartbeat: print a progress line as you go; a silent session is read as a dead one and
-  relaunched on top of you.
+- Print a progress line as you go; a silent session is read as a dead one and relaunched on top
+  of you. The heartbeat is the runtime's: a beat that cannot start never ends your session.
 - Finish with the typed REPORT below, as the last thing you print.
 - Anything a human must decide or run: `NEEDS OPERATOR: <what you could not check or do> — ` then the exact command in backticks (read-only, harvest runs it itself — B-0042), or, with no command, the exact answer needed instead."""
 

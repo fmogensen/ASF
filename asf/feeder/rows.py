@@ -160,6 +160,9 @@ REPLAN = 'RESHAPE → REPLAN'
 REPLAN_KIND = 'replan'
 #: the ``waits_on`` of a code row whose Feature waits on its replan
 WAITS_REPLAN = 'replan'
+#: a Feature its own session holds (a replan, a spec-amend, a correction): one reason row,
+#: ``WAITS ON <job> (<kind>)``, in place of the Task rows it holds (F-0274)
+FEATURE_HELD = 'FEATURE → HELD'
 #: a delivery lead's document session (:func:`delivery_rows`) — no plan yet
 DELIVERY_PLAN = 'DELIVERY → PLAN'
 #: a delivery lead's build session — plan approved, every open member built in one branch
@@ -1511,6 +1514,12 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
         if gate and word in BUILD_STAGES and not plan_carrier(f) and not replan_mod.pending(f):
             # the Feature's own spec-amend session is running: its Tasks still build
             out.extend(task_rows(items, product, f, busy, running, landed_shas))
+        else:
+            # F-0274: the Feature's Task rows are held while its own session runs — say so, on
+            # one row, rather than every open Task vanishing from the table with no reason
+            row = held_feature_row(items, f, occupancy)
+            if row is not None:
+                out.append(row)
         return out
     waits = (occupancy,)
     if is_direct(f) and word not in BUILD_STAGES:
@@ -1561,6 +1570,45 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
             out.append(no_stories_row(f, product, occupancy, stage))
         out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
+
+
+_SESSION_RE = re.compile(r'^session (?P<job>\S+) running')
+
+
+def holder_of(occupancy, fid):
+    """``(job, kind)`` of what holds Feature ``fid`` (:func:`asf.workers.lifecycle.occupancy`):
+    the running session's job and the kind its name leads with (``replan-f-0003`` → ``replan``),
+    else the lane branch and its run's kind; ``('a session', 'session')`` when neither says."""
+    occ = occupancy or {}
+    why = str((occ.get('busy') or {}).get(fid) or '')
+    m = _SESSION_RE.match(why)
+    if m:
+        job = m.group('job')
+        cut = job.lower().find('-' + fid.lower())
+        return job, (job[:cut] if cut > 0 else 'session')
+    for branch, lane in sorted((occ.get('lanes') or {}).items()):
+        if lane.get('item') == fid:
+            return branch, lane.get('kind') or 'lane'
+    return 'a session', 'session'
+
+
+def held_feature_row(items, feature, occupancy):
+    """The one non-launching row of a Feature its own session holds (F-0274): ``WAITS ON <job>
+    (<kind>)``, naming the open Tasks it holds. None when it holds no open Task, or while another
+    row speaks for the Feature:
+    the lane's review or landing state (:func:`lane_rows`), or a correction on it
+    (:func:`correction_rows`)."""
+    fid, occ = feature['id'], occupancy or {}
+    if any(fid in (occ.get(k) or {}) for k in ('review', 'landing', 'corrections')):
+        return None
+    held = [t['id'] for t in ix.feature_tasks(items, feature) if is_open(t)]
+    if not held:   # nothing vanished: the session is the Feature's one row of work
+        return None
+    job, kind = holder_of(occ, fid)
+    tasks = f"its open Task(s) {', '.join(held)} wait for it"
+    return Row(tier=2, kind=FEATURE_HELD, item_id=fid, feature_id=fid,
+               action=f'WAITS ON {job} ({kind})', brief_kind=kind, branch='',
+               reason=f'{fid} is held by {job} ({kind}): {tasks}', waits_on=job)
 
 
 def replan_branch(product, fid):
