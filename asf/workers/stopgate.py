@@ -282,7 +282,9 @@ def _run(stdin_text, environ, out, product, job):
     branch = (run or {}).get('branch')
     if not run or not worktree or not os.path.isdir(worktree):
         return 0
-    if not lifecycle.lands(run, pool.sessions_path(prod)):
+    # a review's own `lands` is False (lifecycle.OFF_BRANCH_KINDS, B-0276), but its stop is
+    # still read for the verdict block below before it is let through
+    if run.get('kind') != REVIEW_KIND and not lifecycle.lands(run, pool.sessions_path(prod)):
         return 0
     if not branch or branch == 'HEAD':
         return 0
