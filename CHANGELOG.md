@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.247 — 2026-10-08
+
+### Features landed
+
+- `--lanes` prints the listing, owns its exit code, and reaches the module (#1057)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.247"`
+
 ## v0.1.246 — 2026-10-08
 
 ### Features landed
