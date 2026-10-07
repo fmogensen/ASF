@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.214 — 2026-10-07
+
+### Features landed
+
+- The ingest's per-card document lookups become one batch (#937)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.214"`
+
 ## v0.1.213 — 2026-10-07
 
 ### Features landed
