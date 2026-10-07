@@ -388,6 +388,8 @@ def build_parser():
     register_redact(sub)
     from asf.dwell import register as register_dwell
     register_dwell(sub)
+    from asf.security.cmd import register as register_security
+    register_security(sub)
 
     p_roadmap = sub.add_parser('roadmap', help='the ROADMAP table: one row per Epic')
     p_roadmap.add_argument('--product')

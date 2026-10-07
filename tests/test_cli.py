@@ -14,7 +14,22 @@ import unittest
 from unittest import mock
 
 from asf import cli, env
+from asf.security import alerts
 from asf.views import status
+
+
+class FakeHost(alerts.Host):
+    """Stands in for :class:`asf.security.alerts.GitHubHost` — no network and no ``gh``."""
+
+    def __init__(self, secrets=None, dependencies=None):
+        self._secrets = secrets if secrets is not None else []
+        self._dependencies = dependencies if dependencies is not None else []
+
+    def secrets(self):
+        return self._secrets
+
+    def dependencies(self):
+        return self._dependencies
 
 
 class RefusedProductFileTests(unittest.TestCase):
@@ -712,3 +727,58 @@ class LineBufferedOutputTests(unittest.TestCase):
 
     def test_a_stream_that_cannot_reconfigure_is_left_alone(self):
         cli.line_buffered(io.StringIO())  # no error
+
+
+class SecurityParserTests(unittest.TestCase):
+    """``asf security alerts --check`` (T-0365): the `--check` contract ``rules.py`` reads
+    (P10) — one line per place on stdout, exit 1 when there is one, 0 when there is none.
+    No network and no ``gh``: :class:`FakeHost` stands in for ``alerts.GitHubHost``."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='cli_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        with open(env.product_path('sample'), 'w') as f:
+            f.write('product: sample\nrepo_slug: x/y\n')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, argv, host):
+        out = io.StringIO()
+        with mock.patch('asf.security.alerts.GitHubHost', lambda product: host):
+            with contextlib.redirect_stdout(out):
+                rc = cli.main(argv)
+        return rc, out.getvalue()
+
+    def test_alerts_with_no_check_prints_the_lines_and_exits_0(self):
+        host = FakeHost(secrets=[{'number': 1, 'kind': 'generic', 'created_at': 't'}])
+        rc, out = self._run(['security', 'alerts', '--product', 'sample'], host)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(
+            out.splitlines(),
+            ['R-0009 secret alert open generic x/y#1 since t sev=S1 sig=secret-x/y-1'])
+
+    def test_check_exits_1_with_lines_naming_the_place(self):
+        host = FakeHost(secrets=[{'number': 1, 'kind': 'generic', 'created_at': 't'}])
+        rc, out = self._run(['security', 'alerts', '--check', '--product', 'sample'], host)
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(
+            out.splitlines(),
+            ['R-0009 secret alert open generic x/y#1 since t sev=S1 sig=secret-x/y-1'])
+
+    def test_check_exits_0_clean_over_an_empty_feed(self):
+        rc, out = self._run(['security', 'alerts', '--check', '--product', 'sample'], FakeHost())
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out, '')
+
+    def test_nothing_but_the_lines_reaches_stdout(self):
+        host = FakeHost(secrets=[{'number': 1, 'kind': 'generic', 'created_at': 't'}])
+        rc, out = self._run(['security', 'alerts', '--check', '--product', 'sample'], host)
+        self.assertEqual(len(out.splitlines()), 1, out)
+
+    def test_an_unknown_subcommand_is_a_parser_error(self):
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(['security', 'bogus'])
