@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.215 — 2026-10-07
+
+### Bugs fixed
+
+- Redact counts only lines the parent lacks; index.json keeps a title scrubbed further (#961)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.215"`
+
 ## v0.1.214 — 2026-10-07
 
 ### Features landed
