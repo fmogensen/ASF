@@ -342,7 +342,7 @@ branch after it. So harvest never merges a PR on its checks alone:
 
   | value | meaning |
   | --- | --- |
-  | `path-filtered` (default) | a skipped or missing required check is satisfied when every GitHub Actions run on the PR head has completed, at least one required check concluded success, none is failed, cancelled or timed out, and the skip is the workflow's own — each job answering for it concluded `skipped`, or no completed run has a job of that name. A run still going waits (never the local-gate clock); the held and harvest lines name each satisfied check and why |
+  | `path-filtered` (default) | a skipped or missing required check is satisfied when every GitHub Actions run on the PR head has completed, at least one required check concluded success, none is failed, cancelled or timed out, and the skip is the workflow's own — each job answering for it concluded `skipped`, or no completed run has a job of that name **and a workflow file at the PR head declares a job answering for that name**. A required check no workflow at the head declares — a third-party app's check, a commit status from outside Actions — is never counted path-filtered, whether or not it has reported: the PR waits for it. A run still going waits (never the local-gate clock); the held and harvest lines name each satisfied check and why |
   | `never` | a skipped or missing required check is never green: the PR waits for a run of it that concludes success |
 
   The same judgement is read again right before MERGING.
