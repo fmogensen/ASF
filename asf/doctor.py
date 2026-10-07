@@ -1637,6 +1637,9 @@ def run(product_name):
     from asf import customer_content  # a product that deploys names its customer pages
     for ok, detail in customer_content.findings(product):
         rows.append(('customer content', False, ok, detail))
+    from asf import debug_toggles  # what the debug-toggle gate checks on this product
+    for ok, detail in debug_toggles.findings(product):
+        rows.append(('debug toggles', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     for required, ok, detail in check_ci_pool(product):

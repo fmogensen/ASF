@@ -159,6 +159,44 @@ class TestCheckClockSteps(unittest.TestCase):
         self.assertIn(f'NEEDS OPERATOR: step {step} ', out.getvalue())
 
 
+class DebugTogglesRow(unittest.TestCase):
+    """The ``debug toggles`` row (:func:`asf.debug_toggles.findings`): green naming the globs
+    and marker count (the defaults when the product wrote no block), red when a declared block
+    names no paths (D8), red per marker that does not compile."""
+
+    def _rows(self, conv):
+        product = env.Product('x', {'repo_dir': '/repo', 'conventions': conv})
+        with mock.patch.object(doctor, 'check_config', return_value=(True, '', {}, product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')):
+            return doctor.run('x')
+
+    def test_no_block_is_green_and_names_the_defaults(self):
+        row = [r for r in self._rows({}) if r[0] == 'debug toggles'][0]
+        self.assertTrue(row[2], row[3])
+        self.assertIn('**', row[3])
+        self.assertIn('7 marker(s)', row[3])
+
+    def test_a_narrowed_paths_is_green_and_names_them(self):
+        row = [r for r in self._rows({'debug_toggles': {'paths': ['asf/**']}})
+               if r[0] == 'debug toggles'][0]
+        self.assertTrue(row[2], row[3])
+        self.assertIn('asf/**', row[3])
+
+    def test_a_declared_block_with_no_paths_is_red(self):
+        row = [r for r in self._rows({'debug_toggles': {'paths': []}})
+               if r[0] == 'debug toggles'][0]
+        self.assertFalse(row[2])
+        self.assertIn('conventions.debug_toggles', row[3])
+
+    def test_a_marker_that_does_not_compile_is_red(self):
+        rows = [r for r in self._rows({'debug_toggles': {'markers': ['(']}})
+               if r[0] == 'debug toggles']
+        self.assertFalse(rows[0][2])
+        self.assertIn('debug_toggles.markers', rows[0][3])
+        self.assertIn("'('", rows[0][3])
+
+
 class TestOneFactoryCheck(unittest.TestCase):
     def test_no_legacy_paths_is_ok(self):
         ok, detail = doctor.check_one_factory({}, env.Product('x', {}))

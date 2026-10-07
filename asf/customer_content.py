@@ -130,6 +130,12 @@ def added_lines(diff):
     return out
 
 
+def diff(repo, base, head):
+    """The ``git diff -U0`` text of ``base...head`` (three-dot: a marker already on the trunk is
+    never a branch's fault), or None when it cannot be read."""
+    return _git(repo, ['diff', '-U0', '--no-color', '--no-ext-diff', f'{base}...{head}'])
+
+
 def added_hits(repo, base, head, conv):
     """``[(path, line, marker)]``: each line ``head`` adds since it left ``base`` under
     ``customer_content.paths`` that matches a forbidden marker. [] when nothing is configured
@@ -137,10 +143,9 @@ def added_hits(repo, base, head, conv):
     globs = paths(conv)
     if not globs or not repo:
         return []
-    diff = _git(repo, ['diff', '-U0', '--no-color', '--no-ext-diff', f'{base}...{head}'])
     pats = markers(conv)
     hits = []
-    for path, n, text in added_lines(diff):
+    for path, n, text in added_lines(diff(repo, base, head)):
         if not matches(globs, path):
             continue
         m = scan_line(pats, text)

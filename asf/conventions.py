@@ -283,6 +283,25 @@ DEFAULT_FORBIDDEN_MARKERS = (
     r'<<\s*[A-Z][A-Z0-9_ ]*\s*>>',
 )
 
+#: ``debug_toggles: {paths, markers, waiver}`` — a debug toggle is a check a session switched off
+#: and forgot: a focused or disabled test, a breakpoint, a debug flag left on
+#: (:mod:`asf.debug_toggles`). The landing gate refuses a branch that *adds* a line matching a
+#: marker under ``paths``, documentation excluded. ``paths`` are globs (default: every file);
+#: ``paths: []`` switches the gate off and ``asf doctor`` says so. ``markers`` are Python regexes
+#: and replace the defaults below. ``waiver`` is the regex that makes a line legal: it must carry
+#: a reason, so the default needs a non-space after the colon.
+DEFAULT_DEBUG_TOGGLE_PATHS = ('**',)
+DEFAULT_DEBUG_TOGGLE_WAIVER = r'(?i)\bdebug-ok:\s*\S'
+DEFAULT_DEBUG_TOGGLES = (
+    r'\bdebugger\s*;',                                            # a JS breakpoint
+    r'\bbreakpoint\s*\(\s*\)',                                    # a Python breakpoint
+    r'\b(?:i?pdb|pudb)\.set_trace\s*\(',                          # the older Python breakpoint
+    r'\b(?:describe|context|it|test|suite|scenario)\.only\s*\(',   # a focused test
+    r'\b(?:describe|context|it|test)\.skip\s*\(',                  # a disabled test
+    r'\b(?:fdescribe|xdescribe|xit)\s*\(',                        # a focused or disabled suite
+    r'\bDEBUG\s*[:=]\s*(?:True|true|1)\b',                        # a debug flag left on
+)
+
 #: ``security: {paths, alerts, ports}`` — the three parts of the security pass
 #: (:mod:`asf.security`): which of the product's own named classes a diff's files fall under,
 #: how long the host's own secret- and dependency-scanning feeds may go unread, and the nightly
@@ -553,9 +572,9 @@ def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
     ``worktree_setup``, ``pre_push_check``, ``auth_env``, ``full_suite_commands``,
-    ``check_commands``, ``read_only_allow``, ``customer_content``, ``security`` and ``feeder`` are
-    checked — every other key is kept verbatim (see the module doc), so a product file written
-    for a newer ``asf`` still loads."""
+    ``check_commands``, ``read_only_allow``, ``customer_content``, ``debug_toggles``, ``security``
+    and ``feeder`` are checked — every other key is kept verbatim (see the module doc), so a
+    product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -643,6 +662,32 @@ def validate_mapping(data):
                 except re.error as e:
                     problems.append(('customer_content.forbidden_markers',
                                      f'{pattern!r} is not a regex ({e})'))
+    dt = data.get('debug_toggles')
+    if dt is not None:
+        if not isinstance(dt, dict):
+            problems.append(('debug_toggles', f'must be a map (paths, markers, waiver), not {dt!r}'))
+        else:
+            if dt.get('paths') is not None:
+                why = _path_list_problem(dt['paths'])
+                if why:
+                    problems.append(('debug_toggles.paths', why))
+            markers = dt.get('markers')
+            if markers is not None and not isinstance(markers, list):
+                problems.append(('debug_toggles.markers', f'must be a list of regexes, not {markers!r}'))
+            for pattern in (markers if isinstance(markers, list) else ()):
+                try:
+                    re.compile(str(pattern))
+                except re.error as e:
+                    problems.append(('debug_toggles.markers', f'{pattern!r} is not a regex ({e})'))
+            waiver = dt.get('waiver')
+            if waiver is not None:
+                if not isinstance(waiver, str) or not waiver.strip():
+                    problems.append(('debug_toggles.waiver', f'must be a regex string, not {waiver!r}'))
+                else:
+                    try:
+                        re.compile(waiver)
+                    except re.error as e:
+                        problems.append(('debug_toggles.waiver', f'{waiver!r} is not a regex ({e})'))
     sec = data.get('security')
     if sec is not None:
         if not isinstance(sec, dict):

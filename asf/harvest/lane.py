@@ -145,8 +145,8 @@ import subprocess
 import tempfile
 import time
 
-from asf import (approvals, attestation, ci_flight, customer_content, env, gitpush, refguard,
-                 reviews, run_cancel, tree_green)
+from asf import (approvals, attestation, ci_flight, customer_content, debug_toggles, env, gitpush,
+                 refguard, reviews, run_cancel, tree_green)
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -384,19 +384,21 @@ def _glob_hit(pattern, path):
     return fnmatch.fnmatch(path, pattern) or path.startswith(pattern.rstrip('/') + '/')
 
 
-def landing_class(product, files):
-    """:data:`DOCS` when every path in ``files`` lies under a docs root — ``specs_dir``,
-    ``plans_dir``, ``reviews_dir`` or a ``conventions.doc_paths`` glob — else :data:`CODE`. The
-    one rule for docs vs code."""
-    conv = _conv(product)
+def is_doc(conv, path):
+    """True when ``path`` lies under a docs root — ``specs_dir``, ``plans_dir``, ``reviews_dir``
+    or a ``conventions.doc_paths`` glob. The one rule, per path."""
+    conv = _conv(conv)
     roots = [str(conv.get(k)).strip('/') + '/' for k in ('specs_dir', 'plans_dir', 'reviews_dir')
              if conv.get(k)]
-    globs = list(conv.get('doc_paths') or ())
+    return any(path.startswith(r) for r in roots) or any(_glob_hit(g, path)
+                                                         for g in conv.get('doc_paths') or ())
+
+
+def landing_class(product, files):
+    """:data:`DOCS` when every path in ``files`` is documentation (:func:`is_doc`), else
+    :data:`CODE`. The one rule for docs vs code."""
     files = [f for f in files or () if f]
-    if files and all(any(f.startswith(r) for r in roots) or any(_glob_hit(g, f) for g in globs)
-                     for f in files):
-        return DOCS
-    return CODE
+    return DOCS if files and all(is_doc(product, f) for f in files) else CODE
 
 
 def review_kind(kind):
@@ -1091,7 +1093,8 @@ def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
     """``(kind, text)`` for a branch the lane refuses before any gate, or None: a merge commit
     on it (B-0056), a commit not naming the item or one of a delivery's ``members``, or a line
     it adds to customer content that carries a forbidden marker
-    (:func:`asf.customer_content.refusal`, ``file:line`` each) — each a correction back to its
+    (:func:`asf.customer_content.refusal`, ``file:line`` each) or a debug toggle a session
+    switched off and forgot (:func:`asf.debug_toggles.refusal`) — each a correction back to its
     session."""
     merges = merge_commits(repo, trunk, branch)
     if merges:
@@ -1106,7 +1109,8 @@ def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
             f'names its item — the lane could not reword them: reword them; the factory '
             f'publishes the rewritten branch')
     if conv is not None:
-        return customer_content.refusal(repo, trunk, branch, conv)
+        return (customer_content.refusal(repo, trunk, branch, conv)
+                or debug_toggles.refusal(repo, trunk, branch, conv))
     return None
 
 
@@ -3522,7 +3526,8 @@ def precheck(lane, entries):
             out(f'held {b}: ruling belongs in the record')
             wait(lane, f, 'ruling belongs in the record', 'held')
             continue
-        marked = customer_content.refusal(lane.repo, lane.trunk, b, conv)
+        marked = (customer_content.refusal(lane.repo, lane.trunk, b, conv)
+                  or debug_toggles.refusal(lane.repo, lane.trunk, b, conv))
         if marked:  # the marker gate again at the gate: a branch past PUSHED before it existed
             f['refusal'] = marked
             lane.enter_back(f, f'kind={marked[0]}')
