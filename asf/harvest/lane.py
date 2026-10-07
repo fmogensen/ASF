@@ -494,9 +494,11 @@ _SUBJECT_ID_RE = re.compile(r'\b([A-Z]-\d{4,})\b')
 
 def commits_note(repo, trunk, branch):
     """The part of a PR body the branch's own commits say (``origin/<trunk>..origin/<branch>``,
-    oldest first): ``## Items`` — every item id a subject names — and ``## Proves`` — every
-    ``Proves:`` trailer (:func:`asf.proves.parse`). '' when they say neither, or git cannot
-    read the range."""
+    oldest first): ``## Items`` — every item id a subject names — ``## Proves`` — every counted
+    ``Proves:`` trailer (:func:`asf.proves.parse`) — and ``## Not proved``: every ``Proves:``
+    trailer the parser **refused** as a qualified claim, with its reason, and every
+    ``Not proved:`` trailer the session wrote deliberately (F-0257). '' when they say none of
+    them, or git cannot read the range."""
     from asf import gitops, proves
     r = gitops.git(['log', '--reverse', '--no-merges', '--format=%B%x1e',
                     f'origin/{trunk}..origin/{branch}'], repo) if repo else None
@@ -508,12 +510,16 @@ def commits_note(repo, trunk, branch):
         for i in _SUBJECT_ID_RE.findall(m.splitlines()[0]):
             if i not in ids:
                 ids.append(i)
-    claims = proves.parse('\n'.join(messages))
+    text = '\n'.join(messages)
+    claims, refused = proves.parse_all(text)
+    gaps = refused + proves.parse_not_proved(text)
     out = ''
     if ids:
         out += '\n## Items\n\n' + ''.join(f'- {i}\n' for i in ids)
     if claims:
         out += '\n## Proves\n\n' + proves.render(claims) + '\n'
+    if gaps:
+        out += '\n## Not proved\n\n' + proves.render_not_proved(gaps) + '\n'
     return out
 
 

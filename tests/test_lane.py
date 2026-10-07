@@ -427,6 +427,26 @@ class LaneFixture(unittest.TestCase):
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
         sh(['git', 'push', '-q', 'origin', 'origin/main:refs/heads/' + branch], cwd=self.worker)
 
+    def push_lane_body(self, branch, files, subject, body='', new=True):
+        # push_lane writes a subject only; a trailer belongs in the commit's body.
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        if new:
+            sh(['git', 'checkout', '-q', '-B', branch, 'origin/main'], cwd=self.worker)
+        else:
+            sh(['git', 'checkout', '-q', branch], cwd=self.worker)
+        for rel, text in files.items():
+            self.write(self.worker, rel, text)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        args = ['git', 'commit', '-q', '-m', subject] + (['-m', body] if body else [])
+        sh(args, cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', branch], cwd=self.worker)
+
+    def note(self, branch):
+        # commits_note reads origin/<trunk>..origin/<branch>: the product checkout's remote
+        # refs are otherwise stale after a push from the worker clone.
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return lane.commits_note(self.repo, 'main', branch)
+
     def push_main(self, files, subject):
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
         sh(['git', 'checkout', '-q', '-B', 'tmp-main', 'origin/main'], cwd=self.worker)
@@ -504,6 +524,74 @@ class OwnCommits(LaneFixture):
         rec_ = self.lane_of('worker/T-0001')
         self.assertEqual(rec_['state'], lane.STALE)
         self.assertNotIn('own', rec_)
+
+
+class ProvesNote(LaneFixture):
+    """F-0257 S-59256 — the pull request says which lines are not proved. ``lane.commits_note``
+    builds a third block, ``## Not proved``, from the one ``git log`` it already runs."""
+
+    WHOLE = 'Proves: S-0021 line 5 — tests/guard.test.ts::"the type guard"'
+    QUALIFIED = ('Proves: S-0021 line 6 — tests/guard.test.ts '
+                 '(type guard, size guard, EXIF strip only)')
+    GAP = ('Not proved: S-0021 line 7 — the EXIF strip has no test yet; '
+           'the fixture needs a real JPEG')
+
+    def test_a_whole_claim_gives_items_and_proves_and_no_not_proved(self):
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a\n'}, 'task(T-0001): the type guard',
+                            self.WHOLE)
+        self.assertEqual(self.note('worker/T-0001'),
+                         '\n## Items\n\n- T-0001\n'
+                         '\n## Proves\n\n- S-0021 line 5 — tests/guard.test.ts::"the type guard"\n')
+
+    def test_the_cards_qualified_claim_gives_not_proved_and_no_proves(self):
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a\n'}, 'task(T-0001): the exif strip',
+                            self.QUALIFIED)
+        self.assertEqual(self.note('worker/T-0001'),
+                         '\n## Items\n\n- T-0001\n'
+                         '\n## Not proved\n\n- S-0021 line 6 — partial claim: "only" '
+                         '(tests/guard.test.ts (type guard, size guard, EXIF strip only))\n')
+
+    def test_one_of_each_gives_both_blocks_proves_first(self):
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a\n'}, 'task(T-0001): guard work',
+                            self.WHOLE + '\n' + self.QUALIFIED)
+        self.assertEqual(self.note('worker/T-0001'),
+                         '\n## Items\n\n- T-0001\n'
+                         '\n## Proves\n\n- S-0021 line 5 — tests/guard.test.ts::"the type guard"\n'
+                         '\n## Not proved\n\n- S-0021 line 6 — partial claim: "only" '
+                         '(tests/guard.test.ts (type guard, size guard, EXIF strip only))\n')
+
+    def test_a_not_proved_trailer_with_no_proves_anywhere_gives_not_proved_alone(self):
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a\n'}, 'task(T-0001): exif todo',
+                            self.GAP)
+        self.assertEqual(self.note('worker/T-0001'),
+                         '\n## Items\n\n- T-0001\n'
+                         '\n## Not proved\n\n- S-0021 line 7 — the EXIF strip has no test yet; '
+                         'the fixture needs a real JPEG\n')
+
+    def test_refused_claims_come_before_declared_gaps_whatever_order_they_were_written(self):
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a\n'}, 'task(T-0001): exif work',
+                            self.GAP + '\n' + self.QUALIFIED)
+        self.assertEqual(self.note('worker/T-0001'),
+                         '\n## Items\n\n- T-0001\n'
+                         '\n## Not proved\n\n- S-0021 line 6 — partial claim: "only" '
+                         '(tests/guard.test.ts (type guard, size guard, EXIF strip only))\n'
+                         '- S-0021 line 7 — the EXIF strip has no test yet; '
+                         'the fixture needs a real JPEG\n')
+
+    def test_a_branch_with_neither_and_an_unreadable_range_both_give_empty(self):
+        self.push_lane_empty('worker/T-0001')
+        self.assertEqual(self.note('worker/T-0001'), '')
+        self.assertEqual(lane.commits_note(os.path.join(self.base, 'no-such-repo'), 'main',
+                                           'worker/T-0001'), '')
+
+    def test_two_commits_the_trailer_on_the_older_one_still_produce_the_block(self):
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a\n'}, 'task(T-0001): the exif strip',
+                            self.QUALIFIED)
+        self.push_lane_body('worker/T-0001', {'b.txt': 'b\n'}, 'task(T-0001): tidy', new=False)
+        self.assertEqual(self.note('worker/T-0001'),
+                         '\n## Items\n\n- T-0001\n'
+                         '\n## Not proved\n\n- S-0021 line 6 — partial claim: "only" '
+                         '(tests/guard.test.ts (type guard, size guard, EXIF strip only))\n')
 
 
 class LaneRepo(LaneFixture):
