@@ -63,6 +63,12 @@ class SpawnError(Exception):
         self.clear = clear
 
 
+class BranchState(SpawnError):
+    """A launch refused by the job's own branch state — a stray local branch, commits origin
+    lacks, no worktree — not by the runtime: one job's leftover, so the cloud breaker never
+    counts it (F-0276, :class:`asf.workers.cloud.Breaker`)."""
+
+
 class WorktreeBusy(SpawnError):
     """The worktree is held by a live run: the item is already at work — a wait, not a fault."""
 
@@ -489,6 +495,34 @@ def _reclaim(product, repo, job, holder, branch, now=None):
 _HELD_BY = re.compile(r"already (?:used|checked out) by worktree at '?([^'\n]+?)'?\s*$", re.M)
 
 
+#: where a stray local branch's commits are kept before it is dropped (:func:`recover_stray`)
+RECOVERED_PREFIX = 'refs/asf/recovered'
+
+
+def recover_stray(product, repo, branch, now=None):
+    """Push the local ``branch``'s tip to ``refs/asf/recovered/<branch>/<UTC ts>`` on origin and
+    verify it there (F-0276). ``(ref, '')`` when origin holds it, else ``('', why)`` — nothing
+    is deleted without its recovery ref."""
+    from asf import gitops, gitpush
+    tip = gitops.rev_parse(repo, f'refs/heads/{branch}')
+    if not tip:
+        return '', f'no local tip for {branch}'
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(time.time() if now is None else now))
+    ref = f'{RECOVERED_PREFIX}/{branch}/{stamp}'
+    guard = refguard.refusal(ref, f'recover {branch}', product.main, None)
+    if guard:
+        return '', guard
+    r = gitpush.push(['-q', 'origin', f'{tip}:{ref}'], repo, refs_only=True,
+                     timeout=gitpush.push_timeout(getattr(product, 'conventions', None)),
+                     guard=refguard.guard_for(product, repo))
+    if r.returncode != 0:
+        return '', ' '.join((r.stderr or '').split())[:200] or 'push failed'
+    ls = gitops.git(['ls-remote', 'origin', ref], repo)
+    if not ls.ok or tip not in ls.data.split():
+        return '', f'{ref} not on origin after the push'
+    return ref, ''
+
+
 def _origin_sha(repo, branch):
     out = _git(['ls-remote', '--heads', 'origin', f'refs/heads/{branch}'], repo).strip()
     return out.split()[0] if out else ''
@@ -537,7 +571,7 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
             ref = _archive_tip(product, repo, branch, tip, limit)
             new = _new_patches(repo, tip, (dead, f'origin/{product.main}'))
             if new:
-                raise SpawnError(f'branch {branch} exists locally with commits past the closed '
+                raise BranchState(f'branch {branch} exists locally with commits past the closed '
                                  f'PR #{reset.get("pr")} and not on origin (archived as {ref}); '
                                  f'git cherry: {"; ".join(new[:3])}'
                                  + (f' and {len(new) - 3} more' if len(new) > 3 else '')
@@ -760,8 +794,15 @@ def _place_worktree(product, repo, job, branch):
         # revived card's old branch) is not lost by cutting fresh: it is dropped too
         ahead = _git(['rev-list', '--count', f'origin/{product.main}..{branch}'], repo)
         if ahead not in ('', '0') and not _archived_on_origin(repo, branch):
-            raise SpawnError(f'branch {branch} exists locally with {ahead} commit(s) not on '
-                             f'origin/{product.main} and no worktree — look before relaunching')
+            # saved, not left to block the job (F-0276): its tip goes to a recovery ref on
+            # origin, then the branch is cut fresh; a failed push keeps the refusal
+            ref, why = recover_stray(product, repo, branch)
+            if not ref:
+                raise BranchState(f'branch {branch} exists locally with {ahead} commit(s) not on '
+                                  f'origin/{product.main} and no worktree, and could not be saved '
+                                  f'({why}) — look before relaunching')
+            print(f'recovered stray {branch}: {ahead} commit(s) kept as {ref}; cut fresh',
+                  file=sys.stderr)
         _git(['branch', '-D', branch], repo)
     # origin does not hold the branch: a tracking ref the fetches never pruned is no head of it
     # (it would read as the launch head, and a session told to fetch it fails every tick)

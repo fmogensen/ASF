@@ -864,7 +864,8 @@ class TestSpawn(Home):
                                runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 52}]), cfg=self.cfg)
         self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=rec2['worktree']), rec['branch'])
 
-    def test_f0087_a_stray_local_branch_with_commits_is_refused_with_the_count(self):
+    def stray_branch(self):
+        """A local ``spec/F-0001`` one commit past origin/main, with no worktree: its tip."""
         git('branch', 'spec/F-0001', 'origin/main', cwd=self.repo)
         tmp_wt = os.path.join(self.tmp, 'stray')
         git('worktree', 'add', '-q', tmp_wt, 'spec/F-0001', cwd=self.repo)
@@ -874,14 +875,43 @@ class TestSpawn(Home):
             git('config', k, v, cwd=tmp_wt)
         git('add', 'x', cwd=tmp_wt)
         git('commit', '-q', '-m', 'x', cwd=tmp_wt)
+        tip = git('rev-parse', 'HEAD', cwd=tmp_wt)
         git('worktree', 'remove', '--force', tmp_wt, cwd=self.repo)
-        row = pool_mod.parse_row(json.dumps({'job': 'spec-f-0001', 'item': 'F-0001', 'state': 'CARD',
-                                             'action': 'SPEC', 'model': 'Opus', 'kind': 'spec',
-                                             'branch': 'spec/F-0001'}))
-        with self.assertRaises(spawn_mod.SpawnError) as cm:
-            spawn_mod.spawn(self.product, row, self.acct(), 'b',
+        return tip
+
+    def spec_row(self):
+        return pool_mod.parse_row(json.dumps({'job': 'spec-f-0001', 'item': 'F-0001',
+                                              'state': 'CARD', 'action': 'SPEC', 'model': 'Opus',
+                                              'kind': 'spec', 'branch': 'spec/F-0001'}))
+
+    def test_f0276_a_stray_local_branch_is_saved_to_a_recovery_ref_and_the_job_launches(self):
+        tip = self.stray_branch()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rec = spawn_mod.spawn(self.product, self.spec_row(), self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 61}]),
+                                  cfg=self.cfg)
+        refs = git('ls-remote', 'origin', 'refs/asf/recovered/*', cwd=self.repo).splitlines()
+        self.assertEqual(len(refs), 1, refs)
+        sha, ref = refs[0].split('\t')
+        self.assertEqual(sha, tip)                      # the unpushed commit is on origin
+        self.assertRegex(ref, r'^refs/asf/recovered/spec/F-0001/\d{8}T\d{6}Z$')
+        self.assertIn(f'kept as {ref}', err.getvalue())  # one line names the ref
+        # the launch cut the branch fresh from the trunk: the stray tip is gone locally
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=rec['worktree']),
+                         git('rev-parse', 'origin/main', cwd=self.repo))
+
+    def test_f0276_a_stray_branch_that_cannot_be_saved_is_refused_as_branch_state(self):
+        tip = self.stray_branch()
+        from asf import gitpush
+        refused = subprocess.CompletedProcess(['git', 'push'], 1, '', 'remote: denied')
+        with mock.patch.object(gitpush, 'push', return_value=refused), \
+                self.assertRaises(spawn_mod.BranchState) as cm:
+            spawn_mod.spawn(self.product, self.spec_row(), self.acct(), 'b',
                             runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
         self.assertIn('spec/F-0001 exists locally with 1 commit(s)', str(cm.exception))
+        self.assertIn('remote: denied', str(cm.exception))
+        self.assertEqual(git('rev-parse', 'refs/heads/spec/F-0001', cwd=self.repo), tip)  # kept
 
     def test_b0142_a_branch_held_by_an_external_worktree_waits_and_is_never_removed(self):
         # a worktree ASF did not create (outside ~/.ASF/state/<p>/worktrees) holds the branch —
