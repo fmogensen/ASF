@@ -168,14 +168,42 @@ def publish(tree, origin, name='fixture', email='fixture@example.com', trunk='ma
     _no_housekeeping(origin)  # `receive-pack` runs the same `--auto` hook on every push it gets
     git('init', '-q', '-b', trunk, cwd=tree)
     _no_housekeeping(tree)  # before the first commit: none of this repo's own can ever start one
-    git('config', 'user.email', email, cwd=tree)
-    git('config', 'user.name', name, cwd=tree)
+    identity(tree, name, email)
     git('add', '-A', cwd=tree)
     git('commit', '-q', '-m', message, cwd=tree)
     git('remote', 'add', 'origin', origin, cwd=tree)
     git('push', '-q', '-u', 'origin', trunk, cwd=tree)
     git('remote', 'set-head', 'origin', trunk, cwd=tree)
     return tree
+
+
+class OutsideSuite(AssertionError):
+    """A test asked to set a git identity in a repo that is not the suite's own (F-0281)."""
+
+
+def suite_roots():
+    """Where a repo the suite made lives: the temp dir (both spellings) and the suite's
+    ``ASF_HOME``."""
+    roots = {tempfile.gettempdir(), os.path.realpath(tempfile.gettempdir())}
+    if os.environ.get('ASF_HOME'):
+        roots.add(os.path.realpath(os.environ['ASF_HOME']))
+    return sorted(r for r in roots if r and r != os.sep)
+
+
+def identity(repo, name='Test', email='test@example.com'):
+    """Set ``repo``'s own git identity — the one sanctioned ``git config user.*`` site in the
+    suite (F-0281). The suite's global config already carries an identity
+    (:func:`asf.hermetic.suite_git_identity`), so only a test that needs a *different* author
+    calls this. ``repo`` must resolve under :func:`suite_roots`: a cwd that resolved to a real
+    repo once wrote ``Test <test@example.com>`` into an operator's record, and every record
+    commit after it was authored by the suite. Raises :class:`OutsideSuite` otherwise."""
+    real = os.path.realpath(repo)
+    if not any(real.startswith(root + os.sep) for root in suite_roots()):
+        raise OutsideSuite(f'{repo} resolves to {real}, outside the suite\'s temp roots '
+                           f'{suite_roots()} — a test sets a git identity only in its own repo')
+    for key, value in (('user.name', name), ('user.email', email)):
+        subprocess.run(['git', '-C', real, 'config', key, value], check=True,
+                       capture_output=True, text=True)
 
 
 def executable_asf(bin_dir):

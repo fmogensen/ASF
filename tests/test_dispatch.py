@@ -210,14 +210,30 @@ class Install(Fixture):
         with open(self.path) as f:
             self.assertEqual(f.read(), '#!/bin/sh\necho mine\n')
 
-    def test_a_live_pipx_link_is_left_alone(self):
+    def test_a_live_pipx_link_is_replaced_and_kept(self):
+        """F-0283: the link held the path, so every hook ran the shared install, never a pin."""
         os.remove(self.path)
         target = os.path.join(self.shared, 'bin', 'asf')
         os.symlink(target, self.path)
         rc, detail = self.write()
         self.assertEqual(rc, 0, detail)
-        self.assertIn('not written', detail)
+        self.assertTrue(dispatch.is_ours(self.path))
+        self.assertEqual(os.readlink(self.path + dispatch.LINK_BACKUP), target)
+        self.assertIn(dispatch.LINK_BACKUP, detail)
+
+    def test_a_pipx_link_with_nothing_to_fall_back_to_is_put_back(self):
+        os.remove(self.path)
+        shutil.rmtree(os.path.join(self.asf_home, 'state'))
+        target = os.path.join(self.tmp, 'gone-venv', 'bin', 'asf')
+        os.makedirs(os.path.dirname(target))
+        with open(target, 'w') as f:
+            f.write('not executable\n')
+        os.symlink(target, self.path)
+        with mock.patch.object(sys, 'prefix', sys.base_prefix):
+            rc, detail = self.write(default_product='nobody')
+        self.assertEqual(rc, 2, detail)
         self.assertEqual(os.readlink(self.path), target)
+        self.assertFalse(os.path.lexists(self.path + dispatch.LINK_BACKUP))
 
     def test_a_dangling_link_is_replaced(self):
         os.remove(self.path)

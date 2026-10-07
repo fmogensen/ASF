@@ -293,22 +293,77 @@ def _account_dirs(config):
     return [(m.group(1), m.group(3)) for m in ACCOUNT_DIR_RE.finditer(text)]
 
 
+#: A product file's ``repo_dir:`` / ``backlog_dir:`` line — read by a pattern for the same reason
+#: as :data:`ACCOUNT_DIR_RE`.
+PRODUCT_DIR_RE = re.compile(r'^(repo_dir|backlog_dir):\s*([\'"]?)([^\s#\'"]+)\2\s*(?:#.*)?$', re.M)
+
+
+def _product_repo_configs(products):
+    """``<dir>/.git/config`` of every ``repo_dir`` and ``backlog_dir`` the product files name."""
+    out = set()
+    for path in products:
+        try:
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for m in PRODUCT_DIR_RE.finditer(text):
+            out.add(os.path.join(os.path.expanduser(m.group(3)), '.git', 'config'))
+    return out
+
+
 def operator_files(home=None):
     """The operator's own files a suite must never write: the operator config and every product
-    file under ``<home>/.ASF``, the runtime's user settings under ``<home>``, and the settings
-    file in every worker account's ``config_dir`` (and ``home``) that config names — paths read
-    from the config itself, so nothing here knows where an operator keeps their accounts."""
+    file under ``<home>/.ASF``, the runtime's user settings under ``<home>``, the settings file in
+    every worker account's ``config_dir`` (and ``home``) that config names, and the git config of
+    every product repo and record (F-0281: a test's ``user.name=Test`` once landed in a real
+    record's ``.git/config``) — paths read from the config itself, so nothing here knows where an
+    operator keeps their accounts or their repos."""
     home = home or operator_home()
     asf_home = os.path.join(home, '.ASF')
     config = os.path.join(asf_home, 'config.yaml')
     out = {config, os.path.join(home, '.claude', 'settings.json')}
-    out.update(glob.glob(os.path.join(asf_home, 'products', '*.yaml')))
+    products = glob.glob(os.path.join(asf_home, 'products', '*.yaml'))
+    out.update(products)
     for key, value in _account_dirs(config):
         if key == 'config_dir':
             out.add(os.path.join(_under(home, value), 'settings.json'))
         else:
             out.add(os.path.join(_under(home, value), '.claude', 'settings.json'))
+    out.update(_product_repo_configs(products))
     return sorted(out)
+
+
+#: The git identity the suite commits as (:func:`suite_git_identity`) — and so the mark a git
+#: config the suite wrote into carries.
+SUITE_GIT_NAME = 'Test'
+SUITE_GIT_EMAIL = 'test@example.com'
+
+
+def suite_git_identity(root, environ=None):
+    """Point git's *global* config at a file the suite owns (``<root>/gitconfig``), holding
+    :data:`SUITE_GIT_NAME` <:data:`SUITE_GIT_EMAIL`>, and drop the system config (F-0281). A
+    fixture then needs no ``git config user.*`` of its own — the call that, run with a cwd that
+    resolved to a real repo, once wrote the suite's identity into an operator's record — and no
+    test ever reads the caller's global config. Called by both suite entry points. Returns the
+    file's path."""
+    environ = os.environ if environ is None else environ
+    path = os.path.join(root, 'gitconfig')
+    os.makedirs(root, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(f'[user]\n\tname = {SUITE_GIT_NAME}\n\temail = {SUITE_GIT_EMAIL}\n'
+                '[safe]\n\tdirectory = *\n')
+    environ['GIT_CONFIG_GLOBAL'] = path
+    environ['GIT_CONFIG_NOSYSTEM'] = '1'
+    return path
+
+
+def _identity_marks(path, data):
+    """A git config holding the suite's identity is marked as the suite's: it names no temp
+    path, so :func:`_suite_paths` alone would never blame it."""
+    if not data or not str(path).endswith(os.path.join('.git', 'config')):
+        return set()
+    return {b'identity:' + SUITE_GIT_EMAIL.encode()} if SUITE_GIT_EMAIL.encode() in data else set()
 
 
 def _read(path):
@@ -342,7 +397,7 @@ def _suite_paths(data, marks):
 def snapshot_operator_files(home=None):
     """``{path: (content, suite paths it names)}`` for every :func:`operator_files` path."""
     marks = suite_markers()
-    return {p: (data, _suite_paths(data, marks))
+    return {p: (data, _suite_paths(data, marks) | _identity_marks(p, data))
             for p in operator_files(home) for data in [_read(p)]}
 
 
@@ -356,7 +411,8 @@ def leaked_files(before, home=None):
     for path in sorted(set(before) | set(operator_files(home))):
         old, old_paths = before.get(path, (None, set()))
         data = _read(path)
-        if data is not None and data != old and _suite_paths(data, marks) - old_paths:
+        gained = (_suite_paths(data, marks) | _identity_marks(path, data)) - old_paths
+        if data is not None and data != old and gained:
             out.append(path)
     return out
 

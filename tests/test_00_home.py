@@ -41,6 +41,8 @@ def hermetic_home():
     os.environ[hermetic.RUNTIME_CONFIG_DIR] = os.path.join(chosen, 'runtime-config')
     # the host-pressure guard reads a quiet host: a loaded machine must not hold the suite's launches
     os.environ['ASF_HOST_READING'] = '0 1 0'
+    # F-0281: git's global config is the suite's own file, holding the suite's identity
+    hermetic.suite_git_identity(chosen)
     return chosen
 
 

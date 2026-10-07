@@ -1173,6 +1173,15 @@ class MoveOps:
         from asf import dispatch, hooks
         return hooks.install(env.load_product(product_name), dispatcher=dispatch.default_path())
 
+    def verify_hooks(self, product_name):
+        """:func:`asf.hooks.verify` — what is wrong with the git hooks just installed: one that
+        does not exec the dispatcher does not run the pin this move wrote (F-0283)."""
+        from asf import hooks
+        try:
+            return hooks.verify(env.load_product(product_name))
+        except (env.ConfigError, OSError) as e:
+            return [f'check did not run ({e})']
+
     def smoke(self, product_name):
         """``(ok_lines, failures)`` of :func:`asf.scheduler.smoke`: read-only commands under each
         written clock plist's exact environment and interpreter."""
@@ -1343,6 +1352,9 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
             out(line)
         if hrc:
             out(f'upgrade: WARNING — asf hooks install --product {product_name} exited {hrc}')
+        verify = getattr(ops, 'verify_hooks', None)
+        for line in (verify(product_name) if verify else ()):
+            out(f'upgrade: WARNING — hook {line}')
         # the smoke: what the clocks will run, under their plists' exact env and interpreter —
         # before a single clock resumes on it (2026-10-03: a render that lost gh from PATH
         # stopped the landing lane, and nothing in the move noticed)

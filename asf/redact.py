@@ -643,6 +643,21 @@ def _scan_pre_push_stdin(repo, pats, stdin):
     return findings
 
 
+def _staged_guard(repo, product_name):
+    """:func:`asf.record.staged_guard.check` over the commit being made, with the product's
+    trunk and intake dir when ``--product`` resolves (else origin's own ``HEAD`` and the default
+    intake dir)."""
+    from asf.record import staged_guard
+    trunk = intake = None
+    if product_name:
+        try:
+            product = env.load_product(product_name)
+            trunk, intake = product.main, product.conventions.intake_dir
+        except Exception:  # an unreadable product file never turns into a refused commit
+            pass
+    return staged_guard.check(repo, trunk=trunk, intake_dir=intake)
+
+
 def add_arguments(p):
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument('--staged', action='store_true')
@@ -666,6 +681,11 @@ def cmd_redact(args):
     if args.staged:
         findings, where = scan_staged(repo, pats), 'cli'
     elif args.pre_commit:
+        refusals = _staged_guard(repo, args.product)
+        if refusals:  # a card a stale tree deletes (F-0282): refused before any scan
+            for line in refusals:
+                print(line, file=sys.stderr)
+            return 1
         findings, where = scan_staged(repo, pats), 'hook-pre-commit'
     elif args.unpublished is not None:
         findings, where = scan_unpublished(repo, args.unpublished, pats), 'cli'

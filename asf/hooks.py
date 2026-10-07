@@ -125,9 +125,12 @@ def _git_hook_body(name, asf_path, product_name):
     """The redaction gate's hook ``name`` (F-0075). It must run wherever the repository is
     checked out — a hooks dir inside the work tree (``core.hooksPath``) is tracked, so a cloud
     container gets the same file with no ``asf`` installed (review-t-0356: every commit aborted
-    on a missing ``asf``). So: the install's own ``asf``, else ``$HOME/.local/bin/asf`` (an agent
-    home's link), else ``asf`` on ``PATH``; without any, the repository's own
-    ``tools/checks/redact.sh``; without that, the commit or push is REFUSED, loudly (exit 1):
+    on a missing ``asf``). So: the install's own ``asf`` (the dispatcher, :mod:`asf.dispatch`),
+    else ``$HOME/.local/bin/asf`` (an agent home's link to it) — never ``asf`` on ``PATH``,
+    which is whatever was installed last and not the product's pin (F-0283: a product's hooks
+    ran a months-old shared install while the product ran its pin); without either, the
+    repository's own ``tools/checks/redact.sh``; without that, the commit or push is REFUSED,
+    loudly (exit 1):
     a pushed branch is public before any landing re-scan reads it, so nothing unscanned leaves.
     The landing still re-scans a commit marked ``Redaction: unchecked``
     (:data:`asf.redact.UNCHECKED_TRAILER`) — a second layer for a mark made elsewhere. Never a
@@ -139,7 +142,6 @@ def _git_hook_body(name, asf_path, product_name):
         f'if [ -x "{asf_path}" ]; then exec "{asf_path}" redact --{name} --product {p}; fi',
         f'if [ -x "$HOME/.local/bin/asf" ]; then exec "$HOME/.local/bin/asf" redact --{name} '
         f'--product {p}; fi',
-        f'if command -v asf >/dev/null 2>&1; then exec asf redact --{name} --product {p}; fi',
         '# no asf here (a cloud container): the repository\'s own check, else refused',
         'top=$(git rev-parse --show-toplevel 2>/dev/null)',
         f'if [ -n "$top" ] && [ -x "$top/{CHECKS_DIR}/redact.sh" ]; then '
@@ -153,6 +155,31 @@ def _git_hook_body(name, asf_path, product_name):
         'exit 1',
     ]
     return '\n'.join(lines) + '\n'
+
+
+#: The second line of every hook :func:`_git_hook_body` writes — how a hook asf wrote itself is
+#: told from one ``asf init`` or an operator wrote (both of which may also be "ours").
+GIT_HOOK_MARKER = '# written by asf hooks install'
+
+
+def stale_own_hook(text, name, asf_path, product_name):
+    """The current body when ``text`` is a hook :func:`_git_hook_body` wrote (its
+    :data:`GIT_HOOK_MARKER`) that no longer reads as it would now — an older body (one that fell
+    back to ``asf`` on ``PATH``, F-0283) or one naming another ``asf`` than ``asf_path``. None
+    otherwise: a hook asf init or an operator wrote is never rewritten here."""
+    if GIT_HOOK_MARKER not in (text or '') or not is_git_hook_ours(text, name):
+        return None
+    body = _git_hook_body(name, asf_path, product_name)
+    return None if text == body else body
+
+
+def _own_upgrade(text, name, asf_path, product_name):
+    """:func:`stale_own_hook`, only when ``asf_path`` is the dispatcher: a hook is moved onto the
+    pin, never off it onto whatever ``asf`` happens to be installed."""
+    from asf import dispatch
+    if not dispatch.is_ours(asf_path):
+        return None
+    return stale_own_hook(text, name, asf_path, product_name)
 
 
 #: A pipx ``--suffix`` appended to the declared console-script name: empty, or starting with a
@@ -340,8 +367,9 @@ def ensure_git_hooks(product, which=shutil.which, withhold=()):
             if os.path.isfile(path):
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
-                upgrade = init_hook_upgrade(text, name) or staged_check_upgrade(text, name)
-                if upgrade is not None:  # ASF's own record hook, from before the gate or --staged
+                upgrade = (init_hook_upgrade(text, name) or staged_check_upgrade(text, name)
+                           or _own_upgrade(text, name, asf_path, product.name))
+                if upgrade is not None:  # ASF's own hook, from before the gate, --staged or the pin
                     with open(path, 'w', encoding='utf-8') as f:
                         f.write(upgrade)
                     os.chmod(path, 0o755)
@@ -446,7 +474,8 @@ def plan(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
             else:
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
-                if (init_hook_upgrade(text, name) or staged_check_upgrade(text, name)) is not None:
+                if (init_hook_upgrade(text, name) or staged_check_upgrade(text, name)
+                        or _own_upgrade(text, name, asf_path, product.name)) is not None:
                     action = 'upgrade'
                 elif is_git_hook_ours(text, name):
                     action = 'already ours'
@@ -624,8 +653,10 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
     ``dispatcher``: the path of the CLI dispatcher (:mod:`asf.dispatch`) — ``asf hooks install``
     passes the operator's ``~/.local/bin/asf``. It is written (or refreshed) first, and once it is
     asf's, every hook entry and git hook written here names it, so each one runs the pinned venv
-    of the product it acts on. A foreign file there is one more refusal; a pipx link still there
-    is left alone and the hooks name whatever ``asf`` is on PATH, as before.
+    of the product it acts on; a git hook asf wrote earlier naming anything else is rewritten
+    onto it. A foreign file there is one more refusal; a pipx link there is replaced (and kept
+    beside it, :func:`asf.dispatch.install`). A pinned product whose hooks would still name
+    something other than the dispatcher is a refusal too (F-0283): its hooks would not run its pin.
 
     Every hook that *can* be written is written before anything is refused: a foreign git hook
     or a missing ``repo_dir`` must never leave worker sessions without the approvals hook (the
@@ -657,6 +688,9 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
     asf_path, refusal = runnable_asf(which)
     if refusal:
         return 2, '\n'.join([refusal] + refusals)
+    pin_refusal = _pin_refusal(product, asf_path, dispatcher)
+    if pin_refusal:
+        refusals.append(pin_refusal)
 
     accounts = pool.accounts_from_config(cfg or env.load_config())
     for account in accounts:  # first, and never gated: no session runs without the guard
@@ -694,6 +728,64 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
     if refusals:
         return 2, '\n'.join([summary] + refusals)
     return 0, summary
+
+
+def _pinned(product):
+    from asf import dispatch
+    return bool(product and product.name) and os.path.isfile(dispatch.record_path(product.name))
+
+
+def _pin_refusal(product, asf_path, dispatcher=None):
+    """The ``NEEDS OPERATOR`` line when ``product`` is pinned (``state/<p>/install.json``) and the
+    hooks this install writes would name ``asf_path`` rather than the dispatcher: they would run
+    that install, not the pin (F-0283). None otherwise."""
+    from asf import dispatch
+    if not _pinned(product) or dispatch.is_ours(asf_path):
+        return None
+    return (f'NEEDS OPERATOR: {product.name} is pinned, but its hooks would run {asf_path}, not '
+            f'the dispatcher ({dispatcher or dispatch.default_path()}) — they would not run the '
+            f'pin. Move that file away, then asf hooks install --product {product.name}')
+
+
+def verify(product):
+    """The problems with ``product``'s installed git hooks, one line each — ``[]`` when every
+    pre-commit and pre-push of its ``repo_dir`` and ``backlog_dir`` is asf's and execs the
+    dispatcher (F-0283). Read-only. A hook that execs another ``asf``, or falls back to ``asf``
+    on ``PATH``, runs whatever was installed last rather than the product's pin; that is only a
+    problem for a pinned product, so an unpinned one is checked for presence alone."""
+    from asf import dispatch
+    pinned = _pinned(product)
+    out = []
+    for repo in [r for r in (product.repo_dir, product.backlog_dir) if r]:
+        try:
+            hooks_dir = git_hooks_dir(repo)
+        except HookDirOutsideConfine as e:
+            out.append(str(e))
+            continue
+        if hooks_dir is None:
+            out.append(f'{repo} is not a git repo')
+            continue
+        for name in GIT_HOOK_NAMES:
+            path = os.path.join(hooks_dir, name)
+            try:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    text = f.read()
+            except OSError:
+                out.append(f'{path} missing')
+                continue
+            if not is_git_hook_ours(text, name):
+                out.append(f'{path} is not asf\'s')
+                continue
+            if not pinned:
+                continue
+            entry = hook_entry(text, name)
+            if entry is None or not dispatch.is_ours(entry):
+                out.append(f'{path} execs {entry or "asf on PATH"}, not the dispatcher — it does '
+                           f'not run the pin of {product.name}')
+            elif re.search(r'(?m)^[^#\n]*command -v asf\b', text):
+                out.append(f'{path} falls back to asf on PATH — asf hooks install --product '
+                           f'{product.name} rewrites it')
+    return out
 
 
 def ensure_account_hooks(account, which=shutil.which):

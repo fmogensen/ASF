@@ -176,6 +176,8 @@ def operator_git_identity(operator_home=None):
     environ = dict(os.environ)
     if operator_home:
         environ['HOME'] = operator_home
+        # that home's own ~/.gitconfig, not a global file an inherited variable names elsewhere
+        environ.pop('GIT_CONFIG_GLOBAL', None)
     out = []
     for key in ('user.name', 'user.email'):
         try:

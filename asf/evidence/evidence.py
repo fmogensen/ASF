@@ -41,6 +41,7 @@ from asf.conventions import Conventions
 from asf.workers import githooks
 from asf.evidence import review
 from asf.evidence import review_store
+from asf.evidence import sources
 
 # An evidence-file path, not per-product config — no obvious Product field for it.
 # TODO(config): no Product field for this yet.
@@ -387,12 +388,11 @@ def resets_of(dead, live=()):
 def pr_list(product=None):
     product = product or env.load_product()
     cache = _cache_file("prs.json", product)
-    if os.path.exists(cache) and time.time() - os.path.getmtime(cache) < PR_TTL:
-        try:
-            with open(cache) as f:
-                return json.load(f)
-        except Exception:
-            pass
+    # keyed on the trunk as well as its age (F-0277): a landing makes the list stale at once
+    trunk = sources.trunk_sha(product)
+    cached = sources.read_pr_cache(cache, PR_TTL, trunk)
+    if cached is not None:
+        return cached
     # mergeCommit is extra vs. factory-board.py's field list: evidence.py needs the merge sha
     # (Feature/Task Closed rules), factory-board.py's board never did; `body` carries id tokens.
     raw = sh(f"gh pr list -R {product.repo_slug} --state all --limit 300 "
@@ -402,12 +402,7 @@ def pr_list(product=None):
         data = json.loads(raw) if raw else []
     except Exception:
         data = []
-    try:
-        with open(cache + f".{os.getpid()}", "w") as f:
-            json.dump(data, f)
-        os.replace(cache + f".{os.getpid()}", cache)
-    except Exception:
-        pass
+    sources.write_pr_cache(cache, data, trunk)
     return data
 
 
@@ -1392,6 +1387,23 @@ def merge_landed(ids, landed, product, green=None):
     return out
 
 
+#: The PR number in a merge-queue landing's subject (:data:`asf.trunk_watch.QUEUE_SUBJECT`).
+_QUEUE_NUMBER_RE = re.compile(r'^merge-queue: #(\d+) ')
+
+
+def queue_landed(commits):
+    """The PR numbers the merge queue landed on the trunk: every ``merge-queue: #<n> …`` subject
+    among ``commits`` (:func:`main_commits`' rows)."""
+    from asf.trunk_watch import QUEUE_SUBJECT
+    out = set()
+    for _sha, subject, _paths in _commit_rows(commits):
+        if QUEUE_SUBJECT.match(subject or ""):
+            m = _QUEUE_NUMBER_RE.match(subject)
+            if m:
+                out.add(int(m.group(1)))
+    return out
+
+
 def id_evidence(product, branches, prs, commits=None, green=None, merges=None, landed=None):
     """{id: {branches, open_prs, commit, green}} — every id a branch, PR or commit on main names.
 
@@ -1450,13 +1462,16 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None, l
         for iid in naming_ids(subject, product.main):
             r = rec(iid)
             r["commit"] = r["commit"] or sha
+    queued = queue_landed(commits)
     merged_prs = []
     for p in sorted(prs, key=lambda p: p.get("number") or 0):
         ids = pr_naming_ids(p)
         state = p.get("state")
         sha = (p.get("mergeCommit") or {}).get("oid") if state == "MERGED" else None
         for iid in ids:
-            if state == "OPEN":
+            # a PR the merge queue already landed on the trunk is not open, whatever a PR list
+            # read before the landing still says (F-0277)
+            if state == "OPEN" and p.get("number") not in queued:
                 rec(iid)["open_prs"].append(p["number"])
         if sha and ids and not lane_kind(p.get("headRefName"), prefixes):
             merged_prs.append((p, sha, ids))

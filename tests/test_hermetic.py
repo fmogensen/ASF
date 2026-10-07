@@ -6,6 +6,7 @@ import itertools
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -339,6 +340,132 @@ class OperatorFilesGuardTests(unittest.TestCase):
         self.assertEqual(leaked.returncode, hermetic.LEAK_EXIT, leaked.stderr)
         out = self.run_child(self.ENTRIES[0], 'open(path, "a").write("\\n")')
         self.assertEqual(out.returncode, 0, out.stderr)
+
+
+class SuiteGitIdentityTests(unittest.TestCase):
+    """F-0281: the suite's git identity never leaves its fixtures. Both entry points point git's
+    global config at a suite-owned file holding ``Test <test@example.com>``; a repo-local identity
+    is set only through ``gitfixture.identity``, which refuses a repo outside the temp roots; and a
+    product repo's ``.git/config`` that gains the identity is a leak at exit."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_both_entry_points_own_the_global_git_config(self):
+        for entry in OperatorFilesGuardTests.ENTRIES:
+            code = (f'{entry}\nimport os, subprocess\n'
+                    'print(os.environ["GIT_CONFIG_GLOBAL"])\n'
+                    'print(os.environ["GIT_CONFIG_NOSYSTEM"])\n'
+                    'print(subprocess.run(["git", "config", "--global", "user.email"], '
+                    'capture_output=True, text=True).stdout.strip())\n')
+            env = dict(os.environ, PYTHONPATH=self.ROOT)
+            env.pop('GIT_CONFIG_GLOBAL', None)
+            out = subprocess.run([sys.executable, '-c', code], cwd=self.ROOT, env=env,
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, entry + out.stderr)
+            path, nosystem, email = out.stdout.split('\n')[:3]
+            self.assertTrue(os.path.realpath(path).startswith(
+                os.path.realpath(tempfile.gettempdir())), path)
+            self.assertEqual(nosystem, '1')
+            self.assertEqual(email, hermetic.SUITE_GIT_EMAIL)
+
+    def test_a_fixture_commits_with_no_identity_of_its_own(self):
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(['git', 'init', '-q', repo], check=True)
+            subprocess.run(['git', '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'x'],
+                           check=True)
+            author = subprocess.run(['git', '-C', repo, 'log', '-1', '--format=%an <%ae>'],
+                                    capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(author, f'{hermetic.SUITE_GIT_NAME} <{hermetic.SUITE_GIT_EMAIL}>')
+            with open(os.path.join(repo, '.git', 'config')) as f:
+                self.assertNotIn('[user]', f.read())
+
+    def test_identity_refuses_a_repo_outside_the_suite(self):
+        from tests import gitfixture
+        with self.assertRaises(gitfixture.OutsideSuite):
+            gitfixture.identity(self.ROOT)  # the checkout under test is no fixture
+
+    def test_identity_sets_it_in_a_temp_repo(self):
+        from tests import gitfixture
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(['git', 'init', '-q', repo], check=True)
+            gitfixture.identity(repo, 'Other', 'other@example.com')
+            got = subprocess.run(['git', '-C', repo, 'config', '--local', 'user.email'],
+                                 capture_output=True, text=True).stdout.strip()
+            self.assertEqual(got, 'other@example.com')
+
+    def test_a_product_repos_git_config_that_gains_the_identity_is_a_leak(self):
+        op = tempfile.mkdtemp(prefix='asf-operator-')
+        self.addCleanup(shutil.rmtree, op, True)
+        record = os.path.join(op, 'record')
+        os.makedirs(os.path.join(record, '.git'))
+        cfg = os.path.join(record, '.git', 'config')
+        with open(cfg, 'w') as f:
+            f.write('[core]\n\tbare = false\n')
+        os.makedirs(os.path.join(op, '.ASF', 'products'))
+        with open(os.path.join(op, '.ASF', 'products', 'p.yaml'), 'w') as f:
+            f.write(f'product: p\nbacklog_dir: {record}\n')
+        self.assertIn(cfg, hermetic.operator_files(op))
+        before = hermetic.snapshot_operator_files(op)
+        with open(cfg, 'a') as f:
+            f.write(f'[user]\n\tname = Test\n\temail = {hermetic.SUITE_GIT_EMAIL}\n')
+        self.assertEqual(hermetic.leaked_files(before, op), [cfg])
+        # one that already carried it (an earlier leak) is not blamed on this run
+        before = hermetic.snapshot_operator_files(op)
+        with open(cfg, 'a') as f:
+            f.write('\n')
+        self.assertEqual(hermetic.leaked_files(before, op), [])
+
+    #: ``git config user.*`` sites per test file — the ratchet (F-0281): a file may only go
+    #: down, a new file starts at zero. A test that needs a repo-local author calls
+    #: ``gitfixture.identity`` (it refuses a repo outside the suite); most need none, since the
+    #: suite's global config carries one. The zero sweep is a later change.
+    IDENTITY_SITES = {
+        'test_backlog.py': 2,
+        'test_brief_facts.py': 4,
+        'test_check_generic.py': 2,
+        'test_ci_cancels.py': 2,
+        'test_clock_install.py': 6,
+        'test_customer_content.py': 2,
+        'test_drift.py': 2,
+        'test_gitfixture.py': 2,
+        'test_groom_adjudicate_reach.py': 2,
+        'test_harvest.py': 6,
+        'test_ingest.py': 2,
+        'test_install.py': 12,
+        'test_landing_stamp.py': 4,
+        'test_lane_off_tick.py': 2,
+        'test_operator_checkout_sync.py': 8,
+        'test_path_resolution.py': 4,
+        'test_product_checks.py': 2,
+        'test_progress.py': 2,
+        'test_readonly.py': 2,
+        'test_redact.py': 6,
+        'test_release_preview.py': 2,
+        'test_sample_product.py': 4,
+        'test_session_identity.py': 2,
+        'test_shadow.py': 5,
+        'test_tick.py': 4,
+        'test_tick_steps.py': 2,
+        'test_version.py': 6,
+    }
+
+    def test_no_new_git_identity_site(self):
+        pat = re.compile(re.escape("'config', ") + r"'user\.")
+        here = os.path.dirname(os.path.abspath(__file__))
+        over = []
+        for dirpath, _dirs, files in os.walk(here):
+            for name in files:
+                if not name.endswith('.py'):
+                    continue
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, here)
+                with open(path, encoding='utf-8') as f:
+                    n = len(pat.findall(f.read()))
+                if n > self.IDENTITY_SITES.get(rel, 0):
+                    over.append(f'{rel}: {n} > {self.IDENTITY_SITES.get(rel, 0)}')
+        self.assertEqual(over, [], 'a new `git config user.*` site in the suite — the suite\'s '
+                                   'global config already sets an identity; if a test needs '
+                                   'another author, call gitfixture.identity(repo, ...)')
 
 
 class GitEnvTests(unittest.TestCase):

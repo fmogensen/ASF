@@ -26,8 +26,10 @@ the script print, on stderr, which product it resolved, from what, and which CLI
 (the hook smoke script reads that line).
 
 :func:`install` writes the script — only where no file is, or over a file this module wrote (the
-:data:`MARKER` line). A pipx link still at the path is left alone (the shared install keeps
-answering, as before; uninstalling it frees the path), and any other file is refused.
+:data:`MARKER` line). A pipx link at the path is moved aside to ``<path>.pipx-link`` and
+replaced (F-0283: while it held the path, every hook ran the shared install, never a product's
+pin); its CLI is the last fallback the script bakes when no product is pinned. Any other file is
+refused.
 
 ``python -m asf.dispatch --product-of-dir <dir>`` prints the product holding ``<dir>`` (step 1's
 cwd lookup), or nothing.
@@ -45,6 +47,10 @@ MARKER = '# asf dispatcher — written by `asf hooks install`'
 
 #: The dispatcher's place, relative to a HOME: where hooks, git hooks and scripts call the CLI.
 REL_PATH = os.path.join('.local', 'bin', 'asf')
+
+#: The suffix a shared install's link (pipx) at the dispatcher's path is kept under when
+#: :func:`install` replaces it.
+LINK_BACKUP = '.pipx-link'
 
 #: A product's pin record, relative to its state directory (written by ``asf upgrade --product``).
 INSTALL_RECORD = 'install.json'
@@ -190,8 +196,8 @@ def render(asf_home, venvs, default_product, default_cli_path, py):
 
 def install(path=None, asf_home=None, venvs=None, default_product=None, cli=None):
     """Write the dispatcher at ``path`` (default :func:`default_path`). Returns ``(rc, detail)``:
-    rc 0 when it is written or already current, or when a pipx link still holds the path (left
-    alone — the shared install answers as before); rc 2 with a ``NEEDS OPERATOR`` line when the
+    rc 0 when it is written or already current — a pipx link at the path is moved aside to
+    ``<path>``:data:`LINK_BACKUP` first; rc 2 with a ``NEEDS OPERATOR`` line when the
     path holds a file this module did not write, or when there is no CLI to fall back to."""
     path = path or default_path()
     asf_home = os.path.abspath(asf_home or env.ASF_HOME)
@@ -201,11 +207,23 @@ def install(path=None, asf_home=None, venvs=None, default_product=None, cli=None
             default_product = env.load_config().get('default_product') or ''
         except (env.ConfigError, OSError, ValueError):
             default_product = ''
+    backup = None
     if os.path.islink(path):
         if os.path.exists(path):
-            return 0, (f'dispatcher: not written — {path} is still the shared install\'s link '
-                       '(uninstalling it frees the path)')
-        os.remove(path)                       # a dangling link: the install it named is gone
+            # the shared install's link (pipx): every hook naming this path ran that install,
+            # never a product's pin (F-0283). It is moved aside — kept, so it can be put back —
+            # and its CLI stays the last fallback when nothing else is pinned
+            target = os.path.realpath(path)
+            backup = path + LINK_BACKUP
+            if os.path.lexists(backup):
+                os.remove(backup)
+            os.replace(path, backup)
+            cli = cli or default_cli(path, default_product, asf_home, venvs) or (
+                target if _executable(target) and not is_ours(target) else None)
+            if not cli:
+                os.replace(backup, path)
+        else:
+            os.remove(path)                   # a dangling link: the install it named is gone
     elif os.path.exists(path) and not is_ours(path):
         return 2, (f'NEEDS OPERATOR: {path} is not asf\'s dispatcher — move it away, then '
                    'asf hooks install again')
@@ -230,7 +248,8 @@ def install(path=None, asf_home=None, venvs=None, default_product=None, cli=None
         f.write(text)
     os.chmod(tmp, 0o755)
     os.replace(tmp, path)                     # a hook mid-call reads the old or the new, never half
-    return 0, f'dispatcher: {path} written (default {cli})'
+    kept = f'; the shared install\'s link kept as {backup}' if backup else ''
+    return 0, f'dispatcher: {path} written (default {cli}){kept}'
 
 
 def main(argv=None):

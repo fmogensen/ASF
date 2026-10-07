@@ -56,6 +56,29 @@ class NewPublishesTests(unittest.TestCase):
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), git(self.origin, 'rev-parse', 'main'))
 
+    def test_a_refused_commit_leaves_nothing_of_itself_in_the_checkout(self):
+        """F-0282: the pre-commit refuses — the card the command created is removed and the card
+        it edited is back to HEAD, so no later record write sweeps either up."""
+        from asf.record import publish
+        hooks = os.path.join(self.tmp, 'hooks')
+        os.makedirs(hooks)
+        with open(os.path.join(hooks, 'pre-commit'), 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\necho refused >&2\nexit 1\n')
+        os.chmod(os.path.join(hooks, 'pre-commit'), 0o755)
+        git(self.root, 'config', 'core.hooksPath', hooks)
+        write_new_item(self.root, {}, 'story', 'S-0002', {'title': 'New', 'parent': 'F-0001'},
+                       '', '2026-01-01', 'test')
+        parent = os.path.join(self.root, 'features', 'F-0001.md')
+        with open(parent, 'a', encoding='utf-8') as f:
+            f.write('an edit the command made\n')
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(subprocess.CalledProcessError):
+                publish.commit_paths(self.root, ['stories/S-0002.md', 'features/F-0001.md'],
+                                     'record: new story S-0002')
+        self.assertFalse(os.path.exists(os.path.join(self.root, 'stories', 'S-0002.md')))
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertIn('put back', err.getvalue())
+
     def test_write_new_item_state_keyword(self):
         write_new_item(self.root, {}, 'decision', 'D-0001', {'title': 'A decision'}, '',
                        '2026-01-01', 'seed', state='Closed')
