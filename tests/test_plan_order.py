@@ -3,12 +3,20 @@ minted without it, and as the wave's guard when a card still lacks it. Before th
 plan launched at once, and each successor's coder ended `empty branch: nothing to land`."""
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
+from asf import env
+from asf.evidence import evidence
 from asf.feeder import rows as feeder_rows
 from asf.record import plan_order, plan_tasks
 from tests.test_plan_tasks import FOLDERS, read, write_item
+
+GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
+               GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid',
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
 
 WAVES_PLAN = """# Plan F-0001
 
@@ -235,6 +243,98 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(by_id['T-0002'].action, 'WAITS ON T-0001')
         self.assertFalse(by_id['T-0002'].launches)
         self.assertTrue(by_id['T-0004'].launches)  # T-0003 is Closed
+
+
+class BatchedPlanReads(unittest.TestCase):
+    """D13: ``TrunkReader`` is a drop-in for ``trunk_reader``'s old closure, with a batched
+    warm-up — ``backfill`` and ``overlay`` call ``prefetch`` only when the reader has one."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='batched_plan_reads_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        origin = os.path.join(self.tmp, 'origin.git')
+        work = os.path.join(self.tmp, 'work')
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', origin], check=True,
+                       capture_output=True, env=GIT_ENV)
+        subprocess.run(['git', 'clone', '-q', origin, work], check=True, capture_output=True,
+                       env=GIT_ENV)
+        self.plans = {}
+        for n in range(5):
+            path = f'docs/plans/plan{n}.md'
+            self.plans[path] = f'# Plan {n}\n'
+        self.plans['docs/plans/f-0001.md'] = WAVES_PLAN
+        self.plans['docs/plans/f-0002.md'] = TABLE_PLAN
+        for path, text in self.plans.items():
+            full = os.path.join(work, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, 'w', encoding='utf-8') as f:
+                f.write(text)
+        subprocess.run(['git', '-C', work, 'add', '.'], check=True, capture_output=True,
+                       env=GIT_ENV)
+        subprocess.run(['git', '-C', work, 'commit', '-q', '-m', 'plans'], check=True,
+                       capture_output=True, env=GIT_ENV)
+        subprocess.run(['git', '-C', work, 'push', '-q', 'origin', 'main'], check=True,
+                       capture_output=True, env=GIT_ENV)
+        repo = os.path.join(self.tmp, 'repo')
+        subprocess.run(['git', 'clone', '-q', origin, repo], check=True, capture_output=True,
+                       env=GIT_ENV)
+        self.product = env.Product('sample', {'repo_dir': repo, 'main': 'main'})
+        self.five = [f'docs/plans/plan{n}.md' for n in range(5)]
+
+    def backfill_fixture(self):
+        root = tempfile.mkdtemp(prefix='batched_plan_reads_backfill_')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for f in FOLDERS:
+            os.makedirs(os.path.join(root, f))
+        write_item(root, 'E-0001', 'epic', 'Factory')
+        write_item(root, 'F-0001', 'feature', 'The reader', parent='E-0001')
+        write_item(root, 'S-0001', 'story', 'Read it', parent='F-0001')
+        write_task(root, 'T-0010', 'the reader', state='Closed')
+        write_task(root, 'T-0011', 'the writer', state='Active')
+        write_task(root, 'T-0012', 'the table', state='Active')
+        return root
+
+    def test_trunk_reader_is_callable_with_one_path_as_the_closure_is_today(self):
+        reader = plan_order.trunk_reader(self.product)
+        self.assertEqual(reader('docs/plans/plan0.md'), '# Plan 0\n')
+        self.assertIsNone(reader('docs/plans/no-such-plan.md'))
+
+    def test_prefetch_over_five_plans_makes_two_processes_and_the_five_reads_make_none(self):
+        reader = plan_order.trunk_reader(self.product)
+        real = subprocess.run
+        with mock.patch.object(evidence.subprocess, 'run', side_effect=real) as run:
+            reader.prefetch(self.five)
+            self.assertEqual(run.call_count, 2)
+            for n, path in enumerate(self.five):
+                self.assertEqual(reader(path), f'# Plan {n}\n')
+            self.assertEqual(run.call_count, 2)  # the five reads above cost nothing more
+
+    def test_a_path_outside_the_prefetch_is_still_read(self):
+        reader = plan_order.trunk_reader(self.product)
+        reader.prefetch(self.five[:2])
+        self.assertEqual(reader(self.five[3]), '# Plan 3\n')
+
+    def test_backfill_handed_a_bare_lambda_behaves_as_before(self):
+        root = self.backfill_fixture()
+        written = plan_order.backfill(root, lambda path: WAVES_PLAN, out=lambda *_: None)
+        self.assertEqual(written, {'T-0012': ['T-0010', 'T-0011']})
+
+    def test_backfill_handed_a_trunk_reader_writes_the_same_after_values(self):
+        root = self.backfill_fixture()
+        reader = plan_order.trunk_reader(self.product)
+        written = plan_order.backfill(root, reader, out=lambda *_: None)
+        self.assertEqual(written, {'T-0012': ['T-0010', 'T-0011']})
+
+    def test_overlay_handed_a_bare_lambda_behaves_as_before(self):
+        items = plan_order.overlay(GuardTests.ITEMS, lambda path: TABLE_PLAN)
+        self.assertEqual(items['T-0002']['after'], ['T-0001'])
+        self.assertEqual(items['T-0004']['after'], ['T-0003'])
+
+    def test_overlay_handed_a_trunk_reader_writes_the_same_after_values(self):
+        reader = plan_order.trunk_reader(self.product)
+        items = plan_order.overlay(GuardTests.ITEMS, reader)
+        self.assertEqual(items['T-0002']['after'], ['T-0001'])
+        self.assertEqual(items['T-0004']['after'], ['T-0003'])
 
 
 if __name__ == '__main__':

@@ -2,11 +2,19 @@
 before this, a Feature sat at plan-approved for ever with nothing for the feeder to launch."""
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
+from asf import env
+from asf.evidence import evidence
 from asf.record import frontmatter
 from asf.record import plan_tasks
+
+GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
+               GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid',
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
 
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
 FOLDER_OF = {'epic': 'epics', 'feature': 'features', 'story': 'stories', 'task': 'tasks'}
@@ -225,6 +233,93 @@ class SkipsSayWhy(unittest.TestCase):
             fh.write(content.replace('state: New', 'state: Resolved'))
         self.mint(ev=self.ev(alias='F-0001'))
         self.assertEqual(self.lines, [])
+
+
+PLAN2 = """# Plan F-0002
+
+### Task 1: the second reader
+stories: S-0001
+writes: asf/record/reader2.py
+
+### Task 2: the second table
+stories: S-0001
+writes: asf/views/table2.py
+"""
+
+
+class BatchedMint(unittest.TestCase):
+    """D14: ``_mint`` collects the refs of every Feature about to mint, then reads them in one
+    ``evidence.read_refs`` — the same cards mint, in the same order, as reading each ref where it
+    was needed. The injected ``read_ref`` (the tests' seam) stays, and mints identically."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='batched_mint_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        origin = os.path.join(self.tmp, 'origin.git')
+        work = os.path.join(self.tmp, 'work')
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', origin], check=True,
+                       capture_output=True, env=GIT_ENV)
+        subprocess.run(['git', 'clone', '-q', origin, work], check=True, capture_output=True,
+                       env=GIT_ENV)
+        for path, text in (('docs/plans/f-0001.md', PLAN), ('docs/plans/f-0002.md', PLAN2)):
+            full = os.path.join(work, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, 'w', encoding='utf-8') as f:
+                f.write(text)
+        subprocess.run(['git', '-C', work, 'add', '.'], check=True, capture_output=True,
+                       env=GIT_ENV)
+        subprocess.run(['git', '-C', work, 'commit', '-q', '-m', 'plans'], check=True,
+                       capture_output=True, env=GIT_ENV)
+        subprocess.run(['git', '-C', work, 'push', '-q', 'origin', 'main'], check=True,
+                       capture_output=True, env=GIT_ENV)
+        repo = os.path.join(self.tmp, 'repo')
+        subprocess.run(['git', 'clone', '-q', origin, repo], check=True, capture_output=True,
+                       env=GIT_ENV)
+        self.product = env.Product('sample', {'repo_dir': repo, 'main': 'main'})
+
+    def fixture(self):
+        root = tempfile.mkdtemp(prefix='batched_mint_root_')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for f in FOLDERS:
+            os.makedirs(os.path.join(root, f))
+        write_item(root, 'E-0001', 'epic', 'Factory')
+        write_item(root, 'F-0001', 'feature', 'The reader', parent='E-0001')
+        write_item(root, 'F-0002', 'feature', 'The second reader', parent='E-0001')
+        write_item(root, 'S-0001', 'story', 'Read it', parent='F-0001')
+        return root
+
+    def ev(self):
+        return {'features': {
+            'f-0001': {'plan': 'origin/main:docs/plans/f-0001.md', 'plan_on_main': True,
+                       'spec_on_main': True},
+            'f-0002': {'plan': 'origin/main:docs/plans/f-0002.md', 'plan_on_main': True,
+                       'spec_on_main': True}}}
+
+    def test_one_read_refs_mints_the_same_cards_in_the_same_order(self):
+        root = self.fixture()
+        real = subprocess.run
+        # satisfied_on_trunk (F-0106) and the id-claim check are their own, unrelated readers —
+        # not what this case measures, so both are held fixed while `_batch` is counted
+        with mock.patch.object(plan_tasks.trunk_check, 'satisfied_on_trunk', return_value=None), \
+                mock.patch.object(plan_tasks, '_claim_view', return_value=[]), \
+                mock.patch.object(evidence.subprocess, 'run', side_effect=real) as run:
+            made = plan_tasks.mint_plan_tasks(root, self.product, self.ev(), out=lambda *_: None)
+        self.assertEqual(made, ['T-0001', 'T-0002', 'T-0003', 'T-0004'])
+        self.assertEqual(read(root, 'task', 'T-0001')[0]['writes'], ['asf/record/reader.py',
+                                                                      'tests/test_reader.py'])
+        self.assertEqual(read(root, 'task', 'T-0003')[0]['writes'], ['asf/record/reader2.py'])
+        self.assertEqual(run.call_count, 2)  # one read_refs round-trip for both Features' plans
+
+    def test_the_injected_reader_mints_identically(self):
+        root = self.fixture()
+        texts = {'origin/main:docs/plans/f-0001.md': PLAN,
+                 'origin/main:docs/plans/f-0002.md': PLAN2}
+        made = plan_tasks.mint_plan_tasks(root, self.product, self.ev(), out=lambda *_: None,
+                                          read_ref=lambda ref: texts[ref])
+        self.assertEqual(made, ['T-0001', 'T-0002', 'T-0003', 'T-0004'])
+        self.assertEqual(read(root, 'task', 'T-0001')[0]['writes'], ['asf/record/reader.py',
+                                                                      'tests/test_reader.py'])
+        self.assertEqual(read(root, 'task', 'T-0003')[0]['writes'], ['asf/record/reader2.py'])
 
 
 if __name__ == '__main__':
