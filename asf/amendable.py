@@ -14,6 +14,7 @@ import os
 import re
 
 from asf import conventions as conv_mod
+from asf import env
 from asf import hooks
 from asf.record import core
 build = importlib.import_module('asf.briefs.build')  # `asf.briefs.build` the attribute is a function
@@ -187,3 +188,36 @@ def glob_set(product):
     """``(paths, excluded)`` for ``product`` — what an edge resolves once and threads to a
     product-free reader, as ``footprint.shared_globs`` does for ``conventions.shared_paths``."""
     return (paths(product), excluded(product))
+
+
+def check_doctor(cfg, product):
+    """The doctor's ``amendable`` row: ``(ok, detail)`` — the set itself, not the matrix
+    (:func:`asf.approvals.check_doctor` already reads that).
+
+    Not ok when the matrix does not load — the same failure that row already carries, named
+    here too since the counts below read it. Otherwise ok, naming the kind and glob counts,
+    where they come from, and the two levels that bound the set: the write side (always
+    refused — ``touch_amendable_set`` only ever loads at ``human-now``) and the merge side
+    (``merge_amendable_set``'s level). A note is added when either side is loosened: the
+    product opted out (`conventions.amendable_paths: []`) or `merge_amendable_set` is `auto` —
+    the write gate still holds but nothing lands it."""
+    from asf import approvals
+    try:
+        levels = approvals.matrix(product)
+    except env.ConfigError as e:
+        return False, str(e)
+
+    n = len(kinds(product))
+    m = len(paths(product))
+    merge_level = levels['merge_amendable_set'][0]
+    detail = f'{n} kinds, {m} globs ({source(product)}); write: refused, merge: {merge_level}'
+
+    notes = []
+    if source(product) == 'yaml' and m == 0:
+        notes.append('conventions.amendable_paths: [] — nothing is protected')
+    if merge_level == 'auto':
+        notes.append('the write gate holds but any branch lands — the set is protected at'
+                      ' only one end')
+    if notes:
+        detail += '; ' + '; '.join(notes)
+    return True, detail

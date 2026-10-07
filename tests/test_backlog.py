@@ -1,3 +1,6 @@
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -10,7 +13,7 @@ from unittest import mock
 from asf.init import STREAM_FOLDERS
 from asf.record import frontmatter
 from asf.record import check as check_mod
-from asf import hermetic, redact
+from asf import env, hermetic, redact
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
@@ -977,6 +980,39 @@ class CheckCommandTests(unittest.TestCase):
         run(['index'], self.root)
         r = run(['check'], self.root)
         self.assertIn('intersects Active task', r.stdout)
+
+    def test_task_writing_the_amendable_set_is_a_finding(self):
+        # F-0024 §2.6: a Task whose writes: reaches the amendable set can only ever be
+        # refused — asf check says so at plan time, before the hook ever has to
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        os.makedirs(os.path.join(home, 'products'))
+        old_home = env.ASF_HOME
+        env.ASF_HOME = home
+        self.addCleanup(lambda: setattr(env, 'ASF_HOME', old_home))
+        with open(os.path.join(home, 'products', 'demo.yaml'), 'w') as f:
+            f.write('product: demo\nmain: main\n')
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        write_item(self.root, 'T-0001', 'task', 'Touch the rules', parent='F-0001',
+                   typed_lines=["writes: [rules/*]"])
+        run(['index'], self.root)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = check_mod.cmd_check(argparse.Namespace(product='demo', paths=[]), self.root)
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertIn("writes: 'rules/*' reaches the amendable set", out.getvalue())
+        self.assertIn('file a proposal instead (F-0024)', out.getvalue())
+
+    def test_task_writing_the_amendable_set_with_no_product_is_clean(self):
+        # PD12: a product that will not load is "no amendable check", not a crash
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        write_item(self.root, 'T-0001', 'task', 'Touch the rules', parent='F-0001',
+                   typed_lines=["writes: [rules/*]"])
+        run(['index'], self.root)
+        r = run(['check'], self.root)  # no --product: the subprocess resolves none
+        self.assertNotIn('reaches the amendable set', r.stdout)
 
     def test_active_task_writes_no_overlap_is_clean(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory')

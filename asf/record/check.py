@@ -173,14 +173,15 @@ def staged_paths(repo, prefix=''):
 
 
 def cmd_check(args, root):
-    shared = footprint.shared_globs(product_of(args))
+    product = product_of(args)
+    shared = footprint.shared_globs(product)
     if getattr(args, 'staged', False):
         return cmd_check_staged(root, shared)
     paths = args.paths or None
     restrict = None
     if paths:
         restrict = {os.path.relpath(os.path.abspath(p), root) for p in paths}
-    findings, warnings, _index_wrong = record_findings(root, shared=shared)
+    findings, warnings, _index_wrong = record_findings(root, shared=shared, product=product)
     if restrict is not None:
         findings = [f for f in findings
                     if f[0] in restrict or f[0] == 'index.json' or f[0] in LAYOUT]
@@ -200,7 +201,7 @@ INDEX_STALE = 'index.json is stale (run `asf index`)'
 INDEX_MISSING = 'index.json is missing (run `asf index`)'
 
 
-def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
+def record_findings(root, scrub=None, layout=True, shared=(), pats=None, product=None):
     """Every check over the record at ``root``: ``(findings, warnings, index_wrong)`` — findings
     and warnings as ``(relpath, line, message)``; ``index_wrong`` the ``index.json`` entries that
     differ from what the cards derive, one ``(id, expected, on disk)`` key each (a card that fails
@@ -213,7 +214,10 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
     its own. ``layout`` False skips the layout folders (a scratch copy of the record has only its
     cards). ``shared``: the product's ``conventions.shared_paths``, passed to the Active-Task
     overlap check so a lockfile the product declares never reads as two Tasks' footprints
-    intersecting."""
+    intersecting. ``product``: resolved by the caller (:func:`product_of`, None for one that will
+    not load) — a Task whose ``writes:`` reaches the amendable set (F-0024 §2.6) is a finding;
+    with no product there is nothing to read the set from, so the check is skipped rather than
+    guessed at (PD12)."""
     by_id, parse_errors = load_items(root)
     canonical, dupes = canonicalize(by_id)
     derived = compute_derived(canonical)
@@ -425,6 +429,23 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None):
     for a, b, g1, g2 in invariants.unordered_overlaps(tasks, shared):
         rec = canonical[a]
         add(rec, find_line(rec, 'writes'), f"writes: {g1!r} intersects Active task {b}'s {g2!r}")
+
+    # a Task whose writes: reaches the amendable set can only ever be refused (F-0024 §2.6):
+    # no product, no amendable set to read it against (PD12)
+    if product is not None:
+        from asf import amendable
+        for iid, rec in canonical.items():
+            meta = rec['meta']
+            if meta.get('type') != 'task' or meta.get('removed'):
+                continue
+            g = amendable.reaches(product, meta.get('writes') or [])
+            if g is None:
+                continue
+            kind = amendable.kind_of(product, g)
+            clause = f' ({kind.name})' if kind else ''
+            add(rec, find_line(rec, 'writes'),
+                f"{iid}: writes: {g!r} reaches the amendable set{clause} — no session edits it;"
+                f" file a proposal instead (F-0024)")
 
     # supersession: dangling, half-written and cyclic pairs — messages and sort are conflicts'
     findings.extend(conflicts.supersession_findings(canonical, find_line))

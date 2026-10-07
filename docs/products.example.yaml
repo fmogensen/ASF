@@ -170,8 +170,12 @@ conventions:
   # docs/config.example.yaml is the measurement this routing was chosen from.
   # models:
   #   review: light
-  # F-0031: globs whose match makes a landed branch's merge class merge_amendable_set (needs a
-  # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
+  # F-0024: the amendable set — no session writes it (touch_amendable_set, refused), and a
+  # landed branch reaching it takes merge_amendable_set (needs a person, see approvals: below)
+  # rather than merge_routine_pr. Three states: unset (the default here) is the six built-in
+  # kinds asf.amendable.kinds derives from the product's own conventions (rule cards, checks,
+  # hooks, role agents, briefs, evals); a list is that list, verbatim, in place of the six kinds;
+  # [] opts out — the set is empty, and both gates above go quiet.
   amendable_paths: [rules/*, docs/CONSTITUTION.md]
   # asf.evidence.discover: the parity matrix file read for Story status. Leave out and the
   # product has no such thing — nothing looks for it.
@@ -503,6 +507,7 @@ approvals:
   touch_security: human-now
   touch_customer_data: human-now
   touch_legal: human-now
+  touch_amendable_set: human-now  # F-0024: a session writing the factory's own rules
   new_epic: human-now
   merge_amendable_set: human-now
   merge_routine_pr: auto

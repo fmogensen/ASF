@@ -12,6 +12,12 @@ A seventh row, **approvals**, reads the product's approval matrix (:func:`asf.ap
 F-0031 §2.5): red when the matrix does not load, otherwise ok with what is legal but probably not
 meant — a class left to its default, a held class nothing can recognise, an empty amendable set.
 
+A row beside it, **amendable** (:func:`asf.amendable.check_doctor`, F-0024 §2.6), reads the set
+itself rather than the matrix: the kind and glob counts, where they came from, and the two levels
+that bound it — red only when the matrix does not load; ok with a note when the product opted
+out (`amendable_paths: []`) or `merge_amendable_set` is `auto`, since either leaves the set
+protected at only one end.
+
 An eighth row, **redaction-hooks** (:func:`check_redaction_hooks`, F-0075 §2.4, T-0025), confirms
 the redaction gate's ``pre-commit`` and ``pre-push`` are in place in every repo the product
 configures — read-only, unlike ``asf hooks install`` (:func:`asf.hooks.ensure_git_hooks`), which
@@ -69,7 +75,9 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
+from asf import (
+    amendable, approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens,
+)
 from asf.workers import lifecycle, pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -1570,6 +1578,8 @@ def run(product_name):
     rows.append(('one-factory', True, ok, detail))
     ok, detail = approvals.check_doctor(cfg, product)
     rows.append(('approvals', True, ok, detail))
+    ok, detail = amendable.check_doctor(cfg, product)
+    rows.append(('amendable', True, ok, detail))
     ok, detail = check_redaction_hooks(product)
     rows.append(('redaction-hooks', True, ok, detail))
     ok, detail = check_approvals_hook(cfg, product)

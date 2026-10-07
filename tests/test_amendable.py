@@ -2,6 +2,8 @@
 tenth class that refuses a session's write to it and cannot be widened, granted away, or made to
 park a wave.
 """
+import argparse
+import contextlib
 import importlib
 import io
 import json
@@ -12,7 +14,9 @@ import unittest
 
 from asf import amendable, approvals, env, hooks
 from asf.env import Product
+from asf.record import check as check_mod
 from asf.record import core
+from asf.record.index import refresh as index_refresh
 from asf.tick import tick
 from tests.test_tick import TickTestCase, _git
 build = importlib.import_module('asf.briefs.build')  # `asf.briefs.build` the attribute is a function
@@ -507,6 +511,103 @@ class PolicyTests(TickTestCase):
         # parked: no session edits the amendable set, so a relaunch spends a slot on a refusal
         # a touch_security refusal parks nothing: the session was told to finish another way
         self.assertEqual(held, {self.ITEM: ('touch_amendable_set', 'human-now')})
+
+
+def _item_text(id_, type_, title, parent=None, typed_lines=()):
+    lines = [f'id: {id_}', f'type: {type_}', f'title: {title}']
+    if parent:
+        lines.append(f'parent: {parent}')
+    lines.extend(typed_lines)
+    lines.append('# ---- machine ----')
+    lines.extend(['schema_version: 1', 'state: New', 'stage_since: 2026-01-01T00:00:00Z',
+                  'updated: 2026-01-01T00:00:00Z'])
+    header = '\n'.join(lines)
+    body = ('## Description\n\n## Acceptance\n- [ ] \n\n## Non-goals\n\n## History\n'
+            '- 2026-01-01: created\n\n## Children\n\n## Backlinks\n')
+    return f'---\n{header}\n---\n{body}'
+
+
+_FOLDER_OF = {'epic': 'epics', 'feature': 'features', 'task': 'tasks'}
+
+
+def _write_item(root, id_, type_, title, **kw):
+    path = os.path.join(root, _FOLDER_OF[type_], f'{id_}.md')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(_item_text(id_, type_, title, **kw))
+    return path
+
+
+class SurfaceTests(unittest.TestCase):
+    """§3.6 — `asf check` refuses a Task whose ``writes:`` reaches the amendable set, naming the
+    kind when the matched glob is itself a listed path, and is silent with no product to read
+    the set from (PD12). (The doctor's own row is tests/test_doctor.py's; `asf approvals`
+    printing the set under the matrix is left out of this Task — see its report.)"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.tmp, 'home')
+        os.makedirs(os.path.join(env.ASF_HOME, 'products'))
+        self.root = os.path.join(self.tmp, 'record')
+        for f in _FOLDER_OF.values():
+            os.makedirs(os.path.join(self.root, f))
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_product(self, name='demo', extra='conventions:\n  briefs_dir: docs/briefs\n'):
+        with open(env.product_path(name), 'w') as f:
+            f.write(f'product: {name}\nmain: main\n{extra}')
+
+    def check(self):
+        index_refresh(self.root, create_index=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = check_mod.cmd_check(argparse.Namespace(product='demo', paths=[]), self.root)
+        return rc, out.getvalue()
+
+    def test_a_task_writing_the_rule_cards_glob_is_a_finding(self):
+        self.write_product('demo')
+        _write_item(self.root, 'E-0001', 'epic', 'Factory')
+        _write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        _write_item(self.root, 'T-0001', 'task', 'Touch the rules', parent='F-0001',
+                    typed_lines=['writes: [rules/*]'])
+        rc, out = self.check()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("writes: 'rules/*' reaches the amendable set", out)
+        self.assertIn('file a proposal instead (F-0024)', out)
+
+    def test_a_task_writing_a_listed_brief_names_its_kind(self):
+        self.write_product('demo')
+        _write_item(self.root, 'E-0001', 'epic', 'Factory')
+        _write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        _write_item(self.root, 'T-0001', 'task', 'Touch a brief', parent='F-0001',
+                    typed_lines=['writes: [docs/briefs/coder.md]'])
+        rc, out = self.check()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("writes: 'docs/briefs/coder.md' reaches the amendable set (briefs)", out)
+
+    def test_a_task_outside_the_set_is_clean(self):
+        self.write_product('demo')
+        _write_item(self.root, 'E-0001', 'epic', 'Factory')
+        _write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        _write_item(self.root, 'T-0001', 'task', 'Touch the package', parent='F-0001',
+                    typed_lines=['writes: [asf/amendable.py]'])
+        rc, out = self.check()
+        self.assertNotIn('reaches the amendable set', out)
+
+    def test_no_product_skips_the_check_entirely(self):
+        # PD12: a product that will not load is "no amendable check", not a crash
+        _write_item(self.root, 'E-0001', 'epic', 'Factory')
+        _write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        _write_item(self.root, 'T-0001', 'task', 'Touch the rules', parent='F-0001',
+                    typed_lines=['writes: [rules/*]'])
+        index_refresh(self.root, create_index=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            check_mod.cmd_check(argparse.Namespace(product=None, paths=[]), self.root)
+        self.assertNotIn('reaches the amendable set', out.getvalue())
 
 
 if __name__ == '__main__':

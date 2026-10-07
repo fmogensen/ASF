@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import console_perms, doctor, env, hooks
+from asf import amendable, console_perms, doctor, env, hooks
 from tests.gitfixture import executable_asf
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
@@ -1745,3 +1745,60 @@ class ClockCodeRowTests(unittest.TestCase):
         ]:
             ok, _detail = self._check(info)
             self.assertTrue(ok)
+
+
+class AmendableRowTests(unittest.TestCase):
+    """F-0024 §2.6 — the doctor's ``amendable`` row, in its four states: red when the matrix
+    does not load; ok naming the kind and glob counts, where they came from, and the write and
+    merge levels; ok-with-a-note when the product opted out (`amendable_paths: []`) and when
+    `merge_amendable_set` is `auto`."""
+
+    def product(self, **kw):
+        return env.Product('demo', {'main': 'main', **kw})
+
+    def test_red_when_the_matrix_cannot_load(self):
+        p = self.product(approvals={'touch_production': 'maybe'})
+        ok, detail = amendable.check_doctor({}, p)
+        self.assertFalse(ok)
+        self.assertIn('maybe', detail)
+
+    def test_ok_names_the_counts_and_both_levels(self):
+        ok, detail = amendable.check_doctor({}, self.product())
+        self.assertTrue(ok)
+        self.assertEqual(detail, '6 kinds, 10 globs (default); write: refused, merge: human-now')
+
+    def test_ok_with_a_note_when_the_product_opts_out(self):
+        p = self.product(conventions={'amendable_paths': []})
+        ok, detail = amendable.check_doctor({}, p)
+        self.assertTrue(ok)
+        self.assertIn('conventions.amendable_paths: [] — nothing is protected', detail)
+        # a non-empty list, and the unset default, say nothing about the set being empty
+        for conv in ({'amendable_paths': ['rules/*']}, {}):
+            _ok, detail = amendable.check_doctor({}, self.product(conventions=conv))
+            self.assertNotIn('nothing is protected', detail)
+
+    def test_ok_with_a_note_when_merge_is_auto(self):
+        p = self.product(approvals={'merge_amendable_set': 'auto'})
+        ok, detail = amendable.check_doctor({}, p)
+        self.assertTrue(ok)
+        self.assertIn('the write gate holds but any branch lands — the set is protected at'
+                       ' only one end', detail)
+        # human-now (the default) says nothing of the kind
+        _ok, detail = amendable.check_doctor({}, self.product())
+        self.assertNotIn('protected at only one end', detail)
+
+    def test_the_row_is_wired_right_after_approvals(self):
+        product = self.product()
+        with mock.patch.object(doctor, 'check_config', return_value=(True, '', {}, product)), \
+                mock.patch.object(doctor, 'check_repo', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_backlog', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_scheduler', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_one_factory', return_value=(True, '')):
+            rows = doctor.run('demo')
+        names = [r[0] for r in rows]
+        self.assertEqual(names[names.index('approvals') + 1], 'amendable')
+        row = [r for r in rows if r[0] == 'amendable'][0]
+        self.assertTrue(row[1])  # required
+        self.assertTrue(row[2])  # ok
+        self.assertEqual(row[3], '6 kinds, 10 globs (default); write: refused, merge: human-now')

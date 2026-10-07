@@ -43,6 +43,7 @@ approvals:
   touch_security: human-now
   touch_customer_data: human-now
   touch_legal: human-now
+  touch_amendable_set: human-now
   new_epic: human-now
   merge_amendable_set: human-now
   merge_routine_pr: auto
