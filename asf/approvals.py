@@ -1160,8 +1160,13 @@ def _enforce(stdin_text, environ, out, product, stdout=sys.stdout):
     hit = amendable.write_target(prod, tool_name, tool_input, cwd)   # §2.3 D7: before the matrix
     if hit:
         relpath, kind = hit
-        refuse(prod, item, 'touch_amendable_set', 'human-now', job, tool_name, relpath,
-               kind=kind.name, patch=_intended_change(tool_name, tool_input))
+        # B-0351: `ask`, not `refuse` — a hold the watchdog has dropped for this same path
+        # must stay dropped; `refuse` unconditionally would reopen it on every retry and the
+        # watchdog's `ungrantable_hold` (0 min, no grant can ever release it) would breach again
+        # right away, forever. The write is refused either way (below); only the ledger entry,
+        # and so the open hold, is skipped once dropped.
+        ask(prod, item, 'touch_amendable_set', 'human-now', job, tool_name, relpath,
+            kind=kind.name, patch=_intended_change(tool_name, tool_input))
         print('\n'.join(_amendable_refusal_lines(item, relpath, kind)), file=out)
         return 2
 
