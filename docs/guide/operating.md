@@ -284,6 +284,41 @@ gh api -X PUT repos/<owner>/<repo>/rulesets/<id> -f enforcement=active     # clo
 `asf doctor` prints the exact pair with the id filled in. Until the ruleset is active again the
 doctor row is red, and `queue bypass` lists every commit that landed outside the queue.
 
+## The factory-only rule: a hand branch into the trunk is refused
+
+**The factory-only rule: a hand branch into the trunk is refused.** The ruleset above decides
+*how* a change reaches the trunk; this decides *whose* changes may. With
+`conventions.merge.factory_only: true` a CI check refuses a pull request into the trunk whose head
+branch is under none of the product's `branch_prefixes`. Three escapes stand: a release tag (no
+pull request), a PR touching nothing but `merge.bot_paths` (default `CHANGELOG.md`, the file the
+release bot writes), and a PR into any branch but the trunk.
+
+A runner cannot read `~/.ASF/products/<product>.yaml`, so turning the rule on takes two committed
+files, not one config key:
+
+1. `.asf/product.yaml` — `main`, the factory `branch_prefixes`, and
+   `conventions.merge: {factory_only: true, bot_paths: [CHANGELOG.md]}`. Nothing else: no
+   `repo_slug`, no `repo_dir`, no account. This file is the rule's only input.
+2. One step in the workflow job whose check is already required — for this repository the `tests`
+   job, whose `tests (3.12)` / `tests (3.13)` names `tools/merge-pr.sh` will not land without:
+
+```yaml
+      - name: the factory-only merge rule (a hand branch into main is refused)
+        run: bash tools/check_factory_only.sh
+```
+
+Put it in an *already required* job. A job of its own is a check nobody requires until someone
+adds its name to `conventions.landing_checks` and to the trunk ruleset — and those live outside
+the repository, which is the hole this rule would otherwise still have.
+
+`conventions.merge.require_item_id: true` adds the second half: a head under a factory prefix must
+also be named after a card (`worker/T-0123`, a suffix allowed). Without it `fix/` is a factory
+prefix and `fix/typo` passes, which is a four-character way round the rule. Leave it off for a
+product whose branches are named for the work rather than for a card (`worker/add-login`).
+
+The rule comes off the way it went on: `factory_only: false` in the committed file, one line, one
+pull request — which the rule itself lets through, because that PR is on a factory branch.
+
 ## Merging an agent PR: `tools/merge-pr.sh <pr>`
 
 This is THE way to merge an agent PR; a bare `gh pr merge` is not allowed. The repo has no merge

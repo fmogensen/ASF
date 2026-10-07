@@ -198,6 +198,74 @@ class CiEntryPoint(unittest.TestCase):
         self.assertNotEqual(rc, 0)
 
 
+class DocsSayHowToTurnItOn(unittest.TestCase):
+    """S-58757: the operating guide and the documented example say how a product turns the
+    factory-only rule on — read from the checkout, not a fixture."""
+
+    OPERATING = os.path.join(REPO, 'docs', 'guide', 'operating.md')
+    EXAMPLE = os.path.join(REPO, 'docs', 'products.example.yaml')
+    HEADING = '## The factory-only rule: a hand branch into the trunk is refused'
+
+    def _read(self, path):
+        with open(path, encoding='utf-8') as f:
+            return f.read()
+
+    def _section(self, text, heading):
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.strip() == heading)
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith('## '))
+        return '\n'.join(lines[start + 1:end])
+
+    def test_operating_carries_the_heading(self):
+        text = self._read(self.OPERATING)
+        self.assertIn(self.HEADING, text)
+
+    def test_the_section_names_the_committed_file_and_both_keys(self):
+        section = self._section(self._read(self.OPERATING), self.HEADING)
+        self.assertIn('.asf/product.yaml', section)
+        self.assertIn('factory_only', section)
+        self.assertIn('require_item_id', section)
+
+    def test_the_section_names_the_entry_point(self):
+        section = self._section(self._read(self.OPERATING), self.HEADING)
+        self.assertIn('tools/check_factory_only.sh', section)
+
+    def test_the_section_names_the_three_escapes(self):
+        section = self._section(self._read(self.OPERATING), self.HEADING)
+        self.assertIn('bot_paths', section)
+        self.assertIn('release tag', section)
+        self.assertIn('any branch but the trunk', section)
+
+    def test_the_section_says_the_step_belongs_in_an_already_required_job(self):
+        section = self._section(self._read(self.OPERATING), self.HEADING)
+        self.assertIn('already required', section)
+
+    def test_the_section_says_how_the_rule_comes_off(self):
+        section = ' '.join(self._section(self._read(self.OPERATING), self.HEADING).split())
+        self.assertIn('factory_only: false', section)
+        self.assertIn('one line, one pull request', section)
+
+    def test_the_section_sits_between_the_two_named_headings(self):
+        text = self._read(self.OPERATING)
+        trunk = text.index('## The trunk ruleset: one door to the trunk')
+        rule = text.index(self.HEADING)
+        merging = text.index('## Merging an agent PR')
+        self.assertTrue(trunk < rule < merging)
+
+    def test_the_example_names_require_item_id_in_the_merge_map(self):
+        text = self._read(self.EXAMPLE)
+        self.assertIn('require_item_id: false', text)
+
+    def test_the_example_says_the_inputs_are_committed_to_the_product_repo(self):
+        text = self._read(self.EXAMPLE)
+        self.assertIn('committed to the product', text)
+        self.assertIn('.asf/product.yaml', text)
+
+    def test_the_example_is_still_valid_once_uncommented(self):
+        text = self._read(self.EXAMPLE)
+        self.assertEqual(env.validate_product_text(text), [])
+
+
 class CommittedProductFile(unittest.TestCase):
     """``.asf/product.yaml``: generic and committed, read by this repository's own CI."""
 
