@@ -181,6 +181,7 @@ def file_rulings(ctx, out=print):
     from asf.record import frontmatter
     from asf.record.ingest import append_history_lines
     from asf.workers import report as report_mod
+    from asf.evidence import precedent
     product = ctx.product
     done = []
     for job, run in pool_mod.load_sessions(product).items():
@@ -189,7 +190,8 @@ def file_rulings(ctx, out=print):
         rec = runtime_mod.read_result(run.get('log'))
         if rec is None:
             continue
-        text = report_mod.ruling(rec.get('result') if isinstance(rec, dict) else '')
+        result = rec.get('result') if isinstance(rec, dict) else ''
+        text = report_mod.ruling(result)
         item = run.get('item') or ''
         folder = next((f for t, (f, p) in TYPES.items() if item.startswith(p + '-')), None)
         path = os.path.join(ctx.record_root(), folder, f'{item}.md') if folder else ''
@@ -197,7 +199,7 @@ def file_rulings(ctx, out=print):
         if text and path and os.path.isfile(path):
             with open(path, encoding='utf-8') as f:
                 meta, body = frontmatter.parse(f.read(), path=path)
-            line = f'- {stamp} adjudicate ({job}): {" ".join(text.split())}'
+            line = f'- {stamp} adjudicate ({job}): {" ".join(text.split())}{precedent.history_note(result)}'
             new_body = append_history_lines(body, [line])
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(frontmatter.render(meta, new_body))
@@ -205,7 +207,12 @@ def file_rulings(ctx, out=print):
             ctx.event('ruling', job=job, item=item, text=text)
             out(f'ruling {job} filed on {item}: {text[:120]}')
         else:
-            why = 'no ruling in its report' if not text else f'no card for {item or "?"} in the record'
+            if not text:
+                why = ('no ruling in its report (and no precedent line)'
+                        if report_mod.needs_input(result) and not precedent.claim(result)
+                        else 'no ruling in its report')
+            else:
+                why = f'no card for {item or "?"} in the record'
             pool_mod.update_session(product, job, adjudicated='none')
             out(f'ruling {job}: {why} — marked, not filed')
         done.append(job)
