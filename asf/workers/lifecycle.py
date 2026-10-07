@@ -2255,6 +2255,20 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     return True, f'published {branch} at {head}' + (' (rebased; lease held)' if remote_sha else '')
 
 
+def published_sha(before, after, line):
+    """The sha a publish just put on origin, or ``''`` when nothing moved: ``after`` (the
+    branch's ``ls-remote`` sha, read post-publish — never :func:`publish`'s own line, whose
+    ``at <head>`` is nine characters and would make every publish look like progress against a
+    forty-character ``launch_head``, F-0217) when it differs from ``before`` (the same branch's
+    sha read before the publish was attempted) and ``line`` neither is empty nor carries a
+    refusal. Pure: no git. What :func:`same_head_loop` folds onto a run's ledger line is this
+    value, never ``after`` on its own — a publish that pushed the very head the item's launches
+    were read on moved nothing (F-0217)."""
+    if not after or after == before or not line or ' refused: ' in line:
+        return ''
+    return after
+
+
 #: The words a publish line opens with when it dropped origin's review/notes rounds (``droppable``).
 DROPPED_ROUNDS = 'dropped'
 #: What a ``transplant`` publish says it dropped: the commits the session's declared rebase left.
@@ -2987,7 +3001,12 @@ def same_head_loop(path, run, head=None, cap=None, kind=None, main=None):
     and recounting the launches it released re-parked T-0338 on the very next tick.
 
     A worktree whose HEAD is a rebase of that sha onto a newer trunk (:func:`rebase_of`, with
-    ``main`` given) moved the branch, though no commit is new: not a loop (a product's F-0037)."""
+    ``main`` given) moved the branch, though no commit is new: not a loop (a product's F-0037).
+
+    A run the factory itself published (:func:`published_sha`, folded onto its ledger line as
+    ``published_head``) moved the branch too, even with no worktree left to read: the record is
+    the witness that survives a reaped worktree, where the head and trunk escapes above have
+    nothing to read (a product's F-0003, 2026-09-27)."""
     cap = loop_cap() if cap is None else cap
     item = (run or {}).get('item')
     kind = kind or (run or {}).get('kind')
@@ -3003,6 +3022,10 @@ def same_head_loop(path, run, head=None, cap=None, kind=None, main=None):
             or any(r.get('kind') != kind for r in rs):
         return None
     sha = heads.pop()
+    # the ledger's own witness: a publish recorded on any of these runs moved the branch, even
+    # with no worktree left for the head/trunk escapes below to read (C1, P5)
+    if any((r.get('published_head') or '') not in ('', sha) for r in rs):
+        return None
     if head and head != sha:
         return None
     if main:

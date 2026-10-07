@@ -994,6 +994,47 @@ class OneClassifierTest(unittest.TestCase):
         self.assertEqual(violations, [])
 
 
+class EveryHoldHandsTheGuardTheTrunk(unittest.TestCase):
+    """F-0217/S-37952: every call to :func:`lc.hold` passes ``main=`` — the one argument that
+    lets a worktree rebased onto a newer trunk (:func:`lc.rebase_of`) count as a moved head when
+    the hold's evidence carries no ``head=`` at all (a session that committed and was never
+    published, where ``ev.remote_sha`` is ``''``). A caller importing ``hold`` bare from
+    :mod:`asf.workers.lifecycle` would route around the attribute match, so that shape is
+    matched too — distinct from the local ``hold(job, …)`` closures ``asf/harvest/harvest.py``
+    and ``asf/harvest/lane.py`` define for themselves, which this walk must not flag as
+    offenders it can never fix."""
+
+    @staticmethod
+    def _sites(root):
+        sites = []
+        for path in sorted(glob.glob(os.path.join(root, 'asf', '**', '*.py'), recursive=True)):
+            relpath = os.path.relpath(path, root).replace(os.sep, '/')
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=path)
+            imports_bare_hold = any(
+                isinstance(node, ast.ImportFrom) and node.module == 'asf.workers.lifecycle'
+                and any(alias.name == 'hold' for alias in node.names)
+                for node in ast.walk(tree))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                is_attr = (isinstance(func, ast.Attribute) and func.attr == 'hold'
+                           and isinstance(func.value, ast.Name) and func.value.id == 'lifecycle')
+                is_bare = imports_bare_hold and isinstance(func, ast.Name) and func.id == 'hold'
+                if is_attr or is_bare:
+                    has_main = any(kw.arg == 'main' for kw in node.keywords)
+                    sites.append((relpath, node.lineno, has_main))
+        return sites
+
+    def test_no_hold_site_decides_a_loop_from_launch_time_heads_alone(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sites = self._sites(root)
+        offenders = [f'{relpath}:{lineno}' for relpath, lineno, has_main in sites if not has_main]
+        self.assertEqual(offenders, [])
+        self.assertEqual(len(sites), 9, sites)
+
+
 class HoldInvariants(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -1370,6 +1411,33 @@ class BlockedParkTests(unittest.TestCase):
         self.assertEqual(lc.card_fingerprint(product, 'T-9999', items), '')
 
 
+class PublishedShaIsTheFactorysOwnPush(unittest.TestCase):
+    """F-0217: :func:`lc.published_sha` is the pure helper behind what a health pass folds onto
+    a run's ledger line — the branch's ``ls-remote`` sha, never :func:`lc.publish`'s own
+    nine-character ``at <head>``, and never on a refusal or a head that did not move."""
+
+    def test_a_new_sha_after_an_empty_before_is_the_new_sha(self):
+        self.assertEqual(lc.published_sha('', 'b733' * 10, 'published worker/X at b733'),
+                          'b733' * 10)
+
+    def test_a_branch_already_on_origin_that_moved_gives_the_new_sha(self):
+        self.assertEqual(lc.published_sha('a' * 40, 'b' * 40, 'published worker/X at abcdef0'),
+                          'b' * 40)
+
+    def test_before_equal_to_after_gives_nothing(self):
+        self.assertEqual(lc.published_sha('a' * 40, 'a' * 40, 'published worker/X at abcdef0'), '')
+
+    def test_a_refusal_line_gives_nothing(self):
+        self.assertEqual(lc.published_sha('a' * 40, 'b' * 40,
+                                          'publish worker/X refused: redact: a.txt:1'), '')
+
+    def test_an_empty_after_gives_nothing(self):
+        self.assertEqual(lc.published_sha('a' * 40, '', 'published worker/X at abcdef0'), '')
+
+    def test_an_empty_line_gives_nothing(self):
+        self.assertEqual(lc.published_sha('a' * 40, 'b' * 40, ''), '')
+
+
 class SameHeadLoopGuard(unittest.TestCase):
     """A product, 2026-09-26: ``adjudicate-b-1377`` launched 14 times and ``correct-t-0338`` 12
     times, each on a head no session had moved. The same kind handed the same head
@@ -1386,7 +1454,7 @@ class SameHeadLoopGuard(unittest.TestCase):
             for ln in lines:
                 f.write(json.dumps(ln) + '\n')
 
-    def run_of(self, n, kind='correct', head='a' * 40, item='T-0001'):
+    def run_of(self, n, kind='correct', head='a' * 40, item='T-0001', published=None):
         job = f'{kind}-{item.lower()}'
         ln = {'job': job, 'item': item, 'branch': 'worker/' + item, 'kind': kind, 'pid': n,
               'started': 't%02d' % n}
@@ -1394,6 +1462,8 @@ class SameHeadLoopGuard(unittest.TestCase):
             ln['launch_head'] = head
         self.write(ln, {'job': job, 'ended': 'e%02d' % n,
                         'end_reason': 'failed: not pushed: 0 uncommitted file(s), 2 unpushed commit(s)'})
+        if published is not None:
+            self.write({'job': job, 'published_head': published})
         return lc.latest(self.path)[job]
 
     def test_the_third_launch_on_one_head_parks_the_item(self):
@@ -1444,6 +1514,28 @@ class SameHeadLoopGuard(unittest.TestCase):
         fields, _ = lc.hold(self.path, last, 'review', 'x', 'h', head='c' * 40)
         self.assertNotIn('parked', fields['correction'])  # the last session pushed: not a loop
         fields, _ = lc.hold(self.path, last, 'review', 'x', 'h', head='a' * 40)
+        self.assertIs(fields['correction']['parked'], True)
+
+    def test_a_published_head_different_from_the_launch_head_is_not_a_loop(self):
+        # F-0217/C1: a factory publish recorded on the ledger moved the branch, with no
+        # worktree left to read — the record is the witness, and no `head`/`main` is given
+        for n in (1, 2):
+            self.run_of(n)
+        launch_head = 'a' * 40
+        published_head = 'b' * 40
+        self.assertEqual(len(published_head), len(launch_head))  # PD2: width agreement
+        last = self.run_of(3, published=published_head)
+        fields, _ = lc.hold(self.path, last, 'review', 'x', 'h')
+        self.assertNotIn('parked', fields['correction'])
+        self.assertNotIn('operator_flagged', fields)
+
+    def test_a_published_head_equal_to_the_launch_head_still_parks(self):
+        # C4: a comparison, not a presence test — a publish that pushed the very head the
+        # launches were read on moved nothing
+        for n in (1, 2):
+            self.run_of(n)
+        last = self.run_of(3, published='a' * 40)
+        fields, _ = lc.hold(self.path, last, 'review', 'x', 'h')
         self.assertIs(fields['correction']['parked'], True)
 
 

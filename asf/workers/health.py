@@ -660,6 +660,7 @@ def republish_steps(product, registry, job, run, alive, found, items=None, statu
     ev = lifecycle.gather(product, run, alive=alive, status=status)
     if refusal_stands(run, ev):
         return  # F-0228: same head, same tip — the same refusal, and the hook costs minutes
+    before = ev.remote_sha
     reason, ev, line = yield (product, run, ev, reason, alive)  # publish_gap, by run_steps
     if not line:
         return
@@ -667,12 +668,17 @@ def republish_steps(product, registry, job, run, alive, found, items=None, statu
         found.append((job, 'published', line))
         fields = {'end_reason': reason, 'rc': 0 if reason == lifecycle.FINISHED else 1,
                   'publish_refused': None, 'publish_refused_heads': None}
+        sha = lifecycle.published_sha(before, ev.remote_sha, line)
+        if sha:
+            fields['published_head'] = sha
         was_unpushed_park = isinstance(run.get('correction'), dict) \
             and run['correction'].get('kind') == lifecycle.UNPUSHED
         if reason == lifecycle.FINISHED:
             fields['correction'] = None
         pool_mod.update_session(product, job, **fields)
         run.update(end_reason=reason)
+        if sha:
+            run.update(published_head=sha)
         found.append((job, 're-judged', reason))
         if reason == lifecycle.FINISHED and was_unpushed_park \
                 and product.conventions.flag('health_opens_pr', True) is not False:
@@ -889,7 +895,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 if lifecycle.pushed_after_stop(s, ev):
                     fields, line = lifecycle.hold(registry, s, lifecycle.PUSHED_AFTER_STOP,
                                                   lifecycle.PUSHED_AFTER_STOP, pool_mod.now_iso(),
-                                                  main=product.main)
+                                                  head=ev.remote_sha, main=product.main)
                     pool_mod.update_session(product, job, **fields)
                     found.append((job, 'held', line.split(': ', 1)[1]))
             # a `dead pid` judgement is revisited: the result may have landed after the check,
@@ -899,12 +905,17 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 ev = file_review(product, job, s, ev, alive, found, status=status)
                 if ev.result is not None:
                     reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
+                    before = ev.remote_sha
                     reason, ev, line = yield (product, s, ev, reason, alive)
                     if line:
                         found.append((job, 'published', line))
                     ok = reason == lifecycle.FINISHED
-                    pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1)
-                    s.update(end_reason=reason, rc=0 if ok else 1)
+                    sha = lifecycle.published_sha(before, ev.remote_sha, line)
+                    fields = {'end_reason': reason, 'rc': 0 if ok else 1}
+                    if sha:
+                        fields['published_head'] = sha
+                    pool_mod.update_session(product, job, **fields)
+                    s.update(**fields)
                     found.append((job, 're-judged', reason))
                     if lifecycle.quota_exhausted(s):
                         found.append(account_fault(product, job, s, ev))
@@ -917,9 +928,11 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
         if reason is None:
             return
+        before = ev.remote_sha
         reason, ev, line = yield (product, s, ev, reason, alive)  # B-0056
         if line:
             found.append((job, 'published', line))
+        sha = lifecycle.published_sha(before, ev.remote_sha, line)
         retry = push_retry(ev, reason, line)
         if retry and retry[0] == lifecycle.NETWORK_ERROR:  # B-0097: a blip — retried, no round
             found.append((job, 'retry', f'{retry[0]}: {retry[1]} — published again next pass'))
@@ -930,10 +943,13 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         # the class is only ever the class of a death (F-0234): a retry or a hook refusal above
         # may have turned `reason` into something other than DEAD_PID since `ev` was gathered
         dead_class = (ev.liveness or None) if reason == lifecycle.DEAD_PID else None
-        pool_mod.update_session(product, job, ended=now, end_reason=reason,
-                                runtime_session=runtime_mod.runtime_session(s.get('log')) or None,
-                                dead_class=dead_class)
-        s.update(ended=now, end_reason=reason)
+        fields = {'ended': now, 'end_reason': reason,
+                  'runtime_session': runtime_mod.runtime_session(s.get('log')) or None,
+                  'dead_class': dead_class}
+        if sha:
+            fields['published_head'] = sha
+        pool_mod.update_session(product, job, **fields)
+        s.update(ended=now, end_reason=reason, **({'published_head': sha} if sha else {}))
         found.append((job, 'ended', reason))
         if reason == lifecycle.FINISHED:
             back = account_auth.proved(s)
@@ -1013,7 +1029,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             if lifecycle.stale_head(line):  # origin holds commits this head lacks: a rebase
                 text = lifecycle.stale_head_text(s.get('branch') or job, line)
             fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED, text, now,
-                                          main=product.main)
+                                          head=ev.remote_sha, main=product.main)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}':
@@ -1021,7 +1037,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             # or say why there is none (B-0076) — its second genuine empty end parks it instead
             # (EMPTY_CAP)
             fields, line = lifecycle.hold(registry, s, lifecycle.EMPTY,
-                                          lifecycle.empty_branch_text(), now)
+                                          lifecycle.empty_branch_text(), now,
+                                          head=ev.remote_sha, main=product.main)
             pool_mod.update_session(product, job, **fields)
             what = 'parked' if fields['correction'].get('parked') else 'held'
             found.append((job, what, line.split(': ', 1)[1]))

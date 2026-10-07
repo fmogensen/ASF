@@ -2165,6 +2165,37 @@ class TestHealth(Home):
         self.assertEqual(git('ls-remote', '--heads', 'origin', rec['branch'], cwd=wt).split()[0],
                          git('rev-parse', 'HEAD', cwd=wt))
 
+    def test_a_publish_records_the_sha_it_put_on_origin(self):
+        # F-0217/S-37950: the sha a factory publish puts on origin is folded onto the run's own
+        # ledger line, the same forty-character sha the loop guard reads back
+        rec = self.spawn('published', {'ok': True})
+        wt = rec['worktree']
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        self.commit(wt, 'x')
+        health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        run = pool_mod.load_sessions(self.product)['published']
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertEqual(run['published_head'], git('rev-parse', 'HEAD', cwd=wt))
+
+    def test_a_refused_publish_records_no_sha(self):
+        # F-0217/S-37950: a publish the factory could not make records no sha — only a publish
+        # that actually moved the branch is progress
+        rec = self.spawn('refused_sha', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'fix')
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(self.product, 'refused_sha', ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1,
+                                correction={'kind': lifecycle.UNPUSHED,
+                                            'text': lifecycle.unpushed_text(reason),
+                                            'at': '2026-09-27T07:00:45Z'})
+        line = f'publish {branch} refused: redact: a.txt:1 names a worker account'
+        with mock.patch.object(lifecycle, 'publish', return_value=(False, line)):
+            health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        run = pool_mod.load_sessions(self.product)['refused_sha']
+        self.assertNotIn('published_head', run)
+        self.assertEqual(run['publish_refused'], line)
+
     def test_b0056_a_rebased_clean_run_is_published_and_finished(self):
         # spawn rebased the branch (or the session finished a conflicted rebase): HEAD is off
         # origin/<branch>, every patch is there; finished means pushed — the factory pushes
