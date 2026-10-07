@@ -60,6 +60,8 @@ record pass. No feeder import: the feeder imports this module.
 import hashlib
 import re
 
+from asf.record.core import ID_DIGITS, ID_TOKEN_RE
+
 #: the typed fields a replan writes on the Feature
 APPLIED = 'reshape_applied'
 APPLIED_AT = 'reshape_applied_at'
@@ -68,17 +70,17 @@ APPLIED_AT = 'reshape_applied_at'
 SUBDIR = 'replans'
 DONE_STATES = ('Resolved', 'Closed')      # == asf.feeder.rows.DONE_STATES
 
-HEADER_RE = re.compile(r'^replan:\s*(?P<fid>[A-Z]+-\d{4})\s+(?P<digest>[0-9a-f]{6,64})\s*$',
+HEADER_RE = re.compile(rf'^replan:\s*(?P<fid>[A-Z]+-{ID_DIGITS})\s+(?P<digest>[0-9a-f]{{6,64}})\s*$',
                        re.MULTILINE)
-SECTION_RE = re.compile(r'^###\s+(?:Task\s+(?:(?P<tid>[A-Z]+-\d{4})|new\s*(?P<newnum>\d*))'
-                        r'|Drop\s+(?P<drop>[A-Z]+-\d{4}))\s*:\s*(?P<rest>.*)$',
+SECTION_RE = re.compile(rf'^###\s+(?:Task\s+(?:(?P<tid>[A-Z]+-{ID_DIGITS})|new\s*(?P<newnum>\d*))'
+                        rf'|Drop\s+(?P<drop>[A-Z]+-{ID_DIGITS}))\s*:\s*(?P<rest>.*)$',
                         re.MULTILINE | re.IGNORECASE)
 #: any ``###`` line at all — used to catch a Task/Drop heading :data:`SECTION_RE` cannot read
 #: (``new`` not followed by a bare number, a typo in ``Task``/``Drop``, a stray ``###``)
 HEADING_RE = re.compile(r'^###[ \t]+\S.*$', re.MULTILINE)
 FIELD_RE = {k: re.compile(rf'^\s*{k}\s*:\s*(.*)$', re.MULTILINE | re.IGNORECASE)
             for k in ('writes', 'after', 'stories')}
-ID_RE = re.compile(r'\b[A-Z]-\d{4}\b')
+ID_RE = ID_TOKEN_RE
 NEW_REF_RE = re.compile(r'\bnew\s+(\d+)\b', re.IGNORECASE)
 
 
@@ -168,7 +170,7 @@ def parse(text):
             'title': rest,
             'writes': _list(writes_raw) if writes_raw is not None else None,
             'after': after,
-            'stories': re.findall(r'\bS-\d{4}\b', stories_raw) if stories_raw is not None else None,
+            'stories': re.findall(rf'\bS-{ID_DIGITS}\b', stories_raw) if stories_raw is not None else None,
             'body': body.strip(),
         })
     # a bare new-Task heading with no explicit number claims the next N no heading already took,

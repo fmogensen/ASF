@@ -31,6 +31,7 @@ import sys
 import traceback
 
 from asf import amendable, env, hooks, readonly
+from asf.record.core import ID_DIGITS
 
 LEVELS = ('auto', 'groom', 'human-now')
 
@@ -146,7 +147,7 @@ _COMMAND_PATTERNS = {
     'new_epic': (r'\basf\s+new\s+epic\b',),
     'file_bug': (r'\basf\s+new\s+bug\b',),
     'touch_amendable_set': (
-        r'\basf\s+new\s+rule\b', r'\basf\s+set\s+R-\d{4}\b', r'\basf\s+hooks\s+install\b',
+        r'\basf\s+new\s+rule\b', rf'\basf\s+set\s+R-{ID_DIGITS}\b', r'\basf\s+hooks\s+install\b',
     ),
 }
 

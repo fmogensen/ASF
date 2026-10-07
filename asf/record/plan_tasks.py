@@ -26,12 +26,13 @@ from asf.record.core import canonicalize, load_items, today
 from asf.record import decisions, idcheck, idclaim, plan_order, trunk_check
 from asf.record.ids import mint_id, write_new_item
 from asf.record.ingest import is_retired, match_feature
+from asf.record.core import ID_DIGITS
 
 #: A Feature the ingest already derived Resolved/Closed gets no fresh Task cards from its plan.
 DONE_STATES = ('Resolved', 'Closed')
 
 STORIES_LINE_RE = re.compile(r'^\s*stories\s*:\s*(.+)$', re.IGNORECASE | re.MULTILINE)
-STORY_ID_RE = re.compile(r'\bS-\d{4}\b')
+STORY_ID_RE = re.compile(rf'\bS-{ID_DIGITS}\b')
 DESCRIPTION_CHARS = 4000
 
 

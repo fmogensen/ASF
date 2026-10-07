@@ -23,6 +23,8 @@ import json
 import os
 import re
 
+from asf.record.core import ID_DIGITS
+
 #: Fields the groom applier itself writes (:func:`asf.groom.groom.apply_groom_answers`) — a
 #: card's digest excludes them, since changing only one of these is groom answering its own
 #: question, never a new fact to ask about again.
@@ -96,7 +98,7 @@ def structural(product):
 
 #: An open ``_card_line`` (:func:`asf.groom.groom._card_line`): the checkbox and the trailing
 #: ``→ answer: ____`` slot, both dropped by :func:`to_report_line`.
-_CARD_LINE_RE = re.compile(r'^- \[ \]\s+(?P<id>[A-Z]-\d{4})\s+(?P<rest>.*?)\s*→\s*answer:\s*____$')
+_CARD_LINE_RE = re.compile(rf'^- \[ \]\s+(?P<id>[A-Z]-{ID_DIGITS})\s+(?P<rest>.*?)\s*→\s*answer:\s*____$')
 
 
 def to_report_line(line):
@@ -189,7 +191,7 @@ def is_sticky(state_dir, iid, section, canonical, days, now=None):
 
 #: An open groom line's leading id — the same token :mod:`asf.groom.groom`'s ``_LINE_ID_RE``
 #: reads, kept here too so this module needs no import of that one (it is imported by it).
-_LINE_ID_RE = re.compile(r'^- \[[ xX]\]\s+([A-Z]-\d{4})\b')
+_LINE_ID_RE = re.compile(rf'^- \[[ xX]\]\s+([A-Z]-{ID_DIGITS})\b')
 
 
 def filter_sticky(sections, state_dir, canonical, days, now=None):

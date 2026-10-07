@@ -28,6 +28,7 @@ import os
 import re
 
 from asf.record import frontmatter
+from asf.record.core import ID_DIGITS
 
 ROLES_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -36,7 +37,7 @@ KEYS = frozenset(('name', 'purpose'))
 MAX_LINES = 60
 DOCTRINE_MIN = 4
 DOCTRINE_MAX = 8
-INCIDENT = r'\b(?:[BDEFRST]-\d{4}|b\d{1,3})\b'
+INCIDENT = rf'\b(?:[BDEFRST]-{ID_DIGITS}|b\d{{1,3}})\b'
 ECONOMY_MAX_LINES = 6
 #: The words a role never says. :func:`forbidden` adds the two label constants of
 #: ``asf.briefs.build``, which this module does not import at load time.

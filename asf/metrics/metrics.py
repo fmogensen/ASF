@@ -34,6 +34,7 @@ from asf import ci_jobs, ci_pool, env, gh_limit, github, gitpush, mutation_guard
 from asf import tokens
 from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
                              Conventions)
+from asf.record.core import ID_TOKEN_RE
 from asf.record import frontmatter
 from asf.record import match
 from asf.record.index import do_index
@@ -1138,7 +1139,7 @@ def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None, a
 
 
 #: Any record id a commit message can name (`task(T-0050): …`, `fix(B-0077)`).
-COMMIT_ID_RE = re.compile(r'\b[A-Z]-\d{4}\b')
+COMMIT_ID_RE = ID_TOKEN_RE
 #: The line of a product's `conventions.version_file` that names its version.
 VERSION_RE = re.compile(r"""(?im)^\s*[_"']*version[_"']*\s*[=:]\s*["']([^"']+)["']""")
 #: A trunk release's tag: `v<major>.<minor>.<patch>`. The tag is the version — the rollup never

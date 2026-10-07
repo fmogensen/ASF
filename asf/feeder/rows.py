@@ -90,6 +90,7 @@ from asf.feeder import footprint
 from asf.groom import policy as groom_policy
 from asf.record import replan as replan_mod
 from asf.views import index_reader as ix
+from asf.record.core import ID_DIGITS
 
 BUG_FIX = 'BUG → FIX'
 FIX_CORRECT = 'FIX → CORRECT'
@@ -595,7 +596,7 @@ def landed_ids(items, landed_shas=None, on_trunk=()):
 #: a removal line that names the card carrying the removed card's work on: a groom merge's
 #: (:func:`asf.groom.groom.merge_tasks`, ``merged into T-0158 (…)``) or a duplicate's
 #: (``duplicate of T-0305 (same parent and footprint) (…)``)
-MERGED_INTO_RE = re.compile(r'\b(?:merged into|duplicate of)\s+([A-Za-z]-\d{4})\b')
+MERGED_INTO_RE = re.compile(rf'\b(?:merged into|duplicate of)\s+([A-Za-z]-{ID_DIGITS})\b')
 
 
 def _retired(items):

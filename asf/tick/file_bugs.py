@@ -38,6 +38,7 @@ from asf.record.ingest import append_history_lines
 from asf.tick.migrate import truncate
 from asf.tick.stale import parse_iso
 from asf.workers import lifecycle
+from asf.record.core import ID_TOKEN_RE
 
 CI_REFUSAL_WINDOW_H = 24
 #: A CI failure's Bug title opens with this, then its ``<job>: <failed step>`` signature — the
@@ -260,7 +261,7 @@ RECORD_ERROR_PLACES = 10
 #: possessive (`T-0001's`) would otherwise pair with the *next* specific's opening quote and
 #: leave that specific in the class, splitting one defect into one class per specific (B-0132).
 _QUOTED_RE = re.compile(r"(?<![A-Za-z0-9])'[^']*'|\"[^\"]*\"")
-_ITEM_ID_RE = re.compile(r'\b[A-Z]-[0-9]{4}\b')
+_ITEM_ID_RE = ID_TOKEN_RE
 
 
 def error_class(message):

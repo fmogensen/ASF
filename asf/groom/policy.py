@@ -15,6 +15,8 @@ module level, the same trick :mod:`asf.capacity` uses for :mod:`asf.workers.life
 import dataclasses
 import re
 
+from asf.record.core import ID_DIGITS, ID_TOKEN_RE
+
 #: D11 — deliberately timid defaults. A policy that answers wrongly is a card closed or decided
 #: without anyone asking, so the first version answers only what is not really a question.
 DUPLICATE_OVERLAP = 0.95
@@ -29,7 +31,7 @@ CI_RED_DAYS = 7
 #: yet answered (PD4). A barred line's slot reads ``____ (barred: …)`` instead, so it never
 #: matches and is never counted open.
 OPEN_QUESTION_RE = re.compile(
-    r'^- \[ \]\s+(?P<id>[A-Z]-\d{4}\b|inbox:\S+).*→\s*answer:\s*____$')
+    rf'^- \[ \]\s+(?P<id>[A-Z]-{ID_DIGITS}\b|inbox:\S+).*→\s*answer:\s*____$')
 
 #: An open question's line, split so :func:`suppress` can keep the ``<id> <title> — <why>``
 #: text and only replace the answer slot.
@@ -38,7 +40,7 @@ OPEN_QUESTION_RE = re.compile(
 #: relaunch is what keeps being refused, so :func:`suppress` leaves the line open.
 REFUSED_MARK = 'refused on repeat:'
 
-_SUPPRESSABLE_RE = re.compile(r'^- \[ \]\s+(?P<id>[A-Z]-\d{4})\s+(?P<body>.*?)\s*→\s*answer:\s*____$')
+_SUPPRESSABLE_RE = re.compile(rf'^- \[ \]\s+(?P<id>[A-Z]-{ID_DIGITS})\s+(?P<body>.*?)\s*→\s*answer:\s*____$')
 
 
 def groom_auto(product):
@@ -762,14 +764,14 @@ GROOM_RULES = ('dedupe-findings', 'dedupe-scorecard', 'report-covered')
 #: An invariant finding's Bug signature (:data:`asf.tick.file_bugs.INVARIANT_SIG`).
 _FINDING_SIG_RE = re.compile(r'^invariant (?P<invariant>\S+): (?P<cause>.*)$')
 #: A record card's path (``features/F-0093.md``) — the cause an older filer keyed a finding on.
-_CARD_PATH_RE = re.compile(r'\b[\w.-]+(?:/[\w.-]+)*/[A-Z]-\d{4}\.md\b')
+_CARD_PATH_RE = re.compile(rf'\b[\w.-]+(?:/[\w.-]+)*/[A-Z]-{ID_DIGITS}\.md\b')
 #: A finding Bug's first evidence line: ``- [<path> — ]<subject>: <message>``.
 _EVIDENCE_RE = re.compile(r'^- (?:\S+ — )?(?P<subject>[^:\n]+): (?P<message>.+)$', re.M)
 #: The scorecard loop's marker line on a card it filed (:data:`asf.scorecard.loop.MARKER`).
 _SCORECARD_RE = re.compile(r'^scorecard-cause: (?P<key>.+?) #\d+\s*$', re.M)
 #: An item id in a commit subject: a commit naming an item is that item's landing, read by the
 #: landing rules — never a covers-only hint for another Task.
-_ITEM_ID_RE = re.compile(r'\b[A-Z]-\d{4}\b')
+_ITEM_ID_RE = ID_TOKEN_RE
 #: The marker a verify Task carries, so one Feature gets one, ever.
 COVERED_MARK = 'groom-covered:'
 
