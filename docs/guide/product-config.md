@@ -174,6 +174,9 @@ block (`range: T:5000-5049`) and its claimant (the job or session).
   before the session starts. A local session gets it as the env var; a cloud session, which has
   neither the env nor the asf CLI, reads it from the CLOUD block of its brief.
 - **`asf new`** outside a block claims its one id the same way (a block of one).
+- **Inside a block**, the next id is the block's own next free number — one above the highest
+  number of the block the record holds, never the record's tip outside it. A block is exhausted
+  only when its own numbers are gone, and the refusal says so.
 - **At land**, a plan that cites an S-/T-/B- id the record lacks and no claim covers — or that
   redeclares a record id for another card — mints nothing, and its line names the id. A plan Task
   whose `(parent, stories, writes)` equals an open Task's is not minted; the line names the

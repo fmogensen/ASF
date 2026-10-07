@@ -29,6 +29,14 @@ def _id_range(prefix):
     return None
 
 
+def next_in_block(taken, lo, hi):
+    """The block's own next free number: one above the highest of ``taken`` inside ``lo``-``hi``,
+    or ``lo`` if the block holds none. A full block returns ``hi + 1`` instead of raising, so the
+    caller's own ``if n > hi:`` decides the refusal."""
+    inside = [n for n in taken if lo <= n <= hi]
+    return max(inside) + 1 if inside else lo
+
+
 def record_top(root, prefix):
     """The highest number the record at ``root`` holds for ``prefix`` (its card file names)."""
     top = 0
@@ -65,30 +73,35 @@ def _claims_enabled(root):
 
 def mint_id(root, canonical, type_, claim=False, claimant=None):
     """The next id for ``type_``. Inside ``BACKLOG_ID_RANGE``: the next free number of the
-    job's claimed block. Otherwise, with ``claim`` (``asf new``) or in a worktree, and the
-    record repo has an ``origin``: a single id claimed by push (:mod:`asf.record.idclaim`) —
-    the same allocator a job's block comes from. Otherwise the record's top + 1, stepping over
-    every block the local claim mirror shows taken."""
+    job's claimed block — one above the highest number of the block the record holds, and the
+    block's ``lo`` when it holds none. The record's tip outside the block is read nowhere: a
+    block claimed later lands its ids above this one's ``hi``, and that must take no number
+    away from a block nobody has used. Otherwise, with ``claim`` (``asf new``) or in a worktree,
+    and the record repo has an ``origin``: a single id claimed by push
+    (:mod:`asf.record.idclaim`) — the same allocator a job's block comes from. Otherwise the
+    record's top + 1, stepping over every block the local claim mirror shows taken."""
     from asf.record import idclaim
     folder, prefix = TYPES[type_]
     rng = _id_range(prefix)
-    max_n = 0
+    taken = set()
     for iid, rec in canonical.items():
         if rec['meta'].get('type') == type_:
             m = re.match(rf'^{prefix}-(\d+)$', iid)
             if m:
-                max_n = max(max_n, int(m.group(1)))
+                taken.add(int(m.group(1)))
     d = os.path.join(root, folder)
     if os.path.isdir(d):
         for name in os.listdir(d):
             m = re.match(rf'^{prefix}-(\d+)\.md$', name)
             if m:
-                max_n = max(max_n, int(m.group(1)))
+                taken.add(int(m.group(1)))
+    max_n = max(taken, default=0)
     if rng:
         lo, hi = rng
-        n = max(lo, max_n + 1) if max_n >= lo else lo
+        n = next_in_block(taken, lo, hi)
         if n > hi:
-            raise SystemExit(f"new: id range {prefix}:{lo:04d}-{hi:04d} exhausted")
+            raise SystemExit(f"new: id range {prefix}:{lo:04d}-{hi:04d} exhausted — every number "
+                              f"of the block is in the record")
         return f"{prefix}-{n:04d}"
     worktree = _in_worktree(root)
     if (claim or worktree) and idclaim.has_origin(root) and _claims_enabled(root):
@@ -101,11 +114,11 @@ def mint_id(root, canonical, type_, claim=False, claimant=None):
         raise SystemExit(f"new: minting {prefix}-ids in a worktree needs BACKLOG_ID_RANGE (e.g. {prefix}:0300-0349) "
                          f"or an origin to claim on — parallel writers collide otherwise")
     n = max_n + 1
-    taken = idclaim.claims(root) if os.path.isdir(os.path.join(root, '.git')) or worktree else []
-    c = idclaim.covers(taken, f"{prefix}-{n}")
+    blocks = idclaim.claims(root) if os.path.isdir(os.path.join(root, '.git')) or worktree else []
+    c = idclaim.covers(blocks, f"{prefix}-{n}")
     while c is not None:  # a number inside a block a job holds is that job's, never ours
         n = c.hi + 1
-        c = idclaim.covers(taken, f"{prefix}-{n}")
+        c = idclaim.covers(blocks, f"{prefix}-{n}")
     return f"{prefix}-{n:04d}"
 
 
