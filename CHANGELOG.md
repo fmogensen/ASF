@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.216 — 2026-10-07
+
+### Bugs fixed
+
+- A job's stray local branch is saved to a recovery ref and never trips the cloud breaker (#958)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.216"`
+
 ## v0.1.215 — 2026-10-07
 
 ### Bugs fixed
