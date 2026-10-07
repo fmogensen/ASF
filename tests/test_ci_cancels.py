@@ -76,8 +76,8 @@ def _literal_causes(path):
 class Causes(unittest.TestCase):
     def test_the_nine_causes_and_their_groups(self):
         self.assertEqual(ci_cancels.CAUSES,
-                          ('relief', 'stall', 'dedupe', 'merged', 'timeout', 'rewrite', 'newhead',
-                           'unresolved', 'unclaimed'))
+                          ('relief', 'stall', 'infra', 'dedupe', 'merged', 'timeout', 'rewrite',
+                           'newhead', 'unresolved', 'unclaimed'))
         seen = set()
         for causes in ci_cancels.GROUPS.values():
             self.assertFalse(seen & set(causes), 'a cause named in two groups')
@@ -87,7 +87,7 @@ class Causes(unittest.TestCase):
     def test_every_landed_cause_string_is_honoured_or_reread(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         found = set()
-        for rel in ('asf/ci_queue.py', 'asf/harvest/lane.py'):
+        for rel in ('asf/ci_queue.py', 'asf/harvest/lane.py', 'asf/flake.py'):
             found |= _literal_causes(os.path.join(root, rel))
         self.assertTrue(found, 'no claim_cancel(...) cause literal was found — the regex needs a '
                          'second look, not a green test on an empty match')

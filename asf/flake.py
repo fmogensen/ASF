@@ -172,7 +172,8 @@ def load(state_dir, now=None):
         return keep
     live = [q for q in quarantine if isinstance(q, dict)
             and (_parse(q.get('expires')) or now) > now]
-    return {'reruns': fresh('reruns'), 'reds': fresh('reds'), 'quarantine': live}
+    return {'reruns': fresh('reruns'), 'reds': fresh('reds'), 'infra': fresh('infra'),
+            'quarantine': live}
 
 
 def save(state_dir, data):
@@ -248,6 +249,144 @@ def infra_red(slug, job_id, gh=None):
     fails = [a.get('message') for a in got if isinstance(a, dict)
              and str(a.get('annotation_level') or 'failure').lower() == 'failure']
     return fails[0].strip().splitlines()[0] if is_infra(fails) else None
+
+
+#: :func:`classify_red`'s answers: two infra reds and the one red that is the code's
+PHANTOM, LOST_RUNNER, TEST = 'phantom', 'lost-runner', 'test'
+#: the infra classes — re-run once on the head, never a correct round
+INFRA_CLASSES = (PHANTOM, LOST_RUNNER)
+#: a job state that has not reached a verdict yet
+_UNFINISHED = ('queued', 'in_progress', 'waiting', 'pending', 'requested')
+#: the claim cause of an infra re-run (:func:`asf.ci_queue.claim_cancel`, ``ci-cancels.json``;
+#: written as its literal at the one call site, where tests/test_ci_cancels.py reads it)
+INFRA_CAUSE = 'infra'
+
+
+def _lost_job(job):
+    """A failed job that never ran on a runner: no runner named and no step that failed."""
+    steps = job.get('steps') if isinstance(job.get('steps'), list) else []
+    return not job.get('runner_name') and not any(
+        isinstance(s, dict) and s.get('conclusion') == 'failure' for s in steps)
+
+
+def classify_red(run, jobs, required=None):
+    """What a red workflow run is, read off the run and its jobs (``gh api …/runs/<id>/jobs``):
+
+    * ``phantom`` — the run concluded ``failure`` and no job of it failed: some are still
+      queued or running, or a ``required`` job (by :func:`job_key`) has no job at all;
+    * ``lost-runner`` — every failed job never ran on a runner: no ``runner_name``, no failed
+      step (its logs are gone with it);
+    * ``test`` — anything else: a job a runner judged. The one red that is the code's.
+
+    Pure: the caller reads the run and its jobs once. The phantom and the lost runner are
+    infra (:data:`INFRA_CLASSES`) — re-run once on the head (:func:`infra_rerun`), never a
+    correct round, never a red check."""
+    run = run if isinstance(run, dict) else {}
+    jobs = [j for j in jobs or () if isinstance(j, dict)]
+    failed = [j for j in jobs if j.get('conclusion') in ('failure', 'timed_out')]
+    if failed:
+        return LOST_RUNNER if all(_lost_job(j) for j in failed) else TEST
+    if run.get('status') == 'completed' and run.get('conclusion') == 'failure':
+        unfinished = any(j.get('status') in _UNFINISHED for j in jobs)
+        have = {job_key(j.get('name')) for j in jobs}
+        missing = bool(required) and not {job_key(r) for r in required} <= have
+        if unfinished or missing or not jobs:
+            return PHANTOM
+    return TEST
+
+
+def infra_rerun(state_dir, slug, sha, run_id, cls, where='', out=print, gh=None, now=None,
+                attempt=None):
+    """Answer an infra red (:func:`classify_red`) on head ``sha``, run ``run_id``: the first is
+    re-run once — ``gh run rerun <id> --failed``, head-matched (the caller's ``sha`` is the
+    branch's current head) — and claimed with :data:`INFRA_CAUSE` in ``ci-cancels.json``
+    (:func:`asf.ci_queue.claim_cancel`); a second on the same head is one watchdog breach, said
+    once, and never re-run again. ``'rerun'``, ``'refused'`` (the host said no: judged as
+    before), ``'breach'`` or ``'held'`` (a breach already said, or the red read is still the
+    attempt the re-run replaces: ``attempt``, the run's ``run_attempt``, not past the one re-run)."""
+    now = now or _now()
+    data = load(state_dir, now)
+    key = str(sha)
+    rec = dict(data['infra'].get(key) or {})
+    if rec.get('count'):
+        if rec.get('breach'):
+            return 'held'
+        if attempt is not None and str(rec.get('run')) == str(run_id) \
+                and int(attempt or 0) <= int(rec.get('attempt') or 0):
+            return 'held'   # the re-run has not started its attempt yet: the old red still reads
+        rec.update(breach=_iso(now), at=_iso(now), last=cls, run=str(run_id))
+        data['infra'][key] = rec
+        save(state_dir, data)
+        out(f'watchdog: BREACH infra red ({cls}) again on {key[:9]} at {where or "?"} — run '
+            f'{run_id}; re-run once already, not again: read the runner pool')
+        return 'breach'
+    r = _call(gh, ['run', 'rerun', str(run_id), '--failed', '-R', slug])
+    if not r.ok:
+        out(f'infra red ({cls}) on {key[:9]} at {where or "?"}: re-run of run {run_id} '
+            f'refused — {(r.stderr or r.reason or "").strip()[:120]}')
+        return 'refused'
+    from asf import ci_queue
+    ci_queue.claim_cancel(state_dir, run_id, 'infra', sha=key, cls=cls, where=where)
+    data['infra'][key] = {'count': 1, 'class': cls, 'run': str(run_id), 'at': _iso(now),
+                          **({'attempt': int(attempt)} if attempt is not None else {})}
+    save(state_dir, data)
+    out(f'infra red ({cls}) on {key[:9]} at {where or "?"}: re-run queued (run {run_id}, '
+        f'--failed) — not a red check')
+    return 'rerun'
+
+
+def run_jobs(slug, run_id, gh=None):
+    """``(run, jobs)`` for workflow run ``run_id`` (two ``gh api`` reads), or ``(None, None)``
+    when either cannot be read."""
+    if not slug or not run_id:
+        return None, None
+    try:
+        r = _call(gh, ['api', f'repos/{slug}/actions/runs/{run_id}'])
+        run = json.loads(r.data) if r.ok and r.data else None
+        j = _call(gh, ['api', f'repos/{slug}/actions/runs/{run_id}/jobs?per_page=100'])
+        got = json.loads(j.data) if j.ok and j.data else None
+    except (ValueError, TypeError):
+        return None, None
+    jobs = got.get('jobs') if isinstance(got, dict) else None
+    if not isinstance(run, dict) or not isinstance(jobs, list):
+        return None, None
+    return run, jobs
+
+
+#: how often one workflow run is read for a phantom while its checks wait (:func:`infra_class`
+#: with ``state_dir``): a queue under load keeps checks queued for long, and is no phantom
+PHANTOM_PROBE_S = 600
+
+
+def infra_class(slug, checks, required=None, gh=None, state_dir=None, now=None):
+    """``(class, run id, attempt)`` when the one workflow run behind ``checks`` (their links) is an infra
+    red (:func:`classify_red`: a phantom or a lost runner), else None — a run that reads as a
+    test red, checks from two runs, a link with no run, or a run that cannot be read. With
+    ``state_dir`` the run is read at most once per :data:`PHANTOM_PROBE_S` (the caller polls a
+    pending head every pass)."""
+    rids = {_ids(c.get('link') or c.get('html_url') or c.get('details_url'))[0]
+            for c in checks or () if isinstance(c, dict)}
+    if len(rids) != 1 or None in rids:
+        return None
+    rid = rids.pop()
+    if state_dir:
+        now = now or _now()
+        data = load(state_dir, now)
+        probe = data['infra'].get(f'probe|{rid}') or {}
+        seen = _parse(probe.get('at'))
+        if seen is not None and (now - seen).total_seconds() < PHANTOM_PROBE_S:
+            return None
+        data['infra'][f'probe|{rid}'] = {'at': _iso(now)}
+        save(state_dir, data)
+    run, jobs = run_jobs(slug, rid, gh)
+    if run is None:
+        return None
+    cls = classify_red(run, jobs, required)
+    try:
+        attempt = int(run.get('run_attempt') or 1)
+    except (TypeError, ValueError):
+        attempt = 1
+    return (cls, rid, attempt) if cls in INFRA_CLASSES else None
 
 
 def run_live(slug, run_id, gh=None, required=None):

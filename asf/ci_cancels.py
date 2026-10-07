@@ -24,7 +24,7 @@ from asf import env
 #: every cause a cancelled run can have, in the order they are tried: the factory's own claims
 #: first (it knows), then the run's own limit, then the two inferences, then the head pair, then
 #: the honest nothing. First match wins; a run has exactly one.
-CAUSES = ('relief', 'stall', 'dedupe', 'merged', 'timeout', 'rewrite', 'newhead',
+CAUSES = ('relief', 'stall', 'infra', 'dedupe', 'merged', 'timeout', 'rewrite', 'newhead',
           'unresolved', 'unclaimed')
 
 #: what the operator does about each. `wasted` is the one this card exists to drive to zero.
@@ -32,14 +32,15 @@ GROUPS = {
     'traded':  ('relief', 'stall'),        # thrown away on purpose, to buy the trunk its runners
     'saved':   ('dedupe', 'merged'),       # the run was moot; the cancel kept the minutes
     'wasted':  ('rewrite',),               # a content-free re-push cut it short — nobody chose it
-    'sound':   ('newhead', 'timeout'),     # the head is gone, or the job hit its own limit
+    'sound':   ('newhead', 'timeout', 'infra'),   # the head is gone, the job hit its own limit,
+                                                # or its runner was lost (re-run once: F-0287)
     'unknown': ('unresolved', 'unclaimed'),
 }
 
 #: the landed cause strings that are the factory's own word about a cancel it made (F-0203 PD2),
 #: plus the host's own annotation for a job that hit its declared limit — stronger evidence than
 #: any supersede rule, so it is honoured as a claim rather than re-read from the head pair.
-HONOURED = {'relief': 'relief', 'stall': 'stall', 'duplicate-push': 'dedupe',
+HONOURED = {'relief': 'relief', 'stall': 'stall', 'infra': 'infra', 'duplicate-push': 'dedupe',
             'merged-pr': 'merged', 'job-timeout': 'timeout',
             # a timeout read as runner contention (asf.ci_queue._contention): still the job's limit
             'contention-rerun': 'timeout', 'contention-alarm': 'timeout',

@@ -175,6 +175,42 @@ class ReapedEmptyDeadRun(DeadRunHoldsNoSeat):
         self.assertEqual(set(lifecycle.corrections(path)), {'F-0001'})
 
 
+class ADiedReviewReRunsTheReview(Home):
+    """F-0275: a review session that died judged nothing — it re-runs on the same head, and the
+    coder is never sent a correction for it (no cold retry, no hold); at the third death in a
+    row it is the operator's."""
+
+    Ctx = ReapedEmptyDeadRun.Ctx
+    registry = DeadRunHoldsNoSeat.registry
+
+    def test_a_dead_review_is_released_never_corrected(self):
+        path = self.registry(launch('review-t-0001', 1, item='T-0001', kind='review'),
+                             {'job': 'review-t-0001', 'ended': 't', 'end_reason': 'dead pid'})
+        s = lifecycle.latest(path)['review-t-0001']
+        lines = []
+        got = step_health.handle_dead(self.Ctx(self.product), dict(s, job='review-t-0001'),
+                                      runtime_fn=lambda: self.fail('no correction'),
+                                      out=lines.append, items={'T-0001': {'state': 'Active'}})
+        self.assertEqual(got, 'released')
+        self.assertEqual(lifecycle.corrections(path), {})
+        self.assertIn('re-runs on the same head', lines[0])
+
+    def test_a_review_dead_three_times_in_a_row_is_the_operators(self):
+        rows = []
+        for i in range(3):
+            rows += [launch('review-t-0001', i + 1, item='T-0001', kind='review',
+                            started=f'2026-09-24T0{i + 4}:10:55Z'),
+                     {'job': 'review-t-0001', 'ended': f't{i}', 'end_reason': 'dead pid'}]
+        path = self.registry(*rows)
+        s = lifecycle.latest(path)['review-t-0001']
+        got = step_health.handle_dead(self.Ctx(self.product), dict(s, job='review-t-0001'),
+                                      runtime_fn=lambda: self.fail('no correction'),
+                                      out=lambda s: None, items={'T-0001': {'state': 'Active'}})
+        self.assertEqual(got, 'operator')
+        self.assertEqual(lifecycle.corrections(path), {})
+        self.assertEqual(step_health.dead_streak(path, 'review-t-0001'), 3)
+
+
 class FeederSendsNothingBack(unittest.TestCase):
     def test_a_removed_or_done_item_gets_no_correction_row(self):
         corr = {'kind': 'unpushed', 'text': 'empty branch', 'rounds': 1, 'at': 't'}
