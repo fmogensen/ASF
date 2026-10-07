@@ -160,7 +160,7 @@ import tempfile
 import time
 
 from asf import (attestation, ci_queue, connectors, env, flake, gh_limit, gitops, gitpush,
-                 refguard, run_cancel, stale_ref)
+                 refguard, run_cancel, stale_ref, tree_green)
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.state import store
@@ -2600,6 +2600,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             continue
         runs = newest(runs)     # a fresh run (asf.stale_ref) supersedes the stale one it replaced
         state, why = verdict(admission_runs(runs), required)
+        earned = state == 'green'
         if state == 'pending' and all(w.endswith('(not started)') for w in why.split(', ')) \
                 and deploy.never_started(runs, required):
             # the head's CI is done and never ran these (a path filter, a matrix the filter
@@ -2614,6 +2615,16 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
             changes.append(('red', key, r['red']))
             continue
+        if state == 'pending':
+            # a reword, a sign-off trailer: a new head with a byte-identical tree, whose CI an
+            # earlier head of this PR already passed. That green is this content's green — carried
+            # rather than waited for all over again (asf.tree_green, B-0275)
+            carry = tree_green.carried(lane.state_dir, n, head,
+                                       tree_green.tree_at(lane.repo, head), required)
+            if carry is not None:
+                lane.out(f'merge queue: asf land PR #{n} green at {head[:12]} — '
+                         f'{tree_green.carried_line(carry)}')
+                state, why, earned = 'green', '', True
         if state == 'red':
             failed = [{'name': c.get('name'), 'link': c.get('html_url')}
                       for c in runs if c.get('status') == 'completed'
@@ -2653,6 +2664,9 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
         if state != 'green':
             lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — {why}')
             continue
+        if earned:  # this head's green is the next identical tree's too (B-0275)
+            tree_green.remember(lane.state_dir, n, head, tree_green.tree_at(lane.repo, head),
+                                required)
         files = [l for l in H.sh(['git', 'diff', '--name-only', f'{trunk_sha}...{head}'],
                                  cwd=lane.repo).stdout.splitlines() if l.strip()]
         out.append({'branch': b, 'item': lane_mod.pr_item(n), 'kind': lane.conv.branch_kind(b),
