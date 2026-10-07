@@ -26,6 +26,11 @@ SIZE = {  # the card's definitions, in one place; the History line and asf check
 
 RULES = ('signature', 'writes', 'features-list', 'parent-feature', 'default')
 
+#: The prefix intake puts on a rule when it reached it by supplying a fact the record already
+#: held rather than by reading the card as the operator wrote it (:func:`asf.groom.inbox.supplied`):
+#: `shape: by-rule-default → feature`. The rule names are this module's, so the prefix is too.
+BY_RULE = 'by-rule-'
+
 #: The line or section that would make a card the type its `type:` line declares — the "fix line"
 #: F-0134 asks for, one per size, read by `_typed` (C4). Each entry completes the sentence
 #: "a <size> needs …".
