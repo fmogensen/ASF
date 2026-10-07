@@ -65,6 +65,32 @@ def severity_change(rec, updates, why):
     return line, None
 
 
+def reshape_applied(rec, updates, why):
+    """``asf set <fid> reshape_applied=current --why "…"``: the Feature's pending ``reshape:``
+    recorded as carried out by hand (a replan the record cannot apply, applied by the operator).
+    ``updates`` gets ``reshape_applied: <digest of the reshape: text>`` and ``reshape_applied_at``
+    — the very fields the replan applier writes, so the feeder's REPLAN row ends the same way —
+    and the History line names the digest and the reason. ``(history_line, None)``, or
+    ``(None, reason)`` when refused: not a Feature, no ``reshape:`` on it, or no one-line
+    ``--why``."""
+    from asf.record import replan
+    from asf.record.core import now_iso
+    meta = rec['meta']
+    if meta.get('type') not in ('feature', 'task'):
+        return None, 'reshape_applied= is a Feature or Task field'
+    if not meta.get('reshape'):
+        return None, f"{meta.get('id')} carries no reshape: — nothing to record as applied"
+    if not why or '\n' in why:
+        return None, ('reshape_applied=current wants --why "<what was done>" (one line, written '
+                      'into ## History)')
+    if not any(h.strip() == '## History' for h, _ in parse_sections(rec['body'])[1]):
+        return None, f"{rec['relpath']} has no ## History section to record the change in"
+    d = replan.digest(meta['reshape'])
+    updates[replan.APPLIED] = d
+    updates[replan.APPLIED_AT] = now_iso()
+    return f'- {today()} set: reshape_applied {d} — {why}', None
+
+
 def _as_list(value):
     if value is None or value == '':
         return []
@@ -233,7 +259,10 @@ def _set_one(args, root, rec, item_id, assignments, canonical=None):
             updates[top] = value
             all_noop = False
 
-    history, err = severity_change(rec, updates, getattr(args, 'why', None))
+    if 'reshape_applied' in updates:
+        history, err = reshape_applied(rec, updates, getattr(args, 'why', None))
+    else:
+        history, err = severity_change(rec, updates, getattr(args, 'why', None))
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 2

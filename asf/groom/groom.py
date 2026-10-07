@@ -8,8 +8,8 @@ from asf import env
 from asf.feeder import footprint
 from asf.record import frontmatter
 from asf.record import writer
-from asf.record.core import (as_list, canonicalize, compute_derived, is_open, is_retired,
-                             jaccard, load_items, parse_sections, tokenize)
+from asf.record.core import (ID_DIGITS, ID_RE, as_list, canonicalize, compute_derived, is_open,
+                             is_retired, jaccard, load_items, parse_sections, tokenize)
 from asf.record.index import do_index
 from asf.record.ingest import append_history_lines, append_section_lines
 from asf.tick import stale
@@ -29,7 +29,7 @@ from asf.groom.shape import SHAPE_LINE_RE
 from asf.views import index_reader
 from asf.workers import lifecycle, pool
 
-ANSWER_LINE_RE = re.compile(r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*(?P<answer>.*)$')
+ANSWER_LINE_RE = re.compile(rf'^- \[[ xX]\]\s+(?P<id>[A-Z]-{ID_DIGITS})\b.*→\s*answer:\s*(?P<answer>.*)$')
 INBOX_ANSWER_RE = re.compile(r'^- \[[ xX]\]\s+inbox:(?P<name>\S+)\s.*→\s*answer:\s*(?P<answer>.*)$')
 ANSWER_YES = re.compile(r'^yes$', re.IGNORECASE)
 #: ``no``/``close``, optionally ``: <reason>`` — a rule that closes a card names why
@@ -40,7 +40,7 @@ ANSWER_OPEN = re.compile(r'^open$', re.IGNORECASE)
 ANSWER_RANK = re.compile(r'^rank\s+(\d+)$', re.IGNORECASE)
 ANSWER_PARENT = re.compile(r'^parent\s+(\S+)$', re.IGNORECASE)
 ANSWER_SEVERITY = re.compile(r'^(S[123])$', re.IGNORECASE)
-ANSWER_UNBLOCK = re.compile(r'^unblock\s+([A-Z]-\d{4})$', re.IGNORECASE)
+ANSWER_UNBLOCK = re.compile(rf'^unblock\s+([A-Z]-{ID_DIGITS})$', re.IGNORECASE)
 #: ``reshape: <how>`` — the card is held and reshaped (a Task's RESHAPE → PLAN row reads it).
 ANSWER_RESHAPE = re.compile(r'^reshape:\s*(?P<how>\S.*)$', re.IGNORECASE)
 #: ``budget <n> [$<usd>]`` — an item stopped by its budget (F-0092 §2.7) is raised to `<n>`
@@ -52,8 +52,8 @@ ANSWER_BUDGET = re.compile(
     r'|\$(?P<usd_only>\d+(?:\.\d+)?))$', re.IGNORECASE)
 #: A shape proposal's line (F-0086 D6): the verb after the id says what `yes` does.
 PROPOSAL_RE = re.compile(
-    r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\s+(?P<verb>merge|batch|split)\s+(?P<rest>.*?)\s+—')
-_ID_RE = re.compile(r'^[A-Z]-\d{4}$')
+    rf'^- \[[ xX]\]\s+(?P<id>[A-Z]-{ID_DIGITS})\s+(?P<verb>merge|batch|split)\s+(?P<rest>.*?)\s+—')
+_ID_RE = ID_RE
 CONTROLLER_PREFIX = re.compile(r'^controller:\s*', re.IGNORECASE)
 ADJUDICATOR_PREFIX = re.compile(r'^adjudicator:\s*', re.IGNORECASE)
 
@@ -1000,7 +1000,7 @@ EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS, OVER_BUDGET_QUESTIONS, STA
 
 _SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + EXTRA_SECTIONS}
 _HEADER_RE = re.compile(r'^## (.+)$')
-_LINE_ID_RE = re.compile(r'^- \[[ xX]\]\s+([A-Z]-\d{4})\b')
+_LINE_ID_RE = re.compile(rf'^- \[[ xX]\]\s+([A-Z]-{ID_DIGITS})\b')
 
 
 def _line_sections(text):

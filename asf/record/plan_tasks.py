@@ -26,12 +26,13 @@ from asf.record.core import canonicalize, load_items, today
 from asf.record import decisions, idcheck, idclaim, plan_order, trunk_check
 from asf.record.ids import mint_id, write_new_item
 from asf.record.ingest import is_retired, match_feature
+from asf.record.core import ID_DIGITS
 
 #: A Feature the ingest already derived Resolved/Closed gets no fresh Task cards from its plan.
 DONE_STATES = ('Resolved', 'Closed')
 
 STORIES_LINE_RE = re.compile(r'^\s*stories\s*:\s*(.+)$', re.IGNORECASE | re.MULTILINE)
-STORY_ID_RE = re.compile(r'\bS-\d{4}\b')
+STORY_ID_RE = re.compile(rf'\bS-{ID_DIGITS}\b')
 DESCRIPTION_CHARS = 4000
 
 
@@ -116,6 +117,7 @@ def _mint(root, product, ev, out=print, read_ref=None):
     # is_retired, match_feature/plan_ref, decided/own_plan) — none of it depends on the plan's
     # text, so this reaches the same refs, in the same order, that the minting loop used to
     candidates = []
+    specs = {}   # fid -> the landed spec's ref
     for fid in sorted(canonical):
         rec = canonical[fid]
         if rec['meta'].get('type') != 'feature':
@@ -139,12 +141,17 @@ def _mint(root, product, ev, out=print, read_ref=None):
                 f'not decided, so nothing minted')
             continue
         candidates.append((fid, ref, plan_path))
+        # the Feature's landed spec too: the `### S-…` Stories it declares are minted with
+        # the Tasks (F-0285)
+        if fev.get('spec') and fev.get('spec_on_main'):
+            specs[fid] = fev['spec']
 
     # one batch for the lot; the injected `read_ref` (the tests' seam) stays per-ref, as before
+    refs = [ref for _fid, ref, _plan_path in candidates] + list(specs.values())
     if read_ref is not None:
-        texts = {ref: read_ref(ref) for _fid, ref, _plan_path in candidates}
+        texts = {ref: read_ref(ref) for ref in refs}
     else:
-        texts = evidence.read_refs([ref for _fid, ref, _plan_path in candidates], product=product)
+        texts = evidence.read_refs(refs, product=product)
 
     for fid, ref, plan_path in candidates:
         rec = canonical[fid]
@@ -180,11 +187,42 @@ def _mint(root, product, ev, out=print, read_ref=None):
             out(f"plan-tasks: {fid}: {plan_path} mints id(s) no claim covers: {'; '.join(bad)} "
                 f"— nothing minted (take ids from the session's BACKLOG_ID_RANGE)")
             continue
+        # F-0285: a Story the plan cites must be a card, or a `### S-…: <title>` heading in the
+        # plan or its spec — a session that cannot reach the record (a cloud one) declares its
+        # Stories that way, from its claimed block, and the record mints them here, before the
+        # Tasks that cite them. A Story nobody declared refuses the plan whole.
+        declared = {**idcheck.declared_stories(texts.get(specs.get(fid)) or ''),
+                    **idcheck.declared_stories(text)}
+        phantom = idcheck.phantom_stories(text, canonical, declared)
+        if phantom:
+            out(f"plan-tasks: {fid}: {plan_path} cites Story id(s) never minted: "
+                f"{', '.join(phantom)} — nothing minted (each needs a card, or a "
+                f"`### <id>: <title>` heading with its acceptance lines in the spec or plan)")
+            continue
+        fresh = {s: d for s, d in declared.items() if s not in canonical}
+        bad = idcheck.check_doc('\n'.join(f'### {s}: {d["title"]}' for s, d in fresh.items()),
+                                canonical, claimed, fid)
+        if bad:
+            out(f"plan-tasks: {fid}: {plan_path} declares Story id(s) no claim covers: "
+                f"{'; '.join(bad)} — nothing minted (take ids from the session's "
+                f"BACKLOG_ID_RANGE)")
+            continue
+        for sid, d in fresh.items():
+            write_new_item(root, canonical, 'story', sid,
+                           {'title': d['title'] or f'{fid} {sid}', 'parent': fid}, '', today(),
+                           f'declared in {plan_path}', acceptance=d['acceptance'] or (),
+                           shape=('parent-feature', 'story'))
+            made.append(sid)
+        if fresh:
+            out(f"plan-tasks: {fid}: {len(fresh)} Story(ies) declared: {', '.join(fresh)}")
+            by_id, _errors = load_items(root)
+            canonical, _dupes = canonicalize(by_id)
         ids = []
         keys = {}
         for t in records:
-            typed = {'title': t['title'] or f"{fid} {t['tid']}", 'parent': fid, 'decided': True,
-                     'links': {'plan': plan_path}}
+            # a bare `D7` the register holds is written as the record's `D-0007` on the card
+            typed = {'title': decisions.normalise(t['title'], known) or f"{fid} {t['tid']}",
+                     'parent': fid, 'decided': True, 'links': {'plan': plan_path}}
             writes = writes_lines(t['body'])
             if writes:
                 typed['writes'] = writes
@@ -212,7 +250,7 @@ def _mint(root, product, ev, out=print, read_ref=None):
                     f'"{subject[:60]}" — minted Closed ({reason})')
             new_id = mint_id(root, canonical, 'task')
             keys[new_id] = idcheck.task_key(fid, typed.get('stories'), typed.get('writes'))
-            body = t['body'].strip()[:DESCRIPTION_CHARS]
+            body = decisions.normalise(t['body'].strip(), known)[:DESCRIPTION_CHARS]
             write_new_item(root, canonical, 'task', new_id, typed, body, today(), why,
                            state=state)
             ids.append(new_id)

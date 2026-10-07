@@ -409,6 +409,32 @@ class RenderNotProvedTests(unittest.TestCase):
         self.assertEqual(proves.render(claims), '- S-18750 line 1 — tests/test_proves.py::A')
 
 
+class UnknownStoryTests(unittest.TestCase):
+    """F-0285: a ``Proves:`` line on a Story id the record holds no card for (a spec that cited
+    ids nobody minted) proves nothing, and says so: ``Not proved: … — unknown story``."""
+
+    TEXT = ('Proves: S-29504 line 1 — tests/a.test.ts\n'
+            'Proves: S-0001 line 2 — tests/b.test.ts\n')
+
+    def test_given_the_records_stories_a_phantom_claim_is_refused_as_unknown(self):
+        counted, refused = proves.parse_all(self.TEXT, known={'S-0001': {'type': 'story'}})
+        self.assertEqual([c.story for c in counted], ['S-0001'])
+        self.assertEqual([(c.story, c.refusal) for c in refused], [('S-29504', 'unknown story')])
+        self.assertEqual(proves.render_not_proved(refused),
+                         '- S-29504 line 1 — unknown story (tests/a.test.ts)')
+
+    def test_an_id_set_works_too_and_a_non_story_card_is_unknown(self):
+        _c, refused = proves.parse_all(self.TEXT, known={'S-0001'})
+        self.assertEqual([c.story for c in refused], ['S-29504'])
+        _c, refused = proves.parse_all(self.TEXT, known={'S-0001': {'type': 'task'},
+                                                         'S-29504': {'type': 'story'}})
+        self.assertEqual([c.story for c in refused], ['S-0001'])
+
+    def test_without_the_record_nothing_changes(self):
+        counted, refused = proves.parse_all(self.TEXT)
+        self.assertEqual((len(counted), refused), (2, []))
+
+
 class UnprovedReasonTests(unittest.TestCase):
     BODY = ("## Acceptance\n- [ ] one\n- [ ] two\n- [ ] three\n- [ ] four\n- [ ] five\n"
             "- [ ] six\n## History\n")

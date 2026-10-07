@@ -7,8 +7,10 @@ files.
 import os
 import re
 
+from asf.record.core import ID_DIGITS
+
 ANSWER_LINE_RE = re.compile(
-    r'^- \[(?P<box>[ x])\]\s+(?P<id>[A-Z]-\d{4})\s+(?P<rest>.*?)\s*→\s*answer:\s*(?P<answer>.*)$')
+    rf'^- \[(?P<box>[ x])\]\s+(?P<id>[A-Z]-{ID_DIGITS})\s+(?P<rest>.*?)\s*→\s*answer:\s*(?P<answer>.*)$')
 HISTORY_LINE_RE = re.compile(
     r'^- (?P<date>\d{4}-\d{2}-\d{2}) groom: (?P<field>\S+) → (?P<value>.+) '
     r'\((?P<kind>controller|adjudicator), (?P<name>[^)]+)\)$')
@@ -17,7 +19,7 @@ SPOKEN_FOR_LABEL_RE = re.compile(r'spoken for:\s*([^)]+)\)')
 SECTION_RE = re.compile(r'^## (.+)$')
 #: A session's freestanding escalation (the brief's fourth answer class), naming the card it
 #: rules is not its to answer — a ruling, not a still-open question (B-0092).
-NEEDS_OPERATOR_ID_RE = re.compile(r'^NEEDS OPERATOR:\s*(?P<id>[A-Z]-\d{4})\b')
+NEEDS_OPERATOR_ID_RE = re.compile(rf'^NEEDS OPERATOR:\s*(?P<id>[A-Z]-{ID_DIGITS})\b')
 #: The groom file's sections that are groom housekeeping, not an operator's decision: a still
 #: open question there goes to **Housekeeping**, never **For you** (the For-you card, item 3).
 #: A barred line (a human-now approval, e.g. a new Epic) is **For you** from any section.

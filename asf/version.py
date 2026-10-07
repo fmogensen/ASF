@@ -26,6 +26,8 @@ import subprocess
 import sys
 import tempfile
 
+from asf.record.core import ID_DIGITS
+
 #: A release tag.
 TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
 #: A pre-release tag (``v0.1.0-preview``): cut by hand through the release workflow, never by
@@ -52,7 +54,7 @@ GRACE_S = 30 * 60
 #: The line of a PR body that is its release note, verbatim.
 NOTE_LINE_RE = re.compile(r'(?im)^\s*[-*]?\s*\**what changed for you\**\s*:\s*\**\s*(.+?)\s*$')
 #: A subject's conventional-commit or item prefix: ``fix(lane): ``, ``S6: ``, ``T-0659 — ``.
-PREFIX_RE = re.compile(r'^(?:[a-z]+(?:\([^)]*\))?!?:\s*|[A-Z]+\d*:\s*|[A-Z]-\d{4}\s*[—:-]\s*)')
+PREFIX_RE = re.compile(rf'^(?:[a-z]+(?:\([^)]*\))?!?:\s*|[A-Z]+\d*:\s*|[A-Z]-{ID_DIGITS}\s*[—:-]\s*)')
 PR_RE = re.compile(r'\s*\(#(\d+)\)\s*$')
 SECTIONS = ('Features landed', 'Bugs fixed', 'In progress')
 #: What a forbidden name becomes in a generated note.

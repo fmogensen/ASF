@@ -72,3 +72,24 @@ def unknown(text, known):
     known = {k.upper() for k in known}
     return [d for d in cited(text) if d.upper() not in known]
 
+
+
+def normalise(text, known):
+    """``text`` with each bare ``D<n>`` (``D7``, outside a code span or fenced block) written in
+    the record's form ``D-0007`` — only when ``known`` (:func:`register`) holds that id. A plan
+    citing its product's ``docs/decisions`` as ``D7`` then reads, on the card it mints, as the
+    decision it is; a ``D<n>`` the register lacks is left as written (it may be anything)."""
+    from asf.record.core import BARE_DECISION_RE
+    have = {k.upper() for k in known or ()}
+
+    def one(m):
+        rid = f'D-{int(m.group(0)[1:]):04d}'
+        return rid if rid in have else m.group(0)
+
+    out, at = [], 0
+    for code in _CODE_RE.finditer(text or ''):
+        out.append(BARE_DECISION_RE.sub(one, text[at:code.start()]))
+        out.append(code.group(0))
+        at = code.end()
+    out.append(BARE_DECISION_RE.sub(one, (text or '')[at:]))
+    return ''.join(out)

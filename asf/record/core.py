@@ -38,7 +38,14 @@ STOPWORDS = {
     'is', 'are', 'this', 'that', 'by', 'as', 'at', 'from', 'be', 'it', 'its',
 }
 
-ID_RE = re.compile(r'^[A-Z]-\d{4}$')
+#: The one id grammar every parser reads: a capital prefix, a hyphen and four **or more** digits.
+#: A claimed block can run past 9999 (``S:29500-29549``, ``T:49890-49939``), and a parser that
+#: wrote ``\d{4}`` read ``S-29501`` as nothing, or as ``S-2950`` — import these, never respell them
+#: (tests/test_id_pattern.py holds the line).
+ID_DIGITS = r'\d{4,}'
+ID_RE = re.compile(rf'^[A-Z]-{ID_DIGITS}$')
+#: one id inside text, on word bounds
+ID_TOKEN_RE = re.compile(rf'\b[A-Z]-{ID_DIGITS}\b')
 # not PF-D18 (a letter-hyphen before D is another id's prefix); D607-D616 is still a range of two
 BARE_DECISION_RE = re.compile(r'(?<![A-Za-z]-)(?<!\w)D\d{1,3}\b')
 
@@ -250,8 +257,8 @@ def scan_text(rec):
     return '\n'.join(parts)
 
 
-MENTION_ID_RE = re.compile(r'[A-Z]-[0-9]{4}')
-MENTION_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9])[A-Z]-[0-9]{4}(?![A-Za-z0-9])')
+MENTION_ID_RE = re.compile(rf'[A-Z]-{ID_DIGITS}')
+MENTION_TOKEN_RE = re.compile(rf'(?<![A-Za-z0-9])[A-Z]-{ID_DIGITS}(?![A-Za-z0-9])')
 
 
 def mention_re(iid):

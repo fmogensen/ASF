@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
+from asf.record.core import ID_DIGITS
+
 #: The points of the tick an invariant runs at.
 SCOPES = ('record', 'feeder', 'lane')
 
@@ -1353,7 +1355,7 @@ def check_i12(text, items):
         if line.startswith('#'):
             current = line.strip() if line.strip() in LANDED_HEADINGS else None
             continue
-        m = re.match(r'^- \[?([A-Z]-\d{4})\b', line) if current else None
+        m = re.match(rf'^- \[?([A-Z]-{ID_DIGITS})\b', line) if current else None
         if m and (items.get(m.group(1)) or {}).get('state') not in DONE_STATES:
             state = (items.get(m.group(1)) or {}).get('state', 'unknown')
             out.append(Finding('I12', 'record', m.group(1), f'listed under {current!r} while {state}'))

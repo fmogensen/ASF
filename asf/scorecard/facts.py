@@ -23,12 +23,14 @@ import json
 import os
 import re
 
+from asf.record.core import ID_DIGITS
+
 STAMP = '%Y-%m-%dT%H:%M:%SZ'
 _HIST_RE = re.compile(r'^-\s+(\d{4}-\d\d-\d\d)(?:[ T](\d\d:\d\d)Z?)?\b')
 _STAGE_RE = re.compile(r'\bstage (.+?) → (.+?)(?: \(|$)')
 _STATE_RE = re.compile(r'\bstate (\w+) → (\w+)')
 _ROUND_RE = re.compile(r'\br(\d+)$')
-ID_RE = re.compile(r'(?<![A-Za-z0-9])([EFSTBDR])-(\d{4})(?![0-9])', re.IGNORECASE)
+ID_RE = re.compile(rf'(?<![A-Za-z0-9])([EFSTBDR])-({ID_DIGITS})(?![0-9])', re.IGNORECASE)
 LANDED_STAGES = ('landed', 'on-prod')
 LANDED_STATES = ('Resolved', 'Closed')
 LADDER = ('card', 'spec-draft', 'spec-review', 'spec-approved', 'plan-draft', 'plan-review',

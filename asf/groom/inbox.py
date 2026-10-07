@@ -11,6 +11,7 @@ from asf.groom.shape import Card, Question, derive, infer_parent_epic
 from asf.record.ids import mint_id, write_new_item
 from asf.record.publish import left_ahead, publish
 from asf.conventions import DEFAULT_INTAKE_DIR
+from asf.record.core import ID_DIGITS
 
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
 
@@ -573,7 +574,7 @@ def stuck_s1_lines(root, intake_dir=None, groom_file=None, product=None):
 _CLAUSES = (
     (re.compile(r'^feature$', re.IGNORECASE), lambda m: ('type', 'feature'), 'feature'),
     (re.compile(r'^bug\s+(.+)$', re.IGNORECASE), lambda m: ('signature', m.group(1).strip()), 'bug <signature>'),
-    (re.compile(r'^parent\s+([A-Z]-\d{4})$', re.IGNORECASE), lambda m: ('parent', m.group(1).upper()), 'parent <id>'),
+    (re.compile(rf'^parent\s+([A-Z]-{ID_DIGITS})$', re.IGNORECASE), lambda m: ('parent', m.group(1).upper()), 'parent <id>'),
     (re.compile(r'^(S[123])$', re.IGNORECASE), lambda m: ('severity', m.group(1).upper()), 'S1|S2|S3'),
 )
 _CLOSE_RE = re.compile(r'^(no|close)$', re.IGNORECASE)

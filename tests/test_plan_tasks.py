@@ -114,6 +114,47 @@ class PlanTasksTests(unittest.TestCase):
         self.assertIn('parses to 0 Tasks', self.lines[0])
 
 
+class DeclaredAndPhantomStories(PlanTasksTests):
+    """F-0285 (a product's F-1144, 2026-10-07): its spec said Stories S-29500..S-29505 were
+    "minted from the spec session's own range" — a cloud session, which cannot reach the record —
+    and none existed. A Story the plan declares as a ``### S-…: <title>`` heading is minted here,
+    before the Tasks that cite it; one its ``## Stories`` section cites and nothing declares
+    refuses the plan whole."""
+
+    DECL = PLAN.replace('coverage: 1/1 stories', '''## Stories
+
+### S-29501: the reader reads
+- [ ] it reads the file
+- [ ] it refuses a broken one
+
+coverage: 1/1 stories''').replace('stories: S-0001, S-0009', 'stories: S-0001, S-29501')
+
+    def test_a_declared_story_is_minted_before_the_tasks_that_cite_it(self):
+        made = self.mint(text=self.DECL)
+        self.assertEqual(made, ['S-29501', 'T-0001', 'T-0002'], self.lines)
+        meta, body = read(self.root, 'story', 'S-29501')
+        self.assertEqual((meta['title'], meta['parent']), ('the reader reads', 'F-0001'))
+        self.assertIn('- [ ] it reads the file\n- [ ] it refuses a broken one', body)
+        self.assertEqual(read(self.root, 'task', 'T-0001')[0]['stories'], ['S-0001', 'S-29501'])
+
+    def test_a_story_its_stories_section_cites_and_nothing_declares_refuses_the_plan(self):
+        text = self.DECL.replace('### S-29501: the reader reads', '- S-29501 the reader reads')
+        self.assertEqual(self.mint(text=text), [])
+        self.assertIn('cites Story id(s) never minted: S-29501', self.lines[0])
+        self.assertEqual(os.listdir(os.path.join(self.root, 'tasks')), [])
+
+    def test_a_story_the_spec_declares_is_minted_with_the_plan(self):
+        spec = '# Spec F-0001\n\n## Stories\n\n### S-29501: the reader reads\n- [ ] it reads\n'
+        plan = self.DECL.replace('### S-29501: the reader reads', '- S-29501 the reader reads')
+        ev = {'features': {'f-0001': {'plan': 'origin/main:docs/plans/f-0001.md',
+                                      'plan_on_main': True, 'spec_on_main': True,
+                                      'spec': 'origin/main:docs/specs/f-0001.md'}}}
+        made = plan_tasks.mint_plan_tasks(
+            self.root, None, ev, out=self.lines.append,
+            read_ref=lambda ref: spec if 'specs/' in ref else plan)
+        self.assertEqual(made, ['S-29501', 'T-0001', 'T-0002'], self.lines)
+
+
 class HeaderRoute(unittest.TestCase):
     """S-38950: the gate's third route — a plan whose only id carrier is its own H1."""
 

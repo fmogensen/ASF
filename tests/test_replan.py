@@ -147,6 +147,25 @@ class APendingFeatureReshapeIsReplanned(unittest.TestCase):
 
     def test_a_running_replan_session_is_the_features_one_session(self):
         out = rows.candidates(f0090_index(), product(), [{'item': 'F-0090', 'kind': 'replan'}])
+        # no second replan row; the one row says what holds the Feature (F-0274)
+        got = [r for r in out if r.item_id == 'F-0090']
+        self.assertEqual([(r.kind, r.launches) for r in got], [(rows.FEATURE_HELD, False)])
+        self.assertIn('T-0030', got[0].reason)
+
+    def test_a_held_feature_names_the_session_and_its_kind(self):
+        # F-0274 (a product's F-0003, 2026-10-07): its replan session ran and every open Task
+        # row vanished from `asf next` with no reason
+        occ = {'busy': {'F-0090': 'session replan-f-0090 running'}}
+        got = [r for r in rows.candidates(f0090_index(), product(), [], occupancy=occ)
+               if r.item_id == 'F-0090']
+        self.assertEqual([r.action for r in got], ['WAITS ON replan-f-0090 (replan)'])
+        self.assertEqual(got[0].waits_on, 'replan-f-0090')
+
+    def test_a_feature_holding_no_open_task_gets_no_held_row(self):
+        idx = f0090_index()
+        for t in ('T-0027', 'T-0030', 'T-0032', 'T-0037'):
+            idx['items'][t]['state'] = 'Closed'
+        out = rows.candidates(idx, product(), [{'item': 'F-0090', 'kind': 'replan'}])
         self.assertFalse([r for r in out if r.item_id == 'F-0090'])
 
     def test_a_feature_not_in_build_gets_no_replan_row(self):
@@ -516,6 +535,130 @@ class ParseAndPending(unittest.TestCase):
         self.assertTrue(replan.replanned_since(items, 'T-0001', '2026-09-29T14:00:00Z'))
         self.assertFalse(replan.replanned_since(items, 'T-0001', '2026-09-29T16:00:00Z'))
         self.assertFalse(replan.replanned_since({'T-0001': items['T-0001']}, 'T-0001', ''))
+
+
+class BothShapesAndUnreadable(TheRecordAppliesALandedReplan):
+    """The applier reads a ``replans/`` document and a Feature plan's ``## … reshaped from <id>``
+    section alike; a heading that is not a Task, new or Drop section is a note; and a landed
+    replan it still cannot apply is written on the card once (``reshape_unreadable:``) and turns
+    the feeder's row into the operator's NEEDS DECISION, never another replan session."""
+
+    PLAN = """# F-0090 — plan
+
+## 1. Context
+
+### C-1. a finding, not a Task
+writes: lib/never.py
+
+## 4. The Tasks — reshaped from T-0037 (groom 2026-10-05)
+
+Prose on why the cut is by directory.
+
+### T-49891: packages/db — the schema
+split_from: T-0037
+stories: S-0010
+writes: lib/db.py
+after: none
+
+### T-49890: packages/core — the grammar
+writes: lib/core.py
+after: T-49891
+
+### T-0030: propose_team over lib/plan.py
+writes: lib/plan.py
+after: T-49890
+
+## 5. What ran on this plan's own head
+
+### T-49999: not in the reshape section, never read
+"""
+
+    def apply_docs(self, docs):
+        return replan.apply_replans(self.root, product(), docs.get, out=self.lines.append)
+
+    def test_a_note_heading_is_read_past_and_bounds_the_section_before_it(self):
+        doc = self.doc.replace('### Drop T-0037', '### Why the cut\nwrites: lib/leak.py\n\n'
+                                                  '### Drop T-0037')
+        done = self.apply(doc)
+        self.assertEqual(list(done), ['F-0090'], self.lines)
+        self.assertIn('note: ### Why the cut', ' '.join(self.lines))
+        # the Task section above the note keeps its own writes:, not the note's
+        self.assertEqual(read_card(self.root, 'task', 'T-0026')['writes'], ['lib/batch.py'])
+
+    def test_the_plan_shape_mints_the_declared_ids_and_drops_the_source(self):
+        done = self.apply_docs({'docs/plans/f-0090.md': self.PLAN})
+        self.assertEqual(list(done), ['F-0090'], self.lines)
+        db = read_card(self.root, 'task', 'T-49891')
+        core = read_card(self.root, 'task', 'T-49890')
+        self.assertEqual((db['parent'], db['writes']), ('F-0090', ['lib/db.py']))
+        self.assertEqual(core['after'], ['T-49891'])
+        self.assertEqual(read_card(self.root, 'task', 'T-0030')['after'], ['T-49890'])
+        self.assertIn('reshaped into T-49891, T-49890',
+                      read_card(self.root, 'task', 'T-0037')['removed'])
+        self.assertFalse(os_exists(self.root, 'T-49999'))
+        self.assertFalse(os_exists(self.root, 'T-0001'))     # C-1 is a note, never a Task
+        f = read_card(self.root, 'feature', 'F-0090')
+        self.assertEqual(f['reshape_applied'], self.d)
+        self.assertEqual(self.apply_docs({'docs/plans/f-0090.md': self.PLAN}), {})
+
+    def test_a_task_reshape_section_is_applied_from_the_features_plan(self):
+        # the reshape answer is on the Task (RESHAPE → PLAN), the Feature carries none: the
+        # cloud session that wrote the section could not write the cards (F-0285)
+        path = os.path.join(self.root, 'features', 'F-0090.md')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text.replace('reshape: ', 'note: '))
+        t37 = os.path.join(self.root, 'tasks', 'T-0037.md')
+        with open(t37, encoding='utf-8') as f:
+            text = f.read()
+        with open(t37, 'w', encoding='utf-8') as f:
+            f.write(text.replace('state: New', 'state: New\nreshape: by directory', 1)
+                    .replace('# ---- machine ----\nstate: New\nreshape: by directory',
+                             'reshape: by directory\n# ---- machine ----\nstate: New'))
+        self.assertTrue(replan.task_pending(read_card(self.root, 'task', 'T-0037')))
+        done = self.apply_docs({'docs/plans/f-0090.md': self.PLAN})
+        self.assertEqual(list(done), ['T-0037'], self.lines)
+        t = read_card(self.root, 'task', 'T-0037')
+        self.assertTrue(t['removed'].startswith('replan F-0090: reshaped into T-49891'))
+        self.assertEqual(t['reshape_applied'], replan.digest('by directory'))
+        self.assertEqual(read_card(self.root, 'task', 'T-49891')['parent'], 'F-0090')
+
+    def test_an_unappliable_replan_is_written_on_the_card_and_reported_once(self):
+        bad = self.doc.replace('after: new 1', 'after: new 7')
+        self.assertEqual(self.apply(bad), {})
+        self.assertEqual(sum('NEEDS OPERATOR' in x for x in self.lines), 1, self.lines)
+        f = read_card(self.root, 'feature', 'F-0090')
+        self.assertTrue(f['reshape_unreadable'].startswith(f'{self.d}: '))
+        self.assertIn('new 7', replan.unreadable(dict(f, type='feature')))
+        self.assertEqual(self.apply(bad), {})
+        self.assertEqual(sum('NEEDS OPERATOR' in x for x in self.lines), 1, self.lines)
+
+    def test_the_feeder_asks_the_operator_instead_of_a_second_replan(self):
+        line = f'{self.d}: docs/plans/replans/x.md is not applied — after: new 7 names nothing'
+        idx = f0090_index(reshape_unreadable=line)
+        (row,) = [r for r in rows.candidates(idx, product(), []) if r.kind == rows.REPLAN]
+        self.assertFalse(row.launches)
+        self.assertEqual(row.action, rows.NEEDS_DECISION)
+        self.assertIn('reshape_applied=current', row.reason)
+        # a newer reshape than the one the line names is a fresh decision: a replan session again
+        idx = f0090_index(reshape_unreadable=line, reshape=HOW + ' and more')
+        (row,) = [r for r in rows.candidates(idx, product(), []) if r.kind == rows.REPLAN]
+        self.assertTrue(row.launches)
+
+    def test_a_task_reshape_row_the_record_cannot_apply_waits_on_the_operator(self):
+        d = replan.digest('by directory')
+        items = {'T-0037': {'id': 'T-0037', 'type': 'task', 'state': 'New',
+                            'reshape': 'by directory', 'reshape_unreadable': f'{d}: x — y'}}
+        row = rows.Row(tier=2, kind=rows.RESHAPE, item_id='T-0037', feature_id='F-0090',
+                       action=rows.LAUNCH, brief_kind='reshape', branch='plan/T-0037', reason='r')
+        (held,) = rows.hold_unreadable([row], items)
+        self.assertEqual(held.action, rows.NEEDS_DECISION)
+        self.assertIn('asf set T-0037 reshape_applied=current', held.reason)
+
+
+def os_exists(root, iid):
+    return os.path.exists(os.path.join(root, 'tasks', f'{iid}.md'))
 
 
 class ParseNewNumbering(unittest.TestCase):

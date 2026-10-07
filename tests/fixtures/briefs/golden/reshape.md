@@ -26,8 +26,8 @@ left out: the retry itself, F-0001 owns it
 - Never push to `main`, never force-push, never `--no-verify`, never open a pull request.
 - Push your own branch before your turn ends — after every commit, and once at the end even if
   nothing changed. A Stop gate refuses your exit while your work is off origin.
-- Keep a heartbeat: print a progress line as you go; a silent session is read as a dead one and
-  relaunched on top of you.
+- Print a progress line as you go; a silent session is read as a dead one and relaunched on top
+  of you. The heartbeat is the runtime's: a beat that cannot start never ends your session.
 - Finish with the typed REPORT below, as the last thing you print.
 - Anything a human must decide or run: `NEEDS OPERATOR: <what you could not check or do> — ` then the exact command in backticks (read-only, harvest runs it itself — B-0042), or, with no command, the exact answer needed instead.
 - Every commit subject names the item: `task(T-0050): <what>`. Harvest holds a branch whose commits do not name it; the id inside the branch name does not count.
@@ -61,12 +61,27 @@ in <sha> — verified by <test>"`. A report that only says so closes nothing.
 
 Final message: the pushed sha, the part ids with their writes, the coverage line.
 
+IF `asf new` CANNOT REACH THE RECORD (a cloud session), write the cut into `docs/plans/t-0050.md` itself, in
+exactly this shape, and the record mints the cards once it lands — T-0050 is removed then:
+
+    ## <n>. The Tasks — reshaped from T-0050
+
+    ### T-nnnnn: <title>        (one per part, the id from BACKLOG_ID_RANGE)
+    stories: <Story ids>
+    writes: <path globs, comma-separated>
+    after: <Task ids — the parts' own ids too — or none>
+
+The section runs to the next `## ` heading. Every `### T-nnnnn:` heading in it is a part; any
+other `### ` heading is read as a note, never as a Task.
+
 ## The heartbeat, the marker, and the report
 
 Print a progress line as you go — what you are doing, not that you are doing something. A session
 whose output has gone quiet is read as stalled and may be relaunched on top of you, which throws
 away everything you have not pushed. Never run a command in the background and never end your
-turn waiting for one.
+turn waiting for one. The heartbeat belongs to the runtime, never to a loop you must keep alive:
+if a HEARTBEAT command above cannot start (the sandbox refuses it), say so in one line and carry
+on with the job — it is never a reason to stop, to end `needs input`, or a `NEEDS OPERATOR`.
 
 Run the gate in the foreground and wait for it. Your last act is `git push`. Never start a
 background task you do not wait for. A result with uncommitted or unpushed work is a failed
