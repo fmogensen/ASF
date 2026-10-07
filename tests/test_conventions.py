@@ -108,6 +108,20 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(Conventions.from_mapping({}), Conventions())
 
 
+class MergeMapTests(unittest.TestCase):
+    def test_the_merge_map_reads_all_four_fields(self):
+        c = Conventions.from_mapping({'merge': {'mode': 'auto', 'factory_only': True,
+                                                 'require_item_id': True,
+                                                 'bot_paths': ['CHANGELOG.md']}})
+        self.assertEqual((c.merge, c.merge_factory_only, c.merge_require_item_id,
+                          c.merge_bot_paths), ('auto', True, True, ['CHANGELOG.md']))
+        self.assertEqual(c.shape_findings(), [])
+
+    def test_an_unknown_key_in_the_merge_map_is_still_misshapen(self):
+        c = Conventions.from_mapping({'merge': {'mode': 'auto', 'bogus': 1}})
+        self.assertIn('merge', dict(c.shape_findings()))
+
+
 class BranchTests(unittest.TestCase):
     def test_a_prefix_without_a_separator_gets_one(self):
         c = Conventions.from_mapping({'branch_prefixes': {'code': 'feature', 'batch': 'm-'}})

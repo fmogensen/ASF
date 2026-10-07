@@ -21,6 +21,7 @@ def conv(merge=None):
 
 
 ON = conv({'mode': 'auto', 'factory_only': True})
+ON_ID = conv({'mode': 'auto', 'factory_only': True, 'require_item_id': True})
 
 
 class VerdictTests(unittest.TestCase):
@@ -60,6 +61,34 @@ class VerdictTests(unittest.TestCase):
 
     def test_on_a_pr_into_another_branch_passes(self):
         self.assertTrue(factory_only.verdict(ON, 'main', 'hand/fix', 'next', ['a.py'])[0])
+
+    def test_require_item_id_refuses_a_factory_branch_with_no_item_id(self):
+        cases = (('fix/typo', 'fix'), ('spec/wip', 'spec'), ('worker/', 'code'),
+                 ('cloud/direct-', 'direct'))
+        for head, kind in cases:
+            with self.subTest(head=head):
+                ok, why = factory_only.verdict(ON_ID, 'main', head, 'main', ['src/a.py'])
+                self.assertFalse(ok)
+                self.assertIn('merge.require_item_id', why)
+                self.assertIn(f'the {kind} lane', why)
+
+    def test_require_item_id_passes_a_branch_named_after_an_item(self):
+        for head in ('worker/T-0001', 'fix/B-0428', 'plan/F-0097-replan', 'worker/T-58250',
+                     'cloud/direct-F-0040', 'old/T-0001'):
+            with self.subTest(head=head):
+                self.assertTrue(factory_only.verdict(ON_ID, 'main', head, 'main', ['a.py'])[0])
+
+    def test_require_item_id_off_lets_every_unnamed_factory_branch_through(self):
+        for head in ('fix/typo', 'spec/wip', 'worker/', 'cloud/direct-'):
+            with self.subTest(head=head):
+                self.assertTrue(factory_only.verdict(ON, 'main', head, 'main', ['src/a.py'])[0])
+
+    def test_require_item_id_still_reaches_the_bot_paths_escape(self):
+        self.assertTrue(factory_only.verdict(ON_ID, 'main', 'fix/typo', 'main',
+                                             ['CHANGELOG.md'])[0])
+
+    def test_on_id_keeps_its_map_shape(self):
+        self.assertEqual(ON_ID.shape_findings(), [])
 
 
 class CliTests(unittest.TestCase):

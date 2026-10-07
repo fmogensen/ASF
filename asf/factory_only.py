@@ -22,9 +22,14 @@ product by name from ``~/.ASF/products``. ``--head``, ``--base`` and ``--ref`` d
 import argparse
 import fnmatch
 import os
+import re
 import sys
 
 TAG_REF = 'refs/tags/'
+#: ``merge.require_item_id``'s branch-naming test: anchored at the start only (a retry or replan
+#: suffix, ``plan/F-0097-replan``, is still that item's), ``\d{4,}`` — four digits is the floor,
+#: not the ceiling, because ``lane.ITEM_ID_RE`` cannot match a five-digit id.
+ITEM_RE = re.compile(r'^[A-Za-z]+-\d{4,}')
 
 
 def verdict(conv, trunk, head, base, files=(), ref=''):
@@ -38,12 +43,18 @@ def verdict(conv, trunk, head, base, files=(), ref=''):
     if base != trunk:
         return True, f'a PR into {base}, not the trunk {trunk}'
     kind = conv.branch_kind(head or '')
-    if kind:
+    rest = conv.strip_prefix(head or '')
+    named = not getattr(conv, 'merge_require_item_id', False) or bool(ITEM_RE.match(rest))
+    if kind and named:
         return True, f'{head} is a factory branch ({kind})'
     bot = list(getattr(conv, 'merge_bot_paths', None) or ())
     files = [f for f in files or () if f]
     if files and bot and all(any(fnmatch.fnmatch(f, g) for g in bot) for f in files):
         return True, f'touches only bot paths ({", ".join(sorted(set(files)))})'
+    if kind:
+        return False, (f'merge.require_item_id: {head} is under a factory prefix (the {kind} '
+                       f'lane) but {rest or "(nothing)"} is no item id — the factory names every '
+                       f'branch after its card (worker/T-0123); land it through the factory')
     prefixes = sorted({conv.prefix(k) for k in conv.kinds()} | set(conv.legacy_prefixes()))
     return False, (f'merge.factory_only: {head or "(no head branch)"} is not a factory branch '
                    f'({", ".join(prefixes)}) and touches more than {", ".join(bot) or "no"} '

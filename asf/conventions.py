@@ -256,8 +256,12 @@ DEFAULT_MERGE = MERGE_MANUAL
 #: release bot writes). Off by default; ``merge: auto`` (a word) is ``{mode: auto}``.
 DEFAULT_MERGE_FACTORY_ONLY = False
 DEFAULT_MERGE_BOT_PATHS = ('CHANGELOG.md',)
+#: ``conventions.merge.require_item_id`` (default false): under ``factory_only``, a head branch
+#: under a factory prefix must also be named after an item (a suffix allowed). Off by default so
+#: a product whose branches are named for the work rather than for a card keeps passing.
+DEFAULT_MERGE_REQUIRE_ITEM_ID = False
 #: The keys of the ``merge:`` map.
-MERGE_MAP_KEYS = ('mode', 'factory_only', 'bot_paths')
+MERGE_MAP_KEYS = ('mode', 'factory_only', 'bot_paths', 'require_item_id')
 #: ``conventions.merge_queue: {ref_prefix, batch_size, inflight, timeout_min, stuck_min,
 #: start_kind, precut_check, precut_check_timeout_s}`` — the queue's shape under ``merge: queue``
 #: (:data:`asf.merge_queue.DEFAULTS`); ``ref_prefix`` is what the product's CI triggers its full
@@ -896,6 +900,9 @@ class Conventions:
     #: ``merge.bot_paths`` (:data:`DEFAULT_MERGE_BOT_PATHS`): the paths a PR may touch alone
     #: and pass that check whatever its branch.
     merge_bot_paths: list = field(default_factory=lambda: list(DEFAULT_MERGE_BOT_PATHS))
+    #: ``merge.require_item_id`` (:data:`DEFAULT_MERGE_REQUIRE_ITEM_ID`): under
+    #: ``factory_only``, a head branch under a factory prefix must also be named after an item.
+    merge_require_item_id: bool = DEFAULT_MERGE_REQUIRE_ITEM_ID
     #: ``delivery``: ``task`` | ``feature`` (:data:`DEFAULT_DELIVERY`) — the unit a Feature is
     #: built and landed in; any other value is a red doctor finding and reads as the default.
     delivery: str = DEFAULT_DELIVERY
@@ -941,6 +948,8 @@ class Conventions:
                 kwargs['merge_factory_only'] = _truthy(merge['factory_only'])
             if isinstance(merge.get('bot_paths'), list):
                 kwargs['merge_bot_paths'] = [str(p) for p in merge['bot_paths']]
+            if 'require_item_id' in merge:
+                kwargs['merge_require_item_id'] = _truthy(merge['require_item_id'])
             if rest or not isinstance(merge.get('bot_paths', []), list):
                 misshapen['merge'] = merge
             merge = merge.get('mode')
