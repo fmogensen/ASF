@@ -784,16 +784,18 @@ def _age_key(item):
     return item.get('created') or item.get('stage_since') or '~'
 
 
-def bug_rows(items, product, busy, attempts=None, why=None):
+def bug_rows(items, product, busy, attempts=None, why=None, adjudicated=None):
     """Within a tier: fewest attempts, then the older card, then id. ``attempts`` is ``{id: sessions
     the registry holds}``, ended or not. A Bug at the limit gets one adjudicate row — its session
     is the next attempt, so the row is gone once it has run.
 
     A decided, open S1/S2 Bug is never silent (inbox "NEXT drops S1/S2 bugs silently"): each
     branch that gives it no session is a non-launching ``WAITS ON`` row that says why — busy
-    (``why``: ``{id: what holds it}``, e.g. a live session or work waiting to land), blocked,
-    Active (its fixer branch is the work), or past the attempt limit (a person decides).
-    :func:`candidates` drops such a row when another row already speaks for the item."""
+    (``why``: ``{id: what holds it}``, e.g. a live session or work waiting to land), blocked, or
+    Active (its fixer branch is the work). Past the attempt limit the row is one of
+    :func:`_capped`'s three outcomes — a ruling carried out by one ``correct`` session on the fix
+    branch, a ``PARKED`` row when the card has not moved, or one adjudicate session on this card
+    state. :func:`candidates` drops such a row when another row already speaks for the item."""
     attempts, why, out = attempts or {}, why or {}, []
     limit = attempt_limit(product)
     bugs = sorted(ix.of_type(items, 'bug'), key=lambda v: (attempts.get(v['id'], 0), _age_key(v), v['id']))
@@ -830,15 +832,12 @@ def bug_rows(items, product, busy, attempts=None, why=None):
             out.append(waits('branch', 'Active — its fixer branch/PR is the work, no session '
                                        'or branch row holds it'))
             continue
-        if n > limit:
-            out.append(waits('operator', f'adjudicated after {n} sessions (limit {limit}): '
-                                         'a person decides'))
-            continue
-        if n == limit:
-            out.append(Row(tier=0 if sev == 'S1' else 1, kind=STALEMATE, item_id=b['id'],
-                           feature_id=fid, action=LAUNCH, brief_kind='adjudicate',
-                           branch=branch_for(product, 'fix', b['id']),
-                           reason=f"{sev} open after {n} sessions: adjudicate, not another fix"))
+        if n >= limit:
+            row = Row(tier=tier, kind=STALEMATE, item_id=b['id'], feature_id=fid,
+                      action=LAUNCH, brief_kind='adjudicate',
+                      branch=branch_for(product, 'fix', b['id']),
+                      reason=f"{sev} open after {n} sessions: adjudicate, not another fix")
+            out.append(row if n == limit else _capped(row, attempts, limit, product, adjudicated))
             continue
         out.append(Row(tier=0 if sev == 'S1' else 1, kind=BUG_FIX, item_id=b['id'],
                        feature_id=fid, action=LAUNCH, brief_kind='fix-bug',
@@ -2443,7 +2442,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     rows = corrected + lane_rows(items, product, live | spoken, occ)
     held_by = {**{i: 'session running' for i in inflight_ids(inflight)},
                **dict(occ.get('waiting_landing') or {}), **dict(occ.get('busy') or {})}
-    bugs = bug_rows(items, product, busy | spoken, attempts, held_by)
+    bugs = bug_rows(items, product, busy | spoken, attempts, held_by, adjudicated)
     rows += [r for r in bugs if r.launches]
     bug_waits = [r for r in bugs if not r.launches]
     # an idle branch is one nothing holds: a correction, a lane state (a partial occupancy

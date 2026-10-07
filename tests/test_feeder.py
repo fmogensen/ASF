@@ -1350,8 +1350,17 @@ class AttemptOrderTest(unittest.TestCase):
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 2})
         self.assertEqual(kinds(out), [('BUG → FIX', 'B-0001')])
 
-    def test_once_adjudicated_the_bug_is_not_relaunched(self):
+    def test_past_the_limit_with_no_adjudication_launches_one(self):
+        # T-0796: nothing has ruled on this card yet, so the row is handed to adjudication
+        # rather than parked — `_capped` only parks once a session has already ended on it.
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 4})
+        self.assertEqual([(r.item_id, r.launches, r.brief_kind) for r in out],
+                         [('B-0001', True, 'adjudicate')])
+
+    def test_once_adjudicated_on_this_card_the_bug_is_parked(self):
+        adjudicated = {'B-0001': {'same_card': True, 'runs': 1, 'at': '2026-01-01T00:00'}}
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 4},
+                             adjudicated=adjudicated)
         self.assertEqual([(r.item_id, r.launches, r.waits_on) for r in out],
                          [('B-0001', False, 'operator')])
 
@@ -1359,12 +1368,14 @@ class AttemptOrderTest(unittest.TestCase):
 class NoS1S2BugIsInvisible(unittest.TestCase):
     """Inbox "NEXT drops S1/S2 bugs silently": every skip branch of :func:`rows.bug_rows` for a
     decided, open S1/S2 Bug is a non-launching WAITS row that says why — busy, blocked, Active
-    with nothing else speaking for it, over the attempt limit — so NEXT always names it."""
+    with nothing else speaking for it, over the attempt limit once already adjudicated — so NEXT
+    always names it."""
 
-    def cand(self, items=None, inflight=(), occupancy=None, attempts=None):
+    def cand(self, items=None, inflight=(), occupancy=None, attempts=None, adjudicated=None):
         idx = items or s1_bugs('B-0001')
         return [r for r in rows.candidates(idx, product(), list(inflight), attempts=attempts,
-                                           occupancy=occupancy) if r.item_id == 'B-0001']
+                                           occupancy=occupancy, adjudicated=adjudicated)
+                if r.item_id == 'B-0001']
 
     def only_wait(self, rs):
         self.assertEqual(len(rs), 1, rs)
@@ -1394,10 +1405,22 @@ class NoS1S2BugIsInvisible(unittest.TestCase):
         r = self.only_wait(self.cand(idx))
         self.assertEqual(r.waits_on, 'branch')
 
-    def test_over_the_attempt_limit_waits_on_the_operator(self):
-        r = self.only_wait(self.cand(attempts={'B-0001': 4}))
-        self.assertEqual(r.waits_on, 'operator')
-        self.assertIn('4 sessions', r.reason)
+    def test_over_the_attempt_limit_with_no_adjudication_launches_one(self):
+        # T-0796: over the limit is judged, not shelved — nothing has ruled on this card yet,
+        # so the row is a launching adjudicate row, still naming the attempt count.
+        rs = self.cand(attempts={'B-0001': 4})
+        self.assertEqual(len(rs), 1, rs)
+        self.assertTrue(rs[0].launches)
+        self.assertEqual(rs[0].brief_kind, 'adjudicate')
+        self.assertIn('4 sessions', rs[0].reason)
+
+    def test_over_the_attempt_limit_once_adjudicated_waits_on_the_operator(self):
+        adjudicated = {'B-0001': {'same_card': True, 'runs': 1, 'at': '2026-01-01T00:00'}}
+        rs = self.cand(attempts={'B-0001': 4}, adjudicated=adjudicated)
+        self.assertEqual(len(rs), 1, rs)
+        self.assertFalse(rs[0].launches)
+        self.assertEqual(rs[0].waits_on, 'operator')
+        self.assertIn('4 sessions', rs[0].reason)
 
     def test_a_correction_row_speaks_for_it_once(self):
         corr = {'B-0001': {'kind': 'gate', 'text': 'FAIL: x', 'rounds': 1}}
@@ -1423,6 +1446,64 @@ class NoS1S2BugIsInvisible(unittest.TestCase):
                                   'state': 'New', 'stage': 'card', 'rank': 1}
         out = rows.plan_rows(idx, product(), [S1_SESSION], 3)
         self.assertIn((rows.CARD_SPEC, 'F-0001', True), [(r.kind, r.item_id, r.launches) for r in out])
+
+
+class BugPastTheAttemptLimit(unittest.TestCase):
+    """T-0796: a Bug past the attempt limit is judged, not shelved. ``bug_rows`` hands its
+    over-limit row to :func:`rows._capped`, exactly as every other capped kind already does
+    (:class:`CapOverEveryLaunchingKindTest`) — a WAITS row that nothing ever moves is gone."""
+
+    def rows_for(self, n, adjudicated=None):
+        out = rows.candidates(s1_bugs('B-0057'), product(), [], attempts={'B-0057': n},
+                              adjudicated=adjudicated)
+        return [r for r in out if r.item_id == 'B-0057']
+
+    def test_past_the_limit_with_no_adjudication_launches_an_adjudicate_session(self):
+        got = self.rows_for(4)
+        self.assertEqual([(r.kind, r.brief_kind, r.launches, r.branch) for r in got],
+                         [(rows.STALEMATE, 'adjudicate', True, 'fix/B-0057')])
+
+    def test_an_ended_adjudicate_run_on_this_same_card_is_parked(self):
+        adjudicated = {'B-0057': {'runs': 1, 'at': '2026-10-03T10:00:00Z', 'same_card': True}}
+        got = self.rows_for(4, adjudicated)
+        self.assertEqual([(r.kind, r.launches, r.waits_on) for r in got],
+                         [(rows.STALEMATE, False, 'operator')])
+        self.assertTrue(got[0].action.startswith(rows.PARKED))
+        self.assertIn('`asf unpark B-0057`', got[0].reason)
+        self.assertIn('`asf correct B-0057', got[0].reason)
+
+    def test_a_ruling_or_a_release_since_that_run_launches_again(self):
+        # a card change (`same_card: False`) is `step_wave.adjudications`' own shape for either
+        # an operator ruling or a release (T-0795's `released_since`) since the parked run
+        adjudicated = {'B-0057': {'runs': 1, 'at': '2026-10-03T10:00:00Z', 'same_card': False}}
+        got = self.rows_for(4, adjudicated)
+        self.assertEqual([(r.kind, r.brief_kind, r.launches) for r in got],
+                         [(rows.STALEMATE, 'adjudicate', True)])
+
+    def test_the_sessions_own_uncarried_ruling_is_carried_out_by_one_correct_session(self):
+        adjudicated = {'B-0057': {'same_card': True, 'carried': False, 'ruling': {
+            'job': 'adjudicate-b-0057', 'at': '2026-10-03T11:00:00Z',
+            'text': 'S1 confirmed; fix asf/feeder/rows.py:42'}}}
+        got = self.rows_for(4, adjudicated)
+        self.assertEqual([(r.brief_kind, r.launches, r.ruling) for r in got],
+                         [('correct', True, True)])
+        self.assertIn('S1 confirmed; fix asf/feeder/rows.py:42', got[0].correction)
+
+    def test_at_the_limit_the_row_is_unchanged(self):
+        got = self.rows_for(3)
+        self.assertEqual([(r.kind, r.brief_kind, r.launches, r.reason) for r in got],
+                         [(rows.STALEMATE, 'adjudicate', True,
+                           'S1 open after 3 sessions: adjudicate, not another fix')])
+
+    def test_the_parked_row_still_reaches_the_s1_gates_unworked_list(self):
+        adjudicated = {'B-0057': {'runs': 1, 'at': '2026-10-03T10:00:00Z', 'same_card': True}}
+        idx = s1_bugs('B-0057')
+        cut = rows.plan_rows(idx, product(), [], 1, attempts={'B-0057': 4}, adjudicated=adjudicated)
+        uncut = rows.plan_rows(idx, product(), [], 1, attempts={'B-0057': 4},
+                               adjudicated=adjudicated, s1_first=False)
+        g = tiers.gate(cut, uncut)
+        self.assertNotIn('operator', tiers.WORKED)
+        self.assertEqual([(i, w) for i, w, _ in g.unworked], [('B-0057', 'operator')])
 
 
 class ForeignCardRowTests(unittest.TestCase):
