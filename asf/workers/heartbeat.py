@@ -188,12 +188,24 @@ done
 '''
 
 
-def brief_lines(job_name, sid, s):
+def brief_lines(job_name, sid, s, runtime_liveness=False):
     """The HEARTBEAT block of a brief: the notes file, and the one command that starts the
-    beat loop in the background. Pure (golden-tested)."""
+    beat loop in the background. Pure (golden-tested). ``runtime_liveness``: a runtime that
+    reports the session's liveness itself (claude-remote: its ``worker_status``), whose
+    session refuses a background process as persistence — told to start none."""
     secs = max(1, int(round(s.interval_min * 60)))
     r = ref(job_name)
     every = f'{s.interval_min:g} minute' + ('' if s.interval_min == 1 else 's')
+    if runtime_liveness:
+        return [
+            '', 'HEARTBEAT',
+            '- Liveness comes from the runtime: the factory reads this session\'s status '
+            'itself. Do NOT start a detached or background process (no loop, nothing left '
+            'running after its command returns), for a heartbeat or anything else.',
+            f'- Commit and push your work on your branch as each piece stands: a run '
+            f'that is neither running nor moving for {s.limit_min:g} minutes is ended and '
+            'continued by a new session from your branch.',
+        ]
     return [
         '', 'HEARTBEAT',
         f'- Every {every} this session proves it is moving: a background loop pushes your work '

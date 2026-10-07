@@ -300,7 +300,8 @@ class CloudStall(Home):
         rec = self.launch()
         self.assertEqual(rec['heartbeat_min'], 5)
         brief = git('show', 'refs/asf/briefs/spec-1:brief.md', cwd=self.origin)
-        self.assertIn(f"refs/asf/hb/spec-1 '{rec['session']}'", brief)
+        self.assertIn('Liveness comes from the runtime', brief)  # no beat loop in the cloud
+        self.assertNotIn('nohup', brief)
         t0 = self.t0(rec)
         self.assertEqual(self.sync(t0 + 60)[0][1], cloud.WORKING)
         self.assertEqual(self.fake.actions(), ['create', 'run', 'get'])
@@ -341,7 +342,8 @@ class CloudStall(Home):
         self.assertIn('next: the tests', brief)
         self.assertIn('tool Bash: {"command": "pytest -x"}', brief)
         self.assertIn('waiting on a permission prompt', brief)
-        self.assertIn(f"refs/asf/hb/spec-1 '{new['session']}'", brief)  # the new id beats
+        self.assertIn('Liveness comes from the runtime', brief)  # the continuation too
+        self.assertNotIn('nohup', brief)
         self.assertEqual(brief.count('CONTINUE\n'), 1)
         self.assertTrue(any('continued as' in ln for ln in lines), lines)
         return rec, new
@@ -390,6 +392,112 @@ class CloudStall(Home):
         self.assertNotIn('create', self.fake.actions()[2:])
         run = pool_mod.load_sessions(self.product)['spec-1']
         self.assertEqual(run['session'], rec['session'])  # left to health's dead path
+
+    # ---- liveness from the runtime: worker_status + last_event_at over a missing beat -------
+
+    def runs_answer(self, worker_status, last_event_at):
+        self.fake.answers['list_runs'] = (200, {'data': [
+            {'id': 'cse_9', 'status': 'running', 'worker_status': worker_status,
+             'last_event_at': last_event_at}]}, '')
+
+    def stalled_sync(self, worker_status=None, event_min=None, diagnose=None):
+        """A launched run, never beating, synced at 31m (the limit is 10m: the beat alone says
+        stalled), ``list_runs`` answering ``worker_status`` with an event at ``event_min``, or
+        ``remote.diagnose`` replaced by ``diagnose``: ``(rec, (job, status, why), lines)``."""
+        from asf.workers import remote
+        rec = self.launch()
+        t0 = self.t0(rec)
+        if worker_status is not None:
+            self.runs_answer(worker_status, self.stamp(t0 + event_min * M))
+        self.assertEqual(self.sync(t0 + 60)[0][1], cloud.WORKING)
+        self.fake.answers['create'] = (200, {'trigger': {'id': 'trig_2'}},  # a continuation
+                                       'https://claude.ai/code/routines/trig_2')
+        self.fake.answers['run'] = (200, {'session_id': 'cse_10'}, '')
+        lines, real = [], remote.diagnose
+        if diagnose is not None:
+            remote.diagnose = diagnose
+        try:
+            found = cloud.sync(self.product, self.cfg, out=lines.append, now=t0 + 31 * M,
+                               remote_client=self.client())
+        finally:
+            remote.diagnose = real
+        return rec, found[0], lines
+
+    def stamp(self, epoch):
+        return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(epoch))
+
+    def assert_dead_as_today(self, rec, found):
+        job, status, why = found
+        self.assertEqual((job, status), ('spec-1', cloud.DEAD))
+        self.assertTrue(why.startswith('stalled: no beat'), why)
+        self.assertEqual(cloudpid.load()['remote:trig_1']['status'], cloud.DEAD)
+        self.assertIn('update', self.fake.actions())  # the routine retired
+
+    def test_a_running_worker_with_a_fresh_event_is_alive_without_a_beat(self):
+        rec = self.launch()
+        t0 = self.t0(rec)
+        self.runs_answer('running', self.stamp(t0 + 29 * M).replace('Z', '.123456Z'))
+        self.assertEqual(self.sync(t0 + 60)[0][1], cloud.WORKING)
+        lines = []
+        (job, status, why), = cloud.sync(self.product, self.cfg, out=lines.append,
+                                         now=t0 + 31 * M, remote_client=self.client())
+        self.assertEqual((job, status), ('spec-1', cloud.WORKING), why)
+        self.assertTrue(any('alive by remote status (worker_status=running, last_event_at='
+                            in ln and 'no heartbeat needed' in ln for ln in lines), lines)
+        self.assertNotIn('update', self.fake.actions())  # not retired
+        self.assertNotIn('create', self.fake.actions()[2:])  # not continued
+        run = pool_mod.load_sessions(self.product)['spec-1']
+        self.assertEqual(run['session'], rec['session'])
+        self.assertTrue(lifecycle.is_live(run))
+        self.assertEqual(cloudpid.load()['remote:trig_1']['status'], cloud.WORKING)
+        # the event is the beat: quiet counts from it, so the next sync inside its limit is calm
+        self.assertAlmostEqual(hb.load_state(self.product)['spec-1']['moved'], t0 + 29 * M,
+                               delta=1)
+        n = len(self.fake.actions())
+        self.assertEqual(self.sync(t0 + 35 * M)[0][1], cloud.WORKING)
+        self.assertEqual(len(self.fake.actions()), n)  # within the limit: no API call at all
+
+    def test_a_running_worker_with_an_old_event_is_stalled_as_today(self):
+        rec, found, _lines = self.stalled_sync('running', 20)  # 11m old at 31m: over the 10m
+        self.assert_dead_as_today(rec, found)
+        self.assertIn('worker_status=running', found[2])
+
+    def test_an_ended_worker_is_stalled_as_today(self):
+        rec, found, _lines = self.stalled_sync('ended', 30)  # a fresh event, but not live
+        self.assert_dead_as_today(rec, found)
+        self.assertIn('worker_status=ended', found[2])
+
+    def test_an_idle_worker_is_stalled_as_today(self):
+        rec, found, _lines = self.stalled_sync('idle', 30)
+        self.assert_dead_as_today(rec, found)
+        self.assertIn('worker_status=idle', found[2])
+
+    def test_a_diagnose_that_raises_is_stalled_as_today(self):
+        def boom(*_a, **_k):
+            raise RuntimeError('remote API down')
+        rec, found, lines = self.stalled_sync(diagnose=boom)
+        self.assert_dead_as_today(rec, found)
+        self.assertFalse(any('alive by remote status' in ln for ln in lines), lines)
+
+    def test_a_diagnose_returning_none_is_stalled_as_today(self):
+        rec, found, _lines = self.stalled_sync(diagnose=lambda *_a, **_k: None)
+        self.assert_dead_as_today(rec, found)
+
+    def test_a_diagnose_returning_nothing_is_stalled_as_today(self):
+        rec, found, _lines = self.stalled_sync(diagnose=lambda *_a, **_k: {})
+        self.assert_dead_as_today(rec, found)
+
+    def test_the_remote_brief_starts_no_background_loop(self):
+        j = remote_job(name='task-t-0001')
+        j.heartbeat = hb.Settings(interval_min=3, missed=2)
+        text = cloud.cloud_brief('the brief', j, runtime_liveness=True)
+        self.assertIn('HEARTBEAT', text)
+        self.assertIn('Liveness comes from the runtime', text)
+        self.assertIn('Do NOT start a detached or background process', text)
+        for loop in ('nohup', 'asf-heartbeat.sh', 'in the background):', '>/dev/null 2>&1 &'):
+            self.assertNotIn(loop, text)
+        # the remote runtime's own launch passes it (a local or actions brief keeps the loop)
+        self.assertIn('nohup', cloud.cloud_brief('the brief', j))
 
 
 class LocalStall(Home):

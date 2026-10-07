@@ -93,6 +93,9 @@ URL_RE = re.compile(r'https://claude\.ai/\S+')
 RUNNING_STATES = ('', 'ROUTINE_RUN_STATUS_UNSPECIFIED', 'ROUTINE_RUN_STATUS_RUNNING',
                   'ROUTINE_RUN_STATUS_PENDING', 'ROUTINE_RUN_STATUS_QUEUED',
                   'ROUTINE_RUN_STATUS_STARTING')
+#: ``list_runs`` ``worker_status`` values of a session whose worker is at work
+#: (``requires_action`` waits on a prompt nobody answers, ``idle`` has stopped: neither is)
+WORKER_LIVE = ('running',)
 
 
 class HelperError(Exception):
@@ -484,7 +487,7 @@ class RemoteRuntime(runtime_mod.Runtime):
         log_path = job.log_path or runtime_mod.job_log_path(job.product, job.name)
         with open(job.brief_path, encoding='utf-8') as f:
             text = cloud.cloud_brief(f.read(), job, setting=setting_lines(job),
-                                    product=product)
+                                    product=product, runtime_liveness=True)
         ok, ref = actions.push_brief(job.cwd, job.name, text, job.env, getattr(job, 'setup', None))
         if not ok:
             raise SpawnError(f'cloud lane: {ref}')
@@ -596,8 +599,9 @@ def _runs_in(obj):
 
 def diagnose(run, s, client=None):
     """``{worker_status, last_event_at}`` of the routine's run, from one ``list_runs`` call —
-    the reason a stalled run records (the heartbeat decided the stall, never this). ``{}`` when
-    the answer names neither."""
+    read when the heartbeat sees a stall: a worker still running with a fresh event is alive
+    (:func:`alive_at`), else it is the reason the stalled run records. ``{}`` when the answer
+    names neither."""
     tid = trigger_of(run)
     if not tid:
         return {}
@@ -610,6 +614,34 @@ def diagnose(run, s, client=None):
     sid = run.get('remote_session_id')
     hit = next((r for r in runs if sid and r.get('id') == sid), runs[0] if runs else {})
     return {k: str(hit[k]) for k in ('worker_status', 'last_event_at') if hit.get(k)}
+
+
+def _event_ts(text):
+    """Epoch seconds of an API timestamp (``2026-10-06T10:00:00Z``, fractions or an offset
+    allowed), or None."""
+    import datetime
+    try:
+        t = datetime.datetime.fromisoformat(str(text).strip().replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    return t.timestamp()
+
+
+def alive_at(diag, now, limit_min):
+    """The epoch of the run's last event when :func:`diagnose`'s answer shows it alive — its
+    ``worker_status`` in :data:`WORKER_LIVE` and its ``last_event_at`` at most ``limit_min``
+    minutes old (the heartbeat's own stall limit) — else None. Liveness from the runtime: a
+    cloud session cannot keep a background beat loop."""
+    if not isinstance(diag, dict):
+        return None
+    if str(diag.get('worker_status') or '').strip().lower() not in WORKER_LIVE:
+        return None
+    ts = _event_ts(diag.get('last_event_at'))
+    if ts is None or now - ts > limit_min * 60.0:
+        return None
+    return min(ts, now)
 
 
 def run_log_summary(run, s, client=None):
