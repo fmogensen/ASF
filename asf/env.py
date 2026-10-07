@@ -523,7 +523,7 @@ PRODUCT_FIELDS = {
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
-    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST, 'references': _LIST,
+    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -567,7 +567,14 @@ NESTED_FIELDS = {
 # instead so *this* release's own doctor still stops naming them unknown (B-0038); the pinned
 # reader's own copy of this code doesn't know the list and keeps warning, which is fine — a
 # warning never refuses a load, only a reader that predates the whole key does.
-DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats'})
+#
+# ``references`` (F-0188 §1) is the same trade at the top level: a brand-new product-file key,
+# the first one since the pinned reader's own unknown-key-is-a-refusal commit, so registering it
+# in PRODUCT_FIELDS would strand that reader on a file that sets one. Left undeclared here too;
+# `_reference_problems` validates its shape on its own, called unconditionally from
+# `validate_product_text`, with no PRODUCT_FIELDS entry standing between it and the value.
+DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats',
+                                         'references'})
 
 
 def _shape_ok(value, shape):
