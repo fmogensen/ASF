@@ -107,6 +107,28 @@ class MatchRules(unittest.TestCase):
         self.assertIn('2 PR', why)
 
 
+class FiveDigitIdTokens(unittest.TestCase):
+    """B-0273: `\\b[EFSTBDR]-\\d{4}\\b` cannot match an id with five or more digits, so a
+    landing on `cloud/T-32850` matched no rule and the Task closed only through ingest's slower
+    landed-green rule."""
+
+    def items(self):
+        return {'T-32850': {'id': 'T-32850', 'type': 'task', 'title': 'The door copy',
+                            'children': []}}
+
+    def test_a_five_digit_id_is_attributed_from_branch_title_and_task(self):
+        items = self.items()
+        for kw in ({'branch': 'cloud/T-32850'}, {'title': 'fix T-32850 copy'},
+                   {'body': 'closes T-32850'}, {'task': 'fix-T-32850-r1'}):
+            self.assertEqual(match.match_event(items, **kw)[0], ['T-32850'], kw)
+
+    def test_a_four_digit_id_is_unchanged_and_no_id_is_invented(self):
+        items = self.items()
+        items['T-0913'] = {'id': 'T-0913', 'type': 'task', 'title': 'x', 'children': []}
+        self.assertEqual(match.match_event(items, title='T-0913 do it')[0], ['T-0913'])
+        self.assertEqual(match.match_event(items, title='T-99999 do it')[0], [])
+
+
 class LegacySlugScrubTests(unittest.TestCase):
     """F-0132 §5/§3.3 (PD10): the incoming slug is scrubbed the same way the entry's title is, so
     a branch cut from the raw title still resolves (P15, P16) — and with no pattern matching, a

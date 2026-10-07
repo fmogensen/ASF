@@ -69,7 +69,7 @@ RECORD_KINDS = {'fix-bug': 'fix', 'fix': 'fix', 'task': 'code', 'code': 'code', 
                 'plan': 'plan', 'review': 'review', 'rebase': 'rebase', 'relaunch': 'relaunch'}
 TS_RE = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
 DAY_RE = re.compile(r'^\d{4}-\d\d-\d\d$')
-ID_RE = re.compile(r'^[EFSTBDR]-\d{4}$')
+ID_RE = re.compile(r'^[EFSTBDR]-\d{4,}$')
 
 
 # ------------------------------------------------------------------ time --

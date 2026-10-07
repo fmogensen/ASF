@@ -550,10 +550,20 @@ class ProductRepo:
 class IdTokenTests(unittest.TestCase):
     def test_tokens_bare_parenthesised_and_bracketed(self):
         self.assertEqual(evidence.id_tokens("fix (B-0001) and [T-0002], F-0005; X-0001 B-12345"),
-                         ["B-0001", "T-0002", "F-0005"])
+                         ["B-0001", "T-0002", "F-0005", "B-12345"])
 
     def test_branch_tokens_are_case_insensitive(self):
         self.assertEqual(evidence.id_tokens("fix/b-0003-banner", evidence.BRANCH_ID_TOKEN), ["B-0003"])
+
+    def test_five_digit_ids_are_tokens(self):
+        """B-0273: `\\d{4}` cannot match an id with five or more digits, so a landing on
+        `cloud/T-32850` carried no id and the Task waited for ingest's landed-green rule."""
+        self.assertEqual(evidence.id_tokens("closes T-32850 and S-53504"), ["T-32850", "S-53504"])
+        self.assertEqual(evidence.branch_ids("cloud/t-32850"), ["T-32850"])
+        self.assertEqual(evidence.naming_ids("task(T-32850): the door"), ["T-32850"])
+        self.assertEqual(evidence.naming_ids("T-32850 — the door (#901)"), ["T-32850"])
+        self.assertEqual(evidence.naming_ids(
+            "Merge pull request #901 from o/cloud/T-32850"), ["T-32850"])
 
     def test_ci_provider(self):
         self.assertIsNone(evidence.ci_provider(env.Product("x", {"ci": "none"})))
