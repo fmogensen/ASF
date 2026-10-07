@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.208 — 2026-10-07
+
+### Features landed
+
+- 21 % of sessions end "other" (threshold 10 %, 85 of 407 in 24h) (#895)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.208"`
+
 ## v0.1.207 — 2026-10-07
 
 ### Features landed
