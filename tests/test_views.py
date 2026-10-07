@@ -108,6 +108,33 @@ class SessionsViewTests(ViewsTestCase):
         self.assertFalse(sessions.pid_alive('x'))
 
 
+class DeadRowsCarryTheirWhy(ViewsTestCase):
+    """F-0266 S-64359 (C16): the Dead group's ``Why`` column reads the composed dead reason —
+    the cloud sync's ``why`` and the run's last ASF refusal — and ``-`` when there is none."""
+
+    def test_the_why_column(self):
+        from asf.workers import cloudpid
+        self.launch('alive', 101)
+        self.launch('local-gone', 202)
+        self.launch('cloud-gone', 'actions:500', correction={
+            'kind': 'naming', 'at': '2026-10-07T10:03:00Z',
+            'text': 'commits do not name T-44931: every commit subject on the branch names its '
+                    'item'})
+        cloudpid.record('actions:500', cloudpid.DEAD,
+                        'run 500 ended succeeded without the report commit')
+        text = sessions.render(self.root, self.product, alive=lambda pid: pid == 101)
+        dead = text[text.index('**Dead**'):]
+        self.assertIn('| Started | Why |', dead)
+        row = next(l for l in dead.splitlines() if '| cloud-gone |' in l)
+        self.assertIn('run 500 ended succeeded without the report commit — last ASF refusal '
+                      '(naming', row)
+        self.assertIn('commits do not name T-44931', row)
+        self.assertTrue(next(l for l in dead.splitlines() if '| local-gone |' in l)
+                        .endswith('| - |'))
+        working = text[text.index('**Working**'):text.index('**Dead**')]
+        self.assertNotIn('Why', working)
+
+
 class StatusViewTests(ViewsTestCase):
     def rows(self, cfg):
         text = status.render(self.root, self.product, cfg=cfg)

@@ -85,3 +85,9 @@ def status(tok):
 def alive(tok):
     """A cloud run holds its seat while it is working."""
     return status(tok) == WORKING
+
+
+def why(tok):
+    """``tok``'s last recorded ``why`` — the sync's own account of how the run ended; '' when none
+    is recorded (the sibling of :func:`status`, F-0266)."""
+    return (load().get(tok) or {}).get('why') or ''

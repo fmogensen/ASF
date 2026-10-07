@@ -35,6 +35,8 @@ from asf.workers import runtime as runtime_mod
 WORKFLOW_DIR = os.path.join('.github', 'workflows')
 BRIEF_REF_PREFIX = 'refs/asf/briefs/'
 GH_TIMEOUT_S = 60   # the default of config github.json_timeout_s
+#: How much of a dead run's log :meth:`Gh.log_tail` keeps — the end, where a refusal sits (F-0266).
+LOG_TAIL_MAX = 64 * 1024
 #: labels of GitHub's own hosted runners: no runner of the product's own needs to be online
 HOSTED_RE = re.compile(r'^(ubuntu|windows|macos)-', re.I)
 _ENV_NAME_RE = re.compile(r'^[A-Z_][A-Z0-9_]*$')
@@ -253,6 +255,21 @@ class Gh:
         except ValueError:
             return None
         return v if isinstance(v, dict) else None
+
+    def log_tail(self, run_id, limit=None):
+        """The last ``limit`` chars (:data:`LOG_TAIL_MAX`) of the run's failed-step log — ``gh
+        run view <id> --log-failed``, falling back to ``--log`` when the run has no failed step (a
+        session that exited 0 without its report). '' when gh cannot say; a rate limit is '' too:
+        no log is no refusal (F-0266 C11)."""
+        limit = LOG_TAIL_MAX if limit is None else limit
+        for flag in ('--log-failed', '--log'):
+            try:
+                ok, out, _err = self.call(['run', 'view', str(run_id), '-R', self.slug, flag])
+            except gh_limit.RateLimited:
+                return ''
+            if ok and (out or '').strip():
+                return out[-limit:]
+        return ''
 
     def cancel(self, run_id):
         """Cancel the worker's workflow run the one way (:func:`asf.run_cancel.cancel`): a

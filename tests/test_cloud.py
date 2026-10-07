@@ -348,6 +348,64 @@ class Classify(unittest.TestCase):
         self.assertEqual(cloud.classify(running, None, 300, 240, '9')[1], 'timed out after 240m')
 
 
+class ClassifyNamesTheRefusal(unittest.TestCase):
+    """F-0266 S-64357: ``classify(refusal=…)`` appends the clause to the "without the report
+    commit" arm only, and stays pure."""
+
+    def test_the_clause_is_on_the_one_arm(self):
+        from asf.workers import refusals
+        done = {'status': 'completed', 'conclusion': 'succeeded'}
+        running = {'status': 'in_progress', 'conclusion': ''}
+        at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 200))
+        r = refusals.Refusal('naming', 'commits do not name T-44931: every commit subject',
+                             at, 'correction')
+        with mock.patch.object(env, 'ASF_HOME', '/nonexistent/asf-home'), \
+                mock.patch('builtins.open', side_effect=AssertionError('classify read a file')):
+            _s, bare = cloud.classify(done, None, 5, 240, '500')
+            _s, why = cloud.classify(done, None, 5, 240, '500', refusal=r)
+            timed = cloud.classify(running, None, 300, 240, '500', refusal=r)[1]
+            never = cloud.classify(None, None, 20, 240, None, refusal=r)[1]
+        self.assertEqual(bare, 'run 500 ended succeeded without the report commit')
+        self.assertEqual(why, 'run 500 ended succeeded without the report commit — last ASF '
+                              'refusal (naming, 3m before): commits do not name T-44931: every '
+                              'commit subject')
+        self.assertEqual(timed, 'timed out after 240m')
+        self.assertEqual(never, 'the dispatched run never appeared')
+        self.assertEqual(cloud.REPORT_MISSING, 'without the report commit')
+
+
+class GhLogTail(unittest.TestCase):
+    """F-0266 C11: ``Gh.log_tail`` reads ``--log-failed``, falls back to ``--log``, and answers
+    '' for a failed call or a rate limit."""
+
+    def gh(self, answers):
+        calls = []
+
+        def run(argv, **_kw):
+            calls.append(argv)
+            flag = argv[-1]
+            rc, out = answers.get(flag, (1, ''))
+            if rc == 'limit':
+                return subprocess.CompletedProcess(argv, 1, stdout='',
+                                                   stderr='API rate limit exceeded')
+            return subprocess.CompletedProcess(argv, rc, stdout=out, stderr='' if rc == 0 else 'x')
+        return actions.Gh(env.Product('p', {'repo_slug': 'o/r'}), run=run), calls
+
+    def test_failed_first_then_the_whole_log(self):
+        g, calls = self.gh({'--log-failed': (0, 'x' * 10 + 'TAIL')})
+        self.assertEqual(g.log_tail('7', limit=4), 'TAIL')
+        self.assertEqual(calls[0][1:], ['run', 'view', '7', '-R', 'o/r', '--log-failed'])
+        g, calls = self.gh({'--log-failed': (0, ''), '--log': (0, 'whole log')})
+        self.assertEqual(g.log_tail('7'), 'whole log')
+        self.assertEqual([c[-1] for c in calls], ['--log-failed', '--log'])
+        g, _ = self.gh({})
+        self.assertEqual(g.log_tail('7'), '')
+        g, _ = self.gh({'--log-failed': ('limit', ''), '--log': ('limit', '')})
+        with mock.patch.object(actions.Gh, 'call', side_effect=gh_limit.RateLimited('x')):
+            self.assertEqual(g.log_tail('7'), '')
+        self.assertEqual(actions.LOG_TAIL_MAX, 64 * 1024)
+
+
 class TokenLiveness(unittest.TestCase):
     def setUp(self):
         self._home = env.ASF_HOME
@@ -1289,3 +1347,102 @@ class PrimaryMode(Lanes):
         self.assertEqual(doctor.check_lane_split(self.cfg, self.product),
                          cloud.lane_split(self.cfg, self.product))
 
+
+
+class LogGh(FakeGh):
+    """FakeGh that also answers ``gh run view <id> --log-failed`` / ``--log`` from ``log``."""
+
+    def __init__(self, log='', **kw):
+        super().__init__(**kw)
+        self.log = log
+
+    def __call__(self, argv, **kw):
+        if argv[1:3] == ['run', 'view'] and argv[-1] in ('--log-failed', '--log'):
+            self.calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0 if self.log else 1, stdout=self.log,
+                                               stderr='' if self.log else 'no log')
+        return super().__call__(argv, **kw)
+
+    def log_reads(self):
+        return [c for c in self.calls if c[-1] in ('--log-failed', '--log')]
+
+
+class _DeadSync(Lanes):
+    launch = Sync.launch
+    sync = Sync.sync
+    push_as_the_job = Sync.push_as_the_job
+
+
+class ADeadReasonCarriesTheRefusal(_DeadSync):
+    """F-0266 S-64357: the sync passes the run's own refusal to ``classify``, and the composed
+    sentence reaches ``cloud-sessions.json`` and the ``cloud <job> dead:`` line."""
+
+    def test_a_naming_correction_on_the_run_is_named(self):
+        rec = self.launch()
+        fake = LogGh()
+        self.sync(fake)
+        pool_mod.update_session(self.product, 'spec-1', correction={
+            'kind': 'naming', 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'text': 'commits do not name F-0001: every commit subject on the branch names its item'})
+        fake.view_ = {'status': 'completed', 'conclusion': 'succeeded'}
+        lines = []
+        (_job, status, why), = self.sync(fake, lines=lines)
+        self.assertEqual(status, cloud.DEAD)
+        self.assertTrue(why.startswith('run 500 ended succeeded without the report commit — last '
+                                       'ASF refusal (naming, 0m before): commits do not name '
+                                       'F-0001'), why)
+        self.assertEqual(cloudpid.why(rec['pid']), why)
+        self.assertIn(f'cloud    spec-1                   dead: {why}', lines)
+        self.assertEqual(fake.log_reads(), [])  # the record answered: no log read
+
+
+class TheRunLogIsReadOnce(_DeadSync):
+    """F-0266 S-64358: with the ledger and the record empty, the dead run's log is read once."""
+
+    PUSH_ALLOW = 'asf: push refused — an ASF session pushes only to factory branches, not: main'
+
+    def test_a_refusal_in_the_log_names_the_death_and_the_log_is_read_once(self):
+        rec = self.launch()
+        fake = LogGh(log=f'step\n{self.PUSH_ALLOW}\nexit 1\n')
+        self.sync(fake)
+        self.assertEqual(fake.log_reads(), [])  # working: no read
+        fake.view_ = {'status': 'completed', 'conclusion': 'failure'}
+        (_job, status, why), = self.sync(fake)
+        self.assertEqual(status, cloud.DEAD)
+        self.assertIn('last ASF refusal (push-allow): asf: push refused', why)
+        self.assertEqual(len(fake.log_reads()), 1)
+        self.assertEqual(fake.log_reads()[0][1:4], ['run', 'view', '500'])
+        pool_mod.update_session(self.product, 'spec-1', ended='2026-10-07T10:00:00Z')
+        self.assertEqual(self.sync(fake), [])  # an ended run is not synced again
+        self.assertEqual(len(fake.log_reads()), 1)
+        self.assertEqual(cloudpid.why(rec['pid']), why)
+
+    def test_no_log_leaves_the_reason_bare(self):
+        self.launch()
+        fake = LogGh(log='')
+        self.sync(fake)
+        fake.view_ = {'status': 'completed', 'conclusion': 'failure'}
+        (_job, _status, why), = self.sync(fake)
+        self.assertEqual(why, 'run 500 ended failure without the report commit')
+
+    def test_the_ledger_answers_first(self):
+        from asf.workers import refusals
+        self.launch()
+        fake = LogGh(log=self.PUSH_ALLOW)
+        self.sync(fake)
+        with open(refusals.env_for(self.product, 'spec-1')['ASF_REFUSAL_LOG'], 'w') as f:
+            f.write(json.dumps({'at': '2026-10-07T10:00:00Z', 'kind': 'hook refused',
+                                'line': 'pre-push: lint failed'}) + '\n')
+        fake.view_ = {'status': 'completed', 'conclusion': 'failure'}
+        (_job, _status, why), = self.sync(fake)
+        self.assertIn('(hook refused', why)
+        self.assertEqual(fake.log_reads(), [])
+
+    def test_the_remote_leg_uses_run_log_summary(self):
+        from asf.workers import remote
+        run = {'remote_session_id': 's', 'pid': 'remote:t'}
+        with mock.patch.object(remote, 'run_log_summary', return_value=self.PUSH_ALLOW) as rls:
+            self.assertEqual(cloud._run_log_tail(run, None, 'client', None), self.PUSH_ALLOW)
+        rls.assert_called_once_with(run, None, 'client')
+        with mock.patch.object(remote, 'run_log_summary', side_effect=RuntimeError('x')):
+            self.assertEqual(cloud._run_log_tail(run, None, 'client', None), '')

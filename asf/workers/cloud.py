@@ -93,6 +93,7 @@ import time
 
 from asf.workers import cloudpid
 from asf.workers import githooks
+from asf.workers import refusals
 
 RUNTIME_ACTIONS = 'actions'
 RUNTIME_REMOTE = 'claude-remote'
@@ -455,16 +456,25 @@ def _pre_push_lines(product):
 
 # ---- status -----------------------------------------------------------------------------------
 
-def classify(view, report, elapsed_min, timeout_min, run_id=None, lost_after_min=None):
+#: The one dead reason that earns the refusal clause and, failing every other source, a read of
+#: the run's own log (F-0266): the run ended and no report commit came.
+REPORT_MISSING = 'without the report commit'
+
+
+def classify(view, report, elapsed_min, timeout_min, run_id=None, lost_after_min=None,
+             refusal=None):
     """``(status, why)`` — the cloud run's state from its evidence: ``view`` is the workflow
     run's ``{status, conclusion}`` (None when unread), ``report`` the report commit or None.
-    Pure: no gh, no git, no clock."""
+    ``refusal`` (:class:`asf.workers.refusals.Refusal`) is the run's last ASF refusal, named in
+    the "without the report commit" reason only — a timeout, a stall and a run that never
+    appeared are the factory's own verdicts on the run (F-0266 C9). Pure: no gh, no git, no file."""
     if report:
         return FINISHED, f'report commit {report["sha"][:9]} on the branch'
     state = (view or {}).get('status')
     if state == 'completed':
         conclusion = (view or {}).get('conclusion') or 'unknown'
-        return DEAD, f'run {run_id} ended {conclusion} without the report commit'
+        return DEAD, (f'run {run_id} ended {conclusion} {REPORT_MISSING}'
+                      + refusals.clause(refusal))
     if timeout_min and elapsed_min is not None and elapsed_min >= timeout_min:
         return DEAD, f'timed out after {timeout_min:g}m'
     if not run_id:
@@ -633,6 +643,7 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
                                         cloud_url=hit.get('url') or None)
                 run.update(actions_run_id=run_id, cloud_url=hit.get('url') or None)
         report = None
+        refusal = refusals.last(product, job, run)  # this run's own: ledger, then the record
         if remote.is_remote(run):
             status, why, report = remote.evidence(run, s, elapsed, now, remote_client)
         elif not run.get('actions_run_name'):  # no workflow run: a launch of a refused runtime
@@ -646,7 +657,12 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
                 out(f'cloud    {job:<24} {why}')
                 found.append((job, (known.get(tok) or {}).get('status') or WORKING, why))
                 continue
-            status, why = classify(view, report, elapsed, s.timeout_min, run_id)
+            status, why = classify(view, report, elapsed, s.timeout_min, run_id,
+                                   refusal=refusal)
+        if status == DEAD and REPORT_MISSING in why and refusals.CLAUSE_HEAD not in why:
+            if refusal is None:  # nothing on this host: the run's own log, read once (C11)
+                refusal = refusals.recognise(_run_log_tail(run, s, remote_client, gh))
+            why += refusals.clause(refusal)
         beat = heartbeat.for_run(run, cfg, product) if status == WORKING else None
         stalled = False
         if beat is not None:
@@ -715,6 +731,19 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
     if json.dumps(hb_state, sort_keys=True) != hb_before:
         heartbeat._save_state(product, hb_state)
     return found
+
+
+def _run_log_tail(run, s, remote_client, gh):
+    """The dead run's own output, as text, or '' — one read, through the runtime already in hand
+    (F-0266 C11). Never raises: no log is no refusal."""
+    from asf.workers import remote
+    try:
+        if remote.is_remote(run):
+            return remote.run_log_summary(run, s, remote_client) or ''
+        run_id = run.get('actions_run_id')
+        return (gh.log_tail(run_id) or '') if run_id and hasattr(gh, 'log_tail') else ''
+    except Exception:  # noqa: BLE001 — a log that cannot be read names no refusal
+        return ''
 
 
 def settle_ended(run):

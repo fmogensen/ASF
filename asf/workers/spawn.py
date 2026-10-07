@@ -43,6 +43,7 @@ from asf.workers import heartbeat
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import pushlog
+from asf.workers import refusals
 from asf.workers import runtime as runtime_mod
 from asf.workers import stopgate
 
@@ -749,6 +750,12 @@ def _place_worktree(product, repo, job, branch):
         what, why = lifecycle.launch_verdict(registry, job, candidate)
         if what == lifecycle.BUSY:
             raise WorktreeBusy(why)
+        if what == lifecycle.ORPHAN:
+            from asf.workers import worktrees as worktrees_mod  # local: it imports this module
+            ok, how = worktrees_mod.adoptable(candidate, branch, product.main)
+            if ok:  # B-0380: a clean leftover at origin's head loses nothing — adopted at once
+                print(f'adopted {candidate}: an orphan worktree {how}', file=sys.stderr)
+                what = ''
         if what == lifecycle.ORPHAN and _stale_orphan(candidate):
             # an orphan nothing has touched in ORPHAN_GRACE_S: reclaimed (archived, trashed),
             # never a NEEDS OPERATOR every tick for ever
@@ -1243,6 +1250,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)
+    refusals.clear(product, row.job)  # ... and keeps its own refusals (F-0266)
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
     for d in getattr(row, 'add_dirs', None) or ():  # the row's own grants are the factory's dirs
         d = os.path.expanduser(d)
@@ -1261,6 +1269,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                **githooks.item_env(getattr(product, 'conventions', None),
                                                    row.item, branch),
                                **pushlog.env_for(product, row.job, row.kind),
+                               **refusals.env_for(product, row.job),
                                'ASF_PUSH_ALLOW': push_allow(product, row, branch),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid,
                                'ASF_READ_ROOTS': os.pathsep.join(add_dirs)},

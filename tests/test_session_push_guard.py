@@ -145,5 +145,90 @@ class PrePushAllow(unittest.TestCase):
         self.assertEqual(self.heads(), [])
 
 
+class ARefusedPushIsWrittenDown(PrePushAllow):
+    """F-0266 S-64355: each of the shim's three refusal points appends one line to
+    ``ASF_REFUSAL_LOG``; a push that passes, a heartbeat and a scratch push write nothing; and the
+    hook's exit status never depends on the write."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = os.path.join(self.tmp, 'gates', 'job.refusals')
+        os.makedirs(os.path.dirname(self.log))
+        self.env['ASF_REFUSAL_LOG'] = self.log
+
+    def lines(self):
+        import json
+        try:
+            with open(self.log, encoding='utf-8') as f:
+                return [json.loads(l) for l in f if l.strip()]
+        except OSError:
+            return []
+
+    def own_hook(self, body):
+        h = os.path.join(self.clone, '.git', 'hooks', 'pre-push')
+        with open(h, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\n' + body)
+        os.chmod(h, 0o755)
+
+    def test_a_push_allow_refusal_is_one_line(self):
+        p = _git(['push', '-q', 'origin', 'HEAD:refs/heads/ci/gate-manifest'], self.wt, self.env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('pushes only to factory branches', p.stderr)
+        [rec] = self.lines()
+        self.assertEqual((rec['kind'], rec['where']), ('push-allow', 'shim'))
+        self.assertIn('ci/gate-manifest', rec['line'])
+        self.assertRegex(rec['at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+
+    def test_the_products_own_hook_refusal_carries_its_output(self):
+        self.own_hook('printf "%s\\n" \'pre-push: lint "failed" in a\\b.py\' >&2\nexit 1\n')
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, self.env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('lint "failed"', p.stderr)   # still printed
+        [rec] = self.lines()
+        self.assertEqual(rec['kind'], 'hook refused')
+        self.assertIn('lint "failed" in a\\b.py', rec['line'])
+
+    def test_a_trunk_check_refusal_is_written_too(self):
+        cli = os.path.join(self.tmp, '.local', 'bin', 'asf')
+        os.makedirs(os.path.dirname(cli))
+        with open(cli, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\ncat >/dev/null\necho "trunk-check: pre-push failed on the merge" >&2\n'
+                    'exit 1\n')
+        os.chmod(cli, 0o755)
+        e = dict(self.env, ASF_PRODUCT='p')
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, e)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('trunk-check: pre-push failed', p.stderr)
+        [rec] = self.lines()
+        self.assertEqual(rec['kind'], 'hook refused')
+        self.assertIn('pre-push failed on the merge', rec['line'])
+
+    def test_a_passing_push_a_heartbeat_and_a_scratch_push_write_nothing(self):
+        self.assertEqual(_git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt,
+                              self.env).returncode, 0)
+        self.assertEqual(_git(['push', '-q', 'origin', 'HEAD:refs/asf/hb/job'], self.wt,
+                              self.env).returncode, 0)
+        bare = os.path.join(self.tmp, 'fixture.git')
+        _git(['init', '-q', '--bare', bare], self.tmp)
+        fx = os.path.join(self.tmp, 'fixture')
+        _git(['init', '-q', '-b', 'main', fx], self.tmp)
+        _git(['commit', '-q', '--allow-empty', '-m', 'x'], fx, self.env)
+        self.assertEqual(_git(['push', '-q', bare, 'main'], fx, self.env).returncode, 0)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_the_exit_status_never_depends_on_the_write(self):
+        for log in (None, os.path.join(self.tmp, 'no', 'such', 'dir', 'x.refusals')):
+            e = dict(self.env)
+            if log is None:
+                e.pop('ASF_REFUSAL_LOG')
+            else:
+                e['ASF_REFUSAL_LOG'] = log
+            p = _git(['push', '-q', 'origin', 'HEAD:refs/heads/ci/x'], self.wt, e)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('pushes only to factory branches', p.stderr)
+            self.assertEqual(_git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt,
+                                  e).returncode, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

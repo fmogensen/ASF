@@ -459,7 +459,8 @@ class Sync(Home):
         self.assertEqual((status, why),
                          (cloud.DEAD, 'run trig_1 ended succeeded without the report commit'))
         self.assertFalse(lifecycle.pid_alive(rec['pid']))
-        self.assertEqual(self.fake.actions()[-1], 'update')
+        # retired, then its log read once for a refusal (F-0266 C11) — none here
+        self.assertEqual(self.fake.actions()[-2:], ['update', 'get_run_log'])
 
     def test_a_run_past_its_limit_is_dead_and_its_routine_disabled(self):
         rec = self.launch()
@@ -527,6 +528,42 @@ class Sync(Home):
     def test_the_lane_runtime_is_the_routine_runtime(self):
         rt = cloud.lane_runtime(cloud.settings(self.cfg, self.product), self.product)
         self.assertIsInstance(rt, remote.RemoteRuntime)
+
+
+class ARemoteRunsRefusalIsRecognised(Home):
+    """F-0266 S-64358: a ``claude-remote`` run that ends without its report has its own log read
+    once through ``run_log_summary`` (``get_run_log``, no new call shape), and a refusal in it is
+    named in the dead reason."""
+
+    PUSH_ALLOW = 'asf: push refused — an ASF session pushes only to factory branches, not: main'
+
+    def setUp(self):
+        super().setUp()
+        self.product = env.Product('sample', dict(self.product._data, repo_slug='o/r'))
+        self.cfg = dict(self.cfg, cloud=dict(ON))
+        self.cfg['worker_pool'] = dict(self.cfg['worker_pool'], accounts=[
+            {'name': 'acct-a', 'role': 'local', 'cap': 1},
+            {'name': 'acct-c', 'role': 'worker', 'cap': 1}])
+        self.fake = FakeHelper()
+
+    client = Sync.client
+    launch = Sync.launch
+    sync = Sync.sync
+
+    def test_the_refusal_in_the_run_log_is_named(self):
+        self.launch()
+        self.fake.answers['get'] = (200, {'trigger': {'last_run': {
+            'status': 'ROUTINE_RUN_STATUS_SUCCEEDED', 'finished_at': '2026-09-26T08:56:16Z',
+            'session_id': 'cse_9'}}}, '')
+        self.fake.answers['get_run_log'] = (200, {'events': [
+            {'type': 'tool_use', 'name': 'Bash'},
+            {'type': 'error', 'error': self.PUSH_ALLOW}]}, '')
+        (_job, status, why), = self.sync()
+        self.assertEqual(status, cloud.DEAD)
+        self.assertTrue(why.startswith('run trig_1 ended succeeded without the report commit — '
+                                       'last ASF refusal (push-allow): '), why)
+        self.assertIn('pushes only to factory branches', why)
+        self.assertEqual(self.fake.actions().count('get_run_log'), 1)
 
 
 if __name__ == '__main__':

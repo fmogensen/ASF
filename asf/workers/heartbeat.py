@@ -588,6 +588,7 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
     from asf.workers import lifecycle
     from asf.workers import pool as pool_mod
     from asf.workers import pushlog
+    from asf.workers import refusals
     from asf.workers import runtime as runtime_mod
     from asf.workers import spawn as spawn_mod
     from asf.workers import stopgate
@@ -614,6 +615,7 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
     job_env = {**env.worker_env(cfg, product),
                **githooks.item_env(conv, run.get('item'), run.get('branch')),
                **pushlog.env_for(product, job_name, run.get('kind')),
+               **refusals.env_for(product, job_name),
                'ASF_SESSION': sid}
     allow = spawn_mod.push_allow(product, row, run.get('branch'))
     if allow:
@@ -642,6 +644,7 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
     job.heartbeat = s
     stopgate.clear(product, job_name)
     pushlog.clear(product, job_name)
+    refusals.clear(product, job_name)
     try:
         result = runtime.run(job)
     except Exception as e:  # noqa: BLE001 — a failed relaunch leaves the run to health
