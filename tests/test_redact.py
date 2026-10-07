@@ -196,6 +196,41 @@ class ScanTests(unittest.TestCase):
         self.assertTrue(any(p.startswith('commit ') and p.endswith(' message') for p in paths))
         self.assertFalse(any('seed' in p for p in paths))  # the published commit is not scanned
 
+    def _moved_lines_repo(self):
+        """A repo whose published seed ``index.json`` already holds a line naming an account, and
+        the patterns that name it (F-0273)."""
+        tmp = tempfile.mkdtemp(prefix='redact_test_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _init_repo(tmp)
+        account_name = 'acct-' + 'moved'
+        lines = ['{', f'  "a": "a title naming {account_name}",', '  "b": "clean",',
+                 '  "c": "also clean"', '}']
+        _write(tmp, 'index.json', '\n'.join(lines) + '\n')
+        _commit(tmp, 'seed')
+        _git(['update-ref', 'refs/remotes/origin/main', 'HEAD'], tmp)  # the seed is published
+        pats = redact.patterns(cfg={'worker_pool': {'accounts': [{'name': account_name}]}},
+                               environ={})
+        return tmp, lines, account_name, pats
+
+    def test_a_commit_that_only_moves_a_matching_line_reports_nothing(self):
+        tmp, lines, _name, pats = self._moved_lines_repo()
+        _write(tmp, 'index.json', '\n'.join([lines[0], lines[3], lines[2], lines[1], lines[4]])
+               + '\n')
+        _commit(tmp, 're-rendered in another order')
+
+        self.assertEqual(redact.scan_unpublished(tmp, 'HEAD', pats), [])
+
+    def test_a_new_matching_line_beside_moved_ones_is_still_found(self):
+        tmp, lines, name, pats = self._moved_lines_repo()
+        _write(tmp, 'index.json', '\n'.join([lines[0], lines[3], lines[2], lines[1],
+                                            f'  "d": "a new title naming {name}",', lines[4]])
+               + '\n')
+        _commit(tmp, 're-rendered, and one new title')
+
+        findings = redact.scan_unpublished(tmp, 'HEAD', pats)
+
+        self.assertEqual([(f.path, f.line) for f in findings], [('index.json', 5)])
+
     def test_signed_off_by_and_co_authored_by_trailers_are_not_scanned(self):
         tmp = tempfile.mkdtemp(prefix='redact_test_')
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)

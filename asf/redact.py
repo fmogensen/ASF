@@ -356,6 +356,19 @@ def _is_commit(repo, sha):
     return _run_git(repo, ['cat-file', '-e', f'{sha}^{{commit}}']).returncode == 0
 
 
+def _new_in_commit(repo, sha, path, numbered):
+    """The lines of ``numbered`` (``path``'s ``+`` lines in ``sha``) whose exact text the parent's
+    ``path`` does not already hold: a line a regenerated file only moved — ``index.json``
+    re-rendered in another order — is not new content, and origin holds it already (F-0273).
+    The parent's file is read once; a root commit, a new file or an unreadable parent keeps
+    every line, as before."""
+    old = _run_git(repo, ['show', f'{sha}^:{path}'])
+    if old.returncode != 0:
+        return numbered
+    held = set(old.stdout.split('\n'))
+    return [(n, line) for n, line in numbered if line not in held]
+
+
 def scan_unpublished(repo, head, pats, published=()):
     """Every commit reachable from ``head`` and from no ``refs/remotes/origin/*`` ref (D4) — nor
     from any sha of ``published`` (a pre-push line's remote sha: the remote already has it) —
@@ -376,6 +389,7 @@ def scan_unpublished(repo, head, pats, published=()):
     for sha in shas:
         diff = _run_git(repo, ['show', '-U0', '--format=', sha]).stdout
         for path, numbered in _parse_diff_added_lines(diff):
+            numbered = _new_in_commit(repo, sha, path, numbered)
             findings += _scan_numbered_lines(path, numbered, pats)
         message = _message_without_trailers(repo, sha)
         findings += scan_text(f'commit {sha[:7]} message', message, pats)
