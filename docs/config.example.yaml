@@ -554,6 +554,12 @@ capacity:
 
 # tick.dry_run_min_free_bytes: a dry run refuses below this much free disk (default 10 GiB).
 
+# proves:                          # the `Proves:` claim grammar (asf.proves)
+#   partial_markers: [only, partial, partly, half, except, not yet, minus]
+#                                  # a word in a claim's prose that makes it a *partial* claim:
+#                                  # the line is not ticked and the refusal is reported. Replaces
+#                                  # the built-in list wholesale; [] turns the rule off.
+
 # Every key above is registered in asf/config_keys.py; a numeric one is checked for its kind and
 # range there, and a malformed value keeps its default and is named in doctor's `config keys` row.
 

@@ -89,6 +89,8 @@ TYPED = {
     # the quota cost model (asf.workers.headroom)
     'quota_guards.default_cost': (MAP, None, None),
     'quota_guards.model_families': (LIST, None, None),
+    # the Proves: claim grammar (asf.proves): the words that make a claim a qualified one
+    'proves.partial_markers': (LIST, None, None),
     'quota_guards.min_runs': (INT, 1, None),
     # the worker session's environment and its worktree setup
     'worker_pool.env': (MAP, None, None),
