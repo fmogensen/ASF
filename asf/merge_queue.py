@@ -798,7 +798,6 @@ def run(lane, ready):
             dropped.add(ref)
         elif state == 'red':
             _ledger(lane, batch, False, f'red: {why}')
-            _drop(lane, batch, f'red on {why}')
             checks, red = detail
             roots = root_failures(checks, why) or [c for c in checks
                                                    if flake.job_key(c.get('name')) in red]
@@ -813,6 +812,7 @@ def run(lane, ready):
             if on_trunk:
                 # the trunk fails the same check: not this batch's defect — nobody is sent back
                 # and nobody is split out; the members wait and are gated again
+                _drop(lane, batch, f'red on {why}')
                 said = ', '.join(f'{n} @ {s[:9]}' for n, s in sorted(on_trunk.items()))
                 lane.out(f'merge queue: {ref} red on {why} — red on {trunk} too ({said}): '
                          f'no member is blamed, the batch waits for {trunk} to go green')
@@ -821,18 +821,36 @@ def run(lane, ready):
                                    f'too ({said}) — not this PR\'s', green=f.get('green'))
                 settled |= {f['branch'] for f in members}
             else:
-                culprits = blame(lane, batch, members, found)
+                test_of = {}
+                named, covered = blame(lane, batch, members, found, test_of)
+                culprits = named
                 if len(members) == 1:
                     culprits = culprits or {members[0]['branch']: []}
+                # the drop line and the cancel claim name the culprit when the blame — not the
+                # one-member membership fallback above — settled on exactly one (PD2): a lone
+                # member blamed by bisect alone (no evidence) keeps the plain text
+                why_drop = f'red on {why}'
+                if len(named) == 1:
+                    (branch,) = named
+                    culprit = next(f for f in members if f['branch'] == branch)
+                    how = (f"the failing test {test_of.get(branch)} covers its files" if covered
+                           else "its files, named in the failing job's log")
+                    why_drop = f"red on {why} — #{_pr(culprit)}'s ({how})"
+                _drop(lane, batch, why_drop)
                 fallback = (checks, [c.get('name') for c in roots] or red)
                 fixed = deterministic(lane, st, roots) if st.get('hold_culprit') else []
-                if fixed and culprits:
+                # a cover-derived culprit is never held out of the queue (D7): the direct
+                # reading earns the hold by naming the member's own file in the error, the hop
+                # says only that the test exercises the code, and a wrong hold needs a human or
+                # a push to clear
+                if fixed and culprits and not covered:
                     hold_culprits(lane, [f for f in members if f['branch'] in culprits], fixed)
                 for f in members:
                     if f['branch'] in culprits:
                         _send_back(lane, f, 'gate',
                                    culprit_text(lane, batch, f, why, found, culprits[f['branch']],
-                                                len(members) == 1, fallback),
+                                                len(members) == 1, fallback, covered,
+                                                test_of.get(f['branch'])),
                                    sorted({p for p, _n, _t in culprits[f['branch']]}))
                 innocent = [f for f in members if f['branch'] not in culprits]
                 if culprits and innocent:
@@ -1100,10 +1118,20 @@ def judge(lane, batch, members, heads, trunk_sha, st):
 _PATH_LINE_RE = re.compile(r'(?<![\w@./-])((?:[\w@.+-]+/)*[\w@.+-]+\.[A-Za-z0-9]{1,8}):(\d+)')
 #: a repo path with no ``:line`` (at least one directory: a bare word with a dot is no path)
 _BARE_PATH_RE = re.compile(r'(?<![\w@./-])((?:[\w@.+-]+/)+[\w@.+-]+\.[A-Za-z0-9]{1,8})(?!:\d)(?![\w/])')
+#: a Python traceback frame — ``_PATH_LINE_RE`` cannot see it: a traceback writes ``", line 42"``,
+#: never ``:42``
+_TB_FILE_RE = re.compile(r'File "(?P<p>[^"\n]+\.[A-Za-z0-9]{1,8})", line (?P<n>\d+)')
+#: a unittest/pytest header's dotted test id — ``_BARE_PATH_RE`` cannot see it: it names no path
+#: at all
+_TEST_DOTTED_RE = re.compile(r'^(?:FAIL|ERROR):\s+\S+\s+\(([\w.]+)\)')
 #: the tokens an added row and a finding line are compared by (:func:`_row_owners`)
 _ROW_TOKEN_RE = re.compile(r'[A-Za-z0-9]{3,}')
 #: how many of a failed step's output lines are read for findings
 FINDING_LINES = 400
+#: how many distinct paths :func:`test_paths` keeps — a stack frame per level, each one a
+#: ``cat-file`` candidate, the way :data:`asf.harvest.lane.RED_TESTS_MAX` already bounds
+#: ``red_tests``
+TEST_PATHS_MAX = 20
 #: how many finding lines a culprit's correct brief names
 BRIEF_FINDINGS = 30
 
@@ -1483,16 +1511,52 @@ def _trunk_red_seen(lane, batch, members, names, found):
     return got if got and all(n in got for n in names) else {}
 
 
+def test_paths(item):
+    """``[(path, line, text)]`` — the failing test's own file, read off ``item['lines']`` by two
+    patterns :func:`failure_findings`'s ``paths`` reading misses (a traceback frame, a unittest
+    header's dotted id): a *separate* reading from ``paths``, never merged into it (a traceback's
+    every stack frame would otherwise feed the direct reading noise). A ``_TB_FILE_RE`` match
+    gives the path verbatim (absolute or relative, unresolved — :func:`repo_path` is the only
+    thing that consults the tree, PD3) at its own line. A ``_TEST_DOTTED_RE`` match gives, for the
+    dotted test id, its ``<prefix>.py`` candidates longest-first, each at line 0 — a one-segment
+    id yields no candidate. De-duplicated on the path alone, first-seen order, capped at
+    :data:`TEST_PATHS_MAX` distinct paths. Pure: no git, no host, cannot raise."""
+    out = []
+    seen = set()
+
+    def add(path, line, text):
+        if path in seen:
+            return False
+        seen.add(path)
+        out.append((path, line, text))
+        return len(seen) >= TEST_PATHS_MAX
+
+    for text in item.get('lines') or ():
+        stripped = text.strip()
+        for m in _TB_FILE_RE.finditer(text):
+            if add(m.group('p'), int(m.group('n')), stripped):
+                return out
+        m = _TEST_DOTTED_RE.match(text)
+        if m:
+            parts = m.group(1).split('.')
+            for i in range(len(parts), 1, -1):
+                if add('/'.join(parts[:i]) + '.py', 0, stripped):
+                    return out
+    return out
+
+
 def failure_findings(slug, roots):
-    """Per failed check in ``roots``: ``{name, link, step, cmd, tests, lines, paths}`` — its
-    failed step's output (``lines``) and the ``(path, line, text)`` each ``path:line`` in it names.
-    A check whose log does not read keeps ``lines`` and ``paths`` empty. Never raises."""
+    """Per failed check in ``roots``: ``{name, link, step, cmd, tests, lines, paths, test_paths}``
+    — its failed step's output (``lines``), the ``(path, line, text)`` each ``path:line`` in it
+    names (``paths``), and the failing test's own file read by :func:`test_paths` — a separate
+    reading, never folded into ``paths``. A check whose log does not read keeps ``lines``,
+    ``paths`` and ``test_paths`` empty. Never raises."""
     out = []
     for c in roots or ():
         link = c.get('link') or ''
         m = lane_mod._JOB_RE.search(link)
         item = {'name': c.get('name'), 'link': link, 'step': None, 'cmd': None, 'tests': [],
-                'lines': [], 'paths': []}
+                'lines': [], 'paths': [], 'test_paths': []}
         out.append(item)
         if not m:
             continue
@@ -1517,7 +1581,34 @@ def failure_findings(slug, roots):
             for text in item['lines']:
                 for p in _BARE_PATH_RE.findall(text):
                     item['paths'].append((p[2:] if p.startswith('./') else p, 0, text.strip()))
+        item['test_paths'] = test_paths(item)
     return out
+
+
+def repo_path(lane, batch, path, memo=None):
+    """``path`` reduced to the spelling the batch's tree holds at ``batch['base']``: the longest
+    suffix of ``path`` (split on ``/``) for which ``git cat-file -e <base>:<suffix>`` exists,
+    tried longest first — ``None`` when none does (a vendored checkout, a tool's own source, a
+    frame in the standard library). The tree is the only authority for what a path is: the
+    package may name no test directory (P14). Memoised on ``(lane.repo, batch['base'], path)`` in
+    ``memo`` when one is given (PD4) — a module-level cache would outlive a pass and leak between
+    the suite's tests."""
+    base = batch.get('base')
+    if not base or not path:
+        return None
+    key = (lane.repo, base, path)
+    if memo is not None and key in memo:
+        return memo[key]
+    parts = [p for p in path.split('/') if p]
+    found = None
+    for i in range(len(parts)):
+        suffix = '/'.join(parts[i:])
+        if suffix and gitops.git(['cat-file', '-e', f'{base}:{suffix}'], lane.repo).ok:
+            found = suffix
+            break
+    if memo is not None:
+        memo[key] = found
+    return found
 
 
 def _member_files(lane, batch, f):
@@ -1529,6 +1620,70 @@ def _member_files(lane, batch, f):
         if got.returncode == 0:
             return {l.strip() for l in got.stdout.splitlines() if l.strip()}
     return set(f.get('files') or ())
+
+
+def covers(text, test_path, files):
+    """Of ``files``, the ones the test at ``test_path`` covers — the product's own test-selection
+    predicate (what the product's test gate would itself have run for a change to one of
+    ``files``), read backwards: that tooling may not be called or named here (P14), so the
+    symmetry is reimplemented, not imported. A file of ``files`` that looks like a source module
+    (a dotted extension, at least one ``/`` — read **PD10**: deliberately no extension allow-list)
+    is covered when ``text`` names its dotted form, or a ``from <parent> import … <leaf>`` of it,
+    or ``test_path``'s own stem is ``test_<leaf>`` or starts with ``test_<leaf>_``. Pure, no git,
+    no host. Returned in ``files``' own sorted order."""
+    stem = os.path.splitext(os.path.basename(test_path))[0]
+    out = []
+    for f in sorted(files):
+        base, ext = os.path.splitext(f)
+        if not ext or '/' not in f:
+            continue
+        dotted = base.replace('/', '.')
+        if dotted.endswith('.__init__'):
+            dotted = dotted[:-len('.__init__')]
+        parent, _, leaf = dotted.rpartition('.')
+        hit = bool(re.search(rf'\b{re.escape(dotted)}\b', text))
+        if not hit and parent:
+            hit = bool(re.search(
+                rf'^\s*from {re.escape(parent)} import [^\n]*\b{re.escape(leaf)}\b', text, re.M))
+        if not hit:
+            hit = stem == f'test_{leaf}' or stem.startswith(f'test_{leaf}_')
+        if hit:
+            out.append(f)
+    return out
+
+
+def cover_blame(lane, batch, members, found, test_of=None):
+    """``{branch: [(member file, 0, the finding's line)]}`` — the member of ``members`` whose
+    changed file a failing test covers (:func:`covers`), for a test path the log names that no
+    member's own diff carries: the fallback for a known-gap test, never a peer of the direct
+    reading (D4). The recorded entry is the *member's own* covered file, at line 0, with the
+    finding's line as its text (D6) — the test file is not the member's to change. A test path
+    that *is* in some member's own diff is a direct hit and is skipped here; the direct reading
+    already had its say. ``test_of``, given a dict, is filled ``{branch: the test's own repo
+    path}`` — the recorded entries hold no path a culprit's correction text or a drop line could
+    read back (D6), so a caller that needs *which* test named a branch passes one in. Never
+    raises: an unresolvable log path, or a test blob unreadable at the base, names nobody."""
+    named = {}
+    memo = {}
+    files_of = {f['branch']: _member_files(lane, batch, f) for f in members}
+    changed = set().union(*files_of.values()) if files_of else set()
+    for item in found or ():
+        for path, _line, text in item.get('test_paths') or ():
+            tp = repo_path(lane, batch, path, memo)
+            if tp is None or tp in changed:
+                continue
+            got = gitops.git(['show', f"{batch['base']}:{tp}"], lane.repo)
+            if not got.ok:
+                continue
+            for f in members:
+                for hit in covers(got.stdout, tp, files_of[f['branch']]):
+                    entry = (hit, 0, text)
+                    lst = named.setdefault(f['branch'], [])
+                    if entry not in lst:
+                        lst.append(entry)
+                    if test_of is not None:
+                        test_of.setdefault(f['branch'], tp)
+    return named
 
 
 def _owns(path, files):
@@ -1570,40 +1725,55 @@ def _row_owners(lane, batch, owners, path, text):
     return [f for f in owners if score[f['branch']] == best]
 
 
-def blame(lane, batch, members, found):
-    """``{branch: [(path, line, text)]}``: the members the failing jobs' logs name — each one a
-    finding's file is in its own diff. Empty (no verdict: the batch splits) when no finding maps
-    to a member, or — with several members — when every member is named (the log cannot tell
-    them apart)."""
+def blame(lane, batch, members, found, test_of=None):
+    """``(named, covered)``: ``named`` is ``{branch: [(path, line, text)]}`` — the members the
+    failing jobs' logs name — each one a finding's file is in its own diff; ``covered`` says
+    whether that map came from the cover hop (:func:`cover_blame`) rather than this direct
+    reading. The hop is a fallback and never a peer (D4): it runs only when the direct reading
+    named nobody, and its result goes through the same two no-verdict rules — empty (the batch
+    splits) when no finding maps to a member, or — with several members — when every member is
+    named (neither reading can tell them apart). ``test_of``, given a dict, is passed to the hop
+    and filled by it."""
     paths = [x for item in found for x in item['paths']]
-    if not paths:
-        return {}
     named = {}
-    files_of = {f['branch']: _member_files(lane, batch, f) for f in members}
-    for x in paths:
-        owners = [f for f in members if _owns(x[0], files_of[f['branch']])]
-        if not x[1] and len(owners) > 1:   # no line: the rows the finding names say whose
-            owners = _row_owners(lane, batch, owners,
-                                 _owns(x[0], files_of[owners[0]['branch']]), x[2])
-        for f in owners:
-            hit = (_owns(x[0], files_of[f['branch']]), x[1], x[2])
-            if hit not in named.setdefault(f['branch'], []):
-                named[f['branch']].append(hit)
+    if paths:
+        files_of = {f['branch']: _member_files(lane, batch, f) for f in members}
+        for x in paths:
+            owners = [f for f in members if _owns(x[0], files_of[f['branch']])]
+            if not x[1] and len(owners) > 1:   # no line: the rows the finding names say whose
+                owners = _row_owners(lane, batch, owners,
+                                     _owns(x[0], files_of[owners[0]['branch']]), x[2])
+            for f in owners:
+                hit = (_owns(x[0], files_of[f['branch']]), x[1], x[2])
+                if hit not in named.setdefault(f['branch'], []):
+                    named[f['branch']].append(hit)
+    covered = False
+    if not named:
+        named = cover_blame(lane, batch, members, found, test_of)
+        covered = bool(named)
     if not named or (len(members) > 1 and len(named) == len(members)):
-        return {}
-    return named
+        return {}, False
+    return named, covered
 
 
-def culprit_text(lane, batch, f, why, found, mine, lone, fallback):
+def culprit_text(lane, batch, f, why, found, mine, lone, fallback, covered=False, tp=None):
     """The correct round's text for the culprit ``f``: the batch and its red verdict, then per
     failed job its link, the log lines naming this PR's files (each under the heading it is listed
     under — a rule's name), else the tail of its failed step, and the named-failure brief
     (:func:`asf.harvest.lane.red_brief`: the step, the tests, the local reproduction). No log
-    read: the red checks' evidence as before (``fallback``: ``(checks, names)``)."""
+    read: the red checks' evidence as before (``fallback``: ``(checks, names)``). ``covered`` and
+    ``tp`` (the test's own repo path) say which hop found this culprit (:func:`blame`) — the
+    ``where`` clause states the evidence truthfully rather than claiming a log reading that did
+    not happen (D8); a lone culprit's wording is unchanged either way."""
     ref, sha, trunk = batch['ref'], batch['sha'], lane.trunk
-    where = (f"this PR alone on {trunk} {batch['base'][:9]}" if lone else
-             f"{len(batch['members'])} PRs on {trunk} {batch['base'][:9]}; the failing job's log "
-             f"names files only this PR changes, the others are cut again without it")
+    if lone:
+        where = f"this PR alone on {trunk} {batch['base'][:9]}"
+    elif covered:
+        where = (f"{len(batch['members'])} PRs on {trunk} {batch['base'][:9]}; the failing test "
+                 f"{tp} covers files only this PR changes, the others are cut again without it")
+    else:
+        where = (f"{len(batch['members'])} PRs on {trunk} {batch['base'][:9]}; the failing job's "
+                 f"log names files only this PR changes, the others are cut again without it")
     head = f"batch {ref} @ {sha[:12]} ({where}) checks red: {why}"
     mine_text = {t for _p, _n, t in mine}
     blocks = []

@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import conventions, env, github, merge_queue
+from asf import ci_queue, conventions, env, github, merge_queue
 from asf.facts import cache as facts_cache
 from asf.harvest import harvest, lane
 from asf.views import status
@@ -533,6 +533,344 @@ class Culprit(QueueRepo):
         self.assertEqual(self.backs, [])
         self.assertEqual([[m['branch'] for m in b['members']] for b in self.batches()],
                          [['worker/T-0001'], ['worker/T-0002']])
+
+
+class TestPathsTests(QueueRepo):
+    """``test_paths`` — the failing test's own file read off the log, beside ``paths`` the direct
+    reading already fills — and ``repo_path``, which resolves a log path against the batch's own
+    tree (S-58804)."""
+
+    def setUp(self):
+        super().setUp()
+        self.push_main({'tests/test_audit.py': 'import asf.audit\n'}, 'add a test')
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+        self.ln = self.lane()
+        self.queue_pass(self.ln, [self.entry('worker/T-0001', 1, 'T-0001', files=('a.txt',))])
+        (self.batch,) = self.batches()
+
+    def test_an_absolute_traceback_frame_reaches_test_paths_and_not_paths(self):
+        line = 'File "/home/x/work/o/p/tests/test_audit.py", line 42, in t'
+        item = {'lines': [line], 'paths': []}
+        self.assertEqual(merge_queue.test_paths(item),
+                          [('/home/x/work/o/p/tests/test_audit.py', 42, line)])
+        self.assertEqual(item['paths'], [])
+
+    def test_a_relative_traceback_frame_is_read_the_same_way(self):
+        line = 'File "tests/test_audit.py", line 42, in t'
+        self.assertEqual(merge_queue.test_paths({'lines': [line]}),
+                          [('tests/test_audit.py', 42, line)])
+
+    def test_a_unittest_header_gives_the_dotted_ids_path_at_line_0(self):
+        line = 'FAIL: test_x (tests.test_audit.AuditGap.test_x)'
+        self.assertIn(('tests/test_audit.py', 0, line), merge_queue.test_paths({'lines': [line]}))
+
+    def test_a_one_segment_dotted_id_yields_no_candidate(self):
+        self.assertEqual(merge_queue.test_paths({'lines': ['FAIL: t (solo)']}), [])
+
+    def test_a_check_with_no_readable_log_keeps_both_paths_and_test_paths_empty(self):
+        roots = [{'name': 'gate', 'link': 'https://github.com/o/p/actions/runs/7/job/999'}]
+        found = merge_queue.failure_findings(SLUG, roots)
+        self.assertEqual((found[0]['paths'], found[0]['test_paths']), ([], []))
+
+    def test_the_three_shapes_the_direct_reading_already_catches_keep_their_exact_paths(self):
+        self.gh.logs['401'] = 'tests/test_audit.py:42: AssertionError\n'
+        self.gh.logs['402'] = 'FAILED tests/test_audit.py::C::t\n'
+        self.gh.logs['403'] = 'FAIL  src/audit.test.ts > name\n'
+        roots = [{'name': 'gate', 'link': f'https://github.com/o/p/actions/runs/7/job/{j}'}
+                 for j in ('401', '402', '403')]
+        found = merge_queue.failure_findings(SLUG, roots)
+        self.assertEqual([[(p, n) for p, n, _t in item['paths']] for item in found],
+                          [[('tests/test_audit.py', 42)], [('tests/test_audit.py', 0)],
+                           [('src/audit.test.ts', 0)]])
+
+    def test_repo_path_resolves_an_absolute_runner_path_to_the_trees_spelling(self):
+        got = merge_queue.repo_path(self.ln, self.batch,
+                                     '/home/x/work/o/p/tests/test_audit.py')
+        self.assertEqual(got, 'tests/test_audit.py')
+
+    def test_repo_path_gives_none_for_a_path_the_tree_does_not_hold(self):
+        got = merge_queue.repo_path(self.ln, self.batch,
+                                     '/usr/lib/python3.12/unittest/case.py')
+        self.assertIsNone(got)
+
+    def test_repo_path_memoises_so_a_second_call_makes_no_more_git_reads(self):
+        memo = {}
+        first = merge_queue.repo_path(self.ln, self.batch,
+                                       '/home/x/work/o/p/tests/test_audit.py', memo)
+        with mock.patch.object(merge_queue.gitops, 'git') as git:
+            second = merge_queue.repo_path(self.ln, self.batch,
+                                            '/home/x/work/o/p/tests/test_audit.py', memo)
+        self.assertEqual((first, second), ('tests/test_audit.py', 'tests/test_audit.py'))
+        git.assert_not_called()
+
+
+class CoversTests(unittest.TestCase):
+    """``covers`` — the inverse of the product's own touched-test selection, read backwards
+    (S-58805)."""
+
+    def test_an_import_names_the_file_it_covers_and_not_an_unrelated_one(self):
+        got = merge_queue.covers('from asf.audit import rows\n', 'tests/test_audit.py',
+                                  {'asf/audit.py', 'asf/release.py'})
+        self.assertEqual(got, ['asf/audit.py'])
+
+    def test_a_test_named_after_the_module_covers_it_with_no_import_at_all(self):
+        got = merge_queue.covers('class X:\n    pass\n', 'tests/test_audit.py', {'asf/audit.py'})
+        self.assertEqual(got, ['asf/audit.py'])
+
+    def test_the_test_leaf_prefix_rule_covers_too(self):
+        got = merge_queue.covers('class X:\n    pass\n', 'tests/test_audit_rows.py',
+                                  {'asf/audit.py'})
+        self.assertEqual(got, ['asf/audit.py'])
+
+    def test_an_init_module_is_covered_by_a_test_naming_its_package(self):
+        got = merge_queue.covers('import asf.a.b\n', 'tests/test_b.py', {'asf/a/b/__init__.py'})
+        self.assertEqual(got, ['asf/a/b/__init__.py'])
+
+    def test_a_changed_non_source_file_is_covered_by_nothing(self):
+        got = merge_queue.covers('import asf.audit\n', 'tests/test_audit.py',
+                                  {'README.md', 'docs/x.md'})
+        self.assertEqual(got, [])
+
+
+class CoverBlameTests(QueueRepo):
+    """``cover_blame`` — a test file no member changed names the member whose files it covers,
+    as a fallback and never a peer (S-58805)."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_main({'tests/test_audit.py': 'import asf.audit\n'}, 'add a test')
+        self.push_lane('worker/T-0001', {'asf/audit.py': 'x\n'}, 'feat: audit')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        self.push_lane('worker/T-0003', {'c.txt': 'c\n'}, 'feat: c')
+
+    def entries(self):
+        return [self.entry('worker/T-0001', 1, 'T-0001', files=('asf/audit.py',)),
+                self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',)),
+                self.entry('worker/T-0003', 3, 'T-0003', files=('c.txt',))]
+
+    def cut(self, product=None):
+        self.ln = self.lane(product)
+        self.queue_pass(self.ln, self.entries())
+        (self.batch,) = self.batches()
+        self.members = self.batch['members']
+
+    def found_for(self, text):
+        return [{'name': 'gate', 'link': '', 'step': None, 'cmd': None, 'tests': [], 'lines': [],
+                 'paths': [], 'test_paths': [('tests/test_audit.py', 0, text)]}]
+
+    def test_the_member_whose_file_the_test_covers_is_named_the_others_are_not(self):
+        self.cut()
+        text = 'FAIL: test_x (tests.test_audit.test_x)'
+        named = merge_queue.cover_blame(self.ln, self.batch, self.members, self.found_for(text))
+        self.assertEqual(named, {'worker/T-0001': [('asf/audit.py', 0, text)]})
+
+    def test_blame_returns_covered_true_and_send_back_gets_the_member_file(self):
+        self.cut()
+        self.gh.checks[self.batch['sha']] = [job_run('gate', '501'), check_run('gate-tests')]
+        self.gh.logs['501'] = 'FAIL: test_x (tests.test_audit.test_x)\n'
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.gh.checks[self.batch['sha']] = [job_run('gate', '502'), check_run('gate-tests')]
+        self.gh.logs['502'] = 'FAIL: test_x (tests.test_audit.test_x)\n'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.backs), 1)
+        branch, kind, text, files = self.backs[0]
+        self.assertEqual((branch, kind, files), ('worker/T-0001', 'gate', ['asf/audit.py']))
+        self.assertIn('the failing test tests/test_audit.py covers files only this PR changes',
+                       text)
+
+    def test_a_test_path_already_in_a_members_diff_is_skipped_as_a_direct_hit(self):
+        self.cut()
+        found = [{'lines': [], 'paths': [],
+                  'test_paths': [('asf/audit.py', 0, 'FAIL: t (asf.audit.t)')]}]
+        named = merge_queue.cover_blame(self.ln, self.batch, self.members, found)
+        self.assertEqual(named, {})
+
+    def test_when_the_direct_reading_already_named_someone_the_hop_never_runs(self):
+        self.cut()
+        found = [{'lines': [], 'paths': [('asf/audit.py', 10, 'asf/audit.py:10: x')],
+                  'test_paths': [('tests/test_audit.py', 0, 'FAIL: test_x (tests.test_audit.test_x)')]}]
+        named, covered = merge_queue.blame(self.ln, self.batch, self.members, found)
+        self.assertEqual(covered, False)
+        self.assertEqual(list(named), ['worker/T-0001'])
+
+    def test_a_test_covering_every_member_is_no_verdict_the_batch_splits(self):
+        self.cut()
+        found = self.found_for('FAIL: test_x (tests.test_audit.test_x)')
+        with mock.patch.object(merge_queue, 'covers',
+                               side_effect=lambda text, tp, files: sorted(files)):
+            named, covered = merge_queue.blame(self.ln, self.batch, self.members, found)
+        self.assertEqual((named, covered), ({}, False))
+
+    def test_a_log_path_that_resolves_to_nothing_in_the_tree_names_nobody(self):
+        self.cut()
+        found = [{'lines': [], 'paths': [],
+                  'test_paths': [('/usr/lib/python3.12/unittest/case.py', 0, 'x')]}]
+        named = merge_queue.cover_blame(self.ln, self.batch, self.members, found)
+        self.assertEqual(named, {})
+
+    def test_an_unreadable_test_blob_names_nobody_and_raises_nothing(self):
+        self.cut()
+        found = self.found_for('FAIL: test_x (tests.test_audit.test_x)')
+        orig = merge_queue.gitops.git
+        show_argv = ['show', f"{self.batch['base']}:tests/test_audit.py"]
+
+        def faked(args, repo):
+            if args == show_argv:
+                return github.Result(False, rc=1)
+            return orig(args, repo)
+
+        with mock.patch.object(merge_queue.gitops, 'git', side_effect=faked):
+            named = merge_queue.cover_blame(self.ln, self.batch, self.members, found)
+        self.assertEqual(named, {})
+
+    def test_a_cover_culprit_writes_no_hold_row(self):
+        self.cut(self.product(merge_queue={'ref_prefix': 'batch/', 'batch_size': 3,
+                                            'deterministic_jobs': ['gate']}))
+        self.gh.checks[self.batch['sha']] = [job_run('gate', '601'), check_run('gate-tests')]
+        self.gh.logs['601'] = 'FAIL: test_x (tests.test_audit.test_x)\n'
+        self.queue_pass(self.lane(self.ln.product), [])
+        self.assertEqual(merge_queue.load_culprits(self.state_dir), {})
+
+    def test_a_direct_culprit_still_writes_a_hold_row(self):
+        self.cut(self.product(merge_queue={'ref_prefix': 'batch/', 'batch_size': 3,
+                                            'deterministic_jobs': ['gate']}))
+        self.gh.checks[self.batch['sha']] = [job_run('gate', '602'), check_run('gate-tests')]
+        self.gh.logs['602'] = 'asf/audit.py:1: boom\n'
+        self.queue_pass(self.lane(self.ln.product), [])
+        self.assertIn('worker/T-0001', merge_queue.load_culprits(self.state_dir))
+
+
+class DropReasonTests(QueueRepo):
+    """The drop reason names the culprit PR and how it was found, and the weaker hop earns no
+    hold (S-58806)."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_main({'tests/test_audit.py': 'import asf.audit\n'}, 'add a test')
+        self.push_lane('worker/T-0001', {'asf/audit.py': 'x\n'}, 'feat: audit')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        self.push_lane('worker/T-0003', {'c.txt': 'c\n'}, 'feat: c')
+
+    def entries(self):
+        return [self.entry('worker/T-0001', 1, 'T-0001', files=('asf/audit.py',)),
+                self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',)),
+                self.entry('worker/T-0003', 3, 'T-0003', files=('c.txt',))]
+
+    def cut(self, product=None):
+        self.queue_pass(self.lane(product), self.entries())
+        (batch,) = self.batches()
+        return batch
+
+    def test_a_direct_culprits_drop_line_names_the_pr_and_its_files(self):
+        batch = self.cut()
+        self.gh.checks[batch['sha']] = [job_run('gate', '701'), check_run('gate-tests')]
+        self.gh.logs['701'] = 'asf/audit.py:1: boom\n'
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.gh.checks[batch['sha']] = [job_run('gate', '711'), check_run('gate-tests')]
+        self.gh.logs['711'] = 'asf/audit.py:1: boom\n'
+        self.queue_pass(self.lane(), [])
+        self.assertTrue(any(
+            "dropped — red on gate (failure) — #1's (its files, named in the failing job's log)"
+            in l for l in self.lines), self.lines)
+
+    def test_a_cover_culprits_drop_line_names_the_pr_and_the_test(self):
+        batch = self.cut()
+        self.gh.checks[batch['sha']] = [job_run('gate', '702'), check_run('gate-tests')]
+        self.gh.logs['702'] = 'FAIL: test_x (tests.test_audit.test_x)\n'
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.gh.checks[batch['sha']] = [job_run('gate', '712'), check_run('gate-tests')]
+        self.gh.logs['712'] = 'FAIL: test_x (tests.test_audit.test_x)\n'
+        self.queue_pass(self.lane(), [])
+        self.assertTrue(any(
+            "dropped — red on gate (failure) — #1's (the failing test tests/test_audit.py "
+            "covers its files)" in l for l in self.lines), self.lines)
+
+    def test_the_cancel_claim_on_the_dropped_ref_carries_the_same_text(self):
+        batch = self.cut()
+        self.gh.checks[batch['sha']] = [job_run('gate', '703'), check_run('gate-tests')]
+        self.gh.logs['703'] = 'asf/audit.py:1: boom\n'
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.gh.checks[batch['sha']] = [job_run('gate', '713'), check_run('gate-tests')]
+        self.gh.logs['713'] = 'asf/audit.py:1: boom\n'
+        wf_run = {'id': 9001, 'status': 'in_progress', 'head_branch': batch['ref']}
+        with mock.patch.object(merge_queue, '_workflow_runs', lambda *_a, **_k: [wf_run]), \
+                mock.patch.object(merge_queue.run_cancel, 'cancel', lambda *_a, **_k: True), \
+                mock.patch.object(merge_queue.run_cancel, 'unconfirmed', lambda *_a, **_k: None):
+            self.queue_pass(self.lane(), [])
+        claims = ci_queue.load_claims(self.state_dir)
+        said = claims[str(wf_run['id'])]
+        self.assertIn("#1's (its files, named in the failing job's log)", said.get('why', ''))
+
+    def test_with_no_culprit_the_drop_line_is_unchanged(self):
+        batch = self.cut()
+        self.gh.checks[batch['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        self.assertIn(f"merge queue: batch {batch['ref']} dropped — red on gate (failure)",
+                      self.lines)
+
+    def test_with_more_than_one_culprit_the_drop_line_is_unchanged(self):
+        batch = self.cut()
+        self.gh.checks[batch['sha']] = [job_run('gate', '704'), check_run('gate-tests')]
+        self.gh.logs['704'] = 'asf/audit.py:1: boom\nb.txt:1: boom\n'
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.gh.checks[batch['sha']] = [job_run('gate', '714'), check_run('gate-tests')]
+        self.gh.logs['714'] = 'asf/audit.py:1: boom\nb.txt:1: boom\n'
+        self.queue_pass(self.lane(), [])
+        self.assertIn(f"merge queue: batch {batch['ref']} dropped — red on gate (failure)",
+                      self.lines)
+
+    def test_red_on_the_trunk_too_the_drop_line_is_unchanged(self):
+        batch = self.cut()
+        self.gh.checks[batch['sha']] = [check_run('rules', 'failure'), check_run('gate', 'skipped'),
+                                        check_run('gate-tests', 'skipped')]
+        with mock.patch.object(lane.GitHubHost, 'trunk_red',
+                               lambda _self, names: {'rules': 'f' * 40} if 'rules' in names else {}):
+            self.queue_pass(self.lane(), [])
+        self.assertIn(
+            f"merge queue: batch {batch['ref']} dropped — red on gate (skipped), "
+            "gate-tests (skipped)", self.lines)
+
+    def test_a_lone_member_blamed_by_bisect_with_no_evidence_keeps_the_plain_line(self):
+        self.queue_pass(self.lane(), self.entries()[:1])
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        self.assertIn(f"merge queue: batch {batch['ref']} dropped — red on gate (failure)",
+                      self.lines)
+
+    def test_the_gate_ledger_row_is_unchanged_in_every_case(self):
+        batch = self.cut()
+        self.gh.checks[batch['sha']] = [job_run('gate', '705'), check_run('gate-tests')]
+        self.gh.logs['705'] = 'asf/audit.py:1: boom\n'
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.gh.checks[batch['sha']] = [job_run('gate', '715'), check_run('gate-tests')]
+        self.gh.logs['715'] = 'asf/audit.py:1: boom\n'
+        self.queue_pass(self.lane(), [])
+        gates_path = os.path.join(self.state_dir, 'gates.jsonl')
+        with open(gates_path, encoding='utf-8') as fh:
+            rows = [json.loads(l) for l in fh if l.strip()]
+        self.assertTrue(any(r.get('line') == f"merge queue {batch['ref']}: red: gate (failure)"
+                            for r in rows), rows)
+
+    def test_a_hop_culprit_writes_no_hold_row(self):
+        product = self.product(merge_queue={'ref_prefix': 'batch/', 'batch_size': 3,
+                                             'deterministic_jobs': ['gate']})
+        batch = self.cut(product)
+        self.gh.checks[batch['sha']] = [job_run('gate', '706'), check_run('gate-tests')]
+        self.gh.logs['706'] = 'FAIL: test_x (tests.test_audit.test_x)\n'
+        self.queue_pass(self.lane(product), [])
+        self.assertEqual(merge_queue.load_culprits(self.state_dir), {})
+
+    def test_a_direct_culprit_still_writes_a_hold_row(self):
+        product = self.product(merge_queue={'ref_prefix': 'batch/', 'batch_size': 3,
+                                             'deterministic_jobs': ['gate']})
+        batch = self.cut(product)
+        self.gh.checks[batch['sha']] = [job_run('gate', '707'), check_run('gate-tests')]
+        self.gh.logs['707'] = 'asf/audit.py:1: boom\n'
+        self.queue_pass(self.lane(product), [])
+        self.assertIn('worker/T-0001', merge_queue.load_culprits(self.state_dir))
 
 
 class EscapeSequences(unittest.TestCase):
