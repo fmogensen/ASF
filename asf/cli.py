@@ -321,6 +321,14 @@ def build_parser():
                                     'provider, exit 1 on an expiring/invalid one, 2 on a '
                                     'broken probe')
 
+    p_proves = sub.add_parser('proves', help="F-0040's story-proof gate: check or show a "
+                              "Task's claims")
+    p_proves.add_argument('proves_command', choices=['check', 'show'])
+    p_proves.add_argument('item', nargs='?', help='a Task id, for `show`')
+    p_proves.add_argument('--product')
+    p_proves.add_argument('--branch', help='`show`: the branch to read, overriding both guesses')
+    p_proves.add_argument('--json', action='store_true')
+
     p_evidence = sub.add_parser('evidence', help='the evidence pass (git/gh derived state)')
     p_evidence.add_argument('--product')
     p_evidence.add_argument('--fresh', action='store_true')
@@ -660,6 +668,9 @@ def _main(argv=None):
         from asf import credentials as credentials_mod
         from asf import env
         return credentials_mod.cmd_check(args, env.load_product(args.product), env.load_config())
+    if args.command == 'proves':
+        from asf.rules.story_proof import cmd_proves
+        return cmd_proves(args, resolve_record(args))
     if args.command == 'evidence':
         from asf.evidence.evidence import main as evidence_main
         evidence_args = ['--json']
