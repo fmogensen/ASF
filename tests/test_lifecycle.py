@@ -678,6 +678,96 @@ class ReviewRunInvariants(unittest.TestCase):
                          f'failed: {lc.push_gap(dirty)}')
 
 
+class ReviewAttemptsTests(unittest.TestCase):
+    """S-36503, plan F-0224 Task 2: ``review_attempts`` counts only ended review runs on a
+    branch started at or after its lane record's ``head_at`` — a reviewer who looked after the
+    head moved is not credited to a dead head, and a branch whose record carries no ``head_at``
+    counts nothing (the guard opens rather than holds)."""
+
+    def _write(self, lines):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 'sessions.jsonl')
+        with open(path, 'w') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return path
+
+    def test_counts_an_ended_review_run_at_or_after_head_at(self):
+        lines = [{'job': 'review-t-1', 'pid': 1, 'started': 't1', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'review'},
+                 {'job': 'review-t-1', 'ended': 't2'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {'head_at': 't0'}}),
+                         {'worker/T-1': 1})
+
+    def test_a_run_started_before_head_at_counts_nothing(self):
+        lines = [{'job': 'review-t-1', 'pid': 1, 'started': 't0', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'review'},
+                 {'job': 'review-t-1', 'ended': 't1'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {'head_at': 't1'}}), {})
+
+    def test_a_run_of_another_kind_counts_nothing(self):
+        lines = [{'job': 'coder-t-1', 'pid': 1, 'started': 't1', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'coder'},
+                 {'job': 'coder-t-1', 'ended': 't2'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {'head_at': 't0'}}), {})
+
+    def test_a_live_run_with_no_ended_counts_nothing(self):
+        lines = [{'job': 'review-t-1', 'pid': 1, 'started': 't1', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'review'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {'head_at': 't0'}}), {})
+
+    def test_a_run_on_another_branch_counts_nothing(self):
+        lines = [{'job': 'review-t-2', 'pid': 1, 'started': 't1', 'branch': 'worker/T-2',
+                  'item': 'T-2', 'kind': 'review'},
+                 {'job': 'review-t-2', 'ended': 't2'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {'head_at': 't0'}}), {})
+
+    def test_two_qualifying_runs_under_different_job_names_count_two(self):
+        # PD8: fold `runs(path)`, not `by_branch`, which keeps one run per branch and would cap
+        # every count at 1
+        lines = [{'job': 'review-t-1', 'pid': 1, 'started': 't1', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'review'},
+                 {'job': 'review-t-1', 'ended': 't2'},
+                 {'job': 'rereview-t-1', 'pid': 2, 'started': 't3', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'review'},
+                 {'job': 'rereview-t-1', 'ended': 't4'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {'head_at': 't0'}}),
+                         {'worker/T-1': 2})
+        self.assertEqual(len(lc.by_branch(path)), 1)  # the case this guards against
+
+    def test_a_record_with_no_head_at_yields_zero(self):
+        lines = [{'job': 'review-t-1', 'pid': 1, 'started': 't1', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'review'},
+                 {'job': 'review-t-1', 'ended': 't2'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {}}), {})
+        self.assertEqual(lc.review_attempts(path, {}), {})
+
+    def test_occupancy_carries_the_count_on_its_review_entry_including_zero(self):
+        lines = [{'job': 'coder-t-1', 'pid': 1, 'started': 't0', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'coder'},
+                 {'job': 'coder-t-1', 'ended': 't0b'},
+                 {'job': 'review-t-1', 'pid': 2, 'started': 't1', 'branch': 'worker/T-1',
+                  'item': 'T-1', 'kind': 'review'},
+                 {'job': 'review-t-1', 'ended': 't2'},
+                 {'job': 'coder-t-2', 'pid': 3, 'started': 't0', 'branch': 'worker/T-2',
+                  'item': 'T-2', 'kind': 'coder'},
+                 {'job': 'coder-t-2', 'ended': 't0b'}]
+        path = self._write(lines)
+        lanes = {'worker/T-1': {'state': 'REVIEW', 'round': 1, 'pr': 5, 'head_at': 't0'},
+                 'worker/T-2': {'state': 'REVIEW', 'round': 1, 'pr': 6, 'head_at': 't0'}}
+        out = lc.occupancy(path, lanes=lanes)
+        self.assertEqual(out['review']['T-1']['attempts'], 1)
+        self.assertEqual(out['review']['T-2']['attempts'], 0)
+
+
 class StateMachineInvariants(unittest.TestCase):
     def test_every_state_but_reaped_has_a_successor_and_all_successors_are_states(self):
         self.assertEqual(set(lc.TRANSITIONS), set(lc.STATES))

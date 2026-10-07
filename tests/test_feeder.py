@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import env, invariants
 from asf.env import Product
@@ -711,6 +712,116 @@ class HeavyCiMissingLabelRowTest(unittest.TestCase):
         out = rows.lane_rows(self.ITEMS, p, set(), occ)
         self.assertEqual(out[0].action, f"{rows.WAITS_LANDING}: PR #9 MERGING")
         self.assertEqual(out[0].reason, 'lane MERGING PR #9: ok')
+
+
+class ReviewAttemptFloorTests(unittest.TestCase):
+    """S-36503, plan F-0224 Task 2: a head whose reviewers have ended ``attempt_limit`` review
+    sessions with no review filed gets a non-launching ``WAITS ON hold`` row naming the count,
+    instead of another reviewer — and the count resets to zero the moment the head moves."""
+
+    ITEMS = {'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                       'writes': ['a.py']}}
+
+    def row_for(self, attempts, p=None, round_=1):
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': round_, 'pr': 9,
+                                     'why': 'no verdict', 'attempts': attempts}}}
+        out = rows.lane_rows(self.ITEMS, p or product(), set(), occ)
+        self.assertEqual(len(out), 1)  # the launch or the hold, never both
+        return out[0]
+
+    def test_launches_below_attempt_limit(self):
+        r = self.row_for(2)
+        self.assertEqual(r.kind, rows.PUSHED_REVIEW)
+        self.assertEqual(r.action, rows.LAUNCH)
+        self.assertEqual(r.review_round, 1)
+
+    def test_at_attempt_limit_waits_on_hold_naming_the_count(self):
+        r = self.row_for(3)
+        self.assertEqual(r.action, f'{rows.HOLD}: 3 reviewers filed nothing')
+        self.assertEqual(r.waits_on, 'hold')
+        self.assertEqual(r.brief_kind, 'review')
+
+    def test_above_attempt_limit_same(self):
+        r = self.row_for(5)
+        self.assertEqual(r.action, f'{rows.HOLD}: 5 reviewers filed nothing')
+        self.assertEqual(r.waits_on, 'hold')
+
+    def test_a_product_that_sets_attempt_limit_takes_effect(self):
+        p = product(conventions={'attempt_limit': 1})
+        self.assertEqual(self.row_for(1, p=p).waits_on, 'hold')
+        self.assertEqual(self.row_for(0, p=p).action, rows.LAUNCH)
+
+    def test_moving_the_head_resets_the_count_and_restores_the_launching_row(self):
+        held = self.row_for(3)
+        self.assertEqual(held.waits_on, 'hold')
+        moved = self.row_for(0)  # a new head_at: occupancy's count is zero again
+        self.assertEqual(moved.action, rows.LAUNCH)
+        self.assertEqual(moved.kind, rows.PUSHED_REVIEW)
+        self.assertEqual(moved.review_round, 1)
+
+
+class ReviewRoundCeilingTests(unittest.TestCase):
+    """S-36504, plan F-0224 Task 3: a code review loop gets the ceiling the document lane
+    already has — ``STALEMATE → ADJUDICATE`` at ``conventions.stalemate_round`` and above,
+    tested before the dead-attempt floor (D4)."""
+
+    ITEMS = {'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                       'writes': ['a.py']}}
+
+    def row_for(self, rnd, attempts=0, p=None, items=None, iid='T-0001', branch='task/T-0001'):
+        occ = {'review': {iid: {'branch': branch, 'round': rnd, 'pr': 9,
+                                'why': 'no verdict', 'attempts': attempts}}}
+        out = rows.lane_rows(self.ITEMS if items is None else items, p or product(), set(), occ)
+        self.assertEqual(len(out), 1)  # the review row or the adjudicate, never both
+        return out[0]
+
+    def test_below_stalemate_round_launches_as_today(self):
+        r = self.row_for(3)
+        self.assertEqual(r.kind, rows.PUSHED_REVIEW)
+        self.assertEqual(r.action, rows.LAUNCH)
+
+    def test_at_stalemate_round_adjudicates(self):
+        r = self.row_for(4)
+        self.assertEqual(r.kind, rows.STALEMATE)
+        self.assertEqual(r.action, rows.LAUNCH)
+        self.assertEqual(r.brief_kind, 'adjudicate')
+        self.assertIn('review round 4 >= r4: adjudicate, no further round', r.reason)
+
+    def test_above_stalemate_round_adjudicates_too(self):
+        self.assertEqual(self.row_for(9).kind, rows.STALEMATE)
+
+    def test_a_product_that_sets_stalemate_round_takes_effect(self):
+        p = product(conventions={'stalemate_round': 2})
+        self.assertEqual(self.row_for(2, p=p).kind, rows.STALEMATE)
+        self.assertEqual(self.row_for(1, p=p).kind, rows.PUSHED_REVIEW)
+
+    def test_the_ceiling_is_tested_before_the_floor(self):
+        # a branch at the ceiling with attempt_limit dead attempts adjudicates, not waits
+        r = self.row_for(4, attempts=99)
+        self.assertEqual(r.kind, rows.STALEMATE)
+        self.assertNotEqual(r.waits_on, 'hold')
+
+    def test_a_foreign_pr_item_reaches_the_ceiling_like_any_other(self):
+        r = self.row_for(4, items={}, iid='PR-42', branch='task/pr-42')
+        self.assertEqual(r.kind, rows.STALEMATE)
+        self.assertEqual(r.brief_kind, 'adjudicate')
+
+    def test_a_direct_feature_reaching_the_ceiling_gets_one_row(self):
+        items = {'F-0010': {'id': 'F-0010', 'type': 'feature', 'parent': 'E-0001',
+                            'state': 'Active', 'stage': 'building 1/1'}}
+        r = self.row_for(4, items=items, iid='F-0010', branch='cloud/direct-F-0010')
+        self.assertEqual(r.kind, rows.STALEMATE)
+
+    def test_the_ceiling_row_survives_the_feeder_gate(self):
+        # PD5: without `STALEMATE → ADJUDICATE` in `LANE_LAUNCH_KINDS['REVIEW']` the gate's own
+        # I4 drops this row every tick — the branch gets no row at all
+        r = self.row_for(4)
+        ctx = invariants.FeederContext(rows=[r], lanes={r.branch: {'state': 'REVIEW'}})
+        lines = []
+        with mock.patch.object(invariants, 'feeder_context', return_value=ctx):
+            kept = invariants.feeder_gate(product(), [r], self.ITEMS, out=lines.append)
+        self.assertEqual(kept, [r])
+        self.assertEqual(lines, [])
 
 
 class FeederHoldTest(unittest.TestCase):

@@ -64,6 +64,20 @@ class R10I4OneLaunchPerBranchOfItsKind(unittest.TestCase):
         ctx = feeder(rows, lanes={'worker/T-0001': {'state': 'REVIEW'}})
         self.assertEqual(invariants.check_i4(ctx), [])
 
+    def test_r10_the_ceilings_adjudicate_on_a_review_branch_is_legal(self):
+        # S-36504, plan F-0224 Task 3 (PD5): the code review ceiling's row launches on a branch
+        # the lane still holds in REVIEW — legal, like the review session itself.
+        rows = [row('STALEMATE → ADJUDICATE', 'T-0001', 'worker/T-0001', brief='adjudicate')]
+        ctx = feeder(rows, lanes={'worker/T-0001': {'state': 'REVIEW'}})
+        self.assertEqual(invariants.check_i4(ctx), [])
+
+    def test_r10_the_ceilings_adjudicate_beside_a_review_row_is_a_second_launch_not_a_kind_finding(self):
+        rows = [row('STALEMATE → ADJUDICATE', 'T-0001', 'worker/T-0001', brief='adjudicate'),
+                row('PUSHED → REVIEW', 'T-0001', 'worker/T-0001', brief='review')]
+        ctx = feeder(rows, lanes={'worker/T-0001': {'state': 'REVIEW'}})
+        self.assertEqual(ids(invariants.check_i4(ctx)),
+                         [('I4', 'PUSHED → REVIEW T-0001 @worker/T-0001')])
+
     def test_r10_a_coder_on_a_branch_the_lane_holds_is_dropped(self):
         rows = [row('PLAN → CODE', 'T-0001', 'worker/T-0001'),
                 row('PLAN → CODE', 'T-0002', 'worker/T-0002')]

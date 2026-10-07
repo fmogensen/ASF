@@ -844,6 +844,25 @@ def by_branch(path):
     return out
 
 
+def review_attempts(path, lanes):
+    """``{branch: n}`` — ended review runs on that branch started at or after its lane record's
+    ``head_at``: how many reviewers this head has already had. Pure over the registry.
+    Folds :func:`runs`, not :func:`by_branch`, which keeps one run per branch and would cap
+    every count at 1. A branch whose record carries no ``head_at`` never enters the map — the
+    guard opens rather than holds."""
+    out = {}
+    for rs in runs(path).values():
+        for r in rs:
+            branch = r.get('branch')
+            if not branch or r.get('kind') != 'review' or not r.get('ended'):
+                continue
+            head_at = (lanes.get(branch) or {}).get('head_at')
+            if not head_at or (r.get('started') or '') < head_at:
+                continue
+            out[branch] = out.get(branch, 0) + 1
+    return out
+
+
 def lane_of(run):
     """``run['lane']`` as the lane state machine's record (:mod:`asf.harvest.lane`), ``{}`` when
     the run carries none or it is not a map. A cloud-lane launch's own ``runtime_lane`` marker
@@ -1424,9 +1443,10 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
     BACK rows. An item is in at most one of ``busy`` and ``waiting_landing``.
 
     Beside those, for the feeder's rows: ``lanes`` (``{branch: lane record + item, kind}`` of
-    every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr}}`` — lane
-    REVIEW: a PUSHED → REVIEW row), ``landing`` (``{item: {branch, state, pr, why}}`` — the other
-    lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}`` of every waiting branch)
+    every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr, why,
+    attempts}}`` — lane REVIEW: a PUSHED → REVIEW row, ``attempts`` from :func:`review_attempts`:
+    ended review sessions on that head), ``landing`` (``{item: {branch, state, pr, why}}`` — the
+    other lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}`` of every waiting branch)
     and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and waiting is not starved);
     ``parks`` (:func:`parks`): the standing operator parks — a branch or job one holds only its
     own rows (its branch is skipped here; the feeder turns its rows into one PARKED row).
@@ -1511,6 +1531,10 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
         if not why:
             continue
         waits.append((item, branch, kind, why))
+    if out['review']:
+        tries = review_attempts(path, out['lanes'])
+        for entry in out['review'].values():
+            entry['attempts'] = tries.get(entry['branch'], 0)
     unpushed = set()
     if on_origin is not None:
         claimed = sorted({b for _i, b, _k, why in waits if why == PUSHED_WAIT})

@@ -784,7 +784,7 @@ def _feeder_only(check):
 #: landing: <branch> BACK``, a product's T-0362 and T-0027, 2026-09-27). A terminal state
 #: (MERGED, STALE, REAPED) or no lane record holds nothing.
 LANE_LAUNCH_KINDS = {
-    'REVIEW': ('PUSHED → REVIEW',),
+    'REVIEW': ('PUSHED → REVIEW', 'STALEMATE → ADJUDICATE'),
     'BACK': ('FIX → CORRECT', 'STARVED → SPEC', 'STARVED → PLAN', 'STALEMATE → ADJUDICATE',
              'RESHAPE → PLAN', 'CONFLICT → REBASE', 'STALE → CLOSE', 'DELIVERY → CODE'),
 }
@@ -834,9 +834,9 @@ def _i4_waits(why, branch):
 
 def check_i4(ctx):
     """I4 (R10) — at most one launching row per branch, and its kind matches the branch's lane
-    state: REVIEW takes the review session (``PUSHED → REVIEW`` is legal), BACK takes a
-    correction, every other open state takes none. The first row of a branch (tier order) is
-    kept; a second is dropped."""
+    state: REVIEW takes the review session or the ceiling's adjudicate (``PUSHED → REVIEW`` or
+    ``STALEMATE → ADJUDICATE`` is legal), BACK takes a correction, every other open state takes
+    none. The first row of a branch (tier order) is kept; a second is dropped."""
     out, seen = [], {}
     for row in _launching(ctx):
         allowed, why = _allowed_kinds(ctx, row)
