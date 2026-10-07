@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.227 — 2026-10-07
+
+### Features landed
+
+- The record reports the refused claim, while the Story is Active, and ticks nothing (#983)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.227"`
+
 ## v0.1.226 — 2026-10-07
 
 ### Features landed
