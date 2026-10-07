@@ -1314,5 +1314,92 @@ class LandedProvesTests(unittest.TestCase):
         self.assertEqual(ev["proves"]["S-18754"][0]["sha"], sha)
 
 
+class RefusedProvesTests(unittest.TestCase):
+    """landed_proves(product, prs, refused=...) (F-0257 §3): a qualified claim is withheld
+    from the returned dict and reported in ``refused`` instead — never both."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+
+    def push_trailer_commit(self, subject, trailer):
+        with open(os.path.join(self.r.repo, "proves.txt"), "a") as f:
+            f.write(subject + "\n")
+        git(self.r.repo, "add", ".")
+        git(self.r.repo, "commit", "-q", "-m", f"{subject}\n\n{trailer}")
+        sha = git(self.r.repo, "rev-parse", "HEAD")
+        git(self.r.repo, "push", "-q", "origin", "main")
+        return sha
+
+    def merged_pr(self, number, sha, body, head="worker/T-0198"):
+        return {"number": number, "title": "task(T-0198): the thing", "body": body,
+                "state": "MERGED", "headRefName": head, "mergedAt": "2026-09-21T10:00:00Z",
+                "mergeCommit": {"oid": sha}}
+
+    def test_a_merged_prs_qualified_claim_is_refused_not_counted(self):
+        pr = self.merged_pr(
+            16, self.r.head,
+            "Proves: S-18754 line 1 - tests.test_evidence\n"
+            "Proves: S-18754 line 2 - tests.test_evidence only")
+        refused = {}
+        per_story = evidence.landed_proves(self.r.product(), [pr], refused=refused)
+        self.assertEqual(per_story["S-18754"], [
+            {"line": 1, "test": "tests.test_evidence", "task": "T-0198", "pr": 16,
+             "sha": self.r.head, "source": "pr"}])
+        self.assertEqual(refused["S-18754"], [
+            {"line": 2, "test": "tests.test_evidence only", "task": "T-0198", "pr": 16,
+             "sha": self.r.head, "source": "pr", "why": 'partial claim: "only"'}])
+
+    def test_a_trailer_on_a_trunk_commit_is_refused_the_same_way(self):
+        sha = self.push_trailer_commit(
+            "task(T-0198): evidence collects the claims",
+            "Proves: S-18754 line 3 - tests.test_evidence only")
+        refused = {}
+        per_story = evidence.landed_proves(self.r.product(), [], refused=refused)
+        self.assertNotIn("S-18754", per_story)
+        self.assertEqual(refused["S-18754"], [
+            {"line": 3, "test": "tests.test_evidence only", "task": "T-0198", "pr": None,
+             "sha": sha, "source": "commit", "why": 'partial claim: "only"'}])
+
+    def test_the_same_refused_claim_from_both_sources_appears_once(self):
+        sha = self.push_trailer_commit(
+            "task(T-0198): evidence collects the claims",
+            "Proves: S-18754 line 4 - tests.test_evidence only")
+        pr = self.merged_pr(17, sha, "Proves: S-18754 line 4 - tests.test_evidence only")
+        refused = {}
+        per_story = evidence.landed_proves(self.r.product(), [pr], refused=refused)
+        self.assertNotIn("S-18754", per_story)
+        self.assertEqual(refused["S-18754"], [
+            {"line": 4, "test": "tests.test_evidence only", "task": "T-0198", "pr": 17,
+             "sha": sha, "source": "pr", "why": 'partial claim: "only"'}])
+
+    def test_refused_none_drops_the_refusal_and_matches_todays_return(self):
+        pr = self.merged_pr(
+            18, self.r.head,
+            "Proves: S-18754 line 1 - tests.test_evidence\n"
+            "Proves: S-18754 line 2 - tests.test_evidence only")
+        per_story = evidence.landed_proves(self.r.product(), [pr])
+        self.assertEqual(per_story["S-18754"], [
+            {"line": 1, "test": "tests.test_evidence", "task": "T-0198", "pr": 18,
+             "sha": self.r.head, "source": "pr"}])
+
+    def test_refused_entries_sort_by_line_then_task(self):
+        self.push_trailer_commit("task(T-0198): a", "Proves: S-18754 line 3 - t.a only")
+        self.push_trailer_commit("task(T-0197): b", "Proves: S-18754 line 1 - t.b only")
+        refused = {}
+        evidence.landed_proves(self.r.product(), [], refused=refused)
+        self.assertEqual([(e["line"], e["task"]) for e in refused["S-18754"]],
+                         [(1, "T-0197"), (3, "T-0198")])
+
+    def test_discover_publishes_the_refusal_separately_from_proves(self):
+        pr = self.merged_pr(
+            19, self.r.head,
+            "Proves: S-18754 line 1 - tests.test_evidence\n"
+            "Proves: S-18754 line 2 - tests.test_evidence only")
+        ev = self.r.discover(self.r.product(), prs=[pr])
+        self.assertEqual([e["line"] for e in ev["proves"]["S-18754"]], [1])
+        self.assertEqual([e["line"] for e in ev["proves_refused"]["S-18754"]], [2])
+
+
 if __name__ == "__main__":
     unittest.main()
