@@ -63,6 +63,11 @@ The row kinds::
     UNDECIDED → DECIDE     an open Feature, or an open S1/S2 Bug, whose ``decided`` is not true: the
                            card a free slot is waiting for. Launches nothing, costs no slot, and is
                            cut to ``conventions.decision_rows``
+    EPIC → FEATURES        a decided, open Epic with no open Feature beneath it: one session
+                           drafts its Feature cards from the Epic's description and files them
+                           with ``asf inbox``, so the groom's intake types them and every gate
+                           (the decision, the approval matrix, the Epic's rank) still applies.
+                           Gated on ``approvals.groom: auto``
     GROOM → ADJUDICATE     an adjudicate session per groom day, for every open question the
                            groom policy pass did not answer (F-0085 §2.5), and another for
                            questions asked since the last was briefed — gated on
@@ -162,6 +167,7 @@ GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
 #: the groom day's clerical half (F-0093 §2.4): the ``inbox:`` lines, a cheap session of their own
 GROOM_CLERK = 'GROOM → CLERK'
 UNDECIDED = 'UNDECIDED → DECIDE'
+EPIC_FEATURES = 'EPIC → FEATURES'
 NEEDS_DECISION = 'NEEDS DECISION'
 ON_TRUNK = 'ON TRUNK'
 PARKED = 'PARKED'
@@ -201,7 +207,7 @@ WAITS_BUILD_SLOT = 'WAITS ON build slot'
 #: ``CORRECTION_ROUNDS``, and a correction is an answer the harvest asked for, not an attempt the
 #: factory chose), ``STALEMATE`` and ``GROOM → ADJUDICATE`` (already the adjudicate row).
 CAPPED_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, CONFLICT, STALE,
-                          NO_STORIES})
+                          NO_STORIES, EPIC_FEATURES})
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 PR_RE = re.compile(r'\bPR #\d+\b')
@@ -1830,6 +1836,39 @@ def undecided_rows(items, product, busy, limit=None):
     return out
 
 
+def epic_rows(items, product, busy):
+    """EPIC → FEATURES (F-0094): one session per decided, open Epic that has no open Feature
+    beneath it — the rung the feeder never had. Every other row starts from a card that already
+    exists; this one proposes the cards.
+
+    The session writes no code and no document: it drafts Feature cards from the Epic's
+    description and files them with ``asf inbox``, so the groom's intake types them
+    (:func:`asf.groom.inbox.process_inbox`) and they arrive undecided, under the Epic, with
+    their acceptance list — ranked by ``feature_order`` and decided by the decision gate like
+    any other card. Nothing about that path changes here.
+
+    Gated on ``approvals.groom: auto``, like every other groom-derived row (:func:`groom_rows`):
+    with the groom off, intake never runs and a drafted card is a file nobody reads.
+    """
+    if not groom_policy.groom_auto(product):
+        return []
+    out = []
+    for e in sorted(ix.of_type(items, 'epic'), key=lambda e: (ix.rank(e), e['id'])):
+        if e.get('decided') is not True or not is_open(e) or e['id'] in busy or e.get('blocked'):
+            continue
+        features = [it for it in ix.subtree(items, e) if it['type'] == 'feature']
+        if any(is_open(f) for f in features):
+            continue
+        done = len(features)
+        out.append(Row(
+            tier=2, kind=EPIC_FEATURES, item_id=e['id'], feature_id='', action=LAUNCH,
+            brief_kind='epic-features', branch=branch_for(product, 'epic', e['id']),
+            reason=(f"decided {ix.age(e.get('stage_since'))}, no open Feature"
+                    + (f" ({done} delivered)" if done else ' ever')
+                    + ' — nothing proposes its Features')))
+    return out
+
+
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, GROOM_CLERK: 2,
               RESHAPE: 3, REPLAN: 3, NO_STORIES: 3, DELIVERY_PLAN: 4, DELIVERY_CODE: 4}
 
@@ -1998,7 +2037,7 @@ def hold_unlanded(rows, items, landed_shas=None, product=None, on_trunk=None):
 #: the rows ``feeder.hold`` holds, per class it names: new work only — a review, a correction,
 #: an adjudicate, the groom and landing are never held
 HELD_KINDS = {'features': (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, SPEC_PLAN,
-                          DIRECT_BUILD, REPLAN),
+                          DIRECT_BUILD, REPLAN, EPIC_FEATURES),
               'bugs': (BUG_FIX,)}
 HOLD = 'WAITS ON hold'
 #: the ``waits_on`` of a row an Epic's spent budget holds (F-0052)
@@ -2467,6 +2506,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     rows += feature_rows(items, product, (busy - docs_waiting) | tasks_spoken, running,
                          landed_shas, occ)
     rows += undecided_rows(items, product, busy, decision_limit)
+    rows += epic_rows(items, product, busy)
     # a skipped S1/S2 Bug's WAITS row only where no other row already speaks for it
     spoken_for = {r.item_id for r in rows}
     rows += [r for r in bug_waits if r.item_id not in spoken_for]
@@ -2515,6 +2555,11 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
             # the Feature work, not at the rank of whichever card happens to be the oldest (an
             # unranked inbox card put it behind every launch, and the cut never reached it)
             return (r.tier, -1, -1, (-1, -1), -1, '', 0, seq)
+        if r.kind == EPIC_FEATURES:
+            # an Epic's own row has no Feature: order it on the Epic's rank directly, so a
+            # product that ranks an Epic first gets its expansion first (F-0094 C9)
+            epic = items.get(r.item_id) or {}
+            return (r.tier, 1, 1, (0, 0), ix.rank(epic), ix.BIG, r.item_id, 5, seq)
         order = feature_order(items, f) if f else (ix.BIG, ix.BIG, r.feature_id or '~')
         phase = finish_phase(items, r)
         # finish before you start, across Features too: a row on pushed work (its review, its

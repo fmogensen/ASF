@@ -2294,6 +2294,120 @@ class UndecidedRowsTests(unittest.TestCase):
         self.assertEqual((r.kind, r.action, r.waits_on), (rows.UNDECIDED, 'NEEDS DECISION', 'decision'))
 
 
+class EpicFeaturesRowTests(unittest.TestCase):
+    """F-0094: a decided Epic with no open Feature gets one EPIC → FEATURES row."""
+
+    def setUp(self):
+        self.auto = product(approvals={'groom': 'auto'})
+
+    def epic(self, id='E-0004', **extra):
+        base = {'id': id, 'type': 'epic', 'decided': True, 'state': 'Active', 'rank': 1,
+                'children': [], 'stage_since': '2026-01-01T00:00:00Z'}
+        base.update(extra)
+        return base
+
+    def cand(self, items, p=None, inflight=(), **kw):
+        return rows.candidates({'items': items}, p or self.auto, list(inflight), **kw)
+
+    def epic_rows(self, items, **kw):
+        return [r for r in self.cand(items, **kw) if r.kind == rows.EPIC_FEATURES]
+
+    def test_a_decided_epic_with_no_features_gets_a_row(self):
+        rs = self.epic_rows({'E-0004': self.epic()})
+        self.assertEqual(len(rs), 1)
+        r = rs[0]
+        self.assertEqual((r.tier, r.kind, r.item_id, r.feature_id), (2, rows.EPIC_FEATURES,
+                                                                     'E-0004', ''))
+        self.assertEqual((r.brief_kind, r.branch, r.action), ('epic-features', 'epic/E-0004',
+                                                              rows.LAUNCH))
+
+    def test_an_undecided_epic_gets_none(self):
+        for decided in (None, False, 'true'):
+            with self.subTest(decided=decided):
+                it = self.epic()
+                if decided is None:
+                    it.pop('decided')
+                else:
+                    it['decided'] = decided
+                self.assertEqual(self.epic_rows({'E-0004': it}), [])
+
+    def test_a_resolved_epic_gets_none(self):
+        for state in ('Resolved', 'Closed'):
+            with self.subTest(state=state):
+                self.assertEqual(self.epic_rows({'E-0004': self.epic(state=state)}), [])
+
+    def test_an_epic_with_one_open_feature_gets_none(self):
+        items = {'E-0004': self.epic(children=['F-0001']),
+                 'F-0001': {'id': 'F-0001', 'type': 'feature', 'parent': 'E-0004',
+                           'decided': True, 'state': 'New'}}
+        self.assertEqual(self.epic_rows(items), [])
+
+    def test_an_epic_whose_features_are_all_done_still_gets_a_row(self):
+        items = {'E-0004': self.epic(children=['F-0001', 'F-0002']),
+                 'F-0001': {'id': 'F-0001', 'type': 'feature', 'parent': 'E-0004',
+                           'decided': True, 'state': 'Closed'},
+                 'F-0002': {'id': 'F-0002', 'type': 'feature', 'parent': 'E-0004',
+                           'decided': True, 'state': 'Resolved'}}
+        rs = self.epic_rows(items)
+        self.assertEqual(len(rs), 1)
+        self.assertIn('(2 delivered)', rs[0].reason)
+
+    def test_a_live_session_on_the_epic_suppresses_it(self):
+        items = {'E-0004': self.epic()}
+        rs = self.epic_rows(items, inflight=[{'item': 'E-0004', 'kind': 'epic-features'}])
+        self.assertEqual(rs, [])
+
+    def test_without_groom_auto_there_is_no_row(self):
+        items = {'E-0004': self.epic()}
+        self.assertEqual(self.epic_rows(items, p=product()), [])
+
+    def test_the_fixture_index_is_unchanged_by_this_row(self):
+        # the existing feeder behaviour is untouched: the fixture's one Epic already has an
+        # open Feature, so turning the gate on adds no row and changes no order
+        self.assertEqual(kinds(rows.candidates(fixture_index(), self.auto, [])),
+                         kinds(rows.candidates(fixture_index(), product(), [])))
+
+    def test_two_epics_order_on_their_own_rank(self):
+        items = {'E-0001': self.epic(id='E-0001', rank=2), 'E-0002': self.epic(id='E-0002', rank=1)}
+        out = rows.plan_rows({'items': items}, self.auto, [], 10)
+        self.assertEqual(kinds(out), [(rows.EPIC_FEATURES, 'E-0002'), (rows.EPIC_FEATURES, 'E-0001')])
+
+    def test_the_epic_row_sorts_behind_every_task_row(self):
+        items = {
+            'E-0004': self.epic(rank=1),
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                      'rank': 5, 'stage': 'building 0/1', 'children': ['T-0001']},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'New',
+                      'writes': ['a.py']}}
+        out = self.cand(items)
+        self.assertEqual(kinds(out), [(rows.PLAN_CODE, 'T-0001'), (rows.EPIC_FEATURES, 'E-0004')])
+
+    def test_feeder_hold_features_holds_it(self):
+        p = product(feeder={'hold': ['features']}, approvals={'groom': 'auto'})
+        rs = self.epic_rows({'E-0004': self.epic()}, p=p)
+        self.assertEqual(len(rs), 1)
+        self.assertEqual((rs[0].action, rs[0].waits_on), ('WAITS ON hold: features', 'hold'))
+        self.assertFalse(rs[0].launches)
+
+    def test_an_epic_over_budget_starts_no_expansion(self):
+        items = {'E-0004': self.epic(children=['F-0001'], budget_usd=500),
+                 'F-0001': {'id': 'F-0001', 'type': 'feature', 'parent': 'E-0004',
+                           'decided': True, 'state': 'Closed', 'cost': {'usd': 600}}}
+        rs = self.epic_rows(items)
+        self.assertEqual(len(rs), 1)
+        self.assertEqual(rs[0].waits_on, 'budget')
+        self.assertFalse(rs[0].launches)
+
+    def test_three_sessions_become_a_stalemate(self):
+        items = {'E-0004': self.epic()}
+        at_cap = [r for r in self.cand(items, attempts={'E-0004': 3}) if r.item_id == 'E-0004']
+        self.assertEqual(kinds(at_cap), [(rows.STALEMATE, 'E-0004')])
+        self.assertEqual(at_cap[0].brief_kind, 'adjudicate')
+        past_cap = [r for r in self.cand(items, attempts={'E-0004': 4})
+                   if r.item_id == 'E-0004' and r.kind == rows.EPIC_FEATURES]
+        self.assertEqual(past_cap, [])
+
+
 class TiersTest(unittest.TestCase):
     """F-0071 acceptance 1: the S1 lane."""
 

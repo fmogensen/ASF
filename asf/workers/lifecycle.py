@@ -2623,8 +2623,10 @@ def push_failure(text):
 
 #: Kinds whose work is not a branch: a groom (adjudicate) session, or a groom-clerk half of one,
 #: rules into the state dir's answers file and is told the repository is not its work, so it
-#: never commits.
-NO_LANDING_KINDS = ('groom', 'groom-clerk')
+#: never commits. An ``epic-features`` session is the same shape (F-0094): its one write is
+#: ``asf inbox`` into the record, never a commit to its branch, so a session that files its
+#: cards perfectly must not be judged on a push it was never going to make.
+NO_LANDING_KINDS = ('groom', 'groom-clerk', 'epic-features')
 
 #: Kinds whose work is a file the factory takes off the branch, not a commit on it: a review
 #: session writes ``docs/reviews/<n>-<item>.md`` in its worktree and leaves it uncommitted for
