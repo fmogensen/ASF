@@ -78,6 +78,44 @@ class CapacityCommandTests(unittest.TestCase):
         }])
 
 
+class CredentialsCommandTests(unittest.TestCase):
+    """``asf credentials check`` (Task 2): the sub-parser's flags and the dispatch that
+    resolves ``--product`` into a :class:`asf.env.Product` and ``~/.ASF/config.yaml``."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='cli_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        with open(env.product_path('sample'), 'w') as f:
+            f.write('product: sample\nrepo_slug: x/y\ncredentials: []\n')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(argv)
+        return rc, out.getvalue()
+
+    def test_check_parses_with_each_flag(self):
+        for flags in ([], ['--fresh'], ['--json'], ['--quiet']):
+            rc, out = self._run(['credentials', 'check', '--product', 'sample'] + flags)
+            self.assertEqual(rc, 0, (flags, out))
+
+    def test_product_resolves(self):
+        rc, out = self._run(['credentials', 'check', '--product', 'sample', '--json'])
+        self.assertEqual(rc, 0, out)
+        data = json.loads(out)
+        self.assertEqual(data['product'], 'sample')
+
+    def test_an_unknown_sub_command_is_a_parser_error(self):
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(['credentials', 'bogus'])
+
+
 class RecordCommandUsesTheProductRecordTests(unittest.TestCase):
     """B-0050: ``asf groom`` (and the other record commands) resolve the record from the
     configured product, not from the cwd — a product repo's cwd is never mistaken for one."""

@@ -302,6 +302,18 @@ def build_parser():
     p_rules.add_argument('--json', action='store_true')
     p_rules.add_argument('--verbose', action='store_true')
 
+    p_credentials = sub.add_parser(
+        'credentials', help='is every signed-in tool this product names still valid')
+    p_credentials.add_argument('credentials_command', choices=['check'])
+    p_credentials.add_argument('--product')
+    p_credentials.add_argument('--fresh', action='store_true',
+                               help='bypass the cache (D6) and probe every provider now')
+    p_credentials.add_argument('--json', action='store_true')
+    p_credentials.add_argument('--quiet', action='store_true',
+                               help='the rule contract: nothing on success, one line per bad '
+                                    'provider, exit 1 on an expiring/invalid one, 2 on a '
+                                    'broken probe')
+
     p_evidence = sub.add_parser('evidence', help='the evidence pass (git/gh derived state)')
     p_evidence.add_argument('--product')
     p_evidence.add_argument('--fresh', action='store_true')
@@ -626,6 +638,10 @@ def _main(argv=None):
     if args.command == 'rules':
         from asf.rules.rules import cmd_check as rules_cmd_check
         return rules_cmd_check(args, resolve_record(args))
+    if args.command == 'credentials':
+        from asf import credentials as credentials_mod
+        from asf import env
+        return credentials_mod.cmd_check(args, env.load_product(args.product), env.load_config())
     if args.command == 'evidence':
         from asf.evidence.evidence import main as evidence_main
         evidence_args = ['--json']

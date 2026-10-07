@@ -32,6 +32,9 @@ class HeaderTests(unittest.TestCase):
         line = header.head('status', 'p', '04:11')
         self.assertIn(f"{header.TITLES['status']} p**", line)
 
+    def test_credentials_check(self):
+        self.assertEqual(header.TITLES['credentials check'], 'CREDENTIALS')
+
     def test_every_title_is_read_from_titles(self):
         for command, title in header.TITLES.items():
             self.assertEqual(header.head(command, 'p'), f"**{title} p**")

@@ -13,6 +13,7 @@ TITLES = {
     'capacity': 'CAPACITY',       'tokens': 'TOKENS',
     'stale': 'STALE',             'doctor': 'DOCTOR',
     'rules check': 'RULES',       'ci': 'CI',
+    'credentials check': 'CREDENTIALS',
     'ci queue': 'CI QUEUE',       'ci reconcile': 'CI RECONCILE',
     'ci reserve': 'CI RESERVE',   'ci cancels': 'CI CANCELS',
     'health': 'HEALTH',
