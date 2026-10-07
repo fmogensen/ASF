@@ -2601,6 +2601,15 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             # the head's CI is done and never ran these (a path filter, a matrix the filter
             # skipped under its unexpanded name): the batch run judges them
             state, why = 'green', ''
+        if state == 'pending' and not lane.conv.branch_kind(b) and conflicts_with_trunk(lane, n):
+            # GitHub starts no pull_request CI on a PR that conflicts with the trunk: its checks
+            # never arrive, and waiting for them would be silent for good. A factory branch is
+            # the lane's own (its conflict path rebuilds it); this one is its author's.
+            why = f'conflicts with {lane.trunk} — merge or rebase it'
+            lane.out(f'merge queue: asf land PR #{n} red at {head[:12]} — {why}')
+            r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
+            changes.append(('red', key, r['red']))
+            continue
         if state == 'pending':
             # a reword, a sign-off trailer: a new head with a byte-identical tree, whose CI an
             # earlier head of this PR already passed. That green is this content's green — carried
@@ -2611,15 +2620,6 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                 lane.out(f'merge queue: asf land PR #{n} green at {head[:12]} — '
                          f'{tree_green.carried_line(carry)}')
                 state, why, earned = 'green', '', True
-        if state == 'pending' and not lane.conv.branch_kind(b) and conflicts_with_trunk(lane, n):
-            # GitHub starts no pull_request CI on a PR that conflicts with the trunk: its checks
-            # never arrive, and waiting for them would be silent for good. A factory branch is
-            # the lane's own (its conflict path rebuilds it); this one is its author's.
-            why = f'conflicts with {lane.trunk} — merge or rebase it'
-            lane.out(f'merge queue: asf land PR #{n} red at {head[:12]} — {why}')
-            r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
-            changes.append(('red', key, r['red']))
-            continue
         if state == 'red':
             failed = [{'name': c.get('name'), 'link': c.get('html_url')}
                       for c in runs if c.get('status') == 'completed'

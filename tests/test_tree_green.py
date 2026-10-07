@@ -7,6 +7,11 @@ Two halves, the acceptance's three bullets:
 * a head whose root tree is byte-identical to an earlier green head of the same PR is read green
   by the merge queue and by the landing gate, and said so — ``green carried from <old head>
   (identical tree)``; a head whose tree differs carries nothing (:class:`GreenCarries`).
+
+Round 1's review asked for two more, each the half above read at the wrong moment: the green guard
+must ask the head itself where this lane's memory of it is necessarily empty
+(:class:`RewordReadsTheHead`, C1), and a carry must never answer for a head the
+conflicts-with-trunk guard would have stopped (:class:`ConflictBeforeCarry`, C2).
 """
 import json
 import os
@@ -157,6 +162,136 @@ class GreenCarries(QueueRepo):
         self.assertEqual(out, [], lines)
         self.assertTrue(any(f'pending at {new[:12]}' in l for l in lines), lines)
         self.assertFalse(any('identical tree' in l for l in lines), lines)
+
+
+class RewordReadsTheHead(QueueRepo):
+    """B-0275 review C1 — the green guard asks the head's own checks when nothing was written
+    down, and writes the answer down.
+
+    ``tree_green.green_on`` is a read of this lane's memory, and no writer of that memory is
+    reachable while a naming correction is pending: the gate writes it
+    (:meth:`asf.harvest.lane.GitHubHost.check_gate`) and the correction keeps the branch from
+    reaching the gate. So on the pass right after a run completes green — the very pass the
+    in-flight guard hands the reword to — the memory is empty and the reword would push that
+    green away. The guard reads the head instead."""
+
+    B = 'worker/T-0001'
+    PR = 11
+
+    def setUp(self):
+        super().setUp()
+        self.push_lane(self.B, {'a.txt': 'a\n'}, 'tidy up')     # a subject naming no item
+
+    def held(self, *checks):
+        """``reword_held``'s answer for the branch as the pass hands it over, with ``checks``
+        what ``gh pr checks`` reports on its head now — nothing in flight, nothing remembered."""
+        ln = self.lane()
+        f = {'branch': self.B, 'head': self.heads()[self.B], 'kind': 'code', 'item': 'T-0001',
+             'class': lane.CODE, 'files': ['a.txt'],
+             'pr': {'number': self.PR, 'state': 'OPEN'}, 'prev': {'pr': self.PR}}
+        with mock.patch.object(ci_flight, 'run_in_flight', return_value=None), \
+                mock.patch.object(harvest, '_gh',
+                                  return_value=(0, json.dumps(list(checks)), '')):
+            return ln.reword_held(f)
+
+    def test_a_run_that_completed_green_defers_the_reword_though_nothing_was_remembered(self):
+        head = self.heads()[self.B]
+        self.assertIsNone(tree_green.green_on(self.state_dir, self.PR, head))
+        why = self.held({'name': 'gate', 'bucket': 'pass'},
+                        {'name': 'gate-tests', 'bucket': 'pass'})
+        self.assertTrue(why.startswith(f'reword {self.B}: deferred'), why)
+        self.assertIn(f'green on {head[:9]}', why)
+        self.assertIn('gate, gate-tests', why)
+
+    def test_the_green_it_read_is_written_down_so_a_later_rewrite_carries_it(self):
+        head = self.heads()[self.B]
+        self.held({'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'pass'})
+        rec = tree_green.green_on(self.state_dir, self.PR, head)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec['tree'], tree_green.tree_at(self.origin, head))
+        self.assertEqual(rec['passed'], ['gate', 'gate-tests'])
+        # and so the reword, when it finally happens, costs that green nothing
+        self.assertIsNotNone(tree_green.carried(self.state_dir, self.PR, 'b' * 40,
+                                                tree_green.tree_at(self.origin, head),
+                                                ['gate', 'gate-tests']))
+
+    def test_a_required_check_still_running_defers_nothing(self):
+        # no green to throw away: the reword happens, exactly as it did before this guard
+        self.assertEqual(self.held({'name': 'gate', 'bucket': 'pass'},
+                                   {'name': 'gate-tests', 'bucket': 'pending'}), '')
+
+    def test_a_head_with_no_checks_at_all_defers_nothing(self):
+        # ``pr_checks`` reads "no checks reported" as green; there is no green there to lose,
+        # and nothing is written down for a head that earned none
+        self.assertEqual(self.held(), '')
+        self.assertIsNone(tree_green.green_on(self.state_dir, self.PR, self.heads()[self.B]))
+
+    def test_without_a_pr_host_the_guard_reads_nothing(self):
+        # a fast-forward product has no PR, no checks and no host to ask: unchanged behaviour
+        ln = lane.Lane(self.product(landing='fast-forward'), self.state_dir,
+                       out=lambda *_: None, items={})
+        f = {'branch': self.B, 'head': self.heads()[self.B], 'kind': 'code', 'item': 'T-0001',
+             'class': lane.CODE, 'files': ['a.txt'], 'prev': {'pr': self.PR}}
+        with mock.patch.object(ci_flight, 'run_in_flight', return_value=None), \
+                mock.patch.object(harvest, '_gh') as gh:
+            self.assertEqual(ln.reword_held(f), '')
+        self.assertEqual(gh.call_args_list, [])
+
+
+class ConflictBeforeCarry(QueueRepo):
+    """B-0275 review C2 — the carry is asked only of a head the conflicts-with-trunk guard let
+    through.
+
+    A PR that conflicts with the trunk gets no ``pull_request`` CI from GitHub at all, so its
+    checks read as the same *pending* a carry answers. Granted above the guard, a carry made that
+    guard unreachable and emitted a conflicting PR into the batch as green, silently."""
+
+    B = 'mine/own-work'           # under no factory prefix: the guard's own case
+    PR = 3
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_lane(self.B, {'a.txt': 'a\n'}, 'feat: my own work')
+        merge_queue.add_request(self.state_dir, self.PR, self.B, priority=True)
+
+    def reword(self):
+        """A reword of the branch's one commit: a new head, byte-identical tree, no checks."""
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, f'origin/{self.B}'], cwd=self.worker)
+        sh(['git', 'commit', '-q', '--amend', '-m', 'feat: my own work, reworded'],
+           cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        return self.heads()[self.B]
+
+    def ready(self, conflicts=False):
+        ln = self.lane()
+        heads = self.heads()
+        with mock.patch.object(merge_queue, 'conflicts_with_trunk', return_value=conflicts):
+            return merge_queue.requested_ready(ln, heads, heads['main']), self.lines
+
+    def test_a_carry_never_admits_a_pr_that_conflicts_with_the_trunk(self):
+        old = self.heads()[self.B]
+        self.green(old)
+        self.ready()                       # green, remembered
+        new = self.reword()
+        self.assertEqual(tree_green.tree_at(self.origin, new),
+                         tree_green.tree_at(self.origin, old))
+        out, lines = self.ready(conflicts=True)
+        self.assertEqual(out, [], lines)
+        self.assertTrue(any('conflicts with main — merge or rebase it' in l for l in lines),
+                        lines)
+        self.assertFalse(any('identical tree' in l for l in lines), lines)
+
+    def test_with_no_conflict_the_same_head_carries_its_green(self):
+        old = self.heads()[self.B]
+        self.green(old)
+        self.ready()
+        new = self.reword()
+        out, lines = self.ready(conflicts=False)
+        self.assertEqual([e['head'] for e in out], [new], lines)
+        self.assertTrue(any(tree_green.CARRIED_FMT.format(old=old[:12]) in l for l in lines),
+                        lines)
 
 
 class LandingGateCarries(LaneFixture):
