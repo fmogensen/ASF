@@ -439,12 +439,14 @@ def account_fault(product, job, run, ev):
 REVIEW_FILING_KINDS = ('review',)
 
 
-def file_review(product, job, run, ev, alive, found):
+def file_review(product, job, run, ev, alive, found, status=None):
     """A finished review run's review, filed off its branch (:func:`asf.evidence.review_store.take`)
     before anything is judged or committed: the session writes the file in its worktree and
     commits nothing, because a push to a PR branch restarts the PR's whole CI and moves the head
     a merge watcher is pinned to. The run records ``review_filed`` (its judgement then needs no
-    commit of its own) and the evidence is gathered again. Returns the evidence to judge."""
+    commit of its own) and the evidence is gathered again. Returns the evidence to judge.
+    ``status`` (a :class:`lifecycle.WorktreeStatus`), when given, answers the re-gather's
+    ``git status``."""
     if run.get('kind') not in REVIEW_FILING_KINDS or ev.result is None or ev.alive:
         return ev
     wt, branch, item = run.get('worktree'), run.get('branch'), run.get('item')
@@ -461,16 +463,17 @@ def file_review(product, job, run, ev, alive, found):
     run['review_filed'] = path
     found.append((job, 'filed', f'review round {n} of {item} filed off {branch} '
                                 f'({os.path.basename(path)})'))
-    return lifecycle.gather(product, run, alive=alive)
+    return lifecycle.gather(product, run, alive=alive, status=status)
 
 
-def publish_gap(product, run, ev, reason, alive=pid_alive):
+def publish_gap(product, run, ev, reason, alive=pid_alive, status=None):
     """B-0056: a run judged ``failed: not pushed`` with a clean tree and commits origin lacks —
     a rebase the factory started or the session finished, or work committed and never pushed —
     is published by the factory (:func:`asf.workers.lifecycle.publish`), then judged again.
     Uncommitted files of an ok run are committed first (:func:`asf.workers.lifecycle.commit_leftovers`,
     B-0094); a commit the repo's hooks refuse stays a hold. Returns
-    ``(reason, evidence, line)``; ``line`` is None when nothing was attempted."""
+    ``(reason, evidence, line)``; ``line`` is None when nothing was attempted. ``status`` (a
+    :class:`lifecycle.WorktreeStatus`), when given, answers the re-gathers' ``git status``."""
     wt, branch = run.get('worktree'), run.get('branch')
     ready = ruling_ready(run)
     result_ok = (reason == lifecycle.FINISHED
@@ -485,7 +488,7 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
         if not ok:
             return reason, ev, line
         lines.append(line)
-        ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
+        ev = lifecycle.gather(product, run, alive=alive, worktree=wt, status=status)
     if not (ev.unpushed or (ev.remote_sha and not ev.head_on_remote)):
         return reason, ev, '; '.join(lines) or None
     from asf.harvest import mechanical  # the lane's table; harvest imports this module
@@ -507,9 +510,9 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     if not ok:
         # the refusal may have moved HEAD before refusing — a rebase that succeeded, an
         # account-name rewrite — so the evidence is re-read: the caller remembers this pair
-        ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
+        ev = lifecycle.gather(product, run, alive=alive, worktree=wt, status=status)
         return reason, ev, '; '.join(lines + [line])
-    ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
+    ev = lifecycle.gather(product, run, alive=alive, worktree=wt, status=status)
     landing = lifecycle.lands(run, pool_mod.sessions_path(product))
     return lifecycle.judge(run, ev, landing=landing), ev, '; '.join(lines + [line])
 
@@ -625,7 +628,7 @@ def refusal_stands(run, ev):
         and run['publish_refused_heads'] == refusal_heads(ev)
 
 
-def republish_steps(product, registry, job, run, alive, found, items=None):
+def republish_steps(product, registry, job, run, alive, found, items=None, status=None):
     """A product's F-0094: a run judged ``failed: not pushed`` whose publish the factory refused
     (its rebase conflicted, a redaction, a hook) kept its commits in its worktree, and no later
     pass ever tried again — the refusal's cause fixed, the worktree publishable, the item still
@@ -642,7 +645,8 @@ def republish_steps(product, registry, job, run, alive, found, items=None):
     unopened PR until some later pass happens to notice (``items``: the record's index, for the
     item the PR's title and body are rendered from; no PR host, or a conflict with the trunk, is
     one more finding, never a reason to leave the correction parked again). ``conventions.flags.
-    health_opens_pr: false`` opts a product out (default on)."""
+    health_opens_pr: false`` opts a product out (default on). ``status`` (a
+    :class:`lifecycle.WorktreeStatus`), when given, answers the gather below's ``git status``."""
     reason = run.get('end_reason') or ''
     wt, branch = run.get('worktree'), run.get('branch')
     if not (reason.startswith(UNPUSHED_REASON_PREFIXES) or ruling_ready(run)) \
@@ -653,7 +657,7 @@ def republish_steps(product, registry, job, run, alive, found, items=None):
     owner = lifecycle.by_worktree(registry).get(lifecycle.path_key(wt))
     if owner is not None and owner.get('job') != job:
         return  # a later run took the worktree: its own judgement owns the branch
-    ev = lifecycle.gather(product, run, alive=alive)
+    ev = lifecycle.gather(product, run, alive=alive, status=status)
     if refusal_stands(run, ev):
         return  # F-0228: same head, same tip — the same refusal, and the hook costs minutes
     reason, ev, line = yield (product, run, ev, reason, alive)  # publish_gap, by run_steps
@@ -824,6 +828,10 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         else:
             alive = observe.identity_alive(observed, sessions.values(), **kw)
             liveness = observe.liveness_for(observed, sessions.values(), **kw)
+    # one `git status --porcelain` per worktree per version of that worktree for the whole pass
+    # (I2) — built here, above `run_steps`, so every site below it shares one snapshot; not
+    # beside `heads` below, which is built after the publish phase on purpose (PD2)
+    status = lifecycle.WorktreeStatus()
     def steps(job, s, found):
         # one run's pass, each publish_gap a yield: run_steps makes the publishes of runs on
         # different branches and worktrees at once, and resumes every run in the ledger's order
@@ -877,7 +885,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                              'nothing to push'))
                 return
             if s.get('end_reason') == lifecycle.STOPPED and not s.get('correction'):
-                ev = lifecycle.gather(product, s, alive=alive)
+                ev = lifecycle.gather(product, s, alive=alive, status=status)
                 if lifecycle.pushed_after_stop(s, ev):
                     fields, line = lifecycle.hold(registry, s, lifecycle.PUSHED_AFTER_STOP,
                                                   lifecycle.PUSHED_AFTER_STOP, pool_mod.now_iso(),
@@ -887,8 +895,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             # a `dead pid` judgement is revisited: the result may have landed after the check,
             # or a correction may have finished the run (B-0028)
             if s.get('end_reason') == lifecycle.DEAD_PID and not s.get('harvested'):
-                ev = lifecycle.gather(product, s, alive=alive)
-                ev = file_review(product, job, s, ev, alive, found)
+                ev = lifecycle.gather(product, s, alive=alive, status=status)
+                ev = file_review(product, job, s, ev, alive, found, status=status)
                 if ev.result is not None:
                     reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
                     reason, ev, line = yield (product, s, ev, reason, alive)
@@ -901,10 +909,11 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                     if lifecycle.quota_exhausted(s):
                         found.append(account_fault(product, job, s, ev))
             if not closed:
-                yield from republish_steps(product, registry, job, s, alive, found, items)
+                yield from republish_steps(product, registry, job, s, alive, found, items,
+                                           status=status)
             return
-        ev = lifecycle.gather(product, s, alive=alive, liveness=liveness)
-        ev = file_review(product, job, s, ev, alive, found)
+        ev = lifecycle.gather(product, s, alive=alive, liveness=liveness, status=status)
+        ev = file_review(product, job, s, ev, alive, found, status=status)
         reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
         if reason is None:
             return
@@ -1019,7 +1028,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
 
     per_run = [(job, s, []) for job, s in sessions.items()]
     run_steps([(job, s, steps(job, s, own)) for job, s, own in per_run],
-              lambda *args: publish_gap(*args))
+              lambda *args: publish_gap(*args, status=status))
     for _job, _s, own in per_run:
         found.extend(own)
     # T-0196: an ended run is finished — its cloud token settled, its lingering process stopped
@@ -1039,11 +1048,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         if not os.path.isdir(path):
             continue
         s = owners.get(lifecycle.path_key(path)) or sessions.get(name)
-        ev = lifecycle.gather(product, s or {}, alive=alive, worktree=path, heads=heads)
+        ev = lifecycle.gather(product, s or {}, alive=alive, worktree=path, heads=heads,
+                              status=status)
         if s is None and not ev.remote_sha:
             # an orphan carries no branch on its record: read the one checked out
             ev = lifecycle.gather(product, {'branch': _head_branch(path)}, alive=alive,
-                                  worktree=path, heads=heads)
+                                  worktree=path, heads=heads, status=status)
         what, detail = lifecycle.reap_verdict(s, ev, product.main, alive)
         if what is None:
             continue

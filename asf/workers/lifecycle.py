@@ -2384,11 +2384,120 @@ class RemoteHeads:
         return next((sha for sha, ref in refs if ref.strip() == want), '')
 
 
-def gather(product, run, alive=None, worktree=None, heads=None, liveness=None):
+def _worktree_git_dir(wt):
+    """Where ``wt``'s own ``HEAD`` and ``index`` live — its ``.git`` directory when ``wt`` is the
+    main worktree, or the linked worktree's own git dir when it is not (``.git/worktrees/<name>``)
+    — read off the files exactly as :func:`_common_git_dir` does, but **stopping there rather
+    than following ``commondir``**: a linked worktree's index is never in the common dir. None
+    when it cannot be read off the files (the caller then asks git itself, uncached)."""
+    dot = os.path.join(wt, '.git')
+    try:
+        if os.path.isdir(dot):
+            return os.path.realpath(dot)
+        with open(dot, encoding='utf-8') as f:
+            first = f.readline().strip()
+        if not first.startswith('gitdir:'):
+            return None
+        gd = first[len('gitdir:'):].strip()
+        return os.path.realpath(gd if os.path.isabs(gd) else os.path.join(wt, gd))
+    except OSError:
+        return None
+
+
+def _read_ref(gd, ref):
+    """The sha a loose or packed ref named ``ref`` resolves to under git dir ``gd`` — the
+    subprocess-free half of what ``git rev-parse`` would do for a ref name already in hand.
+    None when neither file names it."""
+    try:
+        with open(os.path.join(gd, ref), encoding='utf-8') as f:
+            return f.read().strip() or None
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(gd, 'packed-refs'), encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and line.endswith(' ' + ref):
+                    return line.split(' ', 1)[0]
+    except OSError:
+        pass
+    return None
+
+
+def _status_lines(wt):
+    """One ``git status --porcelain`` of ``wt``, as its non-blank lines — or None when the
+    command itself failed (not a git worktree, or worse)."""
+    p = _git(['status', '--porcelain'], wt)
+    return [ln for ln in p.stdout.splitlines() if ln.strip()] if p.returncode == 0 else None
+
+
+class WorktreeStatus:
+    """``git status --porcelain`` for one pass over many worktrees: one process per worktree per
+    *version* of that worktree, where the pass runs one per question — ten a run (P4).
+
+    Keyed on what a change to the worktree moves: its HEAD sha, and the size and mtime of its own
+    index (a linked worktree's index lives in its own git dir, not the common one). Every mutation
+    the factory makes inside a pass — ``commit_leftovers``, ``publish``, the repair's ``reset``
+    and ``cherry-pick`` — moves one of the two, so the re-gather that follows it is a miss by
+    construction (P5, D7). A worktree whose git dir cannot be read is never cached: it is asked
+    every time, exactly as today. ``git status`` itself opportunistically rewrites a stale index
+    stat cache, so the key stored is the one taken *after* the process runs, not before.
+
+    Entered from up to three publish threads at once (``PUBLISH_WORKERS``); ``run_steps``'s
+    ``_groups`` union-find never runs two asks that share a worktree at the same time, so a plain
+    dict is correct and needs no lock — the worst case of that guarantee ever breaking is two
+    threads writing the same key with an equal value, never a wrong one. Do not add a
+    ``threading.Lock``: it would serialise the publish phase this factory deliberately
+    parallelised (PD4)."""
+
+    def __init__(self):
+        self._cache = {}
+
+    def _key(self, wt):
+        gd = _worktree_git_dir(wt)
+        if gd is None:
+            return None
+        try:
+            with open(os.path.join(gd, 'HEAD'), encoding='utf-8') as f:
+                head = f.read().strip()
+            idx = os.stat(os.path.join(gd, 'index'))
+        except OSError:
+            return None
+        if head.startswith('ref:'):
+            common = _common_git_dir(wt)
+            if common is None:
+                return None
+            sha = _read_ref(common, head[len('ref:'):].strip())
+        else:
+            sha = head or None
+        if not sha:
+            return None
+        return (os.path.realpath(wt), sha, idx.st_mtime_ns, idx.st_size)
+
+    def lines(self, wt):
+        """The porcelain lines, or None when the worktree is not one."""
+        key = self._key(wt)
+        if key is not None and key in self._cache:
+            return self._cache[key]
+        result = _status_lines(wt)
+        # `git status` itself opportunistically refreshes the index's cached stat info when it
+        # finds that stale — rewriting it, and moving the very key taken above. Stored under the
+        # key taken again now, after the call, so the *next* lookup's pre-call key (nothing has
+        # touched the index since) lands on this entry instead of missing it forever.
+        key = self._key(wt)
+        if key is not None:
+            self._cache[key] = result
+        return result
+
+
+def gather(product, run, alive=None, worktree=None, heads=None, liveness=None, status=None):
     """The :class:`Evidence` for ``run`` — git in its worktree (``run['worktree']`` unless given),
     ``origin/<branch>`` from the product repo's remote, the log through the runtime. ``heads``
     (a :class:`RemoteHeads`) answers ``origin/<branch>`` for a pass over many worktrees.
-    ``liveness``, when given, is a verdict callable over a pid, read into ``ev.liveness``."""
+    ``liveness``, when given, is a verdict callable over a pid, read into ``ev.liveness``.
+    ``status`` (a :class:`WorktreeStatus`), when given, answers the ``git status`` below for a
+    pass over many worktrees; ``None`` asks git directly, exactly as every caller that passes
+    nothing already did."""
     alive = alive or pid_alive
     pid = run.get('pid')
     ev = Evidence(result=runtime_mod.read_result(run.get('log')), alive=alive(pid),
@@ -2398,11 +2507,11 @@ def gather(product, run, alive=None, worktree=None, heads=None, liveness=None):
     main = getattr(product, 'main', 'main') or 'main'
     if not wt or not os.path.isdir(wt):
         return ev
-    st = _git(['status', '--porcelain'], wt)
-    if st.returncode != 0:
+    lines = status.lines(wt) if status is not None else _status_lines(wt)
+    if lines is None:
         return ev
     ev.worktree = True
-    ev.uncommitted = len([ln for ln in st.stdout.splitlines() if ln.strip()])
+    ev.uncommitted = len(lines)
     ev.head = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
     if branch:
         known = heads.sha(wt, branch) if heads is not None else None
@@ -2446,22 +2555,24 @@ def push_gap(ev):
     return f'{NOT_PUSHED}: {ev.uncommitted} uncommitted file(s), {ev.unpushed} unpushed commit(s)'
 
 
-def unpublished(wt, branch, main='main'):
+def unpublished(wt, branch, main='main', status=None):
     """``(ok, detail)``: whether ``branch``'s work in worktree ``wt`` is on origin, and what is
     missing when it is not — ``not pushed: <n> uncommitted file(s), <m> unpushed commit(s)``,
     the same text :func:`push_gap` formats from gathered evidence (B-0051).
 
-    ``n`` is ``git status --porcelain``; ``m`` is :func:`unpushed_commits`, by patch and above
-    the trunk, so a branch harvest rebased after the session pushed it is not held forever
-    (B-0053). A branch with no remote head at all is unpushed even with nothing to push: the
-    session must publish the branch it was given (D-0048 then reads ``empty branch``)."""
+    ``n`` is ``git status --porcelain`` (through ``status``, a :class:`WorktreeStatus`, when
+    given — ``None`` asks git directly; a failed status reads as ``n = 0``, exactly as today);
+    ``m`` is :func:`unpushed_commits`, by patch and above the trunk, so a branch harvest rebased
+    after the session pushed it is not held forever (B-0053). A branch with no remote head at all
+    is unpushed even with nothing to push: the session must publish the branch it was given
+    (D-0048 then reads ``empty branch``)."""
     if not branch:
         head = _git(['rev-parse', '--abbrev-ref', 'HEAD'], wt)
         branch = head.stdout.strip() if head.returncode == 0 else ''
     if not branch or branch == 'HEAD':
         return False, 'no branch'
-    st = _git(['status', '--porcelain'], wt)
-    n = len([line for line in st.stdout.splitlines() if line.strip()]) if st.returncode == 0 else 0
+    lines = status.lines(wt) if status is not None else _status_lines(wt)
+    n = len(lines) if lines is not None else 0
     remote = remote_head(wt, branch)  # asked of origin now, by its full ref — never a namesake
     m = unpushed_commits(wt, remote, main)
     if n == 0 and m == 0 and remote:
