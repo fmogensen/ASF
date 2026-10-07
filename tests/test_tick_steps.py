@@ -297,6 +297,18 @@ class HealthStepTests(StepsTestCase):
         self.assertEqual(self.lines, ['health: clean', 'stall: none'])
         self.assertEqual(ctx.counts['stalls'], 0)
 
+    def test_the_cache_pass_runs_and_a_failure_never_stops_the_step(self):
+        from asf.workers import caches
+        seen = []
+        with mock.patch.object(caches, 'prune', lambda product, **kw: seen.append(product.name)):
+            step_health.run(self.ctx(), out=self.lines.append,
+                            runtime_fn=lambda: self.fail('no rerun'))
+        self.assertEqual(seen, [self.product.name])
+        with mock.patch.object(caches, 'prune', side_effect=OSError('no such directory')):
+            step_health.run(self.ctx(), out=self.lines.append,
+                            runtime_fn=lambda: self.fail('no rerun'))
+        self.assertIn('caches: skipped — OSError: no such directory', self.lines)
+
 
 # ---- wave -------------------------------------------------------------------------
 

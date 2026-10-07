@@ -248,6 +248,7 @@ def run(ctx, out=print, runtime_fn=_runtime):
     ci_trials(ctx, out=out)
     branch_retention(ctx, items, out=out)
     stale_acts(ctx, out=out)
+    cache_prune(ctx, out=out)
     return 0
 
 
@@ -293,6 +294,17 @@ def branch_retention(ctx, items, out=print):
         return retention.sweep(ctx.product, fix=True, out=out, items=items)
     except Exception as e:  # noqa: BLE001 — the next tick sweeps again
         out(f'retention: skipped — {type(e).__name__}: {e}')
+        return None
+
+
+def cache_prune(ctx, out=print):
+    """The build cache the worktrees share, pruned past its age and its size cap, one line a
+    pass (:mod:`asf.workers.caches`). Printed, never raised: a prune never stops a tick."""
+    from asf.workers import caches
+    try:
+        return caches.prune(ctx.product, fix=True, out=out)
+    except Exception as e:  # noqa: BLE001 — the next tick prunes again
+        out(f'caches: skipped — {type(e).__name__}: {e}')
         return None
 
 

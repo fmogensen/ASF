@@ -61,6 +61,15 @@ The product yaml carries the overrides::
         legacy_days: 7            # … deleted once their tip is older than this
         per_tick: 50              # the most deletes one pass makes
         settled_days: 7           # a head whose work the record says is over (0 = off)
+      cache_prune:                # the build cache the worktrees share (asf.workers.caches)
+        env_vars: [TURBO_CACHE_DIR]   # worker_env variables that name a cache directory
+        max_age_days: 7           # an entry unused this long goes (0 = off)
+        max_size_gb: 10           # the directory's cap, oldest entries first (0 = off)
+        min_age_min: 60           # never take an entry used this recently
+        per_pass: 2000            # the most entries one pass removes
+        summary_glob: '.turbo/runs/*.json'   # the run summaries a session's worktree keeps
+        summary_max: 20           # the most summaries one pass reads
+        summary_window_h: 24      # the window the hit rate is taken over
       outcome_share_pct: 10       # a failing outcome class over this share of 24 h files a Bug
       outcome_min_sessions: 20    # no rate below this many ended sessions in the window
       repeat_failure_n: 2         # the same item, the same class, this many times → a Bug
@@ -337,6 +346,25 @@ ZERO_OK = ('per_tick', 'settled_days')
 DEFAULT_BRANCH_RETENTION = {'archive_days': 14, 'legacy_prefixes': [], 'legacy_days': 7,
                             'per_tick': 50, 'settled_days': 7}
 
+#: ``cache_prune:`` — the build cache a product's worktrees share (:mod:`asf.workers.caches`).
+#: ``env_vars``: the ``worker_env`` variables whose value names a cache directory; the pass reads
+#: the resolved environment (:func:`asf.env.worker_env`), because the path is the operator's and
+#: exists nowhere in this package. ``max_age_days``/``max_size_gb``: an entry unused longer than
+#: the first goes, and while the directory is over the second the oldest entries go until it fits
+#: (0 turns either half off). ``min_age_min``: an entry used this recently is never taken —
+#: a live session's own archive is not pulled out from under it. ``per_pass``: the most entries
+#: one pass removes. ``summary_*``: where a session's run summaries are, how many of them one
+#: pass reads and over what window, for the hit rate (:func:`asf.workers.caches.hit_rate`).
+#: A directory outside the product's state dir, or a value that is not an absolute path, is
+#: never pruned: the pass names it and the doctor's ``caches`` row is red.
+DEFAULT_RUN_SUMMARY_GLOB = '.turbo/runs/*.json'
+DEFAULT_CACHE_PRUNE = {'env_vars': ['TURBO_CACHE_DIR'], 'max_age_days': 7, 'max_size_gb': 10,
+                       'min_age_min': 60, 'per_pass': 2000,
+                       'summary_glob': DEFAULT_RUN_SUMMARY_GLOB, 'summary_max': 20,
+                       'summary_window_h': 24}
+#: ``cache_prune`` keys whose 0 means "off", not "malformed".
+CACHE_PRUNE_ZERO_OK = ('max_age_days', 'max_size_gb', 'min_age_min')
+
 #: ``review: {skip_under_lines: …}``: a Task of a ``size: s`` Feature whose diff adds and removes
 #: fewer lines than this lands on CI and the gate alone — no review session. 0 turns it off.
 DEFAULT_REVIEW_SKIP_UNDER_LINES = 80
@@ -365,8 +393,8 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after',
 #: raises on it (a ``models: light`` string once failed every launch for forty minutes), and it
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
-MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit',
-                   'budget', 'merge_queue', 'roles', 'sequences', 'ci')
+MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'cache_prune',
+                   'commit', 'budget', 'merge_queue', 'roles', 'sequences', 'ci')
 #: ``ci.heavy_label``'s default: the PR label the lane puts on a head its review approved under
 #: ``ci.heavy_after_review`` — the product's workflow runs its heavy jobs only on a PR carrying it.
 DEFAULT_HEAVY_CI_LABEL = 'asf:heavy-ci'
@@ -720,6 +748,7 @@ def validate_mapping(data):
                 problems.append(('feeder.features_per_session',
                                  f'must be a number > 0, not {per!r}'))
     problems.extend(_retention_problems(data.get('branch_retention')))
+    problems.extend(_cache_prune_problems(data.get('cache_prune')))
     lane = data.get('lane')
     if lane is None:
         return problems
@@ -781,6 +810,32 @@ def _retention_problems(value):
                 problems.append((where, f'must be a list of branch prefixes, not {v!r}'))
         elif isinstance(v, bool) or not isinstance(v, int) or v < least:
             problems.append((where, f'must be a whole number >= {least}, not {v!r}'))
+    return problems
+
+
+def _cache_prune_problems(value):
+    """``cache_prune:`` checked: ``[(dotted key, problem)]``."""
+    if not isinstance(value, dict):
+        return []  # absent, or misshapen: the latter is a shape finding (MAP_CONVENTIONS)
+    problems = []
+    for key, v in value.items():
+        where = f'cache_prune.{key}'
+        if key not in DEFAULT_CACHE_PRUNE:
+            problems.append((where, 'is not a cache_prune key '
+                                    f"({', '.join(DEFAULT_CACHE_PRUNE)})"))
+        elif key == 'env_vars':
+            if not isinstance(v, list) or any(not isinstance(p, str) or not p.strip() for p in v):
+                problems.append((where, f'must be a list of variable names, not {v!r}'))
+        elif key == 'summary_glob':
+            if not isinstance(v, str) or not v.strip():
+                problems.append((where, f'must be a non-empty string, not {v!r}'))
+        elif key == 'max_size_gb':
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                problems.append((where, f'must be a number >= 0, not {v!r}'))
+        else:
+            least = 0 if key in CACHE_PRUNE_ZERO_OK else 1
+            if isinstance(v, bool) or not isinstance(v, int) or v < least:
+                problems.append((where, f'must be a whole number >= {least}, not {v!r}'))
     return problems
 
 
@@ -904,6 +959,8 @@ class Conventions:
     slice_max_tasks: int = DEFAULT_SLICE_MAX_TASKS
     #: ``branch_retention``: merged over :data:`DEFAULT_BRANCH_RETENTION` (see there).
     branch_retention: dict = field(default_factory=lambda: dict(DEFAULT_BRANCH_RETENTION))
+    #: ``cache_prune``: merged over :data:`DEFAULT_CACHE_PRUNE` (see there).
+    cache_prune: dict = field(default_factory=lambda: dict(DEFAULT_CACHE_PRUNE))
     #: ``protected_refs``: branch names or globs no factory write may push, force or delete
     #: (:mod:`asf.refguard`); unset is :data:`asf.refguard.DEFAULT_PROTECTED_REFS`. The trunk
     #: is always protected.
@@ -980,6 +1037,10 @@ class Conventions:
         if isinstance(retention, dict):
             kwargs['branch_retention'] = {**DEFAULT_BRANCH_RETENTION,
                                           **{k: v for k, v in retention.items() if v is not None}}
+        cache_prune = data.pop('cache_prune', None)
+        if isinstance(cache_prune, dict):
+            kwargs['cache_prune'] = {**DEFAULT_CACHE_PRUNE,
+                                     **{k: v for k, v in cache_prune.items() if v is not None}}
         lane = data.pop('lane', None)
         if isinstance(lane, dict):  # ``lane: {review, stale_after, …}`` → the lane_* fields
             rest = {}
@@ -1235,6 +1296,25 @@ class Conventions:
             return tuple(p.strip() for p in value if isinstance(p, str) and p.strip())
         least = 0 if key in ZERO_OK else 1
         if isinstance(value, bool) or not isinstance(value, int) or value < least:
+            return default
+        return value
+
+    def pruning(self, key):
+        """One ``cache_prune`` value (:data:`DEFAULT_CACHE_PRUNE`); a malformed one reads as its
+        default — the doctor's ``conventions`` row names it."""
+        default = DEFAULT_CACHE_PRUNE[key]
+        held = self.cache_prune if isinstance(self.cache_prune, dict) else {}
+        value = held.get(key)
+        if key == 'env_vars':
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, list):
+                return tuple(default)
+            return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
+        if key in ('summary_glob',):
+            return value.strip() if isinstance(value, str) and value.strip() else default
+        least = 0 if key in CACHE_PRUNE_ZERO_OK else 1
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < least:
             return default
         return value
 

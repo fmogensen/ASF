@@ -153,7 +153,7 @@ class PathTests(unittest.TestCase):
 class ForbiddenPatternsTests(unittest.TestCase):
     def test_one_pattern_per_path_shaped_default(self):
         patterns = conv_mod.forbidden_patterns()
-        self.assertEqual(len(patterns), 13)
+        self.assertEqual(len(patterns), 14)
         self.assertIn("['\"]" + re.escape('cloud/direct-'), patterns)
         self.assertIn("['\"]" + re.escape(conv_mod.DEFAULT_RELEASE_INSTALL), patterns)
         self.assertIn("['\"]worker/", patterns)
@@ -186,13 +186,13 @@ class ForbiddenPatternsTests(unittest.TestCase):
         # forbidden_patterns() walks string defaults containing '/', '{' or '#' (P14); a
         # dict-valued default like DEFAULT_SAVINGS is never a path-shaped literal.
         self.assertIsInstance(conv_mod.DEFAULT_SAVINGS, dict)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 14)
 
     def test_the_heavy_share_default_and_the_two_labels_add_no_pattern(self):
         # DEFAULT_HEAVY_SHARE_PCT is an int, and HEAVY/LIGHT are not DEFAULT_* names — neither
         # is a path-shaped string default, so the count is unmoved (F-0101 §1.3 P13).
         self.assertIsInstance(conv_mod.DEFAULT_HEAVY_SHARE_PCT, int)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 14)
 
 
 class CheckConventionsScriptTests(unittest.TestCase):
