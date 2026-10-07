@@ -168,6 +168,11 @@ def render(inflight, done, titles_by_item, since, now, first):
 
 
 def _step_word(r):
+    drift = r.get('drift') or {}
+    if r.get('ok') and (drift.get('ahead') or drift.get('behind')):
+        # the operator's record checkout out of step with origin after the sync (F-0260)
+        words = [f'{k} {drift[k]}' for k in ('behind', 'ahead') if drift.get(k)]
+        return f"{r['step']} {' '.join(words)}"
     if r.get('ok'):
         return f"{r['step']} ok"
     reason = r.get('reason')
