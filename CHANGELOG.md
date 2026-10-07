@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.234 — 2026-10-07
+
+### Features landed
+
+- The EPIC → FEATURES row, and the landing judgement that makes a filing session succeed (#1019)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.234"`
+
 ## v0.1.233 — 2026-10-07
 
 ### Features landed
