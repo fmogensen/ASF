@@ -191,6 +191,14 @@ class Documented(unittest.TestCase):
         self.assertEqual(config_keys.unknown_keys(cfg), ['cloud.poll_mins'])
         self.assertNotIn('cloud.*', config_keys.KNOWN_CONFIG_KEYS)
 
+    def test_proves_partial_markers_is_registered_typed_and_documented(self):
+        self.assertEqual(config_keys.TYPED['proves.partial_markers'],
+                         (config_keys.LIST, None, None))
+        self.assertIn('proves.partial_markers', config_keys.KNOWN_CONFIG_KEYS)
+        with open(os.path.join(ROOT, 'docs', 'config.example.yaml'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertTrue(_documented('proves.partial_markers', text))
+
 
 def _value_calls():
     """``{key: file}`` for every ``config_keys.value('<key>', ...)`` call in asf/."""

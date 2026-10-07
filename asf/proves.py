@@ -4,10 +4,16 @@ it, counts the bullets ``line <n>`` counts against, validates one Task's claims 
 record, reads git for a branch's claims through an injected callable (never ``subprocess``,
 D11), and flips a bullet from ``- [ ]`` to ``- [x]`` — once, never in reverse (D7).
 
-Four callers read this module: :mod:`asf.harvest.harvest` (the landing's refusal),
-:mod:`asf.tick.step_prs` (the pull-request body), :mod:`asf.evidence.evidence` (which claims
-have landed) and ``asf proves`` (the rule's backstop check). Pure functions over text; no
-product convention, no branch prefix, no card folder.
+A claim proves a line **whole** (F-0257). One whose prose qualifies it — ``only``, ``partial``,
+``half`` and the rest of :data:`PARTIAL_MARKERS` — is refused: :func:`parse` does not return it,
+so nothing counts it and nothing ticks, and :func:`parse_all` hands it back with its reason so
+the landing and the pull request can say what was refused and why. A line a session knows it has
+only part of is said in the other direction, with a ``Not proved:`` trailer
+(:func:`parse_not_proved`).
+
+Two callers read :func:`parse`: :mod:`asf.evidence.evidence` (which claims have landed) and
+:mod:`asf.harvest.lane` (the pull-request body). Pure functions over text; no product
+convention, no branch prefix, no card folder.
 """
 import dataclasses
 import os
@@ -19,6 +25,61 @@ import re
 CLAIM_RE = re.compile(
     r'^[ \t>*-]*Proves:[ \t]*(?P<story>[A-Za-z]+-\d{4,})[ \t]+line[ \t]+(?P<line>\d+)'
     r'[ \t]*[-–—]+[ \t]*(?P<test>\S.*?)[ \t]*$', re.M | re.I)
+
+#: The words that make a ``Proves:`` claim a *qualified* one — a claim whose own prose says it
+#: covers part of its line. Read in the claim's prose only (:func:`claim_prose`), never in the
+#: commit subject and never in a path or a quoted test name: every separator a real path uses is
+#: a word boundary, so a whole-text scan refuses ``tests/only-guard.test.ts`` and
+#: ``tests/e2e/half/upload.spec.ts`` (F-0257 P3).
+PARTIAL_MARKERS = ('only', 'partial', 'partly', 'half', 'except', 'not yet', 'minus')
+
+#: Why a line with a refused claim against it is unproved — the fourth member of the ``why``
+#: vocabulary beside :data:`NO_PROOF`, :data:`PATH_MISSING` and :data:`NAME_MISSING`.
+PARTIAL_CLAIM = 'partial claim'
+
+
+def partial_markers():
+    """:data:`PARTIAL_MARKERS`, or the operator's ``proves.partial_markers`` where it is set and
+    well-formed. Replaces the list wholesale (D6): the reason to set it is a word a product's
+    prose uses normally, and appending could not remove one."""
+    from asf import config_keys
+    markers = config_keys.value('proves.partial_markers', PARTIAL_MARKERS)
+    return tuple(str(m) for m in markers if str(m).strip())
+
+
+#: A quoted span: a test's own name, never prose (D4). Blanked before the prose is read.
+_QUOTED_RE = re.compile(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`')
+#: What a token must be stripped of before it is judged a citation or read as prose.
+_EDGE = '`"\'()[]{},;.:'
+
+
+def claim_prose(test):
+    """The words of a claim's text that are **not** citations: quoted spans blanked, then every
+    token holding ``::`` or ``/`` or ending in an extension dropped (:data:`_PATHLIKE_RE`), the
+    rest stripped of edge punctuation and joined with single spaces — so a two-word marker
+    (``not yet``) matches across tokens. ``''`` for a claim that is nothing but citations, which
+    is what a well-written claim is."""
+    text = _QUOTED_RE.sub(' ', test or '')
+    words = []
+    for token in text.split():
+        bare = token.strip(_EDGE)
+        if not bare or '::' in bare or _PATHLIKE_RE.search(bare):
+            continue
+        words.append(bare)
+    return ' '.join(words)
+
+
+def partial_marker(test, markers=None):
+    """The first marker of ``markers`` (:func:`partial_markers` when None) that appears as a
+    whole word in :func:`claim_prose` of ``test``, else ``''``. Case-insensitive."""
+    prose = claim_prose(test)
+    if not prose:
+        return ''
+    for marker in (markers if markers is not None else partial_markers()):
+        if re.search(r'\b' + re.escape(marker) + r'\b', prose, re.I):
+            return marker
+    return ''
+
 
 #: A ``## Acceptance`` checkbox bullet: ``- [ ]``, ``- [x]`` or ``- [X]``, leading whitespace
 #: tolerated (P7). The same shape ``asf.record.check.ACCEPTANCE_ITEM_RE`` requires of a Story.
@@ -32,16 +93,20 @@ _UNTICKED_RE = re.compile(r'^([ \t]*- )\[ \]')
 class Claim:
     story: str      # upper-cased
     line: int       # 1-based, the nth bullet of the Story's ## Acceptance
-    test: str       # as written: a path, optionally path::node
+    test: str       # as written: a path, optionally path::node; '' on a Not proved: trailer
     raw: str        # the line as found, for the refusal text
+    refusal: str = ''   # '' when the claim counts; else why this line is not proved
 
 
-def parse(text):
-    """Every claim in ``text``, in first-seen order, duplicates collapsed on
-    ``(story, line, test)``. A line that says ``Proves`` but names no id, no line or no test
-    yields nothing here and raises nothing."""
+def parse_all(text, markers=None):
+    """``(counted, refused)`` — every claim in ``text``, in first-seen order, duplicates
+    collapsed on ``(story, line, test)``. A claim whose prose carries a partial marker
+    (:func:`partial_marker`) goes in ``refused`` with ``refusal`` set to
+    ``'partial claim: "<marker>"'`` and never in ``counted``: a line is proved whole or it is not
+    proved (F-0257). A line that says ``Proves`` but names no id, no line or no test is in
+    neither and raises nothing."""
     seen = set()
-    claims = []
+    counted, refused = [], []
     for m in CLAIM_RE.finditer(text):
         story = m.group('story').upper()
         line = int(m.group('line'))
@@ -50,7 +115,42 @@ def parse(text):
         if key in seen:
             continue
         seen.add(key)
-        claims.append(Claim(story=story, line=line, test=test, raw=m.group(0)))
+        marker = partial_marker(test, markers)
+        claim = Claim(story=story, line=line, test=test, raw=m.group(0),
+                      refusal=f'{PARTIAL_CLAIM}: "{marker}"' if marker else '')
+        (refused if marker else counted).append(claim)
+    return counted, refused
+
+
+def parse(text, markers=None):
+    """The claims of ``text`` that count — :func:`parse_all`'s first half. A qualified claim is
+    not among them, so no caller of this function can tick a line off one."""
+    return parse_all(text, markers)[0]
+
+
+#: A ``Not proved:`` trailer — the other half of the grammar (F-0257): the line this Task did
+#: *not* prove, and what is missing. Same shape as :data:`CLAIM_RE`, no test path.
+NOT_PROVED_RE = re.compile(
+    r'^[ \t>*-]*Not proved:[ \t]*(?P<story>[A-Za-z]+-\d{4,})[ \t]+line[ \t]+(?P<line>\d+)'
+    r'[ \t]*[-–—]+[ \t]*(?P<missing>\S.*?)[ \t]*$', re.M | re.I)
+
+
+def parse_not_proved(text):
+    """Every ``Not proved:`` trailer in ``text`` as a :class:`Claim` with ``test`` empty and
+    ``refusal`` the stated gap, first-seen order, duplicates collapsed on ``(story, line,
+    missing)``. Refused-by-the-parser and declared-by-the-author are the same fact about the same
+    line, so they are the same type and :func:`render_not_proved` renders both (D11)."""
+    seen = set()
+    claims = []
+    for m in NOT_PROVED_RE.finditer(text):
+        story = m.group('story').upper()
+        line = int(m.group('line'))
+        missing = m.group('missing')
+        key = (story, line, missing)
+        if key in seen:
+            continue
+        seen.add(key)
+        claims.append(Claim(story=story, line=line, test='', raw=m.group(0), refusal=missing))
     return claims
 
 
@@ -179,6 +279,14 @@ def render(claims):
     """The ``## Proves`` block a pull-request body carries — one bullet per claim, the same text
     the trailer had."""
     return '\n'.join(f'- {c.story} line {c.line} — {c.test}' for c in claims)
+
+
+def render_not_proved(claims):
+    """The ``## Not proved`` block a pull-request body carries — one bullet per claim that does
+    not prove its line: ``- <S-id> line <n> — <refusal>``, and ``(<test>)`` after it where there
+    was a claim to refuse."""
+    return '\n'.join(f'- {c.story} line {c.line} — {c.refusal}'
+                     + (f' ({c.test})' if c.test else '') for c in claims)
 
 
 # ---- "no test, no done": which acceptance lines a Story has proved --------------------------
@@ -359,7 +467,7 @@ def _bullet_states(body):
     return out
 
 
-def unproved(body, register=(), also_proved=(), repo_dir=None, _cache=None):
+def unproved(body, register=(), also_proved=(), repo_dir=None, _cache=None, refused=()):
     """``[(line_no, text, why), …]`` — every acceptance line of a Story that nothing proves. The
     one predicate "no test, no done" reads; a line is proved when any of these holds:
 
@@ -371,10 +479,19 @@ def unproved(body, register=(), also_proved=(), repo_dir=None, _cache=None):
 
     ``why`` names the reason: :data:`NO_PROOF`, :data:`PATH_MISSING`, :data:`NAME_MISSING`, or a
     deferral whose decision the register lacks. A Story is done only when this is empty; a body
-    with no acceptance bullet has nothing to prove."""
+    with no acceptance bullet has nothing to prove.
+
+    ``refused`` is the line numbers a refused claim named this pass: a line in it that is
+    otherwise unproved says :data:`PARTIAL_CLAIM` and its marker rather than :data:`NO_PROOF`,
+    because a proof *was* offered and named — reading ``no proof`` there would send the operator
+    looking for a missing test instead of at the claim (D9). ``refused`` is a mapping of line
+    number to the refusal text, or any iterable of line numbers.
+    """
     proved = proved_lines(body) | set(also_proved)
     deferred = deferred_lines(body)
     register = {str(d).upper() for d in register}
+    refused_why = refused.get if hasattr(refused, 'get') else (
+        lambda n: PARTIAL_CLAIM if n in refused else None)
     out = []
     for n, (ticked, text) in enumerate(_bullet_states(body), start=1):
         if n in proved:
@@ -387,7 +504,7 @@ def unproved(body, register=(), also_proved=(), repo_dir=None, _cache=None):
             continue
         ok, why = inline_proof(text, repo_dir, _cache) if ticked else (False, NO_PROOF)
         if not ok:
-            out.append((n, text, why))
+            out.append((n, text, refused_why(n) or why))
     return out
 
 
