@@ -269,7 +269,10 @@ class RulingLiftsParkTest(unittest.TestCase):
         return rows._capped(row, {'T-0338': 51}, 3, p, adj)
 
     def test_no_ruling_stays_parked(self):
-        self.assertTrue(self._check().action.startswith(rows.PARKED))
+        got = self._check()
+        self.assertTrue(got.action.startswith(rows.PARKED))
+        self.assertIn('`asf unpark T-0338`', got.reason)
+        self.assertIn('`asf correct T-0338', got.reason)
 
     def test_an_operator_ruling_after_the_park_relaunches(self):
         got = self._check('- 2026-10-02 09:00 adjudicate (operator): older, already seen',

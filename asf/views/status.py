@@ -446,11 +446,24 @@ def decisions_cell(root, product):
     return f"{len(rows)} undecided — next: {shown}" if shown else f"{len(rows)} undecided"
 
 
-def parked_cell(product):
+def _stalemate_parks(product, root):
+    """``{item: adj}`` for every derived "adjudicated, card unchanged" stalemate park
+    (:func:`asf.feeder.rows._capped`) — never one whose adjudicate ruling is still uncarried,
+    because a session is about to act on that one, not a person. ``{}`` with no ``root`` or no
+    ``index.json``: :func:`parked_cell` has no index-dependent contract today."""
+    if not root or not os.path.isfile(os.path.join(root, 'index.json')):
+        return {}
+    from asf.tick import step_wave
+    return {item: adj for item, adj in step_wave.plan_inputs(product, root)['adjudicated'].items()
+            if adj.get('same_card') and not (adj.get('ruling') and not adj.get('carried'))}
+
+
+def parked_cell(product, root=None):
     """What a park holds, each with its scope (a pending correction carrying ``parked``: the
     relaunch cap, an empty or blocked end, a security hold, an item park by hand — the item; a
-    branch or job park by hand — that branch or job alone) — each waits on a person or a state
-    change, not a session. Silent (None) when nothing is parked."""
+    branch or job park by hand — that branch or job alone; a derived stalemate park, given
+    ``root`` — the item) — each waits on a person or a state change, not a session. Silent (None)
+    when nothing is parked."""
     from asf.workers import lifecycle
     from asf.workers import pool as pool_mod
     path = pool_mod.sessions_path(product)
@@ -460,6 +473,9 @@ def parked_cell(product):
     parked += [(p['item'], f"{p['scope']} {p.get('branch') if p['scope'] == 'branch' else p.get('on_job')}",
                 p.get('reason') or '')
                for p in lifecycle.parks(path) if p.get('scope') in ('branch', 'job')]
+    parked += [(iid, 'item', f"adjudicated {adj.get('runs') or 1} time(s), last "
+                             f"{str(adj.get('at') or '?')[:16]}, on this same card")
+               for iid, adj in sorted(_stalemate_parks(product, root).items())]
     if not parked:
         return None
     shown = '; '.join(f"{i} [{scope}]: {why[:120]}" for i, scope, why in parked[:3])
@@ -756,7 +772,7 @@ def render(root, product, cfg=None):
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
                        ('Intake', lambda: intake_cell(root, product)),
-                       ('Parked', lambda: parked_cell(product)),
+                       ('Parked', lambda: parked_cell(product, root)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('PAUSED', lambda: paused_cell(cfg, product)),
                        ('Cron', lambda: cron_cell(cfg, product)),
