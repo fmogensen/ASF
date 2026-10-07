@@ -231,6 +231,13 @@ def build_parser():
                                'repeatable')
     p_retire.add_argument('--product')
 
+    p_undeliver = sub.add_parser(
+        'undeliver', help="take a member out of its lead's delivery: drop it from the lead's "
+                          "delivers:, delete its delivered_by:, a History line on both")
+    p_undeliver.add_argument('task', help='the delivery member (the card carrying delivered_by:)')
+    p_undeliver.add_argument('--why', required=True, help='the reason, written into both cards')
+    p_undeliver.add_argument('--product')
+
     p_reopen = sub.add_parser(
         'reopen', help='correct a falsely derived Resolved/Closed by re-deriving it from '
                        'current evidence, the terminal hold lifted for this one item')
@@ -592,6 +599,10 @@ def _main(argv=None):
         from asf.record.retire import cmd_retire
         return _published(cmd_retire, args, resolve_record(args, announce=_announce_stderr),
                           f"record: retire {args.item}")
+    if args.command == 'undeliver':
+        from asf.record.undeliver import cmd_undeliver
+        return _published(cmd_undeliver, args, resolve_record(args, announce=_announce_stderr),
+                          f"record: undeliver {args.task}")
     if args.command == 'reopen':
         from asf.record.reopen import cmd_reopen
         return _published(cmd_reopen, args, resolve_record(args, announce=_announce_stderr),

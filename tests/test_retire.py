@@ -205,5 +205,119 @@ class SetRemovedTests(unittest.TestCase):
             self.assertEqual(frontmatter.parse(f.read())[0]['removed'], 'landed by hand')
 
 
+class UndeliverTests(unittest.TestCase):
+    """F-0263: ``asf undeliver <task> --why …`` takes a member out of its lead's delivery — the
+    escape for a member an adjudication rules the lead's PR does not build, which ``asf set``
+    cannot write and ``asf retire`` cannot remove. One record commit: the two cards and
+    ``index.json``; ``asf check`` is clean after, and the feeder no longer holds the member on
+    ``WAITS ON delivery <lead>``."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='undeliver_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.origin = os.path.join(self.tmp, 'origin.git')
+        self.root = os.path.join(self.tmp, 'record')
+        git(self.tmp, 'init', '-q', '--bare', '-b', 'main', self.origin)
+        git(self.tmp, 'clone', '-q', self.origin, self.root)
+        for k, v in (('user.name', 'T'), ('user.email', 't@x')):
+            git(self.root, 'config', k, v)
+        from asf.record.check import LAYOUT  # the whole layout, so `asf check` reads clean
+        for f in sorted(set(FOLDERS) | set(LAYOUT)):
+            os.makedirs(os.path.join(self.root, f), exist_ok=True)
+            with open(os.path.join(self.root, f, '.keep'), 'w', encoding='utf-8'):
+                pass
+        machine = ('schema_version: 1', 'state: New', 'stage_since: 2026-01-01T00:00:00Z',
+                   'updated: 2026-01-01T00:00:00Z')
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Thing', parent='E-0001',
+                   typed_lines=('decided: true',),
+                   machine_lines=('schema_version: 1', 'state: Active', 'stage: plan-approved',
+                                  'stage_since: 2026-01-01T00:00:00Z',
+                                  'updated: 2026-01-01T00:00:00Z'))
+        self.lead = write_item(self.root, 'T-0001', 'task', 'Lead', parent='F-0001',
+                               typed_lines=('writes: [a.py]',
+                                            'delivers: [T-0001, T-0002, T-0003]'),
+                               machine_lines=machine)
+        self.member = write_item(self.root, 'T-0002', 'task', 'Member', parent='F-0001',
+                                 typed_lines=('writes: [b.py]', 'delivered_by: T-0001'),
+                                 machine_lines=machine)
+        self.other = write_item(self.root, 'T-0003', 'task', 'Other', parent='F-0001',
+                                typed_lines=('writes: [c.py]', 'delivered_by: T-0001'),
+                                machine_lines=machine)
+        write_item(self.root, 'T-0004', 'task', 'Loose', parent='F-0001',
+                   typed_lines=('writes: [d.py]',), machine_lines=machine)
+        r = run(['index'], self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        git(self.root, 'add', '-A')
+        git(self.root, 'commit', '-qm', 'seed')
+        git(self.root, 'push', '-q', 'origin', 'HEAD:main')
+
+    def meta(self, path):
+        with open(path, encoding='utf-8') as f:
+            return frontmatter.parse(f.read())
+
+    def actions(self):
+        items, _generated = index_reader.load(self.root)
+        conv = {'delivery': 'feature', 'feeder': {'stories_before_plan': False}}
+        out = rows.candidates(items, Product('sample', {'conventions': conv}), [])
+        return {r.item_id: r.action for r in out}
+
+    def test_undeliver_one_of_two_members_cleans_both_cards_in_one_publish(self):
+        self.assertEqual(self.actions().get('T-0002'), 'WAITS ON delivery T-0001')
+        seed = git(self.root, 'rev-parse', 'HEAD')
+        r = run(['undeliver', 'T-0002', '--why', 'ruled not built by #12'], self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lead, lead_body = self.meta(self.lead)
+        member, member_body = self.meta(self.member)
+        self.assertEqual(lead['delivers'], ['T-0001', 'T-0003'])
+        self.assertNotIn('delivered_by', member)
+        self.assertEqual(self.meta(self.other)[0]['delivered_by'], 'T-0001')
+        # one History line on each card
+        self.assertIn('undeliver: T-0002 undelivered from T-0001: ruled not built by #12',
+                      lead_body.split('## History', 1)[1])
+        self.assertIn('undeliver: undelivered from T-0001: ruled not built by #12',
+                      member_body.split('## History', 1)[1])
+        # one commit, pushed: the two cards and index.json, nothing else
+        self.assertEqual(git(self.root, 'rev-list', '--count', f'{seed}..HEAD'), '1')
+        self.assertEqual(git(self.root, 'status', '--porcelain'), '')
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'),
+                         git(self.origin, 'rev-parse', 'main'))
+        self.assertIn('record: undeliver T-0002', git(self.root, 'log', '-1', '--format=%B'))
+        self.assertEqual(sorted(git(self.root, 'show', '--name-only', '--format=',
+                                    'HEAD').split()),
+                         ['index.json', 'tasks/T-0001.md', 'tasks/T-0002.md'])
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            idx = json.load(f)['items']
+        self.assertNotIn('delivered_by', idx['T-0002'])
+        # the record checks clean and the member no longer waits on the delivery
+        r = run(['check'], self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        acts = self.actions()
+        self.assertNotEqual(acts.get('T-0002'), 'WAITS ON delivery T-0001')
+        self.assertEqual(acts.get('T-0003'), 'WAITS ON delivery T-0001')
+
+    def test_undeliver_is_refused_for_a_card_that_is_not_a_member(self):
+        head = git(self.root, 'rev-parse', 'HEAD')
+        for tid in ('T-0004', 'T-0001'):  # a loose Task, and the lead itself
+            r = run(['undeliver', tid, '--why', 'x'], self.root)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn('not a delivery member', r.stderr)
+        r = run(['undeliver', 'T-0999', '--why', 'x'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(self.meta(self.lead)[0]['delivers'], ['T-0001', 'T-0002', 'T-0003'])
+
+    def test_undelivering_the_last_member_drops_the_leads_delivers(self):
+        self.assertEqual(run(['undeliver', 'T-0002', '--why', 'a'], self.root).returncode, 0)
+        r = run(['undeliver', 'T-0003', '--why', 'b'], self.root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lead, body = self.meta(self.lead)
+        self.assertNotIn('delivers', lead)
+        hist = body.split('## History', 1)[1]
+        self.assertIn('T-0002 undelivered from T-0001: a', hist)
+        self.assertIn('T-0003 undelivered from T-0001: b', hist)
+        self.assertEqual(run(['check'], self.root).returncode, 0)
+
+
 if __name__ == '__main__':
     unittest.main()
