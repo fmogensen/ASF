@@ -11,6 +11,7 @@ from unittest import mock
 
 from asf import env
 from asf.record import idclaim, ids
+from tests import gitfixture
 
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
 
@@ -51,8 +52,7 @@ class OriginFixtures(unittest.TestCase):
         self._n += 1
         path = os.path.join(self.tmp, f'scratch{self._n}')
         git(self.tmp, 'clone', '-q', self.origin, path)
-        git(path, 'config', 'user.name', 'T')
-        git(path, 'config', 'user.email', 't@x')
+        gitfixture.identity(path)
         return path
 
     def _seed_bugs_up_to(self, n):
@@ -83,8 +83,7 @@ class OriginFixtures(unittest.TestCase):
         self._n += 1
         path = os.path.join(self.tmp, f'checkout{self._n}')
         git(self.tmp, 'clone', '-q', self.origin, path)
-        git(path, 'config', 'user.name', 'T')
-        git(path, 'config', 'user.email', 't@x')
+        gitfixture.identity(path)
         if flags:
             self._register_product(path, flags)
         return path
@@ -118,8 +117,7 @@ class OriginFixtures(unittest.TestCase):
         root = os.path.join(self.tmp, f'noorigin{self._n}')
         os.makedirs(root)
         git(root, 'init', '-q', '-b', 'main')
-        git(root, 'config', 'user.name', 'T')
-        git(root, 'config', 'user.email', 't@x')
+        gitfixture.identity(root)
         for f in FOLDERS:
             os.makedirs(os.path.join(root, f), exist_ok=True)
         for i in range(1, top + 1):
