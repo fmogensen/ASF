@@ -200,7 +200,8 @@ The ones that matter most:
 | `amendable_paths` | `[]` | globs that make a landing `merge_amendable_set` (see approvals) |
 | `worktree_setup` | none | a shell command run in every fresh worker worktree before its session starts — the dependency install or codegen the product's gate needs. Must be idempotent — see below |
 | `landing` | derived | `fast-forward` or `pull-request` — below |
-| `harvest:` → `gate`, `branches_per_tick`, `gate_timeout_s` | `combined`, 12, 600 | how harvest gates: one gate over all eligible branches (bisecting on red) or `per-branch`; how many per run; seconds before a gate is killed and counted red |
+| `harvest:` → `gate`, `branches_per_tick`, `gate_timeout_s`, `gate_where` | `combined`, 12, 600, `local` | how harvest gates: one gate over all eligible branches (bisecting on red) or `per-branch`; how many per run; seconds before a gate is killed and counted red; where the gate's suite runs — `local` (this host) or `ci` (the product's own CI, on a pushed gate ref: `asf.ci_gate`) |
+| `ci_gate:` → `ref_prefix`, `run_wait_min`, `timeout_min` | `gate/`, 10, 120 | under `harvest.gate_where: ci`: the ref prefix the product's CI triggers its push on, how long a pushed ref may wait for its run to start, how long a run may stay unconcluded before it is dropped and re-cut |
 | `prs_per_tick` | 6 | PRs the `prs` step opens per tick |
 | `models:` → `<kind>: heavy\|light\|cheap`, or a map of those by item class | per kind × class | which model label a job kind runs on, and which label each item class within that kind runs on — below |
 | `review:` → `skip_under_lines` | 80 | a Task of a `size: s` Feature whose diff changes fewer lines lands on CI and the gate alone, no review session (0: always review) |

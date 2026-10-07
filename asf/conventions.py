@@ -168,6 +168,12 @@ DEFAULT_STOP_GATE_ROUNDS = 2
 #: turn onto one throwaway head, one gate, one fast-forward push, bisecting on red — or
 #: ``per-branch``, one gate and one push per landing. Spelt ``harvest: {gate: …}`` in the yaml.
 DEFAULT_HARVEST_GATE = 'combined'
+#: ``harvest.gate_where``: where the landing gate's suite runs — ``local`` (this host, in a
+#: throwaway worktree: :func:`asf.harvest.harvest.product_gate`) or ``ci`` (the product's own
+#: CI, on a pushed gate ref: :mod:`asf.ci_gate`). Orthogonal to ``harvest.gate``, which says how
+#: many gates a tick runs, not where any of them runs.
+DEFAULT_GATE_WHERE = 'local'
+GATE_WHERE_VALUES = ('local', 'ci')
 #: The most branches one tick's harvest gates; the rest wait for the next tick. A safety valve on
 #: the tick's clock (B-0031), not the cost driver once the gate is one per tick. Spelt
 #: ``harvest: {branches_per_tick: …}`` in the yaml.
@@ -192,7 +198,7 @@ DEFAULT_HEAVY_SHARE_PCT = 50
 
 #: The keys of the yaml's ``harvest:`` block and the field each one is.
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
-                'gate_timeout_s': 'gate_timeout_s'}
+                'gate_timeout_s': 'gate_timeout_s', 'gate_where': 'gate_where'}
 #: The keys of the yaml's ``git:`` block and the field each one is.
 GIT_KEYS = {'push_timeout_s': 'push_timeout_s'}
 
@@ -370,7 +376,7 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after',
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
 MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit',
-                   'budget', 'merge_queue', 'roles', 'sequences', 'ci')
+                   'budget', 'merge_queue', 'roles', 'sequences', 'ci', 'ci_gate')
 #: ``ci.heavy_label``'s default: the PR label the lane puts on a head its review approved under
 #: ``ci.heavy_after_review`` — the product's workflow runs its heavy jobs only on a PR carrying it.
 DEFAULT_HEAVY_CI_LABEL = 'asf:heavy-ci'
@@ -823,6 +829,9 @@ class Conventions:
     idle_wave_ticks: int = DEFAULT_IDLE_WAVE_TICKS
     stop_gate_rounds: int = DEFAULT_STOP_GATE_ROUNDS
     harvest_gate: str = DEFAULT_HARVEST_GATE
+    #: ``harvest.gate_where`` (:data:`DEFAULT_GATE_WHERE`, :data:`GATE_WHERE_VALUES`): ``local``
+    #: or ``ci``. Orthogonal to ``harvest_gate``.
+    gate_where: str = DEFAULT_GATE_WHERE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
     #: ``git.push_timeout_s`` (:data:`DEFAULT_PUSH_TIMEOUT_S`).
@@ -989,6 +998,12 @@ class Conventions:
                     data[block] = rest
             elif value_ is not None:
                 data[block] = value_
+        gate_where = kwargs.get('gate_where')
+        if gate_where is not None:
+            if str(gate_where).strip().lower() not in GATE_WHERE_VALUES:
+                misshapen['harvest.gate_where'] = kwargs.pop('gate_where')
+            else:
+                kwargs['gate_where'] = str(gate_where).strip().lower()
         retention = data.pop('branch_retention', None)
         if isinstance(retention, dict):
             kwargs['branch_retention'] = {**DEFAULT_BRANCH_RETENTION,
@@ -1033,6 +1048,7 @@ class Conventions:
             want = (f"one of {', '.join(words)} or a map of them per landing class" if words
                     else f"one of {', '.join(MERGE_MODES)}" if key == 'merge'
                     else f"one of {', '.join(DELIVERY_UNITS)}" if key == 'delivery'
+                    else f"one of {', '.join(GATE_WHERE_VALUES)}" if key == 'harvest.gate_where'
                     else 'a model label or a map of labels by class' if key.startswith('models.')
                     else 'a map')
             out.append((key, f'must be {want}, not {value!r}'))

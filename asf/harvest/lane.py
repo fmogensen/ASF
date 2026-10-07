@@ -3400,7 +3400,8 @@ def held_by_host(lane, ready):
     it is not started at all: every entry that would run it waits (:data:`HOST_PRESSURE`) and is
     re-gated next tick — unknown, never red, nobody blamed. The entries merging on their external
     CI's checks alone (``how == 'ci'``) run no suite here, so they go on. The ones to gate."""
-    gating = [f for f in ready if f.get('how') != 'ci']
+    from asf import ci_gate
+    gating = [f for f in ready if f.get('how') != 'ci'] if not ci_gate.enabled(lane.conv) else []
     if not gating:
         return ready
     try:
@@ -3884,9 +3885,9 @@ def gate_set(product, entries):
             continue
         if str(lane.conv.harvest_gate).strip().lower() == H.GATE_PER_BRANCH:
             for f in group:
-                gate_one_set(lane, [f], to_merge)
+                gate_one_set(lane, [f], to_merge, cls)
         else:
-            gate_one_set(lane, group, to_merge)
+            gate_one_set(lane, group, to_merge, cls)
     if merge_queued(lane):   # T10b: batched onto the trunk, gated once as that sha
         from asf import merge_queue
         merge_queue.run(lane, to_merge)
@@ -3896,10 +3897,18 @@ def gate_set(product, entries):
             for f in entries]
 
 
-def gate_one_set(lane, group, to_merge):
+def gate_one_set(lane, group, to_merge, cls):
     """Gate one set (FF: and push it; PR: queue its green for :func:`merge_prs`). A conflict is
     sent back at once; a branch red alone is sent back only once the trunk alone is seen green
-    (checked once, and only when the bisection did not already show it)."""
+    (checked once, and only when the bisection did not already show it).
+
+    Under ``harvest.gate_where: ci`` on a fast-forward lane, the gate is cut and pushed as a ref
+    for the product's own CI instead (:mod:`asf.ci_gate`) — ``confirmed_group``, ``red_on_trunk``,
+    ``push_set`` and every path to ``H.product_gate`` below are then simply never reached."""
+    from asf import ci_gate
+    if ci_gate.enabled(lane.conv) and isinstance(lane.host, FastForwardHost):
+        ci_gate.pass_for(lane, group, cls)
+        return
     conv, trunk, out = lane.conv, lane.trunk, lane.out
     asf_repo = None     # the gate's extra checks are conventions.gate_checks, for every product
     announce = str(conv.harvest_gate).strip().lower() != H.GATE_PER_BRANCH

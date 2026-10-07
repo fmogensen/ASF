@@ -107,11 +107,21 @@ conventions:
   #   hold_culprit: on    # (default on) a member a deterministic red named is held out of every
   #                       # later cut until its head changes: the same tree answers the same
   # harvest: one gate over every eligible branch (combined, bisecting on red) or per-branch; the
-  # most branches one run gates; seconds before a gate is killed and counted red.
+  # most branches one run gates; seconds before a gate is killed and counted red; where the gate's
+  # suite runs — local (this host, a throwaway worktree) or ci (the product's own CI, on a pushed
+  # gate ref: asf.ci_gate) — orthogonal to gate, which says how many gates a tick runs, not where.
   # harvest:
   #   gate: combined
   #   branches_per_tick: 12
   #   gate_timeout_s: 600
+  #   gate_where: local   # local | ci
+  # the gate's own knobs under harvest.gate_where: ci (defaults shown): the ref prefix the
+  # product's CI triggers its push on (asf.ci_gate.DEFAULTS), how long a pushed ref may wait for
+  # its run to start, and how long a run may stay unconcluded before it is dropped and re-cut.
+  # ci_gate:
+  #   ref_prefix: gate/
+  #   run_wait_min: 10
+  #   timeout_min: 120
   # the dwell-time watchdog (asf.dwell; `asf watchdog`, and the tick's `watchdog` step, which runs
   # with every wave): the longest each state may last, in minutes, or `off` (defaults shown).
   # Only check_cancelled (re-run the failed jobs once per head) and ungrantable_hold (drop it)

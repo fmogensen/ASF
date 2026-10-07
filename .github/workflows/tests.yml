@@ -4,9 +4,12 @@ name: tests
 # change, and firing the suite on every one of them is red notifications for work nobody asked to
 # gate yet plus wasted minutes. pull_request stays open for outside contributors and for any
 # product whose conventions.landing is pull-request, where a branch's gate IS the pull request.
+# gate/** is the opposite of a worker branch: conventions.harvest.gate_where: ci pushes the
+# combined head there once per landing gate, and starting this very workflow on it is the only
+# reason the ref exists (asf.ci_gate).
 on:
   push:
-    branches: [main]
+    branches: [main, 'gate/**']
   pull_request:
 
 jobs:
