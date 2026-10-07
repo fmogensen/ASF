@@ -505,6 +505,9 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     else:
         ok, line = lifecycle.publish(wt, branch, ev.remote_sha, **publish_args)
     if not ok:
+        # the refusal may have moved HEAD before refusing — a rebase that succeeded, an
+        # account-name rewrite — so the evidence is re-read: the caller remembers this pair
+        ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
         return reason, ev, '; '.join(lines + [line])
     ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
     landing = lifecycle.lands(run, pool_mod.sessions_path(product))
@@ -601,6 +604,27 @@ def refusal_text(branch, line):
             f'what it names and commit; the factory publishes, never a push of your own')
 
 
+#: The pair a refused publish is remembered by: the worktree's own HEAD and origin's tip for the
+#: branch. Both halves are what the refusal was a function of — the hook reads the commits being
+#: pushed, the lease and the rebase read the tip — so while neither has moved the next push has
+#: the same inputs and earns the same refusal. The tip is `-` when the branch is not on origin, so
+#: the value is two tokens whatever the evidence says.
+def refusal_heads(ev):
+    return f'{ev.head} {ev.remote_sha or "-"}'
+
+
+def refusal_stands(run, ev):
+    """Whether ``run``'s recorded refusal still describes the worktree, so publishing again would
+    run the product's pre-push hook (16-182 s) for inputs that cannot have changed the answer.
+    Pure: no git, no clock. False when nothing was refused, when the head could not be read, when
+    either half of the pair has moved, and when the worktree holds uncommitted work the factory
+    would commit first (B-0094, D6)."""
+    if not run.get('publish_refused') or not ev.head or ev.uncommitted:
+        return False
+    return bool(run.get('publish_refused_heads')) \
+        and run['publish_refused_heads'] == refusal_heads(ev)
+
+
 def republish_steps(product, registry, job, run, alive, found, items=None):
     """A product's F-0094: a run judged ``failed: not pushed`` whose publish the factory refused
     (its rebase conflicted, a redaction, a hook) kept its commits in its worktree, and no later
@@ -630,13 +654,15 @@ def republish_steps(product, registry, job, run, alive, found, items=None):
     if owner is not None and owner.get('job') != job:
         return  # a later run took the worktree: its own judgement owns the branch
     ev = lifecycle.gather(product, run, alive=alive)
+    if refusal_stands(run, ev):
+        return  # F-0228: same head, same tip — the same refusal, and the hook costs minutes
     reason, ev, line = yield (product, run, ev, reason, alive)  # publish_gap, by run_steps
     if not line:
         return
     if ' refused: ' not in line:
         found.append((job, 'published', line))
         fields = {'end_reason': reason, 'rc': 0 if reason == lifecycle.FINISHED else 1,
-                  'publish_refused': None}
+                  'publish_refused': None, 'publish_refused_heads': None}
         was_unpushed_park = isinstance(run.get('correction'), dict) \
             and run['correction'].get('kind') == lifecycle.UNPUSHED
         if reason == lifecycle.FINISHED:
@@ -653,13 +679,32 @@ def republish_steps(product, registry, job, run, alive, found, items=None):
         return
     if line == run.get('publish_refused'):
         return
-    fields = {'publish_refused': line}
+    why = line.split('refused: ', 1)[-1]  # the hook's own text, never this function's wrapper
+    cls = lifecycle.push_failure(why)
+    fields = {'publish_refused': line,
+              'publish_refused_heads': None if cls == lifecycle.NETWORK_ERROR
+              else refusal_heads(ev)}            # a blip is never remembered (D5)
     corr = run.get('correction')
+    held = None
     if isinstance(corr, dict) and corr.get('kind') == lifecycle.UNPUSHED:
         fields['correction'] = dict(corr, text=refusal_text(branch, line))
+    elif lifecycle.pending_correction(run, registry) is None and cls != lifecycle.NETWORK_ERROR:
+        # nothing pending carries this refusal, and with the retry gone nothing else will
+        text, now = refusal_text(branch, line), pool_mod.now_iso()
+        if cls == lifecycle.HOOK_REFUSED:
+            more, held = lifecycle.hook_refusal_hold(registry, run, text, now)
+        elif lifecycle.rebase_conflict(line):
+            more, held = lifecycle.rebase_conflict_hold(registry, run, text, now,
+                                                        main=product.main)
+        else:
+            more, held = lifecycle.hold(registry, run, lifecycle.UNPUSHED, text, now,
+                                        main=product.main)
+        fields.update(more)
     pool_mod.update_session(product, job, **fields)
     run.update(fields)
     found.append((job, 'published', line))
+    if held:
+        found.append((job, 'held', held.split(': ', 1)[1]))
 
 
 def push_retry(ev, reason, line):
