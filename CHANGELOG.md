@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.240 — 2026-10-07
+
+### Features landed
+
+- A cleanly exited session reads finished or exited, never dead, and the age counts from the exit (#1040)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.240"`
+
 ## v0.1.239 — 2026-10-07
 
 ### Bugs fixed
