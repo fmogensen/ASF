@@ -2534,8 +2534,9 @@ class Lane:
         * the PR carries an ``asf land`` request — the merge queue is holding it to land as it is;
         * its required checks are green on this very head — the green this lane wrote down
           (:func:`asf.tree_green.green_on`), and, when nothing was written down, the head's own
-          checks read from the host, written down as the gate writes them so a later rewrite can
-          carry that green back;
+          checks read from the host — of :func:`exact_head` only, the gate's own pin, so a PR whose
+          head is some other sha is read and remembered for nothing — written down as the gate
+          writes them so a later rewrite can carry that green back;
         * a run is in flight on the branch (:func:`asf.ci_flight.verdict`, F-0203).
 
         The reword is :data:`DEFERRED`, never dropped: it happens on a later pass, once the PR has
@@ -2559,24 +2560,30 @@ class Lane:
                 why = (f'{names} green on {str(head)[:9]} — a rewrite throws that CI away; the '
                        f'reword waits')
         host = self.host if getattr(self.host, 'slug', None) else None    # a PR host only
-        if not why and number and head and host is not None:
+        exact = exact_head(f)
+        if not why and number and exact and host is not None:
             # nothing has written that memory down for a branch held on its naming: the gate's
             # writer (:meth:`GitHubHost.check_gate`) is downstream of the correction, so the
             # green a run has just finished earning is invisible to ``green_on`` above and the
             # reword would push it away on this very pass. So ask the head itself, the one read
             # the in-flight check below already makes, and write it down as the gate does — then
-            # a rewrite that happens later can carry this green back (B-0275 review C1)
+            # a rewrite that happens later can carry this green back (B-0275 review C1).
+            # :func:`exact_head`, as the gate reads it (:meth:`GitHubHost.check_gate`): a green
+            # belongs to the sha that earned it, so when the PR's head is a sha other than the
+            # branch head this guard reads nothing and writes nothing down — a green attributed
+            # to a sha the PR is not at would carry on to every later head with that tree
+            # (B-0275 review round 3 C1)
             cls = f.get('class') or landing_class(self.product, f.get('files') or ())
-            required, _unknown = host.merge_required(self.state_dir, cls, head)
+            required, _unknown = host.merge_required(self.state_dir, cls, exact)
             if required:
                 state, _detail, checks = pr_checks(
-                    host.slug, number, required, host.rerun_ids(), head=head,
+                    host.slug, number, required, host.rerun_ids(), head=exact,
                     attest_context=attestation.context(self.product))
                 # ``green`` with no check reported is no green to lose (``pr_checks``: "no
                 # checks"): only a required set every name of which concluded success defers,
                 # which is exactly what ``remember_green`` will write down
                 if state == 'green' and set(required) <= passed_names(checks, required):
-                    host.remember_green(number, required, head, checks)
+                    host.remember_green(number, required, exact, checks)
                     why = (f'{", ".join(sorted(required))} green on {str(head)[:9]} — a rewrite '
                            f'throws that CI away; the reword waits')
         if why:

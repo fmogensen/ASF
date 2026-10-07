@@ -11,7 +11,9 @@ Two halves, the acceptance's three bullets:
 Round 1's review asked for two more, each the half above read at the wrong moment: the green guard
 must ask the head itself where this lane's memory of it is necessarily empty
 (:class:`RewordReadsTheHead`, C1), and a carry must never answer for a head the
-conflicts-with-trunk guard would have stopped (:class:`ConflictBeforeCarry`, C2).
+conflicts-with-trunk guard would have stopped (:class:`ConflictBeforeCarry`, C2). Round 3 asked
+for the first of those to be pinned to the sha that earned the green, as the landing gate pins it
+(:class:`RewordReadsTheHead`, round 3's C1).
 """
 import json
 import os
@@ -182,16 +184,25 @@ class RewordReadsTheHead(QueueRepo):
         super().setUp()
         self.push_lane(self.B, {'a.txt': 'a\n'}, 'tidy up')     # a subject naming no item
 
-    def held(self, *checks):
+    def held(self, *checks, pr_head=None):
         """``reword_held``'s answer for the branch as the pass hands it over, with ``checks``
-        what ``gh pr checks`` reports on its head now — nothing in flight, nothing remembered."""
+        what ``gh pr checks`` reports on its head now — nothing in flight, nothing remembered.
+
+        ``pr_head``: the PR's own ``headRefOid`` when that is a sha other than the branch head
+        (:func:`asf.harvest.lane.exact_head` is ``None`` there); by default the PR is at the
+        branch head, as it is on every pass that is not racing a push. The ``gh`` mock is kept on
+        ``self.gh``: what the guard read is as much the assertion as what it answered."""
         ln = self.lane()
+        pr = {'number': self.PR, 'state': 'OPEN'}
+        if pr_head:
+            pr['head'] = pr_head
         f = {'branch': self.B, 'head': self.heads()[self.B], 'kind': 'code', 'item': 'T-0001',
              'class': lane.CODE, 'files': ['a.txt'],
-             'pr': {'number': self.PR, 'state': 'OPEN'}, 'prev': {'pr': self.PR}}
+             'pr': pr, 'prev': {'pr': self.PR}}
         with mock.patch.object(ci_flight, 'run_in_flight', return_value=None), \
                 mock.patch.object(harvest, '_gh',
-                                  return_value=(0, json.dumps(list(checks)), '')):
+                                  return_value=(0, json.dumps(list(checks)), '')) as gh:
+            self.gh = gh
             return ln.reword_held(f)
 
     def test_a_run_that_completed_green_defers_the_reword_though_nothing_was_remembered(self):
@@ -214,6 +225,27 @@ class RewordReadsTheHead(QueueRepo):
         self.assertIsNotNone(tree_green.carried(self.state_dir, self.PR, 'b' * 40,
                                                 tree_green.tree_at(self.origin, head),
                                                 ['gate', 'gate-tests']))
+
+    def test_a_pr_whose_head_is_another_sha_is_not_read_and_nothing_is_written_down(self):
+        """Round 3's C1 — a green belongs to the sha that earned it.
+
+        ``gh pr checks`` reports the checks of the head the **PR** is at. When that is not the
+        branch head, judging them green and writing the answer down against the branch head mints
+        a green for content that never ran them, and :func:`asf.tree_green.carried` then hands it
+        to every later head of the PR carrying that tree — a false green on the landing path. The
+        gate pins this read to :func:`asf.harvest.lane.exact_head` (:meth:`check_gate`), and so
+        does the guard: it reads nothing at all rather than read the wrong sha."""
+        head = self.heads()[self.B]
+        self.assertIsNone(lane.exact_head({'head': head, 'pr': {'head': 'c' * 40}}))
+        self.assertEqual(self.held({'name': 'gate', 'bucket': 'pass'},
+                                   {'name': 'gate-tests', 'bucket': 'pass'},
+                                   pr_head='c' * 40), '')
+        self.assertEqual(self.gh.call_args_list, [])     # not judged, because not even read
+        self.assertIsNone(tree_green.green_on(self.state_dir, self.PR, head))
+        # and so no later head of this PR with that tree reads green off it either
+        self.assertIsNone(tree_green.carried(self.state_dir, self.PR, 'd' * 40,
+                                             tree_green.tree_at(self.origin, head),
+                                             ['gate', 'gate-tests']))
 
     def test_a_required_check_still_running_defers_nothing(self):
         # no green to throw away: the reword happens, exactly as it did before this guard
