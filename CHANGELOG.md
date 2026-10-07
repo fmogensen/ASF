@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.243 — 2026-10-07
+
+### Bugs fixed
+
+- Record writes never drop a card; hooks run the pin; the PR cache follows the trunk (#1048)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.243"`
+
 ## v0.1.242 — 2026-10-07
 
 ### Bugs fixed
