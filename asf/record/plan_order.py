@@ -242,13 +242,34 @@ def _missing(order, cards, cid, meta):
     return list(have) + extra if extra else []
 
 
-def trunk_reader(product):
-    """``read_plan(path)`` → the plan's text on ``origin/<main>`` of the product repo, or None."""
-    from asf.evidence import evidence
+class TrunkReader:
+    """``read_plan(path)`` → the plan's text on ``origin/<main>`` of the product repo, or None —
+    callable with one path exactly as :func:`trunk_reader`'s old closure, plus
+    ``prefetch(paths)``: one :func:`evidence.read_refs` round-trip for the lot, served from
+    afterwards. A path outside the prefetch is still read on demand (D13)."""
 
-    def read(path):
-        return evidence.read_ref(f'origin/{product.main}:{path}', product=product)
-    return read
+    def __init__(self, product):
+        self._product = product
+        self._cache = {}
+
+    def _ref(self, path):
+        return f'origin/{self._product.main}:{path}'
+
+    def __call__(self, path):
+        from asf.evidence import evidence
+        ref = self._ref(path)
+        if ref in self._cache:
+            return self._cache[ref]
+        return evidence.read_ref(ref, product=self._product)
+
+    def prefetch(self, paths):
+        from asf.evidence import evidence
+        self._cache.update(evidence.read_refs([self._ref(p) for p in paths], product=self._product))
+
+
+def trunk_reader(product):
+    """A :class:`TrunkReader` for the product repo."""
+    return TrunkReader(product)
 
 
 def _plan_cards(items, plan_path):
@@ -271,6 +292,8 @@ def backfill(root, read_plan, out=print, only=None):
     plans = sorted({(m.get('links') or {}).get('plan') for m in metas.values()
                     if m.get('type') == 'task' and (m.get('links') or {}).get('plan')
                     and (only is None or m.get('id') in only)})
+    if hasattr(read_plan, 'prefetch'):
+        read_plan.prefetch(plans)
     written = {}
     for path in plans:
         cards = _plan_cards(metas, path)
@@ -306,6 +329,11 @@ def overlay(items, read_plan):
             plans.setdefault(path, []).append(i)
     if not plans:
         return items
+    if hasattr(read_plan, 'prefetch'):
+        try:
+            read_plan.prefetch(plans)
+        except Exception:  # the guard never breaks the wave
+            pass
     items = copy.copy(items)  # a copy of the same kind: the index reader's retired cards come along
     for path, ids in plans.items():
         try:

@@ -105,13 +105,17 @@ def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
 
 def _mint(root, product, ev, out=print, read_ref=None):
     from asf.tick.migrate import plan_task_records, task_like_headings, writes_lines
-    read_ref = read_ref or (lambda ref: evidence.read_ref(ref, product=product))
     by_id, _errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
     features = (ev or {}).get('features') or {}
     made = []
     known = None   # the decision register, read once and only when a plan is about to mint
     claimed = None  # origin's id claims, read once and only when a plan is about to mint
+
+    # collection pass: every guard above reads metadata only (type, has_task_child, DONE_STATES,
+    # is_retired, match_feature/plan_ref, decided/own_plan) — none of it depends on the plan's
+    # text, so this reaches the same refs, in the same order, that the minting loop used to
+    candidates = []
     for fid in sorted(canonical):
         rec = canonical[fid]
         if rec['meta'].get('type') != 'feature':
@@ -134,7 +138,17 @@ def _mint(root, product, ev, out=print, read_ref=None):
             out(f'plan-tasks: {fid}: {plan_path} is on the trunk but names {fid} nowhere — '
                 f'not decided, so nothing minted')
             continue
-        text = read_ref(ref)
+        candidates.append((fid, ref, plan_path))
+
+    # one batch for the lot; the injected `read_ref` (the tests' seam) stays per-ref, as before
+    if read_ref is not None:
+        texts = {ref: read_ref(ref) for _fid, ref, _plan_path in candidates}
+    else:
+        texts = evidence.read_refs([ref for _fid, ref, _plan_path in candidates], product=product)
+
+    for fid, ref, plan_path in candidates:
+        rec = canonical[fid]
+        text = texts.get(ref)
         if not text:
             out(f'plan-tasks: {fid}: {plan_path} could not be read — nothing minted')
             continue
