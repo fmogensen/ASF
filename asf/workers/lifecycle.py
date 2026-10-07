@@ -113,7 +113,8 @@ TRANSITIONS = {
 #: A run's own fields: they belong to one launch and never fold into the next (B-0041).
 RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
               'harvest', 'correction', 'rounds', 'stop_tip', 'capped', 'runtime_session',
-              'resumed', 'continued', 'publish_refused', 'dead_class', 'publish_refused_heads')
+              'resumed', 'continued', 'publish_refused', 'dead_class', 'publish_refused_heads',
+              'dead_why', 'heartbeat_refused', 'stopped_by')
 
 FINISHED = 'finished'
 #: A session whose deliverable was never a commit, and which delivered it: not a failure, and not

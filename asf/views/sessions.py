@@ -119,6 +119,17 @@ def _other_table(rows):
     return out
 
 
+def dead_why(run, product=None):
+    """A Dead row's ``Why``: :func:`asf.workers.refusals.dead_reason` on one line — the run's
+    stored ``dead_why``, else the cloud sync's ``why`` for its token, with the run's last ASF
+    refusal — ``-`` when there is none."""
+    from asf.workers import cloudpid, refusals
+    pid = run.get('pid')
+    stored = run.get('dead_why') or (cloudpid.why(pid) if cloudpid.is_token(pid) else '')
+    text = refusals.dead_reason(dict(run, dead_why=stored), product) if stored else ''
+    return ' '.join(text.replace('|', '/').split()) or '-'
+
+
 def render(root, product=None, alive=None, cfg=None, session_source=None):
     """``cfg`` (default: :func:`asf.workers.spawn.load_cfg`) drives one observation read, used
     both for the **Other** group and, when ``alive`` is not given, for the working/dead split
@@ -154,7 +165,11 @@ def render(root, product=None, alive=None, cfg=None, session_source=None):
             continue
         out.append(f"**{name}**")
         out.append("")
-        out.extend(_table(rows, LIVE_COLUMNS, header))
+        if name == 'Dead':  # why each died, the refusal it met included (F-0266 C16)
+            out.extend(_table([dict(r, why=dead_why(r, product)) for r in rows],
+                              LIVE_COLUMNS + ('why',), header + ('Why',)))
+        else:
+            out.extend(_table(rows, LIVE_COLUMNS, header))
         out.append("")
     if why:
         out.append(f"Other: unreadable ({why})")

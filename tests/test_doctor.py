@@ -293,6 +293,26 @@ class TestCheckDeadSessions(unittest.TestCase):
             self.assertIsNone(doctor.check_dead_sessions(product))
 
 
+class DeadCensusNamesTheRefusals(unittest.TestCase):
+    """F-0266 S-64359 (C15): the dead-sessions row gains ``; refusals: …`` when any death's
+    last ASF refusal is known, nothing when none is, and its ``ok`` rule is unchanged."""
+
+    def test_the_clause(self):
+        product = env.Product('x', {})
+        data = {'days': 14, 'runs': 11, 'by_class': {'gone': 6, 'unknown': 4}, 'unclassified': 1,
+                'by_refusal': {'naming': 3, 'hook refused': 1}}
+        with mock.patch('asf.workers.health.dead_census', return_value=data):
+            ok, detail = doctor.check_dead_sessions(product)
+        self.assertFalse(ok)  # unknown still stands: the refusals do not excuse it
+        self.assertEqual(detail, 'dead sessions: 11 in 14 days — gone 6, unknown 4, '
+                                 'unclassified 1; refusals: naming 3, hook refused 1')
+        data = dict(data, by_class={'gone': 6}, by_refusal={})
+        with mock.patch('asf.workers.health.dead_census', return_value=data):
+            ok, detail = doctor.check_dead_sessions(product)
+        self.assertTrue(ok)
+        self.assertNotIn('refusals', detail)
+
+
 class RedactionHooksTests(unittest.TestCase):
     """T-0025 (F-0075 §2.4): ``check_redaction_hooks`` reads back the git hooks
     ``asf.hooks.ensure_git_hooks`` writes — read-only, so this row never writes one itself."""

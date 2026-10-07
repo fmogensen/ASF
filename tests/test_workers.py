@@ -3601,3 +3601,98 @@ class FactoryCliInSessionHome(unittest.TestCase):
             os.symlink('/nowhere', link)
             rt.link_factory_cli(home, op)
             self.assertEqual(os.path.realpath(link), os.path.realpath(cli))
+
+
+class RefusalLogEnvAndClear(Home):
+    """F-0266 S-64355 (P14): ``ASF_REFUSAL_LOG`` is in ``job.env`` at spawn, beside
+    ``ASF_PUSH_LOG``, and the ledger is cleared at spawn and at a heartbeat continuation."""
+
+    def ledger(self, job):
+        from asf.workers import refusals
+        path = refusals.path(self.product, job)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('{"kind": "push-allow", "line": "old run"}\n')
+        return path
+
+    def test_spawn_names_the_log_and_clears_the_last_runs(self):
+        from asf.workers import refusals
+        path = self.ledger('spec-1')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        spawn_mod.spawn(self.product, feature_row('spec-1'), self.acct(), 'b\n', runtime=rt,
+                        cfg=self.cfg)
+        job, _brief = rt.calls[0]
+        self.assertEqual(job.env['ASF_REFUSAL_LOG'], refusals.path(self.product, 'spec-1'))
+        self.assertIn('ASF_PUSH_LOG', job.env)
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_heartbeat_continuation_clears_it_too(self):
+        from asf.workers import heartbeat as hb
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        rec = spawn_mod.spawn(self.product, feature_row('spec-1'), self.acct(), 'b\n',
+                              runtime=rt, cfg=self.cfg)
+        path = self.ledger('spec-1')
+        rt2 = runtime_mod.FakeRuntime([{'running': True, 'pid': 4343}])
+        now = hb.parse_ts(rec['started']) + 21 * 60
+        found = hb.sweep(self.product, cfg=self.cfg, now=now, runtime_fn=lambda: rt2,
+                         alive=lambda pid: True, stop=lambda run, alive: None,
+                         out=lambda s: None)
+        self.assertEqual(len(found), 1, found)
+        cont, _text = rt2.calls[0]
+        self.assertEqual(cont.env['ASF_REFUSAL_LOG'], path)
+        self.assertFalse(os.path.exists(path))
+
+
+class DeadWhyOnTheEndRecord(Home):
+    """F-0266 S-64359 (C13): health writes ``dead_why`` beside ``dead_class`` for a cloud
+    ``dead pid`` — the sync's own ``why`` — and leaves it unwritten for a local one, with
+    ``end_reason`` byte-identical."""
+
+    def test_the_field_and_cloudpid_why(self):
+        from asf.workers import cloudpid
+        self.assertIn('dead_why', lifecycle.RUN_FIELDS)
+        self.assertEqual(cloudpid.why('actions:nobody'), '')
+        cloudpid.record('actions:9', cloudpid.DEAD, 'run 9 ended failure without the report '
+                                                    'commit')
+        self.assertEqual(cloudpid.why('actions:9'),
+                         'run 9 ended failure without the report commit')
+
+    def end(self, job, pid):
+        pool_mod.append_session(self.product, {
+            'job': job, 'item': 'F-0001', 'kind': 'spec', 'branch': f'spec/{job}', 'pid': pid,
+            'started': '2026-10-07T09:00:00Z', 'runtime_lane': 'cloud' if ':' in str(pid) else None,
+            'worktree': os.path.join(self.tmp, 'no-such-worktree', job)})
+        health_mod.health(self.product, fix=True, session_source=observe.FakeSource([]),
+                          out=lambda s: None, items={})
+        return pool_mod.load_sessions(self.product)[job]
+
+    def test_a_cloud_death_carries_its_why_and_a_local_one_does_not(self):
+        from asf.workers import cloudpid
+        cloud_run = self.end('cloud-1', 'actions:500')
+        self.assertTrue(lifecycle.is_dead_reason(cloud_run['end_reason']), cloud_run)
+        self.assertEqual(cloud_run['end_reason'], lifecycle.DEAD_PID)
+        self.assertTrue(cloud_run.get('dead_class'))
+        self.assertEqual(cloud_run['dead_why'], cloudpid.why('actions:500'))
+        self.assertTrue(cloud_run['dead_why'])
+        local = self.end('local-1', 999999)
+        self.assertEqual(local['end_reason'], lifecycle.DEAD_PID)
+        self.assertIsNone(local.get('dead_why'))
+
+
+class HealthMarksAHeartbeatStartRefusal(Home):
+    """F-0279: health marks a run whose report ends "needs input" on a heartbeat-start refusal
+    ``heartbeat_refused``, while the job's log is still that run's own — the relaunch cap reads
+    the mark, never the shared log of an older run."""
+
+    def test_the_mark(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 40}])
+        rec = spawn_mod.spawn(self.product, feature_row('spec-1'), self.acct(), 'b\n',
+                              runtime=rt, cfg=self.cfg)
+        with open(rec['log'], 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': 'NEEDS OPERATOR: the heartbeat loop could not start — '
+                                          'Unauthorized Persistence'}) + '\n')
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None, items={})
+        s = pool_mod.load_sessions(self.product)['spec-1']
+        self.assertTrue(s.get('ended'), s)
+        self.assertEqual(s.get('heartbeat_refused'), 1)

@@ -142,6 +142,16 @@ fi
 if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
         && { [ -n "$ASF_PUSH_LOG" ] || [ -n "$ASF_PUSH_ALLOW" ]; }; then
     input=$(cat)
+    # a refusal is written down (asf.workers.refusals, ASF_REFUSAL_LOG): one JSON object per
+    # line, and a write that fails never changes the hook's answer (F-0266 C4)
+    _json() { tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$/"/'; }
+    asf_refused() {   # $1 kind, $2 line
+        [ -n "$ASF_REFUSAL_LOG" ] || return 0
+        printf '{"at":"%s","kind":"%s","where":"shim","line":%s}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" \
+            "$(printf '%s' "$2" | tr '\n' ' ' | cut -c1-2000 | _json)" \
+            >> "$ASF_REFUSAL_LOG" 2>/dev/null || :
+    }
     # a heartbeat (asf.workers.heartbeat) pushes only refs/asf/hb/<job>: no work, no CI, no count
     if [ -n "$input" ] && ! printf '%s\n' "$input" | awk '
             NF >= 4 && $3 !~ /^refs\/asf\/hb\// { work = 1 } END { exit work ? 0 : 1 }'; then
@@ -155,14 +165,18 @@ if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
                 if (!ok) print b
             }')
         if [ -n "$bad" ]; then
-            echo "asf: push refused — an ASF session pushes only to factory branches, not:" $bad >&2
+            msg=$(echo "asf: push refused — an ASF session pushes only to factory branches, not:" $bad)
+            echo "$msg" >&2
+            asf_refused push-allow "$msg"
             exit 1
         fi
     fi
     rc=0
     if [ "$same" = 0 ] && [ -n "$own" ] && [ -x "$own/$name" ]; then
-        if [ -n "$input" ]; then printf '%s\n' "$input"; fi | "$own/$name" "$@"
+        out=$(if [ -n "$input" ]; then printf '%s\n' "$input"; fi | "$own/$name" "$@" 2>&1)
         rc=$?
+        [ -n "$out" ] && printf '%s\n' "$out" >&2
+        [ "$rc" = 0 ] || asf_refused "hook refused" "$out"
     fi
     # CI judges the branch merged into the trunk, by the trunk's own check list and scripts: the
     # product's pre-push check runs once more on that merge (asf.workers.trunkmerge)
@@ -170,8 +184,11 @@ if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
         cli="$HOME/.local/bin/asf"
         [ -x "$cli" ] || cli=$(command -v asf 2>/dev/null)
         if [ -n "$cli" ]; then
-            printf '%s\n' "$input" | "$cli" trunk-check --pre-push --product "$ASF_PRODUCT"
+            out=$(printf '%s\n' "$input" \
+                | "$cli" trunk-check --pre-push --product "$ASF_PRODUCT" 2>&1)
             rc=$?
+            [ -n "$out" ] && printf '%s\n' "$out" >&2
+            [ "$rc" = 0 ] || asf_refused "hook refused" "$out"
         fi
     fi
     if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PUSH_LOG" ]; then

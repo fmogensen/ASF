@@ -400,5 +400,54 @@ class PerLaunchIngestTests(_Ledger):
         self.assertEqual([e['usd'] for e in evs], [0.4])
 
 
+class HeartbeatStartRefusalTests(_Ledger):
+    """F-0279: a run that ended "needs input" because its sandbox refused the heartbeat loop says
+    nothing about the work — it is no cause of its own, no terminal claim and no launch of the
+    relaunch streak, so the row is never parked on it."""
+
+    HB = ('NEEDS OPERATOR: the heartbeat loop could not start — Unauthorized Persistence: the '
+          'sandbox refused the background process')
+
+    def test_the_text_is_recognised(self):
+        for text in (self.HB, 'cannot start the heartbeat: git-common-dir is outside the sandbox',
+                     'heartbeat did not start'):
+            self.assertTrue(relaunch.heartbeat_refused(text), text)
+        for text in ('NEEDS OPERATOR: confirm the stale writes: line', 'heartbeat ok', ''):
+            self.assertFalse(relaunch.heartbeat_refused(text), text)
+        self.assertTrue(relaunch.ended_on_heartbeat(report('partial', extra=self.HB)))
+        self.assertFalse(relaunch.ended_on_heartbeat('the heartbeat could not start, then I '
+                                                     'carried on'))
+
+    def test_cause_key_ignores_a_heartbeat_start_refusal(self):
+        base = relaunch.cause_key('FIX → CORRECT', 'gate red')
+        self.assertEqual(relaunch.cause_key('FIX → CORRECT', f'gate red\n{self.HB}'), base)
+        self.assertNotEqual(relaunch.cause_key('FIX → CORRECT', 'gate red\nreview: C1'), base)
+        self.assertEqual(relaunch.cause_key('X', ''), relaunch.cause_key('X'))
+
+    def mark_last(self):
+        self.write({'job': self.JOB, 'heartbeat_refused': 1})
+
+    def test_marked_runs_never_park_the_row(self):
+        for _ in range(3):
+            self.run_once(report('partial', extra=self.HB))
+            self.mark_last()
+            self.assertIsNone(self.verdict(head=HEAD))
+            self.assertIsNone(relaunch.loop_guard(self.path, self.JOB, self.ITEM, CARD,
+                                                  {'same_report': 2, 'daily_cap': 2}))
+
+    def test_an_unmarked_needs_input_still_parks(self):
+        self.run_once(report('partial', extra='NEEDS OPERATOR: confirm the stale writes: line'))
+        self.assertIn('needs input', self.verdict(head=HEAD))
+
+    def test_the_heartbeat_claim_is_not_terminal_even_unmarked(self):
+        # a run health has not marked (ended before F-0279): its claim parks nothing at one
+        self.run_once(report('partial', extra=self.HB))
+        self.assertIsNone(self.verdict(head=HEAD))
+
+    def test_the_mark_is_a_run_field(self):  # health writes it: tests.test_workers
+        from asf.workers import lifecycle as lc
+        self.assertIn('heartbeat_refused', lc.RUN_FIELDS)
+
+
 if __name__ == '__main__':
     unittest.main()

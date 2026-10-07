@@ -62,6 +62,8 @@ from asf.workers import heartbeat
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 from asf.workers import pushlog
+from asf.workers import refusals
+from asf.workers import relaunch as relaunch_mod
 from asf.workers import report as report_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import lifecycle
@@ -173,10 +175,13 @@ def dead_census(product, days=14, now=None):
     ``dead pid`` runs ended within the last ``days`` days (F-0234) — the ledger folded the way
     :func:`asf.workers.retention.census` folds branches (P17), every run of every job, not just
     each job's latest. ``unclassified`` counts a death with no ``dead_class``: a row written
-    before this card landed, and not an error."""
+    before this card landed, and not an error. ``by_refusal`` counts each death's last ASF
+    refusal by kind (:func:`asf.workers.refusals.last`, F-0266 C15) — a second axis, never a
+    second count of runs."""
     now = time.time() if now is None else now
     since = now - days * 86400
     by_class = {word: 0 for word in lifecycle.LIVENESS}
+    by_refusal = {}
     unclassified = runs = 0
     for rs in lifecycle._folded(pool_mod.sessions_path(product)).view.values():
         for r in rs:
@@ -191,8 +196,11 @@ def dead_census(product, days=14, now=None):
                 by_class[cls] += 1
             else:
                 unclassified += 1
+            refusal = refusals.last(product, r.get('job'), r)
+            if refusal is not None:
+                by_refusal[refusal.kind] = by_refusal.get(refusal.kind, 0) + 1
     return {'days': days, 'runs': runs, 'by_class': {k: v for k, v in by_class.items() if v},
-            'unclassified': unclassified}
+            'unclassified': unclassified, 'by_refusal': by_refusal}
 
 
 def dead_census_line(data):
@@ -209,7 +217,12 @@ def dead_census_line(data):
     if unclassified:
         parts.append(f'unclassified {unclassified}')
     ok = not by_class.get(lifecycle.UNKNOWN)
-    return ok, f"dead sessions: {runs} in {days} days — {', '.join(parts)}"
+    line = f"dead sessions: {runs} in {days} days — {', '.join(parts)}"
+    by_refusal = data.get('by_refusal') or {}
+    if by_refusal:  # what ASF itself refused them, most first (F-0266 C15)
+        line += '; refusals: ' + ', '.join(
+            f'{k} {n}' for k, n in sorted(by_refusal.items(), key=lambda kn: (-kn[1], kn[0])))
+    return ok, line
 
 
 def remote_retire(run):
@@ -943,9 +956,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         # the class is only ever the class of a death (F-0234): a retry or a hook refusal above
         # may have turned `reason` into something other than DEAD_PID since `ev` was gathered
         dead_class = (ev.liveness or None) if reason == lifecycle.DEAD_PID else None
+        # the cloud sync's own account of the death, kept on the run (F-0266 C13): end_reason
+        # is matched by equality (is_dead_reason) and never carries it; '' for a local run
+        dead_why = (cloudpid.why(s.get('pid')) or None) if dead_class else None
         fields = {'ended': now, 'end_reason': reason,
                   'runtime_session': runtime_mod.runtime_session(s.get('log')) or None,
-                  'dead_class': dead_class}
+                  'dead_class': dead_class, 'dead_why': dead_why}
         if sha:
             fields['published_head'] = sha
         pool_mod.update_session(product, job, **fields)
@@ -962,6 +978,11 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             if defect:
                 found.append((job, 'defect', defect))
         question = report_mod.needs_input(str((ev.result or {}).get('result') or ''))
+        if question and relaunch_mod.ended_on_heartbeat(str((ev.result or {}).get('result'))):
+            # the sandbox refused the session's beat loop: nothing about the work, so the
+            # relaunch cap does not count this run (F-0279) — marked while the log is its own
+            pool_mod.update_session(product, job, heartbeat_refused=1)
+            s['heartbeat_refused'] = 1
         if lifecycle.quota_exhausted(s):
             # the account's window or its auth, not the work: its account stops (until the
             # reset, or until re-enabled), and the item relaunches — no hold, no round
