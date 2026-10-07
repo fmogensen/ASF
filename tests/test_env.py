@@ -714,7 +714,7 @@ _PLANNED_FLAG_VALUES = {
     'relaunch_same_report': '2', 'relaunch_daily_cap': '6',
     'groom.reask_days': '7', 'groom.rank_owner': 'code', 'groom.structural': 'report',
     'health_opens_pr': 'true', 'push_auth_preflight': 'true',
-    'operator_readonly_verbs': '[terraform plan]',
+    'operator_readonly_verbs': '[terraform plan]', 'upgrade': 'notify',
 }
 PLANNED_PRODUCT = _dedent("""
     product: sample
