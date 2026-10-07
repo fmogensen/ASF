@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.230 — 2026-10-07
+
+### Features landed
+
+- The `upgrade:` key — three words, a default, and the raw word the doctor must quote (#968)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.230"`
+
 ## v0.1.229 — 2026-10-07
 
 ### Features landed
