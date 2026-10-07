@@ -9,7 +9,7 @@ import re
 
 from asf.groom.shape import Card, Question, derive, infer_parent_epic
 from asf.record.ids import mint_id, write_new_item
-from asf.record.publish import publish
+from asf.record.publish import left_ahead, publish
 from asf.conventions import DEFAULT_INTAKE_DIR
 
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
@@ -281,7 +281,7 @@ def cmd_inbox(args, root):
             text += f.read()
     path = file_card(root, _intake_dir(args), args.title, text)
     print(os.path.relpath(path, root))
-    return 0
+    return 1 if left_ahead(root) else 0  # a refused push named its commits on stderr (F-0260)
 
 
 def file_card(root, intake_dir, title, rest):

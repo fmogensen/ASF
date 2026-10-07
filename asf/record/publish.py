@@ -28,7 +28,8 @@ def _is_checkout(root):
 
 def publish(root, path, message):
     """Commit ``path`` in the record checkout ``root`` and push it. A ``root`` that is not a git
-    checkout with an ``origin`` is left alone. One stderr line when the push is refused."""
+    checkout with an ``origin`` is left alone. False when the push is refused: the checkout is
+    left ahead, marked for the next tick's sync, and stderr names the unpushed commits."""
     if not _is_checkout(root):
         return True
     rel = os.path.relpath(path, root)
@@ -36,9 +37,26 @@ def publish(root, path, message):
         return True
     if shadow.push(root):
         return True
-    print(f"warning: {rel} committed but the push was refused — push the record by hand",
-          file=sys.stderr)
+    _refused(root, rel)
     return False
+
+
+def left_ahead(root):
+    """The commits the record checkout ``root`` holds that origin does not (as last fetched),
+    ``<short sha> <subject>`` each; ``[]`` for a ``root`` that is not a checkout with an origin."""
+    return shadow.unpushed(root) if _is_checkout(root) else []
+
+
+def _refused(root, what):
+    """A refused record push: the marker the next tick's record sync retries it by
+    (:func:`asf.tick.shadow.sync_operator_checkout`, F-0260), and stderr names what the checkout
+    is left ahead by."""
+    commits = shadow.mark_unpushed(root)
+    print(f"error: {what} committed but the push was refused — {root} is {len(commits)} "
+          f"commit(s) ahead of origin; the next tick's record sync rebases and pushes them:",
+          file=sys.stderr)
+    for line in commits:
+        print(f"  {line}", file=sys.stderr)
 
 
 #: How many times a record commit is built again when another commit landed in the checkout
@@ -198,6 +216,5 @@ def publish_changes(root, before, message):
         return True
     if shadow.push(root):
         return True
-    print(f"warning: {message!r} committed but the push was refused — push the record by hand",
-          file=sys.stderr)
+    _refused(root, repr(message))
     return False

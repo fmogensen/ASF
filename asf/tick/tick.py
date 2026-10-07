@@ -308,6 +308,7 @@ def commit_and_push(ctx):
         rc = 1
     # the read views read the operator's checkout: bring it up to what origin now holds
     shadow.sync_operator_checkout(ctx.product, out=print)
+    ctx.record_drift = shadow.checkout_drift(ctx.product)  # the TICK line's record word (F-0260)
     return rc
 
 
@@ -819,6 +820,13 @@ def finish(ctx, ran):
         rc, reason = 1, _first_line(detail) or type(e).__name__
     if rc:
         ran.append({'step': 'commit', 'ok': False, 'seconds': 0.0, 'reason': reason})
+    ahead, behind = getattr(ctx, 'record_drift', None) or (0, 0)
+    if ahead or behind:
+        # the operator's checkout still out of step after the sync: the record step says so
+        # instead of `record ok` (F-0260), the step itself still ok
+        for entry in ran:
+            if entry.get('step') == 'record':
+                entry['drift'] = {'ahead': ahead, 'behind': behind}
     return rc
 
 

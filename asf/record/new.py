@@ -182,8 +182,8 @@ def cmd_new(args, root):
         write_new_item(root, canonical, type_, new_id, typed, body, today(), 'new',
                        acceptance=acceptance or (), shape=shape)
         print(new_id)
-        publish(root, canonical[new_id]['path'], f"record: new {type_} {new_id}")
-        return 0
+        # a refused push leaves the checkout ahead: stderr named its commits (F-0260)
+        return 0 if publish(root, canonical[new_id]['path'], f"record: new {type_} {new_id}") else 1
     ts = now_iso()
     meta['schema_version'] = SCHEMA_VERSION
     meta['state'] = 'New'
@@ -212,5 +212,4 @@ def cmd_new(args, root):
     path = os.path.join(d, f"{new_id}.md")
     writer.write_card(path, text)
     print(new_id)
-    publish(root, path, f"record: new {type_} {new_id}")
-    return 0
+    return 0 if publish(root, path, f"record: new {type_} {new_id}") else 1

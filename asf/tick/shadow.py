@@ -11,8 +11,9 @@ stands. The live tick's clone is
 ``~/.ASF/state/<product>/record/``: it commits there and pushes (:func:`push`). The shadow tick's
 is ``…/shadow/``: it commits locally and never pushes, so it can be compared against the real
 tools without touching anything — see ``asf shadow-diff``. Neither writes the operator's own
-backlog checkout; after the live tick's push, :func:`sync_operator_checkout` only fast-forwards
-it to origin (clean and on the trunk, never a reset), because the read views read it.
+backlog checkout; after the live tick's push, :func:`sync_operator_checkout` brings it level
+with origin (clean and on the trunk, never a reset; its own stranded record commits rebased and
+pushed), because the read views read it.
 """
 import os
 import re
@@ -25,8 +26,8 @@ def shadow_dir(product):
     return os.path.join(env.state_dir(product), 'shadow')
 
 
-def _sh(args, cwd=None, check=True):
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check)
+def _sh(args, cwd=None, check=True, env=None):
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=check, env=env)
 
 
 def _remote_url(backlog_dir):
@@ -194,15 +195,20 @@ def _resolve_by_ownership(path):
 
 
 def sync_operator_checkout(product, out=print):
-    """Fast-forward the operator's record checkout (``backlog_dir``) to ``origin/<trunk>``.
+    """Bring the operator's record checkout (``backlog_dir``) level with ``origin/<trunk>``.
 
     The tick commits and pushes from its own clone; ``asf status``'s Decisions row, ``asf
     backlog`` and ``asf next`` read ``backlog_dir``. Only a console command run there pulled it,
     so answers the tick applied and pushed never showed: the checkout sat where the last console
     command left it and the Decisions count froze. The same rule as the product checkout's
-    (``harvest.sync_checkout``, B-0042): only on the trunk with a clean tree, only ``--ff-only``;
-    anything else is left alone and named in one line. Silent when already current. True when
-    moved."""
+    (``harvest.sync_checkout``, B-0042): only on the trunk with a clean tree; anything else is
+    left alone and named in one line — a dirty tree once, until it is clean again (F-0260).
+
+    Behind only: ``--ff-only``. Ahead — a record commit ``asf new``/``asf inbox`` made there whose
+    push was refused (:data:`UNPUSHED_MARKER`), stranded until now (F-0260): the local commits
+    are rebased onto ``origin/<trunk>``, an ``index.json`` conflict re-derived (``asf index``),
+    and pushed through :func:`push`. Any other conflict is aborted — the checkout as it was — and
+    named. Silent when already current. True when moved."""
     repo = product.backlog_dir
     if not repo or not os.path.isdir(os.path.join(repo, '.git')):
         return False
@@ -211,8 +217,11 @@ def sync_operator_checkout(product, out=print):
     if _sh(['git', 'fetch', '-q', 'origin'], cwd=repo, check=False).returncode != 0:
         return False
     trunk = _default_branch(repo)
-    behind = _sh(['git', 'rev-list', '--count', f'HEAD..origin/{trunk}'], cwd=repo, check=False)
-    if behind.returncode != 0 or behind.stdout.strip() in ('', '0'):
+    ahead, behind = _counts(repo, trunk)
+    if ahead is None:
+        return False
+    if not (ahead or behind):
+        _drop(repo, UNPUSHED_MARKER)
         return False
     head = _sh(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo, check=False).stdout.strip()
     if head != trunk:
@@ -220,11 +229,125 @@ def sync_operator_checkout(product, out=print):
         return False
     if _sh(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=repo,
            check=False).stdout.strip():
-        out(f'record: {repo} not fast-forwarded — working tree has local changes')
+        if not os.path.exists(_git_path(repo, DIRTY_MARKER)):
+            out(f'record: {repo} not fast-forwarded — working tree has local changes '
+                f'({ahead} ahead, {behind} behind; named once, until it is clean)')
+            _write(repo, DIRTY_MARKER, f'{ahead} ahead, {behind} behind\n')
         return False
+    _drop(repo, DIRTY_MARKER)
+    if ahead:
+        return _rebase_and_push(repo, trunk, ahead, out)
     merge = _sh(['git', 'merge', '-q', '--ff-only', f'origin/{trunk}'], cwd=repo, check=False)
     if merge.returncode != 0:
         detail = (merge.stderr or merge.stdout).strip().splitlines()
         out(f'record: {repo} not fast-forwarded — {detail[-1] if detail else "merge refused"}')
         return False
     return True
+
+
+#: In the record checkout's git dir: a record commit made there whose push was refused (written
+#: by :mod:`asf.record.publish`, the stranded commits listed); the sync that pushes them drops it.
+UNPUSHED_MARKER = 'asf-record-unpushed'
+#: In the record checkout's git dir: its dirty tree was named once; dropped once it is clean.
+DIRTY_MARKER = 'asf-record-dirty'
+
+
+def _git_path(repo, name):
+    return os.path.join(repo, '.git', name)
+
+
+def _write(repo, name, text):
+    try:
+        with open(_git_path(repo, name), 'w', encoding='utf-8') as f:
+            f.write(text)
+    except OSError:
+        pass  # a marker is a courtesy: the sync reads the drift itself every tick
+
+
+def _drop(repo, name):
+    try:
+        os.remove(_git_path(repo, name))
+    except OSError:
+        pass
+
+
+def _counts(repo, trunk):
+    """``(ahead, behind)`` of ``HEAD`` against ``origin/<trunk>`` as last fetched, or
+    ``(None, None)`` when git cannot tell."""
+    r = _sh(['git', 'rev-list', '--left-right', '--count', f'HEAD...origin/{trunk}'],  # client-exempt: the record sync's drift, beside this module's rebase
+            cwd=repo, check=False)
+    parts = r.stdout.split()
+    if r.returncode != 0 or len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None, None
+    return int(parts[0]), int(parts[1])
+
+
+def unpushed(repo):
+    """``<short sha> <subject>`` of every commit ``repo``'s ``HEAD`` holds that
+    ``origin/<trunk>`` (as last fetched) does not."""
+    trunk = _default_branch(repo)
+    r = _sh(['git', 'log', '--format=%h %s', f'origin/{trunk}..HEAD'],  # client-exempt: the record sync's drift
+            cwd=repo, check=False)
+    return r.stdout.strip().splitlines() if r.returncode == 0 else []
+
+
+def mark_unpushed(repo):
+    """After a refused record push in the checkout ``repo``: leave :data:`UNPUSHED_MARKER`
+    (the stranded commits) for the next tick's sync. The commits, as :func:`unpushed`."""
+    lines = unpushed(repo)
+    if lines:
+        _write(repo, UNPUSHED_MARKER, '\n'.join(lines) + '\n')
+    return lines
+
+
+def checkout_drift(product):
+    """``(ahead, behind)`` of the operator's record checkout against ``origin/<trunk>`` as the
+    last sync fetched it; None when there is no separate checkout or git cannot tell."""
+    repo = product.backlog_dir
+    if not repo or not os.path.isdir(os.path.join(repo, '.git')):
+        return None
+    if os.path.realpath(repo) == os.path.realpath(record_dir(product)):
+        return None
+    ahead, behind = _counts(repo, _default_branch(repo))
+    return None if ahead is None else (ahead, behind)
+
+
+def _rebase_and_push(repo, trunk, ahead, out):
+    """The checkout's ``ahead`` local commits rebased onto ``origin/<trunk>`` and pushed. An
+    ``index.json`` conflict is re-derived (:func:`_rederive_index`); any other aborts the rebase
+    and is named. True when the checkout moved."""
+    no_editor = dict(os.environ, GIT_EDITOR='true')
+    rebase = _sh(['git', 'rebase', '-q', f'origin/{trunk}'], cwd=repo, check=False,  # client-exempt: the record sync's rebase, as push's
+                 env=no_editor)
+    while rebase.returncode != 0:
+        conflicted = _sh(['git', 'diff', '--name-only', '--diff-filter=U'], cwd=repo,  # client-exempt: as above
+                         check=False).stdout.split()
+        if not _rederive_index(repo, conflicted):
+            _sh(['git', 'rebase', '--abort'], cwd=repo, check=False)  # client-exempt: as above
+            out(f'record: {repo} holds {ahead} unpushed commit(s) that conflict with '
+                f'origin/{trunk} on {", ".join(conflicted) or "a rebase step"} — left as it was')
+            return False
+        rebase = _sh(['git', 'rebase', '--continue'], cwd=repo, check=False,  # client-exempt: as above
+                     env=no_editor)
+    if not push(repo):
+        out(f'record: {repo} rebased onto origin/{trunk}, push refused — {ahead} commit(s) '
+            f'still unpushed; retried next tick')
+        return True
+    _drop(repo, UNPUSHED_MARKER)
+    out(f'record: pushed {ahead} stranded commit(s)')
+    return True
+
+
+def _rederive_index(repo, conflicted):
+    """Mid-rebase in the operator's checkout: when ``index.json`` is the only conflict, origin's
+    is taken and re-derived (``asf index``) over the tree being rebased, then staged. False for
+    any other conflict — the caller aborts."""
+    from asf.record.index import do_index
+    if conflicted != ['index.json']:
+        return False
+    if _sh(['git', 'checkout', '--ours', '--', 'index.json'], cwd=repo,  # client-exempt: as _rebase_and_push
+           check=False).returncode != 0:
+        return False
+    if do_index(repo) != 0:
+        return False
+    return _sh(['git', 'add', '-u'], cwd=repo, check=False).returncode == 0  # client-exempt: as _rebase_and_push
