@@ -172,6 +172,74 @@ class StoryNeedsEveryLineProved(RecordCase):
         self.assertEqual(self.snapshot(), before)
 
 
+class PartialClaimIsNotAProof(RecordCase):
+    """F-0257 D8/D9: a qualified (``only``/``partial``/``half``/…) ``Proves:`` claim is refused,
+    never counted — the Story's evidence says so, while the Story is Active, and ticks nothing."""
+
+    def fixture(self):
+        self.write('E-0001', 'epic')
+        self.write('F-0001', 'feature', parent='E-0001')
+        s = self.write('S-0001', 'story', parent='F-0001',
+                       body=story_body([(False, 'line one'), (False, 'line two')]))
+        self.write('T-0001', 'task', parent='F-0001', state='Closed',
+                   typed=('stories: [S-0001]',))
+        return s
+
+    def refused_entry(self):
+        return {'line': 2, 'test': 'tests/test_x.py', 'task': 'T-0001', 'pr': 7,
+                'sha': 'a' * 40, 'source': 'pr', 'why': 'partial claim: "only"'}
+
+    def ev(self):
+        return dict(EMPTY_EV, ci=True, ids=landed('T-0001'), proves={},
+                    proves_refused={'S-0001': [self.refused_entry()]})
+
+    def test_the_line_stays_unticked_with_no_history_entry(self):
+        s = self.fixture()
+        self.ingest(self.ev())
+        _meta, body = self.read(s)
+        self.assertNotIn(2, proves.proved_lines(body))
+        self.assertFalse(proves.is_ticked(body, 2))
+
+    def test_the_refusal_is_said_while_the_story_is_active(self):
+        s = self.fixture()
+        self.ingest(self.ev())
+        meta, _body = self.read(s)
+        self.assertEqual(meta['state'], 'Active')
+        self.assertIn('claim refused, line 2 not proved — partial claim: "only" — '
+                      'T-0001, PR #7 (tests/test_x.py)', meta['evidence'])
+
+    def test_unproved_of_gives_line_2_the_refusal_and_line_1_no_proof(self):
+        s = self.fixture()
+        _meta, body = self.read(s)
+        out = ingest.unproved_of('S-0001', {'body': body}, (), self.ev())
+        self.assertEqual([(n, why) for n, _t, why in out],
+                         [(1, 'no proof'), (2, 'partial claim: "only"')])
+        self.assertEqual(tuple(n for n, _t, _w in out), (1, 2))
+
+    def test_a_story_whose_only_claim_is_refused_does_not_close(self):
+        s = self.fixture()
+        self.ingest(self.ev())
+        self.assertNotEqual(self.state(s), 'Closed')
+        self.assertNotIn(self.state('features/F-0001.md'), ('Resolved', 'Closed'))
+
+    def test_the_same_claim_counted_instead_ticks_and_says_no_refusal(self):
+        s = self.fixture()
+        entry = dict(self.refused_entry())
+        del entry['why']
+        self.ingest(dict(EMPTY_EV, ci=True, ids=landed('T-0001'),
+                         proves={'S-0001': [entry]}))
+        meta, body = self.read(s)
+        self.assertIn(2, proves.proved_lines(body))
+        self.assertTrue(proves.is_ticked(body, 2))
+        self.assertFalse(any(l.startswith('claim refused') for l in meta['evidence']))
+
+    def test_no_proves_refused_key_reads_as_today(self):
+        s = self.fixture()
+        self.ingest(dict(EMPTY_EV, ci=True, ids=landed('T-0001')))
+        meta, _body = self.read(s)
+        self.assertFalse(any(l.startswith('claim refused') for l in meta['evidence']))
+
+
 class FeatureCountsItsStories(RecordCase):
     """2026-10-04 20:30: F-0106 stayed Resolved with S-1158 New — `children-resolved` counted
     the Feature's Tasks (3/3 Closed) and ignored its Stories."""
