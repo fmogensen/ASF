@@ -1,5 +1,7 @@
+import argparse
 import contextlib
 import datetime as dt
+import inspect
 import io
 import json
 import os
@@ -1360,46 +1362,6 @@ class TrunkReleases(Base):
         self.assertIn('no GitHub release for v0.1.0', err.getvalue())
 
 
-LOG = """23:50 MERGE: batch A → main abc1234
-00:05 tick-0100 start
-00:06 LAND: batch B worktree-m-batch-20260921-0006 cut from main (#11 #12 #13)
-00:07 WAVE 0005: 2 launches — accta 1; acctb 1; quota after: accta 12%/34%; acctb 5%/6%;
-00:08 REFUSED batch C on: apps/web/x.ts
-00:09 RELAUNCH: fix-a-r1 → fix-a-r2
-00:10 MERGE: batch B → main deadbee
-00:10 MERGE: #580 no service containers → main
-00:11 LAUNCH: fix-free-plan-t3-r1 on accta
-06:00 tick-0101 start
-06:03 WAVE 0600: nothing ready
-"""
-
-
-SAMPLE_LOG = """03:21 REFUSED-WRITE: session fix-spec-api-docs-r2: UNIQUE constraint failed: sessions.id
-03:21 WAVE 0308: 25 launches — accta 8; acctb 12; acctc 5;  quota after: acctc 7%/64%; accta 0%/34%; acctb 34%/27%; acctd 0%/68%;
-03:25 LAUNCH OK acctd launch-fix-eu-compliance-t7-gate-acctd: 1/1 running
-03:35 WAVE 0332: revise cap (3/wave) — published-limits waits
-03:35 WAVE 0332: revise cap (3/wave) — routine-heartbeat waits
-03:36 LAUNCH OK acctc launch-wave0332-acctc: 1/1 running
-03:37 LAUNCH OK acctd launch-wave0332-acctd: 2/2 running
-03:37 REFUSED-WRITE: I9: a working review session is already on cloud/azure-eu-routes
-03:40 LAUNCH OK acctb launch-wave0332-acctb: 9/9 running
-03:40 REFUSED-WRITE: I9: a working review session is already on cloud/vendorx-lane-docs
-03:41 REFUSED-WRITE: I9: a working fix session is already on cloud/plan-published-limits
-03:41 WAVE 0332: 12 launches — acctd 2; acctb 9; acctc 1;  quota after: acctc 11%/64%; accta 5%/35%; acctb 39%/28%; acctd 4%/69%;
-03:42 LAUNCH OK acctc launch-ci-16-site-deploy-acctc: 1/1 running
-03:47 LAUNCH OK acctc launch-rebase-allowance-v3-acctc: 1/1 running
-03:54 LAND: batch A0354 (683 680 679 677 676 675 674 673) REFUSED — merge-queue: refusing the batch — #674 conflicts with #673 on: .github/workflows/ci.yml
-03:55 LAND: batch A0354 (683 680 679 677 676 675 673) REFUSED — merge-queue: refusing the batch — #683 conflicts with the batch so far on: docs/superpowers/plans/2026-09-19-transparent-meter.md
-03:56 WAVE 0352: revise cap (3/wave) — starter-bots waits
-03:57 LAUNCH OK acctd launch-wave0352-acctd: 2/2 running
-03:57 REFUSED-WRITE: I9: a working review session is already on cloud/derived-register-t5
-04:02 LAUNCH OK accta launch-wave0352-accta: 11/11 running
-04:03 REFUSED-WRITE: I9: a working fix session is already on cloud/plan-published-limits
-04:04 REFUSED-WRITE: session fix-spec-api-docs-r2: UNIQUE constraint failed: sessions.id
-04:04 WAVE 0352: 25 launches — acctd 2; accta 11; acctb 12;  quota after: acctc 22%/65%; accta 10%/36%; acctb 49%/30%; acctd 7%/70%;
-"""
-
-
 class SessionEventTests(Base):
     RECORD = {'job': 'p2-t1', 'account': 'accta', 'started': '2026-09-21T06:00:00Z',
               'ended': '2026-09-21T06:10:00Z', 'end_reason': 'done'}
@@ -1427,70 +1389,6 @@ class SessionEventTests(Base):
 
 
 class Backfill(Base):
-    NOW = dt.datetime(2026, 9, 21, 6, 30).astimezone()
-
-    def recs(self):
-        return import_sessions.parse_log(LOG.splitlines(), now=self.NOW)
-
-    def test_log_days_are_inferred_from_the_clock_wrapping(self):
-        recs = self.recs()
-        self.assertEqual(recs[0][0].date().isoformat(), '2026-09-20')      # 23:50 came before midnight
-        self.assertEqual(recs[1][0].date().isoformat(), '2026-09-21')
-        self.assertEqual(recs[-1][0].strftime('%Y-%m-%d %H:%M'), '2026-09-21 06:03')
-        # a log whose last line is later than now ended yesterday
-        late = import_sessions.parse_log(['22:00 a', '23:00 b'], now=dt.datetime(2026, 9, 21, 6, 30).astimezone())
-        self.assertEqual(late[-1][0].date().isoformat(), '2026-09-20')
-
-    def test_batch_pr_lists_come_from_the_cut_lines(self):
-        self.assertEqual(import_sessions.batch_prs_from_log(self.recs()), {'worktree-m-batch-20260921-0006': [11, 12, 13]})
-
-    def test_ticks_from_the_log(self):
-        ticks = import_sessions.ticks_from_log(self.recs())
-        self.assertEqual([t['tick'] for t in ticks], [5, 600])
-        t = ticks[0]
-        self.assertEqual((t['launches'], t['merges'], t['refusals'], t['relaunches'], t['stalls']), (2, 4, 1, 1, 0))
-        self.assertEqual(t['refused_files'], {'apps/web/x.ts': 1})
-        self.assertEqual(t['quota'], {'accta': {'h5': 12, 'd7': 34}, 'acctb': {'h5': 5, 'd7': 6}})
-        self.assertEqual(t['duration_s'], 360)
-        self.assertEqual(ticks[1]['launches'], 0)
-        for ev in ticks:
-            metrics.validate('ticks', ev, self.items)
-
-    def test_one_tick_per_wave_on_the_real_log_shapes(self):
-        lines = SAMPLE_LOG.splitlines()
-        recs = import_sessions.parse_log(lines, now=dt.datetime(2026, 9, 21, 4, 30).astimezone())
-        ticks = import_sessions.ticks_from_log(recs)
-        self.assertEqual(len([l for l in lines if re.search(r'WAVE \d{4}: \d+ launches', l)]), 3)
-        self.assertEqual([t['tick'] for t in ticks], [308, 332, 352])
-        by = {t['tick']: t for t in ticks}
-        self.assertEqual((by[308]['launches'], by[332]['launches'], by[352]['launches']), (25, 12, 25))
-        # 03:21 is 13 min from 0308 and 11 from 0332: neither window takes it
-        self.assertEqual(by[308]['refusals'], 0)
-        self.assertEqual(by[332]['refusals'], 0)            # REFUSED-WRITE is a store write, not a refusal
-        self.assertEqual(by[352]['refusals'], 2)            # the two 03:54/03:55 batch refusals
-        self.assertEqual(by[352]['refused_files'], {'.github/workflows/ci.yml': 1,
-                                                     'docs/superpowers/plans/2026-09-19-transparent-meter.md': 1})
-        self.assertEqual(by[332]['quota']['acctb'], {'h5': 39, 'd7': 28})
-        self.assertEqual(by[352]['quota']['acctc'], {'h5': 22, 'd7': 65})
-        for ev in ticks:
-            metrics.validate('ticks', ev, self.items)
-
-    def test_stalls_and_windows(self):
-        lines = ['01:06 TICK: tick-0038 job hung since 00:40 (no log writes) — killed; tick-0106 spawned',
-                 '01:07 RELAUNCH: fix-a-r1 → fix-a-r2', '01:08 WAVE 0100: 3 launches — accta 3; ',
-                 '01:20 RELAUNCH: fix-b-r1 → fix-b-r2', '01:21 WAVE 0120: nothing ready']
-        ticks = {t['tick']: t for t in import_sessions.ticks_from_log(
-            import_sessions.parse_log(lines, now=dt.datetime(2026, 9, 21, 2, 0).astimezone()))}
-        self.assertEqual((ticks[100]['stalls'], ticks[100]['relaunches'], ticks[100]['launches']), (1, 1, 3))
-        self.assertEqual((ticks[120]['stalls'], ticks[120]['relaunches'], ticks[120]['launches']), (0, 1, 0))
-
-    def test_backfill_ticks_are_idempotent_on_tick(self):
-        recs = import_sessions.parse_log(SAMPLE_LOG.splitlines(), now=dt.datetime(2026, 9, 21, 4, 30).astimezone())
-        for _ in range(2):
-            for ev in import_sessions.ticks_from_log(recs):
-                metrics.append_event(self.root, 'ticks', metrics.validate('ticks', ev, self.items))
-        self.assertEqual(len(metrics.read_stream(self.root, 'ticks')), 3)
-
     def write_results(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
@@ -1567,40 +1465,31 @@ class Backfill(Base):
 
     def test_import_sessions_reads_a_legacy_results_file(self):
         d, res = self.write_results()
-        log = os.path.join(d, 'runner.log')
-        with open(log, 'w') as f:
-            f.write(LOG)
-        counts = import_sessions.import_file(self.root, res, 'legacy-results', log=log,
-                                             launch_dir=d, since_day='2026-09-20',
-                                             now=self.NOW)
+        counts = import_sessions.import_file(self.root, res, 'legacy-results',
+                                             launch_dir=d, since_day='2026-09-20')
         self.assertEqual(counts['sessions appended'], 1)
         ev = json.loads(self.read('metrics/sessions/2026-09-21.jsonl').strip())
         self.assertEqual((ev['task'], ev['result'], ev['model'], ev['item']),
                          ('fix-free-plan-t3-r1', 'done', 'claude-sonnet-5', 'T-0001'))
         # a second import of the same file changes nothing
-        again = import_sessions.import_file(self.root, res, 'legacy-results', log=log,
-                                            launch_dir=d, since_day='2026-09-20', now=self.NOW)
+        again = import_sessions.import_file(self.root, res, 'legacy-results',
+                                            launch_dir=d, since_day='2026-09-20')
         self.assertEqual(again['sessions exists'], 1)
-
-    def test_import_sessions_reads_a_legacy_runner_log(self):
-        d, _res = self.write_results()
-        log = os.path.join(d, 'runner.log')
-        with open(log, 'w') as f:
-            f.write(LOG)
-        counts = import_sessions.import_file(self.root, log, 'legacy-log', since_day='2026-09-20',
-                                             now=self.NOW)
-        self.assertEqual(counts['ticks appended'], 2)
 
     def test_sessions_from_results(self):
         d, res = self.write_results()
-        recs = self.recs()
-        evs = import_sessions.sessions_from_results(res, d, recs, self.items, '2026-09-20')
+        start = dt.datetime(2026, 9, 21, 4, 16).astimezone()
+        brief = os.path.join(d, 'accta', 'brief-fix-free-plan-t3-r1.md')
+        with open(brief, 'w') as f:
+            f.write('x')
+        os.utime(brief, (start.timestamp(), start.timestamp()))
+        evs = import_sessions.sessions_from_results(res, d, self.items, '2026-09-20')
         self.assertEqual(len(evs), 1)                       # last line per task wins; the January one is out of the window
         ev = evs[0]
         self.assertEqual((ev['task'], ev['result'], ev['model'], ev['ts']),
                          ('fix-free-plan-t3-r1', 'done', 'claude-sonnet-5', '2026-09-21T04:20:00Z'))
         self.assertEqual(ev['minutes'], round((dt.datetime(2026, 9, 21, 4, 20, tzinfo=dt.timezone.utc)
-                                               - recs[-3][0]).total_seconds() / 60, 1))
+                                               - start).total_seconds() / 60, 1))
         out = metrics.validate('sessions', ev, self.items)
         self.assertEqual((out['kind'], out['round'], out['item']), ('fix', 1, 'T-0001'))
 
@@ -1670,6 +1559,52 @@ class Backfill(Base):
         self.assertEqual((batch['batch'], batch['cancelled_minutes'], batch['items'], batch['item_reason']),
                          ('worktree-m-batch-20260921-0006', 3, None, 'batch run without a PR list'))
         self.assertFalse(batch['superseded'])           # no later run on that branch
+
+
+class ImportSessionsSurfaceTests(unittest.TestCase):
+    """What survives T-0336: the legacy log parser and its `--format legacy-log` are gone, and
+    `legacy-results` (the only format left) no longer needs a runner log to find start times."""
+
+    def test_the_parser_names_are_gone(self):
+        gone = [n for n in ('parse_log', 'ticks_from_log', 'wave_centres', 'batch_prs_from_log',
+                            'LOG_LINE', 'CUT_LINE', 'WAVE_ID', 'WAVE_LINE', 'QUOTA', 'TICK_WINDOW',
+                            'STALL_LINE') if hasattr(import_sessions, n)]
+        self.assertEqual(gone, [])
+
+    def test_legacy_log_is_not_a_format(self):
+        self.assertNotIn('legacy-log', import_sessions.FORMATS)
+        self.assertIn('legacy-results', import_sessions.FORMATS)
+
+    def test_import_file_has_no_log_argument_or_branch(self):
+        params = inspect.signature(import_sessions.import_file).parameters
+        self.assertNotIn('log', params)
+        with self.assertRaises(ValueError):
+            import_sessions.import_file(tempfile.mkdtemp(), __file__, 'legacy-log')
+
+    def test_the_cli_has_no_log_flag(self):
+        p = argparse.ArgumentParser()
+        import_sessions.register(p.add_subparsers(dest='command', required=True))
+        with self.assertRaises(SystemExit):
+            p.parse_args(['import-sessions', '--file', 'x', '--log', 'y'])
+
+    def test_sessions_from_results_takes_no_recs_argument(self):
+        self.assertNotIn('recs', inspect.signature(import_sessions.sessions_from_results).parameters)
+
+    def test_the_module_docstring_has_no_legacy_log_section(self):
+        self.assertNotIn('legacy-log', import_sessions.__doc__)
+        self.assertIn('legacy-results', import_sessions.__doc__)
+
+    def test_legacy_results_still_imports_a_results_file(self):
+        self.assertTrue(callable(import_sessions.launch_ledger))
+        self.assertTrue(callable(import_sessions.sessions_from_results))
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        res = os.path.join(root, 'results.jsonl')
+        with open(res, 'w') as f:
+            f.write(json.dumps({'task': 't', 'account': 'a', 'result': 'done',
+                                'ended_at': '2026-09-21T00:00:00Z'}) + '\n')
+        evs = import_sessions.sessions_from_results(res, None, {}, '2026-09-20')
+        self.assertEqual([ev['task'] for ev in evs], ['t'])
 
 
 class CollectingPass(Base):
