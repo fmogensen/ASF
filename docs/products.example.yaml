@@ -392,6 +392,24 @@ ci:
     - {runner: ci-1,  box: box-1, provider: alpha, size: 8c-16g, role: heavy, slots: 1}
     - {runner: ci-1b, box: box-1, provider: alpha, size: 8c-16g, role: light}
     - {runner: ci-2,  box: box-2, provider: beta,  size: 8c-24g, role: heavy}
+  # pool: discover — the other form (docs/guide/ci-runner-pool.md#the-census-and-the-tier). The
+  # list above and `discover` are the two forms a product may choose, never both. Discovery reads
+  # the host's own registered runners into a census that the tick refreshes every pass, so a
+  # newly registered runner is placed within one tick with no product file edited. A runner's
+  # tier — `asf-fast` or `asf-bulk` — is placed from its measured speed and never declared: a
+  # `role` or a `class` in ASF's own `asf-` namespace is refused, same as above. The host reports
+  # no machine for a runner, so a discovered entry's `box`, `provider` and `size` are all empty —
+  # `ci.reserve`'s `spread_by: box` has no effect on a discovered pool (it degrades to
+  # `spread_by: none`). The slot sum is still this product's CI ceiling unless capacity.ci below
+  # sets one.
+  # pool: discover
+  # reserve: keep a few runners free for the trunk while PR runs fill the rest
+  # (docs/guide/ci-runner-pool.md#reserving-runners-for-the-trunk-cireserve). `of` and `keep_free`
+  # are required; `label` is optional and defaults to `asf-pr-<of>` with a leading `asf-` stripped
+  # from `of` — `of: asf-fast` gives `asf-pr-fast`, `of: heavy` gives `asf-pr-heavy`. A
+  # hand-written label in ASF's own `asf-` namespace other than that default is refused; one
+  # outside it is still accepted.
+  # reserve: {of: heavy, keep_free: 3, spread_by: box, prefer: fast-heavy}
 
 # capacity: this product's share of the factory. Each is a ceiling, capped in turn by
 # config.yaml's capacity.total and by what worker_pool.accounts can host.
@@ -401,9 +419,12 @@ capacity:
                       # flight (PR and trunk runs start regardless); overrides the ci.pool slot sum
   weight: 1           # share of the worker pool against other active products (default 1); 3 = three times asf's
   batch:              # passed to a batch step as ASF_CAPACITY_*; harvest's PR merges obey it too
-    per_run: 8        # batches per run (harvest: PR merges per run)
+    per_run: 8        # batches per run (harvest: PR merges per run); never measured
     parallel: 2       # batches in flight at once (harvest: PRs in a GitHub merge queue)
     runners: 4        # runner slots one run may claim
+    # declaring neither `parallel` nor `runners` gets both measured — off the census and the
+    # run's own expected jobs per class; declaring either one leaves both alone, since the pair
+    # is one shape and an operator's hand-set other was never chosen together with a measured one.
 
 # token_caps: runaway ceilings on one run's tokens, per dimension, never summed. `default` applies
 # to every job kind; a kind (spec, review, fix, code, plan, ...) narrows or widens single dimensions.

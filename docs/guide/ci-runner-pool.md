@@ -62,6 +62,72 @@ ceiling it sets is this product's. Two products that share one organisation's ru
 declare the runners they route to; the doctor of each names a runner the other declares as
 `undeclared`, which is informational.
 
+## The census and the tier
+
+`ci.pool: discover` is the pool's other form. Instead of naming runners, the product asks ASF to
+read them off the host:
+
+```yaml
+ci:
+  provider: github-actions
+  pool: discover
+```
+
+The effective pool is then every runner the CI host reports, one entry per runner, read out of a
+**census** — `<state dir>/ci-census.json` — that the tick refreshes every pass. `load_pool` itself
+never calls the host: it only ever reads the last census taken, so every existing reader of the
+pool (`asf doctor`, `asf capacity`, the CI start queue) keeps working exactly as it does today,
+with no network call added behind any of them. The host reports no machine for a runner, so a
+discovered entry's `box`, `provider` and `size` are all empty; `ci.reserve`'s `spread_by: box` has
+no effect on a discovered pool and degrades to `spread_by: none`. The slot sum is still this
+product's CI ceiling unless `capacity.ci` sets one — discovery costs `capacity.py` no change.
+
+A runner's **tier** — `asf-fast` or `asf-bulk` — *is* its routing label, placed rather than typed:
+a job's `runs-on` asks for a tier exactly the way it asks for a declared role, so a reader who
+already understands a role already understands a tier. `ci.pool[].role` and `ci.pool[].class` may
+not name either one — `asf-` is ASF's own namespace, and a product file that tries is refused at
+load, same as a declared pool's.
+
+The placement:
+
+- **Promote** to `asf-fast` at or below `PROMOTE_AT` (`1.25`, `ci_census.py:28`) — the runner's
+  ratio against the fleet's best, over the job kinds it has run.
+- **Demote** to `asf-bulk` at or above `DEMOTE_AT` (`1.60`, same line).
+- **Between the two, the tier holds whichever one the runner already carried.** This band is the
+  whole difference between a placement and a flap: without it, a box sitting near one threshold
+  would change tier on almost every tick, and every change is a label write, a trial and a log
+  line.
+- **Fewer than `MIN_READINGS` (`5`, `ci_measure.py:32`) green readings:** the runner is
+  provisionally `asf-bulk`. It has to be given work before it can be measured, and a wrong guess
+  in the bulk tier costs a slower suite, never a red timing gate.
+- **The floor:** if the placement above leaves no runner `asf-fast`, the best-ratio online runner
+  is promoted anyway, whatever its ratio, with one line saying the tier was floored. An empty fast
+  tier makes every `runs-on` that asks for it unsatisfiable — the jobs queue forever — which is
+  worse than one job landing on the fleet's slowest box.
+
+A promotion to `asf-fast` is judged before it is trusted: it goes through the same one-job trial a
+newly-enabled role gets ([below](#asf-ci-reconcile)) — the next job that runner runs decides, kept
+on green, rolled back with a Bug on red.
+
+`asf ci census --product <p>` prints the census, every runner's score and the tier moves it would
+make; `--apply` takes one and writes exactly the tier labels that moved on each runner — nothing
+else. The tick does the same on every pass, so a runner registered a minute ago is in the pool and
+carrying a tier at the next tick, with no product file edited.
+
+**The doctor's rows**, advisory, off the stream and the census file — no host call:
+
+| row | what it means |
+|---|---|
+| `ci census: no census yet — the next tick takes one` | discovery is on but the tick has not run yet |
+| `ci census: <n> runners — asf-fast <a>, asf-bulk <b> (taken <n> min ago)` | the current split; turns amber once the census is over an hour old |
+| `ci census: ci.reserve spread_by: box has no effect on a discovered pool — the host reports no machine (spread_by: none)` | a reservation declared `spread_by: box` over a discovered pool |
+| `ci measure: <runner> runs <kind> at <n>s, <ratio>× the fleet best (<n> green readings, 14 d) — asf-bulk` | a slow runner, named before its own demotion catches up with it |
+| `ci measure: <runner> green <rate> over <n> readings — flaky, never asf-fast` | a runner failing more than `1 - MIN_GREEN_RATE` (`0.85`, `ci_measure.py:34`) of its readings over at least `MIN_READINGS` of them |
+
+Every one of these is advisory: the point is that a slow or flaky box surfaces on its own, before
+anything turns a gate red, and the demotion it earns is already the action nothing can outrun
+faster.
+
 ## The doctor's `ci pool` rows
 
 `asf doctor --product <p>` reads the host (read-only) when the product declares a pool — and makes
@@ -349,6 +415,42 @@ before trusting it. The mode is read from the product file at each ask, so a swi
 `asf ci queue --product <p>` prints the line with each entry's expected jobs
 and what would start now, writing nothing. A product with no `ci.pool`, or `mode: off`, is not
 queued: every start goes at once as before, and the queue makes no `gh` call.
+
+## Reading a baseline from a product's own guard
+
+A job that quietly grows past its usual time is worth catching before it becomes a timing gate's
+problem. `asf ci baseline` gives a product's own guard the one number to compare a run against:
+
+```
+asf ci baseline --product <p> --job <kind> --runner <name>
+asf ci baseline --product <p> --job <kind> --runner <name> --json
+```
+
+`<kind>` is the job's name with any trailing matrix suffix stripped (`test (3.12)` → `test`) — the
+same grouping the measure itself uses, so the kind a guard asks for is the kind the doctor's own
+rows name. Plain, it prints one number on stdout: the seconds a green run of that job usually
+takes on that runner — the runner's own measured p50, or, when it has too few readings, its
+**tier's** p50 across the runners that carry it. (A fleet-wide number that no single box actually
+reaches is exactly the fixed constant this measure replaces; the tier is the coarsest grouping
+that still means something, because it is the one defined by measured speed.) `--json` prints
+`{"seconds", "n", "from"}`, where `from` is `"runner"` or `"tier"`, so a caller can tell which one
+it got. A job kind with a reading on **neither** the runner nor its tier **exits 1, printing
+nothing** — a guard that cannot get a baseline is meant to skip its check, not invent one to
+compare against.
+
+`asf doctor` runs the same comparison itself, advisory, as one row per regression:
+
+`ci baseline: <kind> on <runner> last ran <n>s against its <n>s baseline (<ratio>×) — <n> green readings`
+
+— a green reading that has grown to 1.5× (`REGRESSION_FACTOR`, `ci_measure.py:36`) or more of its
+baseline, named well before anything turns the job's own gate red.
+
+**What this does not do.** ASF does not read a box's cores, memory or disk. Every consumer that
+wants to know "how fast is this box" — the tier above, the pace, a guard's own baseline — wants
+exactly one thing: how long this box takes on this job kind, and that is measured directly from
+readings the factory already keeps. Reading hardware instead would need a credentialed login to
+every CI box, which this product does not have and has not asked for, in exchange for a signal
+that is a strictly worse proxy for the same question.
 
 ## Moving an existing product over
 
