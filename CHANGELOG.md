@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.211 — 2026-10-07
+
+### Bugs fixed
+
+- A cloud (claude-remote) run whose remote status is running with a fresh event is no longer killed as "stalled: no beat", and its brief no longer asks for a background heartbeat loop (#928)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.211"`
+
 ## v0.1.210 — 2026-10-07
 
 ### Features landed
