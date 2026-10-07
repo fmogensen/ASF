@@ -183,6 +183,10 @@ CULPRITS_FILE = 'merge-queue-culprits.json'
 #: operator, a superseding workflow, a timeout the host turned into one), a check the host gave
 #: up on (``timed_out``/``stale``), a workflow that never started its jobs. Never red, never green.
 NONVERDICT = ('cancelled', 'timed_out', 'stale', 'startup_failure')
+#: the lane states an `asf land` request on a lane-held branch may be cut in: the review's
+#: verdict is in (the gate's states) or the branch is queued already. PR_OPEN, REVIEW, BACK and
+#: PUSHED wait — their head is still to move (F-0287)
+VERDICT_STATES = lane_mod.GATE_STATES + (lane_mod.QUEUED,)
 #: the claims (:func:`asf.ci_queue.claim_cancel`, ``ci-cancels.json``) of a batch's non-verdict:
 #: the one re-run per (batch sha, job), a re-run the host refused, and the re-cut that follows a
 #: second one — the ALARM the doctor's ``queue cancels`` row reads
@@ -977,6 +981,13 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     withdrawn = getattr(lane, 'mq_withdrawn', None) or {}
     for f in members:
         rec = f.get('prev') or {}
+        now_head = heads.get(f['branch'])
+        if now_head and now_head != f['head'] and lane_mod.marker_move(lane.repo, f['head'],
+                                                                       now_head):
+            # a report commit on the member: the tree the batch tested is the one it lands —
+            # the member's head advances, the batch stands (F-0287)
+            _advance_member(lane, batch, f, now_head)
+            rec = f.get('prev') or {}
         if heads.get(f['branch']) != f['head']:
             moved.append((f, 'head moved'))
         elif f['branch'] in drafts:   # whoever queued it: its owner parked it
@@ -1137,6 +1148,24 @@ def _ci_queue_holds(lane, ref):
     return any(isinstance(r, dict) and r.get('branch') == ref for r in relief)
 
 
+def _advance_member(lane, batch, f, head):
+    """Move batch member ``f``'s head to ``head`` (a marker-only move, :func:`asf.harvest.lane.
+    marker_move`) in the batch record and, for a lane-held member still QUEUED on this batch, on
+    its lane record — so neither this judge nor the lane's own moved-head rule (R4) drops it."""
+    old = f['head']
+    for m in batch['members']:
+        if m['branch'] == f['branch']:
+            m['head'] = head
+    f['head'] = head
+    lane.out(f"merge queue: {f['branch']} head {old[:9]} → {head[:9]} in batch {batch['ref']} — "
+             f"a report commit, same tree: the batch stands")
+    rec = f.get('prev') or {}
+    if rec.get('state') == lane_mod.QUEUED and rec.get('batch') == batch['ref'] \
+            and f.get('run') is not None:
+        lane.set(f, lane_mod.QUEUED, rec.get('reason') or f"batch {batch['ref']}",
+                 batch=batch['ref'], sha=rec.get('sha'), green=rec.get('green'))
+
+
 def _runner_lost(lane, runs, required, why):
     """``(runs, job ids, names)`` when every red required check of ``why`` is a job lost with
     its runner (:func:`asf.flake.infra_red`: its failure annotations all name runner loss) or a
@@ -1149,10 +1178,11 @@ def _runner_lost(lane, runs, required, why):
         return None
     red = {n.split(' ', 1)[0] for n in (why or '').split(', ') if n}
     skipped = _skipped(why)
-    lost, jobs = set(), []
+    lost, jobs, read = set(), [], {}
     for c in failed:
-        job = flake._ids(c.get('link'))[1]
-        if not job or not flake.infra_red(lane.slug, job, H._gh):
+        rid, job = flake._ids(c.get('link'))
+        if not job or not (flake.infra_red(lane.slug, job, H._gh)
+                           or _lost_runner(lane, rid, job, read)):
             return None
         lost.add(c.get('name'))
         jobs.append(job)
@@ -1165,6 +1195,18 @@ def _runner_lost(lane, runs, required, why):
                                            and deploy.job_key(r.get('name')) in required)
               else r for r in runs]
     return marked, sorted(set(jobs)), sorted(lost)
+
+
+def _lost_runner(lane, rid, job, read):
+    """True when job ``job`` of workflow run ``rid`` failed without ever running on a runner
+    (:func:`asf.flake.classify_red`'s lost runner: no runner named, no failed step) — the jobs
+    of one run read once per pass through ``read``."""
+    if not rid:
+        return False
+    if rid not in read:
+        read[rid] = flake.run_jobs(lane.slug, rid, H._gh)[1] or []
+    got = [j for j in read[rid] if str(j.get('id')) == str(job)]
+    return bool(got) and got[0].get('conclusion') == 'failure' and flake._lost_job(got[0])
 
 
 def _job_id(r):
@@ -2556,10 +2598,13 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
     # every change is collected here and applied once, at the end, on the file as it is then
     # (flags.queue_store): a request `asf land` adds while this loop waits on the host survives
     out, changes = [], []
+    lane_runs = lifecycle.by_branch(lane.path) if reqs else {}
     for key, r in ordered_requests(reqs):
         b, n = r['branch'], r['pr']
         if b in taken:
             continue
+        run = lane_runs.get(b)
+        held = lifecycle.lane_of(run).get('state')
         head = heads.get(b)
         if not head:
             got = H.gh_json(['pr', 'view', str(n), '-R', lane.slug, '--json', 'state'], None)
@@ -2579,6 +2624,13 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             continue
         if b in (getattr(lane, 'mq_drafts', None) or ()):
             lane.out(f'merge queue: asf land PR #{n} is a draft — waits until it is ready')
+            continue
+        if held and held not in VERDICT_STATES:
+            # a branch the lane holds is cut only once its verdict is in (F-0287): a PR still
+            # under review, or back with a session, moves its head again — the batch cut on it
+            # would be dropped for that move, its CI run spent on a head that never lands
+            lane.out(f'merge queue: asf land PR #{n} waits — {b} is {held} in the lane; a batch '
+                     f'is cut only after its verdict')
             continue
         red = r.get('red') or {}
         if red.get('head') == head and not (red.get('kind') == 'checks'
@@ -2606,6 +2658,13 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             # the head's CI is done and never ran these (a path filter, a matrix the filter
             # skipped under its unexpanded name): the batch run judges them
             state, why = 'green', ''
+        if state == 'pending' and lane.conv.branch_kind(b) and run is not None \
+                and held != lane_mod.BACK and conflicts_with_trunk(lane, n):
+            # a factory branch the host reads CONFLICTING gets no CI either: the lane's own
+            # conflict correction sends it to its rebuild (a rebase on the trunk), never a wait
+            # on checks that will not start (F-0284)
+            _conflict_back(lane, b, n, head, run)
+            continue
         if state == 'pending' and not lane.conv.branch_kind(b) and conflicts_with_trunk(lane, n):
             # GitHub starts no pull_request CI on a PR that conflicts with the trunk: its checks
             # never arrive, and waiting for them would be silent for good. A factory branch is
@@ -2641,6 +2700,8 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                 if r.pop('red', None) is not None:
                     changes.append(('unred', key))
                 continue
+            if _land_infra(lane, n, head, failed, required):
+                continue
             lost = failed and all(
                 flake.infra_red(lane.slug, flake._ids(c['link'])[1], H._gh) for c in failed)
             defects, held = ([], [])
@@ -2662,6 +2723,10 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             changes.append(('red', key, r['red']))
             continue
         if state != 'green':
+            waiting = [c for c in runs if c.get('status') != 'completed']
+            if waiting and not any(c.get('status') == 'in_progress' for c in waiting) \
+                    and _land_infra(lane, n, head, waiting, required, probe=True):
+                continue    # a phantom run: its jobs queued under a run that already failed
             lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — {why}')
             continue
         if earned:  # this head's green is the next identical tree's too (B-0275)
@@ -2683,6 +2748,48 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
                     reqs.pop(change[1], None)
             save_requests(lane.state_dir, reqs)
     return out
+
+
+def _land_infra(lane, n, head, checks, required, probe=False):
+    """True when ``checks`` of `asf land` PR ``n`` at ``head`` are one infra red
+    (:func:`asf.flake.infra_class`: a phantom run or a lost runner) and the queue answered it —
+    re-run once on the head, or a watchdog breach on the second — with one line, never a red
+    request. ``probe``: a pending head, read at most once per probe interval. False otherwise
+    (a refused re-run included): the request is judged as before."""
+    try:
+        infra = flake.infra_class(lane.slug, checks, required, gh=H._gh,
+                                  state_dir=lane.state_dir if probe else None)
+    except Exception:   # noqa: BLE001 — unreadable: judged as before
+        return False
+    if not infra:
+        return False
+    cls, rid, attempt = infra
+    got = flake.infra_rerun(lane.state_dir, lane.slug, head, rid, cls, where=f'asf land #{n}',
+                            out=lane.out, gh=H._gh, attempt=attempt)
+    if got == 'refused':
+        return False
+    said = {'rerun': 're-run queued', 'held': 're-run queued, awaiting it',
+            'breach': 'watchdog breach — re-run once already, not again'}
+    lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — infra red ({cls}): '
+             f'{said.get(got, got)}')
+    return True
+
+
+def _conflict_back(lane, b, n, head, run):
+    """Send factory branch ``b`` (PR ``n`` at ``head``, its lane run ``run``), which the host
+    reads ``mergeable: CONFLICTING``, BACK with the lane's own ``kind=conflict`` correction
+    (:meth:`asf.harvest.lane.Lane.enter_back`): the files the merge names, else the host-only
+    dirty read (#44). Its rebuild rebases it on the trunk; the request stays and is judged
+    again on the new head."""
+    rec = lifecycle.lane_of(run)
+    files = lane_mod.conflict_files(lane.repo, lane.trunk, b, fetch=False)
+    f = {'branch': b, 'item': rec.get('item') or (run or {}).get('item'),
+         'kind': lane.conv.branch_kind(b), 'head': head, 'run': run, 'prev': rec or None,
+         'pr': {'number': n, 'state': 'OPEN'}, 'conflict': files, 'host_dirty': not files,
+         'correction': None}
+    lane.out(f'merge queue: asf land PR #{n} conflicts with {lane.trunk} at {head[:12]} — '
+             f'back to the lane for a rebase')
+    lane.enter_back(f, 'kind=conflict')
 
 
 def _land_red_seen(lane, n, head, trunk_sha, failed, required):

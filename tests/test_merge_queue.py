@@ -1379,3 +1379,193 @@ class NoVerdict(QueueRepo):
             self.queue_pass(self.lane(), [])
             self.assertEqual(self.heads()['main'], batch['base'])
         self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.QUEUED)
+
+
+class ABatchIsCutOnlyAfterTheVerdict(QueueRepo):
+    """F-0287 / F-0284 — an `asf land` request on a lane-held branch is cut only once the lane's
+    verdict is in (GATE, its waits, QUEUED); a report commit on a batched member advances its
+    head instead of dropping the batch; a factory PR the host reads CONFLICTING goes BACK to the
+    lane's conflict correction (a rebase), never an endless wait for checks that cannot start."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat(T-0009): y')
+        self.head = self.heads()['worker/T-0009']
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        # the trunk moved past the head: a cut is a batch, not one tested tree landing as is
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+
+    def held(self, state):
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps({'job': 'coder-t-0009', 'item': 'T-0009', 'kind': 'coder',
+                                 'branch': 'worker/T-0009', 'pid': 1,
+                                 'started': '2026-09-21T00:00:00Z',
+                                 'ended': '2026-09-21T00:05:00Z', 'end_reason': 'finished',
+                                 'lane': {'state': state, 'head': self.head, 'pr': 9,
+                                          'item': 'T-0009', 'at': '2026-09-21T00:06:00Z',
+                                          'reason': ''}}) + '\n')
+
+    def test_a_branch_under_review_waits_and_is_cut_once_gated(self):
+        self.green(self.head)
+        for state in (lane.PR_OPEN, lane.REVIEW, lane.BACK, lane.PUSHED):
+            self.held(state)
+            self.queue_pass(self.lane(), [])
+            self.assertEqual(self.batches(), [], state)
+            self.assertTrue(any(f'worker/T-0009 is {state} in the lane' in l
+                                for l in self.lines), self.lines)
+        self.held(lane.GATE)
+        self.queue_pass(self.lane(), [])
+        (batch,) = self.batches()
+        self.assertEqual([m['branch'] for m in batch['members']], ['worker/T-0009'])
+
+    def test_a_branch_the_lane_does_not_hold_is_cut_as_before(self):
+        self.green(self.head)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.batches()), 1)
+
+    def test_a_conflicting_gated_factory_pr_goes_back_for_a_rebase(self):
+        self.held(lane.GATE)
+        self.gh.mergeable[9] = 'CONFLICTING'
+        self.gh.checks[self.head] = [check_run('gate', None, 'queued')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])
+        self.assertEqual([(b, k) for b, k, _t, _f in self.backs], [('worker/T-0009', 'conflict')])
+        self.assertTrue(any('PR #9 conflicts with main' in l and 'rebase' in l
+                            for l in self.lines), self.lines)
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['9'])
+
+    def test_a_conflicting_pr_already_back_is_not_sent_again(self):
+        self.held(lane.BACK)
+        self.gh.mergeable[9] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+
+    def report_commit(self, branch, item):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', branch, f'origin/{branch}'], cwd=self.worker)
+        sh(['git', 'commit', '-q', '--allow-empty', '-m',
+            f'asf({item}): report coder-{item.lower()}'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', branch], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return self.heads()[branch]
+
+    def test_a_report_commit_on_a_batched_member_advances_its_head(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        (batch,) = self.batches()
+        new = self.report_commit('worker/T-0001', 'T-0001')
+        self.green(batch['sha'])
+        self.gh.pr_state = {1: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], batch['sha'])
+        self.assertFalse(any('head moved' in l for l in self.lines), self.lines)
+        self.assertTrue(any('a report commit, same tree' in l for l in self.lines), self.lines)
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.MERGED)
+        self.assertNotEqual(new, batch['members'][0]['head'])
+
+    def test_a_marker_move_keeps_a_batched_member_queued_in_the_lane(self):
+        prev = rec(lane.QUEUED, batch='batch/x')
+        self.assertEqual(lane.next_state(prev, facts(head='b' * 40, marker_move=True))[0],
+                         lane.QUEUED)
+        self.assertEqual(lane.next_state(prev, facts(head='b' * 40))[0], lane.PUSHED)
+        self.assertEqual(lane.next_state(rec(lane.REVIEW), facts(head='b' * 40,
+                                                                 marker_move=True))[0],
+                         lane.PUSHED)
+
+    def test_marker_move_is_false_for_a_commit_with_work(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat: a')
+        old = self.heads()['worker/T-0001']
+        marker = self.report_commit('worker/T-0001', 'T-0001')
+        self.assertTrue(lane.marker_move(self.repo, old, marker))
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a2\n'}, 'feat: a2', new=False)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        work = self.heads()['worker/T-0001']
+        self.assertFalse(lane.marker_move(self.repo, old, work))
+        self.assertFalse(lane.marker_move(self.repo, old, old))
+
+
+class RunGH(FakeGH):
+    """FakeGH plus workflow runs and their jobs, and the re-runs asked of the host."""
+
+    def __init__(self):
+        super().__init__()
+        self.wf_runs, self.wf_jobs = {}, {}
+
+    def __call__(self, args):
+        if args[:2] == ['run', 'rerun']:
+            self.calls.append(list(args))
+            return 0, '', ''
+        if args[0] == 'api' and '/actions/runs/' in args[1]:
+            rid = args[1].split('/actions/runs/')[1].split('/')[0].split('?')[0]
+            if args[1].split('?')[0].endswith('/jobs') and rid in self.wf_jobs:
+                self.calls.append(list(args))
+                return 0, json.dumps({'jobs': self.wf_jobs[rid]}), ''
+            if rid in self.wf_runs and '/jobs' not in args[1]:
+                self.calls.append(list(args))
+                return 0, json.dumps(self.wf_runs[rid]), ''
+        return super().__call__(args)
+
+
+class AnInfraRedIsReRunNotRed(QueueRepo):
+    """The phantom/lost-runner card: an `asf land` head whose red is a lost runner, or whose
+    checks wait under a run that already failed with no failed job, is re-run once on the head
+    (``rerun --failed``) — the request line says "infra red: re-run queued", never red."""
+
+    def setUp(self):
+        super().setUp()
+        self.gh = RunGH()
+        patch = mock.patch.object(github, 'call', side_effect=contracts.as_call(self.gh))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.push_lane('hotfix/fix-x', {'x.txt': 'x\n'}, 'hotfix: x')
+        self.push_main({'m.txt': 'm\n'}, 'trunk moves')
+        self.head = self.heads()['hotfix/fix-x']
+        merge_queue.add_request(self.state_dir, 7, 'hotfix/fix-x')
+
+    def link(self, name, rid='77', jid='5'):
+        return dict(check_run(name), html_url=f'https://x/actions/runs/{rid}/job/{jid}')
+
+    def reruns(self):
+        return [c for c in self.gh.calls if c[:2] == ['run', 'rerun']]
+
+    def test_a_lost_runner_on_the_head_is_re_run_never_red(self):
+        self.gh.checks[self.head] = [self.link('gate', jid='4'),
+                                     dict(self.link('gate-tests'), conclusion='failure')]
+        self.gh.wf_runs['77'] = {'status': 'completed', 'conclusion': 'failure',
+                                 'run_attempt': 1}
+        self.gh.wf_jobs['77'] = [{'id': 4, 'name': 'gate', 'status': 'completed',
+                                  'conclusion': 'success', 'runner_name': 'r1', 'steps': []},
+                                 {'id': 5, 'name': 'gate-tests', 'status': 'completed',
+                                  'conclusion': 'failure', 'runner_name': '', 'steps': []}]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['7'])
+        self.assertEqual(self.reruns(), [['run', 'rerun', '77', '--failed', '-R', SLUG]])
+        self.assertTrue(any('infra red (lost-runner): re-run queued' in l for l in self.lines),
+                        self.lines)
+
+    def test_a_phantom_run_under_queued_checks_is_re_run(self):
+        self.gh.checks[self.head] = [self.link('gate', jid='4'),
+                                     dict(self.link('gate-tests'), status='queued',
+                                          conclusion=None)]
+        self.gh.wf_runs['77'] = {'status': 'completed', 'conclusion': 'failure',
+                                 'run_attempt': 1}
+        self.gh.wf_jobs['77'] = [{'id': 4, 'name': 'gate', 'status': 'completed',
+                                  'conclusion': 'success', 'runner_name': 'r1', 'steps': []},
+                                 {'id': 5, 'name': 'gate-tests', 'status': 'queued',
+                                  'conclusion': None, 'runner_name': '', 'steps': []}]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.reruns()), 1)
+        self.assertTrue(any('infra red (phantom): re-run queued' in l for l in self.lines),
+                        self.lines)
+
+    def test_a_queued_run_is_waited_on_as_before(self):
+        self.gh.checks[self.head] = [self.link('gate', jid='4'),
+                                     dict(self.link('gate-tests'), status='queued',
+                                          conclusion=None)]
+        self.gh.wf_runs['77'] = {'status': 'queued', 'conclusion': None, 'run_attempt': 1}
+        self.gh.wf_jobs['77'] = []
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.reruns(), [])
+        self.assertTrue(any('PR #7 pending' in l for l in self.lines), self.lines)

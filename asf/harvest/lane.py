@@ -207,6 +207,10 @@ HEAVY_KICK_S = 600
 #: branch waits on a PR, a review or the gate, and nothing but a session's push changes it.
 #: MERGING and QUEUED are a merge under way; PARKED is its owner's.
 LANDING_WAITS = (PR_OPEN, REVIEW, GATE, WAITING_CI, WAITING)
+#: The refusals the lane answers by its own mechanics — the naming reword, the drop of trunk
+#: copies — never a landing wait turned BACK, never a session relaunched on an unchanged head
+#: (F-0275)
+REFUSAL_KINDS = (lifecycle.NAMING, lifecycle.COPIES)
 
 
 def head_since(prev, head, now):
@@ -230,11 +234,34 @@ def correction_turns_back(rec, corr):
     change is no reason to hold it (a product's T-0594: the ruling waited on CI for a known-red
     head and launched nothing)."""
     rec, corr = rec or {}, corr or {}
+    if corr.get('kind') in REFUSAL_KINDS and not corr.get('operator_ruling'):
+        # F-0275: a naming or copies refusal is the lane's own mechanics (its reword, its drop
+        # of trunk copies) — never a reason to pull a waiting branch back to a session
+        return False
     if rec.get('state') not in LANDING_WAITS or not corr.get('text') \
             or (corr.get('at_cap') and not corr.get('operator_ruling')):
         return False
     since = rec.get('head_at') or rec.get('at') or ''
     return (corr.get('at') or '') >= since
+
+
+def refused_on_head(path, item, kind, head):
+    """True when a correction of ``kind`` judged at ``head`` (its ``judged_head``) was already
+    handed to a session of ``item`` and answered — a run of the item started after it — with
+    the branch still at ``head``: the session moved nothing (F-0275)."""
+    if not path or not item or not head:
+        return False
+    rs = lifecycle.item_runs(path, item)
+    for r in rs:
+        corr = r.get('correction') if isinstance(r.get('correction'), dict) else {}
+        judged = str(corr.get('judged_head') or '')
+        if corr.get('kind') != kind or not judged \
+                or not (head.startswith(judged) or judged.startswith(head)):
+            continue
+        at = corr.get('at') or ''
+        if at and any((o.get('started') or '') >= at for o in rs if o is not r):
+            return True
+    return False
 
 #: The two landing classes (:func:`landing_class`).
 DOCS = 'docs'
@@ -554,6 +581,25 @@ def marker_commits(repo, shas):
         return set()
     return {sha for sha, subject, empty in _commit_rows(repo, ['--no-walk=unsorted', *shas])
             if empty or githooks.is_report_subject(subject)}
+
+
+def marker_move(repo, old, new):
+    """True when a branch's head moved from ``old`` to ``new`` by marker commits alone
+    (:func:`marker_commits`: a session's report, an empty commit) onto the same tree: ``new``
+    descends from ``old``, every commit between carries no work, and the two trees are one.
+    What a batch tested at ``old`` is then exactly what ``new`` would land (F-0287). False when
+    any read fails."""
+    from asf import gitops
+    if not repo or not old or not new or old == new:
+        return False
+    if gitops.is_ancestor(repo, old, new) is not True:
+        return False
+    rows = _commit_rows(repo, [f'{old}..{new}'])
+    if not rows or not all(empty or githooks.is_report_subject(s) for _, s, empty in rows):
+        return False
+    trees = gitops.git(['rev-parse', f'{old}^{{tree}}', f'{new}^{{tree}}'], repo)
+    got = (trees.stdout or '').split() if trees.ok else []
+    return len(got) == 2 and got[0] == got[1]
 
 
 def commits_name_items(repo, trunk, branch, ids):
@@ -1487,7 +1533,10 @@ def next_state(prev, facts):
         return PARKED, (f'PR #{n} is a draft — parked by its owner' if n
                         else 'draft — parked by its owner')
     # R4 — a moved head: whatever reviewed or gated the old one is history
-    if s in OPEN_STATES and rec.get('head') and head != rec['head']:
+    if s in OPEN_STATES and rec.get('head') and head != rec['head'] \
+            and not (s == QUEUED and rec.get('batch') and f.get('marker_move')):
+        # …except a report commit on a batched member: the merge queue advances its head on
+        # the batch it is in, which tested that very tree (F-0287)
         return PUSHED, f"head moved {rec['head'][:7]} → {head[:7]}"
     corr = f.get('correction')
     if s is None or s == BACK:
@@ -1786,6 +1835,10 @@ class Lane:
             if gone:
                 f['gone_merged'], f['trunk_head'] = True, self.full_sha(gone)
             return f
+        if rec.get('state') == QUEUED and rec.get('batch') and rec.get('head') \
+                and head != rec['head']:
+            # a report commit on a batched member moves no tree: its batch stands (F-0287)
+            f['marker_move'] = marker_move(repo, rec['head'], head)
         ahead = H.sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{b}'],
                      cwd=repo).stdout.strip()
         f['ahead'] = int(ahead) if ahead.isdigit() else 0
@@ -3258,6 +3311,20 @@ class Lane:
             kind, text = f['refusal']
         else:
             return self.set(f, BACK, reason)
+        if kind in REFUSAL_KINDS and f.get('head') \
+                and refused_on_head(self.path, f.get('item'), kind, f['head']):
+            # F-0275: a session already answered this refusal on this very head and moved
+            # nothing — a second session on an unchanged branch is a relaunch of what did not
+            # change. The lane's own mechanics (reword, drop copies) are the answer; held here
+            why = (f'{kind} refused again at {f["head"][:9]}: a session already answered it on '
+                   f'this head and moved nothing — not sent back again (NEEDS OPERATOR if the '
+                   f'lane cannot reword it)')
+            if (f.get('prev') or {}).get('reason') != why:
+                self.out(f'lane: {b} {why}')
+                if not self.dry_run:
+                    self.set(f, PUSHED, why)
+            self.results[b] = 'waiting'
+            return None
         if self.dry_run:
             self.out(f'DRY: would hold {b}: {text}')
             self.results[b] = 'dry'
@@ -4729,6 +4796,13 @@ class GitHubHost(Host):
         # cut short by a cancel (relief, a superseding run, a runner kill): no verdict — re-run
         # or waited on, never a correct round
         if self.cut_short(f, number, red, names, hold=False):
+            return None
+        # a lost runner or a phantom run (asf.flake.classify_red): infra, re-run once on this
+        # head and never a correct round; a second on the same head is a watchdog breach
+        infra = flake.infra_class(self.slug, red, required, gh=H._gh)
+        if infra and flake.infra_rerun(self.lane.state_dir, self.slug, head, infra[1], infra[0],
+                                       where=f'PR #{number}', out=out, gh=H._gh,
+                                       attempt=infra[2]) != 'refused':
             return None
         # flake-vs-defect triage (asf.flake): a red job is re-run once on this head before any
         # correct round; green on its re-run is a flake (quarantined), red again a defect

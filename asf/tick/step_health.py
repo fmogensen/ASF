@@ -97,6 +97,22 @@ def died_before(path, job):
     return len(rs) >= 2 and rs[-2].get('end_reason') == 'dead pid'
 
 
+#: a review session's kind: its death re-runs the review, never a correction (F-0275)
+REVIEW_KIND = 'review'
+#: a review that died this many times in a row is the operator's, not re-run again
+REVIEW_DEATHS_MAX = 3
+
+
+def dead_streak(path, job):
+    """How many of ``job``'s latest runs in a row ended on a dead pid."""
+    n = 0
+    for r in reversed(lifecycle.runs(path).get(job) or []):
+        if r.get('end_reason') != 'dead pid':
+            break
+        n += 1
+    return n
+
+
 def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None, reaped_empty=False):
     """``corrected`` | ``operator`` | ``flagged`` (already raised) | ``closed`` | ``released``
     for one dead session. ``items`` is the record's index: a dead run of a removed or done item is
@@ -115,6 +131,17 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None, reaped
             and not died_before(pool_mod.sessions_path(product), job):
         out(f"DEAD  {job:<24} reaped empty: nothing to retry or correct — "
             f"{session.get('item') or '?'} goes back to its own row")
+        return 'released'
+    if session.get('kind') == REVIEW_KIND:
+        # F-0275: a review that died judged nothing — the branch's head is what it was, so the
+        # review re-runs on it (the lane still wants its round, the feeder's review row
+        # relaunches it). Never a correction: that would send the coder back for no finding
+        if dead_streak(pool_mod.sessions_path(product), job) >= REVIEW_DEATHS_MAX:
+            pool_mod.update_session(product, job, operator_flagged=1)
+            out(f"DEAD  {job:<24} NEEDS OPERATOR: the review died {REVIEW_DEATHS_MAX} times in "
+                f"a row on the same head — not re-run again")
+            return 'operator'
+        out(f"DEAD  {job:<24} review died — re-runs on the same head, no correction")
         return 'released'
     # a correction is never corrected again (B-0085): its own failure is what holds the item, and
     # the round is counted there. Without this the tick would correct the correction for ever.

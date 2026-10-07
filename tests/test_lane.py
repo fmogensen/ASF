@@ -3304,5 +3304,78 @@ class ReportCommitsAreNoCopies(LaneFixture):
         self.assertFalse(any('back to its session' in l for l in self.lines), self.lines)
 
 
+class RelaunchOnlyWhatChanged(LaneFixture):
+    """F-0275 — a naming or copies refusal is the lane's own mechanics: it never turns a landing
+    wait BACK, and once a session answered it on a head and moved nothing, the same head is
+    never handed to another session for it."""
+
+    H1 = 'a' * 40
+
+    def registry(self, *lines):
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        with open(path, 'a', encoding='utf-8') as fh:
+            for line in lines:
+                fh.write(json.dumps(line) + '\n')
+        return path
+
+    def test_a_refusal_correction_never_turns_a_landing_wait_back(self):
+        wait = rec(lane.GATE, head_at='2027-01-15T08:00:00Z')
+        for kind in lane.REFUSAL_KINDS:
+            corr = {'kind': kind, 'text': 'x', 'at': '2027-01-15T09:00:00Z'}
+            self.assertFalse(lane.correction_turns_back(wait, corr), kind)
+        self.assertTrue(lane.correction_turns_back(
+            wait, {'kind': 'gate', 'text': 'x', 'at': '2027-01-15T09:00:00Z'}))
+        ruling = {'kind': lane.COPIES, 'text': 'x', 'at': '2027-01-15T09:00:00Z',
+                  'operator_ruling': True}
+        self.assertTrue(lane.correction_turns_back(wait, ruling))
+
+    def held_then_answered(self, judged):
+        return self.registry(
+            {'job': 'coder-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001', 'pid': 1,
+             'kind': 'coder', 'started': '2026-09-21T00:00:00Z'},
+            {'job': 'coder-t-0001', 'ended': '2026-09-21T00:05:00Z', 'end_reason': 'finished',
+             'correction': {'kind': 'naming', 'text': 'commits do not name T-0001',
+                            'at': '2026-09-21T00:06:00Z', 'judged_head': judged}},
+            {'job': 'correct-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001', 'pid': 2,
+             'kind': 'correct', 'started': '2026-09-21T00:10:00Z'},
+            {'job': 'correct-t-0001', 'ended': '2026-09-21T00:15:00Z', 'end_reason': 'finished'})
+
+    def test_refused_on_head_reads_an_answered_correction_on_the_same_head(self):
+        path = self.held_then_answered(self.H1)
+        self.assertTrue(lane.refused_on_head(path, 'T-0001', 'naming', self.H1))
+        self.assertFalse(lane.refused_on_head(path, 'T-0001', 'naming', 'b' * 40))
+        self.assertFalse(lane.refused_on_head(path, 'T-0001', 'copies', self.H1))
+        self.assertFalse(lane.refused_on_head(path, 'T-0002', 'naming', self.H1))
+
+    def test_an_unanswered_correction_is_not_a_repeat(self):
+        path = self.registry(
+            {'job': 'coder-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001', 'pid': 1,
+             'kind': 'coder', 'started': '2026-09-21T00:00:00Z'},
+            {'job': 'coder-t-0001', 'ended': '2026-09-21T00:05:00Z', 'end_reason': 'finished',
+             'correction': {'kind': 'naming', 'text': 'x', 'at': '2026-09-21T00:06:00Z',
+                            'judged_head': self.H1}})
+        self.assertFalse(lane.refused_on_head(path, 'T-0001', 'naming', self.H1))
+
+    def test_enter_back_holds_no_second_session_on_an_unchanged_head(self):
+        path = self.held_then_answered(self.H1)
+        lines = []
+        ln = lane.Lane(self.product(), self.state_dir, out=lines.append, items={})
+        run = lifecycle.by_branch(path)['worker/T-0001']
+        f = {'branch': 'worker/T-0001', 'item': 'T-0001', 'head': self.H1, 'run': run,
+             'prev': rec(lane.PUSHED, head=self.H1), 'kind': 'code', 'correction': None,
+             'refusal': ('naming', 'commits do not name T-0001: …')}
+        with mock.patch.object(lane, 'hold_with_correction',
+                               side_effect=AssertionError('no second session')):
+            self.assertIsNone(ln.enter_back(f, 'kind=naming'))
+        self.assertEqual(ln.results['worker/T-0001'], 'waiting')
+        self.assertTrue(any('not sent back again' in l for l in lines), lines)
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.PUSHED)
+        # the next pass says nothing new
+        lines.clear()
+        f['prev'] = self.lane_of('worker/T-0001')
+        ln.enter_back(f, 'kind=naming')
+        self.assertFalse(any('not sent back again' in l for l in lines), lines)
+
+
 if __name__ == '__main__':
     unittest.main()
