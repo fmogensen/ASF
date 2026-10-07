@@ -731,8 +731,15 @@ def product_problems(text):
         problems.append((lines.get('ci.queue', lines.get('ci', 0)), dotted, why))
     # `probe:` (F-0051): the production verification probe, off when unset. `config_problems`
     # cannot see `app_host` or `ci.pool` on its own — both are this file's siblings of `probe:`,
-    # not inside it — so they are read here and passed in.
-    pool_roles = ci_pool.roles(ci_pool.load_pool(types.SimpleNamespace(ci=data.get('ci'))))
+    # not inside it — so they are read here and passed in. `ci.pool: discover`'s roles are the
+    # census tiers (asf.ci_census.TIERS, the same set `ci_pool.drift` checks runs-on labels
+    # against) — `ci_pool.load_pool`'s discover branch reads a state-dir census file keyed by a
+    # resolved product name, which text validation has none of, and must not be called here.
+    if ci_pool.pool_mode(types.SimpleNamespace(ci=data.get('ci'))) == ci_pool.DISCOVER:
+        from asf import ci_census
+        pool_roles = set(ci_census.TIERS)
+    else:
+        pool_roles = set(ci_pool.roles(ci_pool.load_pool(types.SimpleNamespace(ci=data.get('ci')))))
     for dotted, why in probe_config.config_problems(data.get('probe'), data.get('app_host'), pool_roles):
         problems.append((lines.get('probe', 0), dotted, why))
     from asf import credentials as credentials_mod  # local: keeps env importable from credentials

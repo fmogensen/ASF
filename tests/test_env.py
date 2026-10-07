@@ -410,6 +410,54 @@ class ProbeFieldTests(unittest.TestCase):
             """))
         self.assertIn((3, 'probe.workflows', env.UNKNOWN_KEY), problems)
 
+    def test_a_discovered_pool_checks_probe_role_against_the_census_tiers_without_a_host_call(self):
+        # `ci.pool: discover` has no declared runner list to read `probe.role` against —
+        # `ci_pool.load_pool`'s discover branch reads a census file keyed by a resolved product
+        # name, which text validation never has, so this must not call it at all.
+        from asf import ci_census
+        problems = env.validate_product_text(_dedent(f"""
+            repo_slug: a/b
+            app_host: https://sample.example.com
+            ci:
+              pool: discover
+            probe:
+              workflow: probe.yml
+              role: {ci_census.TIERS[0]}
+              identity: probe@example.com
+              secrets:
+                identity: PROBE_PASSWORD
+                mailbox: PROBE_MAILBOX
+              mailbox:
+                from: no-reply@example.com
+                subject: sign-in code
+                code: '\\b(\\d{{6}})\\b'
+              journeys: [sign-up]
+              origins: [https://sample.example.com]
+            """))
+        self.assertNotIn('probe.role', [key for _line, key, _why in problems])
+
+    def test_a_discovered_pool_with_a_probe_role_not_a_census_tier_is_a_problem(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            app_host: https://sample.example.com
+            ci:
+              pool: discover
+            probe:
+              workflow: probe.yml
+              role: light
+              identity: probe@example.com
+              secrets:
+                identity: PROBE_PASSWORD
+                mailbox: PROBE_MAILBOX
+              mailbox:
+                from: no-reply@example.com
+                subject: sign-in code
+                code: '\\b(\\d{6})\\b'
+              journeys: [sign-up]
+              origins: [https://sample.example.com]
+            """))
+        self.assertIn('probe.role', [key for _line, key, _why in problems])
+
 
 class DeployProviderTests(unittest.TestCase):
     """T-0232: ``deploy_sha.provider`` gets a validator row — documented and unread until now
