@@ -23,7 +23,7 @@ from unittest import mock
 from asf import env
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest, lane, rebuild_check
-from asf.workers import host, lifecycle
+from asf.workers import host, lifecycle, refusals
 
 NOW = 1_800_000_000.0
 HEAD, NEW = 'a' * 40, 'b' * 40
@@ -1176,6 +1176,86 @@ class DeliveryLaneTest(LaneFixture):
         self.assertEqual(lane.item_footprint(items, 'F-0097'), ['a/**', 'b.py'])
         self.assertEqual(lane.item_footprint(items, 'B-0001'), ['z'])
         self.assertEqual(lane.item_footprint(None, 'B-0001'), [])
+
+
+class ANamingRefusalIsReadableAfterwards(LaneFixture):
+    """F-0266 S-64356 — the lane half: the naming refusal ``lane_refusal`` makes (P6) is found by
+    ``refusals.from_record`` on the held run, with its own ``at``, after
+    ``lifecycle.pending_correction`` has stopped answering for it (P15 — a later run of the item
+    has started); and ``lifecycle.publish``, which the lane's own publishing runs through, writes
+    no ledger line of its own (C5)."""
+
+    def setUp(self):
+        super().setUp()
+        self._home = env.ASF_HOME
+        env.ASF_HOME = tempfile.mkdtemp()
+        self.addCleanup(self._restore_home)
+
+    def _restore_home(self):
+        shutil.rmtree(env.ASF_HOME, ignore_errors=True)
+        env.ASF_HOME = self._home
+
+    def sessions(self):
+        return os.path.join(self.state_dir, 'sessions.jsonl')
+
+    def write_run(self, job, item, branch, started, **extra):
+        p = subprocess.Popen(['true'])
+        p.wait()
+        with open(self.sessions(), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': job, 'item': item, 'branch': branch, 'kind': 'coder',
+                                'pid': p.pid, 'started': started}) + '\n')
+            if extra:
+                f.write(json.dumps(dict({'job': job}, **extra)) + '\n')
+
+    def test_the_lanes_naming_refusal_is_found_by_from_record_after_pending_correction_moves_on(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'tidy up')  # names no item
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        kind, text = lane.lane_refusal(self.repo, 'main', 'worker/T-0001', 'T-0001')
+        self.assertEqual(kind, lifecycle.NAMING)
+        self.assertIn('commits do not name T-0001', text)
+
+        fields, line = lifecycle.hold(self.sessions(), {'item': 'T-0001', 'branch': 'worker/T-0001'},
+                                      kind, text, '2026-09-21T00:06:00Z')
+        self.assertTrue(line.endswith('(naming, no round)'), line)
+        self.write_run('coder-t-0001', 'T-0001', 'worker/T-0001', '2026-09-21T00:00:00Z',
+                       correction=fields['correction'])
+
+        held = lifecycle.by_branch(self.sessions())['worker/T-0001']
+        self.assertEqual(held['correction']['kind'], lifecycle.NAMING)
+
+        # still pending: no later run of the item has started
+        self.assertEqual(lifecycle.pending_correction(held, self.sessions()), held['correction'])
+
+        got = refusals.from_record(held)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].kind, lifecycle.NAMING)
+        self.assertEqual(got[0].at, '2026-09-21T00:06:00Z')
+        self.assertIn('commits do not name T-0001', got[0].line)
+        self.assertEqual(got[0].where, 'correction')
+
+        # a later run of the item starts: pending_correction stops answering for it (P15) —
+        # from_record, reading the held run's own field, still does
+        self.write_run('coder-t-0001-b', 'T-0001', 'worker/T-0001', '2026-09-21T00:10:00Z')
+        self.assertIsNone(lifecycle.pending_correction(held, self.sessions()))
+        got_again = refusals.from_record(held)
+        self.assertEqual(got_again, got)
+
+    def test_a_refused_publish_writes_no_ledger_line(self):
+        product = self.product()
+        job = 'coder-t-0001'
+        self.assertFalse(os.path.exists(refusals.path(product, job)))
+        ok, why = lifecycle.publish(self.worker, 'main', main='main')
+        self.assertFalse(ok)
+        self.assertIn('is not a lane branch', why)
+        self.assertFalse(os.path.exists(refusals.path(product, job)),
+                         'lifecycle.publish writes no ledger line of its own (C5)')
+
+        ok2, why2 = lifecycle.publish(self.worker, 'protected-branch', main='main',
+                                      protected=['protected-branch'])
+        self.assertFalse(ok2)
+        self.assertIn('REF GUARD: refused', why2)
+        self.assertFalse(os.path.exists(refusals.path(product, job)),
+                         'a refguard refusal through lifecycle.publish writes no ledger line')
 
 
 class FakePRHost(lane.FastForwardHost):
