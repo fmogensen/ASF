@@ -3543,3 +3543,117 @@ class UnpublishedTests(unittest.TestCase):
         self.write('a', 'b')
         self.assertEqual(health.push_gap(self.wt, 'lane/x', 'main'),
                           lc.unpublished(self.wt, 'lane/x', 'main'))
+
+
+class WorktreeStatusSnapshot(unittest.TestCase):
+    """§3.2: one ``git status --porcelain`` per worktree per *version* of that worktree — D7's
+    key, read off the files with no subprocess of its own, over a real linked worktree.
+
+    Built fresh per test rather than through :class:`tests.gitfixture.Template`: a linked
+    worktree's own ``.git`` *file* (never ``config``/``gitdir``/``commondir``) carries an
+    absolute path back to its admin dir, which the template's path rewrite does not touch — a
+    copy would share one physical worktree admin dir with every other copy."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='lifecycle_status_')
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        origin, self.main_repo, self.wt = (os.path.join(self.root, n)
+                                           for n in ('origin.git', 'main', 'wt'))
+        self.git('init', '-q', '--bare', '-b', 'main', origin, cwd=self.root)
+        self.git('clone', '-q', origin, self.main_repo, cwd=self.root)
+        for k, v in (('user.name', 'T'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.git('config', k, v, cwd=self.main_repo)
+        with open(os.path.join(self.main_repo, 'seed'), 'w') as f:
+            f.write('seed\n')
+        self.git('add', '-A', cwd=self.main_repo)
+        self.git('commit', '-qm', 'seed', cwd=self.main_repo)
+        self.git('push', '-q', 'origin', 'HEAD:main', cwd=self.main_repo)
+        self.git('worktree', 'add', '-q', '-b', 'lane/x', self.wt, 'origin/main',
+                 cwd=self.main_repo)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', *args], cwd=cwd or self.wt, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    @staticmethod
+    def _count_status(spy):
+        return sum(1 for c in spy.call_args_list if c.args[0] == ['status', '--porcelain'])
+
+    def test_two_calls_on_an_unchanged_worktree_make_one_process(self):
+        status = lc.WorktreeStatus()
+        with mock.patch.object(lc, '_git', wraps=lc._git) as spy:
+            first = status.lines(self.wt)
+            second = status.lines(self.wt)
+        self.assertEqual(self._count_status(spy), 1)
+        self.assertEqual(first, second)
+        self.assertEqual(first, [])
+
+    def test_a_commit_between_two_calls_makes_a_second_process(self):
+        status = lc.WorktreeStatus()
+        with mock.patch.object(lc, '_git', wraps=lc._git) as spy:
+            status.lines(self.wt)
+            with open(os.path.join(self.wt, 'seed'), 'w') as f:
+                f.write('changed\n')
+            self.git('add', '-A')
+            self.git('commit', '-qm', 'changed')
+            status.lines(self.wt)
+        self.assertEqual(self._count_status(spy), 2)
+
+    def test_an_add_that_rewrites_the_index_makes_a_second_process(self):
+        status = lc.WorktreeStatus()
+        with mock.patch.object(lc, '_git', wraps=lc._git) as spy:
+            status.lines(self.wt)
+            with open(os.path.join(self.wt, 'untracked'), 'w') as f:
+                f.write('new\n')
+            self.git('add', 'untracked')
+            lines = status.lines(self.wt)
+        self.assertEqual(self._count_status(spy), 2)
+        self.assertEqual(lines, ['A  untracked'])
+
+    def test_a_path_that_is_not_a_worktree_is_asked_every_time_and_never_cached(self):
+        status = lc.WorktreeStatus()
+        not_a_repo = tempfile.mkdtemp(prefix='lifecycle_status_not_a_repo_')
+        self.addCleanup(shutil.rmtree, not_a_repo, ignore_errors=True)
+        with mock.patch.object(lc, '_git', wraps=lc._git) as spy:
+            first = status.lines(not_a_repo)
+            second = status.lines(not_a_repo)
+        self.assertEqual(self._count_status(spy), 2)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(status._cache, {})
+
+    def test_two_different_worktrees_never_share_an_entry(self):
+        other = os.path.join(self.root, 'other')
+        self.git('worktree', 'add', '-q', '-b', 'lane/y', other, 'origin/main', cwd=self.main_repo)
+        status = lc.WorktreeStatus()
+        with mock.patch.object(lc, '_git', wraps=lc._git) as spy:
+            status.lines(self.wt)
+            status.lines(other)
+            status.lines(self.wt)
+            status.lines(other)
+        self.assertEqual(self._count_status(spy), 2)
+        self.assertEqual(len(status._cache), 2)
+
+    def test_gather_through_the_snapshot_sees_the_mid_pass_commit(self):
+        # P5: gather on a worktree with an uncommitted file, then commit_leftovers, then gather
+        # again through the same snapshot — the mutation is seen, not answered from a stale count
+        with open(os.path.join(self.wt, 'leftover'), 'w') as f:
+            f.write('half done\n')
+        status = lc.WorktreeStatus()
+        run = {'worktree': self.wt, 'branch': 'lane/x'}
+        ev = lc.gather(None, run, status=status)
+        self.assertEqual(ev.uncommitted, 1)
+        ok, line = lc.commit_leftovers(self.wt, 'lane/x')
+        self.assertTrue(ok, line)
+        ev = lc.gather(None, run, status=status)
+        self.assertEqual(ev.uncommitted, 0)
+
+    def test_gather_with_no_status_runs_its_own_exactly_as_every_existing_caller_did(self):
+        with open(os.path.join(self.wt, 'leftover'), 'w') as f:
+            f.write('half done\n')
+        run = {'worktree': self.wt, 'branch': 'lane/x'}
+        with mock.patch.object(lc, '_git', wraps=lc._git) as spy:
+            ev = lc.gather(None, run)
+        self.assertEqual(ev.uncommitted, 1)
+        self.assertEqual(self._count_status(spy), 1)
