@@ -332,6 +332,9 @@ def build_parser():
 
     p_pr_hygiene = sub.add_parser('pr-hygiene', help='sort open PRs into land/fix lanes')
     p_pr_hygiene.add_argument('--product')
+    p_pr_hygiene.add_argument('--lanes', action='store_true',
+                              help='one JSON object per PR the hygiene lanes own: '
+                                   '{pr, branch, lane, since, action}')
 
     p_review_checks = sub.add_parser(
         'review-checks', help='the mechanical pre-review: refuse a missing check table')
@@ -676,6 +679,8 @@ def _main(argv=None):
     if args.command == 'pr-hygiene':
         from asf.harvest.pr_hygiene import main as pr_hygiene_main
         pr_hygiene_args = ['--product', args.product] if args.product else []
+        if args.lanes:
+            pr_hygiene_args.append('--lanes')
         return pr_hygiene_main(pr_hygiene_args)
     if args.command == 'review-checks':
         from asf.review_checks import cmd_review_checks
