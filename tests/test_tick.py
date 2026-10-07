@@ -2,6 +2,7 @@
 import argparse
 import contextlib
 import datetime
+import glob
 import io
 import json
 import os
@@ -489,9 +490,8 @@ class StaleRowCadenceTests(TickTestCase):
             ts = now - datetime.timedelta(minutes=age_minutes)
             ts_str = ts.strftime('%Y-%m-%dT%H:%M:%SZ')
             day = ts.strftime('%Y-%m-%d')
-            path = os.path.join(self.operator, 'metrics', 'ticks', f'{day}.jsonl')
-            if os.path.exists(path):
-                os.remove(path)
+            for p in glob.glob(os.path.join(self.operator, 'metrics', 'ticks', '*.jsonl')):
+                os.remove(p)
             _write_index(self.operator, ts_str)
             _append_tick_line(self.operator, day, ts=ts_str, duration_s=798.0, product='sample',
                                steps=[_record_step()])
