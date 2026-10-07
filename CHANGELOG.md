@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.233 — 2026-10-07
+
+### Features landed
+
+- The block is spent from its own floor — `next_in_block`, the one branch that calls it, the refusal that says why, and the rule written down (#1013)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.233"`
+
 ## v0.1.232 — 2026-10-07
 
 ### Features landed
