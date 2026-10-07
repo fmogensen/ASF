@@ -2,6 +2,26 @@
 
 One entry per released version, newest first.
 
+## v0.1.226 — 2026-10-07
+
+### Features landed
+
+- The refusal travels with the evidence (#982)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.226"`
+
+## v0.1.225 — 2026-10-07
+
+### Features landed
+
+- A factory prefix stops being enough (#981)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.225"`
+
 ## v0.1.224 — 2026-10-07
 
 ### Features landed
