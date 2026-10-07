@@ -575,6 +575,17 @@ with `index.json`, retried when another lands meanwhile, then pushed), and the g
 it again — not from a note, and not from the same title or signature filed a second time.
 `asf set <id> removed=<reason>` writes the bare field.
 
+A delivery member the lead's PR does not build (an adjudication struck it) is taken out of the
+delivery, not retired — retiring a member is refused while its lead still lists it:
+
+    asf undeliver <task> --why "<reason>"
+
+It drops `<task>` from its lead's `delivers:` (the whole list when only the lead is left), deletes
+the member's `delivered_by:`, and writes `undelivered from <lead>: <reason>` into both cards'
+History, in one record commit with `index.json`. The member goes back to its own lane on the next
+tick instead of `WAITS ON delivery <lead>`. It is refused for a card with no `delivered_by:`; a
+lead already Closed or retired is cleaned all the same.
+
 On the next tick the card leaves the tables and the wave: nothing is started on it, and a session
 already on it is ended and its worktree reaped rather than sent back. An S1 Bug retired this way
 releases the tier-2 freeze. (`moved_to:` retires rule cards only; use `removed:` for everything
