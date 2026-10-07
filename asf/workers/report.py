@@ -26,9 +26,10 @@ declares: the question a run raises for a human, either a ``NEEDS OPERATOR:`` li
 import re
 
 FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out',
-          'needs writes', 'proves', 'ruling', 'blocked_on', 'writes', 'superseded_by')
+          'needs writes', 'proves', 'ruling', 'blocked_on', 'writes', 'superseded_by',
+          'precedent')
 HEAD_RE = re.compile(r'^\s*REPORT\s*$', re.M)
-FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes|proves|ruling|blocked_on|writes|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
+FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes|proves|ruling|blocked_on|writes|superseded_by|precedent)\s*:\s*(?P<value>.*)$', re.I)
 NO_RE = re.compile(r'^\s*(no|none|not pushed|unpushed)\b', re.I)
 NONE_RE = re.compile(r'^(none|n/a|-|—)$', re.I)
 UNPUSHED = 'unpushed work'
@@ -102,6 +103,12 @@ def ruling(text):
     """The ``ruling:`` paragraph of an adjudicate session's REPORT, or '' (B-0064): the one
     place a ruling lives — the factory files it on the item's card, the session commits none."""
     return (parse(text).get('ruling') or '').strip()
+
+
+def precedent(text):
+    """The ``precedent:`` line of an adjudicate session's REPORT, or '' — the in-repo precedent
+    it established before it parked a question on a person (F-0262)."""
+    return (parse(text).get('precedent') or '').strip()
 
 
 def _claim(value):
