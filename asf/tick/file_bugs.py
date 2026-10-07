@@ -215,6 +215,8 @@ def rule_violation_signatures(root, data=None):
     # `sig=` (above): a stable key from a source outside this record — an alert number, a box, a
     # port — already names a defect of its own, and folding it into one Bug per rule would lose
     # the one thing that makes it actionable.
+    from asf.rules.rules import owner_of
+
     rules_idx = {}
     try:
         with open(os.path.join(root, 'index.json'), encoding='utf-8') as f:
@@ -226,6 +228,13 @@ def rule_violation_signatures(root, data=None):
     for v in data.get('violations') or []:
         rule, line = v.get('rule', ''), v.get('line', '')
         card = rules_idx.get(rule) or {}
+        owner = v.get('owner')
+        if owner is None:
+            owner = owner_of(card)
+        if owner == 'operator':
+            # the operator's problem, not the product's — no signature, no Bug, no bump
+            # (§2.7); report_operator_rules raises it instead.
+            continue
         text, sev, place = line_fields(line)
         severity = sev if sev else 'S2'
         if place:
@@ -456,6 +465,37 @@ def report_check_failures(failures, ledger, now_iso, out=print):
                 f"not a product Bug")
     ledger['checks'] = checks
     return checks
+
+
+def report_operator_rules(violations, ledger, day, out=print):
+    """An operator-owned violation (§2.7) is raised, never filed: one ``NEEDS OPERATOR`` line
+    per rule per UTC ``day`` — the rule's first violating line, prefixed, then any further
+    lines of that rule, one per line, unprefixed. Keyed in ``ledger['operator'][rule] =
+    {since, last, day, lines}`` (D11, PD10): a rule whose ``day`` is already this day prints
+    nothing, and a rule that is clean this run (absent from ``violations``) has its entry
+    dropped, so the next failure raises the line again. Takes violations in the ``--json``
+    shape (``[{rule, line, owner}]``), so the daily part (T-0314) can call it with lines it
+    built itself. Mutates and returns ``ledger['operator']``."""
+    prev = ledger.get('operator') or {}
+    by_rule = {}
+    for v in violations or []:
+        if v.get('owner') != 'operator':
+            continue
+        by_rule.setdefault(v.get('rule', ''), []).append(v.get('line', ''))
+
+    operator = {}
+    for rule, lines in by_rule.items():
+        entry = dict(prev.get(rule) or {'since': day})
+        if entry.get('day') != day:
+            entry['last'] = day
+            entry['day'] = day
+            entry['lines'] = lines
+            out(f"NEEDS OPERATOR: {lines[0]}")
+            for line in lines[1:]:
+                out(line)
+        operator[rule] = entry
+    ledger['operator'] = operator
+    return operator
 
 
 def usable_bug_epic(canonical, epic_id):
@@ -749,6 +789,7 @@ def cmd_file_bugs(args, root):
     if rule_data is not None:
         report_check_failures(rule_data.get('broken') or [], ledger,
                               now.strftime('%Y-%m-%dT%H:%M:%SZ'))
+        report_operator_rules(rule_data.get('violations') or [], ledger, date)
     _write_ledger(ledger_file, ledger)
 
     level = getattr(args, 'file_bug_level', 'auto')

@@ -152,6 +152,7 @@ class RulesCheckTests(unittest.TestCase):
         self.assertEqual(payload['violations'], [{
             'rule': 'R-0002',
             'line': 'R-0002 merge without a gate sha=abc1234 2026-09-21T06:00:00Z',
+            'owner': 'factory',
         }])
         self.assertEqual(payload['unenforced'], [{
             'rule': 'R-0003',
@@ -440,6 +441,59 @@ class SupersededRuleTests(unittest.TestCase):
                       proc.stdout)
         self.assertNotIn("R-0002", proc.stdout)
         self.assertFalse(os.path.exists(self.marker))
+
+
+class OwnerTest(unittest.TestCase):
+    """§2.7: an `owner: operator` rule's violation is the operator's problem, not the
+    product's — `--json` carries it and `cmd_check`'s stdout says so."""
+
+    def setUp(self):
+        self.root = make_repo()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_owner_operator_is_carried_into_json(self):
+        write_rule(self.root, 'R-0001', 'Every signed-in tool is valid for three more days',
+                   typed_lines=['scope: factory', 'check: tools/checks/r0001.sh',
+                                'owner: operator'])
+        write_check(self.root, 'r0001.sh',
+                    "#!/usr/bin/env bash\n"
+                    "echo 'R-0001 credential provider-c expires 2026-09-29T08:00:00Z "
+                    "(2d, window 3d) — renew: op login provider-c'\n"
+                    "exit 1\n")
+        reindex(self.root)
+
+        proc = run_rules(self.root, ['check', '--json'])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload['violations'][0]['owner'], 'operator')
+
+        proc = run_rules(self.root, ['check'])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        lines = proc.stdout.strip().split('\n')
+        self.assertEqual(lines[0], '== RULES 1 checked, 1 violations, 0 unenforced, 1 operator')
+        self.assertTrue(lines[1].startswith('NEEDS OPERATOR: R-0001 credential provider-c'))
+
+    def test_an_unrecognised_owner_is_read_as_factory_and_reported(self):
+        write_rule(self.root, 'R-0001', 'A rule with a typo',
+                   typed_lines=['scope: factory', 'check: tools/checks/r0001.sh',
+                                'owner: oprator'])
+        write_check(self.root, 'r0001.sh',
+                    "#!/usr/bin/env bash\necho 'R-0001 something bad'\nexit 1\n")
+        reindex(self.root)
+
+        proc = run_rules(self.root, ['check', '--json'])
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload['violations'][0]['owner'], 'factory')
+        self.assertEqual(payload['owner_unknown'], [{'rule': 'R-0001', 'value': 'oprator'}])
+
+        proc = run_rules(self.root, ['check'])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertNotIn('NEEDS OPERATOR', proc.stdout)
+        self.assertIn(
+            "R-0001 owner: 'oprator' is not one of ('factory', 'operator') — read as factory",
+            proc.stdout)
 
 
 if __name__ == '__main__':

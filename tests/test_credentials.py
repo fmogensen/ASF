@@ -1,8 +1,12 @@
 """A credential probe is read-only and never prints a token — the surface Tasks 2, 4, 5 and 6 (the
 command, the daily part, the doctor's row, the installer) are all built against
 (:mod:`asf.credentials`)."""
+import contextlib
 import datetime
+import io
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,7 +14,8 @@ import time
 import unittest
 from unittest import mock
 
-from asf import credentials, env
+from asf import credentials, env, redact
+from asf.tick import file_bugs
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 
@@ -357,6 +362,243 @@ class CheckTest(unittest.TestCase):
         results = credentials.check(product, cfg, now=later, run=broken_run)
         self.assertEqual(results[0].expires, good_expiry)
         self.assertEqual(credentials.verdict(results[0], later, 3), 'expiring')
+
+
+class OperatorLineTest(unittest.TestCase):
+    """§2.7 from the day's side (T-0313): `credentials.daily()`'s once-a-day operator line,
+    raised through `file_bugs.report_operator_rules`'s ledger — never a Bug, never a second
+    copy keyed differently (PD10)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='credentials_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        self.probe = os.path.join(self.tmp, 'probe.sh')
+        with open(self.probe, 'w', encoding='utf-8') as f:
+            f.write("#!/usr/bin/env bash\necho 'expires 2026-09-29T08:00:00Z'\nexit 0\n")
+        os.chmod(self.probe, 0o755)
+        self.record = tempfile.mkdtemp(prefix='credentials_record_')
+        from asf import init
+        init.lay_down(self.record)
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.record, ignore_errors=True)
+
+    def cfg(self):
+        return {'credentials': {'providers': {'provider-a': {
+            'probe': self.probe, 'renew': 'login provider-a'}}}}
+
+    def _daily(self, product):
+        with mock.patch.object(env, 'load_config', return_value=self.cfg()):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = credentials.daily(product, self.record, now=NOW)
+        self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    def _operator_ledger(self, product):
+        with open(file_bugs.ledger_path(product.name), encoding='utf-8') as f:
+            return json.load(f).get('operator', {})
+
+    def test_an_expired_session_is_one_line_a_day(self):
+        product = StubProduct(credentials=['provider-a'])
+        out = self._daily(product)
+        lines = [l for l in out.splitlines() if l.startswith('NEEDS OPERATOR:')]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].endswith('login provider-a'))
+        ledger = self._operator_ledger(product)
+        self.assertEqual(list(ledger), ['credentials'])  # no card installed: the fallback key
+        self.assertEqual(ledger['credentials']['day'], NOW.strftime('%Y-%m-%d'))
+
+        second = self._daily(product)
+        self.assertEqual([l for l in second.splitlines() if l.startswith('NEEDS OPERATOR:')], [])
+
+    def test_the_key_follows_the_installed_cards_id(self):
+        from asf.record.index import do_index
+        card_path = os.path.join(self.record, 'rules', 'R-0001.md')
+        os.makedirs(os.path.dirname(card_path), exist_ok=True)
+        with open(card_path, 'w', encoding='utf-8') as f:
+            f.write("---\nid: R-0001\ntype: rule\ntitle: t\ncheck: rules/credentials.sh\n"
+                   "owner: operator\n# ---- machine ----\nstate: New\n"
+                   "updated: 2026-09-21T00:00:00Z\n---\n"
+                   "## Statement\n\n## Why\n\n## Check\n\n## Source\n\n## Children\n\n"
+                   "## Backlinks\n")
+        do_index(self.record)
+
+        product = StubProduct(credentials=['provider-a'])
+        self._daily(product)
+        ledger = self._operator_ledger(product)
+        self.assertEqual(list(ledger), ['R-0001'])
+
+
+class NoTokenTest(unittest.TestCase):
+    """§2.4: nothing of a probe's own raw output survives but its last line, scrubbed and
+    truncated — checked against every artefact that line can reach."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='credentials_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        self.record = tempfile.mkdtemp(prefix='credentials_record_')
+        from asf import init
+        init.lay_down(self.record)
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.record, ignore_errors=True)
+
+    def _secret(self):
+        """A value shaped like one of :data:`redact.SECRET_RULES` ('github-token'), built at
+        run time — no secret shape is written into this file itself."""
+        pattern = dict(redact.SECRET_RULES)['github-token']
+        value = 'ghp_' + ('a1B2c3D4e5' * 4)
+        self.assertRegex(value, pattern)
+        return value
+
+    def test_no_token_anywhere(self):
+        secret = self._secret()
+        probe = os.path.join(self.tmp, 'probe.sh')
+        with open(probe, 'w', encoding='utf-8') as f:
+            f.write("#!/usr/bin/env bash\n"
+                   f"echo 'expires 2026-12-01T00:00:00Z token={secret}'\n"
+                   "exit 0\n")
+        os.chmod(probe, 0o755)
+        cfg = {'credentials': {'providers': {'provider-a': {
+            'probe': probe, 'renew': 'login-a'}}}}
+        product = StubProduct(credentials=['provider-a'])
+
+        events = []
+        with mock.patch.object(env, 'load_config', return_value=cfg):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                credentials.daily(product, self.record,
+                                  event=lambda kind, **f: events.append((kind, f)), now=NOW)
+
+        results = credentials.check(product, cfg, now=NOW)
+        result = results[0]
+        self.assertEqual(result.expires, '2026-12-01T00:00:00Z')
+        self.assertNotIn(secret, result.detail)
+        self.assertIn(redact.SCRUB_TOKEN, result.detail)
+
+        table = []
+        with mock.patch.object(credentials, '_now', return_value=NOW):
+            credentials.render(results, product, cfg, out=table.append)
+        self.assertNotIn(secret, '\n'.join(table))
+
+        payload = json.dumps(credentials.as_json(results, product, cfg))
+        self.assertNotIn(secret, payload)
+
+        with open(credentials.cache_path(product), encoding='utf-8') as f:
+            cache_text = f.read()
+        self.assertNotIn(secret, cache_text)
+        self.assertIn(redact.SCRUB_TOKEN, cache_text)
+
+        events_text = json.dumps(events)
+        self.assertNotIn(secret, events_text)
+
+    def test_a_20kb_probe_is_truncated_to_detail_max(self):
+        probe = os.path.join(self.tmp, 'probe.sh')
+        with open(probe, 'w', encoding='utf-8') as f:
+            f.write("#!/usr/bin/env bash\npython3 -c \"print('x' * 20000)\"\nexit 0\n")
+        os.chmod(probe, 0o755)
+        provider = credentials.Provider('provider-a', probe, 'login-a')
+        result = credentials.run_probe(provider, {'PATH': os.environ.get('PATH', '')}, NOW)
+        self.assertLessEqual(len(result.detail), credentials.DETAIL_MAX)
+
+
+class InstallTest(unittest.TestCase):
+    """§2.8: the rule card and its check script are the two artefacts this Feature cannot
+    have a session write (D9) — minted and written from the operator's own shell instead."""
+
+    def setUp(self):
+        self.record = tempfile.mkdtemp(prefix='credentials_install_record_')
+        self.core = tempfile.mkdtemp(prefix='credentials_install_core_')
+        self.repo = tempfile.mkdtemp(prefix='credentials_install_repo_')
+        from asf import init
+        init.lay_down(self.record)
+        self._orig_core = os.environ.get('ASF_CORE_RULES_DIR')
+        os.environ['ASF_CORE_RULES_DIR'] = self.core
+        self._orig_job = os.environ.pop('ASF_JOB', None)
+
+    def tearDown(self):
+        if self._orig_core is None:
+            os.environ.pop('ASF_CORE_RULES_DIR', None)
+        else:
+            os.environ['ASF_CORE_RULES_DIR'] = self._orig_core
+        if self._orig_job is not None:
+            os.environ['ASF_JOB'] = self._orig_job
+        shutil.rmtree(self.record, ignore_errors=True)
+        shutil.rmtree(self.core, ignore_errors=True)
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def test_install_writes_the_card_and_the_script(self):
+        from asf.rules import rules
+        rc = credentials.install(self.record, self.repo, job=None)
+        self.assertEqual(rc, 0)
+        cards = rules.load_rules(self.record)
+        self.assertEqual(len(cards), 1)
+        card = cards[0]
+        self.assertEqual(card['check'], 'rules/credentials.sh')
+        self.assertEqual(card['owner'], 'operator')
+        script_path = os.path.join(self.core, 'credentials.sh')
+        self.assertTrue(os.path.isfile(script_path))
+        self.assertEqual(os.stat(script_path).st_mode & 0o777, 0o755)
+        with open(script_path, encoding='utf-8') as f:
+            self.assertIn(card['id'], f.read())
+
+    def test_the_installed_card_runs_in_the_rules_row(self):
+        from asf.rules import rules
+        credentials.install(self.record, self.repo, job=None)
+        card = rules.load_rules(self.record)[0]
+
+        stub_dir = tempfile.mkdtemp(prefix='credentials_install_stub_')
+        self.addCleanup(shutil.rmtree, stub_dir, ignore_errors=True)
+        with open(os.path.join(stub_dir, 'asf'), 'w', encoding='utf-8') as f:
+            f.write("#!/usr/bin/env bash\n"
+                    "echo 'credential provider-c expires 2026-09-29T08:00:00Z "
+                    "(2d, window 3d) — renew: login provider-c'\n"
+                    "exit 1\n")
+        os.chmod(os.path.join(stub_dir, 'asf'), 0o755)
+        old_path = os.environ.get('PATH', '')
+        os.environ['PATH'] = stub_dir + os.pathsep + old_path
+        try:
+            lines, broken = rules.run_check(self.record, card)
+        finally:
+            os.environ['PATH'] = old_path
+        self.assertEqual(broken, [])
+        self.assertEqual(len(lines), 1)
+        self.assertIn('credential provider-c expires', lines[0])
+
+    def test_install_refuses_inside_a_session(self):
+        from asf.rules import rules
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = credentials.install(self.record, self.repo, job='spec-f-0042')
+        self.assertEqual(rc, 2)
+        self.assertIn('NEEDS OPERATOR:', buf.getvalue())
+        self.assertEqual(rules.load_rules(self.record), [])
+        self.assertFalse(os.path.isfile(os.path.join(self.core, 'credentials.sh')))
+
+    def test_the_daily_step_names_credentials(self):
+        from asf.tick import step_daily
+        names = [n for n, _ in step_daily.parts(StubProduct(), self.record)]
+        self.assertIn('credentials', names)
+
+    def test_print_writes_nothing(self):
+        from asf.rules import rules
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = credentials.install(self.record, self.repo, print_only=True, job=None)
+        self.assertEqual(rc, 0)
+        self.assertEqual(rules.load_rules(self.record), [])
+        self.assertFalse(os.path.isfile(os.path.join(self.core, 'credentials.sh')))
+        self.assertIn('credentials.sh', buf.getvalue())
+        self.assertIn('owner: operator', buf.getvalue())
 
 
 if __name__ == '__main__':

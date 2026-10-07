@@ -228,8 +228,11 @@ def probe_env(provider, cfg, product):
 
 # ---- the probe and its verdict -----------------------------------------------------------
 
+#: Not end-anchored: a probe that prints a token beside its expiry (``expires … token=…``)
+#: still contributes a timestamp (2.4) — only the part after the match is ever scrubbed away.
 _EXPIRES_RE = re.compile(
-    r'^\s*expires[:=]?\s+(never|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s*$',
+    r'^\s*expires[:=]?\s+(never|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))'
+    r'(?=\s|$)',
     re.IGNORECASE)
 
 
@@ -545,6 +548,29 @@ def as_json(results, product, cfg):
     }
 
 
+def _bad_lines(results, product, cfg, now=None):
+    """Quiet mode's lines (§2.3): one per provider whose verdict is ``invalid`` or
+    ``expiring``, in provider order — never ``broken`` (that is :func:`quiet`'s own stderr
+    message). Shared with the daily part's once-a-day operator line (§2.6, PD10), so the
+    operator reads the same wording wherever it comes from."""
+    now = now if now is not None else _now()
+    by_name = providers(cfg)
+    lines = []
+    for result in results:
+        provider = by_name.get(result.provider)
+        window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+        renew = provider.renew if provider is not None else ''
+        v = verdict(result, now, window)
+        if v == 'expiring':
+            left = days_left(result, now)
+            lines.append(
+                f'credential {result.provider} expires {result.expires} '
+                f'({int(left)}d, window {window}d) — renew: {renew}')
+        elif v == 'invalid':
+            lines.append(f'credential {result.provider} is not valid — renew: {renew}')
+    return lines
+
+
 def quiet(results, product, cfg, out=print, err=sys.stderr):
     """The rc. Nothing printed and 0 when every verdict is ``ok`` or ``unknown``. One line per
     bad provider and 1 when any is ``invalid``/``expiring``, each line exactly §2.3's shape.
@@ -552,31 +578,19 @@ def quiet(results, product, cfg, out=print, err=sys.stderr):
     broken — 2 beats 1 (PD17), and the bad lines are still written to stdout first."""
     now = _now()
     by_name = providers(cfg)
-    bad_lines = []
     broken_any = False
-    bad_any = False
     for result in results:
         provider = by_name.get(result.provider)
         window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
-        renew = provider.renew if provider is not None else ''
-        v = verdict(result, now, window)
-        if v == 'broken':
+        if verdict(result, now, window) == 'broken':
             broken_any = True
             print(f'credentials: probe broken for {result.provider}: {result.detail}', file=err)
-        elif v == 'expiring':
-            bad_any = True
-            left = days_left(result, now)
-            bad_lines.append(
-                f'credential {result.provider} expires {result.expires} '
-                f'({int(left)}d, window {window}d) — renew: {renew}')
-        elif v == 'invalid':
-            bad_any = True
-            bad_lines.append(f'credential {result.provider} is not valid — renew: {renew}')
-    for line in bad_lines:
+    lines = _bad_lines(results, product, cfg, now)
+    for line in lines:
         out(line)
     if broken_any:
         return 2
-    if bad_any:
+    if lines:
         return 1
     return 0
 
@@ -598,3 +612,191 @@ def cmd_check(args, product, cfg):
         return 0
     render(results, product, cfg)
     return _rc(results, cfg)
+
+
+# ---- the daily part (§2.6) and its operator line (§2.7) -----------------------------------
+
+def rule_id(root):
+    """The id of the live rule card whose ``check:`` basename is ``credentials.sh`` — D11's
+    shared ledger key (PD10). ``'credentials'`` when there is none, or the record cannot be
+    read — which is also the correct key before the operator has installed the card."""
+    from asf.rules import rules
+    try:
+        cards = rules.load_rules(root)
+    except rules.RulesError:
+        return 'credentials'
+    for card in cards:
+        check = card.get('check')
+        if check and os.path.basename(check) == 'credentials.sh':
+            return card['id']
+    return 'credentials'
+
+
+def _summary_line(results, product, cfg, now):
+    """The daily part's one-line summary (§2.6 step 3): ``<n> providers: <n> ok[, 1 EXPIRING
+    <name> (<n>d)]…`` — one clause per non-``ok`` provider that is not broken (a broken probe
+    gets its own line, printed separately). ``'no providers configured'`` with none."""
+    if not results:
+        return 'no providers configured'
+    by_name = providers(cfg)
+    ok = 0
+    clauses = []
+    for result in results:
+        provider = by_name.get(result.provider)
+        window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+        v = verdict(result, now, window)
+        if v in ('ok', 'unknown'):
+            ok += 1
+        elif v == 'expiring':
+            left = days_left(result, now)
+            clauses.append(f'1 EXPIRING {result.provider} ({int(left)}d)')
+        elif v == 'invalid':
+            clauses.append(f'1 INVALID {result.provider}')
+    return f"{len(results)} providers: " + ', '.join([f'{ok} ok'] + clauses)
+
+
+def daily(product, root, event=None, now=None):
+    """The daily credentials part (§2.6): always returns ``0`` (D12) — a broken credential
+    check never fails the day. Probes every provider fresh, emits one ``credentials`` event
+    per provider, prints one summary line (a broken probe gets its own line too), and raises
+    the once-a-day operator line through
+    :func:`asf.tick.file_bugs.report_operator_rules` — never a second copy keyed differently
+    (PD10). Every exception is caught and printed as ``credentials: <ExceptionName>: <msg>``."""
+    from asf.tick import file_bugs
+    now = now if now is not None else _now()
+    day = now.strftime('%Y-%m-%d')
+    try:
+        cfg = env.load_config()
+        results = check(product, cfg, fresh=True, now=now)
+        by_name = providers(cfg)
+        for result in results:
+            provider = by_name.get(result.provider)
+            window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+            v = verdict(result, now, window)
+            if event is not None:
+                event('credentials', provider=result.provider, state=result.state,
+                     verdict=v, expires=result.expires, days_left=days_left(result, now))
+        print(_summary_line(results, product, cfg, now))
+        for result in results:
+            provider = by_name.get(result.provider)
+            window = provider.window_days if provider is not None else DEFAULT_WINDOW_DAYS
+            if verdict(result, now, window) == 'broken':
+                print(f'credentials: probe broken for {result.provider}: {result.detail}')
+
+        lines = _bad_lines(results, product, cfg, now)
+        if lines:
+            def _out(line):
+                print(line)
+                if event is not None and line.startswith('NEEDS OPERATOR: '):
+                    event('needs-operator', message=line)
+
+            ledger_file = file_bugs.ledger_path(product.name)
+            ledger = file_bugs._read_ledger(ledger_file)
+            file_bugs.report_operator_rules(
+                [{'rule': rule_id(root), 'line': line, 'owner': 'operator'} for line in lines],
+                ledger, day, out=_out)
+            file_bugs._write_ledger(ledger_file, ledger)
+    except Exception as e:  # noqa: BLE001 — a broken credential check never fails the day (D12)
+        print(f"credentials: {type(e).__name__}: {e}")
+    return 0
+
+
+# ---- the installer (§2.8) ------------------------------------------------------------------
+
+#: The rule card's title — the one this spec gives, used both to mint the card and (unminted)
+#: in ``--print``.
+CARD_TITLE = 'Every signed-in tool is valid for three more days'
+
+#: §2.8's rule card body, byte for byte.
+CARD_BODY = (
+    "Every command-line tool the factory signs in with is probed read-only, once an hour at "
+    "most: is the session valid, and when does it expire. A session that is invalid, or that "
+    "expires inside `credentials.window_days` (3), is one `NEEDS OPERATOR` line carrying the "
+    "exact re-authentication command — never a Bug, and never a failed job. Which providers "
+    "this product needs is `credentials:` in its product file; each provider's probe and "
+    "renew commands are `credentials.providers` in `~/.ASF/config.yaml`.\n"
+)
+
+#: §2.8's check script, byte for byte — the whole of ``rules/credentials.sh``. ``R-nnnn`` in
+#: the comment is the minted rule id, substituted in at install time.
+SCRIPT_BODY = (
+    "#!/usr/bin/env bash\n"
+    "# R-nnnn — every signed-in tool is valid for three more days (F-0042).\n"
+    "# The rule-check contract: 0 pass, 1 one line per bad provider, 2 a broken probe.\n"
+    "# The product is $ASF_PRODUCT (the tick sets it), else config.yaml's default_product.\n"
+    "set -uo pipefail\n"
+    "exec asf credentials check --quiet\n"
+)
+
+
+def _print_card_and_script():
+    print(f"---\ntype: rule\ntitle: {CARD_TITLE}\nscope: factory\nowner: operator\n"
+         f"check: rules/credentials.sh\n---\n{CARD_BODY}", end='')
+    print(SCRIPT_BODY, end='')
+
+
+def install(record_root, repo_root, print_only=False, job=None):
+    """§2.8: the two artefacts this Feature cannot have a session write (the amendable set,
+    D9) — the rule card and its check script — minted and written from the operator's own
+    shell instead. ``job`` (default ``$ASF_JOB``) set means a session: the refusal is the
+    first statement, so there is no path on which a session writes either file (PD15).
+    ``print_only`` writes nothing and prints both to stdout. Otherwise: mints the card through
+    the record's own id path, sets ``check:`` and ``owner:``, writes the script into
+    :func:`asf.rules.rules.core_rules_dir` at mode ``0o755`` when it is not already there
+    (PD14), then re-indexes — all in process, never by shelling to ``asf`` on ``PATH``."""
+    job = job if job is not None else os.environ.get('ASF_JOB')
+    if job:
+        print('NEEDS OPERATOR: asf credentials install writes the amendable set — '
+             'run it yourself: asf credentials install --product <p>')
+        return 2
+    if print_only:
+        _print_card_and_script()
+        return 0
+
+    import argparse
+    import contextlib
+    import io
+    import tempfile
+    from asf.record import new as record_new
+    from asf.record import setfield
+    from asf.record.index import do_index
+    from asf.rules import rules as rules_mod
+
+    fd, body_path = tempfile.mkstemp(suffix='.md')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(CARD_BODY)
+        new_args = argparse.Namespace(
+            type='rule', parent=None, title=CARD_TITLE, set=['scope=factory'],
+            priority=None, area=None, legacy_id=None, body_file=body_path,
+            acceptance=None, writes=None, force=False)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = record_new.cmd_new(new_args, record_root)
+    finally:
+        os.remove(body_path)
+    if rc:
+        return rc
+    new_id = buf.getvalue().strip()
+
+    set_args = argparse.Namespace(
+        id=new_id, assignments=['check=rules/credentials.sh', 'owner=operator'],
+        why=None, product=None)
+    rc = setfield.cmd_set(set_args, record_root)
+    if rc:
+        return rc
+
+    script_dir = rules_mod.core_rules_dir()
+    script_path = os.path.join(script_dir, 'credentials.sh')
+    if not os.path.isfile(script_path):
+        os.makedirs(script_dir, exist_ok=True)
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(SCRIPT_BODY.replace('R-nnnn', new_id))
+        os.chmod(script_path, 0o755)
+
+    do_index(record_root)
+
+    print(f"wrote rules/{new_id}.md (record) — commit it: git -C {record_root} commit -s rules/")
+    print(f"wrote rules/credentials.sh (asf) — commit it: git -C {repo_root} commit -s "
+         f"rules/credentials.sh")
+    return 0

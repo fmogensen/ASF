@@ -304,7 +304,7 @@ def build_parser():
 
     p_credentials = sub.add_parser(
         'credentials', help='is every signed-in tool this product names still valid')
-    p_credentials.add_argument('credentials_command', choices=['check'])
+    p_credentials.add_argument('credentials_command', choices=['check', 'install'])
     p_credentials.add_argument('--product')
     p_credentials.add_argument('--fresh', action='store_true',
                                help='bypass the cache (D6) and probe every provider now')
@@ -313,6 +313,9 @@ def build_parser():
                                help='the rule contract: nothing on success, one line per bad '
                                     'provider, exit 1 on an expiring/invalid one, 2 on a '
                                     'broken probe')
+    p_credentials.add_argument('--print', action='store_true', dest='print_only',
+                               help='install: print the card and the script instead of '
+                                    'writing them')
 
     p_evidence = sub.add_parser('evidence', help='the evidence pass (git/gh derived state)')
     p_evidence.add_argument('--product')
@@ -641,6 +644,10 @@ def _main(argv=None):
     if args.command == 'credentials':
         from asf import credentials as credentials_mod
         from asf import env
+        if args.credentials_command == 'install':
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            return credentials_mod.install(resolve_record(args), repo_root,
+                                           print_only=args.print_only)
         return credentials_mod.cmd_check(args, env.load_product(args.product), env.load_config())
     if args.command == 'evidence':
         from asf.evidence.evidence import main as evidence_main

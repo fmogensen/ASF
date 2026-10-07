@@ -30,12 +30,16 @@ def parts(product, root, event=None):
     from asf.tick.stale import cmd_stale
     from asf.scorecard.loop import daily as scorecard_daily
     from asf.shadow import settle as shadow_settle
+    from asf.credentials import daily as credentials_daily
     return [
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
                                           product=product.name), root)),
         # the value loop: measure, snapshot, file a card per cause over threshold, verify landed ones
         ('scorecard', lambda: scorecard_daily(product, root)),
+        # every signed-in tool, always green (D12): a broken probe is one needs-operator line,
+        # never a failed day (§2.6)
+        ('credentials', lambda: credentials_daily(product, root, event=event)),
         # the shadow deciders: each due close judged against what happened to its card
         ('deciders', lambda: shadow_settle(product, root)),
     ]

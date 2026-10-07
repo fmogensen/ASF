@@ -3,11 +3,14 @@
 Workers, feeder, briefs and ``gh`` are stubbed (module attributes); git is real: a bare origin
 for the record (``TickTestCase``) and a bare origin + clone for the product repo.
 """
+import argparse
 import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 import types
 import unittest
@@ -19,10 +22,11 @@ from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
 from asf.metrics import metrics as metrics_mod
 from asf.groom import answers
-from asf.tick import shadow, step_daily, step_groom, step_harvest, step_health, step_prs, step_wave, steps, tick
+from asf.tick import file_bugs, shadow, step_daily, step_groom, step_harvest, step_health, step_prs, step_wave, steps, tick
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
+from tests.test_file_bugs import make_repo, run as cli_run, write_check_script, write_rule
 from tests.test_tick import TickTestCase, _git, steps_only
 
 DEAD_PID = 999999
@@ -1761,22 +1765,132 @@ class DailyStepTests(StepsTestCase):
         self.assertIn('daily: stale FAILED — stale broke', self.lines)
         self.assertIn('daily: rollup ok — rollup summary', self.lines)
 
+    def fake_credentials_part(self):
+        from asf.credentials import daily as credentials_daily
+
+        def parts(product, root, event=None):
+            return [('credentials', lambda: credentials_daily(product, root, event=event))]
+        return mock.patch.object(step_daily, 'parts', parts)
+
+    def _configure_credentials(self, probe, renew='login provider-a'):
+        self.write_config(
+            'credentials:\n  providers:\n    provider-a:\n'
+            f'      probe: "{probe}"\n      renew: "{renew}"\n')
+        self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}credentials: [provider-a]\n')
+        self.product = env.load_product('sample')
+
+    def test_credentials_never_fails_the_day(self):
+        self._configure_credentials("bash -c 'exit 1'")
+        with self.fake_credentials_part():
+            rc, out = self.run_tick(steps='daily')
+        self.assertEqual(rc, 0)
+        self.assertIn('daily: credentials ok', out)
+        self.assertTrue(os.path.isfile(steps.stamp_path(self.product)))
+
+    def test_an_exploding_probe_still_stamps_the_day(self):
+        self._configure_credentials('this-command-does-not-exist-anywhere')
+        with self.fake_credentials_part():
+            rc, out = self.run_tick(steps='daily')
+        self.assertEqual(rc, 0)
+        self.assertIn('credentials: probe broken for provider-a:', out)
+        self.assertTrue(os.path.isfile(steps.stamp_path(self.product)))
+
 
 class DailyPartsTests(StepsTestCase):
-    def test_the_daily_is_four_parts_and_only_four(self):
+    def test_the_daily_is_five_parts_and_only_five(self):
         names = [n for n, _ in step_daily.parts(self.product, self.tmp)]
-        self.assertEqual(names, ['stale', 'rollup', 'scorecard', 'deciders'])
+        self.assertEqual(names, ['stale', 'rollup', 'scorecard', 'credentials', 'deciders'])
         self.assertEqual(step_daily.yesterday(__import__('datetime').date(2026, 3, 1)), '2026-02-28')
 
-    def test_asf_tick_daily_prints_those_four_and_stamps_the_day(self):
+    def test_asf_tick_daily_prints_those_five_and_stamps_the_day(self):
         with mock.patch('asf.scorecard.facts.forge_clutter', return_value={}):   # no forge in a test
             rc, out = self.run_tick(steps='daily')
         lines = [ln for ln in steps_only(out).splitlines() if ln.startswith('daily:')]
         self.assertEqual([ln.split()[1:3] for ln in lines],
-                         [['stale', 'ok'], ['rollup', 'ok'], ['scorecard', 'ok'], ['deciders', 'ok']])
+                         [['stale', 'ok'], ['rollup', 'ok'], ['scorecard', 'ok'],
+                          ['credentials', 'ok'], ['deciders', 'ok']])
         self.assertNotIn('daily: groom', out)
         self.assertNotIn('daily: file-bugs', out)
         self.assertTrue(os.path.exists(steps.stamp_path(self.product)))
+
+
+class FileBugsOperatorRuleTests(unittest.TestCase):
+    """§2.7, §3: an operator-owned rule violation files no Bug and raises one ``NEEDS
+    OPERATOR`` line a day — `file_bugs.report_operator_rules`'s ledger, exercised end to end
+    through `cmd_file_bugs`. The fixture's check script prints one line ending in a renew
+    command, so the "ends in the renew command" assertion holds with no credential code in
+    sight."""
+
+    RULE_ID = 'R-0001'
+    RENEW_TAIL = 'renew: login provider-c'
+
+    def setUp(self):
+        self.root = make_repo()
+        self.state = tempfile.mkdtemp(prefix='filebugs_state_')
+        write_rule(self.root, self.RULE_ID, 'Every signed-in tool is valid for three more days',
+                  typed_lines=['scope: factory', 'check: tools/checks/r0001.sh',
+                               'owner: operator'])
+        cli_run(['index'], self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def _write_check(self, ok):
+        if ok:
+            write_check_script(self.root, 'r0001.sh', "#!/usr/bin/env bash\nexit 0\n")
+        else:
+            write_check_script(
+                self.root, 'r0001.sh',
+                "#!/usr/bin/env bash\n"
+                "echo 'R-0001 credential provider-c expires 2026-09-29T08:00:00Z "
+                f"(2d, window 3d) — {self.RENEW_TAIL}'\n"
+                "exit 1\n")
+
+    def _file_bugs(self):
+        from asf.conventions import Conventions
+        args = argparse.Namespace(default_bug_epic=None, file_bug_level='auto',
+                                  conventions=Conventions(), state_dir=self.state)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = file_bugs.cmd_file_bugs(args, self.root)
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def _operator_ledger(self):
+        with open(file_bugs.ledger_path(state_dir=self.state), encoding='utf-8') as f:
+            return json.load(f).get('operator', {})
+
+    def test_an_operator_owned_violation_files_no_bug(self):
+        self._write_check(ok=False)
+        out = self._file_bugs()
+        self.assertEqual(os.listdir(os.path.join(self.root, 'bugs')), [])
+        self.assertIn('file-bugs: 0 filed, 0 bumped, 0 unchanged', out)
+        operator_lines = [l for l in out.splitlines() if l.startswith('NEEDS OPERATOR: R-')]
+        self.assertEqual(len(operator_lines), 1)
+        self.assertTrue(operator_lines[0].endswith(self.RENEW_TAIL))
+
+    def test_the_line_is_printed_once_a_day(self):
+        self._write_check(ok=False)
+        first = self._file_bugs()
+        self.assertIn('NEEDS OPERATOR: R-0001', first)
+        second = self._file_bugs()
+        self.assertNotIn('NEEDS OPERATOR', second)
+        today = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+        self.assertEqual(self._operator_ledger()['R-0001']['day'], today.strftime('%Y-%m-%d'))
+
+    def test_a_clean_run_clears_the_key(self):
+        self._write_check(ok=False)
+        self._file_bugs()
+        self.assertIn('R-0001', self._operator_ledger())
+
+        self._write_check(ok=True)
+        self._file_bugs()
+        self.assertNotIn('R-0001', self._operator_ledger())
+
+        self._write_check(ok=False)
+        third = self._file_bugs()
+        self.assertIn('NEEDS OPERATOR: R-0001', third)
 
 
 class GroomStepTests(StepsTestCase):

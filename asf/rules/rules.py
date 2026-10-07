@@ -38,6 +38,12 @@ def _timeout():
 TIMEOUT = _timeout()
 MAX_WORKERS = 8
 
+#: Who a violation is raised to (§2.7). An unrecognised ``owner:`` is read as the default —
+#: a typo makes the rule factory-owned and its violation files a Bug exactly as today, so
+#: nothing is silenced (PD11); `unknown_owners` reports the typo instead.
+OWNERS = ('factory', 'operator')
+DEFAULT_OWNER = 'factory'
+
 
 class RulesError(Exception):
     pass
@@ -99,6 +105,26 @@ def load_rules(root):
         rule.setdefault('id', iid)
         rules.append(rule)
     return rules
+
+
+def owner_of(rule):
+    """The card's ``owner``, lower-cased and stripped, when it is one of :data:`OWNERS`, else
+    :data:`DEFAULT_OWNER` (PD11)."""
+    value = str(rule.get('owner') or '').strip().lower()
+    return value if value in OWNERS else DEFAULT_OWNER
+
+
+def unknown_owners(rules):
+    """``[(rule id, the raw value)]`` for every card whose ``owner:`` is set and not one of
+    :data:`OWNERS` — visibility for the typo `owner_of`'s default silently absorbs."""
+    out = []
+    for rule in rules:
+        raw = rule.get('owner')
+        if not raw:
+            continue
+        if str(raw).strip().lower() not in OWNERS:
+            out.append((rule['id'], raw))
+    return out
 
 
 def partition(rules):
@@ -217,20 +243,31 @@ def cmd_check(args, root):
     violations.sort()
     unenforced.sort(key=lambda u: u['rule'])
 
+    owners = {r['id']: owner_of(r) for r in rules}
+    unknown = unknown_owners(rules)
+
     if args.json:
         payload = {
-            'violations': [{'rule': rule_of(l), 'line': l} for l in violations],
+            'violations': [{'rule': rule_of(l), 'line': l,
+                           'owner': owners.get(rule_of(l), DEFAULT_OWNER)} for l in violations],
             'unenforced': unenforced,
             'broken': failures,
+            'owner_unknown': [{'rule': rid, 'value': value} for rid, value in unknown],
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 1 if violations or failures else 0
 
+    operator_count = sum(1 for l in violations
+                         if owners.get(rule_of(l), DEFAULT_OWNER) == 'operator')
+    operator_part = f", {operator_count} operator" if operator_count else ''
     broken_part = f", {len(failures)} checks broken" if failures else ''
     print(f"== RULES {len(enforced)} checked, {len(violations)} violations, "
-          f"{len(unenforced)} unenforced{broken_part}")
+          f"{len(unenforced)} unenforced{operator_part}{broken_part}")
     for line in violations:
-        print(line)
+        prefix = 'NEEDS OPERATOR: ' if owners.get(rule_of(line), DEFAULT_OWNER) == 'operator' else ''
+        print(f"{prefix}{line}")
+    for rid, value in unknown:
+        print(f"{rid} owner: {value!r} is not one of {OWNERS} — read as factory")
     for b in failures:
         print(f"{failure_line(b)} ({b['line']})")
     if args.verbose:

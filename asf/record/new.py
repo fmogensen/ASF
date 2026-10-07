@@ -18,7 +18,7 @@ SEVERITIES = ('S1', 'S2', 'S3')
 _COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'legacy_id',
                'local_only')
 SETTABLE = {t: set(_COMMON_SET) for t in TYPES}
-SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check', 'supersedes', 'superseded_by'}
+SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check', 'supersedes', 'superseded_by', 'owner'}
 SETTABLE['decision'] |= {'decided_by', 'date', 'supersedes', 'superseded_by'}
 #: A Bug's severity is settable (F-0163): it is the field the fix lane is ordered by
 #: (:func:`asf.feeder.rows.bug_rows`), so a downgrade releases the S1 lane's hold on everything
