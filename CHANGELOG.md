@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.228 — 2026-10-07
+
+### Features landed
+
+- The pull request says which lines are not proved (#984)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.228"`
+
 ## v0.1.227 — 2026-10-07
 
 ### Features landed
