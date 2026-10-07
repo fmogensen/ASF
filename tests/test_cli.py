@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 from asf import cli, env
+from asf.views import status
 
 
 class RefusedProductFileTests(unittest.TestCase):
@@ -573,6 +574,84 @@ class ScopedParkTests(unittest.TestCase):
         with mock.patch.object(pool_mod, 'sessions_path', lambda _p: self.path):
             cell = status.parked_cell(None)
         self.assertIn('T-0042 [branch cloud/plan-T-0042]', cell)
+
+
+class ParkedCellTests(unittest.TestCase):
+    """F-0239 S-53456: ``parked_cell(product, root=None)`` lists every derived "adjudicated,
+    card unchanged" stalemate park (:func:`asf.feeder.rows._capped`) beside the by-hand and
+    factory parks it already lists — the NEXT table's own PARKED rows, named in ``asf status``
+    too, so the operator does not have to already know `` `asf unpark <item>` `` moves one."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='cli_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.product = env.Product('sample', {'conventions': {
+            'branch_prefixes': {'spec': 'spec', 'plan': 'plan', 'task': 'task'}}})
+        self.path = os.path.join(env.state_dir(self.product), 'sessions.jsonl')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ledger(self, *records):
+        with open(self.path, 'w') as f:
+            for r in records:
+                f.write(json.dumps(r) + '\n')
+
+    def _root(self, items=None):
+        root = tempfile.mkdtemp(dir=self.tmp)
+        with open(os.path.join(root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items or {}}, f)
+        return root
+
+    def _over_limit(self, item='T-0338', digest='d'):
+        runs = [{'job': f'coder-{item.lower()}-{n}', 'item': item, 'kind': 'coder',
+                 'started': f'2026-09-2{n}T09:00:00Z', 'ended': f'2026-09-2{n}T09:30:00Z'}
+                for n in range(6, 10)]
+        runs.append({'job': f'adjudicate-{item.lower()}', 'item': item, 'kind': 'adjudicate',
+                     'started': '2026-10-03T10:00:00Z', 'ended': '2026-10-03T10:10:00Z',
+                     'card_digest': digest})
+        self._ledger(*runs)
+
+    def test_with_no_root_reads_exactly_as_today(self):
+        self._over_limit()
+        with mock.patch('asf.briefs.build.card_digest', return_value='d'):
+            self.assertIsNone(status.parked_cell(self.product))
+        self._ledger({'job': 'coder-t-0338', 'item': 'T-0338', 'kind': 'coder',
+                     'correction': {'kind': 'empty', 'text': 'x', 'at': '2026-09-01T10:00:00Z',
+                                    'parked': True, 'reason': 'ended empty 2 times'}})
+        self.assertEqual(status.parked_cell(self.product), status.parked_cell(self.product, None))
+
+    def test_an_over_limit_item_adjudicated_on_this_same_card_is_listed(self):
+        root = self._root({'T-0338': {'id': 'T-0338', 'type': 'task', 'state': 'New'}})
+        self._over_limit()
+        with mock.patch('asf.briefs.build.card_digest', return_value='d'):
+            cell = status.parked_cell(self.product, root)
+        self.assertTrue(cell.startswith('1 — '), cell)
+        self.assertIn('T-0338 [item]: adjudicated 1 time(s), last 2026-10-03T10:00, on this '
+                      'same card', cell)
+        self.assertIn('`asf unpark <item|branch|job>` releases one', cell)
+
+    def test_an_item_with_an_uncarried_ruling_is_not_listed(self):
+        root = self._root({'T-0338': {'id': 'T-0338', 'type': 'task', 'state': 'New'}})
+        self._over_limit()
+        card = os.path.join(root, 'tasks', 'T-0338.md')
+        os.makedirs(os.path.dirname(card))
+        with open(card, 'w', encoding='utf-8') as f:
+            f.write('---\nid: T-0338\n---\n\n## Description\nx\n\n## History\n'
+                    '- 2026-10-03 11:00 adjudicate (adjudicate-t-0338): C1 upheld; fix a.py:3\n')
+        self.product = env.Product('sample', {'backlog_dir': root, 'conventions': {
+            'branch_prefixes': {'spec': 'spec', 'plan': 'plan', 'task': 'task'}}})
+        with mock.patch('asf.briefs.build.card_digest', return_value='d'):
+            cell = status.parked_cell(self.product, root)
+        self.assertIsNone(cell)
+
+    def test_a_root_with_no_index_json_adds_nothing_and_raises_nothing(self):
+        root = tempfile.mkdtemp(dir=self.tmp)
+        self._over_limit()
+        with mock.patch('asf.briefs.build.card_digest', return_value='d'):
+            self.assertIsNone(status.parked_cell(self.product, root))
 
 
 class ReadmeParserTests(unittest.TestCase):

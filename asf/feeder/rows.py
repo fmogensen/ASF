@@ -2212,7 +2212,8 @@ def _capped(row, attempts, limit, product, adjudicated=None):
     if adj.get('same_card'):
         why = (f"{row.kind} after {n} sessions (limit {limit}); adjudicated "
                f"{adj.get('runs') or 1} time(s), last {str(adj.get('at') or '?')[:16]}, on this "
-               f"same card: a card edit or a person's decision moves it")
+               f"same card: a card edit, a ruling (`asf correct {row.item_id} --why …`) or `asf "
+               f"unpark {row.item_id}` moves it")
         return dataclasses.replace(row, kind=STALEMATE, brief_kind='adjudicate',
                                    action=f'{PARKED} adjudicated, card unchanged',
                                    reason=why, waits_on='operator')
