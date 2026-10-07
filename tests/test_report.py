@@ -214,6 +214,22 @@ class RulingFieldsTests(unittest.TestCase):
         text = self.report('ruling: it waits for T-0025', 'blocked_on: T-0025')
         self.assertEqual(report.ruling(text), 'it waits for T-0025')
 
+    def test_f0262_the_precedent_field_is_parsed_and_changes_no_other_reader(self):
+        text = self.report('ruling: upheld; the call goes through the job',
+                           'superseded_by: none',
+                           'precedent: D-0004, workers/jobs/claim.py')
+        self.assertEqual(report.precedent(text), 'D-0004, workers/jobs/claim.py')
+        self.assertEqual(report.ruling(text), 'upheld; the call goes through the job')
+        self.assertEqual(report.ruling_fields(text)['superseded_by'], None)
+        self.assertIsNone(report.needs_input(text))          # a precedent line asks nothing
+        self.assertIsNone(report.failure(text))
+
+    def test_f0262_a_precedent_line_no_longer_runs_on_into_the_field_above_it(self):
+        # P8: before the field existed, `precedent:` was swallowed as a continuation
+        text = self.report('superseded_by: none', 'precedent: none — I looked in docs/decisions/')
+        self.assertEqual(report.ruling_fields(text)['superseded_by'], None)
+        self.assertTrue(report.precedent(text).startswith('none'))
+
 
     def test_a_report_quoting_a_cli_error_is_not_that_failure(self):
         text = ('REPORT\nitem: F-0001\nstatus: done\npushed: yes\n'
