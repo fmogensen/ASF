@@ -736,6 +736,13 @@ def relaunch_capped(product, row, wrow, out=print):
 STARTS, WAITS, HELD, CLOSED, HOST, NO_SEAT, CAPPED = (
     '', 'waits', 'held', 'closed', 'host', 'no seat', 'relaunch cap')
 
+#: §2.3 — ``wave_state``'s own gates: how many New Task ids it names, so an idle wave's line
+#: never grows without bound on a backlog that is mostly New.
+GATE_CAP = 10
+#: §2.3 — the gate :func:`wave_state` names when the feeder planned no row at all (an empty
+#: ``screened``) while New Tasks exist anyway — nothing else in ``screened`` to blame instead.
+NO_ROW = 'no row planned'
+
 
 class Screened:
     """One planned row through :func:`screen`: ``why`` empty when the wave starts it, else the
@@ -853,6 +860,38 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
         started += 1
         result.append(Screened(row, bypass=bypass, wrow=wrow, brief=brief))
     return result
+
+
+def wave_state(screened, held, items, launching=0):
+    """§2.3 — the one fact the wave knows and nothing else does: that it launched nothing (or
+    not), that New Tasks existed anyway, and which gate held the rows it planned but did not
+    launch. Pure — :func:`launch` is the only caller, right after it knows ``worker_rows``.
+
+    ``{'idle': bool, 'new_tasks': int, 'new_task_ids': [...], 'gates': {gate: count}}`` —
+    ``gates`` counts a non-starting ``screened`` entry under: its ``row.waits_on`` (``WAITS``,
+    falling back to the first word of ``row.action`` for a row without one set); the held
+    class alone, not the level (``HELD``); else the kind string itself (``CLOSED``, ``HOST``,
+    ``NO_SEAT``, ``CAPPED``). An empty ``screened`` with New Tasks still open names
+    :data:`NO_ROW` instead — there is nothing else in it to blame."""
+    new_task_ids = sorted(iid for iid, item in items.items()
+                          if item.get('type') == 'task' and item.get('state', 'New') == 'New')
+    new_tasks = len(new_task_ids)
+    gates = {}
+    if screened:
+        for s in screened:
+            if s.starts:
+                continue
+            if s.kind == WAITS:
+                gate = s.row.waits_on or s.row.action.split()[0]
+            elif s.kind == HELD:
+                gate = f'held {held[s.row.item_id][0]}'
+            else:
+                gate = s.kind
+            gates[gate] = gates.get(gate, 0) + 1
+    elif new_tasks:
+        gates = {NO_ROW: new_tasks}
+    return {'idle': not launching, 'new_tasks': new_tasks,
+            'new_task_ids': new_task_ids[:GATE_CAP], 'gates': gates}
 
 
 def would_start(product, root, items=None):
@@ -1203,6 +1242,7 @@ def launch(ctx, out=print):
     starting = [s for s in screened if s.starts]
     bypassed = any(s.bypass for s in starting)
     worker_rows = [s.wrow for s in starting]
+    ctx.wave = wave_state(screened, held, items, launching=len(worker_rows))
     # the self-tuning loop (asf.tune): its pass, then the tuned model and seat share per kind
     worker_rows = tune_mod.wave_hook(product, worker_rows, running, out=out, event=ctx.event)
     texts = {s.wrow.job: s.brief.text for s in starting}
