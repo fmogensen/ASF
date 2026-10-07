@@ -52,10 +52,45 @@ SHA_RE = re.compile(r'\b[0-9a-f]{7,40}\b')
 HEAD_CAPPED = ('correct',)
 
 
+#: A session that could not start its heartbeat loop and said so — its sandbox refused the
+#: background process ("Unauthorized Persistence") or the beat's git dir sat outside it. The beat
+#: belongs to the runtime, never to the session (F-0279): such an end says nothing about the
+#: work, so it is no cause of its own and no launch of the streak.
+HEARTBEAT_REFUSED_RE = re.compile(
+    r'unauthori[sz]ed persistence'
+    r'|heartbeat[^\n]{0,80}\b(?:could not|cannot|can\'t|did not|didn\'t|failed to|refused)\b'
+    r'[^\n]{0,40}\b(?:start|run|launch|be started)'
+    r'|\b(?:could not|cannot|can\'t|failed to)\s+start[^\n]{0,40}\bheartbeat'
+    r'|git-common-dir[^\n]{0,80}outside[^\n]{0,40}sandbox', re.I)
+
+
+def heartbeat_refused(text):
+    """True when ``text`` (a report, or a correction) is a heartbeat-start refusal
+    (:data:`HEARTBEAT_REFUSED_RE`)."""
+    return bool(HEARTBEAT_REFUSED_RE.search(text or ''))
+
+
 def cause_key(row_kind, correction=''):
-    """A short digest of what a row launches for: its feeder kind and its correction text."""
-    raw = f'{row_kind or ""}\n{correction or ""}'
+    """A short digest of what a row launches for: its feeder kind and its correction text. A
+    correction's heartbeat-start refusal lines are not part of it (F-0279): a run that could not
+    start the loop handed its next run no new cause, and no cause that a later round repeats."""
+    kept = '\n'.join(ln for ln in str(correction or '').split('\n') if not heartbeat_refused(ln))
+    raw = f'{row_kind or ""}\n{kept}'
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
+
+
+def ended_on_heartbeat(text):
+    """True when a run's report ``text`` claims it is stuck (:func:`terminal`) on a
+    heartbeat-start refusal — health marks the run ``heartbeat_refused`` from it, at its end,
+    while the job's log is still that run's own."""
+    return bool(terminal(text)) and heartbeat_refused(text)
+
+
+def counted(run):
+    """False for a run the relaunch cap never counts, as it never counts a spent window's: one
+    health marked ``heartbeat_refused`` (F-0279), and one the operator stopped (``asf stop``,
+    :mod:`asf.workers.stop`) — neither says anything about the work."""
+    return not run.get('heartbeat_refused') and not run.get('stopped_by')
 
 
 def _same(run, head, card, cause):
@@ -73,11 +108,13 @@ def streak(path, job, item, head=None, card='', cause=''):
     """The ended runs of ``job``, newest first, handed the same state as the launch about to be
     made, back to the first one that was not — and never past the item's latest unpark. The
     runs in it must also agree among themselves on the head (so a branch that moved between them
-    breaks it even when the current head is unknown). A spent window's run is not counted."""
+    breaks it even when the current head is unknown). A spent window's run is not counted, nor
+    one that ended on a heartbeat-start refusal (F-0279)."""
     all_runs = lifecycle.item_runs(path, item) if item else []
     since = _since_unpark(all_runs)
     rs = sorted((r for r in all_runs if r.get('job') == job and r.get('ended')
-                 and not lifecycle.quota_exhausted(r) and (r.get('started') or '') > since),
+                 and not lifecycle.quota_exhausted(r) and (r.get('started') or '') > since
+                 and counted(r)),
                 key=lambda r: r.get('started') or '', reverse=True)
     out, first_head = [], None
     for r in rs:
@@ -108,7 +145,8 @@ def head_streak(path, job, item, head, card=''):
     out = []
     for r in all_runs:
         if r.get('job') != job or not r.get('ended') or lifecycle.quota_exhausted(r) \
-                or (r.get('started') or '') <= since or r.get('kind') not in HEAD_CAPPED:
+                or (r.get('started') or '') <= since or r.get('kind') not in HEAD_CAPPED \
+                or not counted(r):
             continue
         have = r.get('launch_head') or ''
         if not have or not (have.startswith(head) or head.startswith(have)):
@@ -209,7 +247,7 @@ def loop_guard(path, job, item, card='', guard=None, now=None):
     all_runs = lifecycle.item_runs(path, item)
     since = _since_unpark(all_runs)
     runs = [r for r in all_runs if r.get('job') == job and not lifecycle.quota_exhausted(r)
-            and (r.get('started') or '') > since]
+            and (r.get('started') or '') > since and counted(r)]
     newest = max(runs, key=lambda r: r.get('started') or '', default=None)
     if newest is not None and newest.get('ended') and not newest.get('report_key'):
         newest['report_key'] = loops.report_key(_result_text(newest))
@@ -235,7 +273,7 @@ def _assess(path, job, item, head, card, cause, repo, main, cap, writes, product
     if not runs:
         return None, ''
     text = _result_text(runs[0])
-    claim = terminal(text)
+    claim = '' if heartbeat_refused(text) else terminal(text)  # F-0279: not the work's claim
     # the terminal shortcut needs the head known: a branch gone from origin (landed and deleted)
     # is relaunched fresh, and one run on it proves nothing about the next
     if len(runs) < cap and not (claim and head):
