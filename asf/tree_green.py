@@ -29,7 +29,7 @@ import json
 import os
 import time
 
-from asf.harvest import harvest as H
+from asf import gitops
 
 STATE_FILE = 'tree-green.json'
 #: a remembered green older than this is dropped: its tree is nobody's head any more
@@ -71,13 +71,15 @@ def save(state_dir, data):
 
 
 def tree_at(repo, rev):
-    """The root tree object of ``rev`` (``git rev-parse <rev>^{tree}``), or '' — no repo, no such
-    rev, a read that failed. The tree is the content: two heads with this one sha carry byte-
-    identical trees, whatever their messages, authors or parents say."""
+    """The root tree object of ``rev`` (:func:`asf.gitops.rev_parse` of ``<rev>^{tree}``), or ''
+    — no repo, no such rev, a read that failed. The tree is the content: two heads with this one
+    sha carry byte-identical trees, whatever their messages, authors or parents say.
+
+    Unknown collapses into '' here on purpose: every caller asks this to *grant* a carry, and a
+    read git could not answer must grant nothing — the same answer as no such rev."""
     if not repo or not rev:
         return ''
-    r = H.sh(['git', 'rev-parse', '--verify', '-q', f'{rev}^{{tree}}'], cwd=repo)
-    return r.stdout.strip() if r.returncode == 0 else ''
+    return gitops.rev_parse(repo, f'{rev}^{{tree}}') or ''
 
 
 def remember(state_dir, pr, head, tree, passed=(), now=None):
