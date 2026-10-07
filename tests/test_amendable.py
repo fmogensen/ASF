@@ -287,6 +287,25 @@ class HookTests(unittest.TestCase):
                 self.assertEqual(rec['class'], 'touch_amendable_set')
                 self.assertNotIn('kind', rec)     # write_target saw no file (Task 1 step 6)
 
+    def test_a_dropped_write_is_not_re_asked_for_the_same_path(self):
+        """B-0351: the watchdog drops an ``ungrantable_hold`` (0 min, no grant can ever release
+        it) once and for all — but the hook kept calling ``refuse`` on every retry of the same
+        write, reopening the hold it had just dropped, so the breach came straight back. Once a
+        human (or the watchdog, on its behalf) has dropped this path, retrying the same write
+        must still be refused, but must not reopen the hold."""
+        path = 'rules/R-0099.md'
+        rc, _out = self.call('Write', {'file_path': path, 'content': 'x'})
+        self.assertEqual(rc, 2)
+        hold = f'{self.ITEM}/touch_amendable_set'
+        approvals.resolve('demo', hold, 'dropped')
+        self.assertEqual(approvals.open_holds('demo'), [])
+
+        rc, out = self.call('Write', {'file_path': path, 'content': 'y'})
+        self.assertEqual(rc, 2, out)                        # the write is still refused
+        self.assertEqual(approvals.open_holds('demo'), [])  # but the hold does not reopen
+        refusals = [r for r in self.ledger() if r.get('event') == 'refused']
+        self.assertEqual(len(refusals), 1, refusals)
+
     def test_negatives_pass_through(self):
         cases = [
             ('Read', {'file_path': 'rules/R-0042.md'}),
