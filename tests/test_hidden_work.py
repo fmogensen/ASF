@@ -309,6 +309,74 @@ class RulingLiftsParkTest(unittest.TestCase):
         self.assertTrue(got.action.startswith(rows.PARKED))
 
 
+class UnparkLiftsStalematePark(unittest.TestCase):
+    """Task 1 (T-0794): ``asf unpark`` releases a derived stalemate park the same way it
+    releases a factory one — ``released_since`` reads the ``unparked`` stamp item-wide (PD2,
+    D3), so it does not matter which of the item's jobs carries it."""
+
+    RUN = '2026-10-03T10:00:00Z'
+
+    def _check(self, *, unparked=None, job='adjudicate-t-0338', ruling=None):
+        from unittest import mock
+        from asf.evidence import rulings
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        p = product(backlog_dir=root)
+        card = rulings._card_file(p, 'T-0338')
+        os.makedirs(os.path.dirname(card))
+        history = (ruling,) if ruling else ()
+        with open(card, 'w', encoding='utf-8') as f:
+            f.write('---\nid: T-0338\n---\n\n## Description\nx\n\n## History\n'
+                    + ''.join(h + '\n' for h in history))
+        adj_run = {'item': 'T-0338', 'kind': 'adjudicate', 'started': self.RUN, 'ended': 'x',
+                  'card_digest': 'd'}
+        runs = {'adjudicate-t-0338': [adj_run]}
+        if unparked:
+            if job == 'adjudicate-t-0338':
+                adj_run['unparked'] = unparked
+            else:
+                runs[job] = [{'item': 'T-0338', 'kind': 'coder', 'started': '2026-09-01T00:00:00Z',
+                              'ended': 'x', 'unparked': unparked}]
+        with mock.patch.object(step_wave.lifecycle, 'runs', return_value=runs), \
+                mock.patch.object(step_wave.pool_mod, 'sessions_path', return_value='/x'), \
+                mock.patch('asf.briefs.build.card_digest', return_value='d'):
+            adj = step_wave.adjudications(p, {'items': {}}, {'T-0338': 51})
+        row = rows.Row(tier=2, kind=rows.FIX_CORRECT, item_id='T-0338', feature_id='',
+                       action=rows.LAUNCH, brief_kind='correct', branch='', reason='')
+        return rows._capped(row, {'T-0338': 51}, 3, p, adj)
+
+    def test_no_unpark_anywhere_stays_parked(self):
+        self.assertTrue(self._check().action.startswith(rows.PARKED))
+
+    def test_an_unpark_on_the_adjudicate_job_relaunches(self):
+        got = self._check(unparked='2026-10-03T10:30:00Z')
+        self.assertEqual(got.action, rows.LAUNCH)
+        self.assertEqual(got.brief_kind, 'adjudicate')
+
+    def test_an_unpark_on_a_different_job_of_the_item_relaunches(self):
+        """D3: ``released_since`` reads ``unparked`` item-wide, so the stamp a job other than
+        the adjudicate run carries still lifts the park."""
+        got = self._check(unparked='2026-10-03T10:30:00Z', job='coder-t-0338')
+        self.assertEqual(got.action, rows.LAUNCH)
+        self.assertEqual(got.brief_kind, 'adjudicate')
+
+    def test_an_unpark_older_than_the_run_stays_parked(self):
+        got = self._check(unparked='2026-10-03T09:00:00Z')
+        self.assertTrue(got.action.startswith(rows.PARKED))
+
+    def test_a_release_on_a_ruled_item_launches_with_no_ruling_carried(self):
+        got = self._check(unparked='2026-10-03T10:30:00Z',
+                          ruling='- 2026-10-03 11:00 adjudicate (adjudicate-t-0338): '
+                                 'C1 upheld; fix a.py:3')
+        self.assertEqual(got.action, rows.LAUNCH)
+        self.assertFalse(got.ruling)
+        self.assertEqual(got.correction, '')
+
+    def test_an_unpark_equal_to_the_runs_started_relaunches(self):
+        got = self._check(unparked=self.RUN)
+        self.assertEqual(got.action, rows.LAUNCH)
+
+
 class DeliveryLeftOutTest(unittest.TestCase):
     """T-0027's delivery: T-0027, T-0030, T-0032, T-0037 — only T-0037 (the close-out, after
     T-0032, writing a path in the amendable set) needs the console."""
