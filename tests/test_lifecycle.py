@@ -921,6 +921,57 @@ class SessionStateInvariants(unittest.TestCase):
         self.assertEqual(status.name, lc.ENDED_AWAITING_TICK)
 
 
+class LiveStatusTest(unittest.TestCase):
+    """F-0199: the rung below `state_of` — a run still live on the ledger, judged on its pid and
+    its log and nothing else."""
+
+    RUN = {'job': 'j', 'item': 'F-0001', 'kind': 'spec', 'branch': 'spec/F-0001', 'pid': 101,
+           'started': 't1'}
+
+    def status(self, alive, rec):
+        return lc.live_status(self.RUN, alive=lambda pid: alive, result=lambda run: rec)
+
+    def test_a_live_pid_is_working(self):
+        self.assertEqual(self.status(True, None).name, lc.WORKING)
+        self.assertEqual(self.status(True, OK).name, lc.WORKING)   # the pid wins
+
+    def test_an_exit_on_a_success_result_is_finished_and_says_it_is_the_report(self):
+        status = self.status(False, OK)
+        self.assertEqual((status.name, status.result, status.source),
+                         (lc.FINISHED, lc.FINISHED, 'report'))
+
+    def test_an_exit_on_a_failing_result_is_ended_awaiting_tick(self):
+        bad = {'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+               'result': 'boom'}
+        status = self.status(False, bad)
+        self.assertEqual((status.name, status.source), (lc.ENDED_AWAITING_TICK, 'report'))
+
+    def test_an_exit_with_no_result_is_dead_with_no_record(self):
+        status = self.status(False, None)
+        self.assertEqual((status.name, status.reason), (lc.DEAD, lc.NO_RECORD))
+
+    def test_it_never_reaches_git(self):
+        def raises(*a, **k):
+            raise AssertionError('gather must not be called')
+        with mock.patch.object(lc, 'gather', raises), mock.patch.object(lc, '_git', raises):
+            for rec in (None, OK, {'is_error': True, 'result': 'boom'}):
+                self.assertIn(lc.live_status(self.RUN, lambda pid: False,
+                                             lambda run: rec).name, lc.SESSION_STATES)
+
+    def test_only_working_holds_a_seat(self):
+        self.assertTrue(lc.holds_seat(self.status(True, None)))
+        for rec in (None, OK):
+            self.assertFalse(lc.holds_seat(self.status(False, rec)))
+
+    def test_inflight_word_covers_every_session_state(self):
+        for name in lc.SESSION_STATES:
+            self.assertIn(lc.inflight_word(name),
+                          (lc.WORKING, lc.FINISHED, lc.EXITED_AWAITING, lc.DEAD))
+        self.assertEqual(lc.inflight_word(lc.Status(lc.ENDED_AWAITING_TICK)),
+                         'exited — awaiting harvest')
+        self.assertEqual(lc.inflight_word(lc.DEAD), 'dead')       # never 'dead pid'
+
+
 class OneClassifierTest(unittest.TestCase):
     """§2.7: no module but ``lifecycle`` derives a session state. ``NOT_YET`` names the readers
     this plan has not converted yet — Task 2 removes its two, Task 3 its three, Task 4 the last
@@ -929,13 +980,13 @@ class OneClassifierTest(unittest.TestCase):
     #: Task 2 empties the first two, Task 3 the next three, Task 4 the next four. The last three,
     #: `score.py`, `cloudpid.py` and `widen_footprint.py`, are readers F-0098's plan does not name
     #: and no Task's `writes:` covers (T-0087's REPORT: `needs writes:`) — they stay exempt until
-    #: a Task claims them.
+    #: a Task claims them. F-0199 converted `asf/tick/summary.py` ahead of Task 3, so that group
+    #: is two entries here, not three.
     NOT_YET = (
         'asf/capacity.py',
         'asf/feeder/tiers.py',
         'asf/views/sessions.py',
         'asf/views/status.py',
-        'asf/tick/summary.py',
         'asf/workers/stall.py',
         'asf/workers/health.py',
         'asf/tick/step_health.py',

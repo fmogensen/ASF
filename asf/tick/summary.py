@@ -81,11 +81,27 @@ def titles(product):
 
 # ---- the rows, both through lifecycle -----------------------------------------------
 
+def exited_at(run):
+    """When ``run``'s process last wrote its log, as a :data:`LEDGER_FORMAT` stamp — its exit,
+    to the second: the result line is the last thing a session writes (F-0199 D5). ``None``
+    when there is no log to stat, which the ``since`` column renders ``?`` (D6)."""
+    try:
+        mtime = os.path.getmtime((run or {}).get('log'))
+    except (OSError, TypeError):
+        return None
+    return datetime.datetime.fromtimestamp(
+        mtime, datetime.timezone.utc).strftime(LEDGER_FORMAT)
+
+
 def inflight_rows(product, alive):
+    """One row per live run, its ``status`` and the stamp its ``since`` column counts from —
+    the launch for a session still working, the exit for one whose process is gone (F-0199)."""
     rows = []
     for run in pool.live_sessions(product):
         row = dict(run)
-        row['status'] = 'working' if alive(run.get('pid')) else 'dead pid'
+        status = lifecycle.live_status(run, alive)
+        row['status'] = lifecycle.inflight_word(status)
+        row['since_at'] = run.get('started') if lifecycle.holds_seat(status) else exited_at(run)
         rows.append(row)
     rows.sort(key=lambda r: r.get('started') or '￿')
     return rows
@@ -140,7 +156,7 @@ def render(inflight, done, titles_by_item, since, now, first):
     in_records = [{
         'job': r.get('job'), 'item': r.get('item'), 'kind': r.get('kind'),
         'feature': r.get('feature'), 'account': r.get('account'), 'model': r.get('model'),
-        'status': r.get('status'), 'since': age(r.get('started'), now),
+        'status': r.get('status'), 'since': age(r.get('since_at'), now),
         'what': titles_by_item.get(r.get('item')),
     } for r in inflight]
 

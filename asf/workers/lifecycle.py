@@ -2716,6 +2716,23 @@ class Status:
         return self.name
 
 
+#: The tick's IN FLIGHT column for an exit health has not judged yet (F-0199): it left, and the
+#: pass that comes next says what it left behind.
+EXITED_AWAITING = 'exited — awaiting harvest'
+
+#: ``{state: the word the IN FLIGHT column prints}`` — :attr:`Status.label`'s spelling for a
+#: padded column. One owner, so the table cannot word a state the views do not (P11).
+INFLIGHT_WORDS = {WORKING: WORKING, FINISHED: FINISHED, NOTHING_TO_LAND: FINISHED,
+                  ENDED_AWAITING_TICK: EXITED_AWAITING, FAILED: EXITED_AWAITING, DEAD: DEAD}
+
+
+def inflight_word(status):
+    """What the tick's IN FLIGHT table prints for ``status``. ``status`` may be a
+    :class:`Status` or its bare ``name`` string, as :func:`holds_seat` takes either."""
+    name = status.name if isinstance(status, Status) else status
+    return INFLIGHT_WORDS.get(name, name)
+
+
 def classify(run, ev, path=None):
     """One run and its evidence to one :class:`Status` (§2.1). Pure: no git, no clock, no file —
     ``judge`` and ``lands`` are the only calls, and ``path`` is passed through to ``lands`` exactly
@@ -2760,6 +2777,28 @@ def state_of(product, run, alive=None, path=None, gather_fn=None):
     if alive(run.get('pid')):
         return classify(run, Evidence(alive=True), path=path)
     return classify(run, (gather_fn or gather)(product, run, alive=alive), path=path)
+
+
+def live_status(run, alive=None, result=None):
+    """The :class:`Status` of a run that is still live on the ledger (no ``ended``), from its
+    pid and its log alone — no git, no remote. §2.2's ladder stopped one rung short of the
+    tick's own summary, which is best-effort console output and must not ``ls-remote`` once per
+    row (F-0199 D3).
+
+    ``working`` while the pid answers; ``finished`` for a pid that exited on a success result —
+    the session's own claim, which health confirms or contradicts one pass later
+    (:func:`finished_unrecorded`); ``ended-awaiting-tick`` for one that exited on a result that
+    is not a success, which health will judge ``failed: …``; ``dead`` — :data:`NO_RECORD` —
+    only for one that exited having written no result at all. ``result``: ``callable(run) ->
+    result line`` (default :func:`result_of`)."""
+    if (alive or pid_alive)(run.get('pid')):
+        return Status(WORKING, source='pid')
+    rec = (result or result_of)(run)
+    if rec is None:
+        return Status(DEAD, reason=NO_RECORD, source='pid')
+    if runtime_mod.result_ok(rec):
+        return Status(FINISHED, result=FINISHED, source='report')
+    return Status(ENDED_AWAITING_TICK, result=judge(run, Evidence(result=rec)), source='report')
 
 
 def holds_seat(status):
