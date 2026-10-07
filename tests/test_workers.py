@@ -921,6 +921,13 @@ class TestSpawn(Home):
         self.assertFalse(runtime_mod.result_ok(runtime_mod.read_result(log)))
         self.assertEqual(runtime_mod.failure_reason(rec), 'unknown model')
 
+    def test_b0294_an_overloaded_api_error_is_named_not_left_bare(self):
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': True,
+               'result': 'API Error: 529 {"type":"error","error":{"type":"overloaded_error",'
+                         '"message":"Overloaded"}}'}
+        self.assertFalse(runtime_mod.result_ok(rec))
+        self.assertEqual(runtime_mod.failure_reason(rec), runtime_mod.OVERLOADED)
+
     def test_spawn_starts_the_sampler_once_for_a_local_launch(self):
         calls = []
 
