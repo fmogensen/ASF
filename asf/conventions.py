@@ -413,7 +413,11 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                # B-0042: the read-only command verbs harvest may run itself and attach to a
                # NEEDS OPERATOR park (asf.harvest.harvest.operator_readonly_verbs) — a list of
                # '<program> <verb>' prefixes beyond the built-in describe/list/get default
-               'operator_readonly_verbs')
+               'operator_readonly_verbs',
+               # F-0112/T-0431: how this product's tick takes a new ASF release — auto | notify
+               # (default) | off (asf.env.Product.upgrade). A flag, not a top-level PRODUCT_FIELDS
+               # key: a new one is refused by tests.test_env.PinnedReader (PR #675).
+               'upgrade')
 
 
 

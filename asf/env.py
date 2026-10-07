@@ -524,6 +524,11 @@ PRODUCT_FIELDS = {
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
     'release': _MAP, 'cloud': _MAP, 'credentials': _LIST,
 }
+#: what ``conventions.flags.upgrade`` may say; anything else reads as UPGRADE_DEFAULT and is a
+#: doctor RED. Not a top-level PRODUCT_FIELDS key (T-0431): the pinned-reader test
+#: (tests/test_env.py:PinnedReader) refuses a new one, so a new switch is a flag (PR #675).
+UPGRADE_POLICIES = ('auto', 'notify', 'off')
+UPGRADE_DEFAULT = 'notify'
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
 # Prod row once named it, so a file that followed that hint loads (and is read) rather than
@@ -891,6 +896,23 @@ class Product:
     @property
     def approvals(self):
         return self._get('approvals', {})
+
+    @property
+    def upgrade(self):
+        """``conventions.flags.upgrade`` — how this product's tick takes a new ASF *release*
+        (F-0112): ``auto`` installs it, ``notify`` (the default) says so once per tag, ``off``
+        says nothing. A word that is none of the three reads as ``notify`` and is a doctor RED.
+        Read only for a product whose repo is not the factory's own source — that one is on the
+        trunk channel, under ``approvals.upgrade``."""
+        word = str(self.flag('upgrade') or UPGRADE_DEFAULT).strip().lower()
+        return word if word in UPGRADE_POLICIES else UPGRADE_DEFAULT
+
+    @property
+    def upgrade_declared(self):
+        """The raw ``conventions.flags.upgrade`` value — ``None`` when absent, the literal
+        string when present, unnormalised. For the doctor row that must quote a typo back;
+        :attr:`upgrade` cannot, since it has already folded the typo into the default."""
+        return self.flag('upgrade')
 
     @property
     def approval_signals(self):
