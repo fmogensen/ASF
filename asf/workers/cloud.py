@@ -398,10 +398,12 @@ CLOUD_PRE_PUSH = ('- No pre-push hook runs here. Before every push, the review/r
                   'red one is fixed and committed first, never pushed for CI to find.')
 
 
-def cloud_brief(text, job, setting=None, product=None):
+def cloud_brief(text, job, setting=None, product=None, runtime_liveness=False):
     """The brief a cloud session gets: the local brief, then the CLOUD block. ``setting``: the
     block's opening lines for a runtime that is not a CI job (:mod:`asf.workers.remote`).
-    ``product``: names its ``conventions.pre_push_check`` (:data:`CLOUD_PRE_PUSH`) when set."""
+    ``product``: names its ``conventions.pre_push_check`` (:data:`CLOUD_PRE_PUSH`) when set.
+    ``runtime_liveness``: the runtime reports the session alive itself — the HEARTBEAT block
+    then starts no background loop (:func:`asf.workers.heartbeat.brief_lines`)."""
     sid = job.session or ''
     setting = list(setting) if setting else [
         'You run in a CI job, not on the factory host: build and test happen here, in this '
@@ -431,7 +433,8 @@ def cloud_brief(text, job, setting=None, product=None):
     beat = getattr(job, 'heartbeat', None)
     if beat is not None:  # asf.workers.heartbeat: the run's proof of movement, every runtime
         from asf.workers import heartbeat
-        lines[-1:] = heartbeat.brief_lines(job.name, sid, beat) + ['']
+        lines[-1:] = heartbeat.brief_lines(job.name, sid, beat,
+                                           runtime_liveness=runtime_liveness) + ['']
     return str(text or '').rstrip('\n') + '\n'.join(lines)
 
 
@@ -645,13 +648,26 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
         if beat is not None:
             stalled, quiet, _line = heartbeat.observe(product, run, beats, now, beat, out=out,
                                                       state=hb_state)
+            diag = None
+            if stalled and remote.is_remote(run):  # liveness from the runtime, before the beat
+                try:
+                    diag = remote.diagnose(run, s, remote_client)
+                except Exception:  # noqa: BLE001 — no answer is no proof of life: stalled
+                    diag = None
+                seen = remote.alive_at(diag, now, beat.limit_min)
+                if seen is not None:
+                    stalled = False
+                    rec = hb_state.get(job)
+                    if isinstance(rec, dict):  # the event is the beat: ``quiet`` resets
+                        rec['moved'] = max(seen, heartbeat._num(rec.get('moved')) or 0)
+                    out(f"cloud    {job:<24} alive by remote status (worker_status="
+                        f"{diag.get('worker_status')}, last_event_at={diag.get('last_event_at')}); "
+                        'no heartbeat needed')
             if stalled:
                 status, why = DEAD, f'{heartbeat.STALLED}: no beat {int(quiet)}m'
-                if remote.is_remote(run):  # diagnostic only: the heartbeat decided
-                    diag = remote.diagnose(run, s, remote_client)
-                    if diag:
-                        why += '; ' + ', '.join(f'{k}={v}' for k, v in diag.items() if v)
-                        cloudpid.record(tok, DEAD, why, **diag)
+                if diag:  # diagnostic: the runtime showed no life
+                    why += '; ' + ', '.join(f'{k}={v}' for k, v in diag.items() if v)
+                    cloudpid.record(tok, DEAD, why, **diag)
         if status == FINISHED and report and run.get('log'):
             _append(run['log'], {'type': 'result', 'subtype': 'success', 'is_error': False,
                                  'result': report['body'],
