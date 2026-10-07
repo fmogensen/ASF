@@ -43,3 +43,6 @@ for _var in hermetic.GIT_HOOK:
 # product the suite's temp home has never heard of. A test that needs a product names one.
 for _var in hermetic.CALLER_IDENTITY:
     os.environ.pop(_var, None)
+# F-0281: git's global config is a file the suite owns, holding the suite's identity — a fixture
+# never needs a `git config user.*` of its own, and the caller's global config is never read.
+hermetic.suite_git_identity(os.environ['ASF_HOME'])

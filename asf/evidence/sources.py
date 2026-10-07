@@ -28,6 +28,57 @@ GH_ACTIONS = ("gh-actions", "github-actions")
 
 Sources = collections.namedtuple("Sources", "git host deploy")
 
+#: The key each cached PR row carries the trunk's sha under, as it was when the list was read
+#: (F-0277). The cache stays a plain list of rows — every reader of the file keeps its shape —
+#: and the key is stripped before a row is handed out.
+PR_CACHE_TRUNK = "_trunkSha"
+
+
+def trunk_sha(product):
+    """``origin/<trunk>``'s sha in the product repo as last fetched, '' when it cannot be read
+    (no ``repo_dir``, not a checkout, no such ref). Never the cwd's repo."""
+    from asf import gitops
+    repo = getattr(product, "repo_dir", None)
+    if not repo or not os.path.isdir(repo):
+        return ""
+    main = getattr(product, "main", None) or "main"
+    return gitops.rev_parse(repo, f"origin/{main}^{{commit}}") or ""
+
+
+def read_pr_cache(path, ttl, trunk):
+    """The PR rows cached at ``path`` while they are younger than ``ttl`` seconds *and* were read
+    at the trunk ``trunk`` (F-0277): a landing moves the trunk, and a PR list read before it
+    still says OPEN for the PR that just landed — 40 min of a landed Task kept Active. ``trunk``
+    '' (unreadable) keeps the age rule alone. None when the cache must be read afresh."""
+    try:
+        if time.time() - os.path.getmtime(path) >= ttl:
+            return None
+        with open(path) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    if trunk:
+        cached = {row.get(PR_CACHE_TRUNK) for row in data if isinstance(row, dict)}
+        if cached != {trunk}:
+            return None  # read at another trunk, or by a release that did not record one
+    return [{k: v for k, v in row.items() if k != PR_CACHE_TRUNK} if isinstance(row, dict)
+            else row for row in data]
+
+
+def write_pr_cache(path, data, trunk):
+    """``data`` cached at ``path``, each row stamped with ``trunk`` (:func:`read_pr_cache`)."""
+    rows = [dict(row, **{PR_CACHE_TRUNK: trunk}) if trunk and isinstance(row, dict) else row
+            for row in data]
+    try:
+        tmp = path + f".{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(rows, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
 
 class GitSource:
     """Every read of the product repo the evidence pass makes. Read-only: the one write it may
@@ -155,25 +206,19 @@ class GitHubHost(HostSource):
         return r.stdout.strip() if r is not None else ""
 
     def prs(self):
-        if os.path.exists(self._cache) and time.time() - os.path.getmtime(self._cache) < PR_TTL:
-            try:
-                with open(self._cache) as f:
-                    return json.load(f)
-            except Exception:
-                pass
+        """The cached list while it is young and was read at the current trunk
+        (:func:`read_pr_cache`), else read afresh and cached with that trunk."""
+        trunk = trunk_sha(self.product)
+        cached = read_pr_cache(self._cache, PR_TTL, trunk)
+        if cached is not None:
+            return cached
         raw = self._gh(["pr", "list", "-R", self.product.repo_slug, "--state", "all",
                        "--limit", "300", "--json", ",".join(self.PR_FIELDS)])
         try:
             data = json.loads(raw) if raw else []
         except Exception:
             data = []
-        try:
-            tmp = self._cache + f".{os.getpid()}"
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-            os.replace(tmp, self._cache)
-        except Exception:
-            pass
+        write_pr_cache(self._cache, data, trunk)
         return data
 
     def runs(self, workflow, branch=None, status=None, limit=20):

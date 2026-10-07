@@ -83,20 +83,50 @@ class HooksInstallWritesTheDispatcher(unittest.TestCase):
             self.assertEqual(f.read(), '#!/bin/sh\necho mine\n')
         self.assertIn(f'{self.shared} hook approvals', self.commands())
 
-    def test_a_live_shared_link_keeps_todays_behaviour(self):
+    def test_a_live_shared_link_is_replaced_and_kept_beside_it(self):
+        """F-0283: while the shared install's link held the path, every hook ran that install
+        and never the pin. The link is moved aside, the dispatcher written, every hook names it."""
         os.makedirs(os.path.dirname(self.dispatcher))
         os.symlink(self.shared, self.dispatcher)
         rc, msg = self.install()
         self.assertEqual(rc, 0, msg)
-        self.assertEqual(os.readlink(self.dispatcher), self.shared)
-        self.assertIn(f'{self.shared} hook approvals', self.commands())
+        self.assertTrue(dispatch.is_ours(self.dispatcher))
+        self.assertEqual(os.readlink(self.dispatcher + dispatch.LINK_BACKUP), self.shared)
+        self.assertIn(f'{self.dispatcher} hook approvals', self.commands())
+        self.assertEqual(hooks.verify(self.product), [])
 
-    def test_without_a_dispatcher_path_nothing_is_written_there(self):
+    def test_a_pinned_product_whose_hooks_would_not_name_the_dispatcher_is_refused(self):
         rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
                                 which=lambda n: self.shared, cfg=self.cfg)
-        self.assertEqual(rc, 0, msg)
+        self.assertEqual(rc, 2, msg)
+        self.assertIn('NEEDS OPERATOR: demo is pinned', msg)
         self.assertFalse(os.path.lexists(self.dispatcher))
-        self.assertNotIn('dispatcher', msg)
+        self.assertNotIn('dispatcher:', msg)
+        self.assertTrue(any('not the dispatcher' in line for line in hooks.verify(self.product)))
+
+    def test_an_older_hook_of_asfs_own_is_moved_onto_the_dispatcher(self):
+        """The body before F-0283 fell back to asf on PATH and named the shared install: a hook
+        asf wrote itself is rewritten; one an operator wrote is never touched."""
+        hooks_dir = hooks.git_hooks_dir(self.repo)
+        os.makedirs(hooks_dir, exist_ok=True)
+        old = hooks._git_hook_body('pre-push', self.shared, 'demo').replace(
+            '# no asf here', 'if command -v asf >/dev/null 2>&1; then exec asf redact '
+            '--pre-push --product demo; fi\n# no asf here')
+        with open(os.path.join(hooks_dir, 'pre-push'), 'w') as f:
+            f.write(old)
+        self.assertTrue(any('not the dispatcher' in line for line in hooks.verify(self.product)))
+        rc, msg = self.install()
+        self.assertEqual(rc, 0, msg)
+        with open(os.path.join(hooks_dir, 'pre-push')) as f:
+            text = f.read()
+        self.assertEqual(text, hooks._git_hook_body('pre-push', self.dispatcher, 'demo'))
+        self.assertEqual(hooks.verify(self.product), [])
+
+    def test_the_hook_body_never_falls_back_to_asf_on_path(self):
+        for name in hooks.GIT_HOOK_NAMES:
+            body = hooks._git_hook_body(name, self.dispatcher, 'demo')
+            self.assertNotIn('command -v asf', body)
+            self.assertTrue(hooks.is_git_hook_ours(body, name))
 
 
 class PrePushHookTests(unittest.TestCase):

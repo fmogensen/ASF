@@ -134,6 +134,7 @@ def _commit_once(root, rels, message, scrub):
             if _head(root) != base or any(w in done.stderr for w in _LOCK_WORDS):
                 return None  # a lock another commit held, or HEAD moved under the commit
             sys.stderr.write(done.stdout + done.stderr)
+            _put_back(root, base, rels, derived, dirty)
             done.check_returncode()
         new = _head(root)
         parent = _run_git(root, ['rev-parse', '--verify', '-q', f'{new}^']).stdout.strip() \
@@ -154,6 +155,29 @@ def _commit_once(root, rels, message, scrub):
     if hand:
         refresh(root, scrub=scrub, only=hand, index=False)
     return True
+
+
+def _put_back(root, base, rels, derived, dirty):
+    """A commit the pre-commit refused leaves nothing of itself in the checkout ``root``: every
+    path it would have committed is put back to ``base`` (``HEAD`` as the attempt read it) — a
+    file ``base`` lacks is removed, so a card the command created does not linger uncommitted
+    for the next record write to sweep up (F-0282). A derived path (``index.json``, a parent's
+    Children) is only ever written to the scratch tree before the commit, so it is put back only
+    when it is not an edit the checkout already held; the command's own paths always are."""
+    restored = []
+    for rel in sorted(set(rels) | (set(derived) - set(dirty))):
+        full = os.path.join(root, rel)
+        if base and _run_git(root, ['cat-file', '-e', f'{base}:{rel}']).returncode == 0:
+            if _run_git(root, ['diff', '--quiet', base, '--', rel]).returncode != 0:
+                _run_git(root, ['checkout', '-q', base, '--', rel])
+                restored.append(rel)
+        elif os.path.lexists(full) and not os.path.isdir(full):
+            os.remove(full)
+            restored.append(rel)
+    if restored:
+        print(f"record: the pre-commit refused the commit — {', '.join(restored)} put back to "
+              f"{base[:7] if base else 'an empty record'}", file=sys.stderr)
+    return restored
 
 
 def _copy(src, dst):

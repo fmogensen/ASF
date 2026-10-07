@@ -922,7 +922,8 @@ def check_cli_dispatcher(product, path=None, timeout=60):
     :mod:`asf.dispatch`) resolves this product into its pin. The dispatcher is run with
     ``ASF_DISPATCH_TRACE=1 … --product <p> --version`` and the CLI its trace names must sit in
     ``install.json``'s venv: RED when it does not. A pinned product whose path still holds the
-    shared install's link is a ``warn`` (its hooks run the shared install, not the pin)."""
+    shared install's link is RED (F-0283: its hooks run the shared install, never the pin —
+    ``asf hooks install`` replaces the link)."""
     from asf import dispatch
     path = path or dispatch.default_path()
     rec, damage = pin_state(product.name)
@@ -937,8 +938,9 @@ def check_cli_dispatcher(product, path=None, timeout=60):
         if rec is None:
             return [(True, True, f'{path} → {target} (shared install; unpinned, so the same '
                                  'one the clocks run)')]
-        return [(False, 'warn', f'{path} → {target} is not the dispatcher — hooks run that, '
-                                f'not the pin {os.path.basename(_pin_venv(rec))}')]
+        return [(True, False, f'{path} → {target} is not the dispatcher — hooks run that, '
+                              f'not the pin {os.path.basename(_pin_venv(rec))}; asf hooks install '
+                              f'--product {product.name} replaces it')]
     child = _clean_env({'ASF_DISPATCH_TRACE': '1'})
     child.pop('ASF_PRODUCT', None)
     try:
@@ -1087,10 +1089,14 @@ def check_redaction_hooks(product):
     ``product.repo_dir`` and ``product.backlog_dir`` that is set has an asf pre-commit and
     pre-push in place. Read-only — unlike ``asf hooks install`` (:func:`asf.hooks.ensure_git_hooks`)
     this never writes a hook file; a missing or foreign one stays red until the operator runs the
-    command the detail names."""
+    command the detail names. For a pinned product each hook's exec path is read too
+    (:func:`asf.hooks.hook_entry`): one that is not the dispatcher runs another install than the
+    pin (F-0283), and is red."""
+    from asf import dispatch
     repos = [r for r in (product.repo_dir, product.backlog_dir) if r]
     if not repos:
         return True, 'no repo_dir or backlog_dir configured'
+    pinned = os.path.isfile(dispatch.record_path(product.name))
     problems = []
     for repo in repos:
         hooks_dir = hooks.git_hooks_dir(repo)
@@ -1108,6 +1114,11 @@ def check_redaction_hooks(product):
                 problems.append(f'{path} is asf init\'s, from before it ran the redaction gate')
             elif not hooks.is_git_hook_ours(text, name):
                 problems.append(f'{path} foreign')
+            elif pinned:
+                entry = hooks.hook_entry(text, name)
+                if entry is None or not dispatch.is_ours(entry):
+                    problems.append(f'{path} execs {entry or "asf on PATH"}, not the dispatcher '
+                                    f'(F-0283: it does not run the pin)')
     if problems:
         return False, '; '.join(problems) + f' — asf hooks install --product {product.name}'
     return True, f'pre-commit, pre-push in {len(repos)} repos'

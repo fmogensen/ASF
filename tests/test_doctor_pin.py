@@ -264,13 +264,14 @@ class CliDispatcherTests(PinFixture):
         self.assertFalse(ok)
         self.assertIn('pin is ' + self.pin, detail)
 
-    def test_the_shared_link_on_a_pinned_product_is_a_warning(self):
+    def test_the_shared_link_on_a_pinned_product_is_red(self):
+        """F-0283: its hooks run the shared install, never the pin."""
         self.pin_it()
         os.symlink(os.path.join(self.shared, 'bin', 'asf'), self.path)
         [(required, ok, detail)] = doctor.check_cli_dispatcher(self.product, self.path)
-        self.assertEqual((required, ok), (False, 'warn'))
+        self.assertEqual((required, ok), (True, False))
         self.assertIn('not the dispatcher', detail)
-        self.assertIn('warn', doctor.format_table('sample', [('cli dispatcher', required, ok, detail)]))
+        self.assertIn('asf hooks install', detail)
 
     def test_the_shared_link_on_an_unpinned_product_is_ok(self):
         os.symlink(os.path.join(self.shared, 'bin', 'asf'), self.path)
@@ -290,6 +291,50 @@ class CliDispatcherTests(PinFixture):
         [(_r, ok, detail)] = doctor.check_cli_dispatcher(self.product, self.path)
         self.assertFalse(ok)
         self.assertIn('pin unreadable', detail)
+
+
+class RedactionHookExecPathTests(PinFixture):
+    """F-0283: a pinned product's git hooks must exec the dispatcher — one naming any other asf
+    runs whatever was installed last, never the pin. Read off the hook files, in a temp repo."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        subprocess.run(['git', 'init', '-q', self.repo], check=True)
+        self.product = env.Product('sample', {'repo_dir': self.repo, 'ci': {'provider': 'none'}})
+        self.dispatcher = os.path.join(self.tmp, 'bin', 'asf')
+        os.makedirs(os.path.dirname(self.dispatcher))
+        rc, detail = dispatch.install(path=self.dispatcher, asf_home=self.home, venvs=self.venvs,
+                                      default_product='', cli=os.path.join(self.shared, 'bin', 'asf'))
+        self.assertEqual(rc, 0, detail)
+
+    def write_hooks(self, asf_path):
+        from asf import hooks
+        d = hooks.git_hooks_dir(self.repo)
+        os.makedirs(d, exist_ok=True)
+        for name in hooks.GIT_HOOK_NAMES:
+            with open(os.path.join(d, name), 'w') as f:
+                f.write(hooks._git_hook_body(name, asf_path, 'sample'))
+
+    def test_a_pinned_products_hook_naming_the_shared_install_is_red(self):
+        self.pin_it()
+        self.write_hooks(os.path.join(self.shared, 'bin', 'asf'))
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('not the dispatcher', detail)
+
+    def test_a_pinned_products_hook_naming_the_dispatcher_is_ok(self):
+        self.pin_it()
+        self.write_hooks(self.dispatcher)
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertTrue(ok, detail)
+
+    def test_an_unpinned_product_is_judged_on_presence_alone(self):
+        self.write_hooks(os.path.join(self.shared, 'bin', 'asf'))
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertTrue(ok, detail)
 
 
 class ProductWarningsRowTests(unittest.TestCase):
