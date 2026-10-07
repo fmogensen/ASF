@@ -1068,6 +1068,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         if claims:
             m = len(proves.bullets(rec['body']))
             lines.append(f"acceptance {len(claims)}/{m} proven ({_newest_review_path(claims, task_ev)})")
+        for entry in (ev.get('proves_refused') or {}).get(iid) or []:
+            lines.append(refused_claim_line(entry))
         # "no test, no done": Task closure is necessary, never sufficient — every acceptance
         # line needs its proved-line entry (or a registered deferral) before a done rule fires
         open_lines = unproved_of(iid, rec, register, ev, claims, repo_dir=repo, _cache=proof_cache)
@@ -1358,19 +1360,34 @@ def _story_tasks(canonical, ancestors=None):
 def unproved_of(sid, rec, register, ev=None, review=None, repo_dir=None, _cache=None):
     """``[(line, text, why), …]``: Story ``sid``'s acceptance lines that no ``proved line`` entry,
     no claim this pass records (``ev['proves']``, ``review``), no registered deferral and no
-    inline ``proven by`` a file in ``repo_dir`` covers (:func:`asf.proves.unproved`)."""
+    inline ``proven by`` a file in ``repo_dir`` covers (:func:`asf.proves.unproved`). A line
+    whose only offered proof was a refused partial claim (``ev['proves_refused']``) is unproved
+    with *that* as its reason, not ``no proof`` (F-0257 D9)."""
     body = rec['body']
     m = len(proves.bullets(body))
     claims = list(((ev or {}).get('proves') or {}).get(sid) or []) + list(review or [])
     pending = {int(c.get('line') or 0) for c in claims}
     pending = {n for n in pending if 1 <= n <= m}
-    return proves.unproved(body, register, also_proved=pending, repo_dir=repo_dir, _cache=_cache)
+    refused = {int(c.get('line') or 0): c.get('why') or proves.PARTIAL_CLAIM
+               for c in ((ev or {}).get('proves_refused') or {}).get(sid) or []}
+    refused = {n: why for n, why in refused.items() if 1 <= n <= m}
+    return proves.unproved(body, register, also_proved=pending, repo_dir=repo_dir,
+                           _cache=_cache, refused=refused)
 
 
 def unproved_line(n, text, why):
     """The evidence line naming one unproved acceptance line."""
     text = text if len(text) <= 80 else text[:77] + '...'
     return f"unproved line {n} — {text} ({why})"
+
+
+def refused_claim_line(entry):
+    """The evidence line naming one refused claim — printed whatever state the Story is in (D8),
+    because the Story is Active at the moment a bad claim lands and the ``unproved line`` lines
+    are printed only where a done rule would have closed over them."""
+    pr = f", PR #{entry['pr']}" if entry.get('pr') else ''
+    return (f"claim refused, line {entry['line']} not proved — {entry.get('why')} "
+            f"— {entry.get('task') or '?'}{pr} ({entry.get('test')})")
 
 
 def review_proven(canonical, task_ev):
