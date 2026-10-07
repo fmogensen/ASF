@@ -466,6 +466,26 @@ deploy_sha:
 # the product's own live URL, used by the prod probe / release notes.
 app_host: https://sample.example.com
 
+# the production verification probe (F-0051): a real customer journey run after every deploy.
+# Unset, the whole Feature is off — no dispatch, no stream, no doctor row, and no change to any
+# close.
+# probe:
+#   workflow: probe.yml          # the product's own headless journey workflow
+#   role: light                  # the ci.pool role its job must run on
+#   identity: probe@example.com  # the probe identity's address
+#   secrets:                     # the repository secrets the job reads; ASF holds neither value
+#     identity: PROBE_PASSWORD
+#     mailbox: PROBE_MAILBOX
+#   mailbox:                     # how the engine finds the sign-in code
+#     from: no-reply@example.com
+#     subject: 'sign-in code'
+#     code: '\b(\d{6})\b'
+#     max_age_s: 300
+#   journeys: [sign-up, create-and-share, billing]   # the standing journeys, by name
+#   origins: [https://sample.example.com]            # defaults to [app_host]
+#   artifact: probe-results      # the artifact the job uploads
+#   timeout: 30m                 # a dispatched run with no result by then is abandoned
+
 # path globs whose diffs are customer-visible — used to classify a Task's blast radius.
 customer_paths:
   - apps/web/**

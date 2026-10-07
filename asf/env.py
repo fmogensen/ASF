@@ -15,9 +15,11 @@ in the config file, not a feature to add here.
 import collections
 import os
 import re
+import types
 
 from asf import conventions as conventions_mod
 from asf.conventions import Conventions
+from asf.probe import config as probe_config
 
 ASF_HOME = os.environ.get('ASF_HOME') or os.path.expanduser('~/.ASF')
 
@@ -518,7 +520,7 @@ _MAP, _LIST, _STR = 'a map', 'a list', 'a scalar'
 # which `asf doctor` reports separately, so it is not a schema error here.
 PRODUCT_FIELDS = {
     'product': _STR, 'repo_slug': _STR, 'repo_dir': _STR, 'main': _STR, 'backlog_dir': _STR,
-    'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
+    'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None, 'probe': _MAP,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
@@ -562,7 +564,7 @@ RELEASE_FIELDS = {'window_days': None, 'max_hand_fixes': None, 'max_repair_per_f
 # every product-file section whose own keys are checked, keyed by its own field table.
 NESTED_FIELDS = {
     'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS, 'improve': IMPROVE_FIELDS,
-    'release': RELEASE_FIELDS,
+    'release': RELEASE_FIELDS, 'probe': probe_config.PROBE_FIELDS,
 }
 # ``gate`` (asf.release_preview.gate_for), ``floor`` and ``seats`` (criteria 9 and 10, same as
 # above) are read by code and documented, but — unlike a field added to NESTED_FIELDS — never
@@ -727,6 +729,12 @@ def product_problems(text):
     from asf import ci_queue  # `ci.queue`: its mode, history and workflows (asf.ci_queue)
     for dotted, why in ci_queue.config_problems(data.get('ci')):
         problems.append((lines.get('ci.queue', lines.get('ci', 0)), dotted, why))
+    # `probe:` (F-0051): the production verification probe, off when unset. `config_problems`
+    # cannot see `app_host` or `ci.pool` on its own — both are this file's siblings of `probe:`,
+    # not inside it — so they are read here and passed in.
+    pool_roles = ci_pool.roles(ci_pool.load_pool(types.SimpleNamespace(ci=data.get('ci'))))
+    for dotted, why in probe_config.config_problems(data.get('probe'), data.get('app_host'), pool_roles):
+        problems.append((lines.get('probe', 0), dotted, why))
     from asf import credentials as credentials_mod  # local: keeps env importable from credentials
     for dotted, why in credentials_mod.product_problems(data.get('credentials')):
         problems.append((lines.get('credentials', 0), dotted, why))
@@ -880,6 +888,12 @@ class Product:
     @property
     def app_host(self):
         return self._get('app_host')
+
+    @property
+    def probe(self):
+        """The ``probe:`` block as a :class:`asf.probe.config.Probe`, ``None`` when unset — the
+        production verification probe (F-0051) is off."""
+        return probe_config.load(self)
 
     @property
     def customer_paths(self):

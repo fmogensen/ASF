@@ -372,6 +372,45 @@ class ProductFieldTests(unittest.TestCase):
         self.assertTrue(all(key == 'credentials' for _line, key, _why in duplicate))
 
 
+class ProbeFieldTests(unittest.TestCase):
+    """F-0051 T-0368: the `probe:` block, checked beside `ci.pool`'s declared roles and
+    `app_host` — both are this file's siblings of `probe:`, not inside it."""
+
+    def test_the_documented_block_validates(self):
+        body = _dedent("""
+            repo_slug: a/b
+            app_host: https://sample.example.com
+            ci:
+              pool:
+                - {runner: ci-1, provider: acme, role: light}
+            probe:
+              workflow: probe.yml
+              role: light
+              identity: probe@example.com
+              secrets:
+                identity: PROBE_PASSWORD
+                mailbox: PROBE_MAILBOX
+              mailbox:
+                from: no-reply@example.com
+                subject: 'sign-in code'
+                code: '\\b(\\d{6})\\b'
+                max_age_s: 300
+              journeys: [sign-up, create-and-share, billing]
+              origins: [https://sample.example.com]
+              artifact: probe-results
+              timeout: 30m
+            """)
+        self.assertEqual(env.validate_product_text(body), [])
+
+    def test_an_unknown_probe_key_is_a_warning(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            probe:
+              workflows: probe.yml
+            """))
+        self.assertIn((3, 'probe.workflows', env.UNKNOWN_KEY), problems)
+
+
 class DeployProviderTests(unittest.TestCase):
     """T-0232: ``deploy_sha.provider`` gets a validator row — documented and unread until now
     (docs/products.example.yaml:237)."""
