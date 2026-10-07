@@ -199,6 +199,45 @@ def doc_carriers(path, branches, product):
     return bool(found.get(refs[0])), [b for b in others if found.get(f"origin/{b}:{path}")]
 
 
+class DocCarriers:
+    """Where each of many typed document paths lives, in one ``cat-file --batch-check`` (D12).
+
+    ``warm(paths, branches)`` asks for the whole path × branch cross product at once;
+    ``carriers(path, branches)`` answers ``(on_trunk, [branches])`` from that, and falls back to
+    one :func:`doc_carriers` call for a path it was never warmed with."""
+
+    def __init__(self, product):
+        self._product = product
+        self._found = {}
+        self._warmed = set()
+
+    def warm(self, paths, branches):
+        product = self._product
+        paths = [p for p in paths if p]
+        if not paths or product is None:
+            return
+        main_ref = f"origin/{product.main}"
+        others = sorted(b for b in branches or () if b != product.main)
+        refs = []
+        for path in paths:
+            refs.append(f"{main_ref}:{path}")
+            refs.extend(f"origin/{b}:{path}" for b in others)
+        self._found.update(resolve(refs, product=product))
+        self._warmed.update(paths)
+
+    def carriers(self, path, branches):
+        product = self._product
+        if not path or product is None:
+            return False, []
+        if path not in self._warmed:
+            return doc_carriers(path, branches, product)
+        main_ref = f"origin/{product.main}"
+        others = sorted(b for b in branches or () if b != product.main)
+        on_trunk = bool(self._found.get(f"{main_ref}:{path}"))
+        carriers = [b for b in others if self._found.get(f"origin/{b}:{path}")]
+        return on_trunk, carriers
+
+
 # ---- inputs ---------------------------------------------------------------------------------
 def remote_branches(product=None):
     return set(remote_heads(product=product))

@@ -717,11 +717,14 @@ def _own_evidence(ev_obj):
                 or ev_obj.open_prs)
 
 
-def _spec_home(meta, fev, ev, product):
+def _spec_home(meta, fev, ev, product, doc_carriers=None):
     """``(on_trunk, carrier_branch)`` for a matched Feature's spec. The lane's discovery answers
     first: on the trunk, or on its spec/plan branch. A typed ``links.spec`` the lane never saw —
     a migrated card's spec on a pre-lane branch with no PR — is looked for on the trunk and on
-    every remote branch, so a spec reached only by its link counts where it really is."""
+    every remote branch, so a spec reached only by its link counts where it really is.
+
+    ``doc_carriers``, when given, is an :class:`evidence.DocCarriers` warmed by the caller; its
+    ``carriers()`` replaces the one-path :func:`evidence.doc_carriers` call below (D12)."""
     if fev.get('spec_on_main'):
         return True, ''
     rev = (fev.get('spec') or '').split(':', 1)[0] if ':' in (fev.get('spec') or '') else ''
@@ -732,15 +735,22 @@ def _spec_home(meta, fev, ev, product):
     link = (typed.get('links') or {}).get('spec')
     if not link or product is None:
         return False, ''
-    on_trunk, carriers = evidence.doc_carriers(_path_only(link), ev.get('branches') or (), product)
+    branches = ev.get('branches') or ()
+    if doc_carriers is not None:
+        on_trunk, carriers = doc_carriers.carriers(_path_only(link), branches)
+    else:
+        on_trunk, carriers = evidence.doc_carriers(_path_only(link), branches, product)
     return on_trunk, ('' if on_trunk else (carriers[0] if carriers else ''))
 
 
-def _plan_home(meta, fev, ev, product):
+def _plan_home(meta, fev, ev, product, doc_carriers=None):
     """``(on_trunk, carrier_branch)`` for a matched Feature's plan. The lane's discovery answers
     first: on the trunk, or on its plan branch. A typed ``links.plan`` the lane never saw —
     a migrated card's plan on a pre-lane branch with no PR — is looked for on the trunk and on
-    every remote branch, so a plan reached only by its link counts where it really is."""
+    every remote branch, so a plan reached only by its link counts where it really is.
+
+    ``doc_carriers``, when given, is an :class:`evidence.DocCarriers` warmed by the caller; its
+    ``carriers()`` replaces the one-path :func:`evidence.doc_carriers` call below (D12)."""
     if fev.get('plan_on_main'):
         return True, ''
     rev = (fev.get('plan') or '').split(':', 1)[0] if ':' in (fev.get('plan') or '') else ''
@@ -751,7 +761,11 @@ def _plan_home(meta, fev, ev, product):
     link = (typed.get('links') or {}).get('plan')
     if not link or product is None:
         return False, ''
-    on_trunk, carriers = evidence.doc_carriers(_path_only(link), ev.get('branches') or (), product)
+    branches = ev.get('branches') or ()
+    if doc_carriers is not None:
+        on_trunk, carriers = doc_carriers.carriers(_path_only(link), branches)
+    else:
+        on_trunk, carriers = evidence.doc_carriers(_path_only(link), branches, product)
     return on_trunk, ('' if on_trunk else (carriers[0] if carriers else ''))
 
 
@@ -1132,6 +1146,19 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     # ---- Features: depend on their own children's derived state
     orphans = orphaned_tasks(canonical, derived)
     retired = set()
+    # D12: one `cat-file --batch-check` for every non-retired Feature's `links.spec`/`links.plan`
+    # (PD1), instead of one per card inside `_spec_home`/`_plan_home` below. A retired Feature's
+    # links are never read on this path, so they are never warmed either.
+    doc_links = set()
+    for iid, rec in canonical.items():
+        if rec['meta'].get('type') != 'feature' or is_retired(rec['meta']):
+            continue
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+        links = typed.get('links') or {}
+        doc_links.update(_path_only(links.get(k)) for k in ('spec', 'plan'))
+    doc_links.discard(None)
+    doc_carriers = evidence.DocCarriers(product)
+    doc_carriers.warm(doc_links, ev.get('branches') or ())
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'feature':
             continue
@@ -1214,9 +1241,9 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         # a document the lane landed on the trunk is approved (B-0059): the fast-forward lane
         # has no reviewer row — harvest's gate is its review, and a spec on main that still read
         # "spec-draft" sent the feeder back to write the same spec again
-        spec_on_main, spec_carrier = _spec_home(rec['meta'], fev, ev, product)
+        spec_on_main, spec_carrier = _spec_home(rec['meta'], fev, ev, product, doc_carriers)
         spec_approved = bool(spec_review and spec_review[1] == 'APPROVED') or spec_on_main
-        plan_on_main, plan_branch = _plan_home(rec['meta'], fev, ev, product)
+        plan_on_main, plan_branch = _plan_home(rec['meta'], fev, ev, product, doc_carriers)
         plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or plan_on_main
         if story_states and not child_ids:
             # Stories only, all Closed: a Closed Story is already in prod by its own rule

@@ -714,6 +714,100 @@ class AncestryTests(unittest.TestCase):
         self.assertFalse(evidence.ancestry(self.p, [])(self.shas[0]))
 
 
+DOC_CARRIERS_BRANCHES = ["alpha", "beta", "gamma", "delta"]
+
+
+class DocCarriersBatch(unittest.TestCase):
+    """D12/§5, §3.5: ``DocCarriers.warm`` answers many paths' carriers from one
+    ``cat-file --batch-check`` process; ``carriers()`` per path then makes none, and must answer
+    exactly what ``doc_carriers`` itself answers."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="doc_carriers_")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        origin = os.path.join(self.tmp, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True,
+                       env=dict(os.environ, **GIT_ENV))
+        work = os.path.join(self.tmp, "work")
+        subprocess.run(["git", "clone", "-q", origin, work], check=True, capture_output=True,
+                       env=dict(os.environ, **GIT_ENV))
+        git(work, "checkout", "-q", "-b", "main")
+
+        def commit(subject, *paths):
+            for p in paths:
+                full = os.path.join(work, p)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as f:
+                    f.write(subject)
+            git(work, "add", ".")
+            git(work, "commit", "-q", "-m", subject)
+
+        commit("seed", "seed.txt")
+        git(work, "push", "-q", "origin", "main")
+        for branch, paths in {
+                "alpha": ["docs/one-alpha.md", "docs/multi-a.md"],
+                "beta": ["docs/one-beta.md", "docs/multi-b.md"],
+                "gamma": ["docs/one-gamma.md", "docs/multi-a.md"],
+                "delta": ["docs/multi-b.md"]}.items():
+            git(work, "checkout", "-q", "-b", branch, "main")
+            commit(f"on {branch}", *paths)
+            git(work, "push", "-q", "origin", branch)
+            git(work, "checkout", "-q", "main")
+        commit("trunk docs", "docs/main-1.md", "docs/main-2.md", "docs/main-3.md")
+        git(work, "push", "-q", "origin", "main")
+
+        repo = os.path.join(self.tmp, "product")
+        subprocess.run(["git", "clone", "-q", origin, repo], check=True,
+                       capture_output=True, env=dict(os.environ, **GIT_ENV))
+        self.product = env.Product("sample", {"repo_dir": repo, "main": "main"})
+        self.branches = DOC_CARRIERS_BRANCHES
+        # (on_trunk, carrier branches) each path must answer, on the trunk, on one branch, on
+        # several (in sorted order), and nowhere — ten paths, matching §3.5
+        self.paths = {
+            "docs/main-1.md": (True, []),
+            "docs/main-2.md": (True, []),
+            "docs/main-3.md": (True, []),
+            "docs/one-alpha.md": (False, ["alpha"]),
+            "docs/one-beta.md": (False, ["beta"]),
+            "docs/one-gamma.md": (False, ["gamma"]),
+            "docs/multi-a.md": (False, ["alpha", "gamma"]),
+            "docs/multi-b.md": (False, ["beta", "delta"]),
+            "docs/nowhere-1.md": (False, []),
+            "docs/nowhere-2.md": (False, []),
+        }
+
+    def test_warm_is_one_process_and_carriers_then_makes_none(self):
+        real = subprocess.run
+        dc = evidence.DocCarriers(self.product)
+        with mock.patch.object(evidence.subprocess, "run", side_effect=real) as run:
+            dc.warm(list(self.paths), self.branches)
+            self.assertEqual(run.call_count, 1)
+            for path, expected in self.paths.items():
+                self.assertEqual(dc.carriers(path, self.branches), expected, path)
+            self.assertEqual(run.call_count, 1)
+
+    def test_answers_match_doc_carriers_itself(self):
+        dc = evidence.DocCarriers(self.product)
+        dc.warm(list(self.paths), self.branches)
+        for path in self.paths:
+            self.assertEqual(dc.carriers(path, self.branches),
+                             evidence.doc_carriers(path, self.branches, self.product), path)
+
+    def test_a_path_never_warmed_falls_back_to_one_doc_carriers_call(self):
+        real = subprocess.run
+        dc = evidence.DocCarriers(self.product)
+        dc.warm(list(self.paths), self.branches)
+        with mock.patch.object(evidence.subprocess, "run", side_effect=real) as run:
+            self.assertEqual(dc.carriers("docs/never-warmed.md", self.branches), (False, []))
+            self.assertEqual(run.call_count, 1)
+
+    def test_a_warm_with_no_paths_makes_no_process(self):
+        dc = evidence.DocCarriers(self.product)
+        with mock.patch.object(evidence.subprocess, "run") as run:
+            dc.warm([], self.branches)
+        run.assert_not_called()
+
+
 class DocLaneCommitTests(unittest.TestCase):
     """B-0059: the landing of eight specs — one commit, `spec(F-0031, F-0075, …)` — closed four
     Features as "commit names it, CI green". A spec, plan, review or ruling commit names its item
