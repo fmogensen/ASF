@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.209 — 2026-10-07
+
+### Features landed
+
+- Item ids with 5+ digits never match in landing attribution and evidence (\d{4} regex) (#901)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.209"`
+
 ## v0.1.208 — 2026-10-07
 
 ### Features landed
