@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.222 — 2026-10-07
+
+### Features landed
+
+- A qualified claim is refused by the grammar, and the marker list is an operator tunable (#972)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.222"`
+
 ## v0.1.221 — 2026-10-07
 
 ### Features landed
