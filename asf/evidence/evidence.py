@@ -932,6 +932,7 @@ def discover(product=None, checked_file=None):
     main_sha = sh(f"git rev-parse {main_ref}", product=product)
     commits = main_commits(product)
     merges = merge_facts(product)
+    proves_refused = {}
 
     return {
         "features": features,
@@ -949,7 +950,8 @@ def discover(product=None, checked_file=None):
         "resets": resets_of(dead, branches),
         "ids": id_evidence(product, branches, prs, commits=commits, merges=merges),
         "lane_docs": lane_docs(product, prs, commits=commits, merges=merges),
-        "proves": landed_proves(product, prs),
+        "proves": landed_proves(product, prs, refused=proves_refused),
+        "proves_refused": proves_refused,
         "ci": ci_provider(product),
         "reverts": trunk_reverts(product),
     }
@@ -1507,7 +1509,7 @@ def _parse_proves_log(text):
             for i, m in enumerate(marks)]
 
 
-def landed_proves(product, prs):
+def landed_proves(product, prs, refused=None):
     """{story: [{line, test, task, pr, sha, source}, ...]} — every claim that has **landed**
     (§2.6): a claim is not evidence until it is on the trunk.
 
@@ -1520,6 +1522,12 @@ def landed_proves(product, prs):
     lands by fast-forward and has no pull requests at all. A claim named by both collapses to
     the pull-request entry, which is why it is read first. Each Story's list sorts by
     ``(line, task)``.
+
+    ``refused``, when a dict is given, is filled with the same shape for the claims this pass
+    **refused** — a qualified claim (:func:`asf.proves.parse_all`) — each entry carrying a
+    ``why`` beside the rest. A refused claim is never in the returned dict: everything that reads
+    it ticks (F-0257 P6). Filled in place rather than returned so the one production caller and
+    the whole of ``LandedProvesTests`` keep their shape (D7).
     """
     main_ref = f"origin/{product.main}"
     per_story = {}
@@ -1531,9 +1539,15 @@ def landed_proves(product, prs):
         if key in seen:
             return
         seen.add(key)
-        per_story.setdefault(claim.story, []).append(
-            {"line": claim.line, "test": claim.test, "task": task, "pr": pr, "sha": sha,
-             "source": source})
+        entry = {"line": claim.line, "test": claim.test, "task": task, "pr": pr, "sha": sha,
+                 "source": source}
+        if claim.refusal:
+            if refused is None:
+                return
+            entry["why"] = claim.refusal
+            refused.setdefault(claim.story, []).append(entry)
+            return
+        per_story.setdefault(claim.story, []).append(entry)
 
     for p in sorted(prs or [], key=lambda p: p.get("number") or 0):
         if p.get("state") != MERGED_STATE:
@@ -1546,7 +1560,8 @@ def landed_proves(product, prs):
         if not on_main(sha):
             continue
         task = next((i for i in pr_naming_ids(p) if i.startswith("T-")), None)
-        for claim in proves.parse(p.get("body") or ""):
+        counted, claims_refused = proves.parse_all(p.get("body") or "")
+        for claim in counted + claims_refused:
             add(claim, task, p.get("number"), sha, "pr")
 
     since = record_since(product)
@@ -1556,11 +1571,15 @@ def landed_proves(product, prs):
     for sha, body in _parse_proves_log(sh(cmd, product=product)):
         subject = body.splitlines()[0] if body else ""
         task = next((i for i in naming_ids(subject, product.main) if i.startswith("T-")), None)
-        for claim in proves.parse(body):
+        counted, claims_refused = proves.parse_all(body)
+        for claim in counted + claims_refused:
             add(claim, task, None, sha, "commit")
 
     for entries in per_story.values():
         entries.sort(key=lambda e: (e["line"], e["task"] or ""))
+    if refused is not None:
+        for entries in refused.values():
+            entries.sort(key=lambda e: (e["line"], e["task"] or ""))
     return per_story
 
 
