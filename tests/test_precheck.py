@@ -1,9 +1,16 @@
-"""asf.precheck — the level, the dimensions, and the table's grammar (F-0060 T1, §3.1, §3.2)."""
+"""asf.precheck — the level, the dimensions, and the table's grammar (F-0060 T1, §3.1, §3.2);
+and the pass's own command, ``asf precheck`` and ``asf precheck report`` (T-0275, §2.7/§3.7)."""
 import ast
+import contextlib
 import inspect
+import io
+import json
+import os
+import shutil
+import tempfile
 import unittest
 
-from asf import precheck, size
+from asf import cli, env, precheck, size
 
 HEADER_LINE = '| check | result | confidence | evidence |'
 SEP_LINE = '| --- | --- | --- | --- |'
@@ -266,8 +273,12 @@ class TableTests(unittest.TestCase):
         self.assertEqual(precheck.level_of('level: high\nother text'), precheck.HIGH)
         self.assertIsNone(precheck.level_of('no level line here'))
 
-    def test_module_imports_nothing_outside_collections_re_and_size(self):
-        tree = ast.parse(inspect.getsource(precheck))
+    def test_grammar_half_imports_nothing_outside_collections_re_and_size(self):
+        """§2.1's own promise holds for the grammar above the ``# ---- the command ----``
+        divider; the command half below it is the one part of this module that opens a file,
+        reads the clock and knows a path (T-0275)."""
+        grammar, _, _ = inspect.getsource(precheck).partition('# ---- the command ----')
+        tree = ast.parse(grammar)
         names = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -275,6 +286,216 @@ class TableTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 names.add(node.module)
         self.assertEqual(names, {'collections', 're', 'asf'})
+
+
+def _complete_table(level=precheck.LOW, extra=()):
+    rows = [f'| {d} | pass | n/a | ok |' for d in precheck.DIMENSIONS[level]]
+    rows.extend(extra)
+    return f'head: 4f2a9c1b8e03d7a6\nlevel: {level}\n\n' + table(*rows)
+
+
+class CommandTests(unittest.TestCase):
+    """§3.7: ``asf precheck PATH --level …``, through ``cli.main``, over files in a temp dir."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='precheck_cmd_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, name, text):
+        path = os.path.join(self.tmp, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return path
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_complete_table_exits_0_blocking_0(self):
+        path = self._write('p.md', _complete_table())
+        rc, out, err = self._run(['precheck', path, '--level', 'low'])
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn('blocking: 0', out)
+
+    def test_one_high_fail_row_exits_0_blocking_1(self):
+        extra = ('| extra check | fail | high | some/file.py:1 - x |',)
+        path = self._write('p.md', _complete_table(extra=extra))
+        rc, out, err = self._run(['precheck', path, '--level', 'low'])
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn('blocking: 1', out)
+        self.assertIn('this branch will be sent back', out)
+
+    def test_missing_dimension_exits_1_naming_it(self):
+        dims = precheck.DIMENSIONS[precheck.LOW]
+        rows = [f'| {d} | pass | n/a | ok |' for d in dims[:-1]]
+        path = self._write('p.md', 'head: 4f2a9c1b8e03d7a6\n\n' + table(*rows))
+        rc, out, err = self._run(['precheck', path, '--level', 'low'])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn('dimension not covered:', out)
+        self.assertIn(dims[-1], out)
+
+    def test_unfilled_confidence_exits_1_naming_its_line(self):
+        dims = precheck.DIMENSIONS[precheck.LOW]
+        rows = [f'| {d} | pass | n/a | ok |' for d in dims[:-1]]
+        rows.append(f'| {dims[-1]} | pass | <n/a\\|high\\|medium\\|low> | ok |')
+        text = 'head: 4f2a9c1b8e03d7a6\n\n' + table(*rows)
+        path = self._write('p.md', text)
+        rc, out, err = self._run(['precheck', path, '--level', 'low'])
+        self.assertEqual(rc, 1, out + err)
+        lineno = text.splitlines().index(rows[-1]) + 1
+        self.assertIn(f'{path}:{lineno}:', out)
+        self.assertIn('confidence is unfilled', out)
+
+    def test_no_head_line_exits_1(self):
+        rows = [f'| {d} | pass | n/a | ok |' for d in precheck.DIMENSIONS[precheck.LOW]]
+        path = self._write('p.md', table(*rows))
+        rc, out, err = self._run(['precheck', path, '--level', 'low'])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn('no head: line', out)
+
+    def test_missing_path_exits_2_one_line_no_traceback(self):
+        path = os.path.join(self.tmp, 'does-not-exist.md')
+        rc, out, err = self._run(['precheck', path, '--level', 'low'])
+        self.assertEqual(rc, 2, out + err)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual(out, '')
+
+    def test_level_omitted_exits_2(self):
+        path = self._write('p.md', _complete_table())
+        rc, out, err = self._run(['precheck', path])
+        self.assertEqual(rc, 2, out + err)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+        self.assertTrue(err.strip().startswith('usage:'), err)
+
+    def test_json_parses_sorted_keys_rows_length(self):
+        path = self._write('p.md', _complete_table())
+        rc, out, err = self._run(['precheck', path, '--level', 'low', '--json'])
+        self.assertEqual(rc, 0, out + err)
+        data = json.loads(out)
+        self.assertEqual(list(data), sorted(data))
+        self.assertEqual(len(data['rows']), len(precheck.DIMENSIONS[precheck.LOW]))
+
+
+class ReportTests(unittest.TestCase):
+    """§3.7: ``asf precheck report`` over a fixture record and reviews directory — no git, no
+    network: the product's checkout and its reviews directory are the whole input."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='precheck_report_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        self.repo = os.path.join(self.tmp, 'repo')
+        self.reviews_dir = os.path.join(self.repo, 'docs', 'reviews')
+        os.makedirs(self.reviews_dir)
+        with open(env.product_path('sample'), 'w', encoding='utf-8') as f:
+            f.write(f'product: sample\nrepo_slug: x/y\nrepo_dir: {self.repo}\n')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, name, text):
+        path = os.path.join(self.reviews_dir, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return path
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def _seed(self):
+        precheck_text = (
+            '# Precheck — T-0244, level high\n\n'
+            'head: 4f2a9c1b8e03d7a6\n'
+            'level: high\n\n'
+            + table(
+                '| dim1 | pass | n/a | ok |',
+                '| dim2 | fail | high | asf/precheck.py:118 - bad |',
+                '| dim3 | fail | medium | asf/other.py:10 - meh |',
+            )
+        )
+        self._write('precheck-t-0244.md', precheck_text)
+        self._write('1-t-0244.md', (
+            '# Review T-0244 — round 1\n\n## C\n\n'
+            '1. `asf/precheck.py:118` - fix this\n'
+            '2. `asf/new_file.py:5` - new problem\n'
+        ))
+        self._write('2-t-0244.md', (
+            '# Review T-0244 — round 2\n\n## C\n\n'
+            '1. `asf/other.py:10` - still here\n'
+        ))
+
+    def test_one_row_per_item_with_level_findings_and_rounds(self):
+        self._seed()
+        rc, out, err = self._run(['precheck', 'report', '--product', 'sample', '--json'])
+        self.assertEqual(rc, 0, out + err)
+        data = json.loads(out)
+        self.assertEqual(len(data['items']), 1)
+        row = data['items'][0]
+        self.assertEqual(row['item'], 'T-0244')
+        self.assertEqual(row['level'], 'high')
+        self.assertEqual(row['findings'], {'high': 1, 'medium': 1, 'low': 0})
+        self.assertEqual(len(row['rounds']), 2)
+
+    def test_c_item_the_precheck_already_named_is_repeated_not_new(self):
+        self._seed()
+        rc, out, _ = self._run(['precheck', 'report', '--product', 'sample', '--json'])
+        row = json.loads(out)['items'][0]
+        round1 = next(r for r in row['rounds'] if r['round'] == 1)
+        self.assertEqual(round1['c'], 2)
+        self.assertEqual(round1['repeated'], 1)
+        self.assertEqual(round1['new'], 1)
+
+    def test_round_raising_only_already_named_findings_is_all_repeated(self):
+        self._seed()
+        rc, out, _ = self._run(['precheck', 'report', '--product', 'sample', '--json'])
+        row = json.loads(out)['items'][0]
+        round2 = next(r for r in row['rounds'] if r['round'] == 2)
+        self.assertEqual(round2['c'], 1)
+        self.assertEqual(round2['repeated'], 1)
+        self.assertEqual(round2['new'], 0)
+
+    def test_json_is_one_typed_object_with_the_same_numbers(self):
+        self._seed()
+        rc, out, err = self._run(['precheck', 'report', '--product', 'sample', '--json'])
+        self.assertEqual(rc, 0, out + err)
+        data = json.loads(out)
+        self.assertEqual(data['days'], 30)
+        row = data['items'][0]
+        self.assertEqual(row['repeated'], 2)
+        self.assertEqual(row['new'], 1)
+
+    def test_human_output_names_the_item_and_level(self):
+        self._seed()
+        rc, out, err = self._run(['precheck', 'report', '--product', 'sample'])
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn('T-0244', out)
+        self.assertIn('high', out)
+
+    def test_days_window_excludes_an_older_precheck(self):
+        self._seed()
+        old = 1000 * 86400
+        now = os.path.getmtime(os.path.join(self.reviews_dir, 'precheck-t-0244.md'))
+        os.utime(os.path.join(self.reviews_dir, 'precheck-t-0244.md'), (now - old, now - old))
+        rc, out, _ = self._run(['precheck', 'report', '--product', 'sample', '--json'])
+        self.assertEqual(json.loads(out)['items'], [])
+
+    def test_no_review_for_the_precheck_raises_no_row(self):
+        self._write('precheck-t-0500.md', 'head: 4f2a9c1b8e03d7a6\nlevel: low\n\n' + table())
+        rc, out, _ = self._run(['precheck', 'report', '--product', 'sample', '--json'])
+        self.assertEqual(json.loads(out)['items'], [])
 
 
 if __name__ == '__main__':

@@ -251,3 +251,200 @@ def level_of(text):
     """The file's own ``level:`` line value (``low``/``high``/``max``), or None (PD7)."""
     m = _LEVEL_LINE_RE.search(text or '')
     return m.group('level').lower() if m else None
+
+
+# ---- the command ----
+# Everything above this line opens no file, runs no git and knows no path (§2.1's own promise).
+# Everything below it is the one part of this module that does: the pass's own self-check
+# (`asf precheck PATH --level …`) and the report over what landed (`asf precheck report`) — the
+# shape `asf/redact.py`'s `add_arguments`/`cmd_redact`/`register`/`main` already has.
+import argparse
+import datetime
+import json
+import os
+import sys
+
+from asf.evidence import review as review_mod
+
+#: ``precheck-<slug>.md`` (D2's default pattern) — the one name this command reads off disk.
+_PRECHECK_FILE_RE = re.compile(r'^precheck-(?P<slug>.+)\.md$', re.I)
+#: ``<n>-<slug>.md`` — the default review pattern (`conventions.DEFAULT_REVIEW_PATTERN`), read the
+#: same way, beside the precheck file, in the same directory.
+_REVIEW_FILE_RE = re.compile(r'^(?P<n>\d+)-(?P<slug>.+)\.md$', re.I)
+#: A leading ``file:line`` evidence token with its line dropped — what a review's bare-path C
+#: item (``asf.evidence.review.c_items``) is compared against.
+_PATH_OF_RE = re.compile(r'^(?P<path>[^:]+)')
+
+
+def add_arguments(p):
+    p.add_argument('target', help="a precheck file's path, or the literal 'report'")
+    p.add_argument('--level', choices=LEVELS)
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--days', type=int, default=30, help="report's own window (default 30)")
+    from asf import env
+    env.add_product_arg(p)
+
+
+def register(subparsers):
+    p = subparsers.add_parser(
+        'precheck', help="the mechanical pass's own self-check, and the report over what it found")
+    add_arguments(p)
+    p.set_defaults(run=cmd_precheck)
+    return p
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='asf.precheck')
+    add_arguments(parser)
+    args = parser.parse_args(argv)
+    return cmd_precheck(args)
+
+
+def _fault_line(path, fault):
+    """One :func:`faults` entry, prefixed ``<path>:<line>: `` when it names a file line (a parse
+    fault's own ``row <n>: …``), else ``<path>: `` (a dimension/head/level fault, which names
+    none) — the same shape ``asf.review_checks._fault_line`` gives a review's own faults."""
+    if fault.startswith('row '):
+        n, _, rest = fault[len('row '):].partition(': ')
+        return f'{path}:{n}: {rest}'
+    return f'{path}: {fault}'
+
+
+def cmd_precheck(args):
+    if args.target == 'report':
+        return cmd_precheck_report(args)
+    if not args.level:
+        print('usage: asf precheck PATH --level {low,high,max} [--json]', file=sys.stderr)
+        return 2
+    try:
+        with open(args.target, encoding='utf-8') as f:
+            text = f.read()
+    except OSError as e:
+        print(f'{args.target}: {e}', file=sys.stderr)
+        return 2
+
+    rows, _ = parse(text)
+    flts = faults(text, args.level)
+    bl = blocking(rows)
+    fnd = findings(rows)
+
+    if args.json:
+        payload = {'path': args.target, 'level': args.level, 'head': head_of(text),
+                   'rows': [dict(r._asdict()) for r in rows], 'findings': len(fnd),
+                   'blocking': len(bl), 'faults': flts}
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        plural = '' if len(flts) == 1 else 's'
+        print(f'== PRECHECK {args.target}  level {args.level}, {len(rows)} rows, '
+              f'{len(fnd)} findings ({len(bl)} high), {len(flts)} fault{plural}')
+        for fault in flts:
+            print(_fault_line(args.target, fault))
+        tail = ' — this branch will be sent back' if bl else ''
+        print(f'blocking: {len(bl)}{tail}')
+    return 1 if flts else 0
+
+
+def _fail_paths(rows):
+    """The file path (its line number dropped) of every FAIL row's evidence, over *every* FAIL
+    row — not only the blocking ones: a `medium` finding the reviewer re-raises is exactly what
+    the report's ``repeated`` count is for. Mirrors :func:`keys` without :func:`blocking`'s
+    confidence filter."""
+    out = set()
+    for row in findings(rows):
+        m = _LEADING_TOKEN_RE.match((row.evidence or '').strip())
+        if m:
+            tok = m.group(0).rstrip(':,;')
+            out.add(_PATH_OF_RE.match(tok).group('path'))
+    return out
+
+
+def _confidence_counts(rows):
+    """The FAIL rows of ``rows``, tallied by confidence."""
+    counts = {CONF_HIGH: 0, CONF_MED: 0, CONF_LOW: 0}
+    for row in findings(rows):
+        if row.confidence in counts:
+            counts[row.confidence] += 1
+    return counts
+
+
+def _scan_reviews_dir(reviews_dir):
+    """``({slug: precheck path}, {slug: [(round, review path), …]})`` over one directory, read
+    straight off disk — no git, no network."""
+    try:
+        names = sorted(os.listdir(reviews_dir))
+    except OSError:
+        return {}, {}
+    precheck_files, review_files = {}, {}
+    for name in names:
+        path = os.path.join(reviews_dir, name)
+        m = _PRECHECK_FILE_RE.match(name)
+        if m:
+            precheck_files[m.group('slug').lower()] = path
+            continue
+        m = _REVIEW_FILE_RE.match(name)
+        if m:
+            review_files.setdefault(m.group('slug').lower(), []).append(
+                (int(m.group('n')), path))
+    return precheck_files, review_files
+
+
+def cmd_precheck_report(args):
+    from asf import env
+    try:
+        product = env.load_product(args.product)
+    except env.ConfigError as e:
+        print(f'precheck report: {e}', file=sys.stderr)
+        return 2
+
+    root = product.repo_dir
+    reviews_dir = os.path.join(root, product.conventions.reviews_dir) if root else ''
+    precheck_files, review_files = _scan_reviews_dir(reviews_dir)
+    cutoff = datetime.datetime.now().timestamp() - args.days * 86400
+
+    out = []
+    for slug in sorted(set(precheck_files) & set(review_files)):
+        ppath = precheck_files[slug]
+        try:
+            mtime = os.path.getmtime(ppath)
+            with open(ppath, encoding='utf-8') as f:
+                ptext = f.read()
+        except OSError:
+            continue
+        if mtime < cutoff:
+            continue
+
+        prows, _ = parse(ptext)
+        level = level_of(ptext) or HIGH
+        fail_paths = _fail_paths(prows)
+        rounds, repeated_total, new_total = [], 0, 0
+        for n, rpath in sorted(review_files[slug]):
+            try:
+                with open(rpath, encoding='utf-8') as f:
+                    body = f.read()
+            except OSError:
+                continue
+            items = review_mod.c_items(body)
+            repeated = sum(1 for p in items if p in fail_paths)
+            new = len(items) - repeated
+            repeated_total += repeated
+            new_total += new
+            rounds.append({'round': n, 'c': len(items), 'repeated': repeated, 'new': new})
+
+        out.append({'item': slug.upper(), 'level': level, 'findings': _confidence_counts(prows),
+                    'rounds': rounds, 'repeated': repeated_total, 'new': new_total})
+
+    if args.json:
+        print(json.dumps({'days': args.days, 'items': out}, sort_keys=True))
+        return 0
+
+    print(f'== PRECHECK REPORT  last {args.days} days, {len(out)} item(s)')
+    for row in out:
+        f = row['findings']
+        print(f"{row['item']}  level {row['level']}, findings high {f[CONF_HIGH]} "
+              f"medium {f[CONF_MED]} low {f[CONF_LOW]}, {len(row['rounds'])} round(s), "
+              f"repeated {row['repeated']}, new {row['new']}")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -57,7 +57,8 @@ SESSION_DAYS = 1
 KINDS = ('spec', 'review', 'fix', 'code', 'plan', 'preflight', 'probe', 'rebase', 'relaunch', 'launch',
          'tick', 'other')
 KIND_PREFIXES = (
-    (r'(spec)', 'spec'), (r'(review|prereview|rr\d*)', 'review'), (r'(fix|bouncefix|revise|hotfix)', 'fix'),
+    (r'(spec)', 'spec'), (r'(review|prereview|precheck|rr\d*)', 'review'),
+    (r'(fix|bouncefix|revise|hotfix)', 'fix'),
     (r'(plan)', 'plan'), (r'(preflight)', 'preflight'), (r'(probe|diag)', 'probe'),
     (r'(rebase|remerge)', 'rebase'), (r'(relaunch)', 'relaunch'), (r'(launch)', 'launch'), (r'(tick)', 'tick'),
     (r'(code)', 'code'), (r'(adjudicate|job|bounce)', 'other'),
@@ -66,7 +67,8 @@ KIND_PREFIXES = (
 DEFAULTS = Conventions()
 #: A session record's ``kind`` (a feeder row kind) → the `sessions` stream's `kind`.
 RECORD_KINDS = {'fix-bug': 'fix', 'fix': 'fix', 'task': 'code', 'code': 'code', 'spec': 'spec',
-                'plan': 'plan', 'review': 'review', 'rebase': 'rebase', 'relaunch': 'relaunch'}
+                'plan': 'plan', 'review': 'review', 'rebase': 'rebase', 'relaunch': 'relaunch',
+                'precheck': 'review'}
 TS_RE = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
 DAY_RE = re.compile(r'^\d{4}-\d\d-\d\d$')
 ID_RE = re.compile(r'^[EFSTBDR]-\d{4,}$')

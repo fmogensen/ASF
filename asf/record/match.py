@@ -28,8 +28,8 @@ import re
 ID_TOKEN = re.compile(r'\b[EFSTBDR]-\d{4,}\b')
 WORK_TYPES = {'epic', 'feature', 'story', 'task', 'bug'}
 ROLE_PREFIX = re.compile(
-    r'^((fix|review|prereview|rebase|remerge|bouncefix|bounce|adjudicate|diag|rr\d*|spec|plan|'
-    r'preflight|probe|relaunch|revise|hotfix|code|job)-)+')
+    r'^((fix|review|prereview|precheck|rebase|remerge|bouncefix|bounce|adjudicate|diag|rr\d*|spec|'
+    r'plan|preflight|probe|relaunch|revise|hotfix|code|job)-)+')
 ROUND_SUFFIX = re.compile(r'(-r\d+[a-z]?)+$')
 TASK_SUFFIX = re.compile(r'^(.+)-(t\d+[a-z]?)$')
 REVIEW_FILE = (

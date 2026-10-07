@@ -667,6 +667,24 @@ class ReadmeParserTests(unittest.TestCase):
                          ('readme', 'sample', True, True, True))
 
 
+class PrecheckVerbTests(unittest.TestCase):
+    """T-0275: ``asf precheck`` is registered — ``--help`` parses and the verb is in the
+    subparser table."""
+
+    def test_precheck_help_parses(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.build_parser().parse_args(['precheck', '--help'])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_precheck_is_a_registered_subcommand(self):
+        parser = cli.build_parser()
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                self.assertIn('precheck', action.choices)
+                return
+        raise AssertionError('no subparsers action')
+
+
 class SetHelpTests(unittest.TestCase):
     """T-0501: `asf set --help` names the list fields and their add/remove forms, read off the
     real parser rather than a hand-kept string — the same idiom `tests/test_readme.py`'s

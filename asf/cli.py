@@ -386,6 +386,8 @@ def build_parser():
     register_approvals(sub)
     from asf.redact import register as register_redact
     register_redact(sub)
+    from asf.precheck import register as register_precheck
+    register_precheck(sub)
     from asf.dwell import register as register_dwell
     register_dwell(sub)
 
