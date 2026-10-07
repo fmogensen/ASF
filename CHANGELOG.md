@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.242 — 2026-10-07
+
+### Bugs fixed
+
+- Ids and parsing — one id grammar, both reshape shapes, phantom Stories, held-Feature row (#1046)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.242"`
+
 ## v0.1.241 — 2026-10-07
 
 ### Features landed
