@@ -6,8 +6,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 
-from asf import factory_only
+from asf import env, factory_only
 from asf.conventions import Conventions
+from asf.env import Product
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PREFIXES = {'code': 'worker/', 'fix': 'fix/', 'spec': 'spec/', 'plan': 'plan/',
             'legacy': ['old/']}
@@ -124,6 +127,39 @@ class CliTests(unittest.TestCase):
         rc, out = self.run_cli('auto', 'hand/fix')
         self.assertEqual(rc, 0)
         self.assertIn('off', out)
+
+
+class CommittedProductFile(unittest.TestCase):
+    """``.asf/product.yaml``: generic and committed, read by this repository's own CI."""
+
+    PATH = os.path.join(REPO, '.asf', 'product.yaml')
+
+    def setUp(self):
+        with open(self.PATH, encoding='utf-8') as f:
+            self.text = f.read()
+        self.data = env.load_file(self.PATH)
+        self.conventions = Product('asf', self.data).conventions
+
+    def test_well_formed_and_generic(self):
+        self.assertEqual(env.product_problems(self.text), ([], []))
+        self.assertEqual(env.validate_product_text(self.text), [])
+
+    def test_top_level_keys(self):
+        self.assertEqual(set(self.data), {'main', 'conventions'})
+
+    def test_main_is_the_trunk(self):
+        self.assertEqual(Product('asf', self.data).main, 'main')
+
+    def test_merge_block(self):
+        self.assertTrue(self.conventions.merge_factory_only)
+        self.assertTrue(self.conventions.merge_require_item_id)
+        self.assertEqual(self.conventions.merge, 'auto')
+        self.assertEqual(self.conventions.merge_bot_paths, ['CHANGELOG.md'])
+        self.assertEqual(self.conventions.shape_findings(), [])
+
+    def test_branch_prefixes_do_not_drift_from_the_defaults(self):
+        self.assertEqual(self.conventions.all_prefixes(),
+                         Conventions.from_mapping({}).all_prefixes())
 
 
 if __name__ == '__main__':
