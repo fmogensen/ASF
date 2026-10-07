@@ -4669,4 +4669,6 @@ def register(ci_subparsers):
                    help='run the queue pass (superseded, dedupe, relief, re-runs) — the '
                         "scheduler's ci-queue job")
     q.set_defaults(run=cmd_queue)
+    from asf import ci_stall               # the stall watch: its own `asf ci` subcommand
+    ci_stall.register(ci_subparsers)
     return q

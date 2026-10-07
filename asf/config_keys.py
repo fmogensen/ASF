@@ -116,6 +116,12 @@ TYPED = {
     # the CI queue's timings (asf.ci_queue)
     'ci.stuck_retry_s': (NUM, 1, None),
     'ci.stuck_max_s': (NUM, 1, None),
+    # the CI stall watch's timings (asf.ci_stall)
+    'ci.stall_watch.silence_s': (NUM, 1, None),
+    'ci.stall_watch.heartbeat_stale_s': (NUM, 1, None),
+    'ci.stall_watch.factor': (NUM, 1, None),
+    'ci.stall_watch.default_max_s': (NUM, 1, None),
+    'ci.stall_watch.cpu_floor': (NUM, 0, None),
     'ci.stale_s': (NUM, 1, None),
     'ci.pickup_s': (NUM, 1, None),
     'ci.urgent_hold_s': (NUM, 0, None),
