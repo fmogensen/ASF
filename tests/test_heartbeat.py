@@ -540,6 +540,61 @@ class LocalStall(Home):
         self.assertTrue(runs[-2]['end_reason'].startswith('failed: stalled'))
         self.assertTrue(lifecycle.is_live(runs[-1]))
 
+    def _stalled_ref_with_log(self, last_line, mtime_age_min, remove=False):
+        """A local run 21 m past its start with no beat: its job log's last line and mtime set
+        (or the log removed). ``(found, stopped, lines, rec, now)``."""
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        rec = spawn_mod.spawn(self.product, feature_row('spec-1'), self.acct(), 'spec it\n',
+                              runtime=rt, cfg=self.cfg)
+        now = hb.parse_ts(rec['started']) + 21 * M
+        if remove:
+            if os.path.exists(rec['log']):
+                os.remove(rec['log'])
+        else:
+            with open(rec['log'], 'w', encoding='utf-8') as f:
+                f.write((last_line(now) if callable(last_line) else last_line) + '\n')
+            os.utime(rec['log'], (now - mtime_age_min * M, now - mtime_age_min * M))
+        stopped, lines = [], []
+        rt2 = runtime_mod.FakeRuntime([{'running': True, 'pid': 4343}])
+        found = hb.sweep(self.product, cfg=self.cfg, now=now, runtime_fn=lambda: rt2,
+                         alive=lambda pid: True, stop=lambda run, alive: stopped.append(run['pid']),
+                         out=lines.append)
+        return found, stopped, lines, rec, now
+
+    def _iso(self, t):
+        return time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(t))
+
+    def test_a_fresh_job_log_event_keeps_a_beatless_local_run_alive(self):
+        # the event's timestamp (2 m old) wins over an old mtime (30 m)
+        found, stopped, lines, _rec, now = self._stalled_ref_with_log(
+            lambda now: json.dumps({'type': 'tool_progress', 'tool_name': 'Bash',
+                                    'timestamp': self._iso(now - 2 * M)}), 30)
+        self.assertEqual((found, stopped), ([], []))
+        self.assertIn('heartbeat spec-1: alive by job log (last event 2m ago); no beat needed',
+                      lines)
+        self.assertTrue(lifecycle.is_live(pool_mod.load_sessions(self.product)['spec-1']))
+        self.assertAlmostEqual(hb.load_state(self.product)['spec-1']['moved'], now - 2 * M,
+                               delta=1)
+
+    def test_an_old_job_log_event_still_stalls(self):
+        old = json.dumps({'type': 'tool_progress', 'timestamp': '2000-01-01T00:00:00.000Z'})
+        found, stopped, _lines, _rec, _now = self._stalled_ref_with_log(old, 15)
+        (job, why, _new), = found
+        self.assertEqual((job, why), ('spec-1', 'stalled: no beat 21m'))
+        self.assertEqual(stopped, [4242])
+
+    def test_no_job_log_still_stalls(self):
+        found, stopped, _lines, _rec, _now = self._stalled_ref_with_log('', 0, remove=True)
+        (job, why, _new), = found
+        self.assertEqual((job, why), ('spec-1', 'stalled: no beat 21m'))
+        self.assertEqual(stopped, [4242])
+
+    def test_a_fresh_mtime_counts_when_the_last_line_is_unparseable(self):
+        found, stopped, lines, _rec, _now = self._stalled_ref_with_log('{"type": "tool_pro', 1)
+        self.assertEqual((found, stopped), ([], []))
+        self.assertIn('heartbeat spec-1: alive by job log (last event 1m ago); no beat needed',
+                      lines)
+
     def test_an_ended_runs_beat_ref_is_deleted_on_origin(self):
         rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
         rec = spawn_mod.spawn(self.product, feature_row('spec-1'), self.acct(), 'spec it\n',

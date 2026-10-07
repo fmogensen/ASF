@@ -511,6 +511,35 @@ def log_records(path, n=200):
     return out
 
 
+def log_alive_at(path, now, limit_min):
+    """The epoch of the job log's newest event when it is at most ``limit_min`` minutes old —
+    its last record's ``timestamp``, failing that the file's mtime — else None (no log, an
+    unreadable one, or a quiet one). A local run streaming events is working: no beat needed."""
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read().decode('utf-8', errors='replace')
+            mtime = os.fstat(f.fileno()).st_mtime
+    except (OSError, TypeError, ValueError):
+        return None
+    from asf.workers import remote  # local: the cloud lane's timestamp parser
+    ts = None
+    lines = [ln for ln in tail.splitlines() if ln.strip()]
+    if lines:
+        try:
+            last = json.loads(lines[-1])
+        except ValueError:
+            last = None
+        if isinstance(last, dict) and last.get('timestamp'):
+            ts = remote._event_ts(last.get('timestamp'))
+    if ts is None:
+        ts = mtime
+    if now - ts > limit_min * 60.0:
+        return None
+    return min(ts, now)
+
+
 def continue_text(original, why, branch, head, notes, summary, local):
     """The continuation's brief: the original, then the CONTINUE block. Pure."""
     where = ('Your worktree is the stalled run\'s own: its commits and the files it left '
@@ -694,6 +723,15 @@ def sweep(product, cfg=None, now=None, beats=None, runtime_fn=None, alive=None, 
     for run in runs:
         s = for_run(run, cfg, product)
         stalled, quiet, _line = observe(product, run, beats, now, s, out=out, state=state)
+        if stalled:  # liveness from the job log, before the beat (the cloud lane's own rule)
+            seen = log_alive_at(run.get('log'), now, s.limit_min)
+            if seen is not None:
+                stalled = False
+                rec = state.get(run['job'])
+                if isinstance(rec, dict):  # the event is the beat: ``quiet`` resets
+                    rec['moved'] = max(seen, _num(rec.get('moved')) or 0)
+                out(f"heartbeat {run['job']}: alive by job log (last event "
+                    f'{max(0.0, now - seen) / 60.0:.0f}m ago); no beat needed')
         if not stalled:
             continue
         why = f'{STALLED}: no beat {int(quiet)}m'
