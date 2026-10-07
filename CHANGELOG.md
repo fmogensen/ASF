@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.235 — 2026-10-07
+
+### Features landed
+
+- The in-repo decision register, the citation's grammar, and the one REPORT field it is read out of (#1030)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.235"`
+
 ## v0.1.234 — 2026-10-07
 
 ### Features landed
