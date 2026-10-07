@@ -193,11 +193,30 @@ class Reaper(unittest.TestCase):
     # ---- the buffer and the cap ---------------------------------------------------------
 
     def _queued(self, job, used):
+        """A finished run waiting to land: its worktree is reused while the buffer allows."""
         ended = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(used))
-        path, _ = self.worktree(job, ended=True, correction={
-            'kind': 'unpushed', 'text': 'fix it', 'at': '2099-01-01T00:00:00Z'})
+        path, _ = self.worktree(job, ended=True, end_reason='finished', rc=0)
         pool_mod.update_session(self.product, job, ended=ended)
         return path
+
+    def test_a_pending_correction_or_a_queued_relaunch_is_never_reaped(self):
+        # B-0380: the reaper took the tree a correction then came for, and the run died on it
+        now = time.time()
+        corr, _ = self.worktree('corr', ended=True, correction={
+            'kind': 'unpushed', 'text': 'fix it', 'at': '2099-01-01T00:00:00Z'})
+        dead, _ = self.worktree('dead', ended=True, end_reason='dead pid', rc=None)
+        retried, _ = self.worktree('retried', ended=True, end_reason='dead pid', corrected=1)
+        self._queued('lru', now - 100)
+        got = self.plan(buffer=0)
+        self.assertEqual(got['corr'].action, wt_mod.SPARE)
+        self.assertIn('a pending correction reuses it', got['corr'].reason)
+        self.assertEqual(got['dead'].action, wt_mod.SPARE)
+        self.assertIn('a queued relaunch reuses it', got['dead'].reason)
+        self.assertEqual(got['retried'].action, wt_mod.REMOVE)
+        self.assertEqual(got['lru'].action, wt_mod.REMOVE)
+        self.reap(buffer=0)
+        self.assertTrue(os.path.isdir(corr) and os.path.isdir(dead))
+        self.assertFalse(os.path.exists(retried))
 
     def test_queued_correction_worktrees_stay_within_the_buffer_lru_out(self):
         now = time.time()

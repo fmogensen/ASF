@@ -137,6 +137,13 @@ def cmd_correct(args, fetch=None, alive=None):
     pool_mod.update_session(product, run['job'], correction=corr, rounds=rounds + 1)
     print(f'corrected {item} on {run["branch"]} (round {rounds + 1} of {lifecycle.round_cap()}, '
           f'job {run["job"]}): {why}')
+    wt = run.get('worktree')
+    if wt and not os.path.isdir(wt):  # B-0380: the round finds its worktree, rebuilt from origin
+        from asf.workers import spawn as spawn_mod, worktrees as worktrees_mod
+        try:
+            worktrees_mod.ensure(product, run['job'], run['branch'], path=wt)
+        except (spawn_mod.SpawnError, OSError) as e:
+            print(f'asf correct: worktree {wt} not recreated now ({e}); the launch makes it')
     return 0
 
 

@@ -37,6 +37,7 @@ import dataclasses
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -223,11 +224,73 @@ def plan(product, buffer=DEFAULT_BUFFER, alive=None, fetch=False, now=None):
         if not safe:
             v.reason = why
             continue
+        if run is not None and not why.startswith(('landed', 'on ')) and awaited(run, registry):
+            # a correction or a relaunch is queued to run in it: never reaped, whatever the
+            # cap (B-0380 — the reaped tree killed the correction that came for it)
+            v.action, v.reason = SPARE, f'{awaited(run, registry)} reuses it ({why})'
+            continue
         v.wanted = run is not None and not why.startswith(('landed', 'on ')) and bool(
-            lifecycle.pending_correction(run, registry) or lifecycle.eligible(run))
+            lifecycle.eligible(run))
         v.action, v.reason = REMOVE, why
     _cap(out, buffer)
     return out
+
+
+def awaited(run, registry):
+    """What queued launch will run in ``run``'s worktree — ``'a pending correction'``, ``'a
+    queued relaunch'`` (a dead run health has not retried yet: its cold correction runs there) —
+    or ``''``."""
+    if lifecycle.pending_correction(run, registry):
+        return 'a pending correction'
+    if lifecycle.is_dead_reason(run.get('end_reason')) and not run.get('corrected') \
+            and not str(run.get('job') or '').endswith('-correction'):
+        return 'a queued relaunch'
+    return ''
+
+
+def adoptable(path, branch, main=None):
+    """``(ok, why)``: the orphan worktree at ``path`` (no run recorded it) can be taken over as
+    it stands — a git checkout on ``branch``, nothing uncommitted, nothing in progress, and its
+    HEAD exactly ``origin/<branch>`` (fetched first). Nothing in it exists only there, so no
+    grace period is needed before a spawn reuses it (B-0380: a clean leftover matching origin
+    refused every tick)."""
+    if not branch or not os.path.isdir(path):
+        return False, 'no worktree'
+    if _head_branch(path) != branch:
+        return False, f'not on {branch}'
+    st = _git(['status', '--porcelain'], path)
+    if st.returncode != 0:
+        return False, 'not a git worktree'
+    if any(ln.strip() for ln in st.stdout.splitlines()):
+        return False, 'uncommitted changes'
+    if _in_progress(path):
+        return False, 'an operation in progress'
+    _git(['fetch', '-q', 'origin', branch], path)
+    head = _git(['rev-parse', 'HEAD'], path).stdout.strip()
+    remote = _git(['rev-parse', '--verify', '-q', f'refs/remotes/origin/{branch}'], path)
+    if remote.returncode != 0 or not head:
+        return False, f'origin/{branch} unreadable'
+    if remote.stdout.strip() != head:
+        return False, f'HEAD is not origin/{branch}'
+    return True, f'clean at origin/{branch}'
+
+
+def ensure(product, job, branch, path=None):
+    """The worktree ``job`` runs in on ``branch``, there when this returns: ``path`` (default
+    ``<worktrees>/<job>``) as it stands when it is a checkout, else recreated by
+    :func:`asf.workers.spawn.make_worktree` — from ``origin/<branch>`` when origin holds the
+    branch, from the trunk for a fresh one. The one owner of "the worktree a correction or a
+    relaunch expects": a missing tree is rebuilt before the session starts, so the run never
+    dies on it and never counts toward a cap (B-0380's reverse case). Returns the path; raises
+    :class:`asf.workers.spawn.SpawnError` when it cannot be made."""
+    path = path or os.path.join(spawn_mod.worktrees_dir(product), job)
+    if os.path.isdir(path) and _git(['rev-parse', '--git-dir'], path).returncode == 0:
+        return path
+    if not branch:
+        raise spawn_mod.SpawnError(f'worktree {path} is missing and the run names no branch')
+    made = spawn_mod.make_worktree(product, os.path.basename(path), branch)
+    print(f'worktree {made} recreated for {job} on {branch}', file=sys.stderr)
+    return made
 
 
 def _cap(verdicts, buffer):

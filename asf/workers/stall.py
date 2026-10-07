@@ -296,7 +296,17 @@ def correct_once(product, session, error_text, runtime):
                                      session.get('branch')), 'ASF_SESSION': sid}
     if session.get('id_range'):
         retry_env['BACKLOG_ID_RANGE'] = session['id_range']
-    job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
+    worktree = session.get('worktree')
+    if worktree and not os.path.isdir(worktree):
+        # reaped, or never made on this host (a cloud run): rebuilt from origin before the
+        # retry starts, never a dead run on a missing directory (B-0380)
+        from asf.workers import spawn as spawn_mod, worktrees as worktrees_mod
+        try:
+            worktree = worktrees_mod.ensure(product, session['job'], session.get('branch'),
+                                            path=worktree)
+        except spawn_mod.SpawnError as e:  # the caller's "could not start" path, as before
+            raise OSError(f'worktree {worktree} missing and not recreated: {e}') from e
+    job = runtime_mod.Job(product.name, retry_job, worktree, path,
                           session.get('model'), account=_account(session),
                           env=retry_env, hooks_dir=hooks_dir,
                           passthrough=env.env_passthrough(_cfg()),
@@ -318,7 +328,7 @@ def correct_once(product, session, error_text, runtime):
     retry = {
         'job': retry_job, 'item': session.get('item'), 'feature': session.get('feature'),
         'kind': session.get('kind'), 'account': session.get('account'),
-        'model': session.get('model'), 'pid': result.pid, 'worktree': session.get('worktree'),
+        'model': session.get('model'), 'pid': result.pid, 'worktree': worktree,
         'branch': session.get('branch'), 'started': started,
         'log': result.log_path, 'brief': path, 'id_range': session.get('id_range'),
         'runtime': runtime.name, 'session': sid, 'product': product.name,
