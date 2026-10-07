@@ -403,7 +403,8 @@ def adjudications(product, index, tries):
             now = ''
         cur['same_card'] = not cur['digest'] or not now or cur.pop('digest') == now
         cur.pop('digest', None)
-        if cur['same_card'] and ruled_since(product, item, cur['at']):
+        if cur['same_card'] and (ruled_since(product, item, cur['at'])
+                or released_since(product, item, cur['at'])):
             cur['same_card'] = False
         if cur['same_card']:
             ruling = session_ruling(product, item, cur['at'])
@@ -456,6 +457,25 @@ def ruled_since(product, item, at):
         return ''
     stamps = [r['at'].replace('T', ' ') for r in rulings.standing(product, item)
               if r.get('job') == OPERATOR]
+    return max((s for s in stamps if s >= since), default='')
+
+
+def released_since(product, item, at, path=None):
+    """The newest ``unparked`` stamp (``asf unpark``, :func:`asf.workers.unpark.cmd_unpark`) on any
+    of ``item``'s runs stamped at or after ``at`` (the newest adjudicate run's start), or ''.
+
+    Read item-wide, not job-wide: an ``unpark`` can land its ``unparked`` stamp on whichever job it
+    names (a factory park's own job, or the newest ended adjudicate run — :func:`released_since`'s
+    caller-to-be, :func:`asf.workers.unpark.stalemate_release`), and the item has one park to lift,
+    not one per job. :func:`lifecycle.same_head_loop` (**:2856**) reads ``unparked`` the same way,
+    item-wide, for the same reason: its own ``since = max(…)`` (**:2874**) is this function's
+    shape, one line over."""
+    since = _stamp(at)
+    if not since:
+        return ''
+    runs = lifecycle.runs(path or pool_mod.sessions_path(product))
+    stamps = [_stamp(r.get('unparked')) for rs in runs.values() for r in rs
+              if r.get('item') == item]
     return max((s for s in stamps if s >= since), default='')
 
 

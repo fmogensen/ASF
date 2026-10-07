@@ -369,6 +369,58 @@ class UnparkTests(unittest.TestCase):
         after, ids = rows.correction_rows(items, env.load_product('sample'), set(), lifecycle.corrections(self.path))
         self.assertEqual((after, ids), ([], set()))
 
+    def test_unpark_releases_a_derived_stalemate_park(self):
+        self._ledger({'job': 'adjudicate-t-0017', 'item': 'T-0017', 'kind': 'adjudicate',
+                      'pid': 1, 'started': '2026-09-01T09:00:00Z',
+                      'ended': '2026-09-01T09:30:00Z', 'end_reason': 'finished'})
+        before = self._read()
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('T-0017', out)
+        self.assertIn('adjudicate-t-0017', out)
+        after = self._read()
+        self.assertTrue(after.startswith(before), 'the run line is still in the file')
+        self.assertEqual(len(after.splitlines()), len(before.splitlines()) + 1)
+        last = self._lines()[-1]
+        self.assertEqual(last['job'], 'adjudicate-t-0017')
+        self.assertTrue(last['unparked'])
+        self.assertEqual(last['unpark_why'], '')
+        self.assertNotIn('correction', last)
+
+    def test_an_item_with_no_park_and_no_ended_adjudicate_run_is_refused(self):
+        self._ledger(dict(self.LAUNCH))  # a live run, nothing ended, nothing parked
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('is not parked — nothing to undo', out)
+
+    def test_unpark_of_a_branch_does_not_release_a_derived_item_park(self):
+        self._ledger({'job': 'adjudicate-t-0017', 'item': 'T-0017', 'kind': 'adjudicate',
+                      'branch': 'plan-T-0017', 'pid': 1, 'started': '2026-09-01T09:00:00Z',
+                      'ended': '2026-09-01T09:30:00Z', 'end_reason': 'finished'})
+        before = self._read()
+        rc, out = self._run(['unpark', 'plan-T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('is not parked — nothing to undo', out)
+        self.assertEqual(self._read(), before)
+
+    def test_unpark_of_an_item_with_both_parks_releases_both_with_one_stamp(self):
+        self._ledger(
+            {'job': 'adjudicate-t-0017', 'item': 'T-0017', 'kind': 'adjudicate', 'pid': 1,
+             'started': '2026-09-01T09:00:00Z', 'ended': '2026-09-01T09:30:00Z',
+             'end_reason': 'finished'},
+            dict(self.LAUNCH, ended='2026-09-01T09:45:00Z',
+                 end_reason='failed: empty branch: nothing to land'),
+            {'job': 'coder-t-0017', 'correction': dict(self.PARK)})
+        before = len(self._read().splitlines())
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        after = self._read().splitlines()
+        self.assertEqual(len(after), before + 1)
+        last = json.loads(after[-1])
+        self.assertEqual(last['job'], 'coder-t-0017')
+        self.assertIsNone(last['correction'])
+        self.assertTrue(last['unparked'])
+
 
 class ScopedParkTests(unittest.TestCase):
     """``asf park`` at the scope its target names, and ``asf unpark`` its exact undo — a
@@ -470,8 +522,15 @@ class ScopedParkTests(unittest.TestCase):
                 self.assertIn('unparked T-0042', out)
                 self.assertEqual(lifecycle.parks(self.path), [])
                 rc, out = self._run(['unpark', target, '--product', 'sample'])
-                self.assertEqual(rc, 1, out)
-                self.assertIn('not parked', out)
+                if target == 'T-0042':
+                    # item scope also releases the item's newest ended adjudicate run — not
+                    # actually a stalemate park here, but PD4's accepted harm: the same
+                    # relaunch-window reset a factory park's release already performs
+                    self.assertEqual(rc, 0, out)
+                    self.assertIn('unparked T-0042', out)
+                else:
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn('not parked', out)
 
     def test_a_branch_park_is_not_refused_by_an_item_that_has_another_branch_parked(self):
         from asf.workers import lifecycle

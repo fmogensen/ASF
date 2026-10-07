@@ -45,6 +45,23 @@ def factory_parks(path, match):
     return out
 
 
+def stalemate_release(path, item):
+    """``(job, run)`` of ``item``'s newest **ended** adjudicate run, or ``(None, None)`` — the
+    run :func:`asf.feeder.rows._capped` derives the item's "adjudicated, card unchanged" park
+    from. Releasing it (writing ``unparked`` on this run) is what
+    :func:`asf.tick.step_wave.released_since` reads to lift that park — item-wide, so it does
+    not matter which job of the item carries the stamp.
+
+    No attempts test, no ``same_card`` test (PD4): deciding whether the derived park actually
+    holds needs the index and the attempts map, neither of which :func:`cmd_unpark` has."""
+    candidates = [(job, run) for job, rs in lifecycle.runs(path).items() for run in rs
+                  if run.get('item') == item and run.get('kind') == 'adjudicate'
+                  and run.get('ended')]
+    if not candidates:
+        return None, None
+    return max(candidates, key=lambda jr: jr[1].get('started') or '')
+
+
 #: An item id, as ``asf park`` reads its argument.
 ITEM_RE = re.compile(r'[A-Z]+-\d+')
 #: The correction kind of a park written by hand.
@@ -106,7 +123,8 @@ def cmd_unpark(args):
              lifecycle.SCOPE_JOB: lambda r: r.get('job') == job}.get(
                  scope, lambda r: r.get('item') == item)
     by_factory = factory_parks(path, match)
-    if not by_hand and not by_factory:
+    sjob, srun = stalemate_release(path, item) if scope == lifecycle.SCOPE_ITEM else (None, None)
+    if not by_hand and not by_factory and not sjob:
         print(f'asf unpark: {_scope_text(scope, item, branch, job)} is not parked — nothing to undo')
         return 1
     now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -119,6 +137,10 @@ def cmd_unpark(args):
     for fjob, corr in by_factory:
         pool_mod.update_session(product, fjob, correction=None, unparked=now, unpark_why=why)
         print(f'unparked {item} (job {fjob}): {corr.get("reason") or ""}'.rstrip(': '))
+    if sjob and not by_hand and not by_factory:
+        pool_mod.update_session(product, sjob, unparked=now, unpark_why=why)
+        print(f'unparked {item} (job {sjob}, adjudicated {srun.get("started") or "?"}): '
+              f'the next tick may relaunch adjudicate on it')
     if why:
         print(f'why: {why}')
     return 0
