@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.237 — 2026-10-07
+
+### Bugs fixed
+
+- The record sync rebases and pushes stranded record commits (#1039)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.237"`
+
 ## v0.1.236 — 2026-10-07
 
 ### Bugs fixed
