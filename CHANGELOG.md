@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.238 — 2026-10-07
+
+### Bugs fixed
+
+- CI queue relief labels a run by what it is; stuck records leave the line; the stall watch moves in-package (F-0286) (#1043)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.238"`
+
 ## v0.1.237 — 2026-10-07
 
 ### Bugs fixed
