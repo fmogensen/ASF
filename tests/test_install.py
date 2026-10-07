@@ -2092,27 +2092,6 @@ class VersionStringTest(unittest.TestCase):
             _git(['tag', 'release-2026-09-24-abc'], tmp)
             self.assertIsNone(cli._release(tmp, {}))
 
-    def test_the_latest_release_is_the_newest_version_tag_and_its_date(self):
-        from asf import cli
-        with tempfile.TemporaryDirectory() as tmp:
-            self._repo_with_tag(tmp, past=2)
-            _git(['tag', 'v0.1.10'], tmp)                       # numeric, not lexical: 10 > 1
-            with mock.patch.object(cli, '_checkout_root', return_value=tmp):
-                tag, when = cli.latest_release()
-        self.assertEqual(tag, 'v0.1.10')
-        self.assertLess(abs((datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()), 600)
-
-    def test_the_latest_release_of_a_git_install_is_its_remote_newest_tag(self):
-        from asf import cli
-        listed = subprocess.CompletedProcess([], 0, 'aa\trefs/tags/v0.1.2\nbb\trefs/tags/v0.1.10\n'
-                                                    'cc\trefs/tags/release-x\n', '')
-        with mock.patch.object(cli, '_checkout_root', return_value=None), self._dist({}), \
-                mock.patch('asf.cli.subprocess.run', return_value=listed):
-            self.assertEqual(cli.latest_release(), ('v0.1.10', None))
-        with mock.patch.object(cli, '_checkout_root', return_value=None), \
-                mock.patch.object(cli, '_direct_url', return_value={}):
-            self.assertIsNone(cli.latest_release())
-
     def test_status_shows_the_running_version_and_the_latest_release(self):
         from asf import cli
         from asf.views import status
@@ -2150,6 +2129,63 @@ class VersionStringTest(unittest.TestCase):
         dist.read_text.return_value = json.dumps({'url': 'file:///x', 'dir_info': {'editable': True}})
         with self._no_checkout(), mock.patch('importlib.metadata.distribution', return_value=dist):
             self.assertEqual(cli.version_string(), asf.__version__)
+
+
+class LatestReleaseTests(HomeCase):
+    """``cli.latest_release()`` (PD8): a checkout's own tags, else a git install's remote tags —
+    read through :func:`asf.upgrade.latest_release`'s hourly shared cache (D12) rather than a
+    ``git ls-remote`` ``cli.py`` runs itself."""
+
+    def _dist(self, vcs_info):
+        dist = mock.Mock()
+        dist.read_text.return_value = json.dumps(
+            {'url': 'https://example.invalid/asf.git', 'vcs_info': {'vcs': 'git', **vcs_info}})
+        return mock.patch('importlib.metadata.distribution', return_value=dist)
+
+    def _repo_with_tag(self, tmp, past):
+        _git(['init', '-q', '-b', 'main'], tmp)
+        for i in range(past + 1):
+            _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+                  '-m', f'c{i}'], tmp)
+            if i == 0:
+                _git(['tag', 'v0.1.0'], tmp)
+                _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q',
+                      '--allow-empty', '-m', 'release'], tmp)
+                _git(['tag', 'not-a-release'], tmp)
+                _git(['tag', 'v0.1.1'], tmp)
+
+    def test_the_latest_release_is_the_newest_version_tag_and_its_date(self):
+        from asf import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_with_tag(tmp, past=2)
+            _git(['tag', 'v0.1.10'], tmp)                       # numeric, not lexical: 10 > 1
+            with mock.patch.object(cli, '_checkout_root', return_value=tmp):
+                tag, when = cli.latest_release()
+        self.assertEqual(tag, 'v0.1.10')
+        self.assertLess(abs((datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()), 600)
+
+    def test_the_latest_release_of_a_git_install_is_its_remote_newest_tag(self):
+        from asf import cli, upgrade
+        with mock.patch.object(cli, '_checkout_root', return_value=None), self._dist({}), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.10', 'c' * 40)):
+            self.assertEqual(cli.latest_release(), ('v0.1.10', None))
+        with mock.patch.object(cli, '_checkout_root', return_value=None), \
+                mock.patch.object(cli, '_direct_url', return_value={}):
+            self.assertIsNone(cli.latest_release())
+
+    def test_the_remote_branch_reads_the_shared_cache_not_its_own_ls_remote(self):
+        """D12: ``cli.latest_release()`` stops shelling out to ``git ls-remote`` itself on every
+        run — it reads :func:`asf.upgrade.latest_release`, which owns the hourly cache (proved
+        directly in ``tests.test_release_channel.LatestReleaseIsReadOnceAnHourTests``)."""
+        from asf import cli, upgrade
+        boom = mock.Mock(side_effect=AssertionError('cli.latest_release must not call git itself'))
+        with mock.patch.object(cli, '_checkout_root', return_value=None), self._dist({}), \
+                mock.patch('asf.cli.subprocess.run', boom), \
+                mock.patch.object(upgrade, 'latest_release',
+                                  return_value=('v0.1.10', 'c' * 40)) as reader:
+            self.assertEqual(cli.latest_release(), ('v0.1.10', None))
+        boom.assert_not_called()
+        reader.assert_called_once_with('https://example.invalid/asf.git')
 
 
 #: The one-product install script, as the suite runs it.

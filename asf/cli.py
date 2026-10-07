@@ -144,7 +144,8 @@ class _VersionAction(argparse.Action):
 
 def latest_release():
     """(the newest ``v<major>.<minor>.<patch>`` tag of asf, when it was cut or ``None``), or
-    ``None``: a checkout's own tags, else the tags on a git install's remote (no date there)."""
+    ``None``: a checkout's own tags, else the tags on a git install's remote, read through the
+    hourly shared cache (D12) — no date there."""
     def newest(pairs):
         key = lambda p: tuple(int(g) for g in re.findall(r'\d+', p[0]))  # noqa: E731
         pairs = [p for p in pairs if RELEASE_TAG.fullmatch(p[0])]
@@ -162,15 +163,9 @@ def latest_release():
             return found[0], when
     url = _direct_url().get('url')
     if isinstance(url, str) and url and not url.startswith('file:'):
-        try:
-            out = subprocess.run(['git', 'ls-remote', '--tags', '--refs', url, 'v*'],
-                                 capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        refs = [line.split('refs/tags/', 1)[-1] for line in out.stdout.splitlines()] \
-            if out.returncode == 0 else []
-        found = newest([(r, None) for r in refs])
-        return found
+        from asf import upgrade
+        tag, _sha = upgrade.latest_release(url)
+        return (tag, None) if tag else None
     return None
 
 
