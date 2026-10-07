@@ -201,6 +201,39 @@ class Settings(unittest.TestCase):
         self.assertIn('ASF-Session: sid-1', text)
         self.assertIn('ASF-Report: task-t-0001', text)
 
+    def test_f0278_the_report_subject_names_the_item(self):
+        # a cloud session runs no commit-msg hook: the unnamed `asf: report <job>` was refused
+        # for naming and looped the lane's corrections (a product's T-0659, 2026-10-07)
+        text = cloud.cloud_brief('Do the task.\n', job())
+        self.assertIn('the subject `asf(T-0001): report task-t-0001`', text)
+        self.assertNotIn('`asf: report', text)
+        j = job(env={'ASF_SESSION': 'sid-1', 'ASF_ITEM': 'F-0042'})
+        self.assertIn('`asf(F-0042): report task-t-0001`', cloud.cloud_brief('x', j))
+        self.assertIn('`asf: report sweep`', cloud.cloud_brief('x', job(name='sweep', env={})))
+
+    def test_f0278_both_report_subjects_peel_as_reports(self):
+        # the older unnamed subject is still read as a report, beside the named one
+        d = tempfile.mkdtemp(prefix='peel_')
+        self.addCleanup(__import__('shutil').rmtree, d, ignore_errors=True)
+        ident = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t',
+                     GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+
+        def g(*args):
+            return subprocess.run(['git', *args], cwd=d, capture_output=True, text=True,
+                                  env=ident).stdout.strip()
+        g('init', '-q', '-b', 'main')
+        with open(os.path.join(d, 'a.txt'), 'w') as f:
+            f.write('a\n')
+        g('add', '-A')
+        g('commit', '-qm', 'fix(T-0001): the hinge')
+        work = g('rev-parse', 'HEAD')
+        g('commit', '-q', '--allow-empty', '-m', 'asf: report coder-t-0001')
+        g('commit', '-q', '--allow-empty', '-m', 'asf(T-0001): report coder-t-0001')
+        self.assertEqual(spawn_mod._past_reports(d, g('rev-parse', 'HEAD')), work)
+        for s in ('asf: report x', 'asf(T-1): report x', 'plan(F-1): asf(F-1): report x'):
+            self.assertTrue(spawn_mod.REPORT_SUBJECT.match(s), s)
+        self.assertFalse(spawn_mod.REPORT_SUBJECT.match('asf(F-1): reports page'))
+
     def test_the_brief_runs_the_products_pre_push_check_before_every_push(self):
         # a cloud job has no pre-push hook: the repo checks the host's hook runs must run here
         # (2026-10-05: a forbidden name in a cloud-committed review file, six PR reds a day)
