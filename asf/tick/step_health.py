@@ -164,7 +164,7 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None, reaped
     if lifecycle.pending_correction(session, pool_mod.sessions_path(product)):
         return 'held'
     fields, line = lifecycle.hold(pool_mod.sessions_path(product), session, 'died',
-                                  died_text(session), pool_mod.now_iso())
+                                  died_text(session), pool_mod.now_iso(), main=product.main)
     ctx.event('held', job=job, item=session.get('item'), text=line)
     pool_mod.update_session(product, job, **fields)
     out(line)
@@ -383,7 +383,7 @@ def hold_failed_corrections(ctx, sessions, out=print, items=None):
             continue  # a removed or done item's run is never held
         original_job = job[:-len('-correction')]
         fields, line = lifecycle.hold(path, dict(original, job=original_job), 'died',
-                                      died_text(run_rec), pool_mod.now_iso())
+                                      died_text(run_rec), pool_mod.now_iso(), main=product.main)
         ctx.event('held', job=original_job, item=original.get('item'), text=line)
         pool_mod.update_session(product, original_job, **fields)
         out(line)
