@@ -396,6 +396,225 @@ class DeployProviderTests(unittest.TestCase):
                       "not 'heroku'"), problems)
 
 
+class ReferenceFieldTests(unittest.TestCase):
+    """F-0188 §1: ``references:`` is a declared top-level list, refused per entry with a dotted
+    key, and ``Product.references``/``Product.reference()`` resolve it with defaults filled."""
+
+    def test_a_well_formed_block_produces_no_problems(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                name: Parity
+                source: stories
+                epic: E-0001
+                decide: need
+                evidence: merge
+              - id: contract
+                source: file
+                path: docs/contract.md
+            """))
+        self.assertEqual(problems, [])
+
+    def test_a_missing_id_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - source: stories
+                epic: E-0001
+            """))
+        self.assertEqual(problems, [(2, 'references[0].id', 'is missing')])
+
+    def test_an_empty_id_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: ""
+                source: stories
+                epic: E-0001
+            """))
+        self.assertEqual(problems, [(2, 'references[0].id', 'is missing')])
+
+    def test_a_duplicate_id_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: stories
+                epic: E-0001
+              - id: parity
+                source: file
+                path: docs/m.md
+            """))
+        self.assertEqual(problems, [(2, 'references.parity.id', 'is already declared')])
+
+    def test_an_unknown_per_entry_key_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: stories
+                epic: E-0001
+                made_up_key: 1
+            """))
+        self.assertEqual(problems,
+                         [(2, 'references.parity.made_up_key', 'is not a field of a reference')])
+
+    def test_a_bad_source_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: nope
+            """))
+        self.assertEqual(problems, [(2, 'references.parity.source',
+                                     "must be one of stories | file, not 'nope'")])
+
+    def test_a_bad_decide_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: stories
+                epic: E-0001
+                decide: nope
+            """))
+        self.assertEqual(problems, [(2, 'references.parity.decide',
+                                     "must be one of need | ask, not 'nope'")])
+
+    def test_a_bad_evidence_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: stories
+                epic: E-0001
+                evidence: nope
+            """))
+        self.assertEqual(problems, [(2, 'references.parity.evidence',
+                                     "must be one of test | merge, not 'nope'")])
+
+    def test_source_stories_with_no_epic_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: stories
+            """))
+        self.assertEqual(problems,
+                         [(2, 'references.parity.epic', 'is required when source: stories')])
+
+    def test_source_file_with_no_path_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: file
+            """))
+        self.assertEqual(problems,
+                         [(2, 'references.parity.path', 'is required when source: file')])
+
+    def test_a_path_on_a_source_stories_entry_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: stories
+                epic: E-0001
+                path: docs/m.md
+            """))
+        self.assertEqual(problems,
+                         [(2, 'references.parity.path', 'is not read when source: stories')])
+
+    def test_an_epic_on_a_source_file_entry_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                source: file
+                path: docs/m.md
+                epic: E-0001
+            """))
+        self.assertEqual(problems,
+                         [(2, 'references.parity.epic', 'is not read when source: file')])
+
+    def test_references_must_be_a_list(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              a: b
+            """))
+        self.assertTrue(problems)
+        self.assertTrue(all(key == 'references' for _line, key, _why in problems))
+
+    def test_a_non_map_entry_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            references:
+              - just-a-string
+            """))
+        self.assertEqual(problems, [(2, 'references[0]', "must be a map, not 'just-a-string'")])
+
+    def test_product_references_returns_declared_order_with_defaults_filled(self):
+        product = env.Product('p', env.loads(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                epic: E-0001
+              - id: contract
+                name: The RFP
+                source: file
+                path: docs/contract.md
+                decide: need
+                evidence: merge
+            """)))
+        refs = product.references
+        self.assertEqual(refs, (
+            env.Reference(id='parity', name='parity', source='stories', epic='E-0001',
+                         path='', decide='ask', evidence='test'),
+            env.Reference(id='contract', name='The RFP', source='file', epic='',
+                         path='docs/contract.md', decide='need', evidence='merge'),
+        ))
+
+    def test_product_reference_returns_the_first_or_the_named_one(self):
+        product = env.Product('p', env.loads(_dedent("""
+            repo_slug: a/b
+            references:
+              - id: parity
+                epic: E-0001
+              - id: contract
+                source: file
+                path: docs/contract.md
+            """)))
+        self.assertEqual(product.reference().id, 'parity')
+        self.assertEqual(product.reference('contract').id, 'contract')
+        self.assertIsNone(product.reference('nope'))
+
+    def test_a_product_with_only_matrix_path_yields_one_synthesised_legacy_reference(self):
+        product = env.Product('p', {'conventions': {'matrix_path': 'docs/matrix.md'}})
+        self.assertEqual(product.references, (env.Reference(
+            id='parity', name='parity', source='file', path='docs/matrix.md',
+            evidence='merge', decide='ask'),))
+        self.assertEqual(product.reference().id, 'parity')
+        self.assertIsNone(product.reference('contract'))
+
+    def test_a_product_with_no_conventions_key_yields_no_reference(self):
+        # PD3: `conventions.matrix_path` is always *present* (DEFAULT_MATRIX_PATH is None), so
+        # the synthesis must test the value for truth and not merely for presence.
+        self.assertEqual(env.Product('p', {}).references, ())
+
+    def test_a_product_with_an_empty_conventions_block_yields_no_reference(self):
+        self.assertEqual(env.Product('p', {'conventions': {}}).references, ())
+
+    def test_the_two_shipped_yamls_still_validate_and_declare_no_reference(self):
+        for rel in ('sample/product.yaml', 'tests/e2e/product/product.yaml'):
+            path = os.path.join(REPO_ROOT, rel)
+            text = open(path, encoding='utf-8').read()
+            self.assertEqual(env.validate_product_text(text), [], rel)
+            product = env.Product('p', env.loads(text))
+            self.assertEqual(product.references, (), rel)
+
+
 def _dedent(text):
     lines = [l for l in text.splitlines() if l.strip() != '']
     if not lines:

@@ -174,7 +174,9 @@ conventions:
   # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
   amendable_paths: [rules/*, docs/CONSTITUTION.md]
   # asf.evidence.discover: the parity matrix file read for Story status. Leave out and the
-  # product has no such thing — nothing looks for it.
+  # product has no such thing — nothing looks for it. With no top-level references: below, this
+  # reads as one synthesised source: file reference (id: parity, evidence: merge) — existing
+  # configs keep working. Declaring references: below supersedes it.
   matrix_path: docs/matrix.md
   # asf.evidence.migrate_sources: a decisions file mined for D-rows. Leave out and the product
   # has no such thing — nothing looks for it.
@@ -351,6 +353,30 @@ conventions:
   #     structural: report  # report (default) | ask: a no_stories/no_tasks line is printed as
   #                         # a report line, not asked — an undecided new/3-day Feature is still
   #                         # asked either way
+
+# references: what this product is built against (F-0188) — a competitor to match, a contract
+# or RFP, a regulation checklist, a system being replaced. `asf coverage` reads one, built/tested/
+# missing rows gaps first; a Story traces a row with its own typed `reference:`/`ref_row:`.
+# Nothing is required: leave this out and the product has no such thing, unless
+# conventions.matrix_path is set above, which reads as one legacy source: file reference with no
+# edit needed here (the comment on matrix_path says so).
+# references:
+#   # source: stories — every Story under this Epic (or carrying `reference: parity` explicitly)
+#   # is a row; `epic` names the Epic whose id you'd fill in here, e.g. E-0001.
+#   - id: parity
+#     name: Parity with Acme Classic
+#     source: stories
+#     epic: E-0001              # <- the Epic whose Stories are this reference's rows
+#     decide: ask                # ask (default) | need — need decides a gap row's Feature by rule
+#     evidence: test              # test (default) | merge — what closes a row (F-0188 §2)
+#   # source: file — a markdown table, today's matrix_path format (same | F- row prefix, same
+#   # nine columns): the generic file format is deliberately out of scope (F-0188 §C3).
+#   - id: contract
+#     name: The Acme RFP
+#     source: file
+#     path: docs/contract.md
+#     decide: need
+#     evidence: merge
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

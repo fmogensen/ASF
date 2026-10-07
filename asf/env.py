@@ -13,6 +13,7 @@ the key and the line; it is never loaded as a string. Anything else outside that
 in the config file, not a feature to add here.
 """
 import collections
+import dataclasses
 import os
 import re
 
@@ -522,7 +523,7 @@ PRODUCT_FIELDS = {
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
-    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST,
+    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST, 'references': _LIST,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -651,6 +652,72 @@ def _target_problems(targets):
     return out
 
 
+#: `references:` — what a reference row may declare. `source` says where the rows come from;
+#: `decide` is the groom policy for a gap row; `evidence` is what closes one (F-0188 §1).
+REFERENCE_SOURCES = ('stories', 'file')
+REFERENCE_DECIDES = ('need', 'ask')
+REFERENCE_EVIDENCE = ('test', 'merge')
+REFERENCE_FIELDS = {'id': _STR, 'name': _STR, 'source': _STR, 'epic': _STR, 'path': _STR,
+                    'decide': _STR, 'evidence': _STR}
+
+
+def _reference_problems(references):
+    """``[(dotted key, problem)]`` for a product file's ``references:`` value (F-0188 §1): not a
+    list, an entry that is not a map, a missing or empty ``id``, a duplicate ``id``, a key outside
+    :data:`REFERENCE_FIELDS`, a ``source``/``decide``/``evidence`` outside its tuple, and the two
+    combinations that cannot be read: ``source: stories`` with no ``epic``, ``source: file`` with
+    no ``path`` — and the reverse, a key that would silently do nothing. The dotted key is
+    ``references[<n>]`` before an ``id`` is known and ``references.<id>.<key>`` after, so the
+    message is findable in a file with several references. ``None`` is "not filled in yet", as
+    everywhere else in this table, and is never a problem."""
+    if references is None:
+        return []
+    if not isinstance(references, list):
+        return [('references', f'must be a list, not {references!r}')]
+    out = []
+    seen = set()
+    for n, entry in enumerate(references):
+        at = f'references[{n}]'
+        if not isinstance(entry, dict):
+            out.append((at, f'must be a map, not {entry!r}'))
+            continue
+        ref_id = entry.get('id')
+        if not (isinstance(ref_id, str) and ref_id.strip()):
+            out.append((f'{at}.id', 'is missing'))
+            continue
+        if ref_id in seen:
+            out.append((f'references.{ref_id}.id', 'is already declared'))
+            continue
+        seen.add(ref_id)
+        key = f'references.{ref_id}'
+        for k in entry:
+            if k not in REFERENCE_FIELDS:
+                out.append((f'{key}.{k}', 'is not a field of a reference'))
+        source = entry.get('source')
+        if source is not None and source not in REFERENCE_SOURCES:
+            out.append((f'{key}.source',
+                       f"must be one of {' | '.join(REFERENCE_SOURCES)}, not {source!r}"))
+        decide = entry.get('decide')
+        if decide is not None and decide not in REFERENCE_DECIDES:
+            out.append((f'{key}.decide',
+                       f"must be one of {' | '.join(REFERENCE_DECIDES)}, not {decide!r}"))
+        evidence = entry.get('evidence')
+        if evidence is not None and evidence not in REFERENCE_EVIDENCE:
+            out.append((f'{key}.evidence',
+                       f"must be one of {' | '.join(REFERENCE_EVIDENCE)}, not {evidence!r}"))
+        if source == 'stories':
+            if not entry.get('epic'):
+                out.append((f'{key}.epic', 'is required when source: stories'))
+            if entry.get('path') is not None:
+                out.append((f'{key}.path', 'is not read when source: stories'))
+        elif source == 'file':
+            if not entry.get('path'):
+                out.append((f'{key}.path', 'is required when source: file'))
+            if entry.get('epic') is not None:
+                out.append((f'{key}.epic', 'is not read when source: file'))
+    return out
+
+
 #: The problem an unknown key carries: a *warning*, never a refusal (:func:`product_problems`).
 UNKNOWN_KEY = 'is not a field of the product file'
 
@@ -716,6 +783,8 @@ def product_problems(text):
         problems.append((lines.get(dotted, lines.get('capacity', 0)), dotted, why))
     for dotted, why in _deploy_problems(data.get('deploy_sha')):
         problems.append((lines.get('deploy_sha', 0), dotted, why))
+    for dotted, why in _reference_problems(data.get('references')):
+        problems.append((lines.get('references', 0), dotted, why))
     from asf import ci_pool  # `ci.pool`: every runner's fields, its role a capability (asf.ci_pool)
     for dotted, why in ci_pool.pool_problems(data.get('ci')):
         problems.append((lines.get('ci.pool', lines.get('ci', 0)), dotted, why))
@@ -774,6 +843,19 @@ def format_problems(problems):
     return '; '.join(
         f"line {ln}: '{key}' {why}" if ln else f"'{key}' {why}" if key else why
         for ln, key, why in problems)
+
+
+@dataclasses.dataclass(frozen=True)
+class Reference:
+    """One row of a product's ``references:`` declaration (F-0188 §1), defaults filled —
+    :meth:`Product.references`/:meth:`Product.reference` are the only way one is built."""
+    id: str
+    name: str
+    source: str       # stories | file
+    epic: str = ''    # source: stories — the Epic whose Stories are the rows
+    path: str = ''    # source: file — the old conventions.matrix_path
+    decide: str = 'ask'
+    evidence: str = 'test'
 
 
 class Product:
@@ -863,6 +945,46 @@ class Product:
                 data.setdefault('deploy_workflow', ci['deploy_workflow'])
             self._conventions = Conventions.from_mapping(data)
         return self._conventions
+
+    @property
+    def references(self):
+        """The declared ``references:`` (F-0188 §1), in declared order, as a tuple of
+        :class:`Reference` with ``source``/``decide``/``evidence`` defaulted and ``name``
+        falling back to ``id``.
+
+        When the yaml declares none and ``conventions.matrix_path`` is set (truthy — PD3:
+        the key is otherwise always *present* and usually ``None``), this yields the one
+        synthesised legacy reference: ``id: parity``, ``source: file``, ``path: <matrix_path>``,
+        ``evidence: merge`` — a matrix Story keeps closing on today's merge-only rule (C2).
+        Declares none and has no ``matrix_path`` either: ``()``, the product has no such thing."""
+        declared = self._get('references')
+        if declared:
+            out = []
+            for entry in declared:
+                ref_id = entry['id']
+                out.append(Reference(
+                    id=ref_id, name=entry.get('name') or ref_id,
+                    source=entry.get('source') or 'stories',
+                    epic=entry.get('epic') or '', path=entry.get('path') or '',
+                    decide=entry.get('decide') or 'ask', evidence=entry.get('evidence') or 'test'))
+            return tuple(out)
+        matrix_path = self.conventions.get('matrix_path')
+        if matrix_path:
+            return (Reference(id='parity', name='parity', source='file', path=matrix_path,
+                              evidence='merge', decide='ask'),)
+        return ()
+
+    def reference(self, ref_id=None):
+        """The declared reference named ``ref_id``, or the first declared one when ``ref_id``
+        is ``None``, or ``None`` when the product declares none — the "first reference" a bare
+        ``asf coverage``/``asf parity`` reads (F-0188 §3)."""
+        refs = self.references
+        if ref_id is None:
+            return refs[0] if refs else None
+        for ref in refs:
+            if ref.id == ref_id:
+                return ref
+        return None
 
     @property
     def ci(self):
