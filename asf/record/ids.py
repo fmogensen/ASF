@@ -158,6 +158,11 @@ def mint_id(root, canonical, type_, claim=False, claimant=None):
     if top is None:
         top, _reachable = origin_top(root, prefix) if has_git else (0, False)
     n = max(max_n, top) + 1
+    if has_git and idclaim.has_origin(root):
+        try:
+            idclaim.fetch(root)
+        except idclaim.ClaimError:
+            pass
     blocks = idclaim.claims(root) if has_git else []
     c = idclaim.covers(blocks, f"{prefix}-{n}")
     while c is not None:  # a number inside a block a job holds is that job's, never ours

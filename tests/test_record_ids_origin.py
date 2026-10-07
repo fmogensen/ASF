@@ -185,6 +185,17 @@ class RecordIdsOriginTests(OriginFixtures):
         with self.assertRaises(SystemExit):
             ids.mint_id(root, {}, 'bug', claim=True)
 
+    def test_the_local_fallback_refreshes_the_claims_mirror_before_stepping_over_it(self):
+        """C1 (review-t-0817): a block another job claimed by push, no card written, must still
+        be invisible to this checkout's stale local mirror of ``refs/asf/ids/*`` — ``origin_top``
+        alone (267) is not enough; the local fallback must refresh the mirror too, or it mints
+        B-0268 right on top of the other job's claim."""
+        c1 = self.checkout_cloned_at('B-0267', flags={'id_claim': 'off'})
+        c2 = self._clone()
+        idclaim.claim_one(c2, 'B', 'other-job', floor=267)      # claims B-0268 on origin, no card
+        self.assertEqual(ids.origin_top(c1, 'B')[0], 267)       # the floor alone still reads 267
+        self.assertEqual(ids.mint_id(c1, {}, 'bug'), 'B-0269')  # but the mirror refresh steps over it
+
 
 if __name__ == '__main__':
     unittest.main()
