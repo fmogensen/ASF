@@ -432,6 +432,67 @@ class RecordHealthStaleStatusTests(TickTestCase):
         self.assertIsNone(status.stale_cell(self.operator, product))
 
 
+class CheckoutRefusalReportsTests(TickTestCase):
+    """A3 (F-0260), first three cases: ``record-health.json`` and ``asf status``'s Stale row
+    name the record checkout that is behind instead of blaming a factory that ticked, and
+    ``metrics/ticks`` and ``[step:record]``'s ``ok=`` stay untouched (D4, D11, P8)."""
+
+    @classmethod
+    def build_repos(cls, tmp):
+        """As the base fixture, plus a tracked ``bugs/B-0001.md`` in the operator's own checkout
+        — a hand edit there is what drives ``why='local-changes'`` for these cases."""
+        origin = os.path.join(tmp, 'origin.git')
+        seed = os.path.join(tmp, 'seed')
+        _git(['init', '-q', '--bare', '-b', 'main', origin])
+        _git(['clone', '-q', origin, seed])
+        _git(['config', 'user.email', 'seed@example.com'], seed)
+        _git(['config', 'user.name', 'seed'], seed)
+        os.makedirs(os.path.join(seed, 'features'))
+        with open(os.path.join(seed, 'features', 'F-0001.md'), 'w') as f:
+            f.write('---\nid: F-0001\ntitle: sample\n---\n')
+        os.makedirs(os.path.join(seed, 'bugs'))
+        with open(os.path.join(seed, 'bugs', 'B-0001.md'), 'w') as f:
+            f.write('---\nid: B-0001\n---\n')
+        _git(['add', '-A'], seed)
+        _git(['commit', '-q', '-m', 'seed'], seed)
+        _git(['push', '-q', 'origin', 'HEAD:main'], seed)
+        _git(['clone', '-q', origin, os.path.join(tmp, 'operator')])
+
+    def dirty_the_checkout(self):
+        with open(os.path.join(self.operator, 'bugs', 'B-0001.md'), 'a') as f:
+            f.write('hand edit\n')
+
+    def tick_n_times(self, n):
+        for _ in range(n):
+            self.run_tick(steps='record')
+
+    def test_record_health_keeps_the_checkout_refusal_beside_a_landed_record(self):
+        from asf.tick import record_health
+        product = env.load_product('sample')
+        self.dirty_the_checkout()
+        self.run_tick(steps='record')
+        data = record_health.read(product)
+        self.assertTrue(data['ok'])                     # D4: the derivation landed
+        self.assertEqual(data['checkout']['why'], 'local-changes')
+        self.assertEqual(data['checkout']['paths'], ['bugs/B-0001.md'])
+
+    def test_the_stale_row_names_the_checkout_and_not_a_missing_tick(self):
+        """P8/D11: twelve ticks landed; the row used to read `no fresh record in 1h`."""
+        from asf.views import status
+        product = env.load_product('sample')
+        self.dirty_the_checkout()
+        self.tick_n_times(12)
+        row = status.stale_cell(self.operator, product)
+        self.assertIn('CHECKOUT', row)
+        self.assertIn('behind', row)
+        self.assertNotIn('no fresh record', row)
+
+    def test_a_landed_record_and_a_clean_checkout_still_give_no_row(self):
+        from asf.views import status
+        self.run_tick(steps='record')
+        self.assertIsNone(status.stale_cell(self.operator, env.load_product('sample')))
+
+
 def _write_index(root, generated):
     """``index.json`` with no live items — only ``generated`` matters to :func:`stale_cell`."""
     with open(os.path.join(root, 'index.json'), 'w', encoding='utf-8') as f:
