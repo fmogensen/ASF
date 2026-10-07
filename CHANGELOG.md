@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.224 — 2026-10-07
+
+### Features landed
+
+- The park names the two commands that end it, in the row and in the cell (#980)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.224"`
+
 ## v0.1.223 — 2026-10-07
 
 ### Features landed
