@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.212 — 2026-10-07
+
+### Bugs fixed
+
+- A local run whose job log is fresh is never stalled for a missing beat (#935)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.212"`
+
 ## v0.1.211 — 2026-10-07
 
 ### Bugs fixed
