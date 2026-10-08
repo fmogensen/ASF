@@ -149,6 +149,12 @@ DEFAULT_PRS_PER_TICK = 6
 DEFAULT_AREA_DEPTH = 2
 #: The most globs a Task may write and still count as small enough to batch (F-0086 D3).
 DEFAULT_BATCH_MAX_GLOBS = 2
+#: The most small items one Delivery carries (F-0102 D8). `0` turns deliveries off (D9).
+DEFAULT_DELIVERY_MAX_ITEMS = 4
+#: The most globs a Delivery's union `writes:` may reach (F-0102 D8).
+DEFAULT_DELIVERY_MAX_GLOBS = 6
+#: The most estimated tokens a Delivery's members and their union globs may reach (F-0102 D8).
+DEFAULT_DELIVERY_MAX_TOKENS = 60000
 #: The most paths the ``widen_footprint`` rule adds to a Task's ``writes:`` in one widening; more
 #: is a reshape of the Task, not a wider one (:mod:`asf.feeder.widen`).
 DEFAULT_WIDEN_MAX_FILES = 5
@@ -874,6 +880,12 @@ class Conventions:
     land_window_days: int = DEFAULT_LAND_WINDOW_DAYS
     area_depth: int = DEFAULT_AREA_DEPTH
     batch_max_globs: int = DEFAULT_BATCH_MAX_GLOBS
+    #: The most small items one Delivery carries; `0` turns deliveries off (F-0102 D8, D9).
+    delivery_max_items: int = DEFAULT_DELIVERY_MAX_ITEMS
+    #: The most globs a Delivery's union `writes:` may reach (F-0102 D8).
+    delivery_max_globs: int = DEFAULT_DELIVERY_MAX_GLOBS
+    #: The most estimated tokens a Delivery's members and their union globs may reach (F-0102 D8).
+    delivery_max_tokens: int = DEFAULT_DELIVERY_MAX_TOKENS
     #: The most paths one footprint widening may add (:mod:`asf.feeder.widen`).
     widen_max_files: int = DEFAULT_WIDEN_MAX_FILES
     outcome_share_pct: int = DEFAULT_OUTCOME_SHARE_PCT

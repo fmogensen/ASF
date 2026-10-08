@@ -144,6 +144,13 @@ conventions:
   # and the most globs a Task may write and still be batched. Both shown at their defaults.
   # area_depth: 2
   # batch_max_globs: 2
+  # asf.groom.delivery: the selection rule that groups several small, decided items sharing a
+  # footprint or an area into one Delivery — one plan, one branch, one coder, one gate. The most
+  # items, the most globs over their union, and the most estimated tokens one Delivery carries.
+  # delivery_max_items: 0 turns deliveries off for the product. All three shown at their defaults.
+  # delivery_max_items: 4
+  # delivery_max_globs: 6
+  # delivery_max_tokens: 60000
   # asf.record.slice: the unit a Feature is built and landed in. `task` (the default) is one
   # branch, one PR, one review per Task. `feature` makes the whole Feature one delivery — its
   # Tasks one branch, one PR, one CI run, one review, one commit per Task — cut into ordered

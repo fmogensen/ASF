@@ -459,6 +459,27 @@ class LegacyBackfillKeys(unittest.TestCase):
         self.assertEqual(c.get('legacy_review'), 'x')
 
 
+class DeliveryCeilingTests(unittest.TestCase):
+    """F-0102 D8/D9: the three ceilings a Delivery is cut to."""
+
+    def test_the_three_defaults_are_4_6_60000(self):
+        self.assertEqual((conv_mod.DEFAULT_DELIVERY_MAX_ITEMS, conv_mod.DEFAULT_DELIVERY_MAX_GLOBS,
+                          conv_mod.DEFAULT_DELIVERY_MAX_TOKENS), (4, 6, 60000))
+        c = Conventions()
+        self.assertEqual((c.delivery_max_items, c.delivery_max_globs, c.delivery_max_tokens),
+                         (4, 6, 60000))
+
+    def test_the_three_names_are_fields(self):
+        for name in ('delivery_max_items', 'delivery_max_globs', 'delivery_max_tokens'):
+            self.assertIn(name, Conventions.field_names())
+
+    def test_a_product_yaml_value_reaches_the_field(self):
+        c = Conventions.from_mapping({'delivery_max_items': 0})
+        self.assertEqual(c.delivery_max_items, 0)
+        self.assertEqual((c.delivery_max_globs, c.delivery_max_tokens), (6, 60000))
+        self.assertEqual(c.extra, {})
+
+
 class SelfBugThresholdTests(unittest.TestCase):
     def test_the_defaults_are_ten_twenty_two_six(self):
         c = Conventions()
