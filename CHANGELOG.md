@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.263 — 2026-10-08
+
+### Features landed
+
+- The Task's own state reads the trunk, so a landed PR is Closed and not Active (#1221)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.263"`
+
 ## v0.1.262 — 2026-10-08
 
 ### Features landed
