@@ -235,6 +235,32 @@ conventions:
   # customer_content:
   #   paths: [apps/site/app/legal/**, apps/site/content/**]
   #   forbidden_markers: ['(?i)\[\s*legal\s*:']
+  # the security block (asf/security): which of a diff's files are sensitive, and how the host's
+  # own secret- and dependency-scanning alerts are read as this factory's Bugs (R-0009, docs/guide
+  # /security-checks.md). All three keys are validated (conventions.validate_mapping) whether or
+  # not this block is set.
+  # security:
+  #   # class name -> globs: the precheck pass reads these to floor a sensitive diff's review
+  #   # level (default {} — nothing is sensitive).
+  #   paths:
+  #     auth: [apps/*/auth/**]
+  #     payments: [apps/*/billing/**]
+  #     secrets: ['**/*.pem', '**/*.key']
+  #     infra: [infra/**, terraform/**]
+  #     deploy: [.github/workflows/**]
+  #     pii: [apps/*/customers/**]
+  #   # hours a secret- or dependency-scanning read may age before an unread feed is itself a
+  #   # violation rather than a pass (R-0009; default 24). The value read, never the alerts.
+  #   alerts:
+  #     max_age_h: 24
+  #   # validated, but nothing reads it yet (the nightly exposed-port probe was cut from this
+  #   # Feature's reshape; docs/guide/security-checks.md says so).
+  #   ports:
+  #     boxes: [lane-1, lane-2]
+  #     workflow: probe-ports.yml
+  #     artifact: ports.json
+  #     max_age_h: 24
+  #     ports: [22, 443]
   # the PR lane: which landing class needs an approved ASF review before the gate (none |
   # required; default docs: none, code: required), and how long an open lane state may sit
   # unchanged and unheld before it is stale (<n>s|m|h|d, default 2d). One branch a tick takes a
