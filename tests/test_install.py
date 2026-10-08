@@ -739,6 +739,8 @@ class UpgradeToTests(HomeCase):
         run.answers[('git', 'ls-remote')] = (
             f'{"a" * 40}\trefs/tags/{self.TAG}\n{self.SHA}\trefs/tags/{self.TAG}^{{}}\n')
         self.assertEqual(upgrade.resolve_ref(self.URL, self.TAG, run=run), self.SHA)
+        self.assertEqual([c for c in run.calls if c[:2] == ['git', 'ls-remote']],
+                         [['git', 'ls-remote', self.URL, self.TAG, f'{self.TAG}^{{}}']])
 
     def test_an_unknown_tag_does_not_resolve(self):
         run = FakeRun()
