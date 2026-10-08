@@ -6,6 +6,7 @@ import datetime
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -16,6 +17,7 @@ from asf.improve.measure import Run
 from asf.metrics import reds, throughput
 from asf.scorecard import diagnose, facts, loop, score
 from asf.scorecard.facts import Facts
+from asf.views import scorecard as views_scorecard
 from asf.workers import lifecycle
 
 UTC = datetime.timezone.utc
@@ -556,6 +558,156 @@ class TotalLineTests(unittest.TestCase):
         totals = {'day': 1, 'days': 7, 'total': {'products': 0}, 'delta': {}}
         self.assertEqual(score.total_line(totals),
                          'scorecard: no weekly snapshot yet — the daily step writes the first one')
+
+
+def _snapshot_row(week, as_of, landed=5, on_prod=3, usd=180.0, usd_per_feature=36.0,
+                   own_usd_per_feature=19.4, repair_sessions=9, repair_per_feature=1.8,
+                   median_lead_days=2.1, clutter=None):
+    return {'week': week, 'landed': landed, 'on_prod': on_prod, 'usd': usd,
+            'usd_per_feature': usd_per_feature, 'own_usd_per_feature': own_usd_per_feature,
+            'repair_sessions': repair_sessions, 'repair_per_feature': repair_per_feature,
+            'median_lead_days': median_lead_days, 'as_of': as_of,
+            'clutter': clutter or {'open_prs': 6, 'stale_prs': 2, 'branches': 3}}
+
+
+class AllProductsHome(unittest.TestCase):
+    """A temp ``ASF_HOME`` of its own, with ``products/*.yaml`` and ``state/<p>/scorecard.jsonl``
+    (PD12 — this Story is the suite's first reader of more than one product's stored week, so it
+    shares no state with the hermetic home the rest of the suite patches into)."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix='scorecard_all_home_')
+        self.addCleanup(shutil.rmtree, self.home, True)
+        os.makedirs(os.path.join(self.home, 'products'))
+        patcher = mock.patch.object(env, 'ASF_HOME', self.home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def configure(self, *names):
+        for name in names:
+            with open(os.path.join(self.home, 'products', f'{name}.yaml'), 'w', encoding='utf-8') as f:
+                f.write(f'product: {name}\n')
+
+    def write_rows(self, name, *rows):
+        path = os.path.join(self.home, 'state', name)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, loop.SNAPSHOTS), 'w', encoding='utf-8') as f:
+            for row in rows:
+                f.write(json.dumps(row) + '\n')
+
+
+class AllProductsReaderTests(AllProductsHome):
+    """loop.totals (F-0148, S-70905) — every configured product's stored row for the ISO week
+    containing ``as_of`` and for the week before it, over real ``scorecard.jsonl`` files in this
+    test's own home."""
+
+    THIS = _snapshot_row('2026-09-21', '2026-09-23T10:00:00Z')
+    LAST = _snapshot_row('2026-09-14', '2026-09-16T10:00:00Z', landed=3, on_prod=2, usd=150.0,
+                         usd_per_feature=50.0, own_usd_per_feature=22.0, repair_sessions=8,
+                         repair_per_feature=2.7, median_lead_days=3)
+
+    def test_two_measured_one_never_measured_is_carried_with_row_none_and_not_summed(self):
+        self.configure('sample', 'other', 'third')
+        self.write_rows('sample', self.LAST, self.THIS)
+        self.write_rows('other', self.LAST, self.THIS)
+        d = loop.totals(as_of='2026-09-23T14:02:11Z')
+        by_name = {p['product']: p for p in d['products']}
+        self.assertEqual(set(by_name), {'sample', 'other', 'third'})
+        self.assertIsNone(by_name['third']['row'])
+        self.assertIsNone(by_name['third']['prev'])
+        self.assertEqual(by_name['sample']['row']['week'], '2026-09-21')
+        self.assertEqual(by_name['sample']['prev']['week'], '2026-09-14')
+        self.assertEqual(d['total']['products'], 2)    # third is not summed (D8)
+        self.assertEqual(d['total']['landed'], 10)     # 5 + 5, never read third's absence as 0
+
+    def test_day_1_7_on_a_monday_day_7_7_on_a_sunday_and_the_right_two_weeks_mid_week(self):
+        self.configure('sample')
+        self.write_rows('sample', self.LAST, self.THIS)
+        mid = loop.totals(as_of='2026-09-23T14:02:11Z')
+        self.assertEqual((mid['day'], mid['days'], mid['week'], mid['prev_week']),
+                         (3, 7, '2026-09-21', '2026-09-14'))
+        monday = loop.totals(as_of='2026-09-21T00:00:01Z')
+        self.assertEqual((monday['day'], monday['week']), (1, '2026-09-21'))
+        sunday = loop.totals(as_of='2026-09-27T23:59:59Z')
+        self.assertEqual((sunday['day'], sunday['week'], sunday['prev_week']),
+                         (7, '2026-09-21', '2026-09-14'))
+
+    def test_a_truncated_line_is_skipped_rather_than_raising(self):
+        self.configure('sample')
+        path = os.path.join(self.home, 'state', 'sample')
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, loop.SNAPSHOTS), 'w', encoding='utf-8') as f:
+            f.write(json.dumps(self.THIS) + '\n')
+            f.write('{"week": "2026-09-14", "landed": tr\n')     # truncated — P7
+        d = loop.totals(as_of='2026-09-23T14:02:11Z')
+        entry = d['products'][0]
+        self.assertEqual(entry['row']['week'], '2026-09-21')
+        self.assertIsNone(entry['prev'])
+
+    def test_opens_no_record_repo_registry_or_forge(self):
+        self.configure('sample')
+        self.write_rows('sample', self.LAST, self.THIS)
+        with mock.patch.object(facts, 'load', side_effect=AssertionError('no record')):
+            d = loop.totals(as_of='2026-09-23T14:02:11Z')
+        self.assertEqual(d['total']['products'], 1)
+
+    def test_each_products_own_delta_is_delta_row_over_its_two_rows(self):
+        self.configure('sample')
+        self.write_rows('sample', self.LAST, self.THIS)
+        d = loop.totals(as_of='2026-09-23T14:02:11Z')
+        self.assertEqual(d['products'][0]['delta'],
+                         score.delta_row(self.THIS, self.LAST))
+
+
+class AllProductsCommandTests(AllProductsHome):
+    """``views.scorecard.compute_all``/``render_all`` (F-0148, S-70905): the table behind
+    ``asf scorecard --all``.
+
+    Exercised here through the view functions directly, never through ``cmd_scorecard`` or
+    ``asf.cli.main`` — ``asf/cli.py:445`` already defines ``--all`` on ``asf scorecard`` for an
+    unrelated, shipped and documented meaning (``idle_hours`` counts every product's launches,
+    ``docs/guide/operating.md:552-553``, landed in #762, consumed by
+    ``views.scorecard._every``/``program_row``/``cmd_check``). Wiring the dispatch this card's
+    spec names (``## The design`` §``asf/views/scorecard.py``, §``asf/cli.py``, PD1) would
+    silently take over that flag for every ``--check ...  --all`` and default-view
+    ``--json --all`` invocation, which is a behaviour change outside this card's own acceptance.
+    Left for an operator decision — see this Task's REPORT."""
+
+    def test_render_all_prints_one_row_per_product_plus_a_total_row(self):
+        self.configure('sample', 'other', 'third')
+        last = _snapshot_row('2026-09-14', '2026-09-16T10:00:00Z', landed=3, on_prod=2, usd=150.0,
+                             usd_per_feature=50.0, own_usd_per_feature=22.0, repair_sessions=8,
+                             repair_per_feature=2.7, median_lead_days=3)
+        this = _snapshot_row('2026-09-21', '2026-09-23T10:00:00Z')
+        self.write_rows('sample', last, this)
+        self.write_rows('other', last, this)
+        d = views_scorecard.compute_all(as_of='2026-09-23T14:02:11Z')
+        text = views_scorecard.render_all(d)
+        table = [line for line in text.splitlines() if line.startswith('|')]
+        self.assertEqual(len(table), 2 + 3 + 1)      # header, divider, 3 products, the total
+        self.assertTrue(table[-1].startswith('| **total**'))
+        self.assertIn('| third | — | — | — | — | — | — | — | — | never measured |', text)
+
+    def test_every_measured_cell_carries_this_week_last_week_and_the_delta(self):
+        self.configure('sample')
+        last = _snapshot_row('2026-09-14', '2026-09-16T10:00:00Z', landed=3, on_prod=2, usd=150.0,
+                             usd_per_feature=50.0, own_usd_per_feature=22.0, repair_sessions=8,
+                             repair_per_feature=2.7, median_lead_days=3)
+        this = _snapshot_row('2026-09-21', '2026-09-23T10:00:00Z')
+        self.write_rows('sample', last, this)
+        text = views_scorecard.render_all(views_scorecard.compute_all(as_of='2026-09-23T14:02:11Z'))
+        self.assertIn('5 (last 3, +2)', text)
+        self.assertIn('$180.00 (last $150.00, +$30.00)', text)
+        self.assertIn('2.1 d (last 3 d)', text)
+
+    def test_all_json_is_the_same_structure_json_dumps_gives(self):
+        self.configure('sample')
+        self.write_rows('sample', _snapshot_row('2026-09-14', '2026-09-16T10:00:00Z'),
+                        _snapshot_row('2026-09-21', '2026-09-23T10:00:00Z'))
+        d = views_scorecard.compute_all(as_of='2026-09-23T14:02:11Z')
+        parsed = json.loads(json.dumps(d, indent=1, default=str))
+        self.assertEqual(parsed['total']['landed'], d['total']['landed'])
+        self.assertEqual(parsed['products'][0]['product'], 'sample')
 
 
 class DiagnoseTests(unittest.TestCase):
