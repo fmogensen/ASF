@@ -42,7 +42,7 @@ def installed_plugin_dir():
     return os.path.join(env.ASF_HOME, 'plugin')
 
 # Operator views: print the table verbatim and stop.
-VIEWS = ('status', 'next', 'backlog', 'roadmap', 'parity', 'prod', 'sessions', 'doctor', 'capacity',
+VIEWS = ('status', 'next', 'board', 'roadmap', 'parity', 'prod', 'sessions', 'doctor', 'capacity',
          'scorecard', 'release-readiness')
 
 # Operator dialogues: print, then a follow-up the skill carries out with the operator.

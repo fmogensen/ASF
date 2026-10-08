@@ -1,7 +1,7 @@
 """The operator's record checkout (``backlog_dir``) follows origin after every tick push.
 
 The tick works in its own clone and pushes; the read views (``asf status``'s Decisions row,
-``asf backlog``, ``asf next``) read ``backlog_dir``. Only a console command run there used to
+``asf board``, ``asf next``) read ``backlog_dir``. Only a console command run there used to
 pull it, so a groom whose answers the tick applied and pushed still showed every card
 undecided in ``asf status`` — the checkout sat where the last console command left it."""
 import io

@@ -6,7 +6,7 @@
 #: covered by tests/test_views_header.py; a command not in it prints neither.
 TITLES = {
     'status': 'FACTORY STATUS',   'next': 'NEXT',
-    'backlog': 'BOARD',           'roadmap': 'ROADMAP',
+    'board': 'BOARD',             'roadmap': 'ROADMAP',
     'parity': 'PARITY',           'prod': 'PROD',
     'sessions': 'SESSIONS',       'scorecard': 'SCORECARD',
     'release-readiness': 'RELEASE READINESS',

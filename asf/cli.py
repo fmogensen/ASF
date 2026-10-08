@@ -7,7 +7,7 @@ command creates anything under the cwd (``tests/test_path_resolution.py`` runs t
 from an empty directory). ``doctor`` and ``scheduler`` take the product, never the cwd.
 
 The commands below are the week-1 fast-path set: today's record/tick/groom/rules tools, moved
-behind product config. The fuller command surface (``init``, ``roadmap``, ``backlog``,
+behind product config. The fuller command surface (``init``, ``roadmap``, ``board``,
 ``product``, ``migrate-epic``, ...) lands with the 0.1 spec.
 """
 import argparse
@@ -408,8 +408,8 @@ def build_parser():
     p_roadmap = sub.add_parser('roadmap', help='the ROADMAP table: one row per Epic')
     p_roadmap.add_argument('--product')
 
-    p_backlog_view = sub.add_parser('backlog', help='the BOARD table: one row per Feature, grouped by Epic')
-    p_backlog_view.add_argument('--product')
+    p_board = sub.add_parser('board', help='the BOARD table: one row per Feature, grouped by Epic')
+    p_board.add_argument('--product')
 
     p_parity = sub.add_parser('parity', help='the PARITY table: one row per Story')
     p_parity.add_argument('--product')
@@ -706,15 +706,15 @@ def _main(argv=None):
     if args.command == 'watch':
         from asf.tick.watch import cmd_watch
         return cmd_watch(args)
-    if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status', 'tokens', 'scorecard',
+    if args.command in ('roadmap', 'board', 'parity', 'prod', 'sessions', 'status', 'tokens', 'scorecard',
                         'release-readiness'):
         view_root = resolve_record(args, announce=_announce_stderr if getattr(args, 'json', False) else print)
         if args.command == 'roadmap':
             from asf.views.roadmap import cmd_roadmap
             return cmd_roadmap(args, view_root)
-        if args.command == 'backlog':
-            from asf.views.board import cmd_backlog
-            return cmd_backlog(args, view_root)
+        if args.command == 'board':
+            from asf.views.board import cmd_board
+            return cmd_board(args, view_root)
         if args.command == 'parity':
             from asf.views.parity import cmd_parity
             return cmd_parity(args, view_root)

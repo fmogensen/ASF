@@ -191,7 +191,7 @@ def render_tables(root, product):
     from asf.views import roadmap, board, parity, prod, sessions, status
     return {
         'roadmap': roadmap.render(root, product),
-        'backlog': board.render(root, product),
+        'board': board.render(root, product),
         'parity': parity.render(root),
         'prod': prod.render(root, product),
         'sessions': sessions.render(root, product),

@@ -16,7 +16,7 @@ import json
 import os
 
 TIMESTAMP_KEYS = {'generated', 'updated', 'stage_since'}
-TABLE_NAMES = ['roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status']
+TABLE_NAMES = ['roadmap', 'board', 'parity', 'prod', 'sessions', 'status']
 
 
 def _strip_timestamps(obj):

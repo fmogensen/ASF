@@ -33,7 +33,7 @@ def frontmatter_keys(text):
 class PluginTests(unittest.TestCase):
     def test_skills_exist(self):
         names = {os.path.basename(os.path.dirname(p)) for p in SKILLS}
-        self.assertTrue({'roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'} <= names)
+        self.assertTrue({'roadmap', 'board', 'parity', 'prod', 'sessions', 'status'} <= names)
 
     def test_plugin_is_generated_from_the_cli(self):
         # the tree on disk is exactly what `asf plugin build` writes; every view has a skill,

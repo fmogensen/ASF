@@ -1,4 +1,4 @@
-"""asf.views.board — the ``BOARD`` table (``asf backlog``): one row per Feature, grouped by Epic.
+"""asf.views.board — the ``BOARD`` table (``asf board``): one row per Feature, grouped by Epic.
 
 Ported from the operator's Feature-table script's index-backed path.
 """
@@ -86,7 +86,7 @@ def render(root, product=None):
     return "\n".join(out) + "\n"
 
 
-def cmd_backlog(args, root):
+def cmd_board(args, root):
     from asf import env
     product = env.load_product(getattr(args, 'product', None))
     print(render(root, product), end='')

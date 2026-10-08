@@ -38,7 +38,7 @@ COMMANDS = [
     (['file-bugs'], 'record'),
     (['rules', 'check'], 'record'),
     (['roadmap'], 'record'),
-    (['backlog'], 'record'),
+    (['board'], 'record'),
     (['parity'], 'record'),
     (['prod'], 'record'),
     (['sessions'], 'record'),
