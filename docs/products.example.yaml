@@ -364,7 +364,7 @@ conventions:
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:
-  provider: gh-actions   # gh-actions | other | none (no PR host: no repo_slug, no gh)
+  provider: gh-actions   # gh-actions | other | none (no PR host: no repo_slug, no gh) | vm
   # the gate: the command a branch must pass before harvest lands it (none: no test gate).
   test_command: make test
   # read as conventions.ci_workflow — the workflow whose runs on the trunk are the green
@@ -396,6 +396,18 @@ ci:
     - {runner: ci-1,  box: box-1, provider: alpha, size: 8c-16g, role: heavy, slots: 1}
     - {runner: ci-1b, box: box-1, provider: alpha, size: 8c-16g, role: light}
     - {runner: ci-2,  box: box-2, provider: beta,  size: 8c-24g, role: heavy}
+  # ci.provider: vm (asf.ci_vm) — external CI on any ssh-reachable machine, instead of the pool
+  # above: a named ssh target per host (`slots`, default 1, is how many jobs it runs at once;
+  # `root`, default .asf-ci under the ssh user's home, is the only place on the host this writes)
+  # and a named command per job (`required`, `timeout_min` default 45, and `labels` it needs a
+  # host's own labels to be a superset of).
+  # provider: vm
+  # hosts:
+  #   - {name: ci-1, ssh: ci-1.example, labels: [linux, heavy], slots: 2, root: /srv/asf-ci}
+  #   - {name: ci-2, ssh: ci-2.example, labels: [linux, light]}
+  # jobs:
+  #   lint: {command: 'make lint', required: true, timeout_min: 10, labels: [light]}
+  #   gate: {command: 'make test', required: true, timeout_min: 45, labels: [heavy]}
 
 # capacity: this product's share of the factory. Each is a ceiling, capped in turn by
 # config.yaml's capacity.total and by what worker_pool.accounts can host.
