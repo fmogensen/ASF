@@ -49,6 +49,8 @@ REGISTRY = {
     'ci-queue.json': _s('asf.ci_queue'),
     'ci-queue.lock': _s('asf.ci_queue', LOCK),
     'ci-cancels.json': _s('asf.ci_queue'),
+    'ci-stall.json': _s('asf.ci_stall'),
+    'ci-heartbeat.json': _s('asf.ci_heartbeat'),
     'ci-trials.json': _s('asf.ci_pool'),
     'ci-trials.jsonl': _s('asf.ci_pool', JSONL),
     'ci-census.json': _s('asf.ci_census'),

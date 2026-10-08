@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import ci_measure, ci_queue, ci_stall, env
+from asf import ci_heartbeat, ci_measure, ci_queue, ci_stall, env
 
 NOW = 1_800_000_000.0
 
@@ -195,6 +195,59 @@ class AStallIsCancelledClaimedAndRerunOnce(Base):
     def test_an_unreachable_box_is_an_alarm(self):
         (_, _), _ = self.run_pass({'box-1': (None, 'ssh timeout')})
         self.assertIn('ci stall: ALARM box box-1 unreachable — ssh timeout', self.lines)
+
+
+class ThePassStampsItself(Base):
+    def test_the_counts_and_at_match_what_the_pass_returned_and_printed(self):
+        self.set_mode('report')
+        pool = [{'runner': 'r-1', 'box': 'box-1', 'provider': 'alpha', 'role': 'heavy'},
+                {'runner': 'r-2', 'box': 'box-2', 'provider': 'alpha', 'role': 'heavy'},
+                {'runner': 'r-3', 'box': 'box-3', 'provider': 'alpha', 'role': 'heavy'}]
+        prod = env.Product('p', {'repo_slug': 'o/r', 'ci': {'provider': 'github-actions',
+                                                             'workflow': 'ci.yml', 'pool': pool}})
+        beats = {'box-1': [hb()], 'box-2': (None, 'ssh timeout'), 'box-3': []}
+
+        def fetch(box, target):
+            v = beats.get(box)
+            return v if isinstance(v, tuple) else (v or [], None)
+        with mock.patch.object(ci_queue.run_cancel, 'time', mock.Mock()):
+            stalls, cancels = ci_stall.watch(prod, apply=False, fetch_fn=fetch, now=NOW,
+                                             out=self.lines.append, events=events())
+        blk = ci_stall.load(prod)['pass']
+        self.assertEqual(blk['at'], NOW)
+        self.assertEqual(blk['mode'], 'report')
+        self.assertEqual((blk['stalls'], blk['cancels']), (stalls, cancels))
+        self.assertEqual((blk['boxes'], blk['unreachable']), (1, 2))
+        self.assertEqual(blk['boxes'] + blk['unreachable'], len(ci_heartbeat.boxes(prod)))
+        self.assertEqual(sum('ALARM' in l for l in self.lines), 2)
+
+    def test_a_pass_held_back_records_the_legacy_age_and_mode_report(self):
+        self.set_mode('act')
+        path = os.path.join(ci_stall.hb_dir(), 'claims.json')
+        with open(path, 'w') as f:
+            json.dump({}, f)
+        os.utime(path, (NOW - 42, NOW - 42))
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW)
+        blk = ci_stall.load(product())['pass']
+        self.assertEqual(blk['mode'], 'report')
+        self.assertEqual(blk['legacy'], 42)
+        line = next(l for l in self.lines if 'report only' in l)
+        self.assertIn(f"claims.json {blk['legacy']}s ago", line)
+
+    def test_an_acting_pass_records_legacy_none(self):
+        self.set_mode('act')
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW)
+        blk = ci_stall.load(product())['pass']
+        self.assertEqual(blk['mode'], 'act')
+        self.assertIsNone(blk['legacy'])
+
+    def test_load_on_a_file_with_no_pass_key_returns_an_empty_mapping(self):
+        ci_stall.save(product(), {'max': {}, 'cpu': {}, 'claims': {}})
+        self.assertEqual(ci_stall.load(product())['pass'], {})
+
+    def test_load_on_a_file_whose_pass_is_a_list_returns_an_empty_mapping(self):
+        ci_stall.save(product(), {'max': {}, 'cpu': {}, 'claims': {}, 'pass': [1, 2]})
+        self.assertEqual(ci_stall.load(product())['pass'], {})
 
 
 class OneWatcherAtATime(Base):
