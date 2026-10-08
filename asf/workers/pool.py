@@ -69,6 +69,9 @@ REASON_NO_QUOTA = ('NEEDS OPERATOR: no account under quota — wait for a window
                    'add an account under worker_pool.accounts (see: asf workers quota)')
 REASON_COOLDOWN = 'quota cooldown — one job at a time'
 
+#: an account naming no ``provider`` is this one kind (F-0138)
+DEFAULT_PROVIDER = 'default'
+
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -79,7 +82,7 @@ def now_iso():
 class Account:
     def __init__(self, name, role='local', cap=1, caps=None, home=None, config_dir=None,
                  home_seed=(), isolate_home=env.DEFAULT_ISOLATE_HOME, auth_env=None,
-                 identity=None):
+                 identity=None, provider=None):
         self.name = name
         self.role = role or 'local'
         self.cap = int(cap if cap is not None else 1)
@@ -96,13 +99,19 @@ class Account:
         #: ``identity``: a ``{name, email}`` map overriding what this account's sessions commit
         #: as (:func:`asf.identity.agent_identity`), or None for the agent default
         self.identity = dict(identity) if identity else None
+        #: ``provider``: the provider *kind* — an opaque operator label naming what sort of
+        #: account this is, so accounts that share a window scale share one estimate (F-0138).
+        #: The window's dollars are read per kind (``quota_guards.window_usd.<provider>``);
+        #: accounts that name none are one kind, :data:`DEFAULT_PROVIDER`.
+        self.provider = str(provider or DEFAULT_PROVIDER)
 
     @classmethod
     def from_dict(cls, d):
         return cls(d['name'], role=d.get('role'), cap=d.get('cap', 1), caps=d.get('caps'),
                    home=d.get('home'), config_dir=d.get('config_dir'),
                    home_seed=env.account_home_seed(d), isolate_home=env.isolate_home(d),
-                   auth_env=env.account_auth_env(d), identity=env.account_identity(d))
+                   auth_env=env.account_auth_env(d), identity=env.account_identity(d),
+                   provider=d.get('provider'))
 
     def __repr__(self):
         return f'Account({self.name!r}, role={self.role!r}, cap={self.cap})'
@@ -406,6 +415,10 @@ class Pool:
         if account.name not in self._usage:
             self._usage[account.name] = self.quota.read(account)
         return self._usage[account.name]
+
+    def providers(self):
+        """``{account name: its provider kind}`` — what a sample line is attributed to."""
+        return {a.name: a.provider for a in self.accounts}
 
     def limit(self, account):
         """The reset a session limit stopped ``account`` until (ISO), or None."""

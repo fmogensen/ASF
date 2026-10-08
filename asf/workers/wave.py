@@ -439,7 +439,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     if raised is not None:
         raise raised
     if sample:
-        headroom_mod.record_samples(dict(pool._usage))
+        headroom_mod.record_samples(dict(pool._usage), providers=pool.providers())
     return launched, waits
 
 
