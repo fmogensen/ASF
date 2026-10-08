@@ -784,9 +784,52 @@ def main(argv=None):
         finish()
 
 
+def _schema_flag_present(args, flag):
+    """Whether ``flag`` (a ``surface.COMMANDS`` row's third column) is on: ``None`` always is; a
+    ``--flag``-shaped one reads its own dest (``audit-proofs``' ``--apply``); a bare word reads as
+    a subcommand value instead (``approvals``' ``resolve``, stored under its own dest, not a dest
+    named ``resolve``) — whichever ``args`` actually carries."""
+    if flag is None:
+        return True
+    dest = flag.lstrip('-').replace('-', '_')
+    if hasattr(args, dest):
+        return bool(getattr(args, dest))
+    return any(v == flag for v in vars(args).values())
+
+
+def _schema_product(args):
+    """The product :func:`asf.schema.require` checks for the command that is about to run — the
+    same two paths :func:`resolve_record` takes (B-0050), returned as a ``Product`` instead of a
+    path, and never printing: the command's own ``resolve_record`` call still owns the
+    ``record: <path>`` announcement."""
+    from asf import env
+    name = getattr(args, 'product', None)
+    cwd = os.getcwd()
+    if name is None and _looks_like_record(cwd):
+        return env.Product('(record)', {'backlog_dir': cwd})
+    if name is None:
+        name = env.default_product_name()
+    return env.load_product(name)
+
+
 def _main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # the schema guard (F-0114 §1): every RECORD-effect command refuses on a non-additive schema
+    # gap before it writes anything — wired once, here, rather than in each command body. `tick`
+    # migrates an additive gap itself and calls `schema.require` on its own (PD6); every other
+    # RECORD writer is guarded here. A `ConfigError` resolving the product is not swallowed: it
+    # propagates to `main`, which already renders it as the NEEDS OPERATOR line and exit 2.
+    if args.command != 'tick':
+        from asf import schema, surface
+        # a command still registered under its pre-rename spelling (F-0084's `migrate`, kept by
+        # the parser though `surface.COMMANDS` only names `import-items`) is looked up by its
+        # current name too, so the table drives this guard exactly as it drives `--help`
+        row = surface.COMMANDS.get(surface.RENAMED.get(args.command, args.command))
+        if row is not None and row[1] == surface.RECORD and _schema_flag_present(args, row[2]):
+            schema.require(_schema_product(args))
+
     root = os.getcwd()  # only `hook` (a runtime hook in the project) and `plugin` run on the cwd
 
     if args.command == 'new':
