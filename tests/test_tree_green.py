@@ -299,7 +299,9 @@ class ConflictBeforeCarry(QueueRepo):
     def ready(self, conflicts=False):
         ln = self.lane()
         heads = self.heads()
-        with mock.patch.object(merge_queue, 'conflicts_with_trunk', return_value=conflicts):
+        merge = merge_queue.Merge(conflicts, ['a.txt'] if conflicts else [],
+                                   'CONFLICTING' if conflicts else 'MERGEABLE')
+        with mock.patch.object(merge_queue, 'merge_read', return_value=merge):
             return merge_queue.requested_ready(ln, heads, heads['main']), self.lines
 
     def test_a_carry_never_admits_a_pr_that_conflicts_with_the_trunk(self):

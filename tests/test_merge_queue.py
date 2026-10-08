@@ -1485,6 +1485,204 @@ class ABatchIsCutOnlyAfterTheVerdict(QueueRepo):
         self.assertFalse(lane.marker_move(self.repo, old, old))
 
 
+class ALandRequestNeverWaitsOnCIThatCannotStart(QueueRepo):
+    """F-0284 — ``merge_read`` replaces ``conflicts_with_trunk``: one read per request per pass,
+    GitHub's own merge decisive where it has answered, git's where it has not (S-75955), feeding
+    the three outcomes — back to the lane's rebuild, red for an owner who must act, or a pending
+    line that says what it is waiting for (S-75954). Every case here is a request whose head has
+    no check runs at all: the shape that waited forever before this card."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+
+    def held(self, state, branch, pr, head, item='T-0009'):
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps({'job': f'coder-{item.lower()}', 'item': item, 'kind': 'coder',
+                                 'branch': branch, 'pid': 1,
+                                 'started': '2026-09-21T00:00:00Z',
+                                 'ended': '2026-09-21T00:05:00Z', 'end_reason': 'finished',
+                                 'lane': {'state': state, 'head': head, 'pr': pr,
+                                          'item': item, 'at': '2026-09-21T00:06:00Z',
+                                          'reason': ''}}) + '\n')
+
+    def mergeable_reads(self):
+        return [c for c in self.gh.calls if c[:2] == ['pr', 'view'] and 'mergeable' in c]
+
+    # S-75954 — every conflicting land request leaves the wait
+
+    def test_host_conflicting_with_a_held_gate_run_goes_back_for_a_rebase(self):
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat(T-0009): y')
+        head = self.heads()['worker/T-0009']
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        self.gh.checks[head] = []
+        self.held(lane.GATE, 'worker/T-0009', 9, head)
+        self.gh.mergeable[9] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])
+        self.assertEqual([(b, k) for b, k, _t, _f in self.backs], [('worker/T-0009', 'conflict')])
+        self.assertTrue(any('PR #9 conflicts with main' in l and 'rebase' in l
+                            for l in self.lines), self.lines)
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['9'])
+
+    def test_host_conflicting_with_no_session_run_is_red_not_back(self):
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat(T-0009): y')
+        head = self.heads()['worker/T-0009']
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        self.gh.checks[head] = []
+        self.gh.mergeable[9] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        red = merge_queue.load_requests(self.state_dir)['9']['red']
+        self.assertEqual(red['kind'], 'conflict')
+        self.assertIn('no session run holds worker/T-0009', red['why'])
+        self.assertIn('the lane does not rebase it', red['why'])
+        self.assertTrue(any('PR #9 red at' in l for l in self.lines), self.lines)
+
+    def test_host_conflicting_with_no_factory_prefix_is_red_with_the_landed_text(self):
+        self.push_lane('mine/own-work', {'y.txt': 'y\n'}, 'feat: my own work')
+        head = self.heads()['mine/own-work']
+        merge_queue.add_request(self.state_dir, 3, 'mine/own-work')
+        self.gh.checks[head] = []
+        self.gh.mergeable[3] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        red = merge_queue.load_requests(self.state_dir)['3']['red']
+        self.assertEqual(red['why'], 'conflicts with main — merge or rebase it')
+
+    def test_a_branch_already_back_is_neither_sent_back_again_nor_marked_red(self):
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat(T-0009): y')
+        head = self.heads()['worker/T-0009']
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        self.gh.checks[head] = []
+        self.held(lane.BACK, 'worker/T-0009', 9, head)
+        self.gh.mergeable[9] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['9'])
+
+    def test_the_red_is_this_heads_only_a_moved_head_is_judged_from_the_start(self):
+        self.push_lane('mine/own-work', {'y.txt': 'y\n'}, 'feat: my own work')
+        merge_queue.add_request(self.state_dir, 3, 'mine/own-work')
+        old_head = self.heads()['mine/own-work']
+        self.gh.checks[old_head] = []
+        self.gh.mergeable[3] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertIn('red', merge_queue.load_requests(self.state_dir)['3'])
+        self.push_lane_body('mine/own-work', {'y.txt': 'y2\n'}, 'feat: my own work, again',
+                            new=False)
+        new_head = self.heads()['mine/own-work']
+        self.gh.mergeable[3] = 'MERGEABLE'
+        self.gh.checks[new_head] = []
+        self.queue_pass(self.lane(), [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['3'])
+
+    def test_one_host_read_per_request_per_pass(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        head = self.heads()['worker/T-0001']
+        merge_queue.add_request(self.state_dir, 1, 'worker/T-0001')
+        self.gh.checks[head] = []
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.mergeable_reads()), 1, self.gh.calls)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.mergeable_reads()), 2, self.gh.calls)
+
+    def test_a_priority_request_takes_the_same_route_as_a_plain_one(self):
+        self.push_lane('mine/own-work', {'y.txt': 'y\n'}, 'feat: my own work')
+        head = self.heads()['mine/own-work']
+        merge_queue.add_request(self.state_dir, 3, 'mine/own-work', priority=True)
+        self.gh.checks[head] = []
+        self.gh.mergeable[3] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        red = merge_queue.load_requests(self.state_dir)['3']['red']
+        self.assertEqual(red['why'], 'conflicts with main — merge or rebase it')
+
+    # S-75955 — the read beneath those outcomes, where GitHub has not answered
+
+    def test_host_unknown_with_a_real_conflict_sends_a_held_factory_branch_back_naming_the_file(self):
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat(T-0009): y')
+        head = self.heads()['worker/T-0009']
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        self.gh.checks[head] = []
+        self.held(lane.GATE, 'worker/T-0009', 9, head)
+        self.push_main({'y.txt': 'm\n'}, 'trunk moves, same file')
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [('worker/T-0009', 'conflict', mock.ANY, ['y.txt'])])
+
+    def test_a_git_only_conflict_with_no_session_run_is_red_the_same_as_a_host_one(self):
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat(T-0009): y')
+        head = self.heads()['worker/T-0009']
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        self.gh.checks[head] = []
+        self.push_main({'y.txt': 'm\n'}, 'trunk moves, same file')
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        red = merge_queue.load_requests(self.state_dir)['9']['red']
+        self.assertEqual(red['kind'], 'conflict')
+        self.assertIn('no session run holds worker/T-0009', red['why'])
+
+    def test_the_host_read_unreadable_with_a_real_conflict_is_the_same_outcome(self):
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat(T-0009): y')
+        head = self.heads()['worker/T-0009']
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        self.gh.checks[head] = []
+        self.held(lane.GATE, 'worker/T-0009', 9, head)
+        self.push_main({'y.txt': 'm\n'}, 'trunk moves, same file')
+        real = merge_queue.H.gh_json
+
+        def unreadable(args, default):
+            return default if 'mergeable' in args else real(args, default)
+
+        with mock.patch.object(merge_queue.H, 'gh_json', side_effect=unreadable):
+            self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [('worker/T-0009', 'conflict', mock.ANY, ['y.txt'])])
+
+    def test_host_unknown_and_git_clean_with_nothing_started_names_what_it_waits_for(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        head = self.heads()['worker/T-0001']
+        merge_queue.add_request(self.state_dir, 1, 'worker/T-0001')
+        self.gh.checks[head] = []
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['1'])
+        self.assertTrue(any('GitHub reads mergeable: UNKNOWN' in l
+                            and 'git merges worker/T-0001 onto main clean' in l
+                            for l in self.lines), self.lines)
+
+    def test_host_mergeable_overrides_a_merge_tree_conflict_the_pending_line_carries_no_clause(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        head = self.heads()['worker/T-0001']
+        merge_queue.add_request(self.state_dir, 1, 'worker/T-0001')
+        self.gh.checks[head] = []
+        self.push_main({'a.txt': 'm\n'}, 'trunk moves, same file')
+        self.gh.mergeable[1] = 'MERGEABLE'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['1'])
+        self.assertTrue(any('pending at' in l and 'GitHub reads mergeable' not in l
+                            for l in self.lines), self.lines)
+
+    def test_a_check_already_in_progress_keeps_the_plain_pending_line(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        head = self.heads()['worker/T-0001']
+        merge_queue.add_request(self.state_dir, 1, 'worker/T-0001')
+        self.gh.checks[head] = [check_run('gate', None, 'in_progress')]
+        self.queue_pass(self.lane(), [])
+        self.assertTrue(any('pending at' in l and 'gate-tests (not started)' in l
+                            and 'GitHub reads mergeable' not in l for l in self.lines), self.lines)
+
+    def test_merge_read_asks_git_with_fetch_false_and_no_second_gh_call(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        ln = self.lane()
+        before = len(self.gh.calls)
+        with mock.patch.object(merge_queue.lane_mod, 'conflict_files',
+                               wraps=merge_queue.lane_mod.conflict_files) as cf:
+            merge = merge_queue.merge_read(ln, 1, 'worker/T-0001')
+        cf.assert_called_once_with(ln.repo, ln.trunk, 'worker/T-0001', fetch=False)
+        self.assertEqual(len(self.gh.calls) - before, 1)
+        self.assertFalse(merge.conflicting)
+
+
 class RunGH(FakeGH):
     """FakeGH plus workflow runs and their jobs, and the re-runs asked of the host."""
 

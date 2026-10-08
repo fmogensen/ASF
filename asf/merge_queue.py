@@ -151,6 +151,7 @@ hook on their own pushes, so it is pushed ``--no-verify``; the trunk push is ref
 does, and neither goes through :mod:`asf.refguard`: the trunk push is the lane's one sanctioned
 landing, and a batch ref that matches a protected pattern is refused before it is made.
 """
+import collections
 import datetime
 import json
 import os
@@ -2556,11 +2557,41 @@ def ordered_requests(reqs):
                                                 kv[1].get('at') or '', kv[0]))
 
 
-def conflicts_with_trunk(lane, n):
-    """True when the host reads PR ``n`` as ``mergeable: CONFLICTING`` (one lean read; UNKNOWN or
-    unreadable is False)."""
-    got = H.gh_json(['pr', 'view', str(n), '-R', lane.slug, '--json', 'mergeable'], None)
-    return isinstance(got, dict) and got.get('mergeable') == 'CONFLICTING'
+#: what the two merges say about PR's head: whether its required checks can ever start
+#: (:func:`merge_read`), the paths git names, and GitHub's own ``mergeable`` word
+Merge = collections.namedtuple('Merge', 'conflicting files host')
+
+
+def merge_read(lane, n, branch):
+    """:data:`Merge` for PR ``n`` on ``branch``: can this head's required checks ever start?
+
+    ``conflicting`` is True when they cannot. GitHub runs no ``pull_request`` workflow on a PR its
+    own merge reads ``mergeable: CONFLICTING``, so that word is decisive — it is GitHub's merge
+    that gates the workflow, and a clean ``git merge-tree`` never overrides it (a merge driver
+    GitHub cannot apply: :func:`asf.harvest.lane.host_reads_dirty`). ``MERGEABLE`` is decisive the
+    other way: the checks are coming, the head is simply waiting for them.
+
+    Where GitHub has not answered — ``UNKNOWN``, which is what it reads until it computes the
+    merge, or an unreadable answer — git answers instead, on the refs this pass has already
+    fetched: a head git will not merge onto the trunk is a head whose checks will not start either,
+    and waiting for GitHub to agree is the silent forever this card is about (F-0284).
+
+    One host read per request per pass; ``files`` are the paths ``git merge-tree`` names, so the
+    caller never reads them twice."""
+    host = H.gh_json(['pr', 'view', str(n), '-R', lane.slug, '--json', 'mergeable'], None)
+    host = host.get('mergeable') if isinstance(host, dict) else None
+    files = lane_mod.conflict_files(lane.repo, lane.trunk, branch, fetch=False) if branch else []
+    if host == 'CONFLICTING':
+        return Merge(True, files, host)
+    if host == 'MERGEABLE':
+        return Merge(False, [], host)
+    return Merge(bool(files), files, host)
+
+
+def _none_started(why):
+    """True when ``why`` (a pending :func:`verdict`) says every required check has no run at all —
+    the only pending shape in which no run may ever arrive."""
+    return bool(why) and all(w.endswith('(not started)') for w in why.split(', '))
 
 
 def red_requests(state_dir, head_of=None):
@@ -2653,27 +2684,36 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
         runs = newest(runs)     # a fresh run (asf.stale_ref) supersedes the stale one it replaced
         state, why = verdict(admission_runs(runs), required)
         earned = state == 'green'
-        if state == 'pending' and all(w.endswith('(not started)') for w in why.split(', ')) \
-                and deploy.never_started(runs, required):
+        if state == 'pending' and _none_started(why) and deploy.never_started(runs, required):
             # the head's CI is done and never ran these (a path filter, a matrix the filter
             # skipped under its unexpanded name): the batch run judges them
             state, why = 'green', ''
-        if state == 'pending' and lane.conv.branch_kind(b) and run is not None \
-                and held != lane_mod.BACK and conflicts_with_trunk(lane, n):
-            # a factory branch the host reads CONFLICTING gets no CI either: the lane's own
-            # conflict correction sends it to its rebuild (a rebase on the trunk), never a wait
-            # on checks that will not start (F-0284)
-            _conflict_back(lane, b, n, head, run)
-            continue
-        if state == 'pending' and not lane.conv.branch_kind(b) and conflicts_with_trunk(lane, n):
-            # GitHub starts no pull_request CI on a PR that conflicts with the trunk: its checks
-            # never arrive, and waiting for them would be silent for good. A factory branch is
-            # the lane's own (its conflict path rebuilds it); this one is its author's.
-            why = f'conflicts with {lane.trunk} — merge or rebase it'
-            lane.out(f'merge queue: asf land PR #{n} red at {head[:12]} — {why}')
-            r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
-            changes.append(('red', key, r['red']))
-            continue
+        if state == 'pending':
+            merge = merge_read(lane, n, b)
+            if merge.conflicting and lane.conv.branch_kind(b) and run is not None \
+                    and held != lane_mod.BACK:
+                # a factory branch the lane holds a run for is the lane's own work: its conflict
+                # correction rebuilds it (a rebase on the trunk), never a wait on checks that will
+                # not start (F-0284). The request stays and is judged again on the new head
+                _conflict_back(lane, b, n, head, run, merge.files)
+                continue
+            if merge.conflicting:
+                # nobody in the factory will move this head. A PR with no factory prefix is its
+                # author's; a factory branch no run holds is not factory work either — an
+                # `asf land` request never is (:meth:`asf.harvest.lane.Lane.branch_facts`), so the
+                # lane does not rebase it. Red, so the request leaves the wait and shows in the
+                # status view; a new head drops the red and is judged from the start
+                why = _conflict_why(lane, b, n, run, merge.files)
+                lane.out(f'merge queue: asf land PR #{n} red at {head[:12]} — {why}')
+                r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
+                changes.append(('red', key, r['red']))
+                continue
+            if _none_started(why) and merge.host != 'MERGEABLE':
+                # not a conflict, and not a verdict either: GitHub has not computed its own merge
+                # and git merges clean. The checks are coming; the line says so, because a wait
+                # that reads the same as a wait that cannot end is the defect this card began as
+                why = (f'{why}; GitHub reads mergeable: {merge.host or "unreadable"} and git '
+                       f'merges {b} onto {lane.trunk} clean — the checks have not started yet')
         if state == 'pending':
             # a reword, a sign-off trailer: a new head with a byte-identical tree, whose CI an
             # earlier head of this PR already passed. That green is this content's green — carried
@@ -2775,17 +2815,32 @@ def _land_infra(lane, n, head, checks, required, probe=False):
     return True
 
 
-def _conflict_back(lane, b, n, head, run):
+def _conflict_why(lane, b, n, run, files):
+    """The red's ``why`` for an `asf land` PR whose required checks can never start. What differs
+    is who moves the head: a PR with no factory prefix is its author's — this text is a landed
+    surface the status view renders and the suite pins, and it does not change. A factory branch
+    the lane holds no run for is nobody's: an `asf land` request is never factory work
+    (:meth:`asf.harvest.lane.Lane.branch_facts`), so the lane does not rebase it and the line says
+    so rather than leaving an operator to infer it from silence."""
+    if lane.conv.branch_kind(b) and run is None:
+        where = f' in {", ".join(files)}' if files else ''
+        return (f'conflicts with {lane.trunk}{where} and no session run holds {b} — an asf land '
+                f'request is never factory work, so the lane does not rebase it: rebase the '
+                f'branch onto origin/{lane.trunk} and push, or hand its card back to a session')
+    return f'conflicts with {lane.trunk} — merge or rebase it'
+
+
+def _conflict_back(lane, b, n, head, run, files):
     """Send factory branch ``b`` (PR ``n`` at ``head``, its lane run ``run``), which the host
     reads ``mergeable: CONFLICTING``, BACK with the lane's own ``kind=conflict`` correction
-    (:meth:`asf.harvest.lane.Lane.enter_back`): the files the merge names, else the host-only
-    dirty read (#44). Its rebuild rebases it on the trunk; the request stays and is judged
-    again on the new head."""
+    (:meth:`asf.harvest.lane.Lane.enter_back`): ``files``, the conflicting paths
+    :func:`merge_read` already read (empty — ``host_dirty`` — when only GitHub's own merge says
+    so: a merge driver it cannot apply). Its rebuild rebases it on the trunk; the request stays
+    and is judged again on the new head."""
     rec = lifecycle.lane_of(run)
-    files = lane_mod.conflict_files(lane.repo, lane.trunk, b, fetch=False)
     f = {'branch': b, 'item': rec.get('item') or (run or {}).get('item'),
          'kind': lane.conv.branch_kind(b), 'head': head, 'run': run, 'prev': rec or None,
-         'pr': {'number': n, 'state': 'OPEN'}, 'conflict': files, 'host_dirty': not files,
+         'pr': {'number': n, 'state': 'OPEN'}, 'conflict': list(files), 'host_dirty': not files,
          'correction': None}
     lane.out(f'merge queue: asf land PR #{n} conflicts with {lane.trunk} at {head[:12]} — '
              f'back to the lane for a rebase')
