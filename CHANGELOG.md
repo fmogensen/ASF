@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.261 — 2026-10-08
+
+### Features landed
+
+- The session shim's trunk check runs the pin or refuses the push (#1196)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.261"`
+
 ## v0.1.260 — 2026-10-08
 
 ### Bugs fixed
