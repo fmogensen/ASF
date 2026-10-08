@@ -399,6 +399,14 @@ class CancelledCheckTests(DwellTestCase):
         gh.assert_not_called()
         self.assertEqual(self.by_state(found, 'check_cancelled'), [])
 
+    def test_a_stale_cancelled_check_shadowed_by_its_own_rerun_is_not_a_breach(self):
+        # the rollup keeps the pre-rerun CANCELLED run of "tests" beside the rerun's own
+        # later, SUCCESS one — B-82658: judging the stale twin breached for ever
+        prs = [pr(1, 'a' * 40, [check('tests', 'CANCELLED', at=NOW - 30 * 60),
+                                check('tests', 'SUCCESS', at=NOW - 5 * 60)])]
+        self.assertEqual(self.by_state(self.found(FakeFacts(self.product, prs=prs)),
+                                       'check_cancelled'), [])
+
 
 class UngrantableHoldTests(DwellTestCase):
     def test_an_ungrantable_hold_is_dropped_and_a_grantable_one_alarms_never(self):
