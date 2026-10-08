@@ -1,6 +1,7 @@
 """The CLI dispatcher (asf.dispatch): the script is written into a temp HOME and executed, with
 two products pinned to fake venvs whose ``bin/asf`` prints its own venv name — never the
 operator's ``~/.local/bin/asf``, ``~/.ASF`` or a real venv."""
+import contextlib
 import json
 import os
 import shutil
@@ -10,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import dispatch
+from asf import dispatch, env
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SMOKE = os.path.join(ROOT, 'tools', 'hook-smoke.sh')
@@ -248,6 +249,99 @@ class Install(Fixture):
         with mock.patch.object(sys, 'prefix', sys.base_prefix):  # no venv runs this process
             rc, detail = self.write(default_product='nobody')
         self.assertEqual(rc, 2)
+        self.assertIn('NEEDS OPERATOR', detail)
+
+
+class Reassert(Fixture):
+    """``dispatch.reassert`` takes only ``path`` (PD9: a default-resolved call reads the real
+    ``~/.local/bin/asf``, so every test here passes ``self.path`` explicitly), and resolves
+    ``asf_home``/``venvs``/``default_product`` the way :func:`dispatch.install` does on its own —
+    through :data:`asf.env.ASF_HOME`, :func:`dispatch.pipx_venvs` and :func:`asf.env.load_config`,
+    patched here onto the Fixture's own home."""
+
+    def setUp(self):
+        super().setUp()
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(env, 'ASF_HOME', self.asf_home))
+        stack.enter_context(mock.patch.object(dispatch, 'pipx_venvs', return_value=self.venvs))
+        stack.enter_context(mock.patch.object(env, 'load_config',
+                                              return_value={'default_product': 'alpha'}))
+
+    def test_an_absent_path_is_a_no_op(self):
+        os.remove(self.path)
+        self.assertEqual(dispatch.reassert(self.path), (False, None))
+        self.assertFalse(os.path.lexists(self.path))
+
+    def test_a_pipx_link_is_replaced_and_kept_and_a_second_pass_is_a_no_op(self):
+        os.remove(self.path)
+        target = os.path.join(self.shared, 'bin', 'asf')
+        os.symlink(target, self.path)
+        changed, detail = dispatch.reassert(self.path)
+        self.assertTrue(changed, detail)
+        self.assertTrue(dispatch.is_ours(self.path))
+        self.assertEqual(os.readlink(self.path + dispatch.LINK_BACKUP), target)
+        self.assertIn(dispatch.LINK_BACKUP, detail)
+        with open(self.path, 'rb') as f:
+            written = f.read()
+        mtime = os.stat(self.path).st_mtime_ns
+        self.assertEqual(dispatch.reassert(self.path), (False, None))
+        with open(self.path, 'rb') as f:
+            self.assertEqual(f.read(), written)
+        self.assertEqual(os.stat(self.path).st_mtime_ns, mtime)
+
+    def test_a_current_dispatcher_is_a_no_op(self):
+        mtime = os.stat(self.path).st_mtime_ns
+        self.assertEqual(dispatch.reassert(self.path), (False, None))
+        self.assertEqual(os.stat(self.path).st_mtime_ns, mtime)
+
+    def test_an_agent_home_link_to_a_dispatcher_is_a_no_op(self):
+        from asf.workers import runtime
+        session = os.path.join(self.tmp, 'session-home')
+        os.makedirs(session)
+        link = runtime.link_factory_cli(session, self.home)
+        self.assertEqual(dispatch.reassert(link), (False, None))
+        self.assertTrue(os.path.islink(link))
+        self.assertFalse(os.path.lexists(link + dispatch.LINK_BACKUP))
+
+    def test_a_foreign_file_is_refused_and_left_untouched(self):
+        with open(self.path, 'w') as f:
+            f.write('#!/bin/sh\necho mine\n')
+        changed, detail = dispatch.reassert(self.path)
+        self.assertFalse(changed)
+        self.assertIn('NEEDS OPERATOR', detail)
+        with open(self.path) as f:
+            self.assertEqual(f.read(), '#!/bin/sh\necho mine\n')
+
+    def test_an_out_of_date_dispatcher_is_rewritten(self):
+        with open(self.path) as f:
+            current = f.read()
+        drifted = current.replace('ASF_DISPATCH_DEFAULT_PRODUCT=', 'ASF_DISPATCH_DEFAULT_PRODUCT=stale # ', 1)
+        self.assertNotEqual(drifted, current)
+        with open(self.path, 'w') as f:
+            f.write(drifted)
+        changed, detail = dispatch.reassert(self.path)
+        self.assertTrue(changed, detail)
+        with open(self.path) as f:
+            self.assertEqual(f.read(), current)
+
+    def test_a_dangling_symlink_is_replaced(self):
+        os.remove(self.path)
+        os.symlink(os.path.join(self.tmp, 'gone', 'bin', 'asf'), self.path)
+        changed, detail = dispatch.reassert(self.path)
+        self.assertTrue(changed, detail)
+        self.assertTrue(dispatch.is_ours(self.path))
+
+    def test_with_no_config_yaml_load_config_still_answers_and_nothing_raises(self):
+        with mock.patch.object(env, 'load_config', return_value={}):
+            changed, detail = dispatch.reassert(self.path)
+        self.assertTrue(changed, detail)
+        self.assertTrue(dispatch.is_ours(self.path))
+
+    def test_an_os_error_from_install_never_raises(self):
+        with mock.patch.object(dispatch, 'install', side_effect=OSError('read-only file system')):
+            changed, detail = dispatch.reassert(self.path)
+        self.assertFalse(changed)
         self.assertIn('NEEDS OPERATOR', detail)
 
 

@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import capacity, ci_queue, env
+from asf import capacity, ci_queue, dispatch, env
 from asf.tick import shadow, steps, summary, tick
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_tick` does not
@@ -1587,3 +1587,59 @@ class MinimalProductTick(TickTestCase):
         rc, out = self.run_tick(steps='record,prs,harvest')   # the steps that need no host
         self.assertEqual(rc, 0, out)
         self.assertIn('committed and pushed', out)
+
+
+class DispatcherReassertTests(TickTestCase):
+    """S-76256: ``cmd_tick`` re-asserts the dispatcher once per pass, before it takes the lock.
+    ``dispatch.reassert`` itself is :mod:`tests.test_dispatch`'s; this is only the call site's
+    three printing arms and its three early returns."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(tick, 'write_tick_line', lambda ctx, ran: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_calls_reassert_once_and_prints_nothing_when_there_was_nothing_to_do(self):
+        with mock.patch.object(dispatch, 'reassert', return_value=(False, None)) as m:
+            rc, out = self.run_tick(steps='record')
+        m.assert_called_once_with()
+        self.assertEqual(rc, 0)
+        self.assertNotIn('tick: dispatcher', out)
+
+    def test_prints_the_detail_on_stdout_when_it_changed_something(self):
+        with mock.patch.object(dispatch, 'reassert', return_value=(
+                True, 'dispatcher: /x/.local/bin/asf written (default /y)')):
+            rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertIn('tick: dispatcher — dispatcher: /x/.local/bin/asf written (default /y)\n', out)
+
+    def test_prints_the_needs_operator_detail_to_stderr_and_still_runs_the_tick(self):
+        err = io.StringIO()
+        with mock.patch.object(dispatch, 'reassert', return_value=(
+                False, "NEEDS OPERATOR: /x/.local/bin/asf is not asf's dispatcher")):
+            with contextlib.redirect_stderr(err):
+                rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertIn("tick: dispatcher — NEEDS OPERATOR: /x/.local/bin/asf is not asf's dispatcher\n",
+                      err.getvalue())
+        self.assertIn('committed and pushed', out)  # the refusal never stops the tick
+
+    def test_dry_run_does_not_call_reassert(self):
+        with mock.patch.object(dispatch, 'reassert') as m:
+            rc, out = self.run_tick(dry_run=True)
+        self.assertEqual(rc, 0, out)
+        m.assert_not_called()
+
+    def test_shadow_does_not_call_reassert(self):
+        with mock.patch.object(tick, 'render_tables', return_value={}), \
+                mock.patch.object(dispatch, 'reassert') as m:
+            rc, out = self.run_tick(shadow=True)
+        self.assertEqual(rc, 0, out)
+        m.assert_not_called()
+
+    def test_manifest_does_not_call_reassert(self):
+        with mock.patch.object(dispatch, 'reassert') as m:
+            rc, out = self.run_tick(manifest=True)
+        self.assertEqual(rc, 0, out)
+        m.assert_not_called()
