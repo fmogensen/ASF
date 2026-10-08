@@ -388,6 +388,17 @@ class CancelledCheckTests(DwellTestCase):
         self.assertTrue(f.breach)
         self.assertEqual(f.action, '')
 
+    def test_a_matrix_leg_cancelled_by_a_failing_sibling_is_not_rerun(self):
+        # B-82407: python 3.12 really fails; the default fail-fast strategy cancels 3.13 in the
+        # same run as collateral — re-running it only cancels it again, forever, since 3.12
+        # fails again each time. That is not an infra fluke `rerun` can fix.
+        prs = [pr(1, 'a' * 40, [check('tests (3.12)', 'FAILURE', run='991'),
+                                check('tests (3.13)', 'CANCELLED', run='991')])]
+        with mock.patch.object(github, 'gh') as gh:
+            found = self.found(FakeFacts(self.product, required=('tests',), prs=prs), act=True)
+        gh.assert_not_called()
+        self.assertEqual(self.by_state(found, 'check_cancelled'), [])
+
 
 class UngrantableHoldTests(DwellTestCase):
     def test_an_ungrantable_hold_is_dropped_and_a_grantable_one_alarms_never(self):
