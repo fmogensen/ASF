@@ -85,7 +85,7 @@ import datetime as dt
 import math
 import re
 
-from asf import amendable, budget, config_keys
+from asf import amendable, budget, config_keys, invariants
 from asf.feeder import footprint
 from asf.groom import policy as groom_policy
 from asf.record import replan as replan_mod
@@ -638,7 +638,11 @@ def after_of(items, item, absorbed=None, keep_aside=False):
 
     An item the map sets aside as ``console_aside`` (``flags.console_wait: aside``,
     :func:`console_only` — its only row waits on the console) is dropped too: it orders nothing
-    (W8-PR1). ``keep_aside``: keep it — the edge as the record has it."""
+    (W8-PR1). ``keep_aside``: keep it — the edge as the record has it.
+
+    So is an Active Task parked under a ``priority: later`` Feature or Epic, for an ``item``
+    that is not itself parked (:func:`parked_after`, B-82960): the edge stays on the card, so
+    once the product raises the Feature the order holds again."""
     absorbed = absorbers(items) if absorbed is None else absorbed
     out = []
     gone = getattr(items, 'retired_open', {})
@@ -653,6 +657,26 @@ def after_of(items, item, absorbed=None, keep_aside=False):
             continue  # removed outright: a dead edge (dead_after says so)
         if a != item.get('id') and a not in out and a not in aside:
             out.append(a)
+    if keep_aside or not out:
+        return out
+    parked = dict(parked_after(items, item, out))
+    return [a for a in out if a not in parked]
+
+
+def parked_after(items, item, ids=None):
+    """``[(id, holder)]``: the ``after:`` entries of ``item`` (or ``ids``) that are Active Tasks
+    parked under a ``priority: later`` card ``holder`` — none when ``item`` is parked itself
+    (B-82960). The parked Task is not being built and will not be until the product raises it:
+    an order on it would hold live work for the whole freeze, and I3 holds no footprint for it."""
+    if invariants.later_holder(items, item.get('id')):
+        return []
+    out = []
+    for a in item.get('after') or () if ids is None else ids:
+        dep = items.get(a) or {}
+        if dep.get('type') == 'task' and dep.get('state') == 'Active':
+            holder = invariants.later_holder(items, a)
+            if holder:
+                out.append((a, holder))
     return out
 
 
@@ -1254,10 +1278,15 @@ def running_footprints(items, busy):
 
     A delivery lead (``delivers:``) that is open and busy holds its union footprint the same
     way — an unrelated Task sharing a file with any of its open members waits on the lead, not
-    on the member (F-0102 D-line)."""
+    on the member (F-0102 D-line).
+
+    A Task parked under a ``priority: later`` Feature or Epic holds no footprint either, busy
+    or not (B-82960): the product put it aside, and holding its files would stall live work
+    behind it for as long as the scope freeze lasts."""
     out = []
     for t in sorted(ix.of_type(items, 'task'), key=lambda v: v['id']):
-        if t['id'] in busy and t.get('writes') and is_open(t) and not t.get('removed'):
+        if t['id'] in busy and t.get('writes') and is_open(t) and not t.get('removed') \
+                and not invariants.later_holder(items, t['id']):
             out.append((t['id'], list(t['writes'])))
     for v in sorted(items.values(), key=lambda v: v['id']):
         if v.get('delivers') and v['id'] in busy and is_open(v):
@@ -2093,6 +2122,11 @@ def hold_unlanded(rows, items, landed_shas=None, product=None, on_trunk=None):
             if put and not pending and r.launches:
                 r = dataclasses.replace(r, reason=f"{r.reason} (after: {', '.join(put)} waits on "
                                                   f"the console — put aside, it orders nothing)")
+            parked = parked_after(items, items.get(r.item_id) or {})
+            if parked and not pending and r.launches:
+                said_parked = ', '.join(f'{a} parked: {h} {LATER}' for a, h in parked)
+                r = dataclasses.replace(r, reason=f"{r.reason} (after: {said_parked} — it holds "
+                                                  f"no footprint, it orders nothing)")
         # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
         # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print.
         # A review of a pushed branch reads a diff and changes nothing the predecessor writes:
