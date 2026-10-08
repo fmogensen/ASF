@@ -78,14 +78,51 @@ def rank(ref, trunk, prs):
     return (1, ref)
 
 
+def _added(repo, trunk, rev):
+    r = H.sh(['git', 'diff', '--name-only', '--diff-filter=A',
+              f'origin/{trunk}...{rev}'], cwd=repo)
+    return [l for l in r.stdout.splitlines() if l.strip()]
+
+
 def added_files(repo, trunk, ref):
     """The paths ``origin/<ref>``'s own commits *add* since it left the trunk —
     ``git diff --name-only --diff-filter=A origin/<trunk>...origin/<ref>``. The sibling of
     :func:`asf.harvest.lane.touched_files` and different from it in one flag on purpose: that one
     lists edits too, and a branch that fixes a typo in a landed ``0201_*.sql`` books nothing."""
-    r = H.sh(['git', 'diff', '--name-only', '--diff-filter=A',
-              f'origin/{trunk}...origin/{ref}'], cwd=repo)
-    return [l for l in r.stdout.splitlines() if l.strip()]
+    return _added(repo, trunk, f'origin/{ref}')
+
+
+def booked(repo, trunk, rev, seqs):
+    """``[(sequence, number)]``, sorted — the numbers the commits of ``rev`` *add* under a
+    sequence's directory since they left the trunk. ``rev`` is any revision: ``HEAD`` in a
+    session's own worktree for a branch not yet on origin (P15), ``origin/<ref>`` for one that is,
+    so the lane can read the same rule off a pushed branch."""
+    return _numbers_under(_added(repo, trunk, rev), seqs)
+
+
+def pending_added(repo, seqs):
+    """``[(sequence, number)]`` for a file this worktree has added but not committed — one
+    ``git status --porcelain --untracked-files=all``, ``A``/``??`` entries only (D7). A session
+    that runs the check before ``git add`` is still told about the migration it just wrote."""
+    r = H.sh(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=repo)
+    paths = []
+    for line in r.stdout.splitlines():
+        if not line:
+            continue
+        status = line[:2]
+        if status == '??' or 'A' in status:
+            paths.append(line[3:])
+    return _numbers_under(paths, seqs)
+
+
+def _numbers_under(paths, seqs):
+    """``[(sequence, number)]`` for ``paths``, each matched against its sequence's directory and
+    regex — the loop :func:`added_bookings` runs per ref (`:107-110`), as one reader."""
+    out = set()
+    for name, (dirname, regex, _width) in seqs.items():
+        names = [os.path.basename(p) for p in paths if os.path.dirname(p) == dirname]
+        out.update((name, n) for n in reserve.numbers_in(names, regex))
+    return sorted(out)
 
 
 def added_bookings(product, seqs, refs):
@@ -104,11 +141,24 @@ def added_bookings(product, seqs, refs):
         trunk_names = list(trunk_trees.get(f'{trunk_rev}:{dirname}', {}))
         for n in reserve.numbers_in(trunk_names, regex):
             out.append(Booking(name, n, trunk, ADDED))
-        for ref, added in added_by_ref.items():
-            names = [os.path.basename(f) for f in added if os.path.dirname(f) == dirname]
-            for n in reserve.numbers_in(names, regex):
-                out.append(Booking(name, n, ref, ADDED))
+    for ref, added in added_by_ref.items():
+        for name, n in _numbers_under(added, seqs):
+            out.append(Booking(name, n, ref, ADDED))
     return out
+
+
+def declared(item, seqs):
+    """``[(sequence, number)]``, sorted — the numbers one card's ``writes:`` globs name. A glob
+    books only when its filename half matches the sequence's regex, so ``db/migrations/*`` and
+    ``029[01]_*.sql`` name none. The inner half of :func:`writes_bookings`, lifted so the brief
+    that states a reservation and the check that enforces it can never read it differently."""
+    out = set()
+    for glob in (item or {}).get('writes') or []:
+        dirname, filename = reserve.split_pattern(glob)
+        for name, (seq_dir, regex, _width) in (seqs or {}).items():
+            if dirname == seq_dir:
+                out.update((name, n) for n in reserve.numbers_in([filename], regex))
+    return sorted(out)
 
 
 def writes_bookings(product, items, seqs):
@@ -129,14 +179,14 @@ def writes_bookings(product, items, seqs):
         carrier = feeder_rows.plan_carrier(feature) if feature else ''
         kind = 'fix' if item.get('type') == 'bug' else 'code'
         branch = carrier or feeder_rows.branch_for(product, kind, item_id)
-        for glob in globs:
-            dirname, filename = reserve.split_pattern(glob)
-            for name, (seq_dir, regex, _width) in seqs.items():
-                if dirname != seq_dir:
-                    continue
-                for n in reserve.numbers_in([filename], regex):
-                    out.append(Booking(name, n, branch, WRITES))
+        for name, n in declared(item, seqs):
+            out.append(Booking(name, n, branch, WRITES))
     return out
+
+
+#: The why :func:`command_bookings` returns for a product that declares no ``reservations`` key —
+#: not an error, so a caller never prints it as a standing warning on every push (PD4).
+NO_COMMAND = 'no reservations command configured'
 
 
 def command_bookings(product, refs):
@@ -150,7 +200,7 @@ def command_bookings(product, refs):
     conv = product.conventions
     command = conv.get('reservations')
     if not command:
-        return [], 'no reservations command configured'
+        return [], NO_COMMAND
     argv = shlex.split(str(command)) + list(refs)
     timeout = H.gate_timeout(conv)
     rc, out, err = H.sh_timed(argv, product.repo_dir, H.gate_env(), timeout)
@@ -261,9 +311,50 @@ def refusal(snapshot, ref):
     return RESERVED, text
 
 
-def snapshot(product, items, heads, prs):
+def unhonoured(reserved, booked_pairs):
+    """``[(sequence, reserved_numbers, number)]`` — one row per number ``booked_pairs`` carries in
+    a sequence that ``reserved`` (:func:`declared`) names at least one number in, and that is not
+    one of them. A sequence ``reserved`` names no number in is open and yields nothing (D4); a
+    sequence it names numbers in that the branch has not booked at all yields nothing either — the
+    work is not done yet, which is not a reservation defect (D5)."""
+    by_seq = collections.defaultdict(set)
+    for sequence, number in reserved or ():
+        by_seq[sequence].add(number)
+    out = []
+    for sequence, number in booked_pairs or ():
+        numbers = by_seq.get(sequence)
+        if numbers and number not in numbers:
+            out.append((sequence, sorted(numbers), number))
+    return sorted(out)
+
+
+def honour_refusal(rows, seqs):
+    """``(RESERVED, text)`` for a non-empty :func:`unhonoured`, else None — the same pair
+    :func:`refusal` returns, so one correction kind covers both grounds (D6). The words name the
+    card's number first and the branch's second: ``reserved: this card holds migrations 0320;
+    this branch books 0321. Rename the file to the reserved number and every reference to it, and
+    push it again. A number the card does not hold is a number another open branch may hold.``"""
+    if not rows:
+        return None
+    sentences = []
+    for sequence, reserved_numbers, number in rows:
+        width = seqs.get(sequence, ('', None, 0))[2]
+        reserved_str = ', '.join(reserve.format_number(n, width) for n in reserved_numbers)
+        booked_str = reserve.format_number(number, width)
+        sentences.append(
+            f'this card holds {sequence} {reserved_str}; this branch books {booked_str}.')
+    text = 'reserved: ' + ' '.join(sentences) + (
+        ' Rename the file to the reserved number and every reference to it, and push it again. '
+        'A number the card does not hold is a number another open branch may hold.')
+    return RESERVED, text
+
+
+def snapshot(product, items, heads, prs, extra=()):
     """The whole map, once: ``{'at', 'trunk', 'refs', 'prs', 'sequences', 'errors'}``, where
-    ``sequences`` is ``{name: {'width': int, 'held': {number: [ref, ...]}}}``."""
+    ``sequences`` is ``{name: {'width': int, 'held': {number: [ref, ...]}}}``. ``extra`` is a
+    branch's own live bookings, merged in before :func:`refusal` is read (PD1) — a branch not yet
+    on origin holds nothing in ``heads`` or ``refs`` *by construction*, so without this its own
+    clash is invisible to itself."""
     conv = product.conventions
     trunk = conv.main
     seqs = sequences(conv)
@@ -273,7 +364,10 @@ def snapshot(product, items, heads, prs):
     bookings += writes_bookings(product, items, seqs)
     cmd_bookings, cmd_error = command_bookings(product, refs)
     bookings += cmd_bookings
+    bookings += list(extra)
     ranked = {ref: rank(ref, trunk, prs) for ref in refs}
+    for b in extra:
+        ranked.setdefault(b.ref, rank(b.ref, trunk, prs))
     holds = holdings(bookings, ranked)
     sequences_out = {}
     for name, (_dirname, _regex, width) in seqs.items():
