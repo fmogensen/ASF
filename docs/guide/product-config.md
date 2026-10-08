@@ -993,6 +993,46 @@ Rules live in the record's `rules/` folder as `R-nnnn` cards. Each carries a `ch
 (the record's own script, else ASF's core script of the same name), or `enforced: false` with a
 `reason:`. The contract: exit 0 is a pass; exit 1 with one line per place is a violation.
 
+**Asking what ASF already owns.** A product rule about open pull requests — *no PR sits
+conflicting*, *no PR goes stale* — will otherwise flag the PRs ASF's own PR-hygiene pass is
+already working. `asf pr-hygiene --product <p> --lanes` is the supported way to ask. It prints one
+JSON object per line, one per PR in a hygiene lane, and nothing else on stdout:
+
+```
+{"action": "close", "branch": "worker/T-0001", "lane": "stale", "pr": 4, "since": "2026-09-21T00:00:00Z"}
+{"action": "rebase", "branch": "worker/T-0002", "lane": "conflict", "pr": 5, "since": "2026-09-21T00:00:00Z"}
+```
+
+| key | what it is |
+| --- | --- |
+| `pr` | the pull request number |
+| `branch` | the branch it is open from |
+| `lane` | `stale` — the lane found it stale — or `conflict` — the gate could not rebase it |
+| `since` | when the branch entered that lane, or `null` when the state does not say |
+| `action` | what the lane is waiting to do: `close` or `rebase` |
+
+It reads the state the tick's `prs` step already cached and makes no network call, so a check may
+call it every run. The exit codes match the contract above: **0** with output, **0** with no
+output when ASF owns nothing, and **2** when the product or its state cannot be read — propagate
+that 2 and your check becomes a check failure rather than a rule the product broke. Name
+`--product` explicitly: a check gets `BACKLOG_ROOT` and a working directory, and no product in its
+environment.
+
+```sh
+#!/usr/bin/env bash
+# R-nnnn: no PR sits conflicting — except the ones ASF's hygiene pass already owns.
+set -euo pipefail
+product=your-product                                     # never `<p>`: inside $( ) that is a redirect
+owned=$(asf pr-hygiene --product "$product" --lanes) || exit 2   # 2 is a check failure, never a pass
+owned=$(printf '%s\n' "$owned" | python3 -c 'import json, sys
+print(" ".join(str(json.loads(l)["pr"]) for l in sys.stdin if l.strip()))')
+lines=$(for pr in $(your_conflicting_prs); do
+          case " $owned " in *" $pr "*) continue ;; esac
+          echo "PR #$pr sits conflicting"
+        done)
+[ -z "$lines" ] || { printf '%s\n' "$lines"; exit 1; }
+```
+
 A rule card with `removed:` or `moved_to:` is **retired**: `asf rules check` skips it and its check
 no longer binds the record. On any other card, `removed:` retires it the same way: the tables and
 the wave leave it out, nothing is started on it, and a session whose item is removed is ended and
