@@ -104,7 +104,8 @@ def pending_added(repo, seqs):
     """``[(sequence, number)]`` for a file this worktree has added but not committed — one
     ``git status --porcelain --untracked-files=all``, ``A``/``??`` entries only (D7). A session
     that runs the check before ``git add`` is still told about the migration it just wrote."""
-    r = H.sh(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=repo)
+    r = H.sh(['git', 'status', '--porcelain', '--untracked-files=all'],  # client-exempt: as _added, through H.sh per the spec/plan
+             cwd=repo)
     paths = []
     for line in r.stdout.splitlines():
         if not line:
