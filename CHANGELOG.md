@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.250 — 2026-10-08
+
+### Features landed
+
+- The pause record, the one predicate, and the two verbs that write it (#1080)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.250"`
+
 ## v0.1.249 — 2026-10-08
 
 ### Features landed
