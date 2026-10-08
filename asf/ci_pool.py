@@ -1621,6 +1621,8 @@ def register(subparsers):
     ci_measure.register(sub)
     from asf import ci_queue
     ci_queue.register(sub)
+    from asf import ci_vm
+    ci_vm.register(sub)
     from asf import ci_cancels
     c = sub.add_parser('cancels', help='every cancelled run, told apart into one cause, as a '
                                        'table (F-0230)')

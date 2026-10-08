@@ -3440,6 +3440,11 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
     if ci_queue.queue_pass(product, items=lane.items, out=lane.out,
                            dry_run=lane.dry_run) is None:
         lane.out('ci queue: its own pass is running — the lane leaves the queue to it')
+    # ci.provider: vm's own pass (dispatch, collect, supersede, time out), under its own lock:
+    # not a vm product, (0, 0) at once, no ssh and no git call (asf.ci_vm.vm_pass)
+    from asf import ci_vm
+    if ci_vm.vm_pass(product, out=lane.out, dry_run=lane.dry_run) is None:
+        lane.out('ci vm: its own pass is running — the lane leaves the CI pass to it')
     return lane.results, found
 
 
