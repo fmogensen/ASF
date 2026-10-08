@@ -178,6 +178,13 @@ DEFAULT_HARVEST_GATE = 'combined'
 #: ``harvest: {branches_per_tick: …}`` in the yaml.
 DEFAULT_BRANCHES_PER_TICK = 12
 
+#: ``conventions.boundary`` (F-0026): how harvest treats a branch whose diff leaves its grant —
+#: ``hold`` (held, the extra diff listed for the groom, nothing reverted), ``warn`` (the extra
+#: diff printed, the branch gated and landed as usual) or ``off`` (not checked). Read through
+#: :func:`asf.boundary.mode`; an unknown value reads as ``hold`` and :func:`asf.boundary.mode_warning`
+#: names it once, rather than silently treating it as ``off``.
+DEFAULT_BOUNDARY = 'hold'
+
 #: The most seconds one gate run (the test command, each check) may take before harvest kills
 #: its process group and holds the branch as red (B-0072: a test that recursed through the
 #: pre-commit hook hung the tick, and every tick after it). The tick's clock, by default.
@@ -846,6 +853,9 @@ class Conventions:
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
+    #: ``boundary``: how harvest treats a branch whose diff leaves its grant
+    #: (:data:`DEFAULT_BOUNDARY`, :func:`asf.boundary.mode`).
+    boundary: str = DEFAULT_BOUNDARY
     #: ``git.push_timeout_s`` (:data:`DEFAULT_PUSH_TIMEOUT_S`).
     push_timeout_s: int = DEFAULT_PUSH_TIMEOUT_S
     briefs_dir: str = DEFAULT_BRIEFS_DIR

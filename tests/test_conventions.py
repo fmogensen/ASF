@@ -26,6 +26,7 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual((c.main, c.preamble_max_lines, c.prs_per_tick, c.land_window_days),
                          ('main', 120, 6, 7))
         self.assertEqual((c.harvest_gate, c.branches_per_tick, c.gate_timeout_s), ('combined', 12, 600))
+        self.assertEqual(c.boundary, 'hold')
         self.assertEqual((c.readme, c.readme_facts), ('README.md', 'docs/readme-numbers.json'))
         self.assertEqual(c.stage_limits, {})
         self.assertEqual(c.heavy_share_pct, 50)
@@ -84,6 +85,10 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(Conventions.from_mapping({'harvest': {}}), Conventions())
         self.assertEqual(Conventions.from_mapping({'harvest_gate': 'per-branch'}).harvest_gate,
                          'per-branch')
+
+    def test_boundary_overrides_the_default(self):
+        self.assertEqual(Conventions.from_mapping({'boundary': 'warn'}).boundary, 'warn')
+        self.assertEqual(Conventions.from_mapping({}).boundary, 'hold')
 
     def test_an_unknown_key_is_kept_not_rejected(self):
         c = Conventions.from_mapping({'slack_channel': '#asf', 'specs_dir': 'specs'})
@@ -326,6 +331,7 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_HARVEST_GATE, c.harvest_gate)
         self.assertEqual(conv_mod.DEFAULT_BRANCHES_PER_TICK, c.branches_per_tick)
         self.assertEqual(conv_mod.DEFAULT_GATE_TIMEOUT_S, c.gate_timeout_s)
+        self.assertEqual(conv_mod.DEFAULT_BOUNDARY, c.boundary)
         self.assertEqual(conv_mod.DEFAULT_SAVINGS, c.savings)
         self.assertEqual((conv_mod.DEFAULT_README, conv_mod.DEFAULT_README_FACTS),
                          (c.readme, c.readme_facts))

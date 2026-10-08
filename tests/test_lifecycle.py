@@ -2424,6 +2424,30 @@ class RebaseOverAReportCommitTest(unittest.TestCase):
         self.assertIs(fields['correction'].get('parked'), True, line)
 
 
+class HoldExtraTests(unittest.TestCase):
+    """F-0026 §2.4: a boundary hold's out-of-grant paths ride the correction as ``extra``."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix='hold_extra_')
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.path = os.path.join(self.base, 's.jsonl')
+        self.run = {'job': 'code-t-0080', 'item': 'T-0080', 'branch': 'worker/T-0080'}
+
+    def test_extra_is_merged_into_the_correction(self):
+        fields, line = lc.hold(self.path, self.run, 'boundary', 'writes outside its grant: a.py',
+                               'now', extra={'outside': ['a.py', 'b.py']})
+        self.assertEqual(fields['correction']['outside'], ['a.py', 'b.py'])
+        self.assertEqual(fields['correction']['kind'], 'boundary')
+        self.assertIn('held worker/T-0080', line)
+
+    def test_no_extra_is_byte_for_byte_what_it_was(self):
+        with_none, line_a = lc.hold(self.path, self.run, 'boundary', 'x', 'now')
+        with_empty, line_b = lc.hold(self.path, self.run, 'boundary', 'x', 'now', extra={})
+        self.assertEqual(with_none, with_empty)
+        self.assertEqual(line_a, line_b)
+        self.assertNotIn('outside', with_none['correction'])
+
+
 class RebaseOffRewordedTrunkCopiesTest(unittest.TestCase):
     """A product's T-0338/T-0349, 2026-09-27: the lane branch carried copies of trunk commits
     whose patches no longer matched the trunk's (the trunk's own landing differed) and whose

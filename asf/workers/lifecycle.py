@@ -3110,7 +3110,8 @@ def loop_text(n, kind, sha, item):
             f'could not move the branch, fix that, then `asf unpark {item}`')
 
 
-def hold(path, run, kind, text, now, empty_cap=None, head=None, finding=None, main=None):
+def hold(path, run, kind, text, now, empty_cap=None, head=None, finding=None, main=None,
+        extra=None):
     """``(fields, line)``: what to append to ``run`` to hold its branch and hand it back, and
     the line to print. The rounds counter runs over every run of the item and stops climbing at
     :data:`ROUND_CAP` (B-0048). The escalation is counted on the hold's finding instead
@@ -3121,7 +3122,18 @@ def hold(path, run, kind, text, now, empty_cap=None, head=None, finding=None, ma
     An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round,
     and so does the loop guard (:func:`same_head_loop`): the same kind handed the same head
     :func:`loop_cap` times — ``head``, when the caller knows it, is where the branch sits now;
-    ``main``, when given, lets a worktree rebased onto a newer trunk count as a moved head."""
+    ``main``, when given, lets a worktree rebased onto a newer trunk count as a moved head.
+    ``extra``: more keys merged into the correction dict on every return path (F-0026's boundary
+    hold uses it for ``outside``, the full out-of-grant path list the text's ``(+N more)``
+    abbreviates) — nowhere else, so a hold with no ``extra`` is byte-for-byte what it was."""
+    fields, line = _hold(path, run, kind, text, now, empty_cap=empty_cap, head=head,
+                         finding=finding, main=main)
+    if extra and fields.get('correction'):
+        fields = dict(fields, correction=dict(fields['correction'], **extra))
+    return fields, line
+
+
+def _hold(path, run, kind, text, now, empty_cap=None, head=None, finding=None, main=None):
     if empty_cap is None:
         empty_cap = empty_ends_cap()
     cap = round_cap()
