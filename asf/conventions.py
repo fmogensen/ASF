@@ -573,10 +573,10 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
-    ``worktree_setup``, ``pre_push_check``, ``auth_env``, ``full_suite_commands``,
-    ``check_commands``, ``read_only_allow``, ``customer_content``, ``security`` and ``feeder`` are
-    checked — every other key is kept verbatim (see the module doc), so a product file written
-    for a newer ``asf`` still loads."""
+    ``worktree_setup``, ``pre_push_check``, ``pre_push_checks``, ``auth_env``,
+    ``full_suite_commands``, ``check_commands``, ``read_only_allow``, ``customer_content``,
+    ``security`` and ``feeder`` are checked — every other key is kept verbatim (see the module
+    doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -664,6 +664,26 @@ def validate_mapping(data):
                 except re.error as e:
                     problems.append(('customer_content.forbidden_markers',
                                      f'{pattern!r} is not a regex ({e})'))
+    checks = data.get('pre_push_checks')
+    if checks is not None:
+        if not isinstance(checks, list):
+            problems.append(('pre_push_checks', f'must be a list of rules, not {checks!r}'))
+        else:
+            for i, rule in enumerate(checks):
+                if not isinstance(rule, dict):
+                    problems.append((f'pre_push_checks[{i}]',
+                                     f'must be a map (paths, run, why), not {rule!r}'))
+                    continue
+                run = rule.get('run')
+                if not isinstance(run, str) or not run.strip():
+                    problems.append((f'pre_push_checks[{i}].run',
+                                     f'must be a non-empty command string, not {run!r}'))
+                why = _path_list_problem(rule.get('paths'))
+                if why:
+                    problems.append((f'pre_push_checks[{i}].paths', why))
+                w = rule.get('why')
+                if w is not None and not isinstance(w, str):
+                    problems.append((f'pre_push_checks[{i}].why', f'must be a string, not {w!r}'))
     sec = data.get('security')
     if sec is not None:
         if not isinstance(sec, dict):
@@ -1310,6 +1330,31 @@ class Conventions:
         not a silent default."""
         value = self.map_of('security').get('paths')
         return value if isinstance(value, dict) else {}
+
+    def pre_push_checks(self):
+        """``pre_push_checks``: ``[{paths: [glob], run: str, why: str}]`` in declaration order —
+        the reader shape of :func:`security_paths`: a value that is not a list reads as ``[]``.
+        A rule that is not a map, has no non-empty ``run``, a ``paths`` that is not a list of
+        non-empty strings, or a non-string ``why`` is dropped — ``validate_mapping`` is where a
+        malformed one is a loud problem; a half-read rule must never refuse a push."""
+        value = self.get('pre_push_checks')
+        if not isinstance(value, list):
+            return []
+        out = []
+        for rule in value:
+            if not isinstance(rule, dict):
+                continue
+            run = rule.get('run')
+            if not isinstance(run, str) or not run.strip():
+                continue
+            paths = rule.get('paths')
+            if _path_list_problem(paths) is not None:
+                continue
+            why = rule.get('why', '')
+            if why is not None and not isinstance(why, str):
+                continue
+            out.append({'paths': list(paths), 'run': run, 'why': why or ''})
+        return out
 
     def security_alerts(self):
         """``security.alerts``: ``{max_age_h}`` — :data:`DEFAULT_ALERT_MAX_AGE_H` when unset or
