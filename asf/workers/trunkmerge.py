@@ -44,11 +44,9 @@ ZERO = re.compile(r'^0+$')
 
 
 def _git(args, cwd, timeout=None):
-    try:
-        return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True,
-                              env=hermetic.git_env(), timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        return subprocess.CompletedProcess(e.cmd, 124, '', 'timed out')
+    from asf import gitops
+    r = gitops.git(args, cwd, timeout=timeout)
+    return subprocess.CompletedProcess(args, r.rc, r.stdout, r.stderr)
 
 
 def _run(command, cwd, timeout):
