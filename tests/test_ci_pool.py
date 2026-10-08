@@ -8,8 +8,6 @@ import subprocess
 import tempfile
 import unittest
 
-import yaml
-
 from asf import capacity, ci_census, ci_pool, env
 from asf.ci_pool import Runner, RunsOn
 
@@ -343,8 +341,32 @@ class JobTimeouts(unittest.TestCase):
         # cancellation as `check_cancelled` and burned its one re-run on a job that was never
         # broken, instead of the real failure being a finding of its own.
         with open('.github/workflows/tests.yml', encoding='utf-8') as f:
-            doc = yaml.safe_load(f)
-        self.assertEqual(doc['jobs']['tests']['strategy'].get('fail-fast'), False)
+            text = f.read()
+        # a line reader, not a YAML parser (this package takes no dependency, pyproject.toml:15):
+        # `jobs.tests.strategy.fail-fast` sits one indent under `strategy:`, itself one indent
+        # under the `tests:` job key.
+        job_indent, strategy_indent, fail_fast = None, None, None
+        for raw in text.splitlines():
+            stripped = raw.strip()
+            indent = len(raw) - len(raw.lstrip(' '))
+            if not stripped or stripped.startswith('#'):
+                continue
+            if job_indent is None:
+                if stripped == 'tests:':
+                    job_indent = indent
+                continue
+            if indent <= job_indent:
+                break
+            if strategy_indent is None:
+                if stripped == 'strategy:':
+                    strategy_indent = indent
+                continue
+            if indent <= strategy_indent:
+                break
+            if indent == strategy_indent + 2 and stripped.startswith('fail-fast:'):
+                fail_fast = stripped[len('fail-fast:'):].strip()
+                break
+        self.assertEqual(fail_fast, 'false')
 
     def test_github_backend_merges_across_files_and_shares_the_walk_with_runs_on(self):
         files = ['ci.yml', 'other.yml']
