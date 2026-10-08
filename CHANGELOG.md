@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.262 — 2026-10-08
+
+### Features landed
+
+- One `hooks.which_asf()`, so `install`, the `--dry-run` plan and the pre-launch refresh name the same asf (#1206)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.262"`
+
 ## v0.1.261 — 2026-10-08
 
 ### Features landed
