@@ -335,6 +335,17 @@ class JobTimeouts(unittest.TestCase):
     def test_default_job_timeout_min(self):
         self.assertEqual(ci_pool.DEFAULT_JOB_TIMEOUT_MIN, 360)
 
+    def test_this_repos_own_tests_matrix_does_not_fail_fast(self):
+        # B-83312: a real failure on one Python version cancelled the other version's job
+        # (matrix `strategy.fail-fast` defaults true) — the dwell watchdog then read that
+        # cancellation as `check_cancelled` and burned its one re-run on a job that was never
+        # broken (PR #1237 run 37829071085: 3.12 failed, 3.13 cancelled 67s later; its re-run
+        # 37830784743 then failed 3.13 and cancelled 3.12 instead).
+        import yaml
+        with open('.github/workflows/tests.yml', encoding='utf-8') as f:
+            doc = yaml.safe_load(f)
+        self.assertEqual(doc['jobs']['tests']['strategy'].get('fail-fast'), False)
+
     def test_github_backend_merges_across_files_and_shares_the_walk_with_runs_on(self):
         files = ['ci.yml', 'other.yml']
         texts = {

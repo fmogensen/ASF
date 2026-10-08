@@ -13,6 +13,10 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     strategy:
+      # a real failure on one Python version must not cancel the other's job (B-83312: that
+      # cancellation then reads to the dwell watchdog as `check_cancelled`, burning its one
+      # re-run on a job that was never broken)
+      fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
     steps:
