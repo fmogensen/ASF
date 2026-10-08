@@ -1387,21 +1387,10 @@ def merge_landed(ids, landed, product, green=None):
     return out
 
 
-#: The PR number in a merge-queue landing's subject (:data:`asf.trunk_watch.QUEUE_SUBJECT`).
-_QUEUE_NUMBER_RE = re.compile(r'^merge-queue: #(\d+) ')
-
-
 def queue_landed(commits):
-    """The PR numbers the merge queue landed on the trunk: every ``merge-queue: #<n> …`` subject
-    among ``commits`` (:func:`main_commits`' rows)."""
-    from asf.trunk_watch import QUEUE_SUBJECT
-    out = set()
-    for _sha, subject, _paths in _commit_rows(commits):
-        if QUEUE_SUBJECT.match(subject or ""):
-            m = _QUEUE_NUMBER_RE.match(subject)
-            if m:
-                out.add(int(m.group(1)))
-    return out
+    """The PR numbers the trunk carries as landed (:func:`asf.trunk_watch.landed_prs`)."""
+    from asf import trunk_watch
+    return set(trunk_watch.landed_prs(_commit_rows(commits)))
 
 
 def id_evidence(product, branches, prs, commits=None, green=None, merges=None, landed=None):
