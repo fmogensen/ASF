@@ -6,8 +6,10 @@ failed (a *phantom*), and a gate job that failed with no runner, no failed step 
 hand. Both are infra: re-run once on the head (``gh run rerun --failed``), claimed ``infra`` in
 ``ci-cancels.json``, never a red check; a second on the same head is one watchdog breach.
 """
+import datetime
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -52,19 +54,26 @@ class TheClassifier(unittest.TestCase):
 
 
 class GH:
-    """``gh`` as the classifier and the re-run call it: a run, its jobs, every call recorded."""
+    """``gh`` as the classifier and the re-run call it: a run, its jobs, every call recorded.
 
-    def __init__(self, run, jobs, rerun_rc=0):
+    One run (``run``, ``jobs``) answers every run id by default; ``runs``, a ``{run id: (run,
+    jobs)}`` map, answers a different run per run id instead — run 78 a test red while run 77
+    is a lost runner, say."""
+
+    def __init__(self, run=None, jobs=None, rerun_rc=0, runs=None):
         self.run, self.jobs, self.rerun_rc, self.calls = run, jobs, rerun_rc, []
+        self.runs = runs or {}
 
     def __call__(self, args):
         self.calls.append(list(args))
         if args[:2] == ['run', 'rerun']:
             return self.rerun_rc, '', 'HTTP 503' if self.rerun_rc else ''
-        if args[0] == 'api' and args[1].endswith('/jobs?per_page=100'):
-            return 0, json.dumps({'jobs': self.jobs}), ''
         if args[0] == 'api' and '/actions/runs/' in args[1]:
-            return 0, json.dumps(self.run), ''
+            m = re.search(r'/actions/runs/(\w+)', args[1])
+            run, jobs = self.runs.get(m.group(1), (self.run, self.jobs)) if m else (None, None)
+            if args[1].endswith('/jobs?per_page=100'):
+                return 0, json.dumps({'jobs': jobs}), ''
+            return 0, json.dumps(run), ''
         return 1, '', 'unexpected'
 
     def reruns(self):
@@ -72,6 +81,10 @@ class GH:
 
 
 LINK = 'https://github.com/o/p/actions/runs/77/job/{}'
+
+
+def link(run_id, job_id=1):
+    return f'https://github.com/o/p/actions/runs/{run_id}/job/{job_id}'
 
 
 class TheOneAnswer(unittest.TestCase):
@@ -84,21 +97,86 @@ class TheOneAnswer(unittest.TestCase):
         return GH(dict(FAILED, run_attempt=attempt),
                   [job('gate'), job('gate-tests', 'failure', runner='', jid=5)])
 
-    def test_infra_class_reads_one_run_behind_the_checks(self):
+    def test_infra_class_reads_the_run_behind_the_checks(self):
         gh = self.lost()
         got = flake.infra_class('o/p', [{'name': 'gate-tests', 'link': LINK.format(5)}], gh=gh)
         self.assertEqual(got, (flake.LOST_RUNNER, '77', 1))
-        two = [{'link': LINK.format(5)}, {'link': 'https://x/actions/runs/78/job/6'}]
-        self.assertIsNone(flake.infra_class('o/p', two, gh=gh))
         real = GH(FAILED, [job('gate', 'failure', failed_step=True)])
         self.assertIsNone(flake.infra_class('o/p', [{'link': LINK.format(1)}], gh=real))
 
-    def test_a_pending_probe_reads_a_run_once_an_interval(self):
+    def test_an_unreadable_run_answers_none(self):
+        class Unreadable(GH):
+            def __call__(self, args):
+                self.calls.append(list(args))
+                return 1, '', 'rc 1'
+        gh = Unreadable(FAILED, [])
+        self.assertIsNone(flake.infra_class('o/p', [{'link': LINK.format(5)}], gh=gh))
+
+    def test_the_phantom_beside_a_green_run_answers_regardless_of_order(self):
+        phantom_run = dict(FAILED, run_attempt=1)
+        phantom_jobs = [job('gate'), job('gate-tests', None, 'queued', runner='')]
+        green_run = {'status': 'completed', 'conclusion': 'success', 'run_attempt': 1}
+        gh = GH(runs={'77': (phantom_run, phantom_jobs), '78': (green_run, [job('site')])})
+        first = [{'link': link(77)}, {'link': link(78)}]
+        second = [{'link': link(78)}, {'link': link(77)}]
+        self.assertEqual(flake.infra_class('o/p', first, gh=gh), (flake.PHANTOM, '77', 1))
+        self.assertEqual(flake.infra_class('o/p', second, gh=gh), (flake.PHANTOM, '77', 1))
+
+    def test_two_infra_runs_answer_the_first_in_check_order_and_the_second_is_never_read(self):
+        lost_run = dict(FAILED, run_attempt=1)
+        lost_jobs = [job('gate'), job('gate-tests', 'failure', runner='', jid=5)]
+        phantom_run = dict(FAILED, run_attempt=2)
+        phantom_jobs = [job('gate'), job('gate-tests', None, 'queued', runner='')]
+        gh = GH(runs={'77': (lost_run, lost_jobs), '78': (phantom_run, phantom_jobs)})
+        checks = [{'link': link(77)}, {'link': link(78)}]
+        got = flake.infra_class('o/p', checks, gh=gh)
+        self.assertEqual(got, (flake.LOST_RUNNER, '77', 1))
+        self.assertFalse([c for c in gh.calls if len(c) > 1 and 'runs/78' in c[1]])
+
+    def test_run_ids_first_seen_order_no_duplicate_skips_non_dict(self):
+        checks = [{'link': link(77)}, 'not-a-dict', {'link': link(78)}, {'link': link(77, 2)}]
+        self.assertEqual(flake._run_ids(checks), ['77', '78'])
+
+    def test_a_check_with_no_readable_run_id_is_skipped_not_fatal(self):
+        gh = self.lost()
+        checks = [{'link': 'https://example.com/no-run-id'}, {'link': LINK.format(5)}]
+        self.assertEqual(flake.infra_class('o/p', checks, gh=gh), (flake.LOST_RUNNER, '77', 1))
+
+    def test_every_run_id_read_gets_its_own_probe_record(self):
+        phantom_run = dict(FAILED, run_attempt=1)
+        phantom_jobs = [job('gate'), job('gate-tests', None, 'queued', runner='')]
+        green_run = {'status': 'completed', 'conclusion': 'success', 'run_attempt': 1}
+        gh = GH(runs={'77': (phantom_run, phantom_jobs), '78': (green_run, [job('site')])})
+        checks = [{'link': link(78)}, {'link': link(77)}]
+        flake.infra_class('o/p', checks, gh=gh, state_dir=self.state)
+        data = flake.load(self.state)
+        self.assertIn('probe|78', data['infra'])
+        self.assertIn('probe|77', data['infra'])
+
+    def test_a_run_inside_its_interval_beside_one_outside_reads_only_the_outside_one(self):
+        green_run = {'status': 'completed', 'conclusion': 'success', 'run_attempt': 1}
+        phantom_run = dict(FAILED, run_attempt=1)
+        phantom_jobs = [job('gate'), job('gate-tests', None, 'queued', runner='')]
+        gh = GH(runs={'77': (green_run, [job('site')]), '78': (phantom_run, phantom_jobs)})
+        self.assertIsNone(flake.infra_class('o/p', [{'link': link(77)}], gh=gh,
+                                            state_dir=self.state))
+        calls_before = len(gh.calls)
+        checks = [{'link': link(77)}, {'link': link(78)}]
+        got = flake.infra_class('o/p', checks, gh=gh, state_dir=self.state)
+        self.assertEqual(got, (flake.PHANTOM, '78', 1))
+        self.assertEqual(len(gh.calls) - calls_before, 2)   # run 77 skipped: no new read of it
+        self.assertFalse([c for c in gh.calls[calls_before:] if len(c) > 1 and 'runs/77' in c[1]])
+
+    def test_a_pending_probe_reads_a_run_once_an_interval_then_again_past_it(self):
         gh = self.lost()
         checks = [{'link': LINK.format(5)}]
         self.assertIsNotNone(flake.infra_class('o/p', checks, gh=gh, state_dir=self.state))
         self.assertIsNone(flake.infra_class('o/p', checks, gh=gh, state_dir=self.state))
         self.assertEqual(len(gh.calls), 2)
+        later = flake._now() + datetime.timedelta(seconds=flake.PHANTOM_PROBE_S + 1)
+        self.assertIsNotNone(flake.infra_class('o/p', checks, gh=gh, state_dir=self.state,
+                                               now=later))
+        self.assertEqual(len(gh.calls), 4)
 
     def test_the_first_infra_red_is_re_run_once_and_claimed(self):
         gh = self.lost()
