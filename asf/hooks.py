@@ -790,7 +790,9 @@ def verify(product):
     pre-commit and pre-push of its ``repo_dir`` and ``backlog_dir`` is asf's and execs the
     dispatcher (F-0283). Read-only. A hook that execs another ``asf``, or falls back to ``asf``
     on ``PATH``, runs whatever was installed last rather than the product's pin; that is only a
-    problem for a pinned product, so an unpinned one is checked for presence alone."""
+    problem for a pinned product, so an unpinned one is checked for presence alone. A hook whose
+    body is older than this build writes (:func:`stale_own_hook`) is named too — it does not
+    check that the asf it runs is the pin."""
     from asf import dispatch
     pinned = _pinned(product)
     out = []
@@ -823,6 +825,9 @@ def verify(product):
             elif re.search(r'(?m)^[^#\n]*command -v asf\b', text):
                 out.append(f'{path} falls back to asf on PATH — asf hooks install --product '
                            f'{product.name} rewrites it')
+            elif stale_own_hook(text, name, entry, product.name, pinned) is not None:
+                out.append(f'{path} is an older body than this build writes — it does not check '
+                           f'that the asf it runs is the pin')
     return out
 
 

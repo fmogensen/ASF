@@ -331,10 +331,128 @@ class RedactionHookExecPathTests(PinFixture):
         ok, detail = doctor.check_redaction_hooks(self.product)
         self.assertTrue(ok, detail)
 
+    def _old_body(self, name, asf_path):
+        """The body :func:`asf.hooks._git_hook_body` wrote before F-0283 Task 1 (measured at
+        ``9a3a897d6``): it names ``asf_path`` directly, with none of the current body's
+        ``asf_pinned()`` guard — asf's own hook (the marker is there, the line matches
+        :func:`asf.hooks.is_git_hook_ours`), just an older shape than this build writes."""
+        from asf import hooks
+        p = 'sample'
+        lines = [
+            '#!/bin/sh',
+            '# written by asf hooks install — the redaction gate (F-0075)',
+            f'if [ -x "{asf_path}" ]; then exec "{asf_path}" redact --{name} --product {p}; fi',
+            f'if [ -x "$HOME/.local/bin/asf" ]; then exec "$HOME/.local/bin/asf" redact --{name} '
+            f'--product {p}; fi',
+            '# no asf here (a cloud container): the repository\'s own check, else refused',
+            'top=$(git rev-parse --show-toplevel 2>/dev/null)',
+            f'if [ -n "$top" ] && [ -x "$top/{hooks.CHECKS_DIR}/redact.sh" ]; then '
+            f'exec "$top/{hooks.CHECKS_DIR}/redact.sh" --{name}; fi',
+        ]
+        what = 'commit' if name == 'pre-commit' else 'push'
+        lines += [
+            f'echo "asf: REDACTION REFUSED ({name}) — no asf and no {hooks.CHECKS_DIR}/redact.sh '
+            f'here: nothing can scan this {what} for names or secrets, so it is refused (a pushed '
+            f'branch is public before any landing re-scan). Install asf, or add '
+            f'{hooks.CHECKS_DIR}/redact.sh." >&2',
+            'exit 1',
+        ]
+        return '\n'.join(lines) + '\n'
+
+    def test_a_hook_with_an_older_dispatcher_body_is_named_stale_until_rewritten(self):
+        """S-76255: measured at ``9a3a897d6`` (pre-Task-1), a pinned product's pre-commit naming
+        the dispatcher with the older, guard-less body gave ``verify() == []`` and
+        ``check_redaction_hooks() == (True, 'pre-commit, pre-push in 1 repos')`` — the one case
+        that was green. A body this build no longer writes is now named instead, on both."""
+        from asf import hooks
+        self.pin_it()
+        self.write_hooks(self.dispatcher)
+        pre_commit = os.path.join(hooks.git_hooks_dir(self.repo), 'pre-commit')
+        with open(pre_commit, 'w') as f:
+            f.write(self._old_body('pre-commit', self.dispatcher))
+        want = (f'{pre_commit} is an older body than this build writes — it does not check that '
+                f'the asf it runs is the pin')
+        self.assertEqual(hooks.verify(self.product), [want])
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('is an older body than this build writes', detail)
+        self.assertIn(pre_commit, detail)
+        with open(pre_commit, 'w') as f:
+            f.write(hooks._git_hook_body('pre-commit', self.dispatcher, 'sample'))
+        self.assertEqual(hooks.verify(self.product), [])
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertTrue(ok, detail)
+
+    def test_every_other_verify_line_and_the_cli_dispatcher_row_are_unmoved(self):
+        """Step 1's unmoved set: missing, foreign, execs-not-dispatcher and falls-back-to-PATH are
+        each still exactly what `verify` said before this Task."""
+        from asf import hooks
+        self.pin_it()
+        d = hooks.git_hooks_dir(self.repo)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'pre-commit'), 'w') as f:
+            f.write('#!/bin/sh\necho mine\n')
+        os.chmod(os.path.join(d, 'pre-commit'), 0o755)
+        problems = hooks.verify(self.product)
+        self.assertIn(f"{os.path.join(d, 'pre-commit')} is not asf's", problems)
+        self.assertIn(f"{os.path.join(d, 'pre-push')} missing", problems)
+
     def test_an_unpinned_product_is_judged_on_presence_alone(self):
         self.write_hooks(os.path.join(self.shared, 'bin', 'asf'))
         ok, detail = doctor.check_redaction_hooks(self.product)
         self.assertTrue(ok, detail)
+
+
+class RedactionHooksApproveRemedyTests(PinFixture):
+    """S-76255 Step 3: the remedy `check_redaction_hooks` names gains ``--approve`` exactly when
+    the problem hook's own path is one the approval matrix withholds (P8) — a tracked
+    ``.githooks`` as ``core.hooksPath`` (``human-now`` by default, no matrix config needed), never
+    the default, untracked ``.git/hooks``."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        subprocess.run(['git', 'init', '-q', self.repo], check=True)
+        self.product = env.Product('sample', {'repo_dir': self.repo, 'ci': {'provider': 'none'}})
+        self.dispatcher = os.path.join(self.tmp, 'bin', 'asf')
+        os.makedirs(os.path.dirname(self.dispatcher))
+        rc, detail = dispatch.install(path=self.dispatcher, asf_home=self.home, venvs=self.venvs,
+                                      default_product='', cli=os.path.join(self.shared, 'bin', 'asf'))
+        self.assertEqual(rc, 0, detail)
+
+    def hooks_dir(self, tracked):
+        import subprocess
+        from asf import hooks
+        if tracked:
+            subprocess.run(['git', '-C', self.repo, 'config', 'core.hooksPath', '.githooks'],
+                           check=True)
+        d = hooks.git_hooks_dir(self.repo)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def test_a_tracked_withheld_hook_gets_approve_in_the_remedy(self):
+        """No hook written yet: ``missing``, and ``plan``'s action for it is ``write`` — the
+        matrix withholds a tracked ``.githooks`` write by default (``human-now``), so the remedy
+        is the ``--approve`` form (P8)."""
+        self.pin_it()
+        d = self.hooks_dir(tracked=True)
+        from asf import hooks
+        self.assertTrue(hooks.is_tracked(os.path.join(d, 'pre-commit')))
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('asf hooks install --product sample --approve', detail)
+
+    def test_an_untracked_hook_gets_no_approve_in_the_remedy(self):
+        self.pin_it()
+        d = self.hooks_dir(tracked=False)
+        from asf import hooks
+        self.assertFalse(hooks.is_tracked(os.path.join(d, 'pre-commit')))
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('asf hooks install --product sample', detail)
+        self.assertNotIn('--approve', detail)
 
 
 class ProductWarningsRowTests(unittest.TestCase):

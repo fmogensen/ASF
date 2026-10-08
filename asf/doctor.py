@@ -1092,13 +1092,17 @@ def check_redaction_hooks(product):
     this never writes a hook file; a missing or foreign one stays red until the operator runs the
     command the detail names. For a pinned product each hook's exec path is read too
     (:func:`asf.hooks.hook_entry`): one that is not the dispatcher runs another install than the
-    pin (F-0283), and is red."""
+    pin (F-0283), and is red. One whose body is older than this build writes (:func:`asf.hooks.
+    stale_own_hook`) is red too — it does not check that the asf it runs is the pin. The remedy
+    the detail names gains ``--approve`` exactly when the matrix withholds that path
+    (:func:`asf.hooks.gated`)."""
     from asf import dispatch
     repos = [r for r in (product.repo_dir, product.backlog_dir) if r]
     if not repos:
         return True, 'no repo_dir or backlog_dir configured'
     pinned = os.path.isfile(dispatch.record_path(product.name))
     problems = []
+    problem_paths = []
     for repo in repos:
         hooks_dir = hooks.git_hooks_dir(repo)
         if hooks_dir is None:
@@ -1108,6 +1112,7 @@ def check_redaction_hooks(product):
             path = os.path.join(hooks_dir, name)
             if not os.path.isfile(path):
                 problems.append(f'{path} missing')
+                problem_paths.append(path)
                 continue
             with open(path, encoding='utf-8') as f:
                 text = f.read()
@@ -1115,13 +1120,24 @@ def check_redaction_hooks(product):
                 problems.append(f'{path} is asf init\'s, from before it ran the redaction gate')
             elif not hooks.is_git_hook_ours(text, name):
                 problems.append(f'{path} foreign')
+                problem_paths.append(path)
             elif pinned:
                 entry = hooks.hook_entry(text, name)
                 if entry is None or not dispatch.is_ours(entry):
                     problems.append(f'{path} execs {entry or "asf on PATH"}, not the dispatcher '
                                     f'(F-0283: it does not run the pin)')
+                    problem_paths.append(path)
+                elif hooks.stale_own_hook(text, name, entry, product.name, pinned) is not None:
+                    problems.append(f'{path} is an older body than this build writes — it does '
+                                    f'not check that the asf it runs is the pin')
+                    problem_paths.append(path)
     if problems:
-        return False, '; '.join(problems) + f' — asf hooks install --product {product.name}'
+        remedy = f'asf hooks install --product {product.name}'
+        withheld = {r['path'] for r in
+                    hooks.gated(product, hooks.plan(product, which=hooks.which_asf()))}
+        if withheld & set(problem_paths):
+            remedy += ' --approve'
+        return False, '; '.join(problems) + f' — {remedy}'
     return True, f'pre-commit, pre-push in {len(repos)} repos'
 
 
