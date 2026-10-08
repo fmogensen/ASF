@@ -70,6 +70,7 @@ import subprocess
 import time
 
 from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
+from asf import pause as pause_mod
 from asf.workers import lifecycle, pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -1449,6 +1450,10 @@ def scheduler_rows(cfg, product, jobs=None):
     marker = upgrade.held(product.name)
     if marker is not None:
         rows.append((YELLOW, 'upgrade', upgrade.held_label(marker)))
+    record = pause_mod.held(product)            # F-0137: the operator's own launch pause
+    if record is not None:
+        rows.append((YELLOW, 'PAUSED', f'launches {pause_mod.text(record)} — `asf resume '
+                     f'--product {product.name}` lifts it; the tick still records and harvests'))
     if 'interval_s' in (cfg.get('scheduler') or {}):
         rows.append((YELLOW, 'config',
                      'scheduler.interval_s is set but no longer read — clocks live in '

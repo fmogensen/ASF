@@ -259,6 +259,7 @@ def _wave_rows(product, root, out):
     them, never building a brief or handing any of them to :mod:`asf.workers.wave`. Applies the
     feeder's invariant check point (its own ``INVARIANT …`` lines) first, same as a live tick."""
     from asf import capacity as capacity_mod
+    from asf import pause as pause_mod
     from asf.record import plan_order
     from asf.tick import step_wave
     from asf.views import index_reader
@@ -280,6 +281,7 @@ def _wave_rows(product, root, out):
         return planned
     from asf.workers import trunkclose
     trunkclose.close_parked(product, out=out, dry_run=True)
+    paused = pause_mod.held(product)            # F-0137: the operator's own hold, durable
     host_held, host_why, _reading = step_wave.host_hold(planned)
     for row in planned:
         key = getattr(row, step_wave.KIND_JOB_KEY.get(row.brief_kind, ''), None)
@@ -287,13 +289,18 @@ def _wave_rows(product, root, out):
         if row.launches and trunkclose.closes_before_launch(product, row.brief_kind,
                                                             row.item_id, out, dry_run=True):
             continue
-        if row.launches and host_held:
+        if row.launches and paused:
+            out(f'waits        {job:<24} {row.item_id:<10} — held: {pause_mod.hold_reason(paused)}')
+        elif row.launches and host_held:
             out(f'waits        {job:<24} {row.item_id:<10} — held: {host_why}')
         elif row.launches:
             out(f'would launch {job:<24} {row.item_id:<10} {row.action}')
         else:
             out(f'waits        {job:<24} {row.item_id:<10} — {row.action}')
-    if host_held:
+    if paused:
+        out(f'wave: {pause_mod.hold_reason(paused)} — no new session this tick; '
+            f'recording and harvesting go on')
+    elif host_held:
         out(f'wave: held: {host_why} — no new session this tick; running sessions go on')
     return planned
 

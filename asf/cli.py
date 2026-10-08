@@ -369,6 +369,8 @@ def build_parser():
     register_install(sub)
     from asf.scheduler import register as register_scheduler
     register_scheduler(sub)
+    from asf.pause import register as register_pause
+    register_pause(sub)
     from asf.feeder.render import register as register_feeder
     register_feeder(sub)
     from asf.workers import register as register_workers

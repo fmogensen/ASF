@@ -65,6 +65,7 @@ import re
 import subprocess
 
 from asf import approvals, budget, env
+from asf import pause as pause_mod
 from asf import tune as tune_mod
 from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
@@ -733,8 +734,8 @@ def relaunch_capped(product, row, wrow, out=print):
 
 
 #: what :func:`screen` says of a row (``Screened.kind``): it starts, or why it does not
-STARTS, WAITS, HELD, CLOSED, HOST, NO_SEAT, CAPPED = (
-    '', 'waits', 'held', 'closed', 'host', 'no seat', 'relaunch cap')
+STARTS, WAITS, HELD, CLOSED, PAUSED, HOST, NO_SEAT, CAPPED = (
+    '', 'waits', 'held', 'closed', 'paused', 'host', 'no seat', 'relaunch cap')
 
 
 class Screened:
@@ -784,14 +785,15 @@ def _preview_capped(product, row, wrow):
 
 
 def screen(product, planned, items, running, held, seats, host=None, bypass_open=False,
-           act=False, out=print, build=None, ctx=None):
+           act=False, out=print, build=None, ctx=None, paused=None):
     """``[Screened]`` — the wave's one per-row filter over ``planned``, in plan order: a row
     that does not launch (``WAITS ON …``); an item an approval hold parks (``held``,
     :func:`asf.approvals.parked`); one whose work is verified on the trunk
-    (:func:`asf.workers.trunkclose.closes_before_launch`); the host-pressure hold (``host`` —
-    ``(held, why)`` — which an S1 row may pass once while ``bypass_open``); no seat left of
-    ``seats`` less ``running``; the relaunch cap (:func:`relaunch_capped`). What passes all of
-    them starts.
+    (:func:`asf.workers.trunkclose.closes_before_launch`); the operator's own launch pause
+    (``paused`` — :func:`asf.pause.held`, holding every row, S1 included, F-0137); the
+    host-pressure hold (``host`` — ``(held, why)`` — which an S1 row may pass once while
+    ``bypass_open``); no seat left of ``seats`` less ``running``; the relaunch cap
+    (:func:`relaunch_capped`). What passes all of them starts.
 
     The live wave (``act``) prints each ``waits`` line, closes and parks as each check says, and
     builds each starting row's brief and worker row through ``build(row, bypass)``. The status
@@ -822,6 +824,11 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
                                            **({} if act else {'dry_run': True})):
             result.append(Screened(row, 'its work is verified on the trunk — closed, not '
                                         'launched', CLOSED))
+            continue
+        if paused:                      # F-0137: the pause holds every row, S1 included
+            why = f'held: {pause_mod.hold_reason(paused)}'
+            say(f'waits    {job:<24} {row.item_id:<10} — {why}')
+            result.append(Screened(row, why, PAUSED))
             continue
         bypass = bypass_open and (items.get(row.item_id) or {}).get('severity') == 'S1'
         if host_held and not bypass:             # a loaded host takes no new session this tick
@@ -1125,6 +1132,7 @@ def launch(ctx, out=print):
     from asf.feeder import rows as feeder_rows
     from asf.views import index_reader
     product = ctx.product
+    paused = pause_mod.held(product)            # F-0137: the operator's own hold, durable
     held = approvals.raise_holds(ctx, out)
     lane_pass(ctx, out, defer_pushes=True)
     try:  # a wedged account-manager usage lock, reclaimed before the pool reads quota (opt-in)
@@ -1160,7 +1168,7 @@ def launch(ctx, out=print):
                         exclude=set(dropped))[0]
              if r.ceiling is not None and r.ceiling != r.sessions else planned)
     wanted_n = demand(items, product, running, inputs, extra, exclude=dropped)
-    capacity_mod.write_demand(product.name, len(running), wanted_n)
+    capacity_mod.write_demand(product.name, len(running), 0 if paused else wanted_n)
     share_held = held_by_share(items, product, running, r, planned, inputs, wider=wider)
     counted = share_counted(running, planned, inputs.get('held')) if share_held else ''
     waits = []
@@ -1199,7 +1207,7 @@ def launch(ctx, out=print):
                        repo_facts=_repo_facts(product, row, items, running))
         return worker_row(row, brief, items, host_load_bypass=bypass), brief
     screened = screen(product, planned, items, running, held, seats, (host_held, host_why),
-                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx)
+                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx, paused=paused)
     starting = [s for s in screened if s.starts]
     bypassed = any(s.bypass for s in starting)
     worker_rows = [s.wrow for s in starting]
@@ -1212,6 +1220,12 @@ def launch(ctx, out=print):
               borrowed=r.borrowed,
               active_products=r.active, ci=r.ci, ci_inflight=r.ci_inflight,
               ci_bound_by=r.ci_bound)
+    if paused:
+        ctx.event('paused', reason=paused.get('reason'), by=paused.get('by'), at=paused.get('at'),
+                  rows=sum(1 for row in planned if row.launches))
+        out(f'wave: {pause_mod.hold_reason(paused)} — no new session this tick; '
+            f'recording and harvesting go on, and the sessions in flight finish and land')
+        return 0
     if host_held:
         ctx.event('host_pressure', load15=reading.get('load15'), cores=reading.get('cores'),
                   swap_pct=reading.get('swap_pct'))
