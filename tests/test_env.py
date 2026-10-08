@@ -771,6 +771,7 @@ _PLANNED_FLAG_VALUES = {
     'groom.reask_days': '7', 'groom.rank_owner': 'code', 'groom.structural': 'report',
     'health_opens_pr': 'true', 'push_auth_preflight': 'true',
     'operator_readonly_verbs': '[terraform plan]', 'upgrade': 'notify',
+    'rule_pass': 'on',
 }
 PLANNED_PRODUCT = _dedent("""
     product: sample

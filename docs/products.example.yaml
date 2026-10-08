@@ -344,6 +344,7 @@ conventions:
   # `asf doctor`'s `product` row (asf.conventions.KNOWN_FLAGS).
   # flags:
   #   mechanical: on     # conflict/copies/merge → the lane rebases it (a pending hold retried once the trunk moved, before any adjudication); naming → reworded; footprint → the widening verdict in the hold; not pushed → published from the worktree, review/notes rounds archived; hook refused → trunk history dropped and published again; an approval carried over the lane's own clean rebuild (default off)
+  #   rule_pass: on      # cosmetic (commit-shape/wording/formatting) or already-settled (a standing ruling, a decision the register confirms) dispute → waived before any adjudicate session is spawned; a genuinely new finding still fires one (asf.evidence.rulepass) (default off)
   #   plan_ahead: 2
   #   console_wait: aside  # hold (default) | aside: an item whose only row waits on the console orders nothing
   #   verdict_block: warn   # off (default) | warn | on: a review's ```verdict block is read
