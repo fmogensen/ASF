@@ -1998,7 +1998,7 @@ def cut(lane, group, base_sha, base_ref, st, base_members=(), inherit=None):
             return None
         started = time.monotonic()
         push = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{ref}'], tmp, refs_only=True,
-                            timeout=gitpush.push_timeout(lane.conv), log=out, guard=refguard.guard_from(trunk, lane.conv))
+                            conv=lane.conv, log=out, guard=refguard.guard_from(trunk, lane.conv))
         out(f'lane: push {ref} {time.monotonic() - started:.1f}s (batch)')
         if push.returncode != 0:
             why = lane_mod.push_why(push.stderr or push.stdout) or 'push refused'
@@ -2143,7 +2143,7 @@ def land(lane, batch, members, trunk_sha, runs=None):
         post_queue_status(lane, batch)
         started = time.monotonic()
         push = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{trunk}'], lane.repo,
-                            refs_only=True, timeout=gitpush.push_timeout(lane.conv), log=out, guard=refguard.guard_from(trunk, lane.conv, door=True))
+                            refs_only=True, conv=lane.conv, log=out, guard=refguard.guard_from(trunk, lane.conv, door=True))
         out(f'lane: push {trunk} {time.monotonic() - started:.1f}s (merge queue)')
         why = lane_mod.push_why(push.stderr or push.stdout) or 'push refused'
     if push is None or push.returncode != 0:

@@ -23,8 +23,10 @@ The product yaml carries the overrides::
         branches_per_tick: 3
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
       git:
-        push_timeout_s: 300       # default 120: a factory git push past it is killed, the ref
-                                  # logged and left as it was (asf.gitpush)
+        push_timeout_s: 1800      # default 900: a factory push that runs the product's pre-push
+                                  # hook is killed past it, the ref logged and left as it was
+        ref_push_timeout_s: 60    # default 120: the same for a push that skips the hook
+                                  # (--no-verify: an archive head, a delete, a tag) — network only
       amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
                                                           # of these globs is merge_amendable_set;
                                                           # unset = the defaults in asf/amendable.py,
@@ -185,10 +187,20 @@ DEFAULT_BRANCHES_PER_TICK = 12
 #: pre-commit hook hung the tick, and every tick after it). The tick's clock, by default.
 DEFAULT_GATE_TIMEOUT_S = 600
 
-#: The most seconds one factory ``git push`` may take (:mod:`asf.gitpush`) before its process
-#: group is killed: the ref is logged and left as it was, and the tick goes on. Spelt
+#: The most seconds one factory ``git push`` that **runs the product's pre-push hook** may take
+#: (:mod:`asf.gitpush`) before its process group is killed: the ref is logged and left as it was,
+#: and the tick goes on. The hook lints, typechecks and builds — on a loaded host that is minutes,
+#: and 120 s killed real publishes (F-0165), so this is the hook's budget, not the network's.
+#: One step's worth of time, the same default as ``tick.step_timeout_s``. Spelt
 #: ``git: {push_timeout_s: …}`` in the yaml.
-DEFAULT_PUSH_TIMEOUT_S = 120
+DEFAULT_PUSH_TIMEOUT_S = 900
+
+#: The most seconds one factory ``git push`` that **skips the hook** (``--no-verify``: an
+#: ``archive/…`` head, a branch delete, a tag, a brief or a reservation ref — ``refs_only``) may
+#: take. Nothing but the network is in it, so it is short on purpose: a ref push that hangs holds
+#: the tick's own housekeeping, and a product's archive push once sat 8+ minutes in its hook inside
+#: the health step. Spelt ``git: {ref_push_timeout_s: …}`` in the yaml.
+DEFAULT_REF_PUSH_TIMEOUT_S = 120
 
 #: The window `asf status`'s Features row measures time-to-land over.
 DEFAULT_LAND_WINDOW_DAYS = 7
@@ -201,7 +213,7 @@ DEFAULT_HEAVY_SHARE_PCT = 50
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
 #: The keys of the yaml's ``git:`` block and the field each one is.
-GIT_KEYS = {'push_timeout_s': 'push_timeout_s'}
+GIT_KEYS = {'push_timeout_s': 'push_timeout_s', 'ref_push_timeout_s': 'ref_push_timeout_s'}
 
 #: Paths (globs) that count as documentation beside ``specs_dir``, ``plans_dir`` and
 #: ``reviews_dir``: a branch touching only docs roots is the ``docs`` landing class
@@ -886,8 +898,10 @@ class Conventions:
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
-    #: ``git.push_timeout_s`` (:data:`DEFAULT_PUSH_TIMEOUT_S`).
+    #: ``git.push_timeout_s`` — a push that runs the hook (:data:`DEFAULT_PUSH_TIMEOUT_S`).
     push_timeout_s: int = DEFAULT_PUSH_TIMEOUT_S
+    #: ``git.ref_push_timeout_s`` — a push that skips it (:data:`DEFAULT_REF_PUSH_TIMEOUT_S`).
+    ref_push_timeout_s: int = DEFAULT_REF_PUSH_TIMEOUT_S
     briefs_dir: str = DEFAULT_BRIEFS_DIR
     evals_dir: str = DEFAULT_EVALS_DIR
     matrix_path: str = DEFAULT_MATRIX_PATH

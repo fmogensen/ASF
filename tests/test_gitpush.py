@@ -2,7 +2,10 @@
 hook (``--no-verify``), and every factory push is killed after ``git.push_timeout_s``: the ref is
 logged and left as it was, and the caller goes on (2026-09-26: a product's archive push sat 8+
 minutes in its hook inside the tick's health step)."""
+import ast
+import glob
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,7 +14,7 @@ import unittest
 from unittest import mock
 
 from asf import gitpush, hermetic, refguard
-from asf.conventions import DEFAULT_PUSH_TIMEOUT_S, Conventions
+from asf.conventions import DEFAULT_PUSH_TIMEOUT_S, DEFAULT_REF_PUSH_TIMEOUT_S, Conventions
 from asf.env import Product
 from asf.workers import lifecycle as lc
 from tests import test_lifecycle as tl
@@ -31,6 +34,15 @@ def hook(repo, body):
         f.write('#!/bin/sh\n' + body)
     os.chmod(path, 0o755)
     git(['config', 'core.hooksPath', hooks], repo)
+
+
+def receive_hook(origin, body):
+    """``origin``'s ``pre-receive`` hook — the server side, which ``--no-verify`` does not skip,
+    unlike the client's own ``pre-push`` (:func:`hook`). What hangs a ref-only push in a test."""
+    path = os.path.join(origin, 'hooks', 'pre-receive')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('#!/bin/sh\n' + body)
+    os.chmod(path, 0o755)
 
 
 #: the guard an ordinary branch push passes: the defaults, refusing
@@ -85,16 +97,6 @@ class PushTest(unittest.TestCase):
         self.assertIn(lines[0], r.stderr)
         self.assertNotIn('work', self.heads())
 
-    def test_the_timeout_is_the_git_block_of_the_conventions(self):
-        self.assertEqual(gitpush.push_timeout(), DEFAULT_PUSH_TIMEOUT_S)
-        self.assertEqual(DEFAULT_PUSH_TIMEOUT_S, 120)
-        conv = Conventions.from_mapping({'git': {'push_timeout_s': 30, 'later': 'x'}})
-        self.assertEqual(gitpush.push_timeout(conv), 30)
-        self.assertEqual(conv.extra, {'git': {'later': 'x'}})
-        self.assertEqual(Conventions.from_mapping({'git': {}}), Conventions())
-        self.assertEqual(gitpush.push_timeout(Conventions.from_mapping(
-            {'git': {'push_timeout_s': 'soon'}})), DEFAULT_PUSH_TIMEOUT_S)
-
     def test_the_child_env_is_hermetic_git_env(self):
         # F-0013 D4: gitpush no longer builds its own hook-variable list — one remover, shared
         # with the harvest gate and everything else that spawns a git child.
@@ -115,6 +117,110 @@ class PushTest(unittest.TestCase):
             gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/x'], self.repo, env=base,
                          guard=G)
         self.assertEqual(captured['env'], hermetic.git_env(base))
+
+
+class PushBudgetTests(unittest.TestCase):
+    """Two budgets, and each default is the one F-0165 names: a hooked push — a session's branch
+    published, the trunk, a lane rewrite — is bounded by the product's own lint, typecheck and
+    build; a hookless one — an archive head, a delete, a tag — has only the network in it. One
+    number for both meant 120 s, and 120 s killed real publishes on a loaded host."""
+
+    setUp, heads = PushTest.setUp, PushTest.heads
+
+    def test_the_defaults_by_value(self):
+        self.assertEqual(DEFAULT_PUSH_TIMEOUT_S, 900)
+        self.assertEqual(DEFAULT_REF_PUSH_TIMEOUT_S, 120)
+
+    def test_push_timeout_picks_the_default_by_kind(self):
+        self.assertEqual(gitpush.push_timeout(), DEFAULT_PUSH_TIMEOUT_S)
+        self.assertEqual(gitpush.push_timeout(refs_only=True), DEFAULT_REF_PUSH_TIMEOUT_S)
+
+    def test_the_split_on_one_conventions_object(self):
+        conv = Conventions.from_mapping({'git': {'push_timeout_s': 900,
+                                                  'ref_push_timeout_s': 30}})
+        self.assertEqual(gitpush.push_timeout(conv), 900)
+        self.assertEqual(gitpush.push_timeout(conv, refs_only=True), 30)
+        # the operator's hand fix: only the hooked key is set — it no longer widens a ref push
+        hand_fix = Conventions.from_mapping({'git': {'push_timeout_s': 900}})
+        self.assertEqual(gitpush.push_timeout(hand_fix), 900)
+        self.assertEqual(gitpush.push_timeout(hand_fix, refs_only=True),
+                         DEFAULT_REF_PUSH_TIMEOUT_S)
+
+    def test_both_keys_survive_from_mapping_and_neither_lands_in_extra(self):
+        conv = Conventions.from_mapping({'git': {'push_timeout_s': 30, 'ref_push_timeout_s': 60,
+                                                  'later': 'x'}})
+        self.assertEqual(conv.push_timeout_s, 30)
+        self.assertEqual(conv.ref_push_timeout_s, 60)
+        self.assertEqual(conv.extra, {'git': {'later': 'x'}})
+        self.assertEqual(Conventions.from_mapping({'git': {}}), Conventions())
+
+    def test_a_junk_value_falls_back_to_its_own_default(self):
+        junk = Conventions.from_mapping(
+            {'git': {'push_timeout_s': 'soon', 'ref_push_timeout_s': 'now'}})
+        self.assertEqual(gitpush.push_timeout(junk), DEFAULT_PUSH_TIMEOUT_S)
+        self.assertEqual(gitpush.push_timeout(junk, refs_only=True), DEFAULT_REF_PUSH_TIMEOUT_S)
+
+    def test_the_kind_of_push_picks_the_clock(self):
+        # the origin's pre-receive hook is what --no-verify cannot skip (PD8): it hangs both
+        # kinds of push alike, so only the two keys decide which one survives
+        receive_hook(self.origin, 'sleep 2\nexit 0\n')
+        conv = Conventions.from_mapping({'git': {'push_timeout_s': 1, 'ref_push_timeout_s': 60}})
+        r = gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/work'], self.repo, conv=conv,
+                         guard=G)
+        self.assertEqual(r.returncode, gitpush.TIMED_OUT, r.stderr)
+        r = gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/archive/a'], self.repo,
+                         refs_only=True, conv=conv, guard=G)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        conv2 = Conventions.from_mapping({'git': {'push_timeout_s': 60,
+                                                   'ref_push_timeout_s': 1}})
+        r = gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/work2'], self.repo, conv=conv2,
+                         guard=G)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/archive/b'], self.repo,
+                         refs_only=True, conv=conv2, guard=G)
+        self.assertEqual(r.returncode, gitpush.TIMED_OUT, r.stderr)
+
+    def test_the_timed_out_line_names_the_key_to_raise(self):
+        receive_hook(self.origin, 'sleep 30\nexit 0\n')
+        lines = []
+        r = gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/work'], self.repo, timeout=1,
+                         log=lines.append, guard=G)
+        self.assertEqual(r.returncode, gitpush.TIMED_OUT)
+        self.assertTrue(lines[0].startswith('push timed out after 1s:'), lines)
+        self.assertTrue(lines[0].endswith('(raise git.push_timeout_s)'), lines)
+        lines2 = []
+        r = gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/archive/x'], self.repo,
+                         refs_only=True, timeout=1, log=lines2.append, guard=G)
+        self.assertEqual(r.returncode, gitpush.TIMED_OUT)
+        self.assertTrue(lines2[0].startswith('push timed out after 1s:'), lines2)
+        self.assertTrue(lines2[0].endswith('(raise git.ref_push_timeout_s)'), lines2)
+
+
+class OneResolverTests(unittest.TestCase):
+    """The ``ast`` fence (C10, P14): ``push_timeout`` is ``gitpush``'s own, and no other call
+    site in ``asf/`` may resolve its own budget — the flag that skips the hook is the flag that
+    sizes the clock, and a caller that computes a timeout can hand a hooked number to a ref push,
+    which is F-0165's bug."""
+
+    def test_no_call_site_resolves_its_own_push_budget(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        resolvers, explicit = [], []
+        for path in sorted(glob.glob(os.path.join(root, 'asf', '**', '*.py'), recursive=True)):
+            tree = ast.parse(open(path, encoding='utf-8').read(), filename=path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, 'attr', None) or getattr(node.func, 'id', None)
+                relpath = os.path.relpath(path, root).replace(os.sep, '/')
+                if name == 'push_timeout' and relpath != 'asf/gitpush.py':
+                    resolvers.append(f'{relpath}:{node.lineno}')
+                if name == 'push' and getattr(getattr(node.func, 'value', None), 'id', '') == \
+                        'gitpush':
+                    explicit += [f'{relpath}:{node.lineno}' for k in node.keywords
+                                if k.arg == 'timeout']
+        self.assertEqual(resolvers, [], 'push_timeout is gitpush\'s own: pass conv= instead')
+        self.assertEqual(len(explicit), 1, explicit)      # publish's documented push_timeout_s
+        self.assertTrue(explicit[0].startswith('asf/workers/lifecycle.py'), explicit)
 
 
 class RefGuardDoorTest(unittest.TestCase):
@@ -257,6 +363,48 @@ class PublishArchiveSkipsTheHookTest(unittest.TestCase):
         self.assertIn('push timed out after 1s', line)
         self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-7777'],
                                  self.repo).split()[0], self.remote_sha)
+        # the archive push is hookless (refs_only) — the hanging hook never touches it, and it
+        # goes through at the short budget while the branch push in front of it times out (C5)
+        archive = f'archive/fix/B-7777-copies-{self.remote_sha[:9]}'
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', archive],
+                                 self.repo).split()[0], self.remote_sha)
+
+
+class PublishSecondsTests(unittest.TestCase):
+    """The hook's seconds are on the publish line (F-0165): ``gitpush.push`` reports how long a
+    push took, timed out or not, and ``publish`` puts the branch push's seconds — never the
+    archive push's — on its line, so the next operator who raises the budget raises it from a
+    measurement rather than a guess."""
+
+    sh, commit = tl.PublishACopiesRebaseTest.sh, tl.PublishACopiesRebaseTest.commit
+
+    def setUp(self):
+        tl.PublishACopiesRebaseTest.setUp(self)  # a rebased head whose old tip needs archiving
+        hook(self.repo, 'sleep 2\nexit 0\n')  # the branch push runs this; the archive one skips it
+
+    def test_seconds_is_a_float_on_a_push_that_went_through_and_one_that_timed_out(self):
+        r = gitpush.push(['-q', 'origin', f'{self.remote_sha}:refs/heads/archive/seconds'],
+                         self.repo, refs_only=True, guard=G)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsInstance(r.seconds, float)
+        r = gitpush.push(['-q', 'origin', f'{self.remote_sha}:refs/heads/fix/seconds'],
+                         self.repo, timeout=1, guard=G)
+        self.assertEqual(r.returncode, gitpush.TIMED_OUT)
+        self.assertIsInstance(r.seconds, float)
+        self.assertGreaterEqual(r.seconds, 1)
+
+    def test_publishs_line_carries_the_branch_pushs_seconds_not_the_archives(self):
+        ok, line = lc.publish(self.repo, 'fix/B-7777', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertRegex(line, r'published \S+ at [0-9a-f]+ in \d+\.\d+s')
+        seconds = float(re.search(r'in (\d+\.\d+)s', line).group(1))
+        self.assertGreaterEqual(seconds, 1.5)  # the hook's ~2s, not the archive push's instant
+
+    def test_the_rebased_variant_keeps_its_clause(self):
+        ok, line = lc.publish(self.repo, 'fix/B-7777', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertTrue(line.startswith('rebased off trunk copies'), line)
+        self.assertRegex(line, r'and pushed: published fix/B-7777 at [0-9a-f]+ in \d+\.\d+s$')
 
 
 if __name__ == '__main__':

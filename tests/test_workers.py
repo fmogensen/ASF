@@ -2160,8 +2160,11 @@ class TestHealth(Home):
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         run = pool_mod.load_sessions(self.product)['done']
         self.assertEqual(run['end_reason'], 'finished')
-        self.assertIn(('done', 'published', f"published {rec['branch']} at " + git('rev-parse', '--short', 'HEAD', cwd=wt)
-                       + ' (rebased; lease held)'), found)
+        pub = next(t for t in found if t[:2] == ('done', 'published'))
+        self.assertTrue(pub[2].startswith(
+            f"published {rec['branch']} at " + git('rev-parse', '--short', 'HEAD', cwd=wt)
+            + ' in '), pub)
+        self.assertTrue(pub[2].endswith('s (rebased; lease held)'), pub)
         self.assertEqual(git('ls-remote', '--heads', 'origin', rec['branch'], cwd=wt).split()[0],
                          git('rev-parse', 'HEAD', cwd=wt))
 

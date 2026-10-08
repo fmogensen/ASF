@@ -365,7 +365,7 @@ def _new_patches(repo, tip, upstreams):
     return list(new.values())
 
 
-def _archive_tip(product, repo, branch, tip, timeout):
+def _archive_tip(product, repo, branch, tip, conv):
     """Push ``tip`` to its ``archive/<branch>-wip-<sha9>`` ref and verify it with
     ``ls-remote``; the ref name. Raises :class:`SpawnError` when it is not there after the push —
     nothing is deleted without its archive."""
@@ -374,7 +374,7 @@ def _archive_tip(product, repo, branch, tip, timeout):
     if refguard.refusal(ref, f'archive {branch}', product.main, None):
         raise SpawnError(f'retire {branch} refused: {ref} is a protected ref')
     r = gitpush.push(['-q', 'origin', f'{tip}:refs/heads/{ref}'], repo, refs_only=True,
-                     timeout=timeout, guard=refguard.guard_for(product, repo))
+                     conv=conv, guard=refguard.guard_for(product, repo))
     have = _git(['ls-remote', '--heads', 'origin', f'refs/heads/{ref}'], repo).split()
     if r.returncode != 0 or tip not in have:
         raise SpawnError(f'retire {branch} refused: {tip[:9]} could not be archived to {ref}: '
@@ -407,7 +407,7 @@ def _archive_unpushed(product, repo, holder, branch):
         if refguard.refusal(ref, f'archive {branch}', product.main, None):
             raise SpawnError(f'reclaim of {holder} refused: {ref} is a protected ref')
         r = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{ref}'], repo, refs_only=True,
-                         timeout=gitpush.push_timeout(getattr(product, 'conventions', None)),
+                         conv=getattr(product, 'conventions', None),
                          guard=refguard.guard_for(product, repo))
         if r.returncode != 0:
             raise SpawnError(f'reclaim of {holder} refused: {sha[:9]} could not be archived '
@@ -514,7 +514,7 @@ def recover_stray(product, repo, branch, now=None):
     if guard:
         return '', guard
     r = gitpush.push(['-q', 'origin', f'{tip}:{ref}'], repo, refs_only=True,
-                     timeout=gitpush.push_timeout(getattr(product, 'conventions', None)),
+                     conv=getattr(product, 'conventions', None),
                      guard=refguard.guard_for(product, repo))
     if r.returncode != 0:
         return '', ' '.join((r.stderr or '').split())[:200] or 'push failed'
@@ -546,7 +546,7 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
     guard = refguard.refusal(branch, f'retire {branch}', product.main, None)
     if guard:
         raise SpawnError(guard)
-    limit = gitpush.push_timeout(getattr(product, 'conventions', None))
+    conv = getattr(product, 'conventions', None)
     tag = reset.get('archive') or f"archive/pr-{reset.get('pr')}"
     have = _git(['ls-remote', '--tags', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}'],
                 repo).split()
@@ -555,7 +555,7 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
         have = _git(['ls-remote', '--tags', 'origin', f'refs/tags/{tag}'], repo).split()
     if dead not in have:
         r = gitpush.push(['-q', 'origin', f'{dead}:refs/tags/{tag}'], repo, refs_only=True,
-                         timeout=limit, guard=refguard.guard_for(product, repo))
+                         conv=conv, guard=refguard.guard_for(product, repo))
         if r.returncode != 0:
             raise SpawnError(f'retire {branch} refused: {dead[:9]} could not be kept as {tag}: '
                              f'{(r.stderr or "").strip()}')
@@ -569,7 +569,7 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
         if not fast:
             # archive first: whatever the patch-id check below decides, the local tip is on
             # origin before anything is deleted or refused (git cherry skips merge commits)
-            ref = _archive_tip(product, repo, branch, tip, limit)
+            ref = _archive_tip(product, repo, branch, tip, conv)
             new = _new_patches(repo, tip, (dead, f'origin/{product.main}'))
             if new:
                 raise BranchState(f'branch {branch} exists locally with commits past the closed '
@@ -581,7 +581,7 @@ def retire_dead_branch(product, repo, job, branch, holders=()):
                   f'rebased copy); archived as {ref}', file=sys.stderr)
         _git(['branch', '-D', branch], repo)
     r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{branch}:{dead}', 'origin',
-                      f':refs/heads/{branch}'], repo, refs_only=True, timeout=limit,
+                      f':refs/heads/{branch}'], repo, refs_only=True, conv=conv,
                      guard=refguard.guard_for(product, repo))
     if r.returncode != 0:
         raise SpawnError(f'retire {branch} refused: {(r.stderr or "").strip() or "push failed"}')

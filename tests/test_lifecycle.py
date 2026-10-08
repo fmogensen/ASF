@@ -2023,7 +2023,8 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.commit('new', 'new work')
         ok, line = lc.publish(self.repo, 'fix/B-9998', '', main='main')
         self.assertTrue(ok, line)
-        self.assertEqual(line, 'published fix/B-9998 at ' + self.sh(['rev-parse', '--short', 'HEAD'], self.repo))
+        head = self.sh(['rev-parse', '--short', 'HEAD'], self.repo)
+        self.assertRegex(line, r'^published fix/B-9998 at ' + head + r' in \d+\.\d+s$')
 
     def test_b0097_a_network_blip_is_retried_in_place_with_backoff_and_then_succeeds(self):
         # B-0097: a DNS blip on the branch's own push is retried right here, with backoff,

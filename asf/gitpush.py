@@ -11,8 +11,9 @@ build for minutes. The factory makes two kinds of push:
 * **content**: the trunk, or a branch's commits published on a session's behalf. The product's
   hook runs as it always did.
 
-Either way the push is killed — its whole process group, the hook's children too — after
-``git.push_timeout_s`` seconds (:func:`push_timeout`), so no hook and no network hang holds a
+Either way the push is killed — its whole process group, the hook's children too — after a budget
+sized to its own kind (:func:`push_timeout`): ``git.push_timeout_s`` for a push that runs the
+hook, ``git.ref_push_timeout_s`` for one that skips it. No hook and no network hang holds a
 tick. A timed-out push is a failed push: the ref is logged and the caller goes on; the branch
 stays as it was (git updates a remote ref only once the hook passed and the pack went through).
 
@@ -26,9 +27,10 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
 from asf import hermetic, mutation_guard, refguard
-from asf.conventions import DEFAULT_PUSH_TIMEOUT_S
+from asf.conventions import DEFAULT_PUSH_TIMEOUT_S, DEFAULT_REF_PUSH_TIMEOUT_S
 
 #: The push door takes a ref guard: the clients lint enforces ``guard=`` at every
 #: ``gitpush.push(`` call while this is set.
@@ -38,12 +40,33 @@ __gitpush_door__ = True
 TIMED_OUT = 124
 
 
-def push_timeout(conv=None):
-    """The seconds one push may take: ``conventions.git.push_timeout_s``, at least 1."""
+def push_timeout(conv=None, refs_only=False):
+    """The seconds one push may take, at least 1 — which budget depends on whether the product's
+    pre-push hook runs in it (``refs_only``, the same flag that decides ``--no-verify``):
+
+    * a **hooked** push — a session's branch published, the trunk, a lane rewrite — is bounded by
+      the product's own lint, typecheck and build: ``conventions.git.push_timeout_s``
+      (:data:`asf.conventions.DEFAULT_PUSH_TIMEOUT_S`, 900 s). One number for both kinds meant
+      120 s, and 120 s killed real publishes on a loaded host (F-0165).
+    * a **hookless** push — an archive head, a delete, a tag, a brief or a reservation ref — has
+      only the network in it: ``conventions.git.ref_push_timeout_s``
+      (:data:`asf.conventions.DEFAULT_REF_PUSH_TIMEOUT_S`, 120 s), short on purpose.
+
+    An unset key and a ``0`` resolve alike — both fall back to that key's own default."""
+    key = 'ref_push_timeout_s' if refs_only else 'push_timeout_s'
+    default = DEFAULT_REF_PUSH_TIMEOUT_S if refs_only else DEFAULT_PUSH_TIMEOUT_S
     try:
-        return max(1, int(getattr(conv, 'push_timeout_s', None) or DEFAULT_PUSH_TIMEOUT_S))
+        return max(1, int(getattr(conv, key, None) or default))
     except (TypeError, ValueError):
-        return DEFAULT_PUSH_TIMEOUT_S
+        return default
+
+
+def _timed(result, started):
+    """``result`` with ``seconds`` on it: how long the push took, the product's hook included. The
+    factory's own bound is a guess until somebody measures the hook it is bounding (F-0165), so
+    every push reports its own; :func:`asf.workers.lifecycle.publish` puts it on its line."""
+    result.seconds = round(time.monotonic() - started, 1)
+    return result
 
 
 def push_args(args, refs_only=False):
@@ -63,21 +86,27 @@ def _say(log, line):
     (log or (lambda s: print(s, file=sys.stderr)))(line)
 
 
-def push(args, cwd, *, guard, refs_only=False, timeout=None, env=None, log=None):
+def push(args, cwd, *, guard, refs_only=False, conv=None, timeout=None, env=None, log=None):
     """``git push <args>`` in ``cwd``: a :class:`subprocess.CompletedProcess` (text output).
 
     ``refs_only``: the push carries no new code — ``--no-verify``, the product's hook skipped.
-    ``timeout``: seconds (default :func:`push_timeout`); past it the push's process group is
-    killed, ``returncode`` is :data:`TIMED_OUT`, ``stderr`` names the refs, and a line goes to
-    ``log`` (default stderr). A dry run in progress (:mod:`asf.mutation_guard`) refuses instead of
+    ``conv``: the product's conventions — the budget is :func:`push_timeout` of ``conv`` and this
+    push's own ``refs_only``, so the flag that skips the hook is the flag that sizes the clock and
+    the two can never disagree (F-0165). ``timeout``: an explicit number, for a caller that means
+    one (:func:`asf.workers.lifecycle.publish`'s ``push_timeout_s``).
+    Past the budget the push's process group is killed, ``returncode`` is :data:`TIMED_OUT`,
+    ``stderr`` names the refs, and a line naming the key to raise goes to ``log`` (default
+    stderr). A dry run in progress (:mod:`asf.mutation_guard`) refuses instead of
     running ``git`` at all — the backstop for a caller that never threaded its own ``dry_run``
     flag this far (2026-09-29): a non-zero, non-:data:`TIMED_OUT` ``returncode`` and ``stderr``
     naming why, exactly the shape a refused push already is to every caller here.
+    ``seconds`` on the returned process is how long it took, timed out or not.
 
     ``guard`` (required, :class:`asf.refguard.Guard`): each target (:func:`targets`) is asked
     :meth:`~asf.refguard.Guard.refusal` first. Under ``refuse`` the push returns
     ``CompletedProcess(cmd, 1, '', line)`` without running ``git``; under ``warn`` the line goes
     to ``log`` and the push proceeds."""
+    started = time.monotonic()
     cmd = push_args(args, refs_only)
     for target in targets(args):
         line = guard.refusal(target)
@@ -85,12 +114,12 @@ def push(args, cwd, *, guard, refs_only=False, timeout=None, env=None, log=None)
             continue
         _say(log, line)
         if guard.mode == refguard.REFUSE:
-            return subprocess.CompletedProcess(cmd, 1, '', line)
+            return _timed(subprocess.CompletedProcess(cmd, 1, '', line), started)
     if mutation_guard.is_active():
         line = mutation_guard.would_line('git', cmd)
         _say(log, line)
-        return subprocess.CompletedProcess(cmd, 1, '', line)
-    limit = timeout if timeout is not None else push_timeout()
+        return _timed(subprocess.CompletedProcess(cmd, 1, '', line), started)
+    limit = timeout if timeout is not None else push_timeout(conv, refs_only)
     run_env = hermetic.git_env(env)
     p = subprocess.Popen(cmd, cwd=cwd, env=run_env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -104,8 +133,10 @@ def push(args, cwd, *, guard, refs_only=False, timeout=None, env=None, log=None)
             p.kill()
         out, err = p.communicate()
         refs = ' '.join(a for a in args if not str(a).startswith('-') and a != 'origin')
-        line = f'push timed out after {limit}s: {refs or "?"} — left as it was'
+        key = 'ref_push_timeout_s' if refs_only else 'push_timeout_s'
+        line = (f'push timed out after {limit}s: {refs or "?"} — left as it was '
+                f'(raise git.{key})')
         _say(log, line)
-        return subprocess.CompletedProcess(cmd, TIMED_OUT, out or '',
-                                           ((err or '') + '\n' + line).strip())
-    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+        return _timed(subprocess.CompletedProcess(cmd, TIMED_OUT, out or '',
+                                           ((err or '') + '\n' + line).strip()), started)
+    return _timed(subprocess.CompletedProcess(cmd, p.returncode, out, err), started)

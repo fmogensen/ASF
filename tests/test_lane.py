@@ -1536,7 +1536,7 @@ class RefPushes(LaneFixture):
             f.write('#!/bin/sh\nsleep 30\n')
         started = time.monotonic()
         lines = []
-        ln = lane.Lane(self.product(git={'push_timeout_s': 1}), self.state_dir,
+        ln = lane.Lane(self.product(git={'ref_push_timeout_s': 1}), self.state_dir,
                        out=lines.append, items=self.items)
         ln.host = FakePRHost(ln.product, ln, self.prs)
         lane.lane_pass(ln.product, self.state_dir, items=self.items, lane=ln)

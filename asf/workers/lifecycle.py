@@ -2139,13 +2139,16 @@ def _rewrite_account_names(wt, remote_sha, findings):
     return bool(new) and _git(['reset', '-q', '--hard', new], wt).returncode == 0
 
 
-def _push_retrying(args, wt, limit, guard, sleep=time.sleep, backoff=PUBLISH_RETRY_BACKOFF_S):
+def _push_retrying(args, wt, guard, conv=None, timeout=None, sleep=time.sleep,
+                    backoff=PUBLISH_RETRY_BACKOFF_S):
     """``gitpush.push``, retried right here with backoff (B-0097) while the only thing refusing
     it is a transient network error — a blip the tick's own retry clears far more often than it
     survives to the next one. A non-network refusal (the hook, auth, a rejected ref) returns on
-    its first try, same as before this retry existed. ``sleep`` is overridden by tests."""
+    its first try, same as before this retry existed. ``conv``/``timeout`` are
+    :func:`asf.gitpush.push`'s own budget, carried unchanged into every retry.
+    ``sleep`` is overridden by tests."""
     from asf import gitpush
-    p = gitpush.push(args, wt, timeout=limit, guard=guard)
+    p = gitpush.push(args, wt, conv=conv, timeout=timeout, guard=guard)
     for delay in backoff:
         if p.returncode == 0:
             break
@@ -2153,12 +2156,12 @@ def _push_retrying(args, wt, limit, guard, sleep=time.sleep, backoff=PUBLISH_RET
         if not NETWORK_RE.search(text):
             break
         sleep(delay)
-        p = gitpush.push(args, wt, timeout=limit, guard=guard)
+        p = gitpush.push(args, wt, conv=conv, timeout=timeout, guard=guard)
     return p
 
 
-def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None,
-            droppable=None, transplant=False, sleep=time.sleep):
+def publish(wt, branch, remote_sha='', main='main', protected=None, conv=None,
+            push_timeout_s=None, droppable=None, transplant=False, sleep=time.sleep):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -2188,9 +2191,12 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
       their own copies, conflicted, and the hold said "rebase onto origin/<branch>" — the
       opposite of the lane's instruction — for sixty runs.
 
-    The old tip's archive carries no new code and skips the product's pre-push hook; the
-    branch's own push runs it. Each push is killed after ``push_timeout_s`` (default
-    :func:`asf.gitpush.push_timeout`): a hook or a network hang never holds the tick.
+    The old tip's archive carries no new code, skips the product's pre-push hook and keeps the
+    short ``git.ref_push_timeout_s``; the branch's own push runs the hook and gets
+    ``git.push_timeout_s``, which is that hook's budget and not the network's — one number for
+    both killed real publishes at 120 s (F-0165). ``push_timeout_s`` overrides the branch push
+    alone. The line says how long the hook took, so the next operator who raises the budget
+    raises it from a measurement.
     The branch's own push is retried in place, with backoff, while a transient network error
     (B-0097) is the only thing refusing it (:func:`_push_retrying`,
     :data:`PUBLISH_RETRY_BACKOFF_S`); a refusal that is still network after the backoff falls
@@ -2223,7 +2229,6 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
     from asf import gitpush, redact, refguard
-    limit = push_timeout_s or gitpush.push_timeout()
     guard = refguard.refusal(branch, f'publish {branch}', main, protected)
     if guard:
         return False, guard
@@ -2294,13 +2299,14 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
         return refused('; '.join(redact.correction(findings)))
     if archive:
         a = gitpush.push(['-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt,
-                         refs_only=True, timeout=limit, guard=refguard.Guard(main, protected))
+                         refs_only=True, conv=conv, guard=refguard.Guard(main, protected))
         if a.returncode != 0:
             return refused('the old tip could not be archived')
     args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
-    p = _push_retrying(args, wt, limit, refguard.Guard(main, protected), sleep=sleep)
+    p = _push_retrying(args, wt, refguard.Guard(main, protected), conv=conv,
+                       timeout=push_timeout_s, sleep=sleep)
     if p.returncode != 0:
         hook_findings = redact.parse_finding_lines(f'{p.stderr or ""}\n{p.stdout or ""}')
         if hook_findings:
@@ -2308,8 +2314,9 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
         return refused(git_error((p.stderr or "") + chr(10) + (p.stdout or "")))
     head = _git(['rev-parse', '--short', 'HEAD'], wt).stdout.strip()
     if rebased:
-        return True, f'{rebased} and pushed: published {branch} at {head}'
-    return True, f'published {branch} at {head}' + (' (rebased; lease held)' if remote_sha else '')
+        return True, f'{rebased} and pushed: published {branch} at {head} in {p.seconds}s'
+    return True, (f'published {branch} at {head} in {p.seconds}s'
+                  + (' (rebased; lease held)' if remote_sha else ''))
 
 
 def published_sha(before, after, line):
