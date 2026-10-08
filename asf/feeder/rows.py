@@ -255,6 +255,9 @@ class Row:
     reason: str
     waits_on: str = ''
     correction: str = ''
+    #: the lane's own ``kind`` for the correction above, as it wrote it on the hold — the fact
+    #: the cloud lane's routing reads (:data:`asf.workers.cloud.REWRITE_KINDS`, F-0289)
+    correction_kind: str = ''
     #: a PUSHED → REVIEW row only: the round the reviewer writes
     review_round: int = 0
     #: the GROOM → ADJUDICATE row only (§2.5, PD8): the groom day, the record clone's groom
@@ -904,7 +907,8 @@ def footprint_row(item, product, c, tier, fid, branch, items=None):
         return Row(tier=tier, kind=RESHAPE, item_id=iid, feature_id=fid, action=LAUNCH,
                    brief_kind='reshape', branch=branch_for(product, 'plan', iid),
                    reason=item.get('reshape') or detail
-                   or f"footprint: needs {' '.join(c.get('needs') or ())}")
+                   or f"footprint: needs {' '.join(c.get('needs') or ())}",
+                   correction_kind=c.get('kind') or '')
     if verdict == 'approval':
         action, waits, why = f'WAITS ON approval {detail}', 'approval', \
             f'footprint needs a path under {detail}: approvals decide'
@@ -914,7 +918,8 @@ def footprint_row(item, product, c, tier, fid, branch, items=None):
         action, waits, why = 'WAITS ON widen_footprint', 'widen', \
             f"footprint needs {' '.join(c.get('needs') or ())}: the rule decides next tick"
     return Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=action,
-               brief_kind='correct', branch=branch, reason=why, waits_on=waits)
+               brief_kind='correct', branch=branch, reason=why, waits_on=waits,
+               correction_kind=c.get('kind') or '')
 
 
 def _owner_done(items, owner):
@@ -999,7 +1004,8 @@ def correction_rows(items, product, busy, corrections):
         if c.get('parked'):  # a Task that wrote nothing twice waits for a person, not a session
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
                            action=f'{PARKED} {c.get("reason") or c["kind"]}', brief_kind='correct',
-                           branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
+                           branch=branch, reason=c.get('reason') or 'parked', waits_on='operator',
+                           correction_kind=c.get('kind') or ''))
             continue
         # a correction of an item whose writes: reach the amendable set is the console's too
         # when it needs an amendable file: a session relaunched on it only buys the hook's
@@ -1019,7 +1025,8 @@ def correction_rows(items, product, busy, corrections):
             out.append(Row(tier=tier, kind=CONFLICT, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='rebase', branch=branch, correction=c['text'],
                            reason=f"{branch} is {behind} commits behind the trunk: rebase it "
-                                  f"before the correction ({c.get('kind')}) is tried on it"))
+                                  f"before the correction ({c.get('kind')}) is tried on it",
+                           correction_kind=c.get('kind') or ''))
             continue
         if c.get('operator_ruling'):
             # ``asf correct`` at the cap: ONE code session on the Task's own branch carries the
@@ -1030,7 +1037,8 @@ def correction_rows(items, product, busy, corrections):
                            action=LAUNCH, brief_kind='correct', branch=branch,
                            correction=c['text'], ruling=True,
                            reason="operator ruling at the round cap: one code session "
-                                  "carries it out"))
+                                  "carries it out",
+                           correction_kind=c.get('kind') or ''))
             continue
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
         rounds_cap = config_keys.value('harvest.round_cap', CORRECTION_ROUNDS)
@@ -1039,7 +1047,8 @@ def correction_rows(items, product, busy, corrections):
                            item_id=iid, feature_id=fid or iid, action=LAUNCH, brief_kind=doc,
                            branch=branch, correction=c['text'],
                            reason=f"the lane held it ({c['kind']}), round {rounds}: the {doc} "
-                                  f"cannot land as it stands"))
+                                  f"cannot land as it stands",
+                           correction_kind=c.get('kind') or ''))
             continue
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch, items=items))
@@ -1052,12 +1061,14 @@ def correction_rows(items, product, busy, corrections):
                 out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
                                action=action, brief_kind='correct', branch=branch,
                                reason=f"adjudicated ({c.get('kind')}): waits on the PR to merge "
-                                      f"or close, or a new push", waits_on='merge'))
+                                      f"or close, or a new push", waits_on='merge',
+                               correction_kind=c.get('kind') or ''))
                 continue
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch, correction=c['text'],
                            reason=f"held {same} times on the same finding ({c.get('kind')}): "
-                                  f"adjudicate, not another correction"))
+                                  f"adjudicate, not another correction",
+                           correction_kind=c.get('kind') or ''))
         elif c.get('kind') == INCOMPLETE and item.get('delivers'):
             # a delivery branch a member of which no commit names: the same lead, the same
             # brief, the hold's text under it — the session continues from the branch's head
@@ -1066,11 +1077,13 @@ def correction_rows(items, product, busy, corrections):
                            feature_id=f['id'] if f else fid, action=LAUNCH,
                            brief_kind='delivery-code', branch=branch, correction=c['text'],
                            reason=f"the lane held it ({INCOMPLETE}), round {rounds}: continue "
-                                  f"the delivery from the head of {branch}"))
+                                  f"the delivery from the head of {branch}",
+                           correction_kind=c.get('kind') or ''))
         else:
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='correct', branch=branch, correction=c['text'],
-                           reason=f"harvest held it ({c.get('kind')}), round {rounds}: back to a session"))
+                           reason=f"harvest held it ({c.get('kind')}), round {rounds}: back to a session",
+                           correction_kind=c.get('kind') or ''))
     return out, ids
 
 

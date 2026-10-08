@@ -283,6 +283,90 @@ class LocalKinds(unittest.TestCase):
         self.assertFalse(cloud.first(row, s))
 
 
+class ACorrectionThatRebasesNeverLeavesTheHost(unittest.TestCase):
+    """:data:`cloud.REWRITE_KINDS` — a correction whose answer rewrites the branch's history
+    stays off both lane doors, under the cloud lane as the default executor and on the
+    overflow path alike, and every other correction kind still goes to the cloud (F-0289
+    S-76104). Pure: no ``gh``, no clock, no home."""
+
+    def test_a_rewrite_kind_correction_stays_off_both_doors(self):
+        primary = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'default': True}})
+        overflow_any = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1,
+                                                 'rows': 'any'}})
+        for k in cloud.REWRITE_KINDS:
+            row = pool_mod.Row('correct-t-0064', 'T-0064', kind='correct', correction_kind=k)
+            for s in (primary, overflow_any):
+                self.assertTrue(cloud.local_only(row, s), (k, s.mode))
+            self.assertFalse(cloud.first(row, primary), k)
+            self.assertFalse(cloud.eligible(row, overflow_any), k)
+
+    def test_every_other_correction_kind_still_goes_to_the_cloud(self):
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'rows': 'any'}})
+        for k in ('merge', 'landing-gate', 'incomplete', 'footprint', ''):
+            row = pool_mod.Row('correct-t-0064', 'T-0064', kind='correct', correction_kind=k)
+            self.assertFalse(cloud.local_only(row, s), k)
+
+    def test_the_list_is_three_kinds_and_a_subset_of_the_refusal_kinds(self):
+        from asf.workers import refusals
+        self.assertEqual(cloud.REWRITE_KINDS, ('conflict', 'copies', 'naming'))
+        self.assertTrue(set(cloud.REWRITE_KINDS) <= set(refusals.CORRECTION_KINDS))
+        self.assertIn('merge', refusals.CORRECTION_KINDS)
+        self.assertNotIn('merge', cloud.REWRITE_KINDS)
+
+    def test_local_only_and_correction_kind_are_two_reasons_not_one(self):
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'default': True}})
+        # local_only: true with no rewrite-kind correction still stays home — its own field,
+        # its own reason (F-0289 C3)
+        marked = pool_mod.Row('j', 'F-0001', kind='coder', local_only=True)
+        self.assertTrue(cloud.local_only(marked, s))
+        self.assertFalse(marked.correction_kind)
+        # a rewrite-kind correction with no local_only mark stays home too — the other reason,
+        # not folded into the first
+        rewrite = pool_mod.Row('j', 'F-0001', kind='coder', correction_kind='conflict')
+        self.assertTrue(cloud.local_only(rewrite, s))
+        self.assertFalse(rewrite.local_only)
+
+    def test_the_fact_is_carried_end_to_end(self):
+        import types
+        from asf.feeder import rows as feeder_rows
+        from asf.tick import step_wave
+        frow = feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'LAUNCH', 'fix-bug', 'fix/B-0001', '',
+                               correction_kind='conflict')
+        brief = types.SimpleNamespace(kind='fix-bug', model='Opus', add_dirs=[], card_digest='')
+        self.assertEqual(step_wave.worker_row(frow, brief, {}).correction_kind, 'conflict')
+        self.assertEqual(
+            pool_mod.Row.from_dict({'job': 'x', 'item': 'F-0001',
+                                   'correction_kind': 'conflict'}).correction_kind, 'conflict')
+
+    def test_correction_rows_sets_the_kind_from_the_hold(self):
+        from asf.feeder import rows as feeder_rows
+        product = env.Product('p', {'conventions': {}})
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active'}}
+
+        plain = {'kind': 'conflict', 'text': 'x', 'rounds': 1, 'branch': 'fix/T-0001'}
+        got, _ids = feeder_rows.correction_rows(items, product, set(), {'T-0001': plain})
+        self.assertEqual([r.correction_kind for r in got], ['conflict'])
+
+        parked = {'kind': 'conflict', 'text': 'x', 'parked': True, 'reason': 'needs operator'}
+        got, _ids = feeder_rows.correction_rows(items, product, set(), {'T-0001': parked})
+        self.assertEqual([r.correction_kind for r in got], ['conflict'])
+
+        waits_on_merge = {'kind': 'conflict', 'text': 'x', 'rounds': 3, 'same': 3,
+                          'settled': True, 'branch': 'fix/T-0001'}
+        got, _ids = feeder_rows.correction_rows(items, product, set(), {'T-0001': waits_on_merge})
+        self.assertEqual([r.correction_kind for r in got], ['conflict'])
+
+    def test_the_two_operator_strings_name_the_new_floor(self):
+        product = env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
+        line = cloud.lane_split({'cloud': dict(ON, default=True)}, product)
+        self.assertIn(f'corrections that rebase ({", ".join(cloud.REWRITE_KINDS)})', line)
+        rows = cloud.checks({'cloud': dict(ON, default=True),
+                             'worker_pool': {'accounts': [{'name': 'acct-c', 'role': 'cloud'}]}},
+                            product, FakeGh())
+        _name, _req, _ok, detail = next(r for r in rows if r[0] == 'default')
+        self.assertIn('corrections that rebase', detail)
+
+
 class Workflow(unittest.TestCase):
     def test_the_template(self):
         s = cloud.settings({'cloud': dict(ON, runs_on=['self-hosted', 'linux'],
@@ -538,6 +622,36 @@ class Lanes(Home):
             pool.untake(accounts_by_name[rec['account']], rec['model'], job=row.job,
                         product=self.product.name, kind=row.kind, lane=lane)
         return launched, waits, lines
+
+
+class ACorrectionThatRebasesNeverLeavesTheHostInAWave(Lanes):
+    """The predicate's effect on a real wave: a conflict correction stays host-side under
+    ``cloud.mode: primary`` and waits for a local seat rather than overflowing (F-0289
+    S-76104)."""
+
+    def test_a_conflict_correction_stays_local_in_primary_mode(self):
+        # the floor holds with a free cloud seat, and a correction-less row goes to the cloud
+        # (F-0289 C1, C3 — the shape DefaultPlacement.test_a_groom_row_stays_on_the_host uses)
+        cfg = dict(self.cfg, cloud=dict(ON, default=True, rows='cloud-ok'))
+        conflict = pool_mod.Row('correct-t-0064', 'T-0064', model='Opus', kind='correct',
+                                correction_kind='conflict')
+        plain = pool_mod.Row('correct-t-0065', 'T-0065', model='Opus', kind='correct')
+        launched, _waits, _ = self.run_wave([conflict, plain], cfg=cfg)
+        self.assertEqual([(r.job, rec.get('runtime_lane') or 'local') for r, rec in launched],
+                         [('correct-t-0064', 'local'), ('correct-t-0065', 'cloud')])
+
+    def test_a_conflict_correction_waits_for_a_local_seat_rather_than_overflowing(self):
+        cfg = dict(self.cfg, cloud=dict(ON, rows='any'))   # overflow mode
+        conflict = pool_mod.Row('correct-t-0064', 'T-0064', model='Opus', kind='correct',
+                                correction_kind='conflict')
+        plain = pool_mod.Row('correct-t-0065', 'T-0065', model='Opus', kind='correct')
+        live = [{'job': 'x', 'account': 'acct-a'}]          # no free local seat
+        launched, waits, _ = self.run_wave([conflict, plain], live=live, cfg=cfg)
+        waits_by_job = dict((r.job, why) for r, why in waits)
+        self.assertEqual(waits_by_job.get('correct-t-0064'),
+                         'pool full — accounts at cap: acct-a 1/1')
+        self.assertNotIn('correct-t-0064',
+                         [r.job for r, rec in launched if rec.get('runtime_lane') == 'cloud'])
 
 
 class Placement(Lanes):
@@ -1088,8 +1202,8 @@ class Doctor(unittest.TestCase):
         rows = cloud.checks(self.cfg(default=True), self.product(), FakeGh())
         _name, _req, _ok, detail = next(r for r in rows if r[0] == 'default')
         self.assertEqual(detail, 'cloud.mode: primary — the cloud lane is the default executor '
-                                 '(local: groom, groom-clerk, close, cloud.local_only, cards '
-                                 'marked local_only, and the fallback)')
+                                 '(local: groom, groom-clerk, close, corrections that rebase, '
+                                 'cloud.local_only, cards marked local_only, and the fallback)')
 
 
 if __name__ == '__main__':
@@ -1339,7 +1453,8 @@ class PrimaryMode(Lanes):
         self.assertTrue(line.startswith(
             'mode primary (cloud first; local takes local-only rows and the fallback) — local '
             'sessions 5 (auto: min(ceiling 8, 10 cores/2, 32 GB/4)), cloud max_inflight 2, '
-            'local only: groom, groom-clerk, close and cards marked local_only'), line)
+            'local only: groom, groom-clerk, close, corrections that rebase (conflict, copies, '
+            'naming) and cards marked local_only'), line)
         off = cloud.lane_split({}, self.product)
         self.assertIn('mode overflow (local first; the cloud takes what local cannot)', off)
         self.assertIn('cloud lane off', off)

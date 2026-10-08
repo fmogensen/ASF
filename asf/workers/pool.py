@@ -128,7 +128,8 @@ class Row:
 
     def __init__(self, job, item, state='', action='', title='', model='', kind=None,
                  severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=(),
-                 card_digest='', cloud_ok=False, host_load_bypass=False, local_only=False):
+                 card_digest='', cloud_ok=False, host_load_bypass=False, correction_kind='',
+                 local_only=False):
         self.job = job
         self.item = item
         self.state = state
@@ -155,6 +156,10 @@ class Row:
         #: the row never leaves the host (its item's ``local_only: true``;
         #: :func:`asf.workers.cloud.local_only`)
         self.local_only = bool(local_only)
+        #: the lane's ``kind`` for the correction this row answers — a rewrite of the branch's
+        #: history has no channel back from the cloud lane
+        #: (:data:`asf.workers.cloud.REWRITE_KINDS`, F-0289)
+        self.correction_kind = correction_kind or ''
         #: this launch is the one S1 row passing the host guard's LOAD hold (the wave step's own
         #: rule, :func:`asf.tick.step_wave.s1_bypass_live`) — carried onto the session ledger so
         #: a later wave can see the bypass is still live.
@@ -175,7 +180,8 @@ class Row:
                    kind=d.get('kind'), severity=d.get('severity'), feature=d.get('feature'),
                    lane=d.get('lane'), branch=d.get('branch'), test=d.get('test'),
                    cloud_ok=d.get('cloud_ok') or d.get('cloud-ok'),
-                   host_load_bypass=d.get('host_load_bypass'), local_only=d.get('local_only'))
+                   host_load_bypass=d.get('host_load_bypass'),
+                   correction_kind=d.get('correction_kind'), local_only=d.get('local_only'))
 
     def __repr__(self):
         return f'Row({self.state} → {self.action} {self.item} {self.job})'
