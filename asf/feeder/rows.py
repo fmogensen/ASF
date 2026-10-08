@@ -922,7 +922,10 @@ def footprint_row(item, product, c, tier, fid, branch, items=None):
     has widened the Task — a widened one is an ordinary FIX → CORRECT row, on the wider
     ``writes:``. A reshape verdict is the RESHAPE row (the card's ``reshape:`` says why); a path
     under an approvals-protected glob waits on its approval; a path a running Task writes waits
-    on that Task; an undecided one waits on the rule (the tick's health step decides it)."""
+    on that Task; an undecided one waits on the rule (the tick's health step decides it). A
+    ``waits`` stored on an owner that has since closed, or on a Task parked under a
+    ``priority: later`` card (:func:`_owner_parked`, B-82960 — it holds no footprint), is stale:
+    the row waits on the rule, which re-decides it next tick."""
     iid, verdict, detail = item['id'], c.get('verdict'), c.get('detail') or ''
     if verdict == 'reshape':
         return Row(tier=tier, kind=RESHAPE, item_id=iid, feature_id=fid, action=LAUNCH,
@@ -932,7 +935,8 @@ def footprint_row(item, product, c, tier, fid, branch, items=None):
     if verdict == 'approval':
         action, waits, why = f'WAITS ON approval {detail}', 'approval', \
             f'footprint needs a path under {detail}: approvals decide'
-    elif verdict == 'waits' and not _owner_done(items, detail):
+    elif verdict == 'waits' and not _owner_done(items, detail) \
+            and not _owner_parked(items, item, detail):
         action, waits, why = f'WAITS ON {detail}', detail, f'footprint widening overlaps {detail}'
     else:
         action, waits, why = 'WAITS ON widen_footprint', 'widen', \
@@ -946,6 +950,16 @@ def _owner_done(items, owner):
     no footprint, so a ``waits`` verdict stored on it is stale (the tick re-decides it)."""
     card = (items or {}).get(owner)
     return bool(card) and (bool(card.get('removed')) or not is_open(card))
+
+
+def _owner_parked(items, item, owner):
+    """True when ``owner`` is parked under a ``priority: later`` card and ``item`` is not
+    (B-82960): whatever its state, the parked Task holds no footprint — I3 pairs nothing with
+    it, :func:`running_footprints` and the widening rule skip it — so a ``waits`` on it is stale.
+    Two Tasks parked together still wait on each other."""
+    items = items or {}
+    return bool(owner in items and invariants.later_holder(items, owner)
+                and not invariants.later_holder(items, item.get('id')))
 
 
 def landed_doc(item, product, c):
