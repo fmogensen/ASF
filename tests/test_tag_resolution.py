@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from asf import env, installs, upgrade
+from tests import gitfixture
 from tests.test_install import FakeRun as InstallFakeRun, HomeCase
 from tests.test_upgrade import CHECKS, FakeOps, FakeRun as MoveFakeRun, MoveCase, URL
 
@@ -37,8 +38,7 @@ def tagged_repo(tmp):
                               text=True).stdout.strip()
 
     subprocess.run(['git', 'init', '-q', '-b', 'main', path], check=True)
-    git('config', 'user.email', 'sample@example.com')
-    git('config', 'user.name', 'sample')
+    gitfixture.identity(path, 'sample', 'sample@example.com')
     git('commit', '-q', '--allow-empty', '-m', 'x')
     git('tag', '-a', TAG, '-m', 'x')
     commit = git('rev-parse', 'HEAD')
