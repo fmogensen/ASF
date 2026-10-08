@@ -1,4 +1,4 @@
-"""``asf/hooks.py`` — both recognisers read back every form asf can write (F-0111 S-32651): a
+"""``asf/hooks.py`` — both recognisers read back every form asf can write (F-0111 S-68655): a
 suffixed basename (a pipx ``--suffix`` install, F-0111 P3) and the module forms, so a second
 ``hooks install`` from the same install changes nothing and never appends a second settings entry,
 and the doctor's ``approvals-hook`` row stays green."""
