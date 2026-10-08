@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import unittest
 
-from asf import env
+from asf import env, trunk_watch
 from asf.evidence import evidence, sources
 
 ID = ['-c', 'user.name=cache', '-c', 'user.email=cache@example.com']
@@ -105,6 +105,34 @@ class QueueLandedIsNotOpenTests(unittest.TestCase):
         out = evidence.id_evidence(product, [], prs, commits=commits, green=[])
         self.assertEqual((out.get('T-10485') or {}).get('open_prs') or [], [])
         self.assertEqual(out['T-10486']['open_prs'], [1047])
+
+
+class TrunkLandedRowTests(unittest.TestCase):
+    SHA = 'a' * 40
+
+    def test_landed_prs_reads_all_three_subject_forms(self):
+        for subject in ('merge-queue: #1046 (cloud/T-10485 @ 243ce531)',
+                        'feat: a thing (#1046)',
+                        'Merge pull request #1046 from org/b'):
+            self.assertEqual(trunk_watch.landed_prs([{'sha': self.SHA, 'subject': subject}]),
+                             {1046: self.SHA})
+
+    def test_landed_prs_is_empty_off_a_subject_naming_no_pr(self):
+        self.assertEqual(
+            trunk_watch.landed_prs([{'sha': self.SHA, 'subject': 'chore: nothing'}]), {})
+
+    def test_landed_prs_takes_both_row_shapes(self):
+        subject = 'merge-queue: #1046 (cloud/T-10485 @ 243ce531)'
+        self.assertEqual(trunk_watch.landed_prs([{'sha': self.SHA, 'subject': subject}]),
+                         {1046: self.SHA})
+        self.assertEqual(trunk_watch.landed_prs([(self.SHA, subject, ['f.txt'])]),
+                         {1046: self.SHA})
+
+    def test_the_newest_row_wins_when_two_rows_name_one_number(self):
+        newest, oldest = 'n' * 40, 'o' * 40
+        rows = [{'sha': newest, 'subject': 'merge-queue: #1046 (cloud/T-10485 @ 243ce531)'},
+                {'sha': oldest, 'subject': 'feat: a thing (#1046)'}]
+        self.assertEqual(trunk_watch.landed_prs(rows), {1046: newest})
 
 
 if __name__ == '__main__':
