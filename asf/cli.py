@@ -428,6 +428,9 @@ def build_parser():
 
     p_status = sub.add_parser('status', help='the FACTORY STATUS table')
     p_status.add_argument('--product')
+    p_status.add_argument('--line', action='store_true',
+                          help="one session status line from the last tick's snapshot; reads no "
+                               "record and computes nothing")
 
     p_scorecard = sub.add_parser('scorecard', help='the SCORECARD: value shipped per week, its cost, '
                                                     'where it went, and the causes the loop filed')
@@ -706,6 +709,9 @@ def _main(argv=None):
     if args.command == 'watch':
         from asf.tick.watch import cmd_watch
         return cmd_watch(args)
+    if args.command == 'status' and getattr(args, 'line', False):
+        from asf.views.status import cmd_status_line
+        return cmd_status_line(args)  # before resolve_record: no `record:` line, no index
     if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status', 'tokens', 'scorecard',
                         'release-readiness'):
         view_root = resolve_record(args, announce=_announce_stderr if getattr(args, 'json', False) else print)

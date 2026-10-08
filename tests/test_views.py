@@ -1,7 +1,10 @@
 """asf.views — sessions (the live registry), status (every row filled or naming its key), prod
 (no deploy), against a temp ASF_HOME and a tiny record. No network: every row that would call
 ``gh`` is either unconfigured here or stubbed."""
+import argparse
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import shutil
@@ -370,6 +373,91 @@ class StatusViewTests(ViewsTestCase):
         with mock.patch.object(step_wave, 'would_start', return_value=(screened, 5, [])):
             cell = status.ready_cell(self.root, self.product)
         self.assertEqual(cell, '0 (2 held back (held 1, relaunch cap 1))')
+
+
+class StatusLineTests(ViewsTestCase):
+    """F-0118: the snapshot format (``status.snapshot_text`` / ``write_snapshot``) and the status
+    line that reads it (``status.line_text`` / ``cmd_status_line``) — one file, one subtraction,
+    never the markdown table (D6)."""
+
+    HORIZON_S = 600
+
+    def test_snapshot_text_is_one_header_and_one_line_per_row_no_pipes(self):
+        now = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        cfg = {'scheduler': {'kind': 'none'}}
+        expected = status.rows(self.root, self.product, cfg)
+        text = status.snapshot_text(self.root, self.product, cfg=cfg, now=now,
+                                    stale_after_s=self.HORIZON_S)
+        lines = text.splitlines()
+        self.assertRegex(lines[0], r'^# asf status p ts=2026-01-01T12:00:00Z stale_after_s=600$')
+        self.assertEqual(lines[1:], [f"{name}: {cell}" for name, cell in expected])
+        self.assertNotIn('|', text)
+
+    def test_a_newline_in_a_cell_folds_to_a_dot(self):
+        with mock.patch.object(status, 'rows', return_value=[('X', 'a\nb\nc')]):
+            text = status.snapshot_text(self.root, self.product)
+        self.assertIn('X: a · b · c\n', text)
+
+    def write_snapshot_file(self, body_lines=(), ts='2026-01-01T12:00:00Z', horizon=600, name=None):
+        name = name or self.product.name
+        path = status.snapshot_path(name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(f"# asf status {name} ts={ts} stale_after_s={horizon}\n")
+            for line in body_lines:
+                f.write(line + '\n')
+        return path
+
+    def test_line_text_shows_the_age_and_carries_the_body(self):
+        self.write_snapshot_file(body_lines=['Stale: —', 'Record: 1 open'])
+        now = dt.datetime(2026, 1, 1, 12, 3, 0, tzinfo=dt.timezone.utc)
+        text = status.line_text(self.product.name, now=now)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], f'ASF {self.product.name} · tick 3m ago')
+        self.assertEqual(lines[1:], ['Stale: —', 'Record: 1 open'])
+
+    def test_line_text_marks_stale_past_the_horizon(self):
+        self.write_snapshot_file()
+        now = dt.datetime(2026, 1, 1, 12, 10, 1, tzinfo=dt.timezone.utc)
+        text = status.line_text(self.product.name, now=now)
+        self.assertTrue(text.splitlines()[0].endswith('· STALE'))
+
+    def test_a_missing_empty_headerless_or_unparseable_snapshot_says_no_tick_yet(self):
+        name = 'ghost'
+        self.assertEqual(status.line_text(name), f'ASF {name} · no tick yet\n')  # missing file
+
+        path = status.snapshot_path(name)
+        with open(path, 'w', encoding='utf-8'):
+            pass  # empty file
+        self.assertEqual(status.line_text(name), f'ASF {name} · no tick yet\n')
+
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('not a header\nmore\n')
+        self.assertEqual(status.line_text(name), f'ASF {name} · no tick yet\n')
+
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('# asf status ghost ts=nope stale_after_s=600\n')
+        self.assertEqual(status.line_text(name), f'ASF {name} · no tick yet\n')
+
+    def test_cmd_status_line_always_returns_0_and_prints_no_record_line(self):
+        self.write_snapshot_file(body_lines=['Stale: —'])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = status.cmd_status_line(argparse.Namespace(product=self.product.name))
+        self.assertEqual(rc, 0)
+        self.assertNotIn('record:', out.getvalue())
+
+        out2 = io.StringIO()
+        with contextlib.redirect_stdout(out2):
+            rc2 = status.cmd_status_line(argparse.Namespace(product='nobody-ticked'))
+        self.assertEqual(rc2, 0)
+        self.assertEqual(out2.getvalue(), 'ASF nobody-ticked · no tick yet\n')
+
+    def test_render_is_rows_rendered_through_the_table(self):
+        cfg = {'scheduler': {'kind': 'none'}}
+        built = status.rows(self.root, self.product, cfg)
+        text = status.render(self.root, self.product, cfg)
+        body = ''.join(f"| {name} | {cell} |\n" for name, cell in built)
+        self.assertTrue(text.endswith(body))
 
 
 class DecisionsCellTests(ViewsTestCase):
