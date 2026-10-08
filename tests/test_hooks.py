@@ -11,6 +11,7 @@ from unittest import mock
 
 from asf import dispatch, env, hooks
 from asf.env import Product
+from asf.workers import pool as pool_mod
 
 
 def _venv_cli(base, name):
@@ -127,6 +128,104 @@ class HooksInstallWritesTheDispatcher(unittest.TestCase):
             body = hooks._git_hook_body(name, self.dispatcher, 'demo')
             self.assertNotIn('command -v asf', body)
             self.assertTrue(hooks.is_git_hook_ours(body, name))
+
+    def test_install_and_plan_name_the_same_asf_with_and_without_a_dispatcher(self):
+        """``which_asf`` is the one place either caller resolves ``asf`` from, so a row `plan`
+        reports and the file `install` writes can never name a different one (S-76257)."""
+        raw_which = lambda n: self.shared  # noqa: E731
+        pre_push = os.path.join(hooks.git_hooks_dir(self.repo), 'pre-push')
+        for dispatcher in (None, self.dispatcher):
+            if dispatcher:
+                rc, msg = self.install()  # writes the real dispatcher at self.dispatcher
+                self.assertEqual(rc, 0, msg)
+            else:
+                rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                                        which=raw_which, cfg=self.cfg)
+            which = hooks.which_asf(dispatcher, raw_which)
+            expected = hooks.runnable_asf(which)[0]
+            with open(pre_push) as f:
+                self.assertIn(expected, f.read())
+            rows = hooks.plan(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                              which=which, cfg=self.cfg)
+            self.assertTrue(all(r['action'] in ('already ours', 'write', 'upgrade', 'left (not ours)',
+                                                'refused (not a git repo)') for r in rows))
+
+
+class WhichAsf(unittest.TestCase):
+    """``hooks.which_asf``'s four states (S-76257): a dispatcher at the path names it; a pipx
+    link, a foreign regular file, or nothing at the path falls back to the given ``which``."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-which-')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.dispatcher = os.path.join(self.tmp, 'home', '.local', 'bin', 'asf')
+        self.cli = _venv_cli(self.tmp, 'cli')
+        self.sentinel = object()
+        self.which = lambda _name: self.sentinel
+
+    def test_a_dispatcher_at_the_path_names_it(self):
+        dispatch.install(self.dispatcher, cli=self.cli)
+        which = hooks.which_asf(self.dispatcher, self.which)
+        self.assertEqual(which('asf'), self.dispatcher)
+        self.assertEqual(which('anything'), self.dispatcher)
+
+    def test_a_pipx_link_falls_back_to_which(self):
+        os.makedirs(os.path.dirname(self.dispatcher))
+        os.symlink(self.cli, self.dispatcher)
+        self.assertIs(hooks.which_asf(self.dispatcher, self.which), self.which)
+
+    def test_a_foreign_regular_file_falls_back_to_which(self):
+        os.makedirs(os.path.dirname(self.dispatcher))
+        with open(self.dispatcher, 'w') as f:
+            f.write('#!/bin/sh\necho mine\n')
+        os.chmod(self.dispatcher, 0o755)
+        self.assertIs(hooks.which_asf(self.dispatcher, self.which), self.which)
+
+    def test_nothing_at_the_path_falls_back_to_which(self):
+        self.assertFalse(os.path.lexists(self.dispatcher))
+        self.assertIs(hooks.which_asf(self.dispatcher, self.which), self.which)
+
+    def test_default_dispatcher_is_dispatch_default_path(self):
+        with mock.patch.object(dispatch, 'default_path', return_value=self.dispatcher):
+            self.assertIs(hooks.which_asf(which=self.which), self.which)
+            dispatch.install(self.dispatcher, cli=self.cli)
+            self.assertEqual(hooks.which_asf(which=self.which)('asf'), self.dispatcher)
+
+    def test_default_which_is_shutil_which(self):
+        with mock.patch.object(dispatch, 'default_path', return_value=self.dispatcher):
+            self.assertIs(hooks.which_asf(), shutil.which)
+
+
+class EnsureAccountHooksDefaultsToTheDispatcher(unittest.TestCase):
+    """``ensure_account_hooks(account)`` with no ``which`` now writes the dispatcher's path —
+    never ``asf`` resolved fresh from ``PATH`` on every launch (S-76257, P6)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-ensure-')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.dispatcher = os.path.join(self.tmp, 'home', '.local', 'bin', 'asf')
+        dispatch.install(self.dispatcher, cli=_venv_cli(self.tmp, 'cli'))
+        self.account = pool_mod.Account('w1', cap=1, config_dir=os.path.join(self.tmp, 'w1'))
+        self.settings_path = hooks.account_settings_path(self.account)
+
+    def test_writes_the_dispatchers_path_with_no_which_given(self):
+        with mock.patch.object(dispatch, 'default_path', return_value=self.dispatcher):
+            self.assertTrue(hooks.ensure_account_hooks(self.account))
+        with open(self.settings_path) as f:
+            data = json.load(f)
+        cmds = [h['command'] for g in data['hooks']['PreToolUse'] for h in g['hooks']]
+        self.assertEqual(cmds, [f'{self.dispatcher} hook approvals'])
+
+    def test_an_entry_already_naming_the_dispatcher_is_left_byte_identical(self):
+        with mock.patch.object(dispatch, 'default_path', return_value=self.dispatcher):
+            self.assertTrue(hooks.ensure_account_hooks(self.account))
+            before = os.stat(self.settings_path).st_mtime_ns
+            with open(self.settings_path, 'rb') as f:
+                before_bytes = f.read()
+            self.assertTrue(hooks.ensure_account_hooks(self.account))
+        with open(self.settings_path, 'rb') as f:
+            self.assertEqual(f.read(), before_bytes)
+        self.assertEqual(os.stat(self.settings_path).st_mtime_ns, before)
 
 
 class PrePushHookTests(unittest.TestCase):

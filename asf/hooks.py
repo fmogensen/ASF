@@ -362,6 +362,18 @@ def runnable_asf(which=shutil.which):
     return asf_path, None
 
 
+def which_asf(dispatcher=None, which=shutil.which):
+    """A ``which``-shaped callable naming the asf every hook should run: the dispatcher when the
+    file at ``dispatcher`` (default :func:`asf.dispatch.default_path`) is one
+    (:func:`asf.dispatch.is_ours`), else ``which`` — so a hook written anywhere names the pin
+    whenever there is a dispatcher to name (F-0283)."""
+    from asf import dispatch
+    dispatcher = dispatcher or dispatch.default_path()
+    if dispatch.is_ours(dispatcher):
+        return lambda _name, _path=dispatcher: _path
+    return which
+
+
 def ensure_git_hooks(product, which=shutil.which, withhold=()):
     """Returns ``(ok, detail)`` (D10, §2.4). Writes the redaction gate's ``pre-commit`` and
     ``pre-push`` into :func:`git_hooks_dir` of each of ``product.repo_dir`` and
@@ -697,8 +709,7 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None, dispatch
         if rc:
             refusals.append(dispatch_detail)
             dispatch_detail = 'dispatcher: NEEDS OPERATOR (below)'
-        if dispatch.is_ours(dispatcher):
-            which = lambda _name, _path=dispatcher: _path  # noqa: E731 — every hook names it
+        which = which_asf(dispatcher, which)
         # every agent home's $HOME/.local/bin/asf follows the operator's path (the dispatcher):
         # a hook under any home finds a working asf, after this install and after every move
         from asf.workers import runtime
@@ -815,7 +826,7 @@ def verify(product):
     return out
 
 
-def ensure_account_hooks(account, which=shutil.which):
+def ensure_account_hooks(account, which=None):
     """Merge :data:`ACCOUNT_HOOKS` into ``account``'s own settings file before a launch, so a
     built-in hook added after ``asf hooks install`` last ran (the ``unpushed`` Stop gate) binds
     the next session without an operator step. Writes only on a change; never raises — a launch
@@ -827,7 +838,7 @@ def ensure_account_hooks(account, which=shutil.which):
             from asf.workers import runtime  # local: runtime is the session's side
             if runtime.session_home(account) is None:
                 return False  # the operator's own HOME: only `asf hooks install` writes there
-        asf_path, refusal = runnable_asf(which)
+        asf_path, refusal = runnable_asf(which or which_asf())
         if refusal:
             return False
         _write_merged(account_settings_path(account), ACCOUNT_HOOKS, asf_path, None)
@@ -859,10 +870,7 @@ def cmd_hooks(args):
     from asf import dispatch
     product = env.load_product(args.product)
     if getattr(args, 'dry_run', False):
-        dispatcher = dispatch.default_path()
-        which = shutil.which
-        if dispatch.is_ours(dispatcher):
-            which = lambda _name, _path=dispatcher: _path  # noqa: E731 — what install names
+        which = which_asf(dispatch.default_path(), shutil.which)
         rows = plan(product, which=which)
         print(format_plan(rows))
         withheld = gated(product, rows)
