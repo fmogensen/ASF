@@ -632,8 +632,9 @@ clocks:
 #   min_upgrades: 3                # auto-upgrades in the window, none failed, torn or rolled back
 #   hand_types: [fix, hotfix, revert]
 #   readme_sections: [Install, Quick start, Configuration, Upgrade]
-#   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product}
-#   requires: {install: [], upgrade: [], generic: [], docs: []}   # Features each criterion also needs landed
+#   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product,
+#              rehearsal: release rehearsal}
+#   requires: {install: [], upgrade: [], generic: [], docs: [], rehearsal: []}   # Features each criterion also needs landed
 #   blocking: []                   # Features that must be landed before a release
 #   floor:                         # criterion 9: no leftover older than its deadline; `off` disables a kind
 #     stale_pr_days: 3             # an open PR the lane marks STALE
