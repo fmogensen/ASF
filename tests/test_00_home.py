@@ -34,8 +34,10 @@ def hermetic_home():
         os.environ.pop(var, None)
     # B-0114: a session that runs the suite carries its own core.hooksPath in GIT_CONFIG_*, and
     # git applies it to every repo — so a fixture repo the suite just created reports the
-    # operator's real hook dir and `asf hooks install` calls those hooks foreign.
-    hermetic.strip_git_config(os.environ)
+    # operator's real hook dir and `asf hooks install` calls those hooks foreign. The same leak in
+    # the identity direction (F-0116, P5): a worker session's own user.name/user.email outranks
+    # every fixture's repo-local identity. Twin of tests/__init__.py's strip.
+    hermetic.strip_git_config(os.environ, hermetic.GIT_CONFIG_NOT_INHERITED_BY_SUITE)
     # the runtime's config dir is the caller's (a worker session's is its account's): the suite's
     # is its own, so a runtime CLI a test reaches never writes an operator's settings
     os.environ[hermetic.RUNTIME_CONFIG_DIR] = os.path.join(chosen, 'runtime-config')

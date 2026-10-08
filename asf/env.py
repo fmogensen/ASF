@@ -275,7 +275,8 @@ def load_config():
     from asf.workers import cloud  # local: the cloud lane's module imports this one
     from asf.tick import network
     from asf.workers import heartbeat
-    problems = (validate_worker_pool(cfg) + cloud.config_problems((cfg or {}).get('cloud'))
+    problems = (validate_worker_pool(cfg) + validate_operator(cfg)
+                + cloud.config_problems((cfg or {}).get('cloud'))
                 + heartbeat.config_problems((cfg or {}).get('workers'))
                 + network.config_problems(cfg))
     if problems:
@@ -297,7 +298,8 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_worker_pool(cfg):
     """``worker_pool.env_passthrough`` (a list of environment variable names) and each
     account's ``home`` (a path), ``isolate_home`` (true | false), ``home_seed`` (a list of
-    paths) and ``auth_env`` (``{VARIABLE: file}``) checked: ``[(dotted key, problem)]``, empty when well-formed or absent."""
+    paths), ``auth_env`` (``{VARIABLE: file}``) and ``identity`` (``{name, email}``) checked:
+    ``[(dotted key, problem)]``, empty when well-formed or absent."""
     pool = (cfg or {}).get('worker_pool')
     if not isinstance(pool, dict):
         return []
@@ -347,6 +349,16 @@ def validate_worker_pool(cfg):
                     elif not isinstance(path, str) or not path.strip():
                         problems.append((label + '.auth_env',
                                          f'{name} must name a file, not {path!r}'))
+        identity = acct.get('identity')
+        if identity is not None:
+            if not isinstance(identity, dict):
+                problems.append((label + '.identity',
+                                 f'must map name and email to strings, not {identity!r}'))
+            else:
+                for field in ('name', 'email'):
+                    if field in identity and not isinstance(identity[field], str):
+                        problems.append((label + '.identity',
+                                         f'{field} must be a string, not {identity[field]!r}'))
     return problems
 
 
@@ -408,6 +420,40 @@ def account_auth_env(acct):
     The mapping names files, never values: a secret never sits in config.yaml."""
     auth = (acct or {}).get('auth_env') or {}
     return {str(k): os.path.expanduser(str(v)) for k, v in auth.items()} if isinstance(auth, dict) else {}
+
+
+def account_identity(acct):
+    """An account's ``identity``: the ``{name, email}`` map it names, or None when unset. Each
+    half is validated at load (:func:`validate_worker_pool`), so a malformed map never reaches
+    here quietly — :func:`asf.identity.agent_identity` falls back to the agent default per half
+    this leaves empty."""
+    identity = (acct or {}).get('identity')
+    return identity if isinstance(identity, dict) else None
+
+
+def operator_config(cfg):
+    """The shared config's top-level ``operator``: the ``{name, email}`` map it names, or None
+    when absent. Validated at load (:func:`validate_operator`), so a value here is always a
+    well-formed map."""
+    operator = (cfg or {}).get('operator')
+    return operator if isinstance(operator, dict) else None
+
+
+def validate_operator(cfg):
+    """``operator`` (``{name, email}``, :func:`asf.identity.operator_identity`'s override)
+    checked: ``[(dotted key, problem)]``, empty when well-formed or absent. Absent is D4's
+    day-one case — the check falls back to the operator's global git config — so a malformed
+    value is the only problem raised here, never a silent fall back to the default."""
+    operator = (cfg or {}).get('operator')
+    if operator is None:
+        return []
+    if not isinstance(operator, dict):
+        return [('operator', f'must map name and email to strings, not {operator!r}')]
+    problems = []
+    for field in ('name', 'email'):
+        if field in operator and not isinstance(operator[field], str):
+            problems.append(('operator', f'{field} must be a string, not {operator[field]!r}'))
+    return problems
 
 
 def product_auth_env(product):

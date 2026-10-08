@@ -635,9 +635,14 @@ A worker session starts from **an allow-list, not the tick's environment**: `PAT
 `LC_*`, `TERM`, `TMPDIR`, `USER`, `SHELL`, the names you list in `worker_pool.env_passthrough`, and
 the job's own variables (`ASF_PRODUCT`, `ASF_JOB`, …, the account's `CLAUDE_CONFIG_DIR`). A secret
 exported in the shell that ran the tick does not reach it. Its `HOME` is its account's own
-(`~/.ASF/state/homes/<account>`), holding only what `home_seed` lists and a `.gitconfig` with your
-`user.name` and `user.email` — none of your CLI logins. `isolate_home: false` gives a session your
-`HOME` back; `asf doctor`'s `worker env` row is red while any account does.
+(`~/.ASF/state/homes/<account>`), holding only what `home_seed` lists and a `.gitconfig` naming the
+agent it commits as — `asf worker <asf-worker@localhost>` by default, never your own `user.name`
+or `user.email`, so a session's commits are never filed under your name. `GIT_CONFIG_*` in the
+session's own environment carries the same pair and is what actually binds it: it outranks this
+file, a `home_seed`ed `~/.gitconfig` and even a repo-local `user.name` a product's
+`worktree_setup` sets. `worker_pool.accounts[].identity: {name, email}` overrides it for one
+account — the code host's `noreply` form, say. `isolate_home: false` gives a session your `HOME`
+back, your own identity included; `asf doctor`'s `worker env` row is red while any account does.
 
 ### Credentials: `auth_env`
 
