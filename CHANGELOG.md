@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.251 — 2026-10-08
+
+### Features landed
+
+- `ci.provider: vm` is a configuration a product can hold — two keys, two blocks, and the file that refuses every way of saying it wrong (#1092)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.251"`
+
 ## v0.1.250 — 2026-10-08
 
 ### Features landed
