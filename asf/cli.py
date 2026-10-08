@@ -494,6 +494,8 @@ def build_parser():
     merge_queue.register(sub)
     from asf import product_check
     product_check.register(sub)
+    from asf.workers import worker_settings
+    worker_settings.register(sub)
 
     return p
 
