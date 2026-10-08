@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import dispatch, env
 from asf.workers import githooks, trunkmerge
 
 OLD_CHECK = '#!/bin/sh\necho "step lint ok"\n'
@@ -176,10 +176,19 @@ class HookTests(unittest.TestCase):
             githooks._write_if_changed(os.path.join(self.hooks, name),
                                        githooks._SHIM.format(name=name))
         self.calls = os.path.join(self.tmp, 'calls')
-        _write(os.path.join(self.tmp, '.local', 'bin', 'asf'),
+        fallback = os.path.join(self.tmp, 'fallback-cli')
+        _write(fallback,
                f'#!/bin/sh\necho "$@" >> {self.calls}\ncat >> {self.calls}\n'
                f'[ -f {self.tmp}/refuse ] && {{ echo "asf: push refused — trunk" >&2; exit 1; }}\n'
                'exit 0\n', 0o755)
+        # the trunk check only runs a real dispatcher (asf.dispatch.MARKER) at the path — built
+        # from dispatch.install, never a hand-written marker line, same as PD8 for test_session_
+        # push_guard.TrunkCheckRunsThePinOrRefuses
+        rc, detail = dispatch.install(path=os.path.join(self.tmp, '.local', 'bin', 'asf'),
+                                      asf_home=os.path.join(self.tmp, 'dispatch-home'),
+                                      venvs=os.path.join(self.tmp, 'dispatch-venvs'),
+                                      default_product='', cli=fallback)
+        assert rc == 0, detail
         self.remote = os.path.join(self.tmp, 'remote.git')
         _git(['init', '-q', '--bare', self.remote], self.tmp)
         # a session's worktree is a linked worktree of the product clone
