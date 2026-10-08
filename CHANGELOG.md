@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.248 — 2026-10-08
+
+### Features landed
+
+- A missing required check is Actions' to skip only against a job the head's own workflows declare — the scan, the read at the head, the rule, the refusal in words, and the three documents (#1069)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.248"`
+
 ## v0.1.247 — 2026-10-08
 
 ### Features landed
