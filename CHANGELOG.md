@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.254 — 2026-10-08
+
+### Features landed
+
+- The two numbers, computed once, and the two rows that print them (#1155)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.254"`
+
 ## v0.1.253 — 2026-10-08
 
 ### Features landed
