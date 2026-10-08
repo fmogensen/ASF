@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.249 — 2026-10-08
+
+### Features landed
+
+- Every mint in a record checkout with an origin is claimed on origin, over a floor read from origin's trunk (#1021)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.249"`
+
 ## v0.1.248 — 2026-10-08
 
 ### Features landed
