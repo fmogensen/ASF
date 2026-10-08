@@ -903,7 +903,9 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         if retry:
             text = (f'the push was refused by the repo\'s own hook — {retry[1]} — fix what it '
                     f'names, commit, and push again')
-            fields, line = lifecycle.hook_refusal_hold(registry, s, text, now)
+            rep = report_mod.parse(str((ev.result or {}).get('result') or ''))
+            retried = report_mod.hook_retried(rep)
+            fields, line = lifecycle.hook_refusal_hold(registry, s, text, now, retried=retried)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.landed_earlier(registry, s):

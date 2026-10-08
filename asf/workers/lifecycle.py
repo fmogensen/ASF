@@ -3131,7 +3131,7 @@ def footprint_hold(run, paths, fact, text, now, tests=()):
                     f'widen_footprint decides')
 
 
-def hook_refusal_hold(path, run, text, now):
+def hook_refusal_hold(path, run, text, now, retried=False):
     """``(fields, line)``: ``run``'s push the repo's own pre-push hook refused. A redaction
     finding (:data:`HOOK_REDACTION_RE`) is parked as a security hold on the FIRST refusal: only a
     person decides what a flagged secret needs, never another session. Otherwise the first hold on
@@ -3142,10 +3142,20 @@ def hook_refusal_hold(path, run, text, now):
     (B-0140) — anything else is marked ``at_cap`` so the item goes to ADJUDICATE the way any other stuck finding does
     (:func:`hold`). A lint or test naming paths outside the Task's own ``writes:`` is left as a
     plain ``hook refused`` correction either way: :mod:`asf.tick.widen_footprint` turns that into
-    a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``."""
+    a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``.
+
+    ``retried`` (F-0235): True when the session's own report declared it already fixed what the
+    hook named, pushed again, and was refused the same thing a second time
+    (:func:`asf.workers.report.hook_retried`). A session that says so has already spent in-run
+    exactly the retry the second session would have been launched to make, so its first hold here
+    *is* the cap — the redaction park and the ``at_cap`` routing fire immediately. The unretried
+    ladder is unchanged and :data:`HOOK_REFUSAL_CAP` is still 2: a session that never saw the
+    hook's output is not at fault for it and still gets its one free relaunch (B-0097)."""
     branch = run.get('branch') or run.get('job')
     keys, same = next_finding(path, run, HOOK_REFUSED, text)
     corr = {'kind': HOOK_REFUSED, 'text': text, 'at': now, 'finding': keys, 'same': same}
+    if retried:
+        corr['retried'] = True
     if HOOK_REDACTION_RE.search(text):
         # held on the first refusal: a product's correct-f-0086 was relaunched 100 times on one
         # redaction finding, its streak reset each time by a lane hold in between
@@ -3154,7 +3164,7 @@ def hook_refusal_hold(path, run, text, now):
         corr.update(parked=True, reason=reason)
         return ({'correction': corr, 'operator_flagged': 1},
                 f'held {branch}: {reason} (security hold)')
-    if same < hook_refusal_cap():
+    if same < hook_refusal_cap() and not retried:
         return {'correction': corr}, f'held {branch}: {text} (no round spent)'
     corr['at_cap'] = True
     return ({'correction': corr},

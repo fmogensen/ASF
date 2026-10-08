@@ -1085,12 +1085,13 @@ class HookRefusalEscalation(unittest.TestCase):
             for ln in lines:
                 f.write(json.dumps(ln) + '\n')
 
-    def hold(self, text):
+    def hold(self, text, retried=False):
         self.n += 1
         run = {'job': f'fix-{self.n}', 'item': 'B-0140', 'branch': 'fix/B-0140',
                'pid': self.n, 'started': f't{self.n:02d}a', 'kind': 'fix-bug'}
         self.write(run)
-        fields, line = lc.hook_refusal_hold(self.path, run, text, f't{self.n:02d}b')
+        fields, line = lc.hook_refusal_hold(self.path, run, text, f't{self.n:02d}b',
+                                             retried=retried)
         self.write(dict(fields, job=run['job']))
         return fields, line
 
@@ -1144,6 +1145,31 @@ class HookRefusalEscalation(unittest.TestCase):
         fields, _ = self.hold(self.REDACT)
         self.assertEqual(fields['correction']['same'], 1)
         self.assertNotIn('at_cap', fields['correction'])
+
+    def test_a_retried_first_lint_refusal_is_at_cap(self):
+        # F-0235: the session already spent the retry the second session would have been
+        # launched to make — its first hold here is the cap, not a free relaunch
+        fields, line = self.hold(self.LINT, retried=True)
+        self.assertEqual(fields['correction']['same'], 1)
+        self.assertTrue(fields['correction']['at_cap'])
+        self.assertIn('adjudicate pending', line)
+        self.assertIs(fields['correction']['retried'], True)
+
+    def test_a_retried_first_redaction_refusal_is_still_a_security_hold(self):
+        fields, line = self.hold(self.REDACT, retried=True)
+        self.assertTrue(fields['correction']['parked'])
+        self.assertEqual(fields.get('operator_flagged'), 1)
+        self.assertIn('security hold', line)
+        self.assertIs(fields['correction']['retried'], True)
+
+    def test_an_unretried_first_hold_still_spends_no_round(self):
+        # D5: HOOK_REFUSAL_CAP stays 2 and the unretried ladder is untouched — the free first
+        # relaunch belongs to a session that never saw the hook's output
+        fields, line = self.hold(self.LINT)
+        self.assertEqual(fields['correction']['same'], 1)
+        self.assertNotIn('at_cap', fields['correction'])
+        self.assertNotIn('retried', fields['correction'])
+        self.assertIn('(no round spent)', line)
 
 
 class EmptyEndsTests(unittest.TestCase):

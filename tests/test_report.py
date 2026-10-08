@@ -93,6 +93,28 @@ class FailureAtTheSourceTests(unittest.TestCase):
         self.assertTrue(runtime_mod.result_ok(ok))
 
 
+class HookRetriedTests(unittest.TestCase):
+    """F-0235: a session that fixed what the hook named, pushed again, and was refused the same
+    thing a second time says so in its own ``pushed:`` line — the shape
+    ``asf.briefs.preamble.HOOK_REFUSAL_RULE`` asks it for."""
+
+    def test_true_for_a_report_that_declares_the_retry(self):
+        text = 'REPORT\nitem: B-0001\nstatus: blocked\npushed: no — hook refused twice: pre-push lint x.py:12\n'
+        self.assertTrue(report.hook_retried(report.parse(text)))
+
+    def test_false_for_a_single_refusal(self):
+        text = 'REPORT\nitem: B-0001\nstatus: blocked\npushed: no — hook refused\n'
+        self.assertFalse(report.hook_retried(report.parse(text)))
+
+    def test_false_for_a_successful_push(self):
+        text = 'REPORT\nitem: B-0001\nstatus: done\npushed: yes abc1234\n'
+        self.assertFalse(report.hook_retried(report.parse(text)))
+
+    def test_false_for_a_report_with_no_pushed_line_at_all(self):
+        text = 'REPORT\nitem: B-0001\nstatus: done\ncommits: none\n'
+        self.assertFalse(report.hook_retried(report.parse(text)))
+
+
 class NeedsInputTests(unittest.TestCase):
     def test_the_first_needs_operator_line_of_two(self):
         text = ('NEEDS OPERATOR: rotate the deploy key — run tools/rotate.sh\n'

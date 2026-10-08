@@ -87,6 +87,18 @@ def unpushed(report):
     return bool(value) and bool(NO_RE.match(value))
 
 
+#: The shape :data:`asf.briefs.preamble.HOOK_REFUSAL_RULE` asks a session for when it fixed what
+#: the hook named, pushed again, and was refused the same thing: the session has already spent the
+#: retry, so the factory does not spend a session on it (F-0235).
+HOOK_RETRIED_RE = re.compile(r'\bhook\s+refused\s+twice\b', re.I)
+
+
+def hook_retried(report):
+    """True when the report's own ``pushed:`` line declares a refusal the session already retried."""
+    value = (report or {}).get('pushed')
+    return bool(value) and bool(HOOK_RETRIED_RE.search(value))
+
+
 #: A ``pushed:`` value declaring a rebase the factory publishes: ``rebased <sha> — …``.
 REBASED_RE = re.compile(r'^\s*rebased\s+`?(?P<sha>[0-9a-f]{7,40})\b', re.I)
 
