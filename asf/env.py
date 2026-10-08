@@ -536,7 +536,7 @@ UPGRADE_DEFAULT = 'notify'
 CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
     'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR, 'deploy_workflow': _STR,
-    'pool': _LIST, 'queue': _MAP, 'reserve': None,
+    'pool': _LIST, 'queue': _MAP, 'reserve': None, 'targets': _MAP,
     # flake-vs-defect triage (asf.flake): on by default; the reference runner class each
     # quarantine entry names; how many days a flaked job stays quarantined (7)
     'flake_triage': None, 'reference_class': _STR, 'quarantine_days': None,
@@ -844,7 +844,10 @@ class Product:
         Built from the yaml's ``conventions:`` block, plus seven values that live at the top
         level of a product file because more than the conventions read them: ``main``,
         ``stage_limits``, ``ci.test_command`` (the gate harvest runs), ``ci.workflow``,
-        ``ci.workflows`` and ``ci.dev_job`` (``ci_workflow``/``ci_workflows``/``ci_dev_job``),
+        ``ci.workflows``, ``ci.dev_job`` and ``ci.provider``
+        (``ci_workflow``/``ci_workflows``/``ci_dev_job``/``ci_provider``), ``ci.targets``'s
+        ``cancelled_pct``/``red_rate_pct``/``min_minutes``/``min_runs``
+        (``ci_cancelled_target_pct``/``ci_red_target_pct``/``ci_min_minutes``/``ci_min_runs``),
         and ``deploy_sha.workflow``
         (``deploy_workflow``; ``ci.deploy_workflow`` is its read-only alias, read last). A
         ``conventions:`` key of the same name wins. Still answers
@@ -862,9 +865,17 @@ class Product:
                 data.setdefault('test_command', test_command)
             if isinstance(ci, dict):
                 for src, dst in (('workflow', 'ci_workflow'), ('dev_job', 'ci_dev_job'),
-                                 ('workflows', 'ci_workflows')):
+                                 ('workflows', 'ci_workflows'), ('provider', 'ci_provider')):
                     if ci.get(src):
                         data.setdefault(dst, ci[src])
+                targets = ci.get('targets')
+                if isinstance(targets, dict):
+                    for src, dst in (('cancelled_pct', 'ci_cancelled_target_pct'),
+                                      ('red_rate_pct', 'ci_red_target_pct'),
+                                      ('min_minutes', 'ci_min_minutes'),
+                                      ('min_runs', 'ci_min_runs')):
+                        if targets.get(src) is not None:
+                            data.setdefault(dst, targets[src])
             deploy = self._get('deploy_sha')
             if isinstance(deploy, dict) and deploy.get('workflow'):
                 data.setdefault('deploy_workflow', deploy['workflow'])

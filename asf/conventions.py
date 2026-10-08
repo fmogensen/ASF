@@ -52,6 +52,11 @@ The product yaml carries the overrides::
         heavy_after_review: true  # default false: a PR's heavy CI jobs run only once its review
                                   # approved the head — the lane labels it (heavy_label, default
                                   # asf:heavy-ci); the light checks run on every push
+        targets:
+          cancelled_pct: 15    # cancelled runner minutes, as a share of all runner minutes
+          red_rate_pct: 15     # CI runs ending red, as a share of all runs
+          min_minutes: 60      # no verdict on cancelled_pct below this many runner-minutes in 7 days
+          min_runs: 20         # no verdict on red_rate_pct below this many runs in 7 days
       merge: auto                 # auto | manual (default manual): under auto the lane merges
                                   # every open PR on the trunk whose required checks are green
                                   # and whose factory review approved it — no operator click
@@ -442,6 +447,18 @@ DEFAULT_REPORT_PATTERN = None    # regex over a file name in reports_dir; None �
 DEFAULT_CI_WORKFLOW = None       # the workflow whose runs on the trunk are the green evidence
 DEFAULT_CI_DEV_JOB = None        # the job in that workflow whose success marks the dev sha
 DEFAULT_CI_WORKFLOWS = ()        # extra workflows the ci stream backfill always keeps (metrics.py)
+#: The share of runner minutes lost to cancelled runs at or above which the seven-day rate is a
+#: defect. Spelt ``ci: {targets: {cancelled_pct: …}}`` in the product yaml.
+DEFAULT_CI_CANCELLED_TARGET_PCT = 15
+#: The share of CI runs ending red at or above which the seven-day rate is a defect.
+DEFAULT_CI_RED_TARGET_PCT = 15
+#: No verdict on the cancelled share below this many runner-minutes in the window.
+DEFAULT_CI_MIN_MINUTES = 60
+#: No verdict on the red rate below this many runs in the window.
+DEFAULT_CI_MIN_RUNS = 20
+#: Which provider ran them — it labels the two target rows and titles the Bugs they file.
+#: None (and the string the yaml writes for a product without CI) label nothing.
+DEFAULT_CI_PROVIDER = None
 DEFAULT_DEPLOY_WORKFLOW = None   # the workflow whose newest success marks the prod sha
 #: A product with no deploy (B-0077): the file in its repo the rollup files each version's
 #: release notes in, newest first. Read from the yaml's ``changelog_file:``.
@@ -840,6 +857,11 @@ class Conventions:
     #: selection every workflow already gets (:func:`asf.metrics.metrics._relevant_run`).
     ci_workflows: list = field(default_factory=lambda: list(DEFAULT_CI_WORKFLOWS))
     ci_dev_job: str = DEFAULT_CI_DEV_JOB
+    ci_cancelled_target_pct: int = DEFAULT_CI_CANCELLED_TARGET_PCT
+    ci_red_target_pct: int = DEFAULT_CI_RED_TARGET_PCT
+    ci_min_minutes: int = DEFAULT_CI_MIN_MINUTES
+    ci_min_runs: int = DEFAULT_CI_MIN_RUNS
+    ci_provider: str = DEFAULT_CI_PROVIDER
     deploy_workflow: str = DEFAULT_DEPLOY_WORKFLOW
     #: ``readme`` / ``readme_facts``: the README's own path and its committed facts file, relative
     #: to the product's repo dir (:data:`DEFAULT_README`, :data:`DEFAULT_README_FACTS`).
