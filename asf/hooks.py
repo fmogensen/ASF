@@ -793,6 +793,7 @@ def verify(product):
     problem for a pinned product, so an unpinned one is checked for presence alone."""
     from asf import dispatch
     pinned = _pinned(product)
+    asf_path, _ = runnable_asf(which_asf())
     out = []
     for repo in [r for r in (product.repo_dir, product.backlog_dir) if r]:
         try:
@@ -820,6 +821,9 @@ def verify(product):
             if entry is None or not dispatch.is_ours(entry):
                 out.append(f'{path} execs {entry or "asf on PATH"}, not the dispatcher — it does '
                            f'not run the pin of {product.name}')
+            elif stale_own_hook(text, name, asf_path, product.name, pinned) is not None:
+                out.append(f'{path} is an older body than this build writes — it does not check '
+                           f'that the asf it runs is the pin')
             elif re.search(r'(?m)^[^#\n]*command -v asf\b', text):
                 out.append(f'{path} falls back to asf on PATH — asf hooks install --product '
                            f'{product.name} rewrites it')

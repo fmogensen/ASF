@@ -309,14 +309,17 @@ class RedactionHookExecPathTests(PinFixture):
         rc, detail = dispatch.install(path=self.dispatcher, asf_home=self.home, venvs=self.venvs,
                                       default_product='', cli=os.path.join(self.shared, 'bin', 'asf'))
         self.assertEqual(rc, 0, detail)
+        patch = mock.patch.object(dispatch, 'default_path', return_value=self.dispatcher)
+        patch.start()
+        self.addCleanup(patch.stop)
 
-    def write_hooks(self, asf_path):
+    def write_hooks(self, asf_path, pin_required=None):
         from asf import hooks
         d = hooks.git_hooks_dir(self.repo)
         os.makedirs(d, exist_ok=True)
         for name in hooks.GIT_HOOK_NAMES:
             with open(os.path.join(d, name), 'w') as f:
-                f.write(hooks._git_hook_body(name, asf_path, 'sample'))
+                f.write(hooks._git_hook_body(name, asf_path, 'sample', pin_required))
 
     def test_a_pinned_products_hook_naming_the_shared_install_is_red(self):
         self.pin_it()
@@ -335,6 +338,100 @@ class RedactionHookExecPathTests(PinFixture):
         self.write_hooks(os.path.join(self.shared, 'bin', 'asf'))
         ok, detail = doctor.check_redaction_hooks(self.product)
         self.assertTrue(ok, detail)
+
+    def test_an_older_body_naming_the_dispatcher_is_red_in_verify_and_check_redaction_hooks(self):
+        """S-76255 line 1 and 2: a hook that execs the dispatcher but whose body predates the pin
+        guard (F-0283 Task 1) is named stale, not silently passed — the one case PD6 measured
+        green before this Task (verify() == [] and check_redaction_hooks() ==
+        (True, 'pre-commit, pre-push in 1 repos') at 9a3a897d6)."""
+        from asf import hooks
+        self.pin_it()
+        self.write_hooks(self.dispatcher, pin_required=False)
+        lines = hooks.verify(self.product)
+        self.assertTrue(lines, lines)
+        self.assertTrue(all('older body than this build writes' in line for line in lines), lines)
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('older body than this build writes', detail)
+        self.assertIn(f'asf hooks install --product {self.product.name}', detail)
+        # rewritten onto the current body, it stops being named
+        self.write_hooks(self.dispatcher)
+        self.assertEqual(hooks.verify(self.product), [])
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertTrue(ok, detail)
+
+    def test_every_line_verify_and_check_redaction_hooks_emitted_before_is_unmoved(self):
+        """S-76255 line 4: the missing/foreign/asf-init/not-the-dispatcher lines are unchanged."""
+        from asf import hooks
+        d = hooks.git_hooks_dir(self.repo)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'pre-commit'), 'w') as f:
+            f.write('#!/bin/sh\necho mine\n')
+        self.assertIn(f"{os.path.join(d, 'pre-commit')} is not asf's", hooks.verify(self.product))
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('foreign', detail)
+        self.pin_it()
+        self.write_hooks(os.path.join(self.shared, 'bin', 'asf'))
+        self.assertTrue(any('not the dispatcher' in line for line in hooks.verify(self.product)))
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('not the dispatcher', detail)
+
+
+class RedactionHooksApproveRemedyTests(PinFixture):
+    """F-0283 Task 5, step 3 (S-76255 line 3): the remedy names ``--approve`` exactly when the
+    stale hook's path is a tracked write the approval matrix withholds, read the way
+    ``cmd_hooks --dry-run`` reads it — never otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+        self.repo = os.path.join(self.tmp, 'repo')
+        subprocess.run(['git', 'init', '-q', self.repo], check=True)
+        self.product = env.Product('sample', {'repo_dir': self.repo, 'ci': {'provider': 'none'}})
+        self.dispatcher = os.path.join(self.tmp, 'bin', 'asf')
+        os.makedirs(os.path.dirname(self.dispatcher))
+        rc, detail = dispatch.install(path=self.dispatcher, asf_home=self.home, venvs=self.venvs,
+                                      default_product='', cli=os.path.join(self.shared, 'bin', 'asf'))
+        self.assertEqual(rc, 0, detail)
+        patch = mock.patch.object(dispatch, 'default_path', return_value=self.dispatcher)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def write_stale_hook(self, d):
+        from asf import hooks
+        os.makedirs(d, exist_ok=True)
+        for name in hooks.GIT_HOOK_NAMES:
+            path = os.path.join(d, name)
+            with open(path, 'w') as f:
+                f.write(hooks._git_hook_body(name, self.dispatcher, 'sample', pin_required=False))
+            os.chmod(path, 0o755)
+
+    def test_a_tracked_withheld_path_gets_the_approve_remedy(self):
+        import subprocess
+        self.pin_it()
+        d = os.path.join(self.repo, '.githooks')    # tracked, as a product keeps it (F-0109)
+        os.makedirs(d)
+        with open(os.path.join(d, 'README'), 'w') as f:
+            f.write('hooks live here\n')
+        subprocess.run(['git', '-C', self.repo, 'config', 'core.hooksPath', '.githooks'],
+                       check=True)
+        subprocess.run(['git', '-C', self.repo, 'add', '.'], check=True)
+        subprocess.run(['git', '-C', self.repo, '-c', 'user.name=t', '-c', 'user.email=t@x',
+                        'commit', '-qm', 'hooks dir'], check=True)
+        self.write_stale_hook(d)
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('--approve', detail)
+
+    def test_an_untracked_path_gets_no_approve_remedy(self):
+        from asf import hooks
+        self.pin_it()
+        self.write_stale_hook(hooks.git_hooks_dir(self.repo))   # the default .git/hooks
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertNotIn('--approve', detail)
 
 
 class ProductWarningsRowTests(unittest.TestCase):

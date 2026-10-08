@@ -1098,7 +1098,9 @@ def check_redaction_hooks(product):
     if not repos:
         return True, 'no repo_dir or backlog_dir configured'
     pinned = os.path.isfile(dispatch.record_path(product.name))
+    asf_path, _ = hooks.runnable_asf(hooks.which_asf())
     problems = []
+    problem_paths = set()
     for repo in repos:
         hooks_dir = hooks.git_hooks_dir(repo)
         if hooks_dir is None:
@@ -1108,11 +1110,13 @@ def check_redaction_hooks(product):
             path = os.path.join(hooks_dir, name)
             if not os.path.isfile(path):
                 problems.append(f'{path} missing')
+                problem_paths.add(path)
                 continue
             with open(path, encoding='utf-8') as f:
                 text = f.read()
             if hooks.init_hook_upgrade(text, name) is not None:
                 problems.append(f'{path} is asf init\'s, from before it ran the redaction gate')
+                problem_paths.add(path)
             elif not hooks.is_git_hook_ours(text, name):
                 problems.append(f'{path} foreign')
             elif pinned:
@@ -1120,8 +1124,18 @@ def check_redaction_hooks(product):
                 if entry is None or not dispatch.is_ours(entry):
                     problems.append(f'{path} execs {entry or "asf on PATH"}, not the dispatcher '
                                     f'(F-0283: it does not run the pin)')
+                    problem_paths.add(path)
+                elif hooks.stale_own_hook(text, name, asf_path, product.name, pinned) is not None:
+                    problems.append(f'{path} is an older body than this build writes — it does '
+                                    f'not check that the asf it runs is the pin')
+                    problem_paths.add(path)
     if problems:
-        return False, '; '.join(problems) + f' — asf hooks install --product {product.name}'
+        remedy = f' — asf hooks install --product {product.name}'
+        withheld = {r['path'] for r in hooks.gated(product, hooks.plan(product,
+                                                                        which=hooks.which_asf()))}
+        if problem_paths & withheld:
+            remedy += ' --approve'
+        return False, '; '.join(problems) + remedy
     return True, f'pre-commit, pre-push in {len(repos)} repos'
 
 
