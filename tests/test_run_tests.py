@@ -153,6 +153,183 @@ class RunTests(FixtureSuite):
         self.assertEqual(rc, 0, text)
 
 
+def flaky_once(marker, homes_log=None):
+    """A test module whose one test fails on its first attempt (``marker`` does not exist yet)
+    and passes on its second (the first attempt created it) — a real ``FAIL:`` traceback raised
+    from the module's own file, so :func:`run_tests.flaky_rows` reads a genuine frame. With
+    ``homes_log``, each attempt appends its own ``ASF_TESTS_HOME`` to it, one per line."""
+    log = (f"        with open({homes_log!r}, 'a') as f:\n"
+          f"            f.write(os.environ['ASF_TESTS_HOME'] + chr(10))\n") if homes_log else ''
+    return (
+        "import os, unittest\n\nclass T(unittest.TestCase):\n"
+        "    def test_flakes(self):\n"
+        f"{log}"
+        f"        if not os.path.exists({marker!r}):\n"
+        f"            open({marker!r}, 'x').close()\n"
+        "            self.fail('rolled badly once')\n")
+
+
+class RetryPassTests(FixtureSuite):
+    """S-67254: a red module gets exactly one more attempt, over itself alone, and a module red
+    then green leaves the run green with its second result in place of its first."""
+
+    def test_the_retry_line_names_only_the_red_module(self):
+        self.module('test_a', GREEN)
+        self.module('test_flakes', flaky_once(os.path.join(self.root, 'marker')))
+        self.module('test_b', GREEN)
+        rc, text = self.run_suite(shards=3)
+        self.assertEqual(rc, 0, text)
+        lines = [l for l in text.splitlines() if l.startswith('retry: ')]
+        self.assertEqual(lines, ['retry: test_flakes'])
+
+    def test_a_module_red_then_green_leaves_the_run_green(self):
+        self.module('test_flakes', flaky_once(os.path.join(self.root, 'marker')))
+        rc, text = self.run_suite(shards=1)
+        self.assertEqual(rc, 0, text)
+
+    def test_the_replaced_result_prints_ok_with_no_red_line(self):
+        self.module('test_flakes', flaky_once(os.path.join(self.root, 'marker')))
+        rc, text = self.run_suite(shards=1)
+        self.assertEqual(rc, 0, text)
+        self.assertRegex(text, r'\nOK\b')
+        self.assertNotIn('red:', text)
+
+    def test_the_module_count_and_ran_count_are_the_final_attempts(self):
+        self.module('test_a', GREEN)
+        self.module('test_flakes', flaky_once(os.path.join(self.root, 'marker')))
+        rc, text = self.run_suite(shards=2)
+        self.assertEqual(rc, 0, text)
+        self.assertRegex(text, r'(?m)^Ran 3 tests in [\d.]+s \(2 module\(s\), 2 at a time\)$')
+
+    def test_the_retry_line_prints_before_the_summary(self):
+        self.module('test_flakes', flaky_once(os.path.join(self.root, 'marker')))
+        rc, text = self.run_suite(shards=1)
+        self.assertEqual(rc, 0, text)
+        summary_at = re.search(r'(?m)^Ran \d+ tests? in [\d.]+s \(\d+ module\(s\)', text).start()
+        self.assertLess(text.index('retry: test_flakes'), summary_at)
+
+    def test_the_second_attempts_home_differs_from_the_first(self):
+        homes_log = os.path.join(self.root, 'homes.log')
+        self.module('test_flakes', flaky_once(os.path.join(self.root, 'marker'), homes_log))
+        rc, text = self.run_suite(shards=1)
+        self.assertEqual(rc, 0, text)
+        with open(homes_log, encoding='utf-8') as f:
+            homes = [l.strip() for l in f if l.strip()]
+        self.assertEqual(len(homes), 2)
+        self.assertNotEqual(homes[0], homes[1])
+
+
+class FlakyBlockTests(FixtureSuite):
+    """S-67255: a flake is read off the first attempt's output, in the shape the factory
+    already reads, after the summary's verdict."""
+
+    def test_flaky_rows_is_pure(self):
+        before_cwd, before_env = os.getcwd(), dict(os.environ)
+        output = ('FAIL: test_x (tests.test_mod.T.test_x)\n'
+                  'Traceback (most recent call last):\n'
+                  '  File "tests/test_mod.py", line 9, in test_x\n'
+                  "    self.fail('boom')\n")
+        rows = self.runner.flaky_rows('test_mod', 1, output)
+        self.assertEqual(rows, [('tests/test_mod.py', 9, 'T.test_x')])
+        self.assertEqual(os.getcwd(), before_cwd)
+        self.assertEqual(dict(os.environ), before_env)
+
+    def test_a_real_frame_under_the_modules_own_file_gives_the_file_and_line(self):
+        output = ('FAIL: test_x (tests.test_mod.T.test_x)\n'
+                  'Traceback (most recent call last):\n'
+                  '  File "/checkout/tests/test_mod.py", line 42, in test_x\n'
+                  "    self.fail('boom')\n")
+        self.assertEqual(self.runner.flaky_rows('test_mod', 1, output),
+                         [('tests/test_mod.py', 42, 'T.test_x')])
+
+    def test_the_title_is_class_dot_test(self):
+        output = 'FAIL: test_x (tests.pkg.test_mod.SomeClass.test_x)\n'
+        rows = self.runner.flaky_rows('pkg.test_mod', 1, output)
+        self.assertEqual(rows[0][2], 'SomeClass.test_x')
+
+    def test_a_dotted_module_resolves_its_own_file_with_slashes(self):
+        output = ('FAIL: test_x (tests.pkg.test_sub.T.test_x)\n'
+                  'Traceback (most recent call last):\n'
+                  '  File "tests/pkg/test_sub.py", line 3, in test_x\n')
+        self.assertEqual(self.runner.flaky_rows('pkg.test_sub', 1, output),
+                         [('tests/pkg/test_sub.py', 3, 'T.test_x')])
+
+    def test_a_frame_elsewhere_falls_back_to_line_one(self):
+        output = ('FAIL: test_x (tests.test_mod.T.test_x)\n'
+                  'Traceback (most recent call last):\n'
+                  '  File "/no/tests/frame/here.py", line 99, in test_x\n')
+        self.assertEqual(self.runner.flaky_rows('test_mod', 1, output),
+                         [('tests/test_mod.py', 1, 'T.test_x')])
+
+    def test_an_attempt_with_no_block_names_itself_no_summary(self):
+        self.assertEqual(self.runner.flaky_rows('test_boom', 2, 'Traceback\nRuntimeError: boom\n'),
+                         [('tests/test_boom.py', 1, 'test_boom: no summary (rc 2)')])
+
+    def test_two_failures_yield_two_rows_in_order(self):
+        output = ('FAIL: test_x (tests.test_mod.T.test_x)\n'
+                  '  File "tests/test_mod.py", line 5, in test_x\n'
+                  'ERROR: test_y (tests.test_mod.T.test_y)\n'
+                  '  File "tests/test_mod.py", line 9, in test_y\n')
+        self.assertEqual(self.runner.flaky_rows('test_mod', 1, output),
+                         [('tests/test_mod.py', 5, 'T.test_x'), ('tests/test_mod.py', 9, 'T.test_y')])
+
+    def test_the_full_run_prints_the_block_after_the_verdict_with_the_real_line(self):
+        self.module('test_flakes', flaky_once(os.path.join(self.root, 'marker')))
+        rc, text = self.run_suite(shards=1)
+        self.assertEqual(rc, 0, text)
+        self.assertLess(text.index('\nOK'), text.index('1 flaky'))
+        self.assertRegex(text, r'(?m)^  tests/test_flakes\.py:\d+:1 › T\.test_flakes$')
+
+    def test_a_green_run_prints_no_flaky_block(self):
+        self.module('test_a', GREEN)
+        rc, text = self.run_suite(shards=1)
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn('flaky', text)
+
+
+class RetryBoundsTests(FixtureSuite):
+    """S-67256: the second pass is bounded and switchable."""
+
+    def test_the_flags_default_to_the_module_constants(self):
+        args = self.runner.build_parser().parse_args([])
+        self.assertEqual(args.retry, self.runner.RETRY)
+        self.assertEqual(args.retry_max, self.runner.RETRY_MAX)
+        self.assertEqual(self.runner.RETRY, 1)
+        self.assertEqual(self.runner.RETRY_MAX, 4)
+
+    def test_retry_zero_runs_no_second_attempt(self):
+        self.module('test_red', RED)
+        rc, text = self.run_suite(shards=1, retry=0)
+        self.assertEqual(rc, 1)
+        self.assertNotIn('retry:', text)
+        self.assertNotIn('flaky', text)
+
+    def test_main_passes_the_cli_flags_through_to_run(self):
+        self.module('test_red', RED)
+        r = subprocess.run([sys.executable, RUNNER, '-s', self.tests, '--shards', '1',
+                           '--retry', '0'], cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn('retry:', r.stdout)
+
+    def test_more_red_modules_than_the_bound_skips_the_retry(self):
+        for i in range(5):
+            self.module(f'test_red{i}', RED)
+        rc, text = self.run_suite(shards=4, retry_max=4)
+        self.assertEqual(rc, 1)
+        self.assertIn('retry: skipped — 5 red module(s) over the bound of 4', text)
+        for i in range(5):
+            self.assertEqual(text.count(f'--- test_red{i}:'), 1)
+
+    def test_exactly_the_bound_still_gets_the_second_pass(self):
+        for i in range(4):
+            self.module(f'test_red{i}', RED)
+        rc, text = self.run_suite(shards=4, retry_max=4)
+        self.assertEqual(rc, 1)
+        self.assertNotIn('skipped', text)
+        for i in range(4):
+            self.assertEqual(text.count(f'--- test_red{i}:'), 2)
+
+
 class OnlyTests(FixtureSuite):
     def test_the_named_modules_alone_run_and_the_red_line_names_the_red_ones(self):
         self.module('test_a', GREEN)

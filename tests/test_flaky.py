@@ -430,5 +430,20 @@ class PassTests(unittest.TestCase):
         self.assertEqual(state['tests'], {})
 
 
+class ASuiteFlakeIsReadAsAFlakyTest(unittest.TestCase):
+    """S-67255's "the factory already reads this" half: the runner's own documented block, fed
+    to :func:`asf.tick.flaky.parse_flaky` unchanged."""
+
+    def test_the_runners_own_block_is_read_unchanged(self):
+        block = ('1 flaky\n'
+                 '  tests/test_groom_publish.py:140:1 › '
+                 'GroomPublishTests.test_a_record_that_is_not_a_checkout_is_left_alone\n')
+        rows = flaky.parse_flaky(block)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(flaky.test_key(rows[0]),
+                         'tests/test_groom_publish.py:140 › '
+                         'GroomPublishTests.test_a_record_that_is_not_a_checkout_is_left_alone')
+
+
 if __name__ == '__main__':
     unittest.main()
