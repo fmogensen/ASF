@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.267 — 2026-10-08
+
+### Features landed
+
+- Watchdog: a required check cancelled or timed out past 10 min — #1222@ff96aa716 (#1250)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.267"`
+
 ## v0.1.266 — 2026-10-08
 
 ### Bugs fixed
