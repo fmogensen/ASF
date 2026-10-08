@@ -1,6 +1,12 @@
+import json
+import os
+import shutil
+import tempfile
 import unittest
+from unittest import mock
 
-from asf import env
+from asf import env, upgrade
+from asf.harvest import lane
 
 
 class ProductUpgradePolicyTests(unittest.TestCase):
@@ -30,6 +36,186 @@ class ProductUpgradePolicyTests(unittest.TestCase):
         product = self._product(None)
         self.assertEqual(product.upgrade, env.UPGRADE_DEFAULT)
         self.assertIsNone(product.upgrade_declared)
+
+
+class VersionComparisonTests(unittest.TestCase):
+    """D5/D6: ``version_tuple`` as a plain tuple (never a string compare), ``+N`` counting as
+    ahead of the bare tag, and an unreadable side never read as newer."""
+
+    def test_older_and_newer_tags(self):
+        self.assertTrue(upgrade.newer('v0.1.62', 'v0.1.9'))
+        self.assertFalse(upgrade.newer('v0.1.9', 'v0.1.62'))
+
+    def test_newer_than_both_a_tag_and_its_dev_form(self):
+        self.assertTrue(upgrade.newer('v0.1.63', 'v0.1.62'))
+        self.assertTrue(upgrade.newer('v0.1.63', 'v0.1.62+7'))
+
+    def test_commits_past_a_tag_count_as_ahead_of_it(self):
+        self.assertFalse(upgrade.newer('v0.1.62', 'v0.1.62+7'))
+        self.assertTrue(upgrade.newer('v0.1.62+7', 'v0.1.62'))
+
+    def test_an_unreadable_side_is_never_newer(self):
+        self.assertFalse(upgrade.newer('v0.1.62', None))
+        self.assertFalse(upgrade.newer(None, 'v0.1.62'))
+        self.assertFalse(upgrade.newer('main', 'v0.1.62'))
+
+
+class _HomeCase(unittest.TestCase):
+    """A temp ``ASF_HOME`` so the release cache and a product's lane registry never touch the
+    operator's real one."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='release_channel_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class LatestReleaseIsReadOnceAnHourTests(_HomeCase):
+    """D4/D12: one cache, keyed by url, shared by every product and by ``asf status`` — the hour
+    is the remote's, not each caller's."""
+
+    def _listing(self, tag, sha, peeled=None):
+        """A ``git ls-remote --tags <url> 'v*'`` line for ``tag``, with its peeled ``^{}`` line
+        when ``peeled`` (an annotated tag) is given — a lightweight tag has none."""
+        lines = [f'{sha}\trefs/tags/{tag}']
+        if peeled:
+            lines.append(f'{peeled}\trefs/tags/{tag}^{{}}')
+        return '\n'.join(lines) + '\n'
+
+    def _run(self, text, calls):
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout=text, stderr='')
+        return run
+
+    def test_two_products_three_calls_inside_the_hour_run_ls_remote_once(self):
+        calls = []
+        run = self._run(self._listing('v0.1.62', 'a' * 40, 'b' * 40), calls)
+        now = 1_000_000.0
+        self.assertEqual(upgrade.latest_release('url', now=now, run=run), ('v0.1.62', 'b' * 40))
+        self.assertEqual(upgrade.latest_release('url', now=now + 10, run=run),
+                         ('v0.1.62', 'b' * 40))
+        self.assertEqual(upgrade.latest_release('url', now=now + 20, run=run),
+                         ('v0.1.62', 'b' * 40))
+        self.assertEqual(len(calls), 1)
+
+    def test_a_call_past_the_hour_reads_again(self):
+        calls = []
+        run = self._run(self._listing('v0.1.62', 'a' * 40, 'b' * 40), calls)
+        now = 1_000_000.0
+        upgrade.latest_release('url', now=now, run=run)
+        upgrade.latest_release('url', now=now + upgrade.RELEASE_POLL_S + 1, run=run)
+        self.assertEqual(len(calls), 2)
+
+    def test_a_failed_read_keeps_the_previous_answer_and_stamps_at(self):
+        now = 1_000_000.0
+        ok = self._run(self._listing('v0.1.62', 'a' * 40, 'b' * 40), [])
+        self.assertEqual(upgrade.latest_release('url', now=now, run=ok), ('v0.1.62', 'b' * 40))
+
+        def failing(cmd, **kw):
+            raise OSError('no network')
+
+        self.assertEqual(
+            upgrade.latest_release('url', now=now + upgrade.RELEASE_POLL_S + 1, run=failing),
+            ('v0.1.62', 'b' * 40))
+        # the failed attempt still stamped `at`: the very next call, within the hour of *that*
+        # attempt, reads nothing from the remote either
+        calls = []
+        again = self._run(self._listing('v0.1.63', 'c' * 40, 'd' * 40), calls)
+        self.assertEqual(
+            upgrade.latest_release('url', now=now + upgrade.RELEASE_POLL_S + 2, run=again),
+            ('v0.1.62', 'b' * 40))
+        self.assertEqual(calls, [])
+
+    def test_a_first_ever_failed_read_is_none_none(self):
+        def failing(cmd, **kw):
+            raise OSError('no network')
+        self.assertEqual(upgrade.latest_release('url', now=1_000_000.0, run=failing),
+                         (None, None))
+
+    def test_the_peeled_line_not_the_tag_objects_is_the_sha_returned(self):
+        calls = []
+        run = self._run(self._listing('v0.1.62', 'a' * 40, 'b' * 40), calls)
+        tag, sha = upgrade.latest_release('url', now=1_000_000.0, run=run)
+        self.assertEqual(tag, 'v0.1.62')
+        self.assertEqual(sha, 'b' * 40)   # the peeled commit, never the tag object's own sha
+
+
+class MidLandingTests(_HomeCase):
+    """D7/PD14: ``occupancy(...)['landing']`` is what "mid-landing" means; an unreadable ledger
+    holds the install — it returns ``[]``, the same shape as "nothing is landing", but the
+    install never clears on it."""
+
+    def _write(self, product, *lines):
+        path = os.path.join(env.state_dir(product), 'sessions.jsonl')
+        with open(path, 'w', encoding='utf-8') as f:
+            for line in lines:
+                f.write(json.dumps(line) + '\n')
+
+    def _landing_row(self, item, branch):
+        return {'job': f'coder-{item.lower()}', 'item': item, 'branch': branch, 'kind': 'coder',
+                'pid': None, 'started': '2026-09-21T00:00:00Z', 'ended': '2026-09-21T00:05:00Z',
+                'end_reason': 'finished',
+                'lane': {'state': lane.GATE, 'item': item, 'head': 'a' * 40, 'pr': None,
+                         'at': '2027-01-15T08:00:00Z', 'reason': ''}}
+
+    def test_a_pushed_to_land_row_is_returned(self):
+        self._write('p', self._landing_row('T-0001', 'worker/T-0001'))
+        self.assertEqual(upgrade.mid_landing('p'), [('T-0001', 'worker/T-0001')])
+
+    def test_an_empty_registry_is_empty(self):
+        self._write('p')
+        self.assertEqual(upgrade.mid_landing('p'), [])
+
+    def test_an_unreadable_registry_is_empty_too(self):
+        path = os.path.join(env.state_dir('p'), 'sessions.jsonl')
+        os.makedirs(path)   # a directory where a file is expected: unreadable, never raises out
+        self.assertEqual(upgrade.mid_landing('p'), [])
+
+
+class TagInstallVerifiesByShaTests(unittest.TestCase):
+    """PD3/PD5: the install's CI guard and its post-install verification must ask about the
+    commit a tag names, never the tag string itself — pinned here so the regression PD3 found
+    (every release-channel install failing verification after pipx had already replaced the
+    package) cannot come back."""
+
+    SHA = 'a1b2c3d4e5' + '0' * 30
+
+    def _install(self, ref, sha, installed=None, ci_state=('clear', '')):
+        out = []
+
+        def run(cmd, **kw):
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(upgrade, 'repo_url',
+                               return_value='https://example.invalid/x.git'), \
+                mock.patch.object(upgrade, 'ci_state', return_value=ci_state) as m_ci, \
+                mock.patch.object(upgrade, 'new_install_commit',
+                                  return_value=installed if installed is not None else sha), \
+                mock.patch.object(upgrade, 'reload_clocks', return_value=[]):
+            rc = upgrade._install(ref, run, out.append, sha=sha)
+        return rc, out, m_ci
+
+    def test_a_tag_install_asks_ci_about_the_sha_and_verifies_against_it(self):
+        rc, out, m_ci = self._install('v0.1.63', self.SHA)
+        self.assertEqual(rc, 0)
+        self.assertEqual(m_ci.call_args.args[1], self.SHA)
+        self.assertTrue(any('git+https://example.invalid/x.git@v0.1.63' in line for line in out))
+        self.assertTrue(any('installed' in line for line in out))
+
+    def test_the_same_call_with_no_sha_fails_verification(self):
+        rc, out, _m_ci = self._install('v0.1.63', None, installed=self.SHA)
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('FAILED' in line for line in out))
+
+    def test_a_bare_sha_with_no_sha_kwarg_is_todays_path(self):
+        rc, out, m_ci = self._install(self.SHA, None, installed=self.SHA)
+        self.assertEqual(rc, 0)
+        self.assertEqual(m_ci.call_args.args[1], self.SHA)
 
 
 if __name__ == '__main__':

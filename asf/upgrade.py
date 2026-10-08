@@ -75,6 +75,10 @@ DRAIN_POLL_S = 5
 _drain_sleep = time.sleep
 #: ``upgrade.min_interval_min`` when the operator config leaves it out
 DEFAULT_MIN_INTERVAL_MIN = 30
+#: the newest release tag is read from the remote at most this often, for every product at once
+RELEASE_POLL_S = 3600
+#: ``v<major>.<minor>.<patch>``, optionally ``+<commits past it>`` (asf.cli's release string)
+RELEASE_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)(?:\+(\d+))?$')
 
 
 def _v(sha):
@@ -567,18 +571,130 @@ def ci_red(url, ref, run=subprocess.run):
     return None if state == 'unknown' else state == 'red'
 
 
-def refuses(url, ref, run=subprocess.run):
+# ---- the release channel: which tag is newest, and whether it is past the install -------------
+#
+# A product that is not the factory's own source has no checkout to compare against — only
+# ASF's release tags. The newest one is read from the remote at most once an hour, in one cache
+# every product and ``asf status`` share (D4): a tick's own call never shells out on top of it.
+
+def releases_path():
+    """``<ASF_HOME>/state/releases.json`` — ``{<url>: {'tag', 'sha', 'at'}}``, one entry per
+    remote, shared by every product (D4)."""
+    return os.path.join(env.ASF_HOME, 'state', 'releases.json')
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def latest_release(url, now=None, run=subprocess.run):
+    """``(tag, sha)`` of the greatest ``v<major>.<minor>.<patch>`` tag on ``url``, from the cache
+    while its entry is younger than :data:`RELEASE_POLL_S`, else ``git ls-remote --tags <url>
+    'v*'`` — the peeled ``^{}`` line is the commit an annotated tag points at. Every attempt
+    stamps ``at``; a read that fails keeps the entry's previous ``tag``/``sha``. ``(None, None)``
+    when nothing was ever read. Never raises."""
+    now = now if now is not None else time.time()
+    cache = _read_json(releases_path())
+    entry = cache.get(url) if isinstance(cache.get(url), dict) else {}
+    tag, sha, at = entry.get('tag'), entry.get('sha'), entry.get('at')
+    if isinstance(at, (int, float)) and now - at < RELEASE_POLL_S:
+        return tag, sha
+    text = _out(run, ['git', 'ls-remote', '--tags', url, 'v*'])  # client-exempt: a url, no local
+    # repo — asf.gitops's `cwd`-shaped client doesn't fit, exactly as its sibling remote_head/
+    # resolve_ref above are already counted raw
+    if text:
+        plain, peeled = {}, {}
+        for line in text.splitlines():
+            parts = line.split('\t', 1)
+            if len(parts) != 2:
+                continue
+            commit, ref = parts
+            name = ref.split('refs/tags/', 1)[-1]
+            if name.endswith('^{}'):
+                peeled[name[:-3]] = commit
+            else:
+                plain[name] = commit
+        names = [n for n in set(plain) | set(peeled) if version_tuple(n) is not None]
+        if names:
+            best = max(names, key=version_tuple)
+            tag, sha = best, peeled.get(best) or plain.get(best)
+    cache[url] = {'tag': tag, 'sha': sha, 'at': now}
+    _write_json(releases_path(), cache)
+    return tag, sha
+
+
+def installed_release():
+    """``(tag, sha)`` of the running install: the tag the install script pinned
+    (:func:`asf.cli._release` — a git install's ``requested_revision``, else a checkout's
+    ``git describe``, else the build stamp) and the commit it was built from
+    (:func:`asf.drift.installed_commit`). ``tag`` is ``None`` when the install records no
+    release at all."""
+    from asf import cli, drift
+    tag = cli._release(cli._checkout_root(), cli._direct_url())
+    return tag, drift.installed_commit()
+
+
+def version_tuple(text):
+    """``(major, minor, patch, past)`` of a release string, or ``None``. ``v0.1.62`` →
+    ``(0, 1, 62, 0)``; ``v0.1.62+7`` → ``(0, 1, 62, 7)`` — seven commits past the tag, and so
+    *ahead* of it (D5). A plain tuple, not a string compare and not ``packaging``: ``v0.1.9``
+    against ``v0.1.62`` is the string compare's classic wrong answer, and ``+N`` is ASF's own
+    "commits past the tag", never a PEP 440 local version."""
+    m = RELEASE_RE.match(str(text or '').strip())
+    if not m:
+        return None
+    major, minor, patch, past = m.groups()
+    return int(major), int(minor), int(patch), int(past or 0)
+
+
+def newer(latest, installed):
+    """True when release ``latest`` is past release ``installed``. False when either is
+    unreadable — an install whose release cannot be read at all is never upgraded on a guess
+    (D6): ``__version__`` is never bumped per release, so comparing against it would read as
+    BEHIND forever and reinstall on every tick."""
+    a, b = version_tuple(latest), version_tuple(installed)
+    return a is not None and b is not None and a > b
+
+
+def mid_landing(product):
+    """``[(item, branch)]`` of ``product``'s items pushed and waiting on the lane
+    (:func:`asf.workers.lifecycle.occupancy`'s ``landing``), sorted by item — the sessions an
+    install must not land under (P8). Any exception — an unreadable registry, an import that
+    cannot resolve — returns ``[]``, which **holds** the install: it never clears it, so the two
+    readings of an error are opposite at the call site."""
+    try:
+        from asf.workers import lifecycle, pool
+        out = lifecycle.occupancy(pool.sessions_path(product))
+        return sorted((item, info['branch']) for item, info in out['landing'].items())
+    except Exception:  # noqa: BLE001 — an unreadable ledger holds the install, never clears it
+        return []
+
+
+def _ref_label(ref):
+    """``ref`` printed whole when it is a release tag (:data:`RELEASE_RE`), else its first seven
+    characters — a tag never prints as a truncated ``v0.1.6``."""
+    return ref if RELEASE_RE.match(ref or '') else (ref or '')[:7]
+
+
+def refuses(url, ref, run=subprocess.run, sha=None):
     """Why :func:`_install` would refuse ``ref`` — one phrase — else ``None``. The pending marker
     parks every other product's ticks, so it is written only for a target the upgrade will
     actually install (B-0141: a red head parked the whole factory for the marker's whole life)
-    — not for one whose CI could not be read either."""
+    — not for one whose CI could not be read either. ``sha`` is the commit ``ref`` names when
+    the caller already knows it (a release tag): ``ci_state`` is asked about ``sha or ref``,
+    never the tag itself (PD5), while the message still names ``ref``."""
     if not ref:
         return f"main's head is unreadable from {url}"
-    state, detail = ci_state(url, ref, run)
+    state, detail = ci_state(url, sha or ref, run)
     if state == 'red':
-        return f'remote CI is red at {ref[:7]}'
+        return f'remote CI is red at {_ref_label(ref)}'
     if state == 'unknown':
-        return f'remote CI is unknown at {ref[:7]} ({detail})'
+        return f'remote CI is unknown at {_ref_label(ref)} ({detail})'
     return None
 
 
@@ -638,7 +754,8 @@ def reload_clocks(names, run=subprocess.run, unloaded=()):
     return lines
 
 
-def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep=time.sleep):
+def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep=time.sleep,
+            sha=None):
     """Reinstall at ``ref`` (default: ``main``'s head). 0 installed and verified, DEFERRED when
     it waits for the next tick, else non-zero.
 
@@ -652,12 +769,16 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
     ``ref`` may be a tag as well as a sha (``--to``/``--ref``): resolved to its commit up front
     (PD12) — that commit is what the CI guard, the pending marker and the post-install check see
     — while ``pipx`` still receives the tag as the operator gave it, so ``direct_url.json``
-    records it and :func:`asf.cli.version_string` reports the release."""
+    records it and :func:`asf.cli.version_string` reports the release. ``sha`` is that commit
+    when the caller already knows it (the release channel's own cache): the resolve over the
+    network is skipped and ``sha`` is what the CI guard, the pending marker and the verification
+    see instead, passed down to :func:`refuses` and :func:`_install` unchanged. With ``sha=None``
+    every existing caller is byte-for-byte unchanged."""
     ref = versions.tag_of(ref) or ref       # --to 0.1.108 is the tag v0.1.108
     others = other_ticks(run)
     marked = []
     pin = ref
-    if ref and not HEX40.match(ref):
+    if ref and not HEX40.match(ref) and sha is None:
         url = repo_url(run)
         resolved = resolve_ref(url, ref, run)
         if resolved is None:
@@ -678,21 +799,22 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
         url = repo_url(run)
         if not owner and not ref:
             ref = remote_head(url, run)  # the operator's marker names what it waits for
-        refusal = refuses(url, ref, run)
+        refusal = refuses(url, ref, run, sha=sha)
         if refusal:
             # the install will refuse this target, so no marker may park the other products for
             # it — and one this caller holds for a head that has moved goes now, not at the TTL
             for name in targets:
                 wait = read_pending(name)
-                if wait is not None and (wait.get('owner') == owner or wait.get('sha') == ref):
+                if wait is not None and (wait.get('owner') == owner
+                                         or wait.get('sha') == (sha or ref)):
                     clear_pending(name)
             out(f'upgrade: no pending mark — {refusal}; the other ticks run')
         elif ref:
             # an operator's wait never replaces a marker a tick already holds
             marked = [n for n in targets if (owner or read_pending(n) is None)
-                      and write_pending(ref, owner, n) is not None]
+                      and write_pending(sha or ref, owner, n) is not None]
             if marked:
-                out(f'upgrade: pending {ref[:7]} — other ticks wait until it installs')
+                out(f'upgrade: pending {(sha or ref)[:7]} — other ticks wait until it installs')
             elif any(cooling(n) for n in targets):
                 until = time.strftime('%H:%M', time.localtime(
                     max(cooling(n) or 0 for n in targets) or time.time()))
@@ -714,9 +836,11 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
             _clear(marked)
             out('upgrade: NOT installed — rerun with --wait [SECONDS] to wait for them to end')
         return DEFERRED
-    rc = _install(ref, run, out, pin=pin) if pin != ref else _install(ref, run, out)
+    sha_kw = {'sha': sha} if sha is not None else {}
+    rc = (_install(ref, run, out, pin=pin, **sha_kw) if pin != ref
+          else _install(ref, run, out, **sha_kw))
     if rc == 0:
-        record_last(ref)
+        record_last(sha or ref)
     if owner:
         _clear(n for n in marked_products(owner)
                if (read_pending(n) or {}).get('owner') == owner)
@@ -729,21 +853,27 @@ def _clear(names):
         clear_pending(name)
 
 
-def _install(ref, run, out, pin=None):
+def _install(ref, run, out, pin=None, sha=None):
     """Reinstall at ``ref``. ``pin`` is what ``pipx`` receives on the command line when it
     differs from ``ref`` — the tag :func:`install` resolved ``ref`` from; ``None`` (the default)
-    means ``pipx`` receives ``ref`` itself, as every caller but :func:`install`'s ``--to`` does."""
+    means ``pipx`` receives ``ref`` itself, as every caller but :func:`install`'s ``--to`` does.
+    ``sha`` is the commit ``ref`` names when the caller already knows it (a release tag, from
+    the cache): :func:`ci_state` and the post-install verification ask about ``sha or ref`` while
+    ``pipx`` still installs ``ref`` — the tag, so ``requested_revision`` records it and
+    :func:`installed_release` can read it next tick (PD3, PD4, PD5). With ``sha=None`` the
+    target is ``ref`` and this is byte-for-byte today's path."""
     url = repo_url(run)
     ref = ref or remote_head(url, run)
     if not ref:
         out(f'NEEDS OPERATOR: cannot read main\'s head from {url}')
         return 2
-    state, detail = ci_state(url, ref, run)
+    target = sha or ref
+    state, detail = ci_state(url, target, run)
     if state == 'red':
-        out(f'upgrade: skipped — remote CI is red at {ref[:7]}; the next green head installs')
+        out(f'upgrade: skipped — remote CI is red at {_ref_label(ref)}; the next green head installs')
         return DEFERRED
     if state == 'unknown':
-        out(f'upgrade: deferred — remote CI is unknown at {ref[:7]} ({detail}); '
+        out(f'upgrade: deferred — remote CI is unknown at {_ref_label(ref)} ({detail}); '
             'the next pass reads it again')
         return DEFERRED
     cmd = upgrade_command(url, pin or ref)
@@ -756,10 +886,10 @@ def _install(ref, run, out, pin=None):
     if rc != 0:
         return rc
     got = new_install_commit(run)
-    if not got or not (got.startswith(ref) or ref.startswith(got)):
-        out(f'upgrade: FAILED — the install is at {(got or "unknown")[:7]}, not {ref[:7]}')
+    if not got or not (got.startswith(target) or target.startswith(got)):
+        out(f'upgrade: FAILED — the install is at {(got or "unknown")[:7]}, not {_ref_label(ref)}')
         return 1
-    out(f'upgrade: installed {_v(ref)}')
+    out(f'upgrade: installed {_v(target)}')
     for line in reload_clocks(products(), run):
         out(line)
     return 0
