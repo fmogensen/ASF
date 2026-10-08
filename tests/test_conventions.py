@@ -17,7 +17,7 @@ class DefaultsTests(unittest.TestCase):
         c = Conventions()
         self.assertEqual(c.branch_prefixes,
                          {'code': 'worker/', 'fix': 'fix/', 'spec': 'spec/', 'plan': 'plan/',
-                          'direct': 'cloud/direct-', 'legacy': []})
+                          'direct': 'cloud/direct-', 'train': 'train/', 'legacy': []})
         self.assertEqual((c.specs_dir, c.plans_dir, c.reviews_dir),
                          ('docs/specs', 'docs/plans', 'docs/reviews'))
         self.assertEqual(c.review_pattern, '{reviews_dir}/{n}-{slug}.md')
@@ -151,6 +151,12 @@ class BranchTests(unittest.TestCase):
         self.assertFalse(Conventions(main='trunk').is_trunk('main'))
         self.assertTrue(Conventions(main='trunk').is_trunk('trunk'))
 
+    def test_the_train_prefix_is_minted_and_recognised(self):
+        c = Conventions()
+        self.assertEqual(c.branch('train', 'code-20260924-0930'), 'train/code-20260924-0930')
+        self.assertIn('train/', c.all_prefixes())
+        self.assertEqual(c.branch_kind('train/code-20260924-0930'), 'train')
+
 
 class PathTests(unittest.TestCase):
     def test_review_path_substitutes_the_reviews_dir_the_round_and_the_slug(self):
@@ -167,10 +173,11 @@ class PathTests(unittest.TestCase):
 class ForbiddenPatternsTests(unittest.TestCase):
     def test_one_pattern_per_path_shaped_default(self):
         patterns = conv_mod.forbidden_patterns()
-        self.assertEqual(len(patterns), 13)
+        self.assertEqual(len(patterns), 14)
         self.assertIn("['\"]" + re.escape('cloud/direct-'), patterns)
         self.assertIn("['\"]" + re.escape(conv_mod.DEFAULT_RELEASE_INSTALL), patterns)
         self.assertIn("['\"]worker/", patterns)
+        self.assertIn("['\"]train/", patterns)
         self.assertIn("['\"]docs/specs\\b", patterns)
         self.assertIn("['\"]" + re.escape('{reviews_dir}/{n}-{slug}.md') + '\\b', patterns)
         self.assertIn("['\"]" + re.escape('### Task') + '\\b', patterns)
@@ -200,13 +207,23 @@ class ForbiddenPatternsTests(unittest.TestCase):
         # forbidden_patterns() walks string defaults containing '/', '{' or '#' (P14); a
         # dict-valued default like DEFAULT_SAVINGS is never a path-shaped literal.
         self.assertIsInstance(conv_mod.DEFAULT_SAVINGS, dict)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 14)
 
     def test_the_heavy_share_default_and_the_two_labels_add_no_pattern(self):
         # DEFAULT_HEAVY_SHARE_PCT is an int, and HEAVY/LIGHT are not DEFAULT_* names — neither
         # is a path-shaped string default, so the count is unmoved (F-0101 §1.3 P13).
         self.assertIsInstance(conv_mod.DEFAULT_HEAVY_SHARE_PCT, int)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 14)
+
+    def test_the_size_and_train_defaults_add_no_pattern_but_the_prefix_does(self):
+        # the eight size/train defaults (F-0041 §2.2) are ints, dicts or empty lists — never a
+        # path-shaped string — but the new `train` branch prefix is, so the count moves by
+        # exactly one over the pre-F-0041 baseline (PD7).
+        for name in ('DEFAULT_SMALL_MAX_FILES', 'DEFAULT_SMALL_MAX_FILES_BY_KIND',
+                     'DEFAULT_MEDIUM_MAX_FILES', 'DEFAULT_KIND_PATHS', 'DEFAULT_NEVER_SMALL_PATHS',
+                     'DEFAULT_TRAIN_LANES', 'DEFAULT_TRAIN_MAX_TASKS', 'DEFAULT_TRAIN_MAX_AGE_S'):
+            self.assertNotIsInstance(getattr(conv_mod, name), str, name)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 14)
 
 
 class CheckConventionsScriptTests(unittest.TestCase):
@@ -416,6 +433,84 @@ class BudgetConventionTests(unittest.TestCase):
         self.assertTrue(hits)
         for rel, pattern in hits:
             self.assertEqual(rel, os.path.join('asf', 'conventions.py'), (rel, pattern))
+
+
+class SizeTrainConventionsTests(unittest.TestCase):
+    """F-0041 §2.2: `size:` and `train:` folded onto flat fields, every field defaulted."""
+
+    def test_the_defaults_are_what_the_card_says(self):
+        self.assertEqual(conv_mod.DEFAULT_SMALL_MAX_FILES, 3)
+        self.assertEqual(conv_mod.DEFAULT_SMALL_MAX_FILES_BY_KIND, {'docs': 15, 'copy': 15})
+        self.assertEqual(conv_mod.DEFAULT_MEDIUM_MAX_FILES, 15)
+        self.assertEqual(conv_mod.DEFAULT_KIND_PATHS, {})
+        self.assertEqual(conv_mod.DEFAULT_NEVER_SMALL_PATHS, [])
+        self.assertEqual(conv_mod.DEFAULT_TRAIN_LANES, [])
+        self.assertEqual(conv_mod.DEFAULT_TRAIN_MAX_TASKS, 6)
+        self.assertEqual(conv_mod.DEFAULT_TRAIN_MAX_AGE_S, 7200)
+
+    def test_a_fresh_conventions_carries_every_default(self):
+        c = Conventions()
+        self.assertEqual((c.size_small_max_files, c.size_small_max_files_by_kind,
+                          c.size_medium_max_files, c.size_kind_paths, c.size_never_small_paths),
+                         (3, {'docs': 15, 'copy': 15}, 15, {}, []))
+        self.assertEqual((c.train_lanes, c.train_max_tasks, c.train_max_age_s), ([], 6, 7200))
+
+    def test_two_instances_do_not_share_their_size_or_train_containers(self):
+        a, b = Conventions(), Conventions()
+        a.size_small_max_files_by_kind['test'] = 5
+        a.size_kind_paths['docs'] = ['docs/**']
+        a.size_never_small_paths.append('db/**')
+        a.train_lanes.append('code')
+        self.assertEqual(b.size_small_max_files_by_kind, {'docs': 15, 'copy': 15})
+        self.assertEqual(b.size_kind_paths, {})
+        self.assertEqual(b.size_never_small_paths, [])
+        self.assertEqual(b.train_lanes, [])
+
+    def test_the_size_block_folds_onto_flat_fields_and_keeps_an_unknown_key(self):
+        c = Conventions.from_mapping({'size': {
+            'small_max_files': 5, 'small_max_files_by_kind': {'docs': 20},
+            'medium_max_files': 25, 'kind_paths': {'docs': ['docs/**']},
+            'never_small_paths': ['db/migrate/**'], 'later': 'x'}})
+        self.assertEqual((c.size_small_max_files, c.size_small_max_files_by_kind,
+                          c.size_medium_max_files, c.size_kind_paths, c.size_never_small_paths),
+                         (5, {'docs': 20}, 25, {'docs': ['docs/**']}, ['db/migrate/**']))
+        self.assertEqual(c.extra, {'size': {'later': 'x'}})
+        self.assertEqual(Conventions.from_mapping({'size': {}}), Conventions())
+
+    def test_the_train_block_folds_onto_flat_fields_and_keeps_an_unknown_key(self):
+        c = Conventions.from_mapping({'train': {'lanes': ['code'], 'max_tasks': 4,
+                                                'max_age_s': 3600, 'later': 'x'}})
+        self.assertEqual((c.train_lanes, c.train_max_tasks, c.train_max_age_s),
+                         (['code'], 4, 3600))
+        self.assertEqual(c.extra, {'train': {'later': 'x'}})
+        self.assertEqual(Conventions.from_mapping({'train': {}}), Conventions())
+        self.assertEqual(Conventions.from_mapping({'train_lanes': ['code']}).train_lanes, ['code'])
+
+    def test_size_config_returns_a_size_config_with_the_resolved_fields(self):
+        from asf.size import SizeConfig
+
+        c = Conventions.from_mapping({'size': {
+            'small_max_files': 5, 'small_max_files_by_kind': {'docs': 20},
+            'medium_max_files': 25, 'kind_paths': {'docs': ['docs/**']}}})
+        cfg = c.size_config()
+        self.assertIsInstance(cfg, SizeConfig)
+        self.assertEqual((cfg.small_max_files, cfg.small_max_files_by_kind, cfg.medium_max_files,
+                          cfg.kind_globs), (5, {'docs': 20}, 25, {'docs': ['docs/**']}))
+
+    def test_size_config_unions_never_small_paths_with_amendable_paths(self):
+        c = Conventions.from_mapping({'size': {'never_small_paths': ['db/migrate/**']},
+                                      'amendable_paths': ['rules/*', 'db/migrate/**']})
+        self.assertEqual(c.size_config().never_small_globs,
+                         ['db/migrate/**', 'rules/*', 'db/migrate/**'])
+
+    def test_size_config_unions_with_amendable_paths_when_never_small_paths_is_absent(self):
+        c = Conventions.from_mapping({'amendable_paths': ['rules/*']})
+        self.assertEqual(c.size_config().never_small_globs, ['rules/*'])
+        self.assertEqual(Conventions().size_config().never_small_globs, [])
+
+    def test_train_lanes_defaults_to_empty(self):
+        self.assertEqual(Conventions().train_lanes, [])
+        self.assertEqual(Conventions.from_mapping({}).train_lanes, [])
 
 
 class SelfBugThresholdTests(unittest.TestCase):

@@ -144,6 +144,29 @@ conventions:
   # and the most globs a Task may write and still be batched. Both shown at their defaults.
   # area_depth: 2
   # batch_max_globs: 2
+  # F-0041: the size class every Task derives from its own writes: footprint. A Task at or under
+  # small_max_files entries (small_max_files_by_kind raises it for a kind whose files cannot turn
+  # a test red) is small and rides its lane's train; medium keeps its own pull request; large is
+  # unchanged. A footprint with a wildcard entry, one naming another repo, or none at all is
+  # never small — a glob is not a file count. never_small_paths names the changes that must never
+  # be batched behind someone else's; the product's amendable_paths are added to it for free.
+  size:
+    small_max_files: 3
+    medium_max_files: 15
+    small_max_files_by_kind: {docs: 15, copy: 15}
+    kind_paths:
+      docs: [docs/**, README.md]
+      test: [tests/**]
+      config: ['*.yaml', '*.toml']
+      copy: [locales/**]
+    never_small_paths: [db/migrate/**, app/routes/**]
+  # F-0041: the lanes that run a train, the seats one train holds, and how old its first commit
+  # may get before the cutter closes it. No lane named: no train — every Task keeps the branch
+  # and the landing it has today.
+  train:
+    lanes: [code]
+    max_tasks: 6
+    max_age_s: 7200
   # asf.record.slice: the unit a Feature is built and landed in. `task` (the default) is one
   # branch, one PR, one review per Task. `feature` makes the whole Feature one delivery — its
   # Tasks one branch, one PR, one CI run, one review, one commit per Task — cut into ordered

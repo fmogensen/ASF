@@ -27,6 +27,14 @@ class TestExampleConfigsParse(unittest.TestCase):
         self.assertEqual(product.approvals['spend_money'], 'human-now')
         self.assertEqual(product.groom['adjudicate_attempts'], 2)
         self.assertEqual(product.branch_prefix('groom'), 'groom')
+        # F-0041 §2.2: both documented blocks resolve onto the Conventions fields.
+        self.assertEqual((product.conventions.size_small_max_files,
+                          product.conventions.size_medium_max_files), (3, 15))
+        self.assertEqual(product.conventions.size_kind_paths['docs'], ['docs/**', 'README.md'])
+        self.assertEqual(product.conventions.size_never_small_paths,
+                         ['db/migrate/**', 'app/routes/**'])
+        self.assertEqual((product.conventions.train_lanes, product.conventions.train_max_tasks,
+                          product.conventions.train_max_age_s), (['code'], 6, 7200))
 
 
 class DocumentedModelsTests(unittest.TestCase):
@@ -187,6 +195,16 @@ class TestProductConventions(unittest.TestCase):
         self.assertEqual(p.conventions.ci_workflows, [])
         self.assertIsNone(p.conventions.ci_dev_job)
         self.assertIsNone(p.conventions.deploy_workflow)
+
+    def test_a_partial_size_block_resolves_the_rest_to_their_defaults(self):
+        # F-0041 §2.2: a product naming one size key still gets the other four at their
+        # documented defaults — a partial block is a partial block, not a reset.
+        p = self.product({'conventions': {'size': {'small_max_files': 5}}})
+        self.assertEqual(p.conventions.size_small_max_files, 5)
+        self.assertEqual(p.conventions.size_small_max_files_by_kind, {'docs': 15, 'copy': 15})
+        self.assertEqual(p.conventions.size_medium_max_files, 15)
+        self.assertEqual(p.conventions.size_kind_paths, {})
+        self.assertEqual(p.conventions.size_never_small_paths, [])
 
 
 class TestProduct(unittest.TestCase):

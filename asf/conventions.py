@@ -104,6 +104,8 @@ DEFAULT_BRANCH_PREFIXES = {
     'plan': 'plan/',
     #: a ``lane: direct`` Feature's one branch — the whole Feature, code and tests, one PR
     'direct': 'cloud/direct-',
+    #: a train's one branch — six small Tasks or two hours, whichever comes first (F-0041 §2.4)
+    'train': 'train/',
     'legacy': [],
 }
 
@@ -195,6 +197,38 @@ HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick'
                 'gate_timeout_s': 'gate_timeout_s'}
 #: The keys of the yaml's ``git:`` block and the field each one is.
 GIT_KEYS = {'push_timeout_s': 'push_timeout_s'}
+#: The keys of the yaml's ``size:`` block and the field each one is (F-0041 §2.2).
+SIZE_KEYS = {'small_max_files': 'size_small_max_files',
+             'small_max_files_by_kind': 'size_small_max_files_by_kind',
+             'medium_max_files': 'size_medium_max_files',
+             'kind_paths': 'size_kind_paths',
+             'never_small_paths': 'size_never_small_paths'}
+#: The keys of the yaml's ``train:`` block and the field each one is (F-0041 §2.2).
+TRAIN_KEYS = {'lanes': 'train_lanes', 'max_tasks': 'train_max_tasks',
+              'max_age_s': 'train_max_age_s'}
+
+#: ``size.small_max_files`` — at or under this many ``writes:`` entries, a Task is small (F-0041).
+DEFAULT_SMALL_MAX_FILES = 3          # the card's threshold
+#: ``size.small_max_files_by_kind`` — a per-kind override of ``small_max_files``, raised for a
+#: kind whose files cannot turn a test red (F-0041 D7).
+DEFAULT_SMALL_MAX_FILES_BY_KIND = {'docs': 15, 'copy': 15}   # D7
+#: ``size.medium_max_files`` — at or under this many entries (and not small), a Task is medium;
+#: over it, large.
+DEFAULT_MEDIUM_MAX_FILES = 15
+#: ``size.kind_paths`` — globs by kind (``docs``, ``test``, ``config``, ``copy``), read by
+#: :func:`asf.size.kind_of`. Empty by default: no product's tree is known here.
+DEFAULT_KIND_PATHS = {}              # no product's tree is known here
+#: ``size.never_small_paths`` — globs whose match in a footprint floors the Task at medium; the
+#: product's ``amendable_paths`` are unioned in for free (F-0041 D6).
+DEFAULT_NEVER_SMALL_PATHS = []       # plus amendable_paths, always (D6)
+#: ``train.lanes`` — the lanes that run a train. Empty by default: no train opens until an
+#: operator names one (F-0041 D15).
+DEFAULT_TRAIN_LANES = []             # D15: no train until an operator names a lane
+#: ``train.max_tasks`` — the most small Tasks one train carries before the cutter closes it.
+DEFAULT_TRAIN_MAX_TASKS = 6          # the card's seat count
+#: ``train.max_age_s`` — the most seconds since a train's first commit before the cutter closes
+#: it, whatever its seat count.
+DEFAULT_TRAIN_MAX_AGE_S = 7200       # the card's two hours
 
 #: Paths (globs) that count as documentation beside ``specs_dir``, ``plans_dir`` and
 #: ``reviews_dir``: a branch touching only docs roots is the ``docs`` landing class
@@ -871,6 +905,24 @@ class Conventions:
     #: states (F-0024): unset (``None``) is the defaults in `asf/amendable.py`, a list is that
     #: list, and ``[]`` is an opt-out — the set is empty.
     amendable_paths: list = None
+    #: ``size.small_max_files`` (:data:`DEFAULT_SMALL_MAX_FILES`).
+    size_small_max_files: int = DEFAULT_SMALL_MAX_FILES
+    #: ``size.small_max_files_by_kind`` (:data:`DEFAULT_SMALL_MAX_FILES_BY_KIND`).
+    size_small_max_files_by_kind: dict = field(
+        default_factory=lambda: dict(DEFAULT_SMALL_MAX_FILES_BY_KIND))
+    #: ``size.medium_max_files`` (:data:`DEFAULT_MEDIUM_MAX_FILES`).
+    size_medium_max_files: int = DEFAULT_MEDIUM_MAX_FILES
+    #: ``size.kind_paths`` (:data:`DEFAULT_KIND_PATHS`).
+    size_kind_paths: dict = field(default_factory=lambda: dict(DEFAULT_KIND_PATHS))
+    #: ``size.never_small_paths`` (:data:`DEFAULT_NEVER_SMALL_PATHS`); unioned with
+    #: ``amendable_paths`` by :meth:`size_config`.
+    size_never_small_paths: list = field(default_factory=lambda: list(DEFAULT_NEVER_SMALL_PATHS))
+    #: ``train.lanes`` (:data:`DEFAULT_TRAIN_LANES`).
+    train_lanes: list = field(default_factory=lambda: list(DEFAULT_TRAIN_LANES))
+    #: ``train.max_tasks`` (:data:`DEFAULT_TRAIN_MAX_TASKS`).
+    train_max_tasks: int = DEFAULT_TRAIN_MAX_TASKS
+    #: ``train.max_age_s`` (:data:`DEFAULT_TRAIN_MAX_AGE_S`).
+    train_max_age_s: int = DEFAULT_TRAIN_MAX_AGE_S
     #: More docs roots (globs) beside the specs/plans/reviews dirs (:data:`DEFAULT_DOC_PATHS`).
     doc_paths: list = field(default_factory=lambda: list(DEFAULT_DOC_PATHS))
     #: Lockfile-like globs outside footprint overlap (:data:`DEFAULT_SHARED_PATHS`).
@@ -975,7 +1027,8 @@ class Conventions:
             # ``models.<kind>``: a label, or a map of labels by class (asf.briefs.build)
             if not model_value_ok(value):
                 misshapen[f'models.{kind}'] = value
-        for block, block_keys in (('harvest', HARVEST_KEYS), ('git', GIT_KEYS)):
+        for block, block_keys in (('harvest', HARVEST_KEYS), ('git', GIT_KEYS),
+                                  ('size', SIZE_KEYS), ('train', TRAIN_KEYS)):
             value_ = data.pop(block, None)
             if isinstance(value_, dict):  # ``harvest: {gate, …}`` / ``git: {…}`` → the fields
                 rest = {}
@@ -1357,6 +1410,21 @@ class Conventions:
             else:
                 names.append(str(key))
         return sorted(n for n in names if n not in KNOWN_FLAGS)
+
+    def size_config(self):
+        """The resolved :class:`asf.size.SizeConfig` :func:`asf.size.classify` takes, with
+        ``never_small_globs = size_never_small_paths + amendable_paths`` — the union is built
+        here, once, so neither the classifier nor the cutter has to remember it (F-0041 §2.2)."""
+        from asf.size import SizeConfig
+
+        never_small = list(self.size_never_small_paths) + list(self.amendable_paths or [])
+        return SizeConfig(
+            small_max_files=self.size_small_max_files,
+            small_max_files_by_kind=dict(self.size_small_max_files_by_kind),
+            medium_max_files=self.size_medium_max_files,
+            kind_globs=dict(self.size_kind_paths),
+            never_small_globs=never_small,
+        )
 
     # ---- the mapping face ----------------------------------------------------
 
