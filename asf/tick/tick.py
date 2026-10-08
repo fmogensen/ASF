@@ -506,6 +506,41 @@ def _run_locked(args, product, fresh, rows, chosen, locks=None, started=None):
         return 2
 
 
+def _migrate_schema(product, locks):
+    """The migration before the steps (F-0114 §2): an additive gap is migrated here, drained to
+    a bound (:func:`asf.schema.tick_drain_s`); a non-additive one is the only pending migration
+    that stops anything — the operator line, and no step runs. Silent (one read of
+    ``index.json``, one of ``config.yaml``) when nothing is pending, which is every tick on a
+    matching install. The tick's own :func:`asf.schema.require` call, immediately after, is the
+    assertion that this did its job — it is written as a call, not an assert, so the tick
+    refuses identically to every other RECORD writer (PD6) rather than silently."""
+    from asf import schema
+    gaps = schema.pending(product)
+    record_steps, config_steps = gaps['record'], gaps['config']
+    if not record_steps and not config_steps:
+        return 0
+    if schema.blocking(product):
+        detail = schema.check(product)[1]
+        print(f'NEEDS OPERATOR: run asf schema-migrate --drain — {detail}')
+        return schema.EXIT_MISMATCH
+    with locks.record('schema migrate') as ok:
+        if ok:
+            a, b, _m = (record_steps or config_steps)[0]
+            print(f'tick: schema {a} → {b} pending (additive) — migrating')
+            migrated, lines = schema.auto_migrate(product, drain_s=schema.tick_drain_s())
+            if not migrated:
+                line = lines[0] if lines else f'schema {a} → {b} still pending'
+                print(f'tick: {line}; the next tick retries')
+            else:
+                for line in lines:
+                    print(f'tick: {line}')
+    try:
+        schema.require(product)
+    except SystemExit as e:
+        return e.code or schema.EXIT_MISMATCH
+    return 0
+
+
 def _run_steps(args, product, ctx, rows, chosen, locks=None):
     from asf import drift, upgrade
     locks = locks or Locks(product, held=True)
@@ -536,6 +571,9 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         marker = upgrade.read_pending(product.name)
         print(f'tick: upgrade to {marker["sha"][:7]} pending — this tick runs'
               ' without a new background harvest; the install goes at the next start')
+    migrate_rc = _migrate_schema(product, locks)
+    if migrate_rc:
+        return migrate_rc
     if any(s == 'wave' and o == 'asf' for s, o, _ in rows) and not any(s == 'watchdog' for s, _, _ in rows):
         # the dwell watchdog (asf.dwell) runs with every asf wave, whichever clock carries it — a
         # product whose clocks predate the step is watched too; `steps: {watchdog: off}` stops it

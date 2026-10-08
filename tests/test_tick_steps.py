@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import budget, capacity, env
+from asf import budget, capacity, env, schema
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
@@ -29,7 +29,7 @@ from tests.test_tick import TickTestCase, _git, steps_only
 DEAD_PID = 999999
 CARD = ('---\nid: B-0001\ntype: bug\ntitle: the first bug\n---\n## Description\nx\n\n'
         '## Acceptance\n- [ ] the named test passes\n- [x] no regression\n\n## History\n- made\n')
-INDEX = {'generated': '', 'items': {
+INDEX = {'generated': '', 'schema_version': schema.SCHEMA_VERSION, 'items': {
     'B-0001': {'id': 'B-0001', 'type': 'bug', 'title': 'the first bug', 'folder': 'bugs',
                'severity': 'S1', 'state': 'New', 'decided': True},
     'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'sample', 'folder': 'features'},
@@ -70,7 +70,11 @@ class StepsTestCase(TickTestCase):
         super().setUp()
         self.repo_origin = os.path.join(self.tmp, 'repo.git')
         self.repo = os.path.join(self.tmp, 'repo')
-        self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}')
+        # a matching install (F-0114): config.yaml and products/sample.yaml both stamped, so the
+        # schema migration block is silent by default — a test of it overwrites one back down
+        self.write_config(f'schema_version: {schema.CONFIG_VERSION}\n')
+        self.write_product(f'schema_version: {schema.CONFIG_VERSION}\nrepo_dir: {self.repo}\n'
+                           f'{self.product_extra}')
         self.product = env.load_product('sample')
         self.lines = []
 
@@ -181,6 +185,93 @@ class OrderedTickTests(StepsTestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(steps_only(out), '[command:batch] batch ran\n')
         self.assertFalse(os.path.exists(self.record_path()))
+
+
+# ---- schema migration (F-0114 §2) --------------------------------------------------
+
+class SchemaMigrationStepTests(StepsTestCase):
+    """The migration block in ``_run_steps``: silent on the matching install every other test
+    in this module runs (``StepsTestCase``'s own fixture is stamped), and otherwise the subject
+    here. ``self.operator`` (cloned before this class's own ``build_repos`` pushes the index) and
+    a fresh product carry no ``index.json`` of their own, so a record entry exists to compare
+    only once the tick's own clone has been made — a priming tick, every test's own first act."""
+
+    def _run_fast(self, **kw):
+        with mock.patch.object(step_health, 'run', return_value=0), \
+                mock.patch.object(step_groom, 'run', return_value=0), \
+                mock.patch.object(step_wave, 'run', return_value=0), \
+                mock.patch.object(step_prs, 'run', return_value=0), \
+                mock.patch.object(step_harvest, 'run', return_value=0), \
+                mock.patch.object(step_daily, 'run', return_value=0):
+            return self.run_tick(**kw)
+
+    def setUp(self):
+        super().setUp()
+        rc, out = self._run_fast()
+        assert rc == 0, out  # the priming tick itself must be clean, or a test below is lying
+
+
+class TheTickMigratesItselfTests(SchemaMigrationStepTests):
+    def test_the_tick_migrates_an_additive_record_gap_and_still_runs_its_steps(self):
+        clone = os.path.join(env.ASF_HOME, 'state', 'sample', 'record')
+        with mock.patch.object(schema, 'SCHEMA_VERSION', 2), \
+                mock.patch.dict(schema.MIGRATIONS,
+                                {2: schema.Migration(lambda d: None, additive=True, note='x')}):
+            rc, out = self._run_fast()
+            self.assertEqual(rc, 0, out)
+            self.assertIn('migrate: schema 1 → 2', out)
+            self.assertEqual(schema.record_version(clone), 2)
+            # not just the exit code: its steps ran, all the way to the state commit
+            self.assertIn('tick: state committed and pushed', out)
+            self.assertIn('migrate: schema 1 → 2', _git(['log', '--format=%s', 'main'], self.origin))
+            # a second tick migrates nothing and says nothing
+            rc2, out2 = self._run_fast()
+        self.assertEqual(rc2, 0, out2)
+        self.assertNotIn('migrate:', out2)
+        self.assertNotIn('pending', out2)
+
+
+class AnAdditiveGapNeverRefusesTests(SchemaMigrationStepTests):
+    def test_an_in_flight_session_with_a_zero_drain_runs_the_steps_anyway(self):
+        self.session(job='a', started='2026-09-24T10:00:00Z', pid=os.getpid())
+        with mock.patch.object(schema, 'SCHEMA_VERSION', 2), \
+                mock.patch.dict(schema.MIGRATIONS,
+                                {2: schema.Migration(lambda d: None, additive=True, note='x')}), \
+                mock.patch.object(schema, 'tick_drain_s', return_value=0):
+            rc, out = self._run_fast()
+        self.assertEqual(rc, 0, out)
+        self.assertIn('still pending', out)
+        self.assertIn('session(s) in flight', out)
+        self.assertIn('tick: state committed and pushed', out)
+
+    def test_a_non_additive_gap_stops_the_tick_with_the_operator_line_and_no_step(self):
+        with mock.patch.object(schema, 'SCHEMA_VERSION', 2), \
+                mock.patch.dict(schema.MIGRATIONS,
+                                {2: schema.Migration(lambda d: None, additive=False, note='x')}):
+            rc, out = self._run_fast()
+        self.assertEqual(rc, schema.EXIT_MISMATCH)
+        self.assertIn('NEEDS OPERATOR: run asf schema-migrate --drain — ', out)
+        self.assertNotIn('tick: state committed', out)
+
+    def test_a_pending_config_step_is_migrated_and_stamped_with_no_operator_action(self):
+        self.write_config('')  # back down to unstamped: an additive config gap
+        rc, out = self._run_fast()
+        self.assertEqual(rc, 0, out)
+        self.assertIn('config.yaml schema 0 → 1', out)
+        self.assertEqual(schema.config_version(), schema.CONFIG_VERSION)
+
+    def test_the_upgrade_block_runs_before_the_migration(self):
+        from asf import drift
+
+        def fake_report(*_a, **_kw):
+            print('tick: fake upgrade check ran')
+        with mock.patch.object(drift, 'report', side_effect=fake_report), \
+                mock.patch.object(schema, 'SCHEMA_VERSION', 2), \
+                mock.patch.dict(schema.MIGRATIONS,
+                                {2: schema.Migration(lambda d: None, additive=True, note='x')}):
+            rc, out = self._run_fast()
+        self.assertEqual(rc, 0, out)
+        self.assertLess(out.index('fake upgrade check ran'), out.index('migrate: schema 1 → 2'))
 
 
 # ---- health -----------------------------------------------------------------------

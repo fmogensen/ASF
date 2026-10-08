@@ -1,14 +1,18 @@
+import contextlib
+import io
 import json
 import os
 import shutil
+import tempfile
 import types
 import unittest
 from unittest import mock
 
-from asf import schema
+from asf import env, schema
 from asf.init import STREAM_FOLDERS
 from asf.record import frontmatter
 from tests.test_backlog import make_repo, run, write_item
+from tests.test_install import HomeCase, SchemaTest
 
 
 def card_version(root, folder, id_):
@@ -119,6 +123,169 @@ class IngestKeepsTheStamp(unittest.TestCase):
     def test_an_unmigrated_record_is_left_for_the_migration(self):
         self.ingest()
         self.assertIsNone(card_version(self.root, 'epics', 'E-0001'))
+
+
+class RequireRefusesOnlyANonAdditiveGapTests(SchemaTest):
+    """F-0114 §1, the card's first acceptance clause: ``require`` refuses on a non-additive gap,
+    or a file stamped newer than the package, and never on an additive one or an absent stamp."""
+
+    def test_matching_passes(self):
+        self.assertTrue(schema.require(self.product))
+
+    def test_additive_gap_passes_and_writes_nothing(self):
+        self.write(os.path.join(self.operator, 'index.json'), '{"items": {}}')  # unstamped: 0
+        before = self.origin_log()
+        self.assertTrue(schema.require(self.product))
+        self.assertEqual(self.origin_log(), before)  # require only checks; it never migrates
+
+    def test_non_additive_record_gap_exits_3_with_the_operator_line(self):
+        def to_2(record_dir):
+            pass
+        with mock.patch.object(schema, 'SCHEMA_VERSION', 2), \
+                mock.patch.dict(schema.MIGRATIONS,
+                                {2: schema.Migration(to_2, additive=False, note='x')}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                schema.require(self.product)
+        self.assertEqual(cm.exception.code, schema.EXIT_MISMATCH)
+        self.assertRegex(err.getvalue(), r'^NEEDS OPERATOR: run asf schema-migrate — ')
+
+    def test_non_additive_config_gap_exits_3_independently_of_the_record(self):
+        self.write(env.config_path(), 'default_product: sample\n')  # config: absent -> 0
+
+        def to_2(paths):
+            pass
+        with mock.patch.object(schema, 'CONFIG_VERSION', 2), \
+                mock.patch.dict(schema.CONFIG_MIGRATIONS,
+                                {1: schema.CONFIG_MIGRATIONS[1],
+                                 2: schema.Migration(to_2, additive=False, note='x')}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+                schema.require(self.product)
+        self.assertEqual(cm.exception.code, schema.EXIT_MISMATCH)
+        self.assertIn('NEEDS OPERATOR: run asf schema-migrate — ', err.getvalue())
+
+    def test_a_newer_record_exits_3_with_migrate_dirs_forward_only_wording(self):
+        self.write(os.path.join(self.operator, 'index.json'), '{"items": {}, "schema_version": 9}')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            schema.require(self.product)
+        self.assertEqual(cm.exception.code, schema.EXIT_MISMATCH)
+        self.assertIn('forward-only', err.getvalue())
+
+    def test_an_absent_config_stamp_never_refuses(self):
+        self.write(env.config_path(), 'default_product: sample\n')  # no schema_version at all
+        self.assertTrue(schema.require(self.product))
+
+
+class ConfigMigrationTests(HomeCase):
+    """F-0114 §1's config fence (its ``tests.test_env.ConfigSchemaVersionTests`` half lands with
+    the reader, in a later card): :func:`schema.pending`, :func:`schema.migrate_config` and
+    their snapshot/restore over ``config.yaml`` and every ``products/*.yaml``."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(env.config_path(), '# operator notes\nfoo: bar\n')
+        self.write(env.product_path('alpha'), '# alpha notes\nrepo_slug: a/a\n')
+        self.write(env.product_path('beta'), '# beta notes\nrepo_slug: b/b\n')
+        self.no_record = env.Product('none', {})  # a product with no record_dirs of its own
+
+    def _read_all(self):
+        out = {}
+        for p in schema.config_files():
+            with open(p, encoding='utf-8') as f:
+                out[p] = f.read()
+        return out
+
+    def test_pending_is_one_additive_step_over_every_unstamped_file(self):
+        self.assertEqual(schema.pending(self.no_record)['config'],
+                         [(0, 1, schema.CONFIG_MIGRATIONS[1])])
+
+    def test_migrate_config_stamps_all_three_byte_identical_otherwise(self):
+        before = self._read_all()
+        applied = schema.migrate_config()
+        self.assertEqual(applied, [(0, 1, schema.CONFIG_MIGRATIONS[1])])
+        for p, old in before.items():
+            with open(p, encoding='utf-8') as f:
+                text = f.read()
+            self.assertEqual(text, 'schema_version: 1\n' + old)  # the stamp lands as the first key
+
+    def test_migrate_config_is_idempotent(self):
+        schema.migrate_config()
+        self.assertEqual(schema.migrate_config(), [])
+
+    def test_non_additive_entry_snapshots_first_and_the_snapshot_holds_the_pre_step_bytes(self):
+        before = self._read_all()
+
+        def to_2(paths):
+            pass
+        with mock.patch.object(schema, 'CONFIG_VERSION', 2), \
+                mock.patch.dict(schema.CONFIG_MIGRATIONS,
+                                {1: schema.CONFIG_MIGRATIONS[1],
+                                 2: schema.Migration(to_2, additive=False, note='x')}):
+            schema.migrate_config()
+        backups = schema.snapshots()
+        self.assertEqual(len(backups), 1)
+        version, _stamp, backup_dir = backups[0]
+        self.assertEqual(version, 1)  # the step landing at 2 snapshots the state before it: 1
+        for p, old in before.items():
+            with open(os.path.join(backup_dir, os.path.basename(p)), encoding='utf-8') as f:
+                self.assertEqual(f.read(), 'schema_version: 1\n' + old)
+
+    def test_restore_puts_the_backup_back(self):
+        before = self._read_all()
+
+        def to_2(paths):
+            pass
+        with mock.patch.object(schema, 'CONFIG_VERSION', 2), \
+                mock.patch.dict(schema.CONFIG_MIGRATIONS,
+                                {1: schema.CONFIG_MIGRATIONS[1],
+                                 2: schema.Migration(to_2, additive=False, note='x')}):
+            schema.migrate_config()
+            self.assertIsNotNone(schema.restore(None, 1))
+        for p, old in before.items():
+            with open(p, encoding='utf-8') as f:
+                self.assertEqual(f.read(), 'schema_version: 1\n' + old)
+
+
+class EveryMigrationIsAdditiveOrBumpsTheMinorTests(HomeCase):
+    """D10 as a fence over the tables, not over one run: every entry today is additive, and a
+    non-additive entry's ``apply`` is reached only through a code path that snapshots first."""
+
+    def test_every_entry_today_is_additive(self):
+        self.assertTrue(all(m.additive for m in schema.MIGRATIONS.values()), schema.MIGRATIONS)
+        self.assertTrue(all(m.additive for m in schema.CONFIG_MIGRATIONS.values()),
+                        schema.CONFIG_MIGRATIONS)
+
+    def test_a_fabricated_non_additive_entry_is_snapshotted_before_its_apply_runs(self):
+        self.write(env.config_path(), 'schema_version: 1\n')
+        order = []
+        real_snapshot = schema.snapshot
+
+        def spy(product, version):
+            order.append('snapshot')
+            return real_snapshot(product, version)
+
+        def to_2(paths):
+            order.append('apply')
+        with mock.patch.object(schema, 'CONFIG_VERSION', 2), \
+                mock.patch.object(schema, 'snapshot', side_effect=spy), \
+                mock.patch.dict(schema.CONFIG_MIGRATIONS,
+                                {2: schema.Migration(to_2, additive=False, note='x')}):
+            schema.migrate_config()
+        self.assertEqual(order, ['snapshot', 'apply'])
+
+    def test_an_additive_entry_never_snapshots(self):
+        self.write(env.config_path(), 'schema_version: 1\n')
+
+        def to_2(paths):
+            pass
+        with mock.patch.object(schema, 'CONFIG_VERSION', 2), \
+                mock.patch.object(schema, 'snapshot') as snap, \
+                mock.patch.dict(schema.CONFIG_MIGRATIONS,
+                                {2: schema.Migration(to_2, additive=True, note='x')}):
+            schema.migrate_config()
+        snap.assert_not_called()
 
 
 if __name__ == '__main__':
