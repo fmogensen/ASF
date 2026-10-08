@@ -586,6 +586,15 @@ class Wiring(unittest.TestCase):
         with unittest.mock.patch('asf.ci_queue.queue_pass', lambda *a, **k: (0, 0)):
             lane.lane_pass(product, out=lambda _l: None)  # no ssh, no git: ci_vm.vm_pass == (0, 0)
 
+    def test_scheduler_clocks_installs_no_ci_vm_clock_for_a_vm_product(self):
+        from asf import scheduler
+        product = env.Product('p', {
+            'repo_dir': self.repo_dir, 'main': 'main',
+            'clocks': {'main': {'steps': ['record'], 'every': '5m'}},
+            'ci': {'provider': 'vm', 'hosts': [{'name': 'ci-1', 'ssh': 'x'}],
+                  'jobs': {'gate': {'command': 'x'}}}})
+        self.assertEqual([c.name for c in scheduler.clocks(product)], ['main'])
+
 
 if __name__ == '__main__':
     unittest.main()

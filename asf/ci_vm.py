@@ -282,9 +282,12 @@ cd "$(dirname "$0")/src"
 sh "$(dirname "$0")/cmd" >"$(dirname "$0")/log" 2>&1
 echo $? > "$(dirname "$0")/exit"
 ASF_RUN_EOF
-setsid sh "$rundir/run.sh" >/dev/null 2>&1 &
-pid=$!
-echo "$pid" > "$rundir/pid"
+(
+set -m
+sh "$rundir/run.sh" >/dev/null 2>&1 &
+echo $! > "$rundir/pid"
+) >/dev/null 2>&1
+pid=$(cat "$rundir/pid")
 echo "$pid"
 """
 
