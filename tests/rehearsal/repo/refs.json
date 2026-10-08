@@ -1,0 +1,20 @@
+[
+  {
+    "annotated": true,
+    "message": "id irure veniam sint nostrud id in elit aute magna ",
+    "name": "v0.1.0",
+    "prerelease": false
+  },
+  {
+    "annotated": true,
+    "message": "aliquip nulla tempor mollit exercitation lorem aute ",
+    "name": "v0.1.1",
+    "prerelease": false
+  },
+  {
+    "annotated": false,
+    "message": "",
+    "name": "v0.1.2-rc1",
+    "prerelease": true
+  }
+]
