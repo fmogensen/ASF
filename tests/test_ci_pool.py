@@ -11,6 +11,8 @@ import unittest
 from asf import capacity, ci_census, ci_pool, env
 from asf.ci_pool import Runner, RunsOn
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def pool_data():
     return [
@@ -150,6 +152,42 @@ class RunsOnParser(unittest.TestCase):
         self.assertEqual(got, {'gate': None, 'hosted': frozenset({'ubuntu-latest'}),
                                'mat': None, 'blk': frozenset({'self-hosted', 'light'})})
         self.assertEqual(rows['gate'].needs_vars, frozenset({'X'}))
+
+
+class WorkflowJobNames(unittest.TestCase):
+    """:func:`ci_pool.parse_job_names` — the check names one workflow file can put on a commit
+    (F-0204)."""
+
+    def test_this_repos_own_workflow_declares_its_job(self):
+        path = os.path.join(ROOT, '.github', 'workflows', 'tests.yml')
+        self.assertEqual(ci_pool.parse_job_names(open(path).read()), ['tests'])
+
+    def test_job_keys_and_literal_names_are_declared(self):
+        text = '\n'.join([
+            'on: push', 'jobs:',
+            '  gate:', '    runs-on: ubuntu-latest', '    steps:', '      - run: echo',
+            '  e2e:', '    name: m8-e2e', '    runs-on: ubuntu-latest', '    steps:',
+            '      - run: echo',
+            '  call:', '    uses: ./.github/workflows/other.yml',
+            '  flow: {runs-on: ubuntu-latest, steps: [{run: echo}]}', ''])
+        self.assertEqual(ci_pool.parse_job_names(text), ['gate', 'e2e', 'm8-e2e', 'call', 'flow'])
+
+    def test_a_step_name_is_not_a_job_name(self):
+        text = '\n'.join([
+            'on: push', 'jobs:', '  gate:', '    runs-on: ubuntu-latest', '    steps:',
+            '      - name: not a job name', '        run: |',
+            '          echo jobs:', '          echo fake:', ''])
+        self.assertEqual(ci_pool.parse_job_names(text), ['gate'])
+
+    def test_an_expression_name_is_dropped_and_its_key_kept(self):
+        text = '\n'.join([
+            'on: push', 'jobs:', '  e2e:', '    name: ${{ matrix.leg }} e2e',
+            '    runs-on: ubuntu-latest', '    steps:', '      - run: echo', ''])
+        self.assertEqual(ci_pool.parse_job_names(text), ['e2e'])
+
+    def test_a_file_with_no_jobs_block_declares_nothing(self):
+        for text in ('', 'on: push', 'jobs:'):
+            self.assertEqual(ci_pool.parse_job_names(text), [], text)
 
 
 class FakeRun:
