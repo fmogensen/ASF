@@ -167,6 +167,11 @@ def sub_cause_line(subs, total):
     return f'of the {total} runs: ' + ', '.join(parts) + '.'
 
 
+#: The ``by_feature`` row for spend no Feature could be found for. Kept as the name it has always
+#: had: it is a row an operator reads beside real Features, and its share is ``rank['unattributed']``.
+UNATTRIBUTED = '(none)'
+
+
 def rank(facts, start, end):
     """``{'usd', 'hours', 'by_kind', 'by_failure', 'by_ci_job', 'by_feature'}`` over ``[start, end)``;
     each ``by_*`` a list of dicts, largest first."""
@@ -222,23 +227,30 @@ def rank(facts, start, end):
         c['runs'] += 1
         c['red'] += 1 if red else 0
 
-    feats = {}
+    feats, unplaced = {}, {'usd': 0.0, 'sessions': 0}
     flags = score.repair_flags(facts.sessions)
     for s, rep in zip(facts.sessions, flags):
         if not score.in_window(s.get('ts'), start, end):
             continue
-        fid = score.feature_of(facts.items, s.get('item')) or '(none)'
+        fid = score.feature_of_session(facts.items, s)
+        if fid is None:
+            fid = UNATTRIBUTED
+            unplaced['usd'] += score._num(s.get('usd'))
+            unplaced['sessions'] += 1
         c = feats.setdefault(fid, {'name': fid, 'usd': 0.0, 'sessions': 0, 'repair': 0,
                                    'title': (facts.items.get(fid) or {}).get('title', '')})
         c['usd'] = round(c['usd'] + score._num(s.get('usd')), 2)
         c['sessions'] += 1
         c['repair'] += 1 if rep else 0
+    unplaced['usd'] = round(unplaced['usd'], 2)
+    unplaced['share'] = round(unplaced['usd'] / usd, 3) if usd else 0.0
 
     def desc(d, key):
         return sorted(d.values(), key=lambda c: (-c[key], c['name']))
     return {'usd': round(usd, 2), 'hours': round(minutes / 60, 1),
             'by_kind': desc(kinds, 'usd'), 'by_failure': desc(fails, 'runs'),
-            'by_ci_job': desc(jobs, 'minutes'), 'by_feature': desc(feats, 'usd')}
+            'by_ci_job': desc(jobs, 'minutes'), 'by_feature': desc(feats, 'usd'),
+            'unattributed': unplaced}
 
 
 def _landed_window(facts, start, end):

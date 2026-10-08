@@ -176,6 +176,58 @@ def attributed_bugs(items, fid):
     return sorted(out)
 
 
+#: The card types the record lets hang outside a Feature (``asf.record.core.PARENT_TYPES``), and
+#: so the types whose own text is read for the Feature they belong to. A card of any other type
+#: that merely mentions a Feature is not work spent on it — see D3.
+TEXT_ATTRIBUTED_TYPES = ('bug',)
+
+
+def feature_named_by(items, iid):
+    """The Feature card ``iid``'s own text names — :func:`attributed_bugs`' join, read the other
+    way (D2). Only for a card of :data:`TEXT_ATTRIBUTED_TYPES`, and only a live Feature carded no
+    later than the card itself, so an old Feature never absorbs a newer Bug's spend. When the text
+    names several, the **newest-carded** wins (ties by id): a Bug is about the Feature it was filed
+    after, not the one it compares against. ``None`` when none is named."""
+    it = items.get(iid) or {}
+    if it.get('type') not in TEXT_ATTRIBUTED_TYPES or it.get('removed'):
+        return None
+    named = []
+    for fid in ids_in(it.get('text') or ''):
+        f = items.get(fid) or {}
+        if f.get('type') != 'feature' or f.get('removed'):
+            continue
+        if it.get('created') and f.get('created') and it['created'] < f['created']:
+            continue
+        named.append(fid)
+    return max(named, key=lambda f: (items[f].get('created') or '', f)) if named else None
+
+
+def feature_of_card(items, iid):
+    """The Feature a card belongs to: up its ``parent`` chain, else the one its own text names."""
+    return feature_of(items, iid) or feature_named_by(items, iid)
+
+
+def feature_of_session(items, ev):
+    """The Feature one ``metrics/sessions`` event's spend belongs to, by the first rung that
+    answers:
+
+    1. the event's ``item``, up its ``parent`` chain (:func:`feature_of`) — today's whole rule;
+    2. that same card's own text (:func:`feature_named_by`) — a Bug may hang under an Epic;
+    3. every card id the job's ``branch`` names (:func:`asf.scorecard.facts.ids_in`), in the order
+       the branch names them, each through rungs 1 and 2.
+
+    ``None`` when no rung answers — the spend is unattributed, and the scorecard says so rather
+    than charging it to a Feature it cannot name."""
+    found = feature_of_card(items, ev.get('item'))
+    if found:
+        return found
+    for iid in ids_in(ev.get('branch') or ''):
+        found = feature_of_card(items, iid)
+        if found:
+            return found
+    return None
+
+
 # ------------------------------------------------------------ per item --
 
 def per_item(facts):

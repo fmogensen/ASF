@@ -182,6 +182,71 @@ class ScoreTests(unittest.TestCase):
         self.assertFalse(score.is_dead(run('j', '2026-09-01T00:00:00Z', 'failed', landed=True)))
 
 
+class SessionAttributionTests(unittest.TestCase):
+    """score.feature_of_session — the ladder a dollar's Feature is read off, pure (D1-D4)."""
+
+    def items(self):
+        return {
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'parent': None,
+                       'text': 'kept alive, see F-0010', 'created': '2026-09-01T00:00:00Z'},
+            'F-0010': {'id': 'F-0010', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-01T00:00:00Z'},
+            'F-0020': {'id': 'F-0020', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-10T00:00:00Z'},
+            'F-0030': {'id': 'F-0030', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-20T00:00:00Z'},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0010', 'text': '',
+                       'created': '2026-09-02T00:00:00Z'},
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'parent': 'E-0001',
+                       'text': 'broke after F-0010 landed', 'created': '2026-09-15T00:00:00Z'},
+            'B-0002': {'id': 'B-0002', 'type': 'bug', 'parent': 'E-0001',
+                       'text': 'maybe related to F-0010, worse than F-0020',
+                       'created': '2026-09-15T00:00:00Z'},
+            'B-0003': {'id': 'B-0003', 'type': 'bug', 'parent': 'E-0001', 'text': 'about F-0030',
+                       'created': '2026-09-02T00:00:00Z'},
+            'D-0001': {'id': 'D-0001', 'type': 'decision', 'parent': 'E-0001',
+                       'text': 'see F-0010', 'created': '2026-09-15T00:00:00Z'},
+            'B-0004': {'id': 'B-0004', 'type': 'bug', 'parent': None, 'removed': True,
+                       'text': '', 'created': '2026-09-02T00:00:00Z'},
+        }
+
+    def test_a_bug_under_an_epic_naming_a_feature_is_charged_to_it(self):
+        self.assertEqual(score.feature_of_session(self.items(), {'item': 'B-0001'}), 'F-0010')
+
+    def test_a_bug_naming_two_features_goes_to_the_newest_carded(self):
+        # F-0020 carded 09-10, after F-0010's 09-01 (D2)
+        self.assertEqual(score.feature_of_session(self.items(), {'item': 'B-0002'}), 'F-0020')
+
+    def test_a_bug_naming_a_feature_carded_after_it_goes_to_neither(self):
+        # B-0003 carded 09-02, F-0030 carded 09-20 — after the Bug (P4's guard)
+        self.assertIsNone(score.feature_of_session(self.items(), {'item': 'B-0003'}))
+
+    def test_an_epic_or_a_decision_naming_a_feature_is_not_charged_to_it(self):
+        self.assertIsNone(score.feature_of_session(self.items(), {'item': 'E-0001'}))
+        self.assertIsNone(score.feature_of_session(self.items(), {'item': 'D-0001'}))
+
+    def test_a_branch_naming_a_task_under_a_feature_is_charged_to_it(self):
+        ev = {'item': None, 'branch': 'worker/T-0001'}
+        self.assertEqual(score.feature_of_session(self.items(), ev), 'F-0010')
+
+    def test_a_branch_naming_a_bug_goes_through_the_text_rung_too(self):
+        ev = {'item': None, 'branch': 'fix/B-0001'}
+        self.assertEqual(score.feature_of_session(self.items(), ev), 'F-0010')
+
+    def test_a_branch_naming_a_removed_or_unknown_id_falls_through_to_the_next(self):
+        ev = {'item': None, 'branch': 'fix/B-0004 worker/T-0999 task/T-0001'}
+        self.assertEqual(score.feature_of_session(self.items(), ev), 'F-0010')
+
+    def test_a_session_with_neither_item_nor_branch_is_unattributed(self):
+        self.assertIsNone(score.feature_of_session(self.items(), {}))
+
+    def test_an_item_that_already_reaches_a_feature_resolves_as_feature_of_does_today(self):
+        items = self.items()
+        ev = {'item': 'T-0001'}
+        self.assertEqual(score.feature_of_session(items, ev), score.feature_of(items, 'T-0001'))
+        self.assertEqual(score.feature_of_session(items, ev), 'F-0010')
+
+
 class RepairPrefixTests(unittest.TestCase):
     """score.REPAIR_PREFIXES carries 'precheck' (F-0224 S-36505): a precheck session is repair
     load in its own right, and no other kind's numbers move because of it."""
@@ -450,6 +515,85 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(diagnose.metric(f, 'lead-time', s, s + wk), 2.4)
         with self.assertRaises(KeyError):
             diagnose.metric(f, 'nonsense', s, s + wk)
+
+
+class UnattributedSpendTests(unittest.TestCase):
+    """diagnose.rank's 'unattributed' row: the three shapes the 2026-09-25 run found — a Bug
+    under an Epic, an unmatched job on a lane branch, a session on a card outside every Feature
+    — over 10 % unattributed under the old rule and 0 % under the ladder."""
+
+    def facts(self):
+        items = items_fixture()
+        items.update({
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'title': 't2',
+                       'text': '', 'created': '2026-09-02T00:00:00Z', 'landed': None, 'prod': None,
+                       'send_backs': 0, 'reopens': 0},
+            'B-0003': {'id': 'B-0003', 'type': 'bug', 'parent': 'E-0001', 'title': 'b3',
+                       'text': '', 'created': '2026-09-06T00:00:00Z', 'landed': None, 'prod': None,
+                       'send_backs': 0, 'reopens': 0},
+        })
+        sessions = sessions_fixture() + [
+            # an unmatched job on a lane branch — no `item`, the branch names the Task
+            {'ts': '2026-09-10T09:00:00Z', 'task': 'coder-x', 'item': None,
+             'branch': 'worker/T-0002', 'usd': 4.0, 'minutes': 20},
+            # a session on a card outside every Feature, resolved through its own branch
+            {'ts': '2026-09-10T10:00:00Z', 'task': 'coder-y', 'item': 'B-0003',
+             'branch': 'fix/B-0003 worker/T-0002', 'usd': 3.0, 'minutes': 15},
+        ]
+        return facts_fixture(items=items, sessions=sessions, as_of='2026-09-11T00:00:00Z')
+
+    def window(self):
+        return (datetime.datetime(2026, 8, 25, tzinfo=UTC), datetime.datetime(2026, 9, 11, tzinfo=UTC))
+
+    def test_over_ten_percent_unattributed_under_the_old_rule(self):
+        f = self.facts()
+        start, end = self.window()
+        sessions = [s for s in f.sessions if score.in_window(s.get('ts'), start, end)]
+        usd = sum(score._num(s.get('usd')) for s in sessions)
+        old_unplaced = sum(score._num(s.get('usd')) for s in sessions
+                           if score.feature_of(f.items, s.get('item')) is None)
+        self.assertGreater(old_unplaced / usd, 0.10)
+
+    def test_zero_percent_unattributed_under_the_ladder_and_the_none_row_is_gone(self):
+        r = diagnose.rank(self.facts(), *self.window())
+        self.assertEqual(r['unattributed'], {'usd': 0.0, 'sessions': 0, 'share': 0.0})
+        self.assertNotIn(diagnose.UNATTRIBUTED, [c['name'] for c in r['by_feature']])
+
+    def test_the_window_total_usd_is_unchanged_by_the_regrouping(self):
+        r = diagnose.rank(self.facts(), *self.window())
+        self.assertEqual(round(sum(c['usd'] for c in r['by_feature']), 2), r['usd'])
+        self.assertEqual(r['usd'], 28.0)   # 21 (sessions_fixture) + 4 + 3
+
+    def test_the_none_row_reappears_when_something_stays_unattributed(self):
+        f = self.facts()
+        f.sessions.append({'ts': '2026-09-10T11:00:00Z', 'task': 'z', 'item': None, 'usd': 2.0})
+        r = diagnose.rank(f, *self.window())
+        self.assertEqual(r['unattributed'], {'usd': 2.0, 'sessions': 1, 'share': round(2 / 30, 3)})
+        self.assertIn(diagnose.UNATTRIBUTED, [c['name'] for c in r['by_feature']])
+
+    def test_an_empty_window_has_zero_share_and_no_division_by_zero(self):
+        s = datetime.datetime(2020, 1, 1, tzinfo=UTC)
+        r = diagnose.rank(self.facts(), s, s + datetime.timedelta(days=1))
+        self.assertEqual(r['unattributed'], {'usd': 0.0, 'sessions': 0, 'share': 0.0})
+
+    def test_view_render_prints_the_row_and_none_when_nothing_is_unattributed(self):
+        from asf.views import scorecard as view
+        f = self.facts()
+        rk = diagnose.rank(f, *self.window())
+        d = {'product': 'p', 'as_of': f.as_of, 'headline': score.headline(f), 'clutter': f.clutter,
+             'weeks': [], 'features': [], 'window_days': 14, 'causes': [], 'loop': {},
+             'rank': rk, 'diagnostics': []}
+        self.assertIn('| unattributed | none |', view.render(d))
+
+    def test_view_render_prints_the_share_when_something_is_unattributed(self):
+        from asf.views import scorecard as view
+        f = self.facts()
+        f.sessions.append({'ts': '2026-09-10T11:00:00Z', 'task': 'z', 'item': None, 'usd': 2.0})
+        rk = diagnose.rank(f, *self.window())
+        d = {'product': 'p', 'as_of': f.as_of, 'headline': score.headline(f), 'clutter': f.clutter,
+             'weeks': [], 'features': [], 'window_days': 14, 'causes': [], 'loop': {},
+             'rank': rk, 'diagnostics': []}
+        self.assertIn('| unattributed | $2.00 (7 %), 1 sessions', view.render(d))
 
 
 class NotPushedCauseTests(unittest.TestCase):
@@ -1002,7 +1146,8 @@ class ChildrenResolvedProdTests(unittest.TestCase):
         d = {'product': 'p', 'as_of': f.as_of, 'headline': score.headline(f), 'clutter': {},
              'weeks': [], 'features': [], 'window_days': 14, 'causes': [], 'loop': {},
              'rank': {'usd': 0, 'hours': 0, 'by_kind': [], 'by_failure': [], 'by_ci_job': [],
-                      'by_feature': []}, 'diagnostics': f.diagnostics}
+                      'by_feature': [], 'unattributed': {'usd': 0.0, 'sessions': 0, 'share': 0.0}},
+             'diagnostics': f.diagnostics}
         self.assertEqual(view.render(d).count('F-0030 landed without a traceable commit'), 1)
 
     def test_the_value_row_counts_them(self):

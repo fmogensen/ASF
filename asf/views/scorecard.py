@@ -112,7 +112,12 @@ def render(d):
             '| CI job | ' + ('; '.join(f"{k['name']} {k['minutes']:,.0f} min, {k['red']} red"
                                       for k in rk['by_ci_job'][:5]) or '—') + ' |',
             '| Feature | ' + '; '.join(f"{k['name']} {_m(k['usd'])} ({k['repair']} repair)"
-                                     for k in rk['by_feature'][:5]) + ' |']
+                                     for k in rk['by_feature'][:5]) + ' |',
+            '| unattributed | ' + (f"{_m(rk['unattributed']['usd'])} "
+                                   f"({rk['unattributed']['share'] * 100:.0f} %), "
+                                   f"{rk['unattributed']['sessions']} sessions — no Feature from "
+                                   f"the card, its text or the branch"
+                                   if rk['unattributed']['sessions'] else 'none') + ' |']
     out += ['', '**Causes over threshold** (filed once each through the inbox; verified after landing)', '']
     if d['causes']:
         out += ['| Cause | Reading | Threshold | Loop |', '|---|---|---|---|']
