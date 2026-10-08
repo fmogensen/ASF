@@ -83,19 +83,27 @@ def _plan(root, product):
     in its own ``try`` (RD6)."""
     from asf.feeder import rows as feeder_rows
     from asf.feeder import tiers
+    from asf.record import plan_order
     from asf.tick import step_wave
     from asf.views import index_reader as ix
     from asf.workers import host as host_mod
     if not root or not os.path.exists(os.path.join(root, 'index.json')):
         return None
     items, _generated = ix.load(root)
+    # the same `after:` overlay `would_start` applies before planning (step_wave.py:873-874):
+    # `plan.items` (what `build_cell`/`decisions_cell` read) stays un-overlaid, since those two
+    # cells' pre-existing behavior never had the overlay and must not gain it now (C1 of
+    # docs/reviews/1-t-0441.md)
+    planning_items = (plan_order.overlay(items, plan_order.trunk_reader(product))
+                      if product.repo_dir else items)
     inputs = step_wave.plan_inputs(product, root)
     running = step_wave.inflight(product)
     cap = step_wave.capacity(product)
-    rows = feeder_rows.plan_rows(items, product, running, cap, **inputs)
+    rows = feeder_rows.plan_rows(planning_items, product, running, cap, **inputs)
     # the uncut plan: capacity nothing can exhaust, so the S1 lane's cut of it is the product's
     # whole demand behind the gate, not just this tick's (RD2)
-    uncut = feeder_rows.plan_rows(items, product, running, len(items) + len(running or ()),
+    uncut = feeder_rows.plan_rows(planning_items, product, running,
+                                  len(planning_items) + len(running or ()),
                                   s1_first=False, **inputs)
     # the wave's own screen, over this same plan_inputs (no second call, RD5) — the cloud lane's
     # seats included, same as would_start, so a product running one is never undercounted (C1/I1
@@ -105,7 +113,7 @@ def _plan(root, product):
     cloud_ready = step_wave.cloud_readiness(product, cloud)
     _held, _hold, extra = step_wave.split_hold(cloud, cloud_ready, False, '')
     seats = cap + extra
-    planned, _dropped = step_wave.gated_plan(items, product, running, seats, inputs,
+    planned, _dropped = step_wave.gated_plan(planning_items, product, running, seats, inputs,
                                              out=lambda _line: None)
     host_held, host_why, reading = step_wave.host_hold(planned)
     host_held, _local, _extra = step_wave.split_hold(cloud, cloud_ready, host_held, host_why)
@@ -113,7 +121,8 @@ def _plan(root, product):
                        and host_mod.load_only_hold(reading,
                                                    host_mod.guards_from_config(env.load_config()))
                        and not step_wave.s1_bypass_live())
-    screened = step_wave.screen(product, planned, items, running, inputs.get('held') or set(),
+    screened = step_wave.screen(product, planned, planning_items, running,
+                                inputs.get('held') or set(),
                                 seats, (host_held, host_why), bypass_open, act=False)
     return Plan(product=product, items=items, rows=rows, inputs=inputs, capacity=cap,
                inflight=running, gate=tiers.gate(rows, uncut, held=inputs.get('held')),

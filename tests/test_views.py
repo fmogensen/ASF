@@ -343,6 +343,26 @@ class StatusViewTests(ViewsTestCase):
         plan = status._plan(os.path.join(self.tmp, 'nowhere'), self.product)
         self.assertEqual(status.ready_cell(plan), '— (not configured: backlog_dir (no index.json))')
 
+    def test_the_plan_overlays_after_before_planning_when_the_product_has_a_repo_dir(self):
+        """C1 of docs/reviews/1-t-0441.md: `_plan` must plan from the same `after:`-overlaid
+        items `would_start` plans from — a derived predecessor a card's plan implies, not just
+        an explicit one, holds it back the same way the real tick holds it."""
+        from asf.record import plan_order
+        with mock.patch.object(plan_order, 'overlay', wraps=plan_order.overlay) as spy:
+            plan = status._plan(self.root, self.product)
+        spy.assert_called_once()
+        call_items, call_reader = spy.call_args[0]
+        self.assertIs(call_items, plan.items)
+        self.assertIsInstance(call_reader, plan_order.TrunkReader)
+
+    def test_the_plan_never_overlays_without_a_repo_dir(self):
+        from asf.record import plan_order
+        product = env.Product('p', {'main': 'trunk', 'ci': {'provider': 'none'},
+                                     'deploy_sha': 'none'})
+        with mock.patch.object(plan_order, 'overlay') as spy:
+            status._plan(self.root, product)
+        spy.assert_not_called()
+
     def test_the_ready_cell_counts_rows_failing_to_spawn(self):
         from asf.feeder import rows as feeder_rows
         from asf.tick.step_wave import Screened
