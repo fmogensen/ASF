@@ -1849,3 +1849,66 @@ class SecurityRowTests(unittest.TestCase):
             for _ok, detail in self.findings():
                 self.assertNotIn('acme/x', detail)
                 self.assertNotIn(self.backlog, detail)
+
+
+class ReadmeRowTests(unittest.TestCase):
+    """`doctor.check_readme` — F-0030 §2.7, Task 6: the ``readme`` row, required so a drifted
+    page is RED, ``'warn'`` (never red) for a page never refreshed at all — nothing committed to
+    have drifted from — and skipped entirely for a page with no span or a repo dir that does not
+    resolve."""
+
+    SPAN = '<!--asf:n sessions-->9<!--/asf:n--> sessions run so far.\n'
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='doctor_readme_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _product(self):
+        return env.Product('sample', {'repo_dir': self.tmp})
+
+    def _write(self, name, text):
+        with open(os.path.join(self.tmp, name), 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def test_ok_for_a_sound_page(self):
+        self._write('README.md', self.SPAN)
+        os.makedirs(os.path.join(self.tmp, 'docs'), exist_ok=True)
+        self._write('docs/readme-numbers.json', json.dumps(
+            {'numbers': {'sessions': {'text': '9'}}}))
+        ok, detail = doctor.check_readme(self._product())
+        self.assertEqual((ok, detail), (True, 'ok'))
+
+    def test_red_names_the_first_complaint_for_a_hand_edited_span(self):
+        self._write('README.md', self.SPAN.replace('-->9<!--', '-->99<!--'))
+        os.makedirs(os.path.join(self.tmp, 'docs'), exist_ok=True)
+        self._write('docs/readme-numbers.json', json.dumps(
+            {'numbers': {'sessions': {'text': '9'}}}))
+        ok, detail = doctor.check_readme(self._product())
+        self.assertFalse(ok)
+        self.assertIn('sessions', detail)
+        self.assertTrue(detail.startswith('1 complaints — '), detail)
+
+    def test_spanless_readme_is_skipped(self):
+        self._write('README.md', 'Nothing to see here.\n')
+        self.assertIsNone(doctor.check_readme(self._product()))
+
+    def test_never_refreshed_warns_but_is_not_red(self):
+        self._write('README.md', self.SPAN)
+        ok, detail = doctor.check_readme(self._product())
+        self.assertEqual(ok, 'warn')
+        self.assertIn('readme-numbers.json', detail)
+        self.assertFalse(doctor.is_red([('readme', True, ok, detail)]))
+
+    def test_repo_dir_not_resolved_is_skipped(self):
+        self.assertIsNone(doctor.check_readme(env.Product('sample', {})))
+        self.assertIsNone(doctor.check_readme(env.Product('sample', {'repo_dir': '/no/such/dir'})))
+
+    def test_the_table_still_formats(self):
+        self._write('README.md', self.SPAN.replace('-->9<!--', '-->99<!--'))
+        os.makedirs(os.path.join(self.tmp, 'docs'), exist_ok=True)
+        self._write('docs/readme-numbers.json', json.dumps(
+            {'numbers': {'sessions': {'text': '9'}}}))
+        ok, detail = doctor.check_readme(self._product())
+        out = doctor.format_table('sample', [('readme', True, ok, detail)])
+        self.assertIn('readme', out)
+        self.assertIn('RED', out)

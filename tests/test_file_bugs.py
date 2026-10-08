@@ -220,6 +220,70 @@ class RefusalSignatureTests(unittest.TestCase):
         self.assertEqual(file_bugs.refusal_signatures(self.root, self.now), {})
 
 
+class ReadmeStaleTests(unittest.TestCase):
+    """`file_bugs.readme_signatures` — F-0030 §2.7, Task 6: `readme/stale`, filed once a red
+    `asf readme --check` has sat past `README_STALE_DAYS`, bumped rather than duplicated."""
+
+    SPAN = '<!--asf:n sessions-->9<!--/asf:n--> sessions run so far.\n'
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix='filebugs_readme_')
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+        self.conv = Conventions()
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def _write(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def _facts(self, day, text='9'):
+        self._write('docs/readme-numbers.json',
+                    json.dumps({'day': day, 'numbers': {'sessions': {'text': text}}}))
+
+    def test_eight_days_behind_and_red_files_one_bug(self):
+        self._write('README.md', self.SPAN.replace('-->9<!--', '-->99<!--'))
+        day = (self.now.date() - datetime.timedelta(days=8)).isoformat()
+        self._facts(day)
+        sigs = file_bugs.readme_signatures(self.repo, self.now, self.conv)
+        self.assertEqual(list(sigs), ['readme/stale'])
+        self.assertEqual(sigs['readme/stale']['severity'], 'S3')
+
+    def test_a_second_run_bumps_not_duplicates(self):
+        # the signature is deterministic per (page, facts): two calls on the same red, stale
+        # state produce the identical signature, so `_file_or_bump_bug` bumps the one Bug already
+        # filed rather than minting a second
+        self._write('README.md', self.SPAN.replace('-->9<!--', '-->99<!--'))
+        day = (self.now.date() - datetime.timedelta(days=8)).isoformat()
+        self._facts(day)
+        first = file_bugs.readme_signatures(self.repo, self.now, self.conv)
+        second = file_bugs.readme_signatures(self.repo, self.now, self.conv)
+        self.assertEqual(list(first), list(second), ['readme/stale'])
+
+    def test_six_days_behind_files_nothing(self):
+        self._write('README.md', self.SPAN.replace('-->9<!--', '-->99<!--'))
+        day = (self.now.date() - datetime.timedelta(days=6)).isoformat()
+        self._facts(day)
+        self.assertEqual(file_bugs.readme_signatures(self.repo, self.now, self.conv), {})
+
+    def test_red_with_no_facts_file_files_nothing(self):
+        self._write('README.md', self.SPAN.replace('-->9<!--', '-->99<!--'))
+        self.assertEqual(file_bugs.readme_signatures(self.repo, self.now, self.conv), {})
+
+    def test_sound_page_files_nothing(self):
+        self._write('README.md', self.SPAN)
+        day = (self.now.date() - datetime.timedelta(days=8)).isoformat()
+        self._facts(day)
+        self.assertEqual(file_bugs.readme_signatures(self.repo, self.now, self.conv), {})
+
+    def test_spanless_readme_files_nothing(self):
+        self._write('README.md', 'Nothing to see here.\n')
+        self.assertEqual(file_bugs.readme_signatures(self.repo, self.now, self.conv), {})
+
+
 class RuleViolationSignatureTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()

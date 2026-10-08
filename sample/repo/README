@@ -1,1 +1,5 @@
-A tiny word counter: the second product ASF runs in its own tests (see ../README.md).
+A tiny word counter: the second product ASF runs in its own tests (see ../README.md). It has
+shipped <!--asf:n features_shipped-->0<!--/asf:n--> features.
+
+<!--asf:block scoreboard-->
+<!--/asf:block-->
