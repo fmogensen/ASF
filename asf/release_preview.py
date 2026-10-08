@@ -18,6 +18,8 @@ one for a single run.
    (``preview.notes``) and a known-issues page with at least one section (``preview.known_issues``), and a feedback
    channel (``feedback``: ``github-issues`` — an issue template on the trunk and a forge — or
    ``url`` with ``feedback.url``) that the README names under a *Feedback* heading.
+6. **rehearsal** — the release rehearsal: a green ``ci_steps.rehearsal`` step, because a
+   pre-release is a version offered too.
 
 Each step is read from the newest finished trunk run that ran it (a workflow with a ``paths``
 filter does not run on every push), looking back over the last ``preview.lookback_runs`` (50).
@@ -33,7 +35,8 @@ STEPS = {'install_linux': 'install from zero, linux container',
          'minimal_product': 'a minimal product, end to end',
          'readme_first_user': 'readme-only first-user run',
          'generic': 'check generic',
-         'privacy': 'privacy sweep'}
+         'privacy': 'privacy sweep',
+         'rehearsal': 'release rehearsal'}
 #: ``release.preview.lookback_runs``: how many finished trunk runs a step is looked for in.
 LOOKBACK_RUNS = 50
 DEFAULTS = {'notes': 'docs/RELEASE-NOTES.md', 'known_issues': 'docs/KNOWN-ISSUES.md'}
@@ -225,6 +228,7 @@ def evaluate(f, st):
     parts.append(ch_ev + ('' if named else '; README has no Feedback heading'))
     out.append(Criterion('ship', 'Main CI green, a version tag, release notes, KNOWN-ISSUES, a '
                          'feedback channel', ok, '; '.join(parts)))
+    out.append(from_steps('rehearsal', 'Release rehearsal green', ('rehearsal',)))
     return out
 
 
