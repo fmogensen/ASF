@@ -243,22 +243,15 @@ def _repo_url(host):
     return f'ssh://{host.ssh}{tail}/repo.git'
 
 
-def push_sha(product, host, sha, run_id, run=subprocess.run):
+def push_sha(product, host, sha, run_id):
     """``git push --force <ssh://…/repo.git> <sha>:refs/asf/<run_id>`` from the product's own
     checkout (C5): ``(True, '')`` or ``(False, why)``. A write — refused under a dry run,
-    through the same guard, with the same line shape."""
-    cmd = ['git', 'push', '--force', _repo_url(host), f'{sha}:refs/asf/{run_id}']
-    if mutation_guard.is_active():
-        line = mutation_guard.would_line('git', cmd[1:])
-        print(line)
-        return False, line
-    try:
-        r = run(cmd, cwd=product.repo_dir, capture_output=True, text=True,
-               timeout=CONNECT_TIMEOUT_S + 30)
-    except subprocess.TimeoutExpired as e:
-        return False, str(e) or 'git push timed out'
-    except OSError as e:
-        return False, str(e) or type(e).__name__
+    through the same guard, with the same line shape. ``refs/asf/<run_id>`` is never the
+    product's trunk or a protected ref, so :func:`asf.refguard.guard_for` never refuses it."""
+    from asf import gitpush, refguard
+    r = gitpush.push(['--force', _repo_url(host), f'{sha}:refs/asf/{run_id}'], product.repo_dir,
+                     guard=refguard.guard_for(product, product.repo_dir),
+                     timeout=CONNECT_TIMEOUT_S + 30)
     if r.returncode != 0:
         lines = (r.stderr or r.stdout or '').strip().splitlines()
         return False, (lines[-1] if lines else f'git push exited {r.returncode}')
@@ -461,18 +454,15 @@ GREEN_TRUNK_LIMIT = 20  #: shas `trunk_shas` reads, newest first — matches tod
                         #: `gh run list --limit 20` depth
 
 
-def heads(product, run=subprocess.run):
+def heads(product):
     """``{branch: sha}`` from one ``git ls-remote --heads origin`` (P16) — no ``Lane``, no
     record. ``{}`` on any failure."""
+    from asf import gitops
     repo_dir = product.repo_dir
     if not repo_dir:
         return {}
-    try:
-        r = run(['git', '-C', repo_dir, 'ls-remote', '--heads', 'origin'],
-               capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return {}
-    if r.returncode != 0:
+    r = gitops.git(['ls-remote', '--heads', 'origin'], repo_dir, timeout=30)
+    if not r.ok:
         return {}
     out = {}
     for line in r.stdout.splitlines():
@@ -482,43 +472,38 @@ def heads(product, run=subprocess.run):
     return out
 
 
-def trunk_shas(product, limit=GREEN_TRUNK_LIMIT, run=subprocess.run):
+def trunk_shas(product, limit=GREEN_TRUNK_LIMIT):
     """The trunk's own ``--first-parent`` history, newest first, at most ``limit`` shas (PD3):
     one bounded ``git rev-list`` — the reader ``evidence.ci_green_runs`` has none of its own.
     ``--first-parent`` matches :meth:`asf.harvest.lane.GitHubHost.trunk_red`'s own walk, so both
     readers of trunk history agree on what "the trunk's commits" are. ``[]`` on any failure."""
+    from asf import gitops
     repo_dir = product.repo_dir
     if not repo_dir:
         return []
-    try:
-        r = run(['git', '-C', repo_dir, 'rev-list', '--first-parent', '-n', str(limit),
-                f'origin/{product.conventions.main}'], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if r.returncode != 0:
+    r = gitops.git(['rev-list', '--first-parent', '-n', str(limit),
+                    f'origin/{product.conventions.main}'], repo_dir, timeout=30)
+    if not r.ok:
         return []
     return [s for s in r.stdout.split() if s]
 
 
-def dispatch_targets(product, run=subprocess.run):
+def dispatch_targets(product):
     """``[(sha, branch_or_None)]`` in C9's order: the trunk's own head first (branch ``None`` —
     never superseded, C8), then every lane branch by name with its head (PD10, mirroring
     :meth:`asf.harvest.lane.Lane.remote_heads`'s filter, P16, with no ``Lane``). ``[]`` when the
     trunk's own sha cannot be read."""
+    from asf import gitops
     repo_dir = product.repo_dir
     out = []
     if not repo_dir:
         return out
     conv = product.conventions
-    try:
-        r = run(['git', '-C', repo_dir, 'rev-parse', f'origin/{conv.main}'],
-               capture_output=True, text=True, timeout=30)
-        trunk_sha = r.stdout.strip() if r.returncode == 0 else ''
-    except (OSError, subprocess.TimeoutExpired):
-        trunk_sha = ''
+    r = gitops.git(['rev-parse', f'origin/{conv.main}'], repo_dir, timeout=30)
+    trunk_sha = r.data if r.ok else ''
     if trunk_sha:
         out.append((trunk_sha, None))
-    h = heads(product, run=run)
+    h = heads(product)
     for branch in sorted(h):
         if branch == conv.main or not conv.branch_kind(branch):
             continue
@@ -605,7 +590,7 @@ def _supersede(product, out, now, run):
     cleanup, ``state: cancelled``, ``superseded_by`` the new sha. A trunk run (``branch`` None)
     is never superseded."""
     data = load(product)
-    current = heads(product, run=run)
+    current = heads(product)
     changed = False
     for sha, jobs_at in data['runs'].items():
         if not isinstance(jobs_at, dict):
@@ -691,7 +676,7 @@ def _dispatch(product, out, now, run):
                 free[row['host']] -= 1
     total = sum(h.slots for h in host_list)
     n, changed = 0, False
-    for sha, branch in dispatch_targets(product, run=run):
+    for sha, branch in dispatch_targets(product):
         existing = data['runs'].get(sha, {})
         label = branch or product.conventions.main
         for job_name, job in job_cfg.items():  # ci.jobs declaration order (C9)
@@ -710,7 +695,7 @@ def _dispatch(product, out, now, run):
                 out(f"ci vm: dispatch {label} {sha[:9]} {job_name} — could not prepare "
                     f"{host.name}: {err.strip() or rc}")
                 continue
-            ok, why = push_sha(product, host, sha, run_id, run=run)
+            ok, why = push_sha(product, host, sha, run_id)
             if not ok:
                 out(f"ci vm: dispatch {label} {sha[:9]} {job_name} — push failed: {why}")
                 continue

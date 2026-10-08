@@ -385,8 +385,7 @@ class OneRun(FakeSsh):
         host = ci_vm.hosts(self.product)[0]
         ci_vm.run_ssh(host, ci_vm._fill(ci_vm.REMOTE_ENSURE_REPO, root=host.root), kind='start',
                       run=self.run)
-        ok, why = ci_vm.push_sha(self.product, host, self.sha, 'abc123456789-gate-1',
-                                 run=self.run)
+        ok, why = ci_vm.push_sha(self.product, host, self.sha, 'abc123456789-gate-1')
         self.assertTrue(ok, why)
         refs = _sh(['git', 'for-each-ref'], cwd=os.path.join(host.root, 'repo.git'))
         self.assertEqual(refs.strip(), f'{self.sha} commit\trefs/asf/abc123456789-gate-1')
