@@ -33,6 +33,7 @@ with the hook's stdin, exiting 0 when there is no such script.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -121,7 +122,7 @@ def git_hooks_dir(repo):
     return out
 
 
-def _git_hook_body(name, asf_path, product_name):
+def _git_hook_body(name, asf_path, product_name, pin_required=None):
     """The redaction gate's hook ``name`` (F-0075). It must run wherever the repository is
     checked out — a hooks dir inside the work tree (``core.hooksPath``) is tracked, so a cloud
     container gets the same file with no ``asf`` installed (review-t-0356: every commit aborted
@@ -134,13 +135,34 @@ def _git_hook_body(name, asf_path, product_name):
     a pushed branch is public before any landing re-scan reads it, so nothing unscanned leaves.
     The landing still re-scans a commit marked ``Redaction: unchecked``
     (:data:`asf.redact.UNCHECKED_TRAILER`) — a second layer for a mark made elsewhere. Never a
-    silent pass."""
+    silent pass.
+
+    While ``product_name`` is pinned (``pin_required``, defaulting to the same
+    ``state/<p>/install.json`` read :func:`_pinned` does when left unspecified), each candidate
+    ``asf`` is run only when it carries the dispatcher's marker line (F-0283) — one warning line
+    per hook run, never two for the same file (C4)."""
+    from asf import dispatch
     p = product_name
+    if pin_required is None:
+        pin_required = os.path.isfile(dispatch.record_path(p))
+    pin_marker = shlex.quote(dispatch.MARKER) if pin_required else "''"
     lines = [
         '#!/bin/sh',
         '# written by asf hooks install — the redaction gate (F-0075)',
-        f'if [ -x "{asf_path}" ]; then exec "{asf_path}" redact --{name} --product {p}; fi',
-        f'if [ -x "$HOME/.local/bin/asf" ]; then exec "$HOME/.local/bin/asf" redact --{name} '
+        f'# the asf a hook runs must be the dispatcher while {p} is pinned (F-0283)',
+        f'pin_marker={pin_marker}',
+        'warned=',
+        'asf_pinned() {',
+        '    [ -x "$1" ] || return 1',
+        '    [ -z "$pin_marker" ] && return 0',
+        '    head -n 3 "$1" 2>/dev/null | grep -qF "$pin_marker" && return 0',
+        f'    [ -n "$warned" ] || echo "asf: $1 is not asf\'s dispatcher, so it is not {p}\'s '
+        f'pinned build (F-0283) — skipped; run: asf hooks install --product {p}" >&2',
+        '    warned=1',
+        '    return 1',
+        '}',
+        f'if asf_pinned "{asf_path}"; then exec "{asf_path}" redact --{name} --product {p}; fi',
+        f'if asf_pinned "$HOME/.local/bin/asf"; then exec "$HOME/.local/bin/asf" redact --{name} '
         f'--product {p}; fi',
         '# no asf here (a cloud container): the repository\'s own check, else refused',
         'top=$(git rev-parse --show-toplevel 2>/dev/null)',
@@ -149,9 +171,10 @@ def _git_hook_body(name, asf_path, product_name):
     ]
     what = 'commit' if name == 'pre-commit' else 'push'
     lines += [
-        f'echo "asf: REDACTION REFUSED ({name}) — no asf and no {CHECKS_DIR}/redact.sh here: '
-        f'nothing can scan this {what} for names or secrets, so it is refused (a pushed branch '
-        f'is public before any landing re-scan). Install asf, or add {CHECKS_DIR}/redact.sh." >&2',
+        f'echo "asf: REDACTION REFUSED ({name}) — no asf that is {p}\'s build and no '
+        f'{CHECKS_DIR}/redact.sh here: nothing can scan this {what} for names or secrets, so it '
+        f'is refused (a pushed branch is public before any landing re-scan). Install asf, or add '
+        f'{CHECKS_DIR}/redact.sh." >&2',
         'exit 1',
     ]
     return '\n'.join(lines) + '\n'
@@ -162,24 +185,25 @@ def _git_hook_body(name, asf_path, product_name):
 GIT_HOOK_MARKER = '# written by asf hooks install'
 
 
-def stale_own_hook(text, name, asf_path, product_name):
+def stale_own_hook(text, name, asf_path, product_name, pin_required=None):
     """The current body when ``text`` is a hook :func:`_git_hook_body` wrote (its
     :data:`GIT_HOOK_MARKER`) that no longer reads as it would now — an older body (one that fell
-    back to ``asf`` on ``PATH``, F-0283) or one naming another ``asf`` than ``asf_path``. None
-    otherwise: a hook asf init or an operator wrote is never rewritten here."""
+    back to ``asf`` on ``PATH``, F-0283) or one naming another ``asf`` than ``asf_path``, or one
+    rendered on the other side of a pin being added or removed. None otherwise: a hook asf init
+    or an operator wrote is never rewritten here."""
     if GIT_HOOK_MARKER not in (text or '') or not is_git_hook_ours(text, name):
         return None
-    body = _git_hook_body(name, asf_path, product_name)
+    body = _git_hook_body(name, asf_path, product_name, pin_required)
     return None if text == body else body
 
 
-def _own_upgrade(text, name, asf_path, product_name):
+def _own_upgrade(text, name, asf_path, product_name, pin_required=None):
     """:func:`stale_own_hook`, only when ``asf_path`` is the dispatcher: a hook is moved onto the
     pin, never off it onto whatever ``asf`` happens to be installed."""
     from asf import dispatch
     if not dispatch.is_ours(asf_path):
         return None
-    return stale_own_hook(text, name, asf_path, product_name)
+    return stale_own_hook(text, name, asf_path, product_name, pin_required)
 
 
 #: A pipx ``--suffix`` appended to the declared console-script name: empty, or starting with a
@@ -353,6 +377,7 @@ def ensure_git_hooks(product, which=shutil.which, withhold=()):
     repos = [r for r in (product.repo_dir, product.backlog_dir) if r]
     if not repos:
         return True, 'no repo_dir or backlog_dir configured'
+    pin_required = _pinned(product)
     refusals = []
     for repo in repos:
         hooks_dir = git_hooks_dir(repo)
@@ -368,7 +393,7 @@ def ensure_git_hooks(product, which=shutil.which, withhold=()):
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
                 upgrade = (init_hook_upgrade(text, name) or staged_check_upgrade(text, name)
-                           or _own_upgrade(text, name, asf_path, product.name))
+                           or _own_upgrade(text, name, asf_path, product.name, pin_required))
                 if upgrade is not None:  # ASF's own hook, from before the gate, --staged or the pin
                     with open(path, 'w', encoding='utf-8') as f:
                         f.write(upgrade)
@@ -380,7 +405,7 @@ def ensure_git_hooks(product, which=shutil.which, withhold=()):
                 continue
             os.makedirs(hooks_dir, exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
-                f.write(_git_hook_body(name, asf_path, product.name))
+                f.write(_git_hook_body(name, asf_path, product.name, pin_required))
             os.chmod(path, 0o755)
     if refusals:
         return False, '\n'.join(refusals)
@@ -452,6 +477,7 @@ def plan(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
     ``left (not ours)`` / ``refused (not a git repo)``. The same decisions :func:`install` takes,
     so the plan and the write cannot disagree."""
     asf_path = runnable_asf(which)[0] or 'asf'
+    pin_required = _pinned(product)
     rows = []
     try:
         accounts = pool.accounts_from_config(cfg or env.load_config())
@@ -475,7 +501,8 @@ def plan(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
                 if (init_hook_upgrade(text, name) or staged_check_upgrade(text, name)
-                        or _own_upgrade(text, name, asf_path, product.name)) is not None:
+                        or _own_upgrade(text, name, asf_path, product.name,
+                                        pin_required)) is not None:
                     action = 'upgrade'
                 elif is_git_hook_ours(text, name):
                     action = 'already ours'
