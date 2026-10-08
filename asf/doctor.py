@@ -54,6 +54,17 @@ when the operator's own console — not a worker account's — would still hit a
 cleanup: neither the operator's user-level runtime settings nor the product repo's carry every
 rule ``asf console-permissions offer`` shows.
 
+Three rows from F-0062 §2.7/§2.12: **role-launch** (:func:`check_role_launch`) is red when a
+role file and ``asf.roles.launch.TABLE`` disagree, or a pool-wide ``worker_pool.permission_mode``
+flattens the table's own per-role modes — naming the kinds, and, for ``bypassPermissions``, that
+it also switches off the prober's ``--restricted`` — and always ends with the installed runtime's
+own missing flags. **worker-deny** (:func:`check_worker_deny`) is red while a role's generated
+settings file (:mod:`asf.workers.worker_settings`) is missing a deny or allow rule, naming the
+rule and the ``asf worker-permissions install`` that writes it; not configured before any role
+has a file yet. **worker-redaction** (:func:`check_worker_redaction`) is red when a live
+session's own job log carries a match of :mod:`asf.redact`'s own patterns — never the matched
+text, so the row is safe to print.
+
 The **scheduler** row is red while a pre-ASF job the operator config names
 (``scheduler.launchd_label``, ``scheduler.legacy_cron``) is still loaded or in the crontab: two
 factories would be ticking one product.
@@ -444,6 +455,103 @@ def check_worker_push_auth(cfg, product):
     if failures:
         return False, '; '.join(failures)
     return True, 'authenticates for ' + ', '.join(oks)
+
+
+#: The flags F-0062's launch table depends on that the installed runtime might still lack: the
+#: seven `build_command` gates (`asf/roles/launch.py`, T3) plus `--restricted`, the prober's
+#: alone. Named here, not in `capability`, because this row is the one reader of the list.
+ROLE_LAUNCH_FLAGS = ('effort', 'agents', 'max-budget-usd', 'plugin-dir', 'strict-mcp-config',
+                     'tools', 'disallowedTools', 'restricted')
+
+
+def check_role_launch(cfg):
+    """(ok, detail) — the ``role-launch`` row: every role file in ``roles.roles_dir()`` has
+    exactly one row in ``asf.roles.launch.TABLE`` and every row names a role file that exists.
+    Red too when ``worker_pool.permission_mode`` is set and differs from the table's own mode for
+    any kind — naming the kinds it flattens — and, when that override is ``bypassPermissions``,
+    that it also switches off the prober's ``--restricted`` (PD8: ``--restricted`` refuses
+    ``bypassPermissions`` outright, so a pool-wide default of it is a dead prober launch). The
+    detail always ends with the installed runtime's own missing flags, in order
+    (:data:`ROLE_LAUNCH_FLAGS`, :func:`asf.workers.capability.missing`)."""
+    from asf.roles import launch as role_launch
+    from asf.roles import roles
+    from asf.workers import capability
+    problems = []
+    files, table_roles = set(roles.load_all()), set(role_launch.TABLE)
+    for name in sorted(table_roles - files):
+        problems.append(f'{name} has a table row but no role file')
+    for name in sorted(files - table_roles):
+        problems.append(f'{name} has a role file but no table row')
+    override = str(((cfg or {}).get('worker_pool') or {}).get('permission_mode') or '').strip()
+    if override:
+        flattened = sorted({kind for kind in roles.BINDINGS
+                            if role_launch.TABLE[roles.BINDINGS[kind]].permission_mode != override})
+        if flattened:
+            problems.append(f"worker_pool.permission_mode {override} flattens "
+                            f"{', '.join(flattened)} to one mode")
+        if override == 'bypassPermissions':
+            problems.append("worker_pool.permission_mode bypassPermissions also switches off "
+                            "the prober's --restricted")
+    gone = capability.missing(ROLE_LAUNCH_FLAGS)
+    tail = (f"{len(gone)} flag(s) the installed runtime lacks: {', '.join(gone)}" if gone
+           else 'every flag present')
+    if problems:
+        return False, '; '.join(problems) + ' — ' + tail
+    return True, tail
+
+
+def check_worker_deny(cfg, product):
+    """(ok, detail) — the ``worker-deny`` row: every role's generated settings file
+    (:func:`asf.workers.worker_settings.settings_path`) carries every rule of
+    :func:`asf.workers.worker_settings.deny_rules`/``allow_rules``. ``None`` (not configured, like
+    ``console permissions``) while no role has a file yet; red names the rule and the one command
+    that fixes it, in :func:`asf.console_perms.check_doctor`'s shape, once at least one does but a
+    rule is missing (a role file never written, or a rule deleted by hand)."""
+    from asf.roles import launch as role_launch
+    from asf.workers import worker_settings
+    total_missing = total_wanted = 0
+    bad = []
+    for role in sorted(role_launch.TABLE):
+        lau = role_launch.TABLE[role]
+        current = worker_settings.read_settings(worker_settings.settings_path(product, lau))
+        missing_allow, missing_deny = worker_settings.missing(current, product, lau)
+        wanted = len(worker_settings.allow_rules(product, lau)) + len(worker_settings.deny_rules(product, lau))
+        total_wanted += wanted
+        total_missing += len(missing_allow) + len(missing_deny)
+        if missing_allow or missing_deny:
+            bad.append(f"{role}: {', '.join(missing_allow + missing_deny)}")
+    cmd = f'asf worker-permissions install --product {product.name}'
+    if total_wanted and total_missing == total_wanted:
+        return None, f'{NOT_CONFIGURED}: no worker settings file written yet — {cmd}'
+    if bad:
+        return False, 'missing ' + '; '.join(bad) + f' — {cmd}'
+    return True, f'{len(role_launch.TABLE)} role settings file(s) checked, every rule present'
+
+
+def check_worker_redaction(product):
+    """(ok, detail) — the ``worker-redaction`` row: a live session's own job log carries no
+    ``redact`` match. Built on today's API only: :func:`asf.redact.default_patterns` and
+    :func:`asf.redact.scan_text` over the log's lines, live sessions from
+    :func:`asf.workers.pool.live_sessions`. A finding never carries the matched text
+    (``asf/redact.py:6-8``), so this row is safe to print."""
+    from asf import redact
+    live = pool.live_sessions(product)
+    findings = []
+    pats = redact.default_patterns(product.repo_dir if product is not None else None)
+    for s in live:
+        log_path = s.get('log')
+        if not log_path or not os.path.isfile(log_path):
+            continue
+        try:
+            with open(log_path, encoding='utf-8') as f:
+                text = f.read()
+        except OSError:
+            continue
+        for finding in redact.scan_text(log_path, text, pats):
+            findings.append(f'{s.get("job")}: {finding.kind} ({finding.source}) line {finding.line}')
+    if findings:
+        return False, f'{len(findings)} redaction match(es): ' + '; '.join(findings)
+    return True, f'{len(live)} live session log(s) checked, no match'
 
 
 def check_credentials(cfg, product):
@@ -1599,6 +1707,12 @@ def run(product_name):
     rows.append(('worker secrets', True, ok, detail))
     ok, detail = check_worker_push_auth(cfg, product)
     rows.append(('worker push auth', True, ok, detail))
+    ok, detail = check_role_launch(cfg)
+    rows.append(('role-launch', True, ok, detail))
+    ok, detail = check_worker_deny(cfg, product)
+    rows.append(('worker-deny', True, ok, detail))
+    ok, detail = check_worker_redaction(product)
+    rows.append(('worker-redaction', True, ok, detail))
     ok, detail = check_credentials(cfg, product)
     rows.append(('credentials', True, ok, detail))
     for ok, detail in check_install_checkout(product):

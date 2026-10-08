@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 import shutil
 import subprocess
@@ -9,6 +10,8 @@ import unittest
 from unittest import mock
 
 from asf import console_perms, doctor, env, hooks
+from asf.roles import launch as launch_mod
+from asf.workers import worker_settings
 from tests.gitfixture import executable_asf
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
@@ -485,6 +488,116 @@ class ConsolePermissionsDoctorTests(unittest.TestCase):
         self.assertTrue(row[1])
         self.assertFalse(row[2])
         self.assertTrue(doctor.is_red(rows))
+
+
+class RoleLaunchRowTests(unittest.TestCase):
+    """F-0062 T9/T14 — the ``role-launch`` doctor row: every role file matches
+    ``asf.roles.launch.TABLE``, a pool-wide ``worker_pool.permission_mode`` override is named by
+    the kinds it flattens (and, for ``bypassPermissions``, that it also switches off the
+    prober's ``--restricted``, PD8), and the detail always ends with the installed runtime's own
+    missing flags."""
+
+    def test_the_real_table_and_role_files_agree_and_the_row_is_green(self):
+        ok, detail = doctor.check_role_launch({})
+        self.assertTrue(ok, detail)
+
+    def test_a_table_row_naming_no_role_file_is_red(self):
+        from asf.roles import roles
+        files = dict(roles.load_all())
+        files.pop('asf-locator')
+        with mock.patch.object(roles, 'load_all', return_value=files):
+            ok, detail = doctor.check_role_launch({})
+        self.assertFalse(ok)
+        self.assertIn('asf-locator has a table row but no role file', detail)
+
+    def test_a_role_file_naming_no_table_row_is_red(self):
+        from asf.roles import roles
+        files = dict(roles.load_all())
+        files['asf-extra'] = files['asf-locator']
+        with mock.patch.object(roles, 'load_all', return_value=files):
+            ok, detail = doctor.check_role_launch({})
+        self.assertFalse(ok)
+        self.assertIn('asf-extra has a role file but no table row', detail)
+
+    def test_a_pool_wide_permission_mode_names_the_kinds_it_flattens(self):
+        cfg = {'worker_pool': {'permission_mode': 'plan'}}
+        ok, detail = doctor.check_role_launch(cfg)
+        self.assertFalse(ok)
+        self.assertIn('worker_pool.permission_mode plan flattens', detail)
+        self.assertIn('coder', detail)
+
+    def test_bypasspermissions_also_names_the_prober_restricted_switch_off(self):
+        cfg = {'worker_pool': {'permission_mode': 'bypassPermissions'}}
+        ok, detail = doctor.check_role_launch(cfg)
+        self.assertFalse(ok)
+        self.assertIn("also switches off the prober's --restricted", detail)
+
+    def test_detail_always_ends_with_the_installed_runtimes_missing_flags(self):
+        from asf.workers import capability
+        with mock.patch.object(capability, 'missing', return_value=('effort', 'restricted')):
+            ok, detail = doctor.check_role_launch({})
+        self.assertTrue(ok, detail)
+        self.assertIn('2 flag(s) the installed runtime lacks: effort, restricted', detail)
+
+
+class WorkerDenyRowTests(unittest.TestCase):
+    """T9 — the doctor's ``worker-deny`` row: not configured before any role has a settings
+    file, red while one is missing a rule (naming the rule and the fix), green once every role's
+    carries every rule of :mod:`asf.workers.worker_settings`."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='doctor_worker_deny_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.addCleanup(self._restore_home)
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        self.product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main'})
+
+    def _restore_home(self):
+        env.ASF_HOME = self.home
+
+    def write_every_role(self):
+        for launch in launch_mod.TABLE.values():
+            worker_settings.path(self.product, launch, {})
+
+    def test_not_configured_before_any_role_has_a_file(self):
+        ok, detail = doctor.check_worker_deny({}, self.product)
+        self.assertIsNone(ok)
+        self.assertTrue(detail.startswith(doctor.NOT_CONFIGURED), detail)
+        self.assertFalse(doctor.is_red([('worker-deny', True, ok, detail)]))
+
+    def test_red_when_a_rule_is_missing_from_a_written_file_and_names_the_fix(self):
+        self.write_every_role()
+        target = worker_settings.settings_path(self.product, launch_mod.TABLE['asf-reviewer'])
+        obj = worker_settings.read_settings(target)
+        obj['permissions']['deny'].remove('Bash(env)')
+        with open(target, 'w', encoding='utf-8') as f:
+            json.dump(obj, f)
+        ok, detail = doctor.check_worker_deny({}, self.product)
+        self.assertFalse(ok)
+        self.assertIn('asf-reviewer', detail)
+        self.assertIn('Bash(env)', detail)
+        self.assertIn('asf worker-permissions install --product sample', detail)
+
+    def test_green_once_every_role_file_has_every_rule(self):
+        self.write_every_role()
+        ok, detail = doctor.check_worker_deny({}, self.product)
+        self.assertTrue(ok, detail)
+        self.assertIn('every rule present', detail)
+
+    def test_doctor_run_carries_the_three_new_rows(self):
+        cfg = {}
+        with mock.patch.object(doctor, 'check_config',
+                               return_value=(True, '', cfg, self.product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')):
+            rows = doctor.run('sample')
+        names = {r[0] for r in rows}
+        self.assertIn('role-launch', names)
+        self.assertIn('worker-deny', names)
+        self.assertIn('worker-redaction', names)
 
 
 class LegacySchedulerJobTests(unittest.TestCase):
