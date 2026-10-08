@@ -664,6 +664,26 @@ class SetFootprintStageTests(unittest.TestCase):
         with open(t1, encoding='utf-8') as f:
             self.assertEqual(f.read(), before)
 
+    def test_after_minus_a_parked_later_holder_is_accepted(self):
+        # B-82960: the need Task's after: to an Active Task of a `priority: later` Feature is
+        # no I3 order — the parked Task holds no footprint, so removing the edge is accepted
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        write_item(root, 'E-0001', 'epic', 'Factory')
+        write_item(root, 'F-0001', 'feature', 'Thing', parent='E-0001',
+                   typed_lines=('priority: need',))
+        write_item(root, 'F-0002', 'feature', 'Shelved', parent='E-0001',
+                   typed_lines=('priority: later',))
+        write_item(root, 'T-0002', 'task', 'Parked', parent='F-0002',
+                   typed_lines=('writes: [lib/x.py]',), machine_lines=self.ACTIVE)
+        t1 = write_item(root, 'T-0001', 'task', 'Do', parent='F-0001',
+                        typed_lines=('writes: [lib/x.py]', 'after: [T-0002]'),
+                        machine_lines=self.ACTIVE)
+        r = run(['set', 'T-0001', 'after-=T-0002'], root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(t1, encoding='utf-8') as f:
+            self.assertEqual(frontmatter.parse(f.read())[0].get('after') or [], [])
+
     def test_a_successful_write_is_committed_and_pushed(self):
         tmp = tempfile.mkdtemp(prefix='setpub_')
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)

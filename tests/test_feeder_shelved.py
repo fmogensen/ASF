@@ -103,6 +103,40 @@ class Shelved(unittest.TestCase):
         self.assertTrue(out[0].launches)
 
 
+class ParkedHolderHoldsNothing(unittest.TestCase):
+    """B-82960: an Active Task under a ``priority: later`` Feature holds no footprint and orders
+    no live Task — an ``after:`` to it from a non-later Feature's Task is read as satisfied."""
+
+    def parked(self, later=True):
+        idx = index(later=later)
+        its = idx['items']
+        its['T-01011'].update(state='Active', writes=['lib/x.py'])
+        its['T-01021'].update(writes=['lib/x.py'])
+        return idx
+
+    def test_a_need_task_after_a_parked_active_holder_launches(self):
+        by = {r.item_id: r for r in rows.plan_rows(self.parked(), product(), [], 20)}
+        self.assertTrue(by['T-01021'].launches, by['T-01021'])
+        self.assertIn('T-01011 parked: F-0101 later', by['T-01021'].reason)
+
+    def test_the_parked_holder_holds_no_footprint_even_while_busy(self):
+        items = rows.items_of(self.parked())
+        self.assertEqual(rows.running_footprints(items, {'T-01011'}), [])
+        live = rows.items_of(self.parked(later=False))
+        self.assertEqual(rows.running_footprints(live, {'T-01011'}), [('T-01011', ['lib/x.py'])])
+
+    def test_raised_again_the_after_order_is_back(self):
+        # the edge is never rewritten: once the Feature is raised, the order holds again
+        by = {r.item_id: r for r in rows.plan_rows(self.parked(later=False), product(), [], 20)}
+        self.assertEqual(by['T-01021'].action, 'WAITS ON T-01011')
+
+    def test_a_later_task_keeps_its_order_on_another_later_task(self):
+        idx = self.parked()
+        idx['items']['F-0102']['priority'] = 'later'
+        item = rows.items_of(idx)['T-01021']
+        self.assertEqual(rows.after_of(rows.items_of(idx), item), ['T-01011'])
+
+
 class ParityLater(unittest.TestCase):
 
     def render(self, later):

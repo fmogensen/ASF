@@ -440,10 +440,10 @@ class R9SoftFailure(unittest.TestCase):
         self.assertEqual((findings, events, lines), ([], [], []))
 
 
-def _card(root, iid, writes, state='Active', after=(), removed=None):
+def _card(root, iid, writes, state='Active', after=(), removed=None, parent='F-0001'):
     os.makedirs(os.path.join(root, 'tasks'), exist_ok=True)
     rel = f'tasks/{iid}.md'
-    typed = [f'id: {iid}', 'type: task', f'title: {iid}', 'parent: F-0001', f'writes: [{writes}]']
+    typed = [f'id: {iid}', 'type: task', f'title: {iid}', f'parent: {parent}', f'writes: [{writes}]']
     if after:
         typed.append(f"after: [{', '.join(after)}]")
     if removed:
@@ -555,6 +555,59 @@ class OrderedOverlapTests(unittest.TestCase):
         before_text = _read(os.path.join(self.root, p2))
         _card(self.root, 'T-0002', 'lib/x.py', after=('T-0001',))
         self.assertEqual(self.check([p2], before={p2: before_text}), [])
+
+
+def _feature(root, fid, priority='need'):
+    os.makedirs(os.path.join(root, 'features'), exist_ok=True)
+    rel = f'features/{fid}.md'
+    with open(os.path.join(root, rel), 'w', encoding='utf-8') as f:
+        f.write(f'---\nid: {fid}\ntype: feature\ntitle: {fid}\npriority: {priority}\n'
+                '# ---- machine ----\nschema_version: 1\nstate: Active\n---\n'
+                '## Description\n\n## History\n- 2026-01-01: created\n')
+    return rel
+
+
+class ParkedHolderTests(unittest.TestCase):
+    """B-82960: an Active Task whose Feature is ``priority: later`` holds no footprint — it is no
+    side of an I3 pair, so the ``after:`` a live Task carries to it may be removed."""
+
+    setUp, check, subjects = (OrderedOverlapTests.setUp, OrderedOverlapTests.check,
+                              OrderedOverlapTests.subjects)
+
+    def test_a_later_features_active_task_is_no_pair(self):
+        _feature(self.root, 'F-0001')
+        _feature(self.root, 'F-0002', priority='later')
+        p1 = _card(self.root, 'T-0001', 'lib/x.py')
+        p2 = _card(self.root, 'T-0002', 'lib/x.py', parent='F-0002')
+        self.assertEqual(self.check([p1, p2]), [])
+
+    def test_removing_the_after_edge_to_a_later_holder_is_not_refused(self):
+        _feature(self.root, 'F-0001')
+        _feature(self.root, 'F-0002', priority='later')
+        _card(self.root, 'T-0002', 'lib/x.py', parent='F-0002')
+        p1 = _card(self.root, 'T-0001', 'lib/x.py', after=('T-0002',))
+        before_text = _read(os.path.join(self.root, p1))
+        _card(self.root, 'T-0001', 'lib/x.py')
+        self.assertEqual(self.check([p1], before={p1: before_text}), [])
+
+    def test_the_same_pair_under_a_live_feature_is_still_refused(self):
+        _feature(self.root, 'F-0001')
+        _feature(self.root, 'F-0002')
+        _card(self.root, 'T-0002', 'lib/x.py', parent='F-0002')
+        p1 = _card(self.root, 'T-0001', 'lib/x.py', after=('T-0002',))
+        before_text = _read(os.path.join(self.root, p1))
+        _card(self.root, 'T-0001', 'lib/x.py')
+        self.assertEqual(self.subjects(self.check([p1], before={p1: before_text})), ['T-0001'])
+
+    def test_later_on_the_epic_parks_its_tasks_too(self):
+        metas = {'E-0001': {'id': 'E-0001', 'type': 'epic', 'priority': 'later'},
+                 'F-0001': {'id': 'F-0001', 'type': 'feature', 'parent': 'E-0001'},
+                 'F-0002': {'id': 'F-0002', 'type': 'feature'},
+                 'T-0001': dict(_task(['lib/x.py']), parent='F-0001'),
+                 'T-0002': dict(_task(['lib/x.py']), parent='F-0002')}
+        self.assertEqual(invariants.later_holder(metas, 'T-0001'), 'E-0001')
+        self.assertIsNone(invariants.later_holder(metas, 'T-0002'))
+        self.assertEqual(invariants.unordered_overlaps(invariants.overlap_tasks(metas)), [])
 
 
 def _task(writes, evidence=()):
