@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.264 — 2026-10-08
+
+### Features landed
+
+- The criterion — the rehearsal in both gates, with its own step lookup (#1230)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.264"`
+
 ## v0.1.263 — 2026-10-08
 
 ### Features landed
