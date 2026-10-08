@@ -119,6 +119,9 @@ DIRECT_BUILD = 'DIRECT → BUILD'
 #: the brief kinds of those two rows, and the branch kind of the direct lane
 SPEC_PLAN_KIND = 'spec-plan'
 DIRECT = 'direct'
+#: the branch kinds a Feature's own lane branch carries (:func:`lane_rows`): the direct lane's
+#: one branch, and the two document lanes. A Task's or Bug's branch is never one of these.
+FEATURE_LANES = (DIRECT, 'spec', 'plan')
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
 #: a Feature with no Story may not be planned (``feeder.stories_before_plan``): its next step is a
@@ -1164,9 +1167,10 @@ def lane_rows(items, product, busy, occupancy):
             item = {'id': iid, 'type': 'task'}
         elif not item or not is_open(item) or iid in busy or item.get('blocked'):
             continue
-        direct = (item.get('type') == 'feature'
-                  and _conventions(product).branch_kind(h.get('branch') or '') == DIRECT)
-        if item.get('type') not in ('task', 'bug') and not direct:
+        feature_lane = (item.get('type') == 'feature'
+                        and _conventions(product).branch_kind(h.get('branch') or '')
+                        in FEATURE_LANES)
+        if item.get('type') not in ('task', 'bug') and not feature_lane:
             continue
         f = None if foreign else feature_of(items, item)
         fid, branch, number = (f['id'] if f else ''), h.get('branch') or '', h.get('pr')
@@ -1655,6 +1659,13 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy, 
         if gate:
             out.append(no_stories_row(f, product, occupancy, stage))
         out.extend(task_rows(items, product, f, busy, running, landed_shas))
+    if lane_speaks(fid, occupancy):
+        # the lane holds the Feature's own branch: its PUSHED → REVIEW / PUSHED → LAND row
+        # (:func:`lane_rows`) is the row. A `building` Feature keeps its Task rows. Every
+        # PUSHED_LAND/APPROVED_LAND emitter reachable from here (`_doc_row`, `replan_row`,
+        # `direct_row`, `spec_plan_row`, `land_doc_row`) is the Feature's own; `task_rows` emits
+        # neither (PD5).
+        out = [r for r in out if r.kind not in (PUSHED_LAND, APPROVED_LAND)]
     return out
 
 
@@ -1801,6 +1812,14 @@ def hold_unreadable(rows, items):
     return out
 
 
+def lane_speaks(fid, occupancy):
+    """True while the lane holds ``fid`` in a state :func:`lane_rows` draws a row for — its
+    ``REVIEW`` (a session) or any other open landing state (a wait). The Feature's own document
+    and landing rows step aside for that row: one item, one row."""
+    occ = occupancy or {}
+    return fid in (occ.get('review') or {}) or fid in (occ.get('landing') or {})
+
+
 def direct_row(feature, product, occupancy):
     """A ``lane: direct`` Feature's one row: DIRECT → BUILD, a session that builds it end to end
     on ``<branch_prefixes.direct><id>``; once that branch is pushed, a PUSHED → LAND row that
@@ -1808,7 +1827,7 @@ def direct_row(feature, product, occupancy):
     (:func:`lane_rows` speaks for it then)."""
     fid, occ = feature['id'], occupancy or {}
     branch = branch_for(product, DIRECT, fid)
-    if fid in (occ.get('review') or {}) or fid in (occ.get('landing') or {}):
+    if lane_speaks(fid, occ):
         return None
     why = (occ.get('branches') or {}).get(branch) or (occ.get('waiting_landing') or {}).get(fid)
     if why:
@@ -2759,28 +2778,55 @@ def open_pr_of(item):
 
 
 def pushed_ids(items, occupancy):
-    """The open Tasks and Bugs whose work is pushed: the lifecycle holds them in a lane state, a
-    wait on the lane or a correction (:data:`PUSHED_KEYS`), or the record names an open PR on
-    them. Each one is owed a row in every plan (:func:`pushed_rows`, :func:`orphaned_pushed`)."""
+    """The open Tasks, Bugs and Features whose work is pushed: the lifecycle holds them in a lane
+    state, a wait on the lane or a correction (:data:`PUSHED_KEYS`), or — a Task/Bug only — the
+    record names an open PR on them (a Feature's evidence never carries one: C4). Each one is
+    owed a row in every plan (:func:`pushed_rows`, :func:`orphaned_pushed`)."""
     occ = occupancy or {}
     named = set()
     for key in PUSHED_KEYS:
         named |= set(occ.get(key) or ())
     return {iid for iid, v in (items or {}).items()
-            if isinstance(v, dict) and v.get('type') in ('task', 'bug') and is_open(v)
-            and (iid in named or open_pr_of(v))}
+            if isinstance(v, dict) and is_open(v)
+            and (v.get('type') == 'feature' and iid in named
+                 or v.get('type') in ('task', 'bug') and (iid in named or open_pr_of(v)))}
+
+
+def _pushed_branch(items, product, occupancy, iid):
+    """The branch ``iid``'s pushed work sits on: the one the occupancy entry that named it
+    carries (``review``, ``landing``, ``back``, or the lane's own ``lanes`` map), else the
+    item's lane branch by its type (:func:`_branch_of`). A Feature's branch is only ever the
+    lane's: nothing derives `spec/`/`plan/`/`direct` from the type alone (C5)."""
+    occ = occupancy or {}
+    for key in ('review', 'landing', 'back'):
+        h = (occ.get(key) or {}).get(iid)
+        if h and h.get('branch'):
+            return h['branch']
+    for branch, rec in (occ.get('lanes') or {}).items():
+        if rec.get('item') == iid:
+            return branch
+    item = items.get(iid) or {}
+    if item.get('type') == 'feature':
+        return ''
+    kind = 'task' if item.get('type') == 'task' else 'fix'
+    return _branch_of(item, product, kind)
 
 
 def pushed_rows(items, product, pushed, occupancy, spoken):
     """A non-launching PUSHED → LAND row for each pushed item (:func:`pushed_ids`) no other row
     and no live session speaks for (``spoken``) — never a silent PR: a blocked one waits on its
     blocker, one finished and awaiting harvest says so, and an open PR no run holds waits on the
-    lane, which takes run-less branches up (:meth:`asf.harvest.lane.Lane.orphan_claims`)."""
+    lane, which takes run-less branches up (:meth:`asf.harvest.lane.Lane.orphan_claims`). A
+    Feature no occupancy entry names a branch for gets no row: its own document row already
+    speaks for it (C5)."""
     occ = occupancy or {}
     waiting = occ.get('waiting_landing') or {}
     out = []
     for iid in sorted(set(pushed) - set(spoken)):
         item = items.get(iid) or {}
+        branch = _pushed_branch(items, product, occ, iid)
+        if item.get('type') == 'feature' and not branch:
+            continue
         kind = 'task' if item.get('type') == 'task' else 'fix'
         f = _task_feature(items, item) if kind == 'task' else feature_of(items, item)
         number = open_pr_of(item)
@@ -2797,7 +2843,7 @@ def pushed_rows(items, product, pushed, occupancy, spoken):
             action = f'{WAITS_LANDING}: {what} open, no run holds it — the lane takes it up'
         row = Row(tier=review_tier(item), kind=PUSHED_LAND, item_id=iid,
                   feature_id=f['id'] if f else '', action=action, brief_kind='review',
-                  branch=_branch_of(item, product, kind), reason='pushed work, no other row')
+                  branch=branch, reason='pushed work, no other row')
         out.append(blocked_row(row, item) if item.get('blocked') else row)
     return out
 
