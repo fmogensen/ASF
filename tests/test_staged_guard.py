@@ -96,6 +96,57 @@ class StagedGuardTests(unittest.TestCase):
         git(self.repo, 'add', '-A')
         self.assertEqual(self.check(), [])
 
+    def _answered(self):
+        """The F-0305 sequence's first half: a filed note with a question, answered by groom —
+        its header lines rewritten in place, so its HEAD text survives nowhere verbatim."""
+        from asf.groom import inbox
+        write(self.repo, 'inbox/s1-answered.md',
+              '# S1: the guard refuses the move\n\nthe body\n\n## Question\nwhat type?\n')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-q', '-m', 'file')
+        git(self.repo, 'push', '-q', 'origin', 'main')
+        applied, _ = inbox.apply_answer(self.repo, 's1-answered.md', 'feature', '2026-10-08',
+                                        'groom')
+        self.assertTrue(applied)
+        return inbox
+
+    def test_groom_apply_then_move_to_done_passes(self):
+        inbox = self._answered()
+        with open(os.path.join(self.repo, 'inbox/s1-answered.md'), encoding='utf-8') as f:
+            text = f.read()
+        inbox.move_to_done(os.path.join(self.repo, 'inbox'), 's1-answered.md',
+                           '→ closed (groom 2026-10-08, groom)', text)
+        git(self.repo, 'add', '-A')
+        self.assertEqual(self.check(), [])
+
+    def test_groom_apply_then_a_mint_named_by_the_title_slug_passes(self):
+        self._answered()
+        path = os.path.join(self.repo, 'inbox/s1-answered.md')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        write(self.repo, 'inbox/done/the-guard-refuses-the-move.md', f'→ B-10005\n\n{text}')
+        write(self.repo, 'bugs/B-10005.md', 'the bug\n')
+        os.remove(path)
+        git(self.repo, 'add', '-A')
+        self.assertEqual(self.check(), [])
+
+    def test_an_intake_deletion_with_no_done_note_is_refused(self):
+        self._answered()
+        git(self.repo, 'rm', '-q', '-f', 'inbox/s1-answered.md')
+        self.assertIn('inbox/s1-answered.md', ''.join(self.check()))
+
+    def test_an_unrelated_done_note_does_not_pair_with_a_stale_deletion(self):
+        git(self.repo, 'rm', '-q', '--cached', 'inbox/s1-urgent.md')
+        write(self.repo, 'inbox/done/another-note.md', '→ B-10006\n\n# another note\n')
+        git(self.repo, 'add', 'inbox/done/another-note.md')
+        self.assertIn('inbox/s1-urgent.md', ''.join(self.check()))
+
+    def test_a_card_deletion_is_refused_whatever_done_note_it_brings(self):
+        git(self.repo, 'rm', '-q', 'features/F-10001.md')
+        write(self.repo, 'inbox/done/F-10001.md', '→ closed\n\n---\nid: F-10001\n---\n')
+        git(self.repo, 'add', '-A')
+        self.assertIn('features/F-10001.md', ''.join(self.check()))
+
     def test_the_escape_variable_lets_a_meant_deletion_through(self):
         git(self.repo, 'rm', '-q', 'features/F-10001.md')
         self.env = {staged_guard.ALLOW_VAR: '1'}
