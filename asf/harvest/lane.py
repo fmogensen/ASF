@@ -2713,9 +2713,7 @@ class Lane:
             cls = f.get('class') or landing_class(self.product, f.get('files') or ())
             required, _unknown = host.merge_required(self.state_dir, cls, exact)
             if required:
-                state, _detail, checks = pr_checks(
-                    host.slug, number, required, host.rerun_ids(), head=exact,
-                    attest_context=attestation.context(self.product))
+                state, _detail, checks = host.checks(number, required, head=exact)
                 # ``green`` with no check reported is no green to lose (``pr_checks``: "no
                 # checks"): only a required set every name of which concluded success defers,
                 # which is exactly what ``remember_green`` will write down
@@ -4536,10 +4534,8 @@ class GitHubHost(Host):
         p = H.gh_json(['pr', 'view', branch, '-R', self.slug, '--json',
                        'number,state,headRefOid,mergeCommit,autoMergeRequest'], {})
         required = self.required_checks(self.lane.state_dir) if p and self.lane else ()
-        state, _detail, _checks = (pr_checks(self.slug, p.get('number'), required, self.rerun_ids(),
-                                             head=p.get('headRefOid'),
-                                             attest_context=attestation.context(self.product)) if p
-                                   else ('none', '', []))
+        state, _detail, _checks = (self.checks(p.get('number'), required, head=p.get('headRefOid'))
+                                   if p else ('none', '', []))
         return {'pr': p.get('number'), 'state': p.get('state'), 'head': p.get('headRefOid'),
                 'checks': {'green': 'passed', 'red': 'failed'}.get(state, state),
                 'merged': p.get('state') == 'MERGED',
@@ -4594,9 +4590,7 @@ class GitHubHost(Host):
         required, why = self.merge_required(lane.state_dir, cls, f.get('head'))
         if required is None:
             return f'required checks unknown: {why}'
-        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
-                                          head=exact_head(f),
-                                          attest_context=attestation.context(self.product))
+        state, detail, checks = self.checks(number, required, head=exact_head(f))
         state, detail, checks = self.carried_green(f, number, required, exact_head(f), state,
                                                    detail, checks)
         if state == 'red' or (state != 'green' and f.get('how') == 'ci'):
@@ -4762,10 +4756,24 @@ class GitHubHost(Host):
         from asf import ci_queue
         return ci_queue.rerun_ids(self.lane.state_dir) if self.lane else frozenset()
 
+    def checks(self, number, required=(), head=None):
+        """``(state, detail, checks)`` for this head. ``ci.provider: vm``: the results ASF's
+        own CI pass recorded (:func:`asf.ci_vm.checks_at`), by sha and never from the PR host.
+        Else :func:`pr_checks` on the PR, as ever (C1 — the one seam every ``pr_checks`` call
+        in this class goes through)."""
+        from asf import ci_vm
+        if ci_vm.enabled(self.product):
+            return ci_vm.checks_at(self.product, head, required)
+        return pr_checks(self.slug, number, required, self.rerun_ids(), head=head,
+                         attest_context=attestation.context(self.product))
+
     def required_checks(self, state_dir):
         named = self.product.conventions.get('landing_checks')
         if named:
             return (str(named),) if isinstance(named, str) else tuple(str(n) for n in named)
+        from asf import ci_vm
+        if ci_vm.enabled(self.product):
+            return tuple(ci_vm.required_names(self.product))
         if self._required is None:
             self._required = protected_checks(self.slug, self.trunk, state_dir)
         return self._required
@@ -4874,9 +4882,7 @@ class GitHubHost(Host):
         required, _why = self.merge_required(self.lane.state_dir, cls, head)
         if required is None:
             return None
-        state, _detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
-                                           head=head,
-                                           attest_context=attestation.context(self.product))
+        state, _detail, checks = self.checks(number, required, head=head)
         from asf import flake
         out = self.lane.out if callable(getattr(self.lane, 'out', None)) else print
         flake.settle(self.product, self.lane.state_dir, self.slug, head, checks, out=out)
@@ -5184,9 +5190,7 @@ class GitHubHost(Host):
             lane.out(f'waiting {b}: PR #{number} required checks unknown — {why}')
             wait(lane, f, f'required checks unknown: {why}', state=WAITING_CI)
             return None
-        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
-                                          head=exact_head(f),
-                                          attest_context=attestation.context(self.product))
+        state, detail, checks = self.checks(number, required, head=exact_head(f))
         # the PR's exact head only (:func:`exact_head`): a green belongs to the sha that earned
         # it, and a carry onto a sha the PR is not at would be a green for nothing
         state, detail, checks = self.carried_green(f, number, required, exact_head(f), state,
@@ -5342,6 +5346,7 @@ class GitHubHost(Host):
         queue attested it is green there (the batch run judged that exact sha), on any other it
         is no verdict and the commit before judges; where the attestation does not read
         (Unknown) the check has no verdict at all — never the older commit's red."""
+        from asf import ci_vm
         want = [n for n in dict.fromkeys(names or ()) if n]
         repo = getattr(self.lane, 'repo', None)
         if not want or not repo:
@@ -5349,7 +5354,15 @@ class GitHubHost(Host):
         log = H.sh(['git', 'rev-list', '--first-parent', '-n', str(TRUNK_RED_DEPTH),
                     f'origin/{self.trunk}'], cwd=repo)
         red, left = {}, set(want)
+        vm = ci_vm.enabled(self.product)
         for sha in log.stdout.split() if log.returncode == 0 else ():
+            if vm:
+                found, complete = ci_vm.trunk_red_at(self.product, sha, left)
+                red.update({n: sha for n in found})
+                left -= complete
+                if not left:
+                    break
+                continue
             if sha not in self._trunk_runs:
                 data = H.gh_json(['api', f'repos/{self.slug}/commits/{sha}/check-runs'
                                          f'?per_page=100'], None)
@@ -5678,6 +5691,9 @@ def red_evidence(slug, checks, red):
     never raises."""
     out = []
     for c in checks or ():
+        if c.get('name') in red and c.get('log'):
+            out.append(f"\n{c.get('name')}: {c.get('host') or 'vm'}\n" + '\n'.join(c['log']))
+            continue
         link = c.get('link') or ''
         m = _JOB_RE.search(link)
         if c.get('name') not in red or not m:

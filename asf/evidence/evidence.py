@@ -1082,6 +1082,10 @@ def ci_provider(product):
 
 def ci_green_runs(product):
     """[headSha, …] of the newest successful CI runs on main, newest first; [] if unreadable."""
+    from asf import ci_vm
+    if ci_provider(product) == ci_vm.PROVIDER:
+        return ci_vm.green_trunk_shas(product, ci_vm.trunk_shas(product),
+                                      ci_vm.required_names(product))
     if ci_provider(product) not in GH_ACTIONS:
         return []
     runs = _gh_json(f"run list --branch {product.main} --status success --limit 20 "

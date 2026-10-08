@@ -2693,6 +2693,220 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(len(self.merges(calls)), 1)
 
 
+def _vm_row(state, **kw):
+    from asf import ci_vm
+    row = {'state': state, 'host': 'ci-1', 'run_id': 'r', 'pid': 1, 'branch': None, 'attempt': 1,
+          'started': 0, 'ended': 0, 'exit': (0 if state == ci_vm.PASSED else 1), 'log': [],
+          'superseded_by': None, 'ever_red': state in ci_vm.RED_STATES}
+    row.update(kw)
+    return row
+
+
+class VmChecks(unittest.TestCase):
+    """T-0711 — the lane judges a vm product with no host call: ``GitHubHost.checks`` is the
+    one seam its callers go through, ``required_checks`` never reads branch protection,
+    ``trunk_red`` reads the store per sha, ``recheck`` and ``check_gate`` read it too, and
+    ``not_green``'s tail (``path_filtered``) is never entered (P6)."""
+
+    write = ProductHarvestTests.write
+    push_lane = ProductHarvestTests.push_lane
+    origin_main = ProductHarvestTests.origin_main
+    record = ProductHarvestTests.record
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix='vmchecks_home_')
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        patcher = mock.patch.object(env, 'ASF_HOME', self.home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.base = PRODUCT_REPOS.fresh()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.origin = os.path.join(self.base, 'origin.git')
+        self.repo = os.path.join(self.base, 'repo')
+        self.worker = os.path.join(self.base, 'worker')
+        self.state_dir = os.path.join(self.base, 'state')
+
+    def vm_product(self, **extra):
+        ci = extra.pop('ci', None) or {'provider': 'vm', 'hosts': [{'name': 'ci-1', 'ssh': 'x'}],
+                                       'jobs': {'gate': {'command': 'x', 'required': True}}}
+        conv = {'test_command': PRODUCT_TEST, 'landing': 'pull-request',
+               'specs_dir': 'docs/specs', 'plans_dir': 'docs/plans', 'reviews_dir': '.in/reviews'}
+        conv.update(extra.pop('conventions', {}) or {})
+        data = {'repo_dir': self.repo, 'repo_slug': 'o/p', 'main': 'main', 'conventions': conv,
+               'steps': {'batch': 'bash q.sh'}, 'ci': ci}
+        data.update(extra)
+        return env.Product('sample', data)
+
+    def raising_gh(self, *_args, **_kw):
+        raise AssertionError('H._gh was called — a vm product must never read the code host '
+                             'for pr checks')
+
+    def host_for(self, product, out=None):
+        return lane.Lane(product, self.state_dir, out=out or (lambda _l: None)).host
+
+    def set_rows(self, product, sha, rows):
+        from asf import ci_vm
+        data = ci_vm.load(product)
+        data['runs'][sha] = rows
+        ci_vm.save(product, data)
+
+    def test_host_checks_reads_the_store_never_the_host(self):
+        from asf import ci_vm
+        product = self.vm_product()
+        self.set_rows(product, 'abc123', {'gate': _vm_row(ci_vm.PASSED)})
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product)
+            self.assertEqual(host_.checks(41, ('gate',), head='abc123'),
+                             ci_vm.checks_at(product, 'abc123', ('gate',)))
+        gh_product = self.vm_product(ci={'provider': 'github-actions'})
+        with mock.patch.object(harvest, '_gh',
+                               return_value=(1, '', "no checks reported on the 'x' branch\n")):
+            host_ = self.host_for(gh_product)
+            self.assertEqual(host_.checks(41, (), head='abc123'), ('green', 'no checks', []))
+
+    def test_required_checks_is_landing_checks_or_required_jobs_never_branch_protection(self):
+        product = self.vm_product()
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product)
+            self.assertEqual(host_.required_checks(self.state_dir), ('gate',))
+        named = self.vm_product(conventions={'landing_checks': ['lint']})
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            self.assertEqual(self.host_for(named).required_checks(self.state_dir), ('lint',))
+
+    def test_check_gate_on_a_pending_store_waits_at_waiting_ci_and_carries_ci_since(self):
+        from asf import ci_vm
+        product = self.vm_product()
+        self.push_lane('fix/B-0001', [('fix(B-0001): x', {'a.txt': 'a\n'})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        head = sh(['git', 'rev-parse', 'origin/fix/B-0001'], cwd=self.repo).stdout.strip()
+        self.set_rows(product, head, {'gate': _vm_row(ci_vm.RUNNING)})
+        lines = []
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product, out=lines.append)
+            f = {'branch': 'fix/B-0001', 'head': head, 'class': 'code', 'pr': {}}
+            self.assertIsNone(host_.check_gate(f, 41, ['a.txt']))
+            rec1 = self.record('fix/B-0001')['lane']
+            self.assertEqual(rec1['state'], 'WAITING_CI')
+            ci_since_1 = rec1['ci_since']
+            f2 = {'branch': 'fix/B-0001', 'head': head, 'class': 'code', 'pr': {}, 'prev': rec1}
+            self.assertIsNone(host_.check_gate(f2, 41, ['a.txt']))
+            rec2 = self.record('fix/B-0001')['lane']
+            self.assertEqual(rec2['ci_since'], ci_since_1)  # carried, not reset (P3)
+        self.assertTrue(any('checks pending' in l for l in lines))
+
+    def test_check_gate_on_a_red_store_holds_with_the_stores_log_tail(self):
+        """C11: the correction text ``check_gate`` composes for a red PR carries the store's own
+        log tail (:func:`asf.harvest.lane.red_evidence`), with no ``gh … /logs`` call — proven
+        directly against the real function, as ``AsChecks``/``VmChecks`` test the vocabulary."""
+        from asf import ci_vm
+        product = self.vm_product()
+        self.push_lane('fix/B-0002', [('fix(B-0002): x', {'a.txt': 'a\n'})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        head = sh(['git', 'rev-parse', 'origin/fix/B-0002'], cwd=self.repo).stdout.strip()
+        self.set_rows(product, head, {'gate': _vm_row(ci_vm.FAILED, log=['boom: assertion error'])})
+        lines = []
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product, out=lines.append)
+            f = {'branch': 'fix/B-0002', 'head': head, 'class': 'code', 'pr': {}}
+            self.assertIsNone(host_.check_gate(f, 42, ['a.txt']))
+            _state, _detail, checks = host_.checks(42, ('gate',), head=head)
+            evidence_text = lane.red_evidence(product.repo_slug, checks, ['gate'])
+        self.assertIn('boom: assertion error', evidence_text)
+        self.assertTrue(any('held' in l and 'checks red: gate' in l for l in lines), lines)
+        rec = self.record('fix/B-0002')
+        self.assertEqual(rec['lane']['state'], 'BACK')
+
+    def test_trunk_red_walks_the_store_per_sha(self):
+        from asf import ci_vm
+        product = self.vm_product()
+        older = self.push_trunk_vm('a.txt')
+        newest = self.push_trunk_vm('b.txt')
+        self.set_rows(product, newest, {'gate': _vm_row(ci_vm.RUNNING)})
+        self.set_rows(product, older, {'gate': _vm_row(ci_vm.FAILED)})
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product)
+            self.assertEqual(host_.trunk_red(['gate']), {'gate': older})
+
+    def test_trunk_red_b0129_a_red_attempt_stays_red_beside_a_green_retry(self):
+        from asf import ci_vm
+        product = self.vm_product()
+        sha = self.push_trunk_vm('a.txt')
+        self.set_rows(product, sha, {'gate': _vm_row(ci_vm.PASSED, ever_red=True)})
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product)
+            self.assertEqual(host_.trunk_red(['gate']), {'gate': sha})
+
+    def test_recheck_refuses_a_merge_whose_store_went_red(self):
+        from asf import ci_vm
+        product = self.vm_product()
+        self.push_lane('fix/B-0003', [('fix(B-0003): x', {'a.txt': 'a\n'})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        head = sh(['git', 'rev-parse', 'origin/fix/B-0003'], cwd=self.repo).stdout.strip()
+        self.set_rows(product, head, {'gate': _vm_row(ci_vm.FAILED)})
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product)
+            f = {'branch': 'fix/B-0003', 'head': head, 'class': 'code'}
+            why = host_.recheck(f, 43)
+        self.assertIsNotNone(why)
+        self.assertIn('red', why)
+
+    def test_not_green_never_enters_path_filtered(self):
+        from asf import ci_vm
+        product = self.vm_product()
+        self.push_lane('fix/B-0004', [('fix(B-0004): x', {'a.txt': 'a\n'})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        head = sh(['git', 'rev-parse', 'origin/fix/B-0004'], cwd=self.repo).stdout.strip()
+        self.set_rows(product, head, {'gate': _vm_row(ci_vm.PASSED)})
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product)
+            with mock.patch.object(lane.GitHubHost, 'path_filtered',
+                                   side_effect=AssertionError('path_filtered must not be called')):
+                f = {'branch': 'fix/B-0004', 'head': head, 'class': 'code', 'pr': {}}
+                state, _detail, checks = host_.checks(44, ('gate',), head=head)
+                self.assertEqual(state, 'green')
+                passed, skipped, missing, _sat, _running, _refused = host_.not_green(
+                    f, ('gate',), checks)
+                self.assertEqual((skipped, missing), ([], []))
+                self.assertEqual(passed, {'gate'})
+
+    def push_trunk_vm(self, rel):
+        self.write(self.worker, rel, 'x\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', f'trunk: {rel}'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return sh(['git', 'rev-parse', 'origin/main'], cwd=self.repo).stdout.strip()
+
+    def test_head_red_reads_the_store_too_no_fifth_read_of_the_host(self):
+        """A vm product's ``head_red`` returns the store's red names and makes no ``gh`` call —
+        so no fifth read of a vm product's CI goes to the code host."""
+        from asf import ci_vm
+        product = self.vm_product()
+        self.push_lane('fix/B-0005', [('fix(B-0005): x', {'a.txt': 'a\n'})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        head = sh(['git', 'rev-parse', 'origin/fix/B-0005'], cwd=self.repo).stdout.strip()
+        self.set_rows(product, head, {'gate': _vm_row(ci_vm.FAILED)})
+        with mock.patch.object(harvest, '_gh', side_effect=self.raising_gh):
+            host_ = self.host_for(product)
+            f = {'branch': 'fix/B-0005', 'head': head, 'class': 'code', 'pr': {'head': head}}
+            got = host_.head_red(f, 45)
+        self.assertIsNotNone(got)
+        self.assertEqual(got['names'], ['gate'])
+
+    def test_pr_checks_calls_are_inside_gi_thub_host_checks_only(self):
+        """The structural form of C1's claim: every direct call to ``pr_checks(`` in
+        ``lane.py`` is its own definition or the one default-body call inside
+        ``GitHubHost.checks`` — the four (five, after the replan's own drift) call sites this
+        card found all go through the seam instead."""
+        path = os.path.join(REPO_ROOT, 'asf', 'harvest', 'lane.py')
+        with open(path, encoding='utf-8') as f:
+            source = f.readlines()
+        hits = [source[i].strip() for i, line in enumerate(source) if 'pr_checks(' in line]
+        self.assertEqual(len(hits), 2, hits)
+        self.assertEqual(sum(1 for h in hits if h.startswith('def pr_checks(')), 1, hits)
+        self.assertEqual(sum(1 for h in hits if h.startswith('return pr_checks(')), 1, hits)
+
+
 class RuledOnThisHeadTests(unittest.TestCase):
     """F-0157 P4(b,c): the lane acting on what it can now read — ``asf/harvest/lane.py:1368-1374``
     sets ``f['overruled']``/``f['review_answered']`` from :func:`lifecycle.overruling` and
