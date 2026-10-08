@@ -1853,7 +1853,9 @@ class SecurityRowTests(unittest.TestCase):
 
 class ReadmeRowTests(unittest.TestCase):
     """`doctor.check_readme` — F-0030 §2.7, Task 6: the ``readme`` row, required so a drifted
-    page is RED, skipped entirely for a page with no span or a repo dir that does not resolve."""
+    page is RED, ``'warn'`` (never red) for a page never refreshed at all — nothing committed to
+    have drifted from — and skipped entirely for a page with no span or a repo dir that does not
+    resolve."""
 
     SPAN = '<!--asf:n sessions-->9<!--/asf:n--> sessions run so far.\n'
 
@@ -1889,6 +1891,13 @@ class ReadmeRowTests(unittest.TestCase):
     def test_spanless_readme_is_skipped(self):
         self._write('README.md', 'Nothing to see here.\n')
         self.assertIsNone(doctor.check_readme(self._product()))
+
+    def test_never_refreshed_warns_but_is_not_red(self):
+        self._write('README.md', self.SPAN)
+        ok, detail = doctor.check_readme(self._product())
+        self.assertEqual(ok, 'warn')
+        self.assertIn('readme-numbers.json', detail)
+        self.assertFalse(doctor.is_red([('readme', True, ok, detail)]))
 
     def test_repo_dir_not_resolved_is_skipped(self):
         self.assertIsNone(doctor.check_readme(env.Product('sample', {})))
