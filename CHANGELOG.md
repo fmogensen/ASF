@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.257 — 2026-10-08
+
+### Features landed
+
+- The readers the brief states and the check enforces, in one function each (#1183)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.257"`
+
 ## v0.1.256 — 2026-10-08
 
 ### Features landed
