@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.268 — 2026-10-09
+
+### Features landed
+
+- Drift is visible — the sample product renders, doctor shows it, file-bugs files it (#1247)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.268"`
+
 ## v0.1.267 — 2026-10-08
 
 ### Features landed
