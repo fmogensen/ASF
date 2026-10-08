@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.260 — 2026-10-08
+
+### Bugs fixed
+
+- Staged-guard lets an intake note move to done/ after groom rewrote it (#1194)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.260"`
+
 ## v0.1.259 — 2026-10-08
 
 ### Features landed
