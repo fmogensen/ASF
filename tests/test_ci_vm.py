@@ -232,8 +232,6 @@ class FakeSsh(unittest.TestCase):
         self.repo_dir = os.path.join(self.tmp, 'repo')
         _sh(['git', 'init', '-q', '--bare', origin_dir])
         _sh(['git', 'clone', '-q', origin_dir, self.repo_dir])
-        _sh(['git', 'config', 'user.email', 'test@example.com'], cwd=self.repo_dir)
-        _sh(['git', 'config', 'user.name', 'Test'], cwd=self.repo_dir)
         _sh(['git', 'config', 'commit.gpgsign', 'false'], cwd=self.repo_dir)
         with open(os.path.join(self.repo_dir, 'README.md'), 'w', encoding='utf-8') as f:
             f.write('x\n')
@@ -528,8 +526,6 @@ class Wiring(unittest.TestCase):
         self.repo_dir = os.path.join(self.tmp, 'repo')
         _sh(['git', 'init', '-q', '--bare', origin])
         _sh(['git', 'clone', '-q', origin, self.repo_dir])
-        _sh(['git', 'config', 'user.email', 'test@example.com'], cwd=self.repo_dir)
-        _sh(['git', 'config', 'user.name', 'Test'], cwd=self.repo_dir)
         _sh(['git', 'config', 'commit.gpgsign', 'false'], cwd=self.repo_dir)
         with open(os.path.join(self.repo_dir, 'README.md'), 'w', encoding='utf-8') as f:
             f.write('x\n')
