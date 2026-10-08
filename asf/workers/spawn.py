@@ -37,6 +37,7 @@ import time
 from asf import ci_flight
 from asf import env, refguard
 from asf import hooks
+from asf import prepush
 from asf import progress
 from asf.workers import githooks
 from asf.workers import heartbeat
@@ -1251,6 +1252,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)
     refusals.clear(product, row.job)  # ... and keeps its own refusals (F-0266)
+    prepush.clear(product, row.job)   # ... and the door's own catches (F-0301)
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
     for d in getattr(row, 'add_dirs', None) or ():  # the row's own grants are the factory's dirs
         d = os.path.expanduser(d)
@@ -1270,6 +1272,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                                    row.item, branch),
                                **pushlog.env_for(product, row.job, row.kind),
                                **refusals.env_for(product, row.job),
+                               **prepush.env_for(product, row.job),
                                'ASF_PUSH_ALLOW': push_allow(product, row, branch),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid,
                                'ASF_READ_ROOTS': os.pathsep.join(add_dirs)},
