@@ -2,6 +2,26 @@
 
 One entry per released version, newest first.
 
+## v0.1.259 — 2026-10-08
+
+### Features landed
+
+- `dispatch.reassert()` puts the dispatcher back, and `cmd_tick` calls it once per pass before the lock (#1190)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.259"`
+
+## v0.1.258 — 2026-10-08
+
+### Features landed
+
+- The hook body checks the asf it is about to exec, and `ensure_git_hooks` bakes the guard exactly when the product is pinned (#1189)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.258"`
+
 ## v0.1.257 — 2026-10-08
 
 ### Features landed
