@@ -70,6 +70,9 @@ class FakeFacts(dwell.Facts):
     def live_refs(self):
         return self.kw.get('live')
 
+    def rerun_ids(self):
+        return self.kw.get('rerun_ids', frozenset())
+
 
 class DwellTestCase(unittest.TestCase):
     def setUp(self):
@@ -373,6 +376,18 @@ class CancelledCheckTests(DwellTestCase):
         gh.assert_not_called()
         got = self.by_state(found, 'check_cancelled')
         self.assertEqual([(f.key, f.breach) for f in got], [(f"#2@{'b' * 9}", False)])
+
+    def test_a_run_the_ci_queue_holds_to_rerun_is_not_watched(self):
+        # B-82809: the trunk relief cancels a run and holds it to re-run on its own
+        # (ci_queue.rerun_ids) — the same cancel pr_checks already reads as pending, never red;
+        # the watchdog must defer to it too, or it re-runs (or alarms on) a head the queue is
+        # already handling, breaching every pass since the per-head mark blocks its own retry.
+        prs = [pr(1, 'a' * 40, [check('tests', 'CANCELLED', run='991')])]
+        with mock.patch.object(github, 'gh') as gh:
+            found = self.found(FakeFacts(self.product, prs=prs, rerun_ids=frozenset({'991'})),
+                               act=True)
+        gh.assert_not_called()
+        self.assertEqual(self.by_state(found, 'check_cancelled'), [])
 
     def test_a_check_the_landing_does_not_require_is_not_watched(self):
         prs = [pr(1, 'a' * 40, [check('optional-lint', 'CANCELLED')])]

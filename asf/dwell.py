@@ -359,6 +359,14 @@ class Facts:
         from asf import approvals
         return approvals.open_holds(self.product)
 
+    def rerun_ids(self):
+        """Ids of the runs the CI queue's trunk/S1 relief cancelled and already holds to
+        re-run on its own (:func:`asf.ci_queue.rerun_ids`) — :func:`check_cancelled` defers to
+        it the way :func:`asf.harvest.lane.pr_checks` already does: that cancel is no verdict
+        on the code, and watchdog re-running (or alarming on) it races the relief's own plan."""
+        from asf import ci_queue
+        return self._once('rerun_ids', lambda: ci_queue.rerun_ids(self.state_dir))
+
 
 # ---- the probes: one per state, each a list of Findings ----------------------------------------
 
@@ -392,11 +400,17 @@ def pr_green_not_landing(facts):
     return out
 
 
+def _run_id(c):
+    m = _RUN_ID_RE.search(str(c.get('detailsUrl') or ''))
+    return m.group(1) if m else None
+
+
 def check_cancelled(facts):
     prs = facts.open_prs()
     if prs is None:
         return []
     required = facts.required()
+    held = facts.rerun_ids()
     from asf.harvest import lane as lane_mod
     out = []
     for pr in prs:
@@ -406,7 +420,8 @@ def check_cancelled(facts):
         if any(str(c.get('status') or '').upper() in _RUNNING for c in checks):
             continue                           # something still runs on this head
         gone = [c for c in checks if str(c.get('conclusion') or '').upper() in CANCELLED
-                and (not required or lane_mod.required_name(c.get('name'), required))]
+                and (not required or lane_mod.required_name(c.get('name'), required))
+                and _run_id(c) not in held]     # the CI queue's relief already holds it to re-run
         if not gone:
             continue
         ended = [parse_ts(c.get('completedAt')) for c in gone]
