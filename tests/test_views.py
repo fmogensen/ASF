@@ -345,15 +345,35 @@ class StatusViewTests(ViewsTestCase):
 
     def test_the_ready_cell_counts_rows_failing_to_spawn(self):
         from asf.feeder import rows as feeder_rows
+        from asf.tick.step_wave import Screened
         mk = lambda iid, action: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
                                                  feature_id='F-0001', action=action,
                                                  brief_kind='task', branch='', reason='')
-        plan = status.Plan(product=self.product, items={}, rows=[
-            mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2'),
-            mk('T-0002', 'would launch')], inputs={}, capacity=5, inflight=[], gate=None)
+        screened = [Screened(mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2')),
+                   Screened(mk('T-0002', 'would launch'))]
+        plan = status.Plan(product=self.product, items={}, rows=[], inputs={}, capacity=5,
+                           inflight=[], gate=None, screened=screened)
         # the plan tries the failing row, but it does not start: N is the one that does
         self.assertEqual(status.ready_cell(plan),
                          f'1 — first: {feeder_rows.PLAN_CODE} T-0002; 1 failing to spawn')
+
+    def test_the_ready_cell_counts_only_what_the_wave_would_start(self):
+        """C1 of docs/reviews/1-t-0441.md: a row the plan would launch but the wave's own filter
+        (held, host pressure, trunk close, a cloud lane's seats, the relaunch cap) refuses is
+        named as held back, by why — never counted as ready, and never silently dropped."""
+        from asf.feeder import rows as feeder_rows
+        from asf.tick.step_wave import CAPPED, HELD, Screened
+        mk = lambda iid, action: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
+                                                 feature_id='F-0001', action=action,
+                                                 brief_kind='task', branch='', reason='')
+        screened = [Screened(mk('T-0001', 'would launch'), why='held b (minor)', kind=HELD),
+                   Screened(mk('T-0002', 'would launch'), why='landed: abc (verified on origin/'
+                                                               'trunk); closed, not relaunched',
+                             kind=CAPPED)]
+        plan = status.Plan(product=self.product, items={}, rows=[], inputs={}, capacity=5,
+                           inflight=[], gate=None, screened=screened)
+        self.assertEqual(status.ready_cell(plan),
+                         '0 (2 held back (held 1, relaunch cap 1))')
 
     def _s1_gate_record(self, bugs, features, capacity=3):
         items = {'E-0001': INDEX['items']['E-0001']}
@@ -423,12 +443,14 @@ class StatusViewTests(ViewsTestCase):
 
     def test_one_plan_feeds_every_feeder_row(self):
         # D15, RD5: a render whose four feeder rows (Features in build, Ready to launch, S1
-        # gate, Decisions) are all filled still reads the ledger and the record once
+        # gate, Decisions) are all filled still reads the ledger and the record once for the
+        # feeder's own plan — Parked's _stalemate_parks, grown on trunk since RD5 was measured,
+        # is a second, independent plan_inputs call of its own, not one of the four feeder rows
         from asf.tick import step_wave
         product = self._holding_record()
         with mock.patch.object(step_wave, 'plan_inputs', wraps=step_wave.plan_inputs) as spy:
             status.render(self.root, product, cfg={'scheduler': {'kind': 'none'}})
-        self.assertEqual(spy.call_count, 1)
+        self.assertEqual(spy.call_count, 2)
 
 
 class DecisionsCellTests(ViewsTestCase):

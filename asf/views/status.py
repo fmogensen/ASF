@@ -22,8 +22,9 @@ Every row is filled from what exists, or says which key would fill it —
   starts" only while the cap holds a launching row, else "the cap holds no row now";
 * **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
   closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
-* **Ready to launch** — the rows this tick's one plan (:func:`_plan`) would launch, less the
-  sessions in flight — a failing-to-spawn row named apart;
+* **Ready to launch** — the rows this tick's one plan (:func:`_plan`) would launch, through the
+  wave's own per-row filter (:func:`asf.tick.step_wave.screen`) over that plan — held back and
+  failing-to-spawn rows named apart;
 * **S1 gate** — the S1 lane's cut of that same plan (:func:`asf.feeder.tiers.gate`): who holds
   the floor and how many rows behind it, and any open S1 nothing is working; no row while the
   gate holds nothing (P11);
@@ -68,7 +69,11 @@ def not_configured(key):
 #: inflight  the sessions running now (:func:`asf.tick.step_wave.inflight`)
 #: gate      the S1 lane's gate over the cut and the uncut plan (:func:`asf.feeder.tiers.gate`),
 #:           or ``None``
-Plan = collections.namedtuple('Plan', 'product items rows inputs capacity inflight gate')
+#: screened  the cut plan through the wave's own per-row filter
+#:           (:func:`asf.tick.step_wave.screen`: approval holds, trunk closes, host pressure,
+#:           seats (the cloud lane's included), the relaunch cap) — what ``ready_cell`` counts,
+#:           so its N is never a row the wave would then refuse
+Plan = collections.namedtuple('Plan', 'product items rows inputs capacity inflight gate screened')
 
 
 def _plan(root, product):
@@ -80,6 +85,7 @@ def _plan(root, product):
     from asf.feeder import tiers
     from asf.tick import step_wave
     from asf.views import index_reader as ix
+    from asf.workers import host as host_mod
     if not root or not os.path.exists(os.path.join(root, 'index.json')):
         return None
     items, _generated = ix.load(root)
@@ -91,8 +97,27 @@ def _plan(root, product):
     # whole demand behind the gate, not just this tick's (RD2)
     uncut = feeder_rows.plan_rows(items, product, running, len(items) + len(running or ()),
                                   s1_first=False, **inputs)
+    # the wave's own screen, over this same plan_inputs (no second call, RD5) — the cloud lane's
+    # seats included, same as would_start, so a product running one is never undercounted (C1/I1
+    # of docs/reviews/1-t-0441.md: the cut above has no notion of a hold, host pressure, trunk
+    # close or the relaunch cap, all of which live only in step_wave.screen)
+    cloud = step_wave.cloud_settings(product)
+    cloud_ready = step_wave.cloud_readiness(product, cloud)
+    _held, _hold, extra = step_wave.split_hold(cloud, cloud_ready, False, '')
+    seats = cap + extra
+    planned, _dropped = step_wave.gated_plan(items, product, running, seats, inputs,
+                                             out=lambda _line: None)
+    host_held, host_why, reading = step_wave.host_hold(planned)
+    host_held, _local, _extra = step_wave.split_hold(cloud, cloud_ready, host_held, host_why)
+    bypass_open = bool(host_held
+                       and host_mod.load_only_hold(reading,
+                                                   host_mod.guards_from_config(env.load_config()))
+                       and not step_wave.s1_bypass_live())
+    screened = step_wave.screen(product, planned, items, running, inputs.get('held') or set(),
+                                seats, (host_held, host_why), bypass_open, act=False)
     return Plan(product=product, items=items, rows=rows, inputs=inputs, capacity=cap,
-               inflight=running, gate=tiers.gate(rows, uncut, held=inputs.get('held')))
+               inflight=running, gate=tiers.gate(rows, uncut, held=inputs.get('held')),
+               screened=screened)
 
 
 _DIGEST_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})-digest\.md$')
@@ -418,18 +443,34 @@ def _residue(item):
 
 
 def ready_cell(plan):
-    """How many rows this tick's one plan (:func:`_plan`) would launch, and the first of them.
-    A row failing to spawn tick after tick is in the plan but not counted as starting."""
+    """How many rows this tick's one plan (:func:`_plan`) would launch, and the first of them —
+    the wave's own filter (:func:`asf.tick.step_wave.screen`: approval holds, trunk closes, host
+    pressure, seats, the relaunch cap), so N is never a row the wave then refuses. A row the plan
+    launches but that filter refuses is counted as held back, by why; a row failing to spawn tick
+    after tick is tried by the wave but not counted as starting."""
     from asf.feeder import rows as feeder_rows
     if plan is None:
         return not_configured('backlog_dir (no index.json)')
-    starting = [r for r in plan.rows if r.launches]
-    failing = [r for r in starting if feeder_rows.FAILING_TO_SPAWN in r.action]
-    ready = [r for r in starting if r not in failing]
-    tail = f"; {len(failing)} {feeder_rows.FAILING_TO_SPAWN.lower()}" if failing else ''
+    screened = plan.screened
+    starting = [s for s in screened if s.starts]
+    failing = [s for s in starting if feeder_rows.FAILING_TO_SPAWN in s.row.action]
+    ready = [s for s in starting if s not in failing]
+    back = {}
+    for s in screened:
+        if s.row.launches and s.why:
+            back[s.kind] = back.get(s.kind, 0) + 1
+    notes = []
+    if failing:
+        notes.append(f"{len(failing)} {feeder_rows.FAILING_TO_SPAWN.lower()}")
+    if back:
+        notes.append(f"{sum(back.values())} held back ("
+                     + ', '.join(f'{k} {n}' for k, n in sorted(back.items())) + ')')
+    tail = ''.join(f'; {n}' for n in notes)
     if not ready:
-        return f"0{tail}" if tail else "0"
-    first = ready[0]
+        waiting = sum(1 for s in screened if not s.row.launches)
+        parts = ([f"{waiting} row(s) waiting"] if waiting else []) + notes
+        return f"0 ({'; '.join(parts)})" if parts else "0"
+    first = ready[0].row
     return f"{len(ready)} — first: {first.kind} {first.item_id}{tail}"
 
 
