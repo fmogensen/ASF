@@ -648,6 +648,8 @@ generated: 2026-09-21 — from metrics/ci (3), metrics/sessions (4), metrics/tic
 | tokens | in — · out — · cache rd — · cache wr — | 4 sessions, 0 capped |
 | spec quality | 1 specs reviewed, 0 in round 1 | mean 2.0 rounds, median 2 |
 | bandwidth | quota 5h/7d: accta 12/21 %, acctb 5/6 % | 2 runners seen, 40 runner-minutes |
+| ci cancelled minutes | 40 runner-minutes (7d) — under the 60-minute floor | target 15 % — no verdict; today — %; batch 12 |
+| ci red rate | 3 runs (7d) — under the 20-run floor | target 15 % — no verdict; today — %; e2e 1/3 |
 
 ## Cost per Feature (7 days)
 
@@ -907,6 +909,168 @@ class Rollup(Base):
                 with open(p, 'rb') as fh:
                     snap[os.path.relpath(p, self.root)] = fh.read()
         return snap
+
+
+def waste_ci(n, red, minutes_total=0, cancelled_minutes=0):
+    """`n` hand-built `ci` events (no schema, `ci_waste_numbers` reads with `.get`): the first
+    carries `minutes_total` and `cancelled_minutes`, the rest zero; the first `red` of them
+    conclude `failure`, the rest `success`."""
+    rows = [{'minutes': 0, 'cancelled_minutes': 0, 'conclusion': 'failure' if i < red else 'success', 'jobs': []}
+            for i in range(n)]
+    if rows:
+        rows[0]['minutes'] = minutes_total
+        rows[0]['cancelled_minutes'] = cancelled_minutes
+    return rows
+
+
+class CiWasteNumberTests(unittest.TestCase):
+    def test_scorecard_order_and_both_over_target(self):
+        ci = waste_ci(100, 21, 4210, 760)
+        cancelled, red = metrics.ci_waste_numbers(ci)
+        self.assertEqual([n['key'] for n in metrics.ci_waste_numbers(ci)], ['cancelled', 'red'])
+        self.assertEqual((cancelled['num'], cancelled['den'], cancelled['pct'], cancelled['verdict']),
+                         (760, 4210, 18, 'over'))
+        self.assertEqual((red['num'], red['den'], red['pct'], red['verdict']), (21, 100, 21, 'over'))
+
+    def test_both_ok_at_a_higher_target(self):
+        conv = Conventions(ci_cancelled_target_pct=25, ci_red_target_pct=25)
+        cancelled, red = metrics.ci_waste_numbers(waste_ci(100, 21, 4210, 760), conv)
+        self.assertEqual(cancelled['verdict'], 'ok')
+        self.assertEqual(red['verdict'], 'ok')
+
+    def test_a_number_exactly_at_its_target_is_over(self):
+        cancelled, red = metrics.ci_waste_numbers(waste_ci(100, 15, 100, 15))
+        self.assertEqual((cancelled['pct'], cancelled['verdict']), (15, 'over'))
+        self.assertEqual((red['pct'], red['verdict']), (15, 'over'))
+
+    def test_den_under_the_floor_is_no_verdict(self):
+        cancelled, _red = metrics.ci_waste_numbers(waste_ci(1, 0, 59, 10))
+        self.assertEqual((cancelled['den'], cancelled['pct'], cancelled['verdict']), (59, None, 'no verdict'))
+
+    def test_empty_list_is_den_zero_same_verdict_both(self):
+        numbers = metrics.ci_waste_numbers([])
+        self.assertEqual([(n['den'], n['pct'], n['verdict']) for n in numbers], [(0, None, 'no verdict')] * 2)
+
+    def test_missing_cancelled_minutes_counts_as_zero_but_minutes_still_contribute(self):
+        cancelled, _red = metrics.ci_waste_numbers([{'minutes': 10, 'conclusion': 'success', 'jobs': []}])
+        self.assertEqual((cancelled['num'], cancelled['den']), (0, 10))
+
+    def test_an_unparseable_ts_stays_in_the_totals_and_out_of_by_day(self):
+        ci = [{'minutes': 10, 'cancelled_minutes': 5, 'conclusion': 'success', 'jobs': [], 'ts': 'not a timestamp'},
+              {'minutes': 10, 'cancelled_minutes': 5, 'conclusion': 'success', 'jobs': [], 'ts': '2026-09-17T00:00:00Z'}]
+        cancelled, _red = metrics.ci_waste_numbers(ci)
+        self.assertEqual((cancelled['num'], cancelled['den']), (10, 20))
+        self.assertEqual(cancelled['by_day'], [('2026-09-17', 5, 10)])
+
+    def test_by_day_is_oldest_first_and_only_days_with_runs(self):
+        ci = [{'minutes': 5, 'cancelled_minutes': 1, 'conclusion': 'success', 'jobs': [], 'ts': '2026-09-19T00:00:00Z'},
+              {'minutes': 5, 'cancelled_minutes': 2, 'conclusion': 'success', 'jobs': [], 'ts': '2026-09-17T00:00:00Z'},
+              {'minutes': 5, 'cancelled_minutes': 3, 'conclusion': 'success', 'jobs': [], 'ts': '2026-09-18T00:00:00Z'}]
+        cancelled, _red = metrics.ci_waste_numbers(ci)
+        self.assertEqual([d for d, _n, _dd in cancelled['by_day']], ['2026-09-17', '2026-09-18', '2026-09-19'])
+
+    def test_split_is_largest_first_by_lane_for_cancelled(self):
+        ci = [{'minutes': 1, 'cancelled_minutes': 20, 'conclusion': 'success', 'jobs': [], 'batch': 'm1'},
+              {'minutes': 1, 'cancelled_minutes': 5, 'conclusion': 'success', 'jobs': [], 'branch': 'main'},
+              {'minutes': 1, 'cancelled_minutes': 10, 'conclusion': 'success', 'jobs': [], 'branch': 'feature/x'}]
+        cancelled, _red = metrics.ci_waste_numbers(ci)
+        self.assertEqual([(k, v) for k, v, _p in cancelled['split']], [('batch', 20), ('branch', 10), ('trunk', 5)])
+
+    def test_split_is_largest_first_capped_by_failing_job_for_red(self):
+        ci = []
+        for name, count in (('j1', 5), ('j2', 4), ('j3', 3), ('j4', 2), ('j5', 1)):
+            ci.extend({'minutes': 1, 'jobs': [{'name': name, 'conclusion': 'failure'}]} for _ in range(count))
+        _cancelled, red = metrics.ci_waste_numbers(ci)
+        self.assertEqual([k for k, _v, _p in red['split']], ['j1', 'j2', 'j3', 'j4'])
+        self.assertEqual(len(red['split']), metrics.CI_SPLIT_CAP)
+
+    def test_a_non_numeric_target_yields_the_default_and_a_config_sentence(self):
+        conv = Conventions(ci_cancelled_target_pct='fifteen')
+        cancelled, _red = metrics.ci_waste_numbers(waste_ci(100, 0, 100, 20), conv)
+        self.assertEqual(cancelled['target'], 15)
+        self.assertEqual(cancelled['config'], "'fifteen' is not a number")
+        self.assertEqual(cancelled['verdict'], 'over')
+
+    def test_a_bool_target_is_not_read_as_the_integer_one(self):
+        conv = Conventions(ci_cancelled_target_pct=True)
+        cancelled, _red = metrics.ci_waste_numbers(waste_ci(100, 0, 100, 20), conv)
+        self.assertEqual(cancelled['target'], 15)
+        self.assertEqual(cancelled['config'], 'True is not a number')
+
+    def test_pure_no_clock_no_filesystem_same_input_twice(self):
+        ci = waste_ci(50, 10, 500, 60)
+        self.assertEqual(metrics.ci_waste_numbers(ci), metrics.ci_waste_numbers(ci))
+
+
+class CiTargetRowTests(Base):
+    def put_ci(self, run, **kw):
+        self.put('ci', ci_event(run, **kw))
+
+    def test_two_rows_labelled_with_provider_week_value_differs_from_todays_note(self):
+        conv = Conventions(ci_provider='gh-actions', ci_min_minutes=1, ci_min_runs=1)
+        week = metrics.days_back(DAY, 7)
+        run = 1
+        for day in week[:-1]:
+            self.put_ci(run, ts=f'{day}T09:00:00Z', minutes=100, cancelled_minutes=30, conclusion='failure',
+                        branch='main', jobs=[job('e2e', 'failure', 100)])
+            run += 1
+        self.put_ci(run, ts=f'{DAY}T09:00:00Z', minutes=100, cancelled_minutes=0, conclusion='success',
+                    branch='main', jobs=[job('e2e', 'success', 100)])
+        rows = {r[0]: r for r in metrics.scorecard_rows(
+            metrics.read_stream(self.root, 'ci', [DAY]), [], [], conv,
+            ci7=metrics.read_stream(self.root, 'ci', week))}
+        self.assertEqual(rows['ci cancelled minutes (gh-actions)'],
+                         ('ci cancelled minutes (gh-actions)', '25 % of 700 runner-minutes (7d)',
+                          'target 15 % — over; today 0 %; trunk 180'))
+        self.assertEqual(rows['ci red rate (gh-actions)'],
+                         ('ci red rate (gh-actions)', '85 % of 7 runs (7d)',
+                          'target 15 % — over; today 0 %; e2e 6/7'))
+
+    def test_under_target_is_ok(self):
+        conv = Conventions(ci_provider='gh-actions')
+        week = metrics.days_back(DAY, 7)
+        run = 1
+        for day in week:
+            for _ in range(4):
+                self.put_ci(run, ts=f'{day}T09:00:00Z', minutes=20, cancelled_minutes=0, conclusion='success',
+                            branch='main', jobs=[job('e2e', 'success', 20)])
+                run += 1
+        md = metrics.render_daily(self.root, DAY, self.items, conv=conv)
+        self.assertIn('| ci cancelled minutes (gh-actions) | 0 % of 560 runner-minutes (7d) | '
+                      'target 15 % — ok; today 0 % |', md)
+        self.assertIn('| ci red rate (gh-actions) | 0 % of 28 runs (7d) | '
+                      'target 15 % — ok; today — % |', md)
+
+    def test_den_under_the_floor_names_the_floor(self):
+        conv = Conventions(ci_provider='gh-actions')
+        self.put_ci(1, ts=f'{DAY}T09:00:00Z', minutes=10, cancelled_minutes=0, conclusion='success',
+                    branch='main', jobs=[job('e2e', 'success', 10)])
+        md = metrics.render_daily(self.root, DAY, self.items, conv=conv)
+        self.assertIn('| ci cancelled minutes (gh-actions) | 10 runner-minutes (7d) — under the 60-minute floor | '
+                      'target 15 % — no verdict; today — % |', md)
+        self.assertIn('| ci red rate (gh-actions) | 1 runs (7d) — under the 20-run floor | '
+                      'target 15 % — no verdict; today — % |', md)
+
+    def test_no_runs_at_all_with_a_provider_prints_the_rows_anyway(self):
+        conv = Conventions(ci_provider='gh-actions')
+        md = metrics.render_daily(self.root, DAY, self.items, conv=conv)
+        self.assertIn('| ci cancelled minutes (gh-actions) | no runs in 7 days | '
+                      'target 15 % — no verdict; today — % |', md)
+        self.assertIn('| ci red rate (gh-actions) | no runs in 7 days | '
+                      'target 15 % — no verdict; today — % |', md)
+
+    def test_no_runs_and_no_provider_skips_both_rows_and_the_rest_is_unchanged(self):
+        md = metrics.render_daily(self.root, DAY, self.items)
+        self.assertNotIn('ci cancelled minutes', md)
+        self.assertNotIn('ci red rate', md)
+        self.assertIn('| ci runs | 0 — 0 green, 0 red, 0 reruns | red rate 0 % |', md)
+        self.assertIn('| **All** | | 0 | 0 | 0 | — |', md)
+
+    def test_ci_runs_and_runner_minutes_rows_are_unchanged(self):
+        fixture_streams(self)
+        md = metrics.render_daily(self.root, DAY, self.items)
+        self.assertIn('| ci runs | 3 — 1 green, 1 red, 1 reruns | red rate 33 % |', md)
+        self.assertIn('| runner-minutes | 40 (0 h) — useful 70 % | cancelled: batch 12 (30 %) — 30 % of the minutes |', md)
 
 
 DEPLOYS = [{'headSha': 'b' * 40, 'conclusion': 'success', 'updatedAt': '2026-09-21T05:00:00Z'},
