@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.266 — 2026-10-08
+
+### Bugs fixed
+
+- A footprint correction never waits on a priority-later Task (#1244)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.266"`
+
 ## v0.1.265 — 2026-10-08
 
 ### Bugs fixed
