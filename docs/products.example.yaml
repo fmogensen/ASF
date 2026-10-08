@@ -649,6 +649,14 @@ clocks:
 #   readme_sections: [Install, Quick start, Configuration, Upgrade]
 #   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product,
 #              rehearsal: release rehearsal}
+#   channels: {stable_every_days: 7, edge_dwell_h: 48, rehearsal_check: rehearsal, lookback_tags: 10, log_keep: 60}
+#                                  # F-0308's release channels (asf.channels): the weekly cadence
+#                                  # (stable_every_days), hours a tag must sit on edge before
+#                                  # stable considers it (edge_dwell_h), the named CI check
+#                                  # stable's rehearsal row reads — off disables the row
+#                                  # (rehearsal_check) — at most this many tags examined, newest
+#                                  # first, for edge's candidate (lookback_tags), and edge
+#                                  # publications kept in the channel log (log_keep)
 #   requires: {install: [], upgrade: [], generic: [], docs: [], rehearsal: []}   # Features each criterion also needs landed
 #   blocking: []                   # Features that must be landed before a release
 #   floor:                         # criterion 9: no leftover older than its deadline; `off` disables a kind

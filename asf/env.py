@@ -624,8 +624,12 @@ NESTED_FIELDS = {
 # ``ci.hosts``/``ci.jobs`` (asf.ci_vm: the ``ci.provider: vm`` config) are the same case — a
 # product only sets either after adopting a release that reads them, so the pinned reader this
 # key would strand never runs a file that carries it.
+# ``release.channels`` (asf.channels.settings, F-0308) is a map of its own five thresholds,
+# never registered in RELEASE_FIELDS or NESTED_FIELDS — a registered sub-key is what the pinned
+# reader refuses (PD7), and `check()` validates one level only, so the keys inside the map are
+# never read by it either way.
 DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats',
-                                         'ci.hosts', 'ci.jobs'})
+                                         'release.channels', 'ci.hosts', 'ci.jobs'})
 
 
 def _shape_ok(value, shape):
