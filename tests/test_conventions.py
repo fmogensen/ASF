@@ -108,6 +108,24 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(Conventions.from_mapping({}), Conventions())
 
 
+class CiTargetConventionTests(unittest.TestCase):
+    """T-0216 T1: the two targets, the two floors and the provider (F-0043 §2.1)."""
+
+    def test_the_defaults_are_15_15_60_20_and_no_provider(self):
+        c = Conventions()
+        self.assertEqual((c.ci_cancelled_target_pct, c.ci_red_target_pct, c.ci_min_minutes,
+                          c.ci_min_runs), (15, 15, 60, 20))
+        self.assertIsNone(c.ci_provider)
+
+    def test_from_mapping_overrides_one_and_leaves_the_rest_default(self):
+        c = Conventions.from_mapping({'ci_red_target_pct': 5})
+        self.assertEqual(c.ci_red_target_pct, 5)
+        self.assertEqual((c.ci_cancelled_target_pct, c.ci_min_minutes, c.ci_min_runs),
+                         (15, 60, 20))
+        self.assertIsNone(c.ci_provider)
+        self.assertEqual(c.extra, {})
+
+
 class MergeMapTests(unittest.TestCase):
     def test_the_merge_map_reads_all_four_fields(self):
         c = Conventions.from_mapping({'merge': {'mode': 'auto', 'factory_only': True,

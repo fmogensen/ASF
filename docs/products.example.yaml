@@ -379,6 +379,13 @@ ci:
   # workflows: [tests.yml, lint]
   # read as conventions.ci_dev_job — the job in that workflow whose success marks the dev sha.
   dev_job: test
+  # F-0043: the two waste numbers the daily scorecard prints as value against target, and the
+  # volume below which it prints no verdict at all. Shown at their defaults.
+  targets:
+    cancelled_pct: 15    # cancelled runner minutes, as a share of all runner minutes
+    red_rate_pct: 15     # CI runs ending red, as a share of all runs
+    min_minutes: 60      # no verdict on cancelled_pct below this many runner-minutes in 7 days
+    min_runs: 20         # no verdict on red_rate_pct below this many runs in 7 days
   budgets:
     minutes_per_day: 500
   runner_org: acme
