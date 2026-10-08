@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.269 — 2026-10-09
+
+### Features landed
+
+- The peel asked for by name, the Unknown that says why, and a test real git answers (#1241)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.269"`
+
 ## v0.1.268 — 2026-10-09
 
 ### Features landed
