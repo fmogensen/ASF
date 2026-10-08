@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.253 — 2026-10-08
+
+### Features landed
+
+- The two targets, the two floors and the provider are product configuration (#1127)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.253"`
+
 ## v0.1.252 — 2026-10-08
 
 ### Features landed
