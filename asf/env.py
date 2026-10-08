@@ -297,7 +297,8 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_worker_pool(cfg):
     """``worker_pool.env_passthrough`` (a list of environment variable names) and each
     account's ``home`` (a path), ``isolate_home`` (true | false), ``home_seed`` (a list of
-    paths) and ``auth_env`` (``{VARIABLE: file}``) checked: ``[(dotted key, problem)]``, empty when well-formed or absent."""
+    paths), ``auth_env`` (``{VARIABLE: file}``) and ``provider`` (a provider-kind name) checked:
+    ``[(dotted key, problem)]``, empty when well-formed or absent."""
     pool = (cfg or {}).get('worker_pool')
     if not isinstance(pool, dict):
         return []
@@ -319,6 +320,9 @@ def validate_worker_pool(cfg):
         home = acct.get('home')
         if home is not None and (not isinstance(home, str) or not home.strip()):
             problems.append((label + '.home', f'must be a path, not {home!r}'))
+        provider = acct.get('provider')
+        if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+            problems.append((label + '.provider', f'must be a provider-kind name, not {provider!r}'))
         isolate = acct.get('isolate_home')
         if isolate is not None and not isinstance(isolate, bool):
             problems.append((label + '.isolate_home', f'must be true or false, not {isolate!r}'))
