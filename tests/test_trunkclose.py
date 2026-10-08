@@ -541,5 +541,16 @@ class GitUnknownTests(_Repo):
 _REAL_OPEN_PRS = landing.open_prs
 
 
+class ProseReportFallbackTests(unittest.TestCase):
+    """F-0025 replan, PD-READERS: `own_shas` and `trunk_sha` still read a prose-only report (no
+    `asf-report` fence at all) through `report._prose` — the regression PD-READERS exists to
+    prevent."""
+
+    def test_own_shas_reads_a_prose_only_report(self):
+        text = ('REPORT\nitem: T-0332\nkind: coder\nstatus: done\n'
+                'pushed: yes abc1234\ncommits: def5678 task(T-0332): the work\n')
+        self.assertEqual(trunkclose.own_shas(text), ['abc1234', 'def5678'])
+
+
 if __name__ == '__main__':
     unittest.main()

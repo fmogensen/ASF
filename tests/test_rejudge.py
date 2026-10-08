@@ -274,5 +274,18 @@ class LiveOverlapTests(WidenStepBase):
         self.assertEqual([r.action for r in rows], ['WAITS ON T-0002'], rows)
 
 
+class ProseReportFallbackTests(unittest.TestCase):
+    """F-0025 replan, PD-READERS: `rejudge.judged`'s status read still reads a prose-only report
+    (no `asf-report` fence at all) through `report._prose` — the regression PD-READERS exists to
+    prevent."""
+
+    def test_judged_reads_the_status_off_a_prose_only_report(self):
+        text = 'REPORT\nitem: T-0001\nkind: coder\nstatus: done\npushed: yes abc1234\n'
+        run = {'end_reason': f'failed: {lifecycle.EMPTY_BRANCH}'}
+        fields, what = rejudge.judged(run, text)
+        self.assertEqual((fields, what), ({'end_reason': lifecycle.NOTHING_TO_LAND},
+                                          lifecycle.NOTHING_TO_LAND))
+
+
 if __name__ == '__main__':
     unittest.main()

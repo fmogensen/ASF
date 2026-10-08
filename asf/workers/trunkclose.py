@@ -81,7 +81,7 @@ def own_shas(text):
     """The shas the REPORT itself says the run made: every sha of its ``pushed:`` field, and the
     leading sha of each ``commits:`` entry (``<sha> <subject>``; a subject may name the evidence
     — "already landed in <sha>" — and is not read)."""
-    rep = report_mod.parse(text or '')
+    rep = report_mod._prose(text or '')
     out = relaunch.SHA_RE.findall(rep.get('pushed') or '')
     for part in re.split(r'[\n;,]', rep.get('commits') or ''):
         m = LEAD_SHA_RE.match(part)
@@ -112,7 +112,7 @@ def trunk_sha(repo, main, run, text, item='', writes=(), prs=()):
     launch = run.get('launch_head') or ''
     branch = run.get('branch') or ''
     skip = {s[:7] for s in own_shas(text) + [launch] if s}
-    pushed = next(iter(relaunch.SHA_RE.findall(report_mod.parse(text).get('pushed') or '')), '')
+    pushed = next(iter(relaunch.SHA_RE.findall(report_mod._prose(text).get('pushed') or '')), '')
     for sha in dict.fromkeys(relaunch.SHA_RE.findall(text)):
         if sha[:7] in skip or not _is_ancestor(repo, sha, f'origin/{main}'):
             continue

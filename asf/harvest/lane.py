@@ -1163,7 +1163,7 @@ def report_status(run):
         return ''
     from asf.workers import report as report_mod
     result = lifecycle.result_of(run) or {}
-    fields = report_mod.parse(result.get('result') if isinstance(result, dict) else '')
+    fields = report_mod._prose(result.get('result') if isinstance(result, dict) else '')
     return (fields.get('status') or '').strip().lower().split(' ')[0]
 
 
@@ -1699,7 +1699,7 @@ class Lane:
         out = []
         rec = lifecycle.result_of(run) or {}
         text = rec.get('result') if isinstance(rec, dict) else ''
-        m = lifecycle.PUSHED_SHA_RE.search(report_mod.parse(text or '').get('pushed') or '')
+        m = lifecycle.PUSHED_SHA_RE.search(report_mod._prose(text or '').get('pushed') or '')
         if m:
             out.append(m.group(0).lower())
         wt = (run or {}).get('worktree')

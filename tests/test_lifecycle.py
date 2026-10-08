@@ -27,6 +27,7 @@ from asf import env, redact
 from asf.scorecard import score
 from asf.workers import lifecycle as lc
 from asf.workers import observe
+from asf.workers import report as report_mod
 
 OK = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}
 ERR = {'type': 'result', 'subtype': 'error', 'is_error': True, 'result': 'boom'}
@@ -601,8 +602,8 @@ class NoLandingRunInvariants(unittest.TestCase):
         self.assertEqual(lc.judge(self.GROOM, lc.Evidence(result=ERR)), 'failed')
 
     def test_a_groom_report_saying_pushed_no_is_not_unpushed_work(self):
-        rec = dict(OK, result='REPORT\nitem: F-0080\nkind: groom\nstatus: done\n'
-                              'pushed: no — a ruling is not a commit\n')
+        rec = dict(OK, result=report_mod.render('groom', pushed='no',
+                                                  why='a ruling is not a commit'))
         self.assertEqual(lc.judge(self.GROOM, lc.Evidence(result=rec)), lc.FINISHED)
 
     def test_a_run_sent_back_on_a_groom_branch_lands_nothing_either(self):
@@ -746,11 +747,12 @@ class StateMachineInvariants(unittest.TestCase):
         self.assertEqual(lc.attempts(path), {'B-0001': 2})
 
     def _ruling_log(self, d, text):
-        """A fake session log whose REPORT's ``ruling:`` field is ``text`` — what
-        ``settled_prs`` reads (:func:`asf.workers.report.ruling`)."""
+        """A fake session log whose typed report's ``ruling`` field is ``text`` — what
+        ``settled_prs`` reads (:func:`asf.workers.report.ruling`, typed-only)."""
         log = os.path.join(d, 'ruling.jsonl')
-        rec = {'type': 'result', 'subtype': 'success', 'is_error': False,
-               'result': f'REPORT\nitem: B-0001\nstatus: done\nruling: {text}\n'}
+        result = (f'REPORT\nitem: B-0001\nstatus: done\nruling: {text}\n\n' +
+                  report_mod.render('adjudicate', ruling=text))
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': result}
         with open(log, 'w') as f:
             f.write(json.dumps(rec) + '\n')
         return log
@@ -2611,7 +2613,8 @@ class DeliveredOffBranchTests(unittest.TestCase):
         with open(path or self.path, 'a') as f:
             f.write(json.dumps(ln) + '\n')
 
-    RULING = 'REPORT\nitem: T-0001\nstatus: done\ncommits: none\nruling: overruled — no defect\n'
+    RULING = ('REPORT\nitem: T-0001\nstatus: done\ncommits: none\nruling: overruled — no defect\n'
+              '\n' + report_mod.render('adjudicate', ruling='overruled — no defect'))
 
     def test_an_adjudicate_ruling_is_believed(self):
         run = {'kind': 'adjudicate', 'item': 'T-0001'}
@@ -2656,14 +2659,15 @@ class DeliveredOffBranchTests(unittest.TestCase):
         claims_a_sha = 'REPORT\nitem: T-0001\nstatus: done\ncommits: deadbeef fix\nruling: overruled\n'
         self.assertIsNone(lc.delivered_off_branch(None, run, claims_a_sha))
         # pinned against an adjudicate run with a real ruling: F-0126's blocked park still wins
-        needs_operator = self.RULING + 'NEEDS OPERATOR: pick a knob\n'
+        needs_operator = self.RULING + '\nNEEDS OPERATOR: pick a knob\n'
         self.assertIsNone(lc.delivered_off_branch(None, run, needs_operator))
 
     def test_every_no_claim_spelling_of_commits_passes(self):
         run = {'kind': 'adjudicate', 'item': 'T-0001'}
         for value in ('', 'none', 'n/a', '-', '—'):
             with self.subTest(commits=value):
-                text = f'REPORT\nitem: T-0001\nstatus: done\ncommits: {value}\nruling: overruled\n'
+                text = (f'REPORT\nitem: T-0001\nstatus: done\ncommits: {value}\nruling: overruled\n'
+                       '\n' + report_mod.render('adjudicate', ruling='overruled'))
                 self.assertEqual(lc.delivered_off_branch(None, run, text),
                                  'ruling filed: overruled…')
 
@@ -2718,7 +2722,8 @@ class DeliveredReadersTests(unittest.TestCase):
     def test_overruling_over_its_commits_none_clause(self):
         head = 'a' * 40
         log = self._log('overrule.jsonl',
-                        'REPORT\nitem: B-0001\nstatus: done\ncommits: none\nruling: overruled — no defect\n')
+                        'REPORT\nitem: B-0001\nstatus: done\ncommits: none\nruling: overruled — no defect\n'
+                        '\n' + report_mod.render('adjudicate', ruling='overruled — no defect'))
         run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
                'started': 't1', 'ended': 't2', 'end_reason': lc.NOTHING_TO_LAND,
                'launch_head': head, 'log': log}
@@ -2732,7 +2737,8 @@ class DeliveredReadersTests(unittest.TestCase):
     def test_overruling_the_pushed_sha_and_same_code_paths_still_work(self):
         sha = 'c' * 12
         pushed_ruling = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
-                         f'ruling: upheld — fixed\npushed: yes {sha}\n')
+                         f'ruling: upheld — fixed\npushed: yes {sha}\n'
+                         '\n' + report_mod.render('adjudicate', ruling='upheld — fixed'))
         log = self._log('pushed.jsonl', pushed_ruling)
         run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
                'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}
@@ -2796,7 +2802,8 @@ class RulingAcrossARebaseTests(unittest.TestCase):
     def test_the_pushed_sha_through_the_predicate(self):
         sha = 'c' * 12
         text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
-                'ruling: upheld — fixed\npushed: yes ' + sha + '\n')
+                'ruling: upheld — fixed\npushed: yes ' + sha + '\n'
+                '\n' + report_mod.render('adjudicate', ruling='upheld — fixed'))
         log = self._log('pushed-log.jsonl', text)
         run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
                'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}
@@ -2811,7 +2818,8 @@ class RulingAcrossARebaseTests(unittest.TestCase):
         # and it is launch_head — the fact behind the claim — the predicate must be reached for.
         head = 'a' * 40
         text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: none\n'
-                'ruling: overruled — no defect\npushed: yes deadbeef99999999\n')
+                'ruling: overruled — no defect\npushed: yes deadbeef99999999\n'
+                '\n' + report_mod.render('adjudicate', ruling='overruled — no defect'))
         log = self._log('rebased-log.jsonl', text)
         run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
                'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'launch_head': head,
@@ -2825,7 +2833,8 @@ class RulingAcrossARebaseTests(unittest.TestCase):
     def test_a_run_that_committed_offers_no_launch_head_candidate(self):
         head = 'a' * 40
         text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: abc1234 fix: C1\n'
-                'ruling: upheld — fixed\npushed: yes deadbeef99999999\n')
+                'ruling: upheld — fixed\npushed: yes deadbeef99999999\n'
+                '\n' + report_mod.render('adjudicate', ruling='upheld — fixed'))
         log = self._log('committed-log.jsonl', text)
         run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
                'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'launch_head': head,
@@ -2837,7 +2846,8 @@ class RulingAcrossARebaseTests(unittest.TestCase):
     def test_a_predicate_that_accepts_nothing_is_not_called_when_the_head_already_matches(self):
         sha = 'c' * 12
         text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
-                'ruling: upheld — fixed\npushed: yes ' + sha + '\n')
+                'ruling: upheld — fixed\npushed: yes ' + sha + '\n'
+                '\n' + report_mod.render('adjudicate', ruling='upheld — fixed'))
         log = self._log('matches-log.jsonl', text)
         run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
                'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}
@@ -2859,7 +2869,8 @@ class RulingAcrossARebaseTests(unittest.TestCase):
     def test_same_code_none_is_sha_identity_only(self):
         sha = 'c' * 12
         text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
-                'ruling: upheld — fixed\npushed: yes ' + sha + '\n')
+                'ruling: upheld — fixed\npushed: yes ' + sha + '\n'
+                '\n' + report_mod.render('adjudicate', ruling='upheld — fixed'))
         log = self._log('identity-log.jsonl', text)
         run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
                'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}

@@ -27,6 +27,7 @@ from asf.workers import lifecycle
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 from asf.workers import quota as quota_mod
+from asf.workers import report as report_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
@@ -2052,10 +2053,9 @@ class TestHealth(Home):
         # the brief's own words: "pushed: no is read as that failure at once" — a session that
         # honestly backgrounds the suite and says so must be held for correction exactly like a
         # git-detected unpushed run is, or an honest report is a dead end nobody comes back to
-        text = ('I stopped to wait for the background test run.\n\n'
-                'REPORT\nitem: F-0001\nkind: coder\nstatus: partial\nbranch: b\n'
-                'pushed: no — the suite is still running in the background\n'
-                'commits: none\ntests: python3 -m unittest (background)\nleft out: the push\n')
+        text = ('I stopped to wait for the background test run.\n\n' +
+                report_mod.render('coder', status='partial', pushed='no',
+                                   why='the suite is still running in the background'))
         self.spawn('waiting', {'ok': True, 'result': text, 'pid': 61})
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('waiting', 'ended', 'failed: unpushed work'), found)

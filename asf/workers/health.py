@@ -736,7 +736,7 @@ def push_retry(ev, reason, line):
     — else None (:func:`asf.workers.lifecycle.push_failure`)."""
     if not (reason or '').startswith(UNPUSHED_REASON_PREFIXES):
         return None
-    said = report_mod.parse(str((ev.result or {}).get('result') or '')).get('pushed') or ''
+    said = report_mod._prose(str((ev.result or {}).get('result') or '')).get('pushed') or ''
     if not report_mod.NO_RE.match(said):
         said = ''
     m = re.search(r'\bpublish \S+ refused: (.*)', line or '')  # the factory's own push

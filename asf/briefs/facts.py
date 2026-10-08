@@ -32,7 +32,7 @@ from asf.workers import lifecycle, pool, report, runtime
 TEST_LIMIT = 6
 #: The longest a field of the last report may run, in characters, its label included.
 FIELD_CAP = 200
-REPORT_FIELDS = ('status', 'pushed', 'tests', 'left out', 'ruling')
+REPORT_FIELDS = ('status', 'pushed', 'tests', 'left_out', 'ruling')
 TEST_NAME_RE = re.compile(r'^test_|_test\.|\.test\.|\.spec\.')
 #: The most top-level functions/classes the "Where to look" section names per file
 #: (asf.briefs.preamble.outline_lines) — a file with more just reads longer under the same line.
@@ -300,15 +300,31 @@ def stored_review(product, item_id, branch, review=None):
             stored['text'])
 
 
+def _field_text(value):
+    """``value``, joined to one string when it is a typed report's list: each dict item's own
+    values space-joined, each plain item stringified, the items then joined with ``; ``."""
+    if not isinstance(value, list):
+        return str(value)
+    parts = []
+    for item in value:
+        if isinstance(item, dict):
+            parts.append(' '.join(str(v) for v in item.values() if v))
+        else:
+            parts.append(str(item))
+    return '; '.join(parts)
+
+
 def last_report(product, item_id, branch='', review=None):
     """The newest ended session's typed report on the item, else ``''``.
 
-    ``<job> ended <ts> — <end_reason>`` and the five fields worth carrying, each capped — never
-    the transcript above the REPORT block. A log that is gone leaves the one ledger line. A
-    ``branch`` given keeps only that branch's runs; falsy, every run of the item, as before. When
-    the newest run left no REPORT and ``review`` (an ``(n, path, text)`` triple) is given, one
-    line — ``review round <n> (<path>): verdict <v>`` — stands in, omitted when the review carries
-    no verdict."""
+    ``<job> ended <ts> — <end_reason>`` and the five fields worth carrying (:data:`REPORT_FIELDS`),
+    each capped, read off the typed ``asf-report`` object (:func:`asf.workers.report.typed`) —
+    never the transcript above it, and never the prose REPORT block (PD4). A log that is gone, or
+    whose result carries no readable typed report, leaves the one ledger line. A ``branch`` given
+    keeps only that branch's runs; falsy, every run of the item, as before. When the newest run
+    left no typed report and ``review`` (an ``(n, path, text)`` triple) is given, one line —
+    ``review round <n> (<path>): verdict <v>`` — stands in, omitted when the review carries no
+    verdict."""
     if not item_id:
         return ''
     path = os.path.join(env.state_dir(product), 'sessions.jsonl')
@@ -319,8 +335,12 @@ def last_report(product, item_id, branch='', review=None):
     run = max(ended, key=lambda r: str(r.get('ended')))
     lines = [f"{run.get('job', '?')} ended {run.get('ended')} — {run.get('end_reason') or '?'}"]
     result = runtime.read_result(run.get('log'))
-    fields = report.parse((result or {}).get('result'))
-    field_lines = [_cap(key, fields[key]) for key in REPORT_FIELDS if fields.get(key)]
+    try:
+        fields = report.typed((result or {}).get('result'), None)
+    except report.ReportError:
+        fields = {}
+    field_lines = [_cap(key.replace('_', ' '), _field_text(fields[key]))
+                   for key in REPORT_FIELDS if fields.get(key)]
     if not field_lines and review:
         n, review_path, text = review
         verdict = review_mod.verdict_of(text)

@@ -19,6 +19,7 @@ from asf.briefs import facts
 from asf.briefs import preamble as preamble_mod
 from asf.env import Product
 from asf.feeder.rows import Row
+from asf.workers import report as report_mod
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
     from gitfixture import Template
@@ -324,14 +325,16 @@ class LastReportTests(FactsCase):
         return recs
 
     def test_the_newest_ended_session_report_is_carried(self):
-        old = self.log('old.log', 'REPORT\nstatus: partial\npushed: no')
-        new = self.log('new.log', 'lots of transcript\nREPORT\nstatus: done\npushed: yes abc')
+        old = self.log('old.log', report_mod.render('coder', status='partial', pushed='no',
+                                                      why='still running'))
+        new = self.log('new.log', 'lots of transcript\n\n' +
+                       report_mod.render('coder', status='done', pushed='yes', sha='abc'))
         self.ledger(*self.run_rec('job-old', '2026-01-01T01:00:00Z', old),
                     *self.run_rec('job-new', '2026-01-02T01:00:00Z', new))
         text = facts.last_report(self.prod, 'B-0001')
         self.assertIn('job-new ended 2026-01-02T01:00:00Z — finished', text)
         self.assertIn('status: done', text)
-        self.assertIn('pushed: yes abc', text)
+        self.assertIn('pushed: yes', text)
         self.assertNotIn('transcript', text)
         self.assertNotIn('job-old', text)
 
@@ -347,24 +350,26 @@ class LastReportTests(FactsCase):
                          'job-a ended 2026-01-02T01:00:00Z — finished')
 
     def test_a_field_is_capped(self):
-        log = self.log('big.log', 'REPORT\nstatus: done\nleft out: ' + 'x' * 5000)
+        log = self.log('big.log', report_mod.render('coder', left_out=['x' * 5000]))
         self.ledger(*self.run_rec('job-a', '2026-01-02T01:00:00Z', log))
         text = facts.last_report(self.prod, 'B-0001')
         self.assertIn('left out: xxx', text)
         self.assertLessEqual(max(len(l) for l in text.splitlines()), 200)
 
     def test_a_branch_given_ignores_other_branches_and_takes_the_newest_here(self):
-        other = self.log('other.log', 'REPORT\nstatus: done\npushed: yes other')
-        here = self.log('here.log', 'REPORT\nstatus: done\npushed: yes here')
+        other = self.log('other.log', report_mod.render(
+            'coder', tests=[{'command': 'x', 'last_line': 'other'}]))
+        here = self.log('here.log', report_mod.render(
+            'coder', tests=[{'command': 'x', 'last_line': 'here'}]))
         self.ledger(*self.run_rec('job-other', '2026-01-03T00:00:00Z', other,
                                    branch='fix/B-9999'),
                     *self.run_rec('job-here', '2026-01-02T00:00:00Z', here,
                                    branch='fix/B-0001'))
         text = facts.last_report(self.prod, 'B-0001', branch='fix/B-0001')
         self.assertIn('job-here', text)
-        self.assertIn('pushed: yes here', text)
+        self.assertIn('here', text)
         self.assertNotIn('job-other', text)
-        self.assertNotIn('pushed: yes other', text)
+        self.assertNotIn('other', text)
 
     def test_a_run_with_no_report_falls_back_to_the_branch_review_verdict(self):
         log = self.log('crashed.log', 'a crash, no REPORT block here')
@@ -375,7 +380,7 @@ class LastReportTests(FactsCase):
         self.assertIn('review round 2 (docs/reviews/fix-b-0001-r2.md): verdict approved', text)
 
     def test_a_report_already_present_ignores_the_review_fallback(self):
-        log = self.log('ok.log', 'REPORT\nstatus: done\npushed: yes abc')
+        log = self.log('ok.log', report_mod.render('coder', status='done', pushed='yes', sha='abc'))
         self.ledger(*self.run_rec('job-a', '2026-01-02T00:00:00Z', log, branch='fix/B-0001'))
         review = (1, 'docs/reviews/fix-b-0001-r1.md', 'Verdict: approved')
         text = facts.last_report(self.prod, 'B-0001', branch='fix/B-0001', review=review)

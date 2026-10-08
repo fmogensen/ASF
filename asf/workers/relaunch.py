@@ -164,7 +164,7 @@ def terminal(text):
     question = report_mod.needs_input(text)
     if question:
         return f'needs input — {question}'
-    rep = report_mod.parse(text)
+    rep = report_mod._prose(text)
     status = (rep.get('status') or '').strip().lower().split(' ', 1)[0]
     if status in TERMINAL_STATUSES:
         left = (rep.get('left out') or '').strip().split('\n', 1)[0]

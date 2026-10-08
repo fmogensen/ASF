@@ -24,6 +24,7 @@ from asf import env
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest, lane, rebuild_check
 from asf.workers import host, lifecycle
+from asf.workers import report as report_mod
 
 NOW = 1_800_000_000.0
 HEAD, NEW = 'a' * 40, 'b' * 40
@@ -735,11 +736,16 @@ class LaneRepo(LaneFixture):
         if launch_head == 'head':
             launch_head = head
         log = os.path.join(self.state_dir, 'adjudicate-t-0001.jsonl')
+        ruling_text = ('the C list is false against this branch — a.txt:1 already reads a; '
+                      'overruled, do not reopen it.')
         report = (f'REPORT\nitem: T-0001\nkind: adjudicate\nstatus: {status}\n'
                   f'branch: worker/T-0001\npushed: yes {pushed_sha or head}\ncommits: {commits}\n'
-                  f'ruling: the C list is false against this branch — a.txt:1 already reads a; '
-                  f'overruled, do not reopen it.\nblocked_on: {blocked_on}\nwrites: a.txt\n'
-                  f'superseded_by: none\n')
+                  f'ruling: {ruling_text}\nblocked_on: {blocked_on}\nwrites: a.txt\n'
+                  f'superseded_by: none\n\n' +
+                  report_mod.render(
+                      'adjudicate', status=status, ruling=ruling_text,
+                      blocked_on=(None if blocked_on in ('none', None) else blocked_on),
+                      writes=['a.txt']))
         with open(log, 'w', encoding='utf-8') as f:
             f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
                                 'result': report}) + '\n')
@@ -3491,6 +3497,33 @@ class RelaunchOnlyWhatChanged(LaneFixture):
         f['prev'] = self.lane_of('worker/T-0001')
         ln.enter_back(f, 'kind=naming')
         self.assertFalse(any('not sent back again' in l for l in lines), lines)
+
+
+class ProseReportFallbackTests(unittest.TestCase):
+    """F-0025 replan, PD-READERS: `report_status` and `Lane.run_heads` still read a prose-only
+    report (no `asf-report` fence at all) through `report._prose` — the regression PD-READERS
+    exists to prevent."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def log(self, result_text):
+        path = os.path.join(self.tmp, 'job.jsonl')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': result_text}) + '\n')
+        return path
+
+    def test_report_status_reads_a_prose_only_report(self):
+        log = self.log('REPORT\nitem: T-0001\nkind: coder\nstatus: partial\n'
+                       'pushed: no — the suite is still running\n')
+        self.assertEqual(lane.report_status({'log': log}), 'partial')
+
+    def test_run_heads_reads_the_pushed_sha_off_a_prose_only_report(self):
+        log = self.log('REPORT\nitem: T-0001\nkind: coder\nstatus: done\n'
+                       'pushed: yes abc1234def\n')
+        self.assertEqual(lane.Lane.run_heads({'log': log}), ['abc1234def'])
 
 
 if __name__ == '__main__':

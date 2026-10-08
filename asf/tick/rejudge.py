@@ -57,7 +57,7 @@ def judged(run, text):
     """``(fields, what)``: the run judged on its own report once its park is released — the
     fields to append, and what it now is."""
     reason = str(run.get('end_reason') or '')
-    status = (report_mod.parse(text).get('status') or '').strip().lower().split(' ')[0]
+    status = (report_mod._prose(text).get('status') or '').strip().lower().split(' ')[0]
     if reason == f'failed: {lifecycle.EMPTY_BRANCH}' and status == 'done':
         return {'end_reason': lifecycle.NOTHING_TO_LAND}, lifecycle.NOTHING_TO_LAND
     return {}, reason or 'ended'

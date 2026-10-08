@@ -1212,7 +1212,7 @@ def overruling(path, item, head, same_code=None):
     run = ruled[-1]  # only the newest ruling speaks for the branch as it stands
     rec = result_of(run) or {}
     text = rec.get('result') if isinstance(rec, dict) else ''
-    rep = report_mod.parse(text or '')
+    rep = report_mod._prose(text or '')
     status = (rep.get('status') or '').strip().lower().split(' ')[0]
     fields = report_mod.ruling_fields(text or '')
     if status != 'done' or not report_mod.ruling(text or '') \
@@ -3259,7 +3259,7 @@ def delivered_off_branch(path, run, text):
     blocked park, which keeps winning over this."""
     from asf.workers import report as report_mod
     text = text or ''
-    rep = report_mod.parse(text)
+    rep = report_mod._prose(text)
     status = (rep.get('status') or '').strip().lower().split(' ')[0]
     if status != 'done' or report_mod._claim(rep.get('commits')) or report_mod.needs_input(text):
         return None
