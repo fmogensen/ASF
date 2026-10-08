@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.270 — 2026-10-09
+
+### Features landed
+
+- The reader reads every run behind the checks — `_run_ids`, and one probe record per run id (#1254)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.270"`
+
 ## v0.1.269 — 2026-10-09
 
 ### Features landed
