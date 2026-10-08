@@ -108,6 +108,9 @@ FOOTPRINT = 'footprint'  # == asf.workers.lifecycle.FOOTPRINT: a correction wide
 #: == asf.workers.lifecycle.INCOMPLETE: the lane held a delivery branch a member of which no
 #: commit names — the same lead comes back as a DELIVERY → CODE row and continues from the head
 INCOMPLETE = 'incomplete'
+#: == asf.workers.lifecycle.FINISHED_WAIT (the feeder imports no worker module): the run
+#: ended and harvest has not got to it — a hold the harvest clears, not the lane (F-0205)
+FINISHED_WAIT = 'finished, awaiting harvest'
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
 STALE = 'STALE → CLOSE'
@@ -351,6 +354,26 @@ def session_of(inflight, item_id):
         if item_id in (s.get('item'), s.get('item_id'), s.get('id')):
             return s
     return None
+
+
+def session_wait(session):
+    """``session <job> running`` — the sentence :func:`asf.workers.lifecycle.occupancy` writes
+    into ``busy`` for a live run, built here for the in-flight list too so a Bug's WAITS row names
+    the session that holds it whether or not the caller passed an occupancy (F-0205). A record
+    with no job falls back to the bare ``session running``."""
+    job = (session or {}).get('job')
+    return f'session {job} running' if job else 'session running'
+
+
+def held_kind(held):
+    """``(waits_on, sentence)`` for one :func:`candidates` ``why`` entry. A pair is the caller's
+    own label (it knows which map the id came from); a bare string is a caller that passed none,
+    and reads as a live session — the only hold an ``inflight``-only caller can have. Nothing is
+    inferred from the sentence's words: the lane's state names carry no ``land``, and neither does
+    ``finished, awaiting harvest`` (F-0205)."""
+    if isinstance(held, tuple):
+        return held
+    return 'session', held or 'session running'
 
 
 # ---- product conventions ----------------------------------------------------
@@ -827,7 +850,9 @@ def bug_rows(items, product, busy, attempts=None, why=None):
     branch that gives it no session is a non-launching ``WAITS ON`` row that says why — busy
     (``why``: ``{id: what holds it}``, e.g. a live session or work waiting to land), blocked,
     Active (its fixer branch is the work), or past the attempt limit (a person decides).
-    :func:`candidates` drops such a row when another row already speaks for the item."""
+    :func:`candidates` drops such a row when another row already speaks for the item.
+    ``why``'s values are ``(waits_on, sentence)`` pairs (:func:`held_kind`); a bare string reads
+    as a live session (F-0205)."""
     attempts, why, out = attempts or {}, why or {}, []
     limit = attempt_limit(product)
     bugs = sorted(ix.of_type(items, 'bug'), key=lambda v: (attempts.get(v['id'], 0), _age_key(v), v['id']))
@@ -850,8 +875,7 @@ def bug_rows(items, product, busy, attempts=None, why=None):
             out.append(row)
             continue
         if b['id'] in busy:
-            held = why.get(b['id']) or 'session running'
-            on = 'landing' if 'land' in held else 'session'
+            on, held = held_kind(why.get(b['id']))
             out.append(waits(on, held))
             continue
         if b.get('blocked'):  # B-0058: a blocked Bug waits like a blocked Feature
@@ -2628,8 +2652,14 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     running = running_footprints(items, busy)
     corrected, spoken = correction_rows(items, product, busy, corrections)
     rows = corrected + lane_rows(items, product, live | spoken, occ)
-    held_by = {**{i: 'session running' for i in inflight_ids(inflight)},
-               **dict(occ.get('waiting_landing') or {}), **dict(occ.get('busy') or {})}
+    # ``inflight`` is a what-if the caller may have handed in to replace the live sessions
+    # (``asf next --inflight``, B-0042): it outranks what the real ledger's own occupancy says,
+    # so it merges last (F-0205)
+    held_by = {**{i: ('harvest' if w == FINISHED_WAIT else 'landing', w)
+                  for i, w in (occ.get('waiting_landing') or {}).items()},
+               **{i: ('session', w) for i, w in (occ.get('busy') or {}).items()},
+               **{i: ('session', session_wait(session_of(inflight, i)))
+                  for i in inflight_ids(inflight)}}
     bugs = bug_rows(items, product, busy | spoken, attempts, held_by)
     rows += [r for r in bugs if r.launches]
     bug_waits = [r for r in bugs if not r.launches]
