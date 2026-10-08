@@ -571,7 +571,11 @@ NESTED_FIELDS = {
 # instead so *this* release's own doctor still stops naming them unknown (B-0038); the pinned
 # reader's own copy of this code doesn't know the list and keeps warning, which is fine — a
 # warning never refuses a load, only a reader that predates the whole key does.
-DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats'})
+# ``ci.hosts``/``ci.jobs`` (asf.ci_vm: the ``ci.provider: vm`` config) are the same case — a
+# product only sets either after adopting a release that reads them, so the pinned reader this
+# key would strand never runs a file that carries it.
+DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats',
+                                         'ci.hosts', 'ci.jobs'})
 
 
 def _shape_ok(value, shape):
@@ -727,6 +731,9 @@ def product_problems(text):
     from asf import ci_queue  # `ci.queue`: its mode, history and workflows (asf.ci_queue)
     for dotted, why in ci_queue.config_problems(data.get('ci')):
         problems.append((lines.get('ci.queue', lines.get('ci', 0)), dotted, why))
+    from asf import ci_vm  # `ci.hosts`/`ci.jobs`: an external-CI machine and a named command
+    for dotted, why in ci_vm.config_problems(data.get('ci')):
+        problems.append((lines.get('ci.hosts', lines.get('ci', 0)), dotted, why))
     from asf import credentials as credentials_mod  # local: keeps env importable from credentials
     for dotted, why in credentials_mod.product_problems(data.get('credentials')):
         problems.append((lines.get('credentials', 0), dotted, why))
