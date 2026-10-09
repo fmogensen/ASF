@@ -10,6 +10,11 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   starts with :data:`asf.kernel.decide.CONFLICT`; a failed launch is an attempt ``launch: …``;
 - a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; one whose
   API failed before it reported is an attempt :data:`asf.kernel.decide.API_FAILED`;
+- an ended session that reported ``pushed: rebased <sha>`` (the floor's wording: "the factory
+  publishes") and pushed nothing is pushed once by the host (``sessions.push_rebase``: the
+  worktree's HEAD must be that sha; ``--force-with-lease``; the push recorded on its push log)
+  before the session is ended — a kernel session pushes its own branch, and this is the safety
+  net; a refused push keeps the worktree;
 - a review session that ended has its report's verdict lines
   (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree it
   was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
@@ -23,6 +28,7 @@ already holds is skipped. One action's failure is logged in the result and never
 one card's failed write is logged the same way.
 """
 import dataclasses
+import re
 
 from asf.kernel import actions as A
 from asf.kernel import ports as P
@@ -32,6 +38,18 @@ from asf.kernel.model import State
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
 NO_VERDICT = 'review: no VERDICT line'
+
+#: a REPORT's ``pushed: rebased <sha> …`` — the floor's "the factory publishes" line
+REBASED_RE = re.compile(r'^\s*rebased\s+([0-9a-fA-F]{7,40})\b')
+
+
+def rebased_sha(s):
+    """The sha an ended, non-review session reported as ``pushed: rebased <sha>`` and left
+    to the factory, else '' (the port skips a sha its push log already holds)."""
+    if not s.ended or s.kind == 'review':
+        return ''
+    m = REBASED_RE.match(str((s.fields or {}).get('pushed') or ''))
+    return m.group(1).lower() if m else ''
 
 
 @dataclasses.dataclass
@@ -104,7 +122,16 @@ class _Applier:
             self.verdict(s)
         elif s.api_error and not s.fields:
             self.attempt(s.item_id, API_FAILED)
-        self.ports.sessions.end(s, a.free_worktree)
+        free, note = a.free_worktree, None
+        sha = rebased_sha(s)
+        if sha:
+            try:
+                note = self.ports.sessions.push_rebase(s, sha)
+            except Exception as e:  # the worktree is kept: its commits are the work
+                free, note = False, 'rebase not pushed: %s' % (str(e) or type(e).__name__)
+            self.log('%s %s — %s' % (s.job, s.item_id, note))
+        self.ports.sessions.end(s, free)
+        return note
 
     def verdict(self, s):
         """Record an ended review session's verdict on the ledger, keyed by the tree it read."""

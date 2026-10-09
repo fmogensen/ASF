@@ -162,8 +162,8 @@ class EndReview(unittest.TestCase):
     def setUp(self):
         self.repo = tempfile.mkdtemp()
         self.state = tempfile.mkdtemp()
-        for args in (['init', '-q', '-b', 'main'], ['config', 'user.email', 't@t'],
-                     ['config', 'user.name', 't'], ['commit', '-q', '--allow-empty', '-m', 'x']):
+        # the suite's global git config carries the identity (tests.test_hermetic's ratchet)
+        for args in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'x']):
             subprocess.run(['git'] + args, cwd=self.repo, check=True, capture_output=True)
         self.wt = os.path.join(self.state, 'worktrees', 'review-t-0001')
         subprocess.run(['git', 'worktree', 'add', '-q', '-b', 'r1', self.wt], cwd=self.repo,

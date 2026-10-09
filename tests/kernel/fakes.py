@@ -101,7 +101,7 @@ class FakeSessions:
     def __init__(self, sessions=(), fail=()):
         self._sessions = list(sessions)
         self.fail = set(fail)
-        self.launched, self.ended, self.meta = [], [], []
+        self.launched, self.ended, self.meta, self.pushed = [], [], [], []
 
     def sessions(self):
         return copy.deepcopy(self._sessions)
@@ -114,6 +114,12 @@ class FakeSessions:
         self.meta.append(dict(meta or {}))
         self._sessions.append(M.Session(job=job, item_id=item_id, kind=kind))
         return job
+
+    def push_rebase(self, session, sha):
+        if ('push_rebase', session.job) in self.fail:
+            raise P.PortError('rebased %s: push refused' % sha)
+        self.pushed.append((session.job, session.branch, sha))
+        return 'pushed rebased %s' % sha
 
     def end(self, session, free_worktree):
         self.ended.append((session.job, free_worktree))

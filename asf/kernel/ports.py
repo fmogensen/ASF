@@ -494,7 +494,8 @@ class RealSessions:
                 question=said['question'] or None, last_line=said['last_line'],
                 report=str((result or {}).get('result') or ''),
                 pr=run.get('kernel_pr'), tree_sha=run.get('kernel_tree') or '',
-                worktree=run.get('worktree') or '', status=said['status'],
+                worktree=run.get('worktree') or '', branch=run.get('branch') or '',
+                status=said['status'],
                 fields=said['fields'], api_error=said['api_error']))
             out[-1].started = run.get('started') or ''
         return out
@@ -534,6 +535,43 @@ class RealSessions:
             pool.update_session(self.product, job, kernel_pr=meta.get('pr'),
                                 kernel_tree=meta.get('tree'))
         return job
+
+    def push_rebase(self, session, sha):
+        """The safety net for a session that reported ``pushed: rebased <sha>`` and stopped
+        (B-82658, B-83312): when its worktree still holds ``sha`` as HEAD, push it once to the
+        session's branch with ``--force-with-lease`` over origin's head read just before (a push
+        that would erase a commit origin holds is refused), and record the sha on the session's
+        push log. Returns a note; raises :class:`PortError` when it cannot or will not push."""
+        from asf import gitops, refguard
+        from asf.harvest import harvest
+        from asf.workers import pushlog
+        wt, branch = session.worktree, session.branch
+        if not wt or not os.path.isdir(wt):
+            raise PortError('rebased %s: no worktree to push from' % sha)
+        head = gitops.git(['rev-parse', 'HEAD'], wt, timeout=60)
+        if not head.ok or not head.data.startswith(sha.lower()):
+            raise PortError('rebased %s: the worktree HEAD is %s' % (
+                sha, (head.data[:12] if head.ok else 'unreadable')))
+        full = head.data
+        if not branch:
+            got = gitops.git(['rev-parse', '--abbrev-ref', 'HEAD'], wt, timeout=60)
+            branch = got.data if got.ok and got.data != 'HEAD' else ''
+        if not branch:
+            raise PortError('rebased %s: no branch to push to' % sha)
+        if full in pushlog.shas(self.product, session.job):
+            return 'rebased %s already pushed' % full[:12]
+        expected = harvest.remote_head(wt, branch)
+        if expected == full:
+            return 'origin/%s already at %s' % (branch, full[:12])
+        ok, why = harvest.push_branch(wt, full, branch, expected, self.product.main,
+                                      refguard.listed(self.product.conventions))
+        if not ok:
+            raise PortError('rebased %s: %s' % (sha, why))
+        log = pushlog.path(self.product, session.job)
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, 'a', encoding='utf-8') as f:
+            f.write(full + '\n')
+        return 'pushed rebased %s to %s (--force-with-lease)' % (full[:12], branch)
 
     def end(self, session, free_worktree):
         from asf import env
