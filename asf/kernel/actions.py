@@ -32,6 +32,18 @@ class UpdateBranch:
 
 
 @dataclasses.dataclass
+class OpenPR:
+    """Open the pull request of ``item_id``'s pushed ``branch`` against ``base`` (``''``: the
+    product's trunk) with ``title`` (``<ITEM-ID> — <card title>``) and ``body``. Idempotent: a PR
+    that already exists for the branch is recorded, not duplicated."""
+    item_id: str
+    branch: str
+    base: str
+    title: str
+    body: str
+
+
+@dataclasses.dataclass
 class Rerun:
     """Rerun the failed jobs of check run ``run_id`` (a red touching none of the PR's files, not
     yet rerun)."""

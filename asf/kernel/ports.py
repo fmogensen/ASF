@@ -101,6 +101,8 @@ class GitHubPort(typing.Protocol):
     def enable_auto_merge(self, pr) -> None: ...
     def update_branch(self, pr) -> None: ...
     def rerun(self, run_id) -> None: ...
+    def branches(self) -> list: ...                     # [Branch] under the work prefixes
+    def open_pr(self, branch, base, title, body) -> int: ...  # the PR number (new or existing)
 
 
 class SessionPort(typing.Protocol):
@@ -459,6 +461,46 @@ class RealGitHub:
     def rerun(self, run_id):
         self._write(['run', 'rerun', str(run_id), '-R', self.slug, '--failed'],
                     'rerun %d' % run_id)
+
+    def _prefixes(self):
+        conv = self.product.conventions
+        return sorted({p for p in (conv.prefix('code'), conv.prefix('fix')) if p})
+
+    def branches(self):
+        """Every branch on origin under the kernel's work prefixes (``code``, ``fix``) that names
+        an item: ``git/matching-refs/heads/<prefix>`` — what ``ls-remote`` would list."""
+        out = []
+        for prefix in self._prefixes():
+            r = self._gh(['api', 'repos/%s/git/matching-refs/heads/%s' % (self.slug, prefix)])
+            if not r.ok or not isinstance(r.data, list):
+                continue  # unknown is no pushed branch: nothing is opened on a guess
+            for d in r.data or []:
+                name = str((d or {}).get('ref') or '')[len('refs/heads/'):]
+                iid = item_of_branch(name)
+                if name and iid:
+                    out.append(M.Branch(name, iid, str((d.get('object') or {}).get('sha') or '')))
+        return out
+
+    def _pr_of(self, branch):
+        r = self._gh(['pr', 'list', '-R', self.slug, '--head', branch, '--state', 'open',
+                      '--json', 'number'])
+        return int(r.data[0]['number']) if r.ok and r.data else None
+
+    def open_pr(self, branch, base, title, body):
+        """Open the PR of ``branch`` against ``base`` (the trunk when empty); a PR already open
+        for the branch is returned, not duplicated. Returns the PR number."""
+        number = self._pr_of(branch)
+        if number is not None:
+            return number
+        r = self._gh(['pr', 'create', '-R', self.slug, '--base', base or self.product.main,
+                      '--head', branch, '--title', title, '--body', body], json=False)
+        m = re.search(r'/pull/(\d+)', '%s\n%s' % (r.stdout or '', r.stderr or ''))
+        if m and (r.ok or 'already exists' in (r.stderr or '')):
+            return int(m.group(1))
+        number = self._pr_of(branch)
+        if number is not None:
+            return number
+        raise PortError('open PR %s: %s' % (branch, r.reason or 'no PR number in the reply'))
 
 
 # ---- sessions -----------------------------------------------------------------------------------

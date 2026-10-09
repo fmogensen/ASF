@@ -14,7 +14,8 @@ The verdicts are the kernel's review ledger (``state/<product>/kernel-reviews.js
 reviewer report, keyed by the tree it read), GitHub's own reviews on the head, and the old floor's
 approvals that still name the head (:meth:`asf.kernel.ports.RealGitHub.floor_approvals`). Parked
 items (``priority: later`` on the item or an ancestor) are not filtered here: ``decide`` holds
-that rule, so it is the same everywhere.
+that rule, so it is the same everywhere. The pushed branches
+(:meth:`asf.kernel.ports.RealGitHub.branches`) count only for items on the record.
 """
 from asf.kernel.model import Facts, State
 
@@ -31,5 +32,7 @@ def read_facts(ports):
     answers = [a for a in record.answers() if a.item_id in waiting]
     specs = {fid: text for fid, text in record.specs_landed().items()
              if fid in items and items[fid].state is not State.DONE}
+    branches = getattr(ports.github, 'branches', None)
+    pushed = [b for b in (branches() if branches else []) if b.item_id in items]
     return Facts(items=items, prs=prs, sessions=list(ports.sessions.sessions()), reviews=reviews,
-                 answers=answers, specs_landed=specs, paused=record.paused())
+                 answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed)

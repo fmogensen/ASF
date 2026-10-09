@@ -69,6 +69,8 @@ def describe(action):
         return 'auto-merge #%d' % action.pr
     if isinstance(action, A.UpdateBranch):
         return 'update-branch #%d' % action.pr
+    if isinstance(action, A.OpenPR):
+        return 'open PR %s for %s: %s' % (action.branch, action.item_id, action.title)
     if isinstance(action, A.Rerun):
         return 'rerun run %s' % action.run_id
     if isinstance(action, A.MintStory):
@@ -157,6 +159,9 @@ class _Applier:
 
     def MintStory(self, a):
         self.ports.record.mint_story(a.feature_id, a.story_id, a.title, a.acceptance)
+
+    def OpenPR(self, a):
+        return 'PR #%s' % self.ports.github.open_pr(a.branch, a.base, a.title, a.body)
 
     def Rerun(self, a):
         self.ports.github.rerun(a.run_id)

@@ -134,6 +134,16 @@ class PR:
 
 
 @dataclasses.dataclass
+class Branch:
+    """One branch on origin under a kernel work prefix (``work_branch`` / ``fix_branch``):
+    ``name``, the ``item_id`` it names, and its ``head_sha``. A pushed branch with no open PR is
+    work a session finished and the kernel still has to open a pull request for."""
+    name: str
+    item_id: str
+    head_sha: str = ''
+
+
+@dataclasses.dataclass
 class Session:
     """One worker session the host launched. ``job`` is the host's id for it; ``kind`` is the
     launch kind (``build``, ``review``, ``spec``, ``plan``). ``alive`` is whether its pid answers;
@@ -189,7 +199,8 @@ class Answer:
 class Facts:
     """Everything one tick knows. ``items`` maps id -> :class:`Item` (every type: Epics, Features,
     Stories, Tasks, Bugs). ``specs_landed`` maps a Feature id to the text of its spec, for every
-    spec merged to trunk. ``paused`` holds every launch; nothing else."""
+    spec merged to trunk. ``paused`` holds every launch; nothing else. ``branches`` are the
+    :class:`Branch` values on origin under the kernel's work prefixes."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -197,6 +208,7 @@ class Facts:
     answers: list = dataclasses.field(default_factory=list)
     specs_landed: dict = dataclasses.field(default_factory=dict)
     paused: bool = False
+    branches: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

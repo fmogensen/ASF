@@ -109,8 +109,16 @@ IDLE_REASONS = {
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
-ORDER = (A.ApplyAnswer, A.EndSession, A.NoteItem, A.MarkStuck, A.MintStory, A.Rerun, A.UpdateBranch,
-         A.EnableAutoMerge, A.Launch)
+ORDER = (A.ApplyAnswer, A.EndSession, A.NoteItem, A.MarkStuck, A.MintStory, A.OpenPR, A.Rerun,
+         A.UpdateBranch, A.EnableAutoMerge, A.Launch)
+
+#: the prefix of a Stuck reason a ``done`` REPORT left (its ``NEEDS OPERATOR:`` question, before
+#: a done-and-pushed session moved on): with its branch pushed it is re-judged to an OpenPR
+DONE_STUCK = R.DONE + ':'
+
+#: the card states whose pushed branch with no PR gets one (a build session held it, or its PR
+#: was being opened): a stale branch of a New or Ready item is never turned into a PR
+PR_STATES = (State.BUILDING, State.REVIEW, State.LANDING)
 
 
 @dataclasses.dataclass
@@ -177,7 +185,7 @@ def _judge(it, facts, config, actions):
     attempts = list(it.attempts)
     prs = [p for p in facts.prs if p.item_id == it.id]
     open_pr = max((p for p in prs if not p.merged), key=lambda p: p.number, default=None)
-    ended_stuck, api_detail = None, ''
+    ended_stuck, api_detail, pushed = None, '', None
     for s in sessions:
         if s.alive:
             continue
@@ -190,6 +198,7 @@ def _judge(it, facts, config, actions):
             attempts.append(API_FAILED)
             api_detail = s.api_error
         elif done_and_pushed(s):
+            pushed = s
             note = pushed_note(s)
             if note and note not in it.notes and not any(
                     isinstance(a, A.NoteItem) and (a.item_id, a.text) == (it.id, note)
@@ -200,6 +209,11 @@ def _judge(it, facts, config, actions):
 
     if open_pr is None and any(p.merged for p in prs) and not it.reopened:
         return _Judged(State.DONE)
+    if open_pr is None and not live and not question:
+        branch = _pr_branch(it, sessions, pushed, stuck, ended_stuck, facts, config)
+        if branch:
+            actions.append(open_pr_action(it, branch, pushed))
+            return _Judged(State.REVIEW, hold=True)
     if stuck:
         return _Judged(State.STUCK, _keep(stuck))
     if ended_stuck:
@@ -259,6 +273,57 @@ def pushed_note(s):
     """The note a done-and-pushed session's ``NEEDS OPERATOR:`` line leaves on its item, or ''."""
     q = ' '.join(str(s.question or '').split())
     return '%s: NEEDS OPERATOR: %s' % (s.job, R.cap(q)) if q else ''
+
+
+def pushed_branch(iid, facts, config, item=None):
+    """The branch on origin (``facts.branches``) that holds ``iid``'s work, or None: the one the
+    kernel would launch on (:func:`_branch`) first, else the first by name."""
+    named = sorted(b.name for b in facts.branches if b.item_id == iid)
+    want = _branch('build', iid, config, item)
+    return want if want in named else (named[0] if named else None)
+
+
+def _pr_branch(it, sessions, pushed, stuck, ended_stuck, facts, config):
+    """The branch ``it`` (no open PR, no live session) gets a pull request for, or None:
+
+    - a session that ended ``done`` and pushed this tick: its branch;
+    - a Stuck recorded from a ``done`` REPORT (:data:`DONE_STUCK`) whose branch is on origin;
+    - a card in :data:`PR_STATES`, no session ended this tick, its branch on origin."""
+    if pushed is not None:
+        return pushed.branch or pushed_branch(it.id, facts, config, it) or \
+            _branch('build', it.id, config, it)
+    if ended_stuck is not None or any(not s.alive for s in sessions):
+        return None
+    branch = pushed_branch(it.id, facts, config, it)
+    if not branch:
+        return None
+    if stuck is not None:
+        return branch if str(stuck.reason).startswith(DONE_STUCK) else None
+    return branch if it.state in PR_STATES else None
+
+
+def pr_title(it):
+    """A kernel PR's title: ``<ITEM-ID> — <card title>`` (the item id first, so a head-branch or
+    title check that wants an item id finds it)."""
+    title = ' '.join(str(it.title or '').split())
+    return '%s — %s' % (it.id, title) if title else it.id
+
+
+def pr_body(it, session=None):
+    """A kernel PR's body: the item it delivers and the REPORT of the session that pushed it."""
+    lines = ['Delivers %s%s.' % (it.id, ' — %s' % it.title if it.title else ''), '']
+    fields = (session.fields if session is not None else None) or {}
+    if fields:
+        lines += ['## Session REPORT (%s)' % session.job, '']
+        lines += ['- %s: %s' % (k, ' '.join(str(v).split())) for k, v in fields.items() if v]
+    else:
+        lines.append('Pushed by a kernel build session; its REPORT is on the item\'s card.')
+    return '\n'.join(lines) + '\n'
+
+
+def open_pr_action(it, branch, session=None):
+    """The :class:`OpenPR` of ``it``'s pushed ``branch`` against the trunk."""
+    return A.OpenPR(it.id, branch, '', pr_title(it), pr_body(it, session))
 
 
 def _ended_stuck(s, open_pr):

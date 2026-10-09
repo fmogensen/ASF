@@ -70,10 +70,11 @@ class FakeRecord:
 
 class FakeGitHub:
 
-    def __init__(self, prs=(), reviews=(), fail=()):
+    def __init__(self, prs=(), reviews=(), fail=(), branches=()):
         self._prs, self._reviews = list(prs), list(reviews)
+        self._branches = list(branches)
         self.fail = set(fail)
-        self.calls = []
+        self.calls, self.opened = [], []
 
     def prs(self):
         return copy.deepcopy(self._prs)
@@ -94,6 +95,18 @@ class FakeGitHub:
 
     def rerun(self, run_id):
         self._do('rerun', run_id)
+
+    def branches(self):
+        return copy.deepcopy(self._branches)
+
+    def open_pr(self, branch, base, title, body):
+        self._do('open_pr', branch)
+        self.opened.append((branch, base, title, body))
+        number = 900 + len(self.opened)
+        self._prs.append(M.PR(number=number, branch=branch, item_id=P.item_of_branch(branch),
+                              head_sha='head-%d' % number, tree_sha='tree-%d' % number,
+                              files=['src/a.py']))
+        return number
 
 
 class FakeSessions:
