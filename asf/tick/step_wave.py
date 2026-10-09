@@ -864,9 +864,10 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
 
 def would_start(product, root, items=None):
     """``(screened, seats, running)`` — the wave this tick would run, previewed: the plan the
-    wave cuts (the same ceiling, cloud seats, gate and holds) through :func:`screen` with
-    nothing acted on. What ``asf status`` counts as Ready to launch, and what the dwell
-    watchdog (:mod:`asf.dwell`) asks why a free seat stays free."""
+    wave cuts (the same ceiling, cloud seats, gate and holds, the operator's own pause among
+    them — B-84836) through :func:`screen` with nothing acted on. What ``asf status`` counts as
+    Ready to launch, and what the dwell watchdog (:mod:`asf.dwell`) asks why a free seat stays
+    free."""
     from asf.views import index_reader
     if items is None:
         items, _generated = index_reader.load(root)
@@ -887,8 +888,9 @@ def would_start(product, root, items=None):
                                                    host_mod.guards_from_config(env.load_config()))
                        and not s1_bypass_live())
     held = approvals.parked(product)
+    paused = pause_mod.held(product)             # F-0137: the preview holds exactly as launch() does
     return (screen(product, planned, items, running, held, seats, (host_held, host_why),
-                   bypass_open, act=False), seats, running)
+                   bypass_open, act=False, paused=paused), seats, running)
 
 
 def trunk_preflight(ctx, planned, items, out=print):

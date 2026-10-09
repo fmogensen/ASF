@@ -397,6 +397,63 @@ class TheSlotsAreLent(unittest.TestCase):
         self.assertEqual(capacity.claim('bots', 2), 2)
 
 
+class TheStatusPreviewSeesItToo(unittest.TestCase):
+    """``step_wave.would_start`` — the preview ``asf status``'s Ready cell and the dwell
+    watchdog's ``launchable_idle`` (B-84836) read, rather than the live wave itself: it must
+    hold every row exactly as :func:`step_wave.launch` does, or a row waits for the pause the
+    whole time while the preview keeps calling it about to start — a ``launchable_idle`` breach
+    that never clears for as long as the pause lasts."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='pause_test_')
+        self._home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.product = env.Product('sample', {})
+
+    def tearDown(self):
+        env.ASF_HOME = self._home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _would_start(self, rows):
+        resolved = capacity.Resolved(sessions=5, sessions_bound='product', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={})
+        cloud = types.SimpleNamespace(on=False, max_inflight=0)
+        patches = [
+            mock.patch.object(step_wave, 'inflight', lambda product: []),
+            mock.patch.object(step_wave.capacity_mod, 'resolve', lambda product, *a, **k: resolved),
+            mock.patch.object(step_wave, 'cloud_settings', lambda product: cloud),
+            mock.patch.object(step_wave, 'cloud_readiness',
+                              lambda product, cl: (False, 'cloud lane off')),
+            mock.patch.object(step_wave, 'plan_inputs', lambda product, root, items=None: {}),
+            mock.patch.object(step_wave, 'gated_plan', lambda *a, **k: (list(rows), set())),
+            mock.patch.object(step_wave, 'host_hold', lambda planned: (False, '', {})),
+            mock.patch.object(step_wave.approvals, 'parked', lambda product: {}),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return step_wave.would_start(self.product, None, items={})
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_a_paused_product_s_preview_holds_every_row_too(self):
+        pause.pause('sample', 'release freeze', 'op1')
+        rows = _sample_rows()
+        screened, seats, running = self._would_start(rows)
+        self.assertEqual(seats, 5)
+        self.assertEqual(running, [])
+        self.assertFalse(any(s.starts for s in screened), screened)
+        for s in screened:
+            self.assertIn('launches paused: release freeze', s.why, (s.row.item_id, s.why))
+
+    def test_the_same_preview_unpaused_starts_every_row(self):
+        rows = _sample_rows()
+        screened, _seats, _running = self._would_start(rows)
+        self.assertEqual([s.row.item_id for s in screened if s.starts],
+                         [r.item_id for r in rows])
+
+
 class TheOperatorCanSee(unittest.TestCase):
     """The three places an operator looks when nothing is happening (F-0137 §4):
     ``status.paused_cell``, ``doctor.scheduler_rows``, ``dry_run._wave_rows``."""
