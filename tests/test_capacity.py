@@ -250,6 +250,20 @@ class FairShare(Home):
                            + 'steps:\n  wave: bash wave.sh\n')
         self.assertEqual(capacity.active_products('asf'), ['asf'])
 
+    def test_an_invalid_sibling_is_skipped_with_one_warning_not_a_crash(self):
+        # B-0098: the pool's cross-product load never blanks on a broken sibling file, and
+        # never silently counts it as a zero-capacity partner — it names it once and moves on.
+        import io
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web', 'product: web\ncapacity:\n  sessions: TODO\n')
+        err = io.StringIO()
+        with mock.patch('sys.stderr', err):
+            self.assertEqual(capacity.active_products('asf'), ['asf'])
+        lines = [ln for ln in err.getvalue().splitlines() if ln]
+        self.assertEqual(len(lines), 1)
+        self.assertIn('web', lines[0])
+        self.assertIn('config invalid', lines[0])
+
     def test_a_share_above_the_configured_ceiling_changes_nothing(self):
         self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
         self.write_product('web', WAVE_PRODUCT.format(name='web'))
