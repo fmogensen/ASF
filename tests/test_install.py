@@ -2517,6 +2517,18 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(self._asf_call(), 'install --product demo')
         self.assertIn(f'install: product demo, release v0.3.0 from {self.remote}', r.stdout)
 
+    def test_an_unreachable_repo_fails_tag_resolution_with_needs_operator(self):
+        """B-0113: with no ref, resolving the newest tag runs ``git ls-remote`` before pipx is
+        ever reached; an unreachable repo must not fall through ``set -e`` silently with git's
+        own exit code — it names NEEDS OPERATOR, exits 2, and pipx is never invoked."""
+        bad_remote = os.path.join(self.tmp, 'no-such-remote.git')
+        r = self._run(['demo'], ASF_REPO_URL=bad_remote)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('install: NEEDS OPERATOR:', r.stderr)
+        self.assertIn(bad_remote, r.stderr)
+        self.assertFalse(os.path.exists(self.pipx_log))
+        self.assertFalse(os.path.exists(self.log))
+
     def test_a_second_argument_pins_the_ref_with_no_tag_resolution(self):
         r = self._run(['demo', 'deadbeef'])
         self.assertEqual(r.returncode, 0, r.stderr)

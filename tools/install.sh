@@ -99,7 +99,8 @@ if [ "$MODE" != no-package ]; then
 command -v pipx >/dev/null 2>&1 || die "pipx is not installed — brew install pipx (or python3 -m pip install --user pipx)"
 
 if [ -z "$REF" ]; then
-  TAG_REFS="$(git ls-remote --tags --refs "$REPO_URL" 'v*')"
+  TAG_REFS="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" ||
+    die "listing tags at $REPO_URL failed — check the ref and network"
   REF="$(python3 - "$TAG_REFS" <<'RESOLVE_TAG'
 import re, sys
 pattern = re.compile(r"v\d+\.\d+\.\d+")
