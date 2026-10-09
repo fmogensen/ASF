@@ -459,6 +459,19 @@ def build_parser():
     from asf.shadow import add_parser as add_deciders_parser
     add_deciders_parser(sub)
 
+    p_kernel = sub.add_parser('kernel', help="ASF 0.2's kernel: one loop of facts -> decide -> apply")
+    kernel_sub = p_kernel.add_subparsers(dest='kernel_command', required=True)
+    p_ktick = kernel_sub.add_parser('tick', help='one tick: read facts, decide, apply (or print)')
+    p_ktick.add_argument('--product', required=True)
+    p_ktick.add_argument('--dry-run', action='store_true', help='print the plan; write nothing')
+    p_kstatus = kernel_sub.add_parser('status', help='Stuck items, states and sessions')
+    p_kstatus.add_argument('--product', required=True)
+    p_kpause = kernel_sub.add_parser('pause', help="hold the product's launches")
+    p_kpause.add_argument('--product', required=True)
+    p_kpause.add_argument('--reason', default='kernel pause', help='recorded with the pause')
+    p_kresume = kernel_sub.add_parser('resume', help="lift the product's launch pause")
+    p_kresume.add_argument('--product', required=True)
+
     p_capacity = sub.add_parser('capacity', help='the CAPACITY table: sessions and CI runs per product')
     g_capacity = p_capacity.add_mutually_exclusive_group()
     g_capacity.add_argument('--product')
@@ -567,6 +580,27 @@ def _published(cmd, args, record, message):
 
 #: the exit status of a run GitHub's rate limit cut short (sysexits' "try again later")
 EX_TEMPFAIL = 75
+
+
+def _kernel(args):
+    """``asf kernel tick|status|pause|resume --product P``."""
+    if args.kernel_command == 'tick':
+        from asf.kernel.loop import tick
+        summary = tick(args.product, dry_run=args.dry_run)
+        return 1 if summary.get('locked') or summary.get('failed') else 0
+    if args.kernel_command == 'status':
+        from asf.kernel.status import status
+        status(args.product)
+        return 0
+    from asf import env, pause
+    name = env.load_product(args.product).name
+    if args.kernel_command == 'pause':
+        lines = pause.pause(name, args.reason, os.environ.get('USER') or '?')
+    else:
+        lines = pause.resume(name)
+    for line in lines:
+        print(line)
+    return 0
 
 
 def main(argv=None):
@@ -736,6 +770,8 @@ def _main(argv=None):
         if args.command == 'status':
             from asf.views.status import cmd_status
             return cmd_status(args, view_root)
+    if args.command == 'kernel':
+        return _kernel(args)
     if args.command == 'capacity':
         from asf.views.capacity import cmd_capacity
         return cmd_capacity(args)
