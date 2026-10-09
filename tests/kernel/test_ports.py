@@ -101,6 +101,8 @@ class Record(unittest.TestCase):
         r = self.record()
         self.assertEqual(r.answers(), [M.Answer('T-0001', 'yes')])
         self.assertEqual(r.reviews(), [M.Review('T-0001', 't1', 'approve', [])])
+        r.record_review('T-0001', 7, 't2', 'approve', [], 'c2')
+        self.assertEqual(r.reviews()[-1], M.Review('T-0001', 't2', 'approve', [], 'c2'))
 
 
 class GitHub(unittest.TestCase):
@@ -140,6 +142,35 @@ class GitHub(unittest.TestCase):
                          ('failure', 55, 2, ['src/a.py', 'tests/test_a.py']))
         self.assertEqual((merged.item_id, merged.merged), ('T-0002', True))
         self.assertEqual(gh.reviews(prs[:1]), [M.Review('T-0001', 'tree1', 'approve', [])])
+
+    def test_change_id_is_blind_to_line_numbers_and_sees_a_new_commit(self):
+        files = [{'filename': 'src/a.py', 'status': 'modified', 'sha': 'b1',
+                  'patch': '@@ -1,2 +1,3 @@ def f():\n x = 1\n+y = 2\n z = 3'},
+                 {'filename': 'img.png', 'status': 'added', 'sha': 'b2'}]
+        moved = [dict(files[0], patch=files[0]['patch'].replace('-1,2 +1,3', '-40,2 +41,3'),
+                      sha='b9'), files[1]]
+        self.assertEqual(P.change_id(files), P.change_id(list(reversed(moved))))
+        more = [dict(files[0], patch=files[0]['patch'] + '\n+w = 4'), files[1]]
+        self.assertNotEqual(P.change_id(files), P.change_id(more))
+        self.assertNotEqual(P.change_id(files), P.change_id([files[0], dict(files[1], sha='b3')]))
+        self.assertEqual(P.change_id([]), '')
+
+    def test_the_change_is_read_off_the_compare_api_once_per_head(self):
+        calls = []
+        compare = {'files': [{'filename': 'src/a.py', 'status': 'modified', 'patch': '+x'}]}
+
+        def run(argv, **kw):
+            calls.append(argv[1:])
+            out = json.dumps(compare) if argv[1:3] == ['api', 'repos/o/r/compare/main...h9'] \
+                else ''
+            return subprocess.CompletedProcess(argv, 0 if out else 1, out, '')
+
+        gh = P.RealGitHub(env.Product('sample', {'repo_slug': 'o/r'}), run=run)
+        P.RealGitHub._changes.pop(('o/r', 'main', 'h9'), None)
+        self.assertEqual(gh._change('main', 'h9'), P.change_id(compare['files']))
+        self.assertEqual(gh._change('main', 'h9'), P.change_id(compare['files']))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(gh._change('main', 'h8'), '')  # unreadable: keyed by tree alone
 
     def test_writes_refuse_under_the_dry_run_guard(self):
         from asf import mutation_guard

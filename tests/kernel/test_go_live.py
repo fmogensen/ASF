@@ -128,7 +128,7 @@ class RealBriefs(unittest.TestCase):
         self.assertIn('#7, head `%s`' % ('h' * 40), text)
         self.assertTrue(text.rstrip().endswith(KB.VERDICT_RULE.splitlines()[-1]))
         self.assertIn('`VERDICT: approve` or `VERDICT: changes`', text)
-        self.assertEqual(sess.meta, [{'pr': 7, 'tree': 'tree-1'}])
+        self.assertEqual(sess.meta, [{'pr': 7, 'tree': 'tree-1', 'change': ''}])
 
     def test_a_fix_round_is_a_correct_brief_naming_the_findings(self):
         sess = self.launch([B.task('T-0001', state=State.REVIEW)], prs=[B.pr(7, 'T-0001')],
@@ -219,6 +219,34 @@ class VerdictRoundTrip(unittest.TestCase):
         rec, *_ = self.run_ticks('REPORT\nstatus: done\n')
         self.assertEqual(rec.fields['T-0001'][P.ATTEMPTS], [NO_VERDICT])
         self.assertFalse(os.path.exists(os.path.join(self.state, P.REVIEWS_FILE)))
+
+
+class ApprovalSurvivesUpdate(unittest.TestCase):
+
+    def test_a_verdict_recorded_with_its_change_survives_a_branch_update(self):
+        state = tempfile.mkdtemp()
+        rec = LedgerRecord([B.task('T-0001', state=State.REVIEW)], state)
+        gh = F.FakeGitHub(prs=[B.pr(7, 'T-0001', tree='t1', change_id='c1')])
+        sess = F.FakeSessions([B.session('rv', 'T-0001', kind='review', alive=False, ended=True,
+                                         result='report', report=REPORT % 'approve', pr=7,
+                                         tree_sha='t1', change_id='c1')])
+        ports = F.ports(record=rec, github=gh, sessions=sess)
+        tick = lambda: loop.tick(env.Product('sample', {}), ports=ports,  # noqa: E731
+                                 config=B.config(), state_dir=state, out=lambda *_: None)
+        tick()
+        with open(os.path.join(state, P.REVIEWS_FILE)) as f:
+            self.assertEqual(json.loads(f.readline())['change_id'], 'c1')
+        # GitHub's "update branch" merged trunk in: a new head tree, the same own change
+        gh._prs = [B.pr(7, 'T-0001', tree='t2', head='head-2', change_id='c1', auto_merge=True)]
+        sess._sessions = []
+        tick()
+        self.assertEqual(rec.fields['T-0001'][P.STATE], 'landing')
+        self.assertEqual(sess.launched, [])
+        # a new commit on the PR: a new change, a new review
+        gh._prs = [B.pr(7, 'T-0001', tree='t3', head='head-3', change_id='c2', auto_merge=True)]
+        tick()
+        self.assertEqual(rec.fields['T-0001'][P.STATE], 'review')
+        self.assertEqual([k for k, *_ in sess.launched], ['review'])
 
 
 class FloorApprovals(unittest.TestCase):

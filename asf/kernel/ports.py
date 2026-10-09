@@ -32,6 +32,7 @@ marker), so every old writer carries them through byte for byte
   REPORT with a pushed head) — shown by ``asf kernel status``, holding nothing.
 """
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -89,7 +90,8 @@ class RecordPort(typing.Protocol):
     def specs_landed(self) -> dict: ...                 # Feature id -> spec text
     def answers(self) -> list: ...                      # [Answer]
     def reviews(self) -> list: ...                      # [Review] from the kernel's ledger
-    def record_review(self, item_id, pr, tree_sha, verdict, findings) -> None: ...  # append
+    def record_review(self, item_id, pr, tree_sha, verdict, findings,
+                      change_id='') -> None: ...  # append
     def paused(self) -> bool: ...
     def write_fields(self, item_id, fields) -> None: ...  # merge into the machine block
     def mint_story(self, feature_id, story_id, title, acceptance) -> None: ...
@@ -228,16 +230,21 @@ class RealRecord:
 
     def reviews(self):
         return [M.Review(str(r['item']), str(r.get('tree_sha') or r['tree']), str(r['verdict']),
-                         [str(f) for f in as_list(r.get('findings'))])
+                         [str(f) for f in as_list(r.get('findings'))],
+                         str(r.get('change_id') or ''))
                 for r in _jsonl(os.path.join(self.state_dir, REVIEWS_FILE))
                 if r.get('item') and (r.get('tree_sha') or r.get('tree')) and r.get('verdict')]
 
-    def record_review(self, item_id, pr, tree_sha, verdict, findings):
-        """Append one verdict to the review ledger: ``{item, pr, tree_sha, verdict, findings,
-        at}``."""
+    def record_review(self, item_id, pr, tree_sha, verdict, findings, change_id=''):
+        """Append one verdict to the review ledger: ``{item, pr, tree_sha, change_id, verdict,
+        findings, at}``. A row from before ``change_id`` was kept (or with it '') matches on its
+        tree alone."""
         os.makedirs(self.state_dir, exist_ok=True)
-        line = json.dumps({'item': item_id, 'pr': pr, 'tree_sha': tree_sha, 'verdict': verdict,
-                           'findings': list(findings), 'at': now_iso()}, sort_keys=True)
+        row = {'item': item_id, 'pr': pr, 'tree_sha': tree_sha, 'verdict': verdict,
+               'findings': list(findings), 'at': now_iso()}
+        if change_id:
+            row['change_id'] = change_id
+        line = json.dumps(row, sort_keys=True)
         with open(os.path.join(self.state_dir, REVIEWS_FILE), 'a', encoding='utf-8') as f:
             f.write(line + '\n')
 
@@ -295,8 +302,30 @@ class RealRecord:
 # ---- GitHub -------------------------------------------------------------------------------------
 
 #: the open-PR fields one ``gh pr list`` reads
-PR_FIELDS = ('number', 'headRefName', 'headRefOid', 'mergeable', 'mergeStateStatus',
-             'autoMergeRequest', 'files', 'statusCheckRollup', 'latestReviews')
+PR_FIELDS = ('number', 'headRefName', 'headRefOid', 'baseRefName', 'mergeable',
+             'mergeStateStatus', 'autoMergeRequest', 'files', 'statusCheckRollup',
+             'latestReviews')
+_HUNK = re.compile(r'^@@[^@]*@@')
+
+
+def change_id(files):
+    """The PR's own change as one stable hash, from the compare API's ``files`` (merge base ->
+    head): each file's name, old name, status and patch with the hunk headers' line numbers
+    dropped (as a patch-id ignores them), in name order; a file with no patch (binary, too large)
+    counts by its blob sha. A merge of trunk into the branch moves the merge base and the line
+    numbers, never this; a new commit on the PR changes it. '' for no files."""
+    rows = []
+    for f in sorted(files or [], key=lambda f: str(f.get('filename') or '')):
+        patch = f.get('patch')
+        body = ('\n'.join(_HUNK.sub('@@', line) for line in patch.splitlines())
+                if patch is not None else 'blob:%s' % (f.get('sha') or ''))
+        rows.append('\0'.join((str(f.get('filename') or ''), str(f.get('previous_filename') or ''),
+                                str(f.get('status') or ''), body)))
+    if not rows:
+        return ''
+    return hashlib.sha256('\0\0'.join(rows).encode('utf-8')).hexdigest()
+
+
 _RUN_ID = re.compile(r'/actions/runs/(\d+)')
 _TEST_MODULE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([\w.]+)\)', re.M)
 
@@ -335,6 +364,8 @@ class RealGitHub:
     MERGED_LIMIT = 100
     #: red runs whose logs are read per tick (the rest keep ``failing_files`` empty)
     LOG_LIMIT = 10
+    #: the compare API's file cap: a change listing this many files may be cut short
+    COMPARE_FILES_CAP = 300
 
     def __init__(self, product, run=None):
         from asf import ci_pool
@@ -379,6 +410,7 @@ class RealGitHub:
                   checks=[_check(c) for c in d.get('statusCheckRollup') or []],
                   auto_merge=bool(d.get('autoMergeRequest')))
         pr.tree_sha = self._tree(pr.head_sha)
+        pr.change_id = self._change(d.get('baseRefName') or self.product.main, pr.head_sha)
         pr.latest_reviews = d.get('latestReviews') or []
         for c in pr.checks:
             if c.status == 'completed' and c.conclusion in M.RED_CONCLUSIONS and c.run_id:
@@ -390,6 +422,30 @@ class RealGitHub:
             return ''
         r = self._gh(['api', 'repos/%s/git/commits/%s' % (self.slug, sha)])
         return ((r.data or {}).get('tree') or {}).get('sha', '') if r.ok else ''
+
+    #: (repo, base, head sha) -> change id: a head's merge base with trunk never moves, so
+    #: neither does its change (one compare call per new head, not per tick)
+    _changes = {}
+
+    def _change(self, base, head):
+        """The PR's own change at ``head`` (:func:`change_id` over ``compare/<base>...<head>``);
+        '' when unreadable or cut short (the verdict then keys by tree alone)."""
+        if not (base and head):
+            return ''
+        key = (self.slug, base, head)
+        if key in self._changes:
+            return self._changes[key]
+        r = self._gh(['api', 'repos/%s/compare/%s...%s' % (self.slug, base, head)])
+        if not r.ok or not isinstance(r.data, dict):
+            return ''
+        files = r.data.get('files')
+        if not isinstance(files, list) or len(files) >= self.COMPARE_FILES_CAP:
+            return ''  # GitHub lists at most 300 files: a longer change cannot be hashed whole
+        cid = change_id(files)
+        if len(self._changes) >= 4096:
+            self._changes.clear()
+        self._changes[key] = cid
+        return cid
 
     def _red_detail(self, check, files):
         r = self._gh(['api', 'repos/%s/actions/runs/%d' % (self.slug, check.run_id)])
@@ -414,7 +470,8 @@ class RealGitHub:
                 oid = (rv.get('commit') or {}).get('oid')
                 if verdict and pr.tree_sha and oid == pr.head_sha:
                     body = (rv.get('body') or '').strip()
-                    out.append(M.Review(pr.item_id, pr.tree_sha, verdict, [body] if body else []))
+                    out.append(M.Review(pr.item_id, pr.tree_sha, verdict, [body] if body else [],
+                                        pr.change_id))
         return out
 
     def floor_approvals(self, prs):
@@ -540,6 +597,7 @@ class RealSessions:
                 question=said['question'] or None, last_line=said['last_line'],
                 report=str((result or {}).get('result') or ''),
                 pr=run.get('kernel_pr'), tree_sha=run.get('kernel_tree') or '',
+                change_id=run.get('kernel_change') or '',
                 worktree=run.get('worktree') or '', branch=run.get('branch') or '',
                 status=said['status'],
                 fields=said['fields'], api_error=said['api_error']))
@@ -581,7 +639,7 @@ class RealSessions:
             raise PortError('launch: %s' % e) from None
         if meta:
             pool.update_session(self.product, job, kernel_pr=meta.get('pr'),
-                                kernel_tree=meta.get('tree'))
+                                kernel_tree=meta.get('tree'), kernel_change=meta.get('change'))
         return job
 
     def push_rebase(self, session, sha):

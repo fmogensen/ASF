@@ -15,9 +15,11 @@ item and the actions of one tick. The rules it holds, in the design's words:
   invisible everywhere: it is :attr:`State.PARKED` (Done stays Done), gets no launch, no PR upkeep
   (update, rerun, auto-merge), no answer, no mint for its landed spec, is never Stuck, and never
   counts in a ``blocked_count`` or holds anyone through ``after:`` or ``writes``.
-- Review: one reviewer per PR head; the verdict is keyed by the head's tree, so a rebase with the
-  same tree keeps it. ``changes`` sends the item to Ready with the findings. Every PR without a
-  verdict on its head tree gets a review, a document branch (``config.doc_branches``) included.
+- Review: one reviewer per PR head; the verdict is keyed by the head's tree and by the PR's own
+  change (``change_id``), and holds when either matches: a rebase with the same tree keeps it, and
+  so does an update that merges trunk in (the change is the same). ``changes`` sends the item to
+  Ready with the findings. Every PR without a verdict on its head gets a review, a document branch
+  (``config.doc_branches``) included.
 - Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch`.
   Every open PR's item is in Review or Landing (or Ready on a fix round, or Stuck) — never stateless.
 - Red: only ``failure``/``timed_out``. A red whose ``failing_files`` meet none of the PR's files
@@ -58,7 +60,7 @@ import fnmatch
 
 from asf.kernel import actions as A
 from asf.kernel import reports as R
-from asf.kernel.model import OWNERS, RED_CONCLUSIONS, State, Stuck
+from asf.kernel.model import OWNERS, RED_CONCLUSIONS, State, Stuck, verdict_holds
 from asf.kernel.stories import declared_stories
 
 #: the item types whose state is derived from their children (when they have any)
@@ -426,7 +428,7 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
 
     verdict = None
     for r in facts.reviews:
-        if r.item_id == it.id and r.tree_sha == pr.tree_sha:
+        if r.item_id == it.id and verdict_holds(r, pr):
             verdict = r
     if verdict is None:
         return _Judged(State.REVIEW, review_branch=pr.branch)

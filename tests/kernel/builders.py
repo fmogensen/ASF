@@ -51,8 +51,9 @@ def session(job, item_id, **kw):
     return M.Session(job=job, item_id=item_id, **kw)
 
 
-def review(item_id, tree='tree-1', verdict='approve', findings=None):
-    return M.Review(item_id=item_id, tree_sha=tree, verdict=verdict, findings=list(findings or []))
+def review(item_id, tree='tree-1', verdict='approve', findings=None, change=''):
+    return M.Review(item_id=item_id, tree_sha=tree, verdict=verdict, findings=list(findings or []),
+                    change_id=change)
 
 
 def answer(item_id, text):

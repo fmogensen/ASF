@@ -15,7 +15,7 @@ class FakeRecord:
         self._answers, self._reviews = list(answers), list(reviews)
         self._paused = paused
         self.fail = set(fail)
-        self.writes, self.minted, self.recorded = [], [], []
+        self.writes, self.minted, self.recorded, self.changes = [], [], [], []
 
     def items(self):
         out = {}
@@ -45,9 +45,10 @@ class FakeRecord:
     def reviews(self):
         return list(self._reviews)
 
-    def record_review(self, item_id, pr, tree_sha, verdict, findings):
+    def record_review(self, item_id, pr, tree_sha, verdict, findings, change_id=''):
         self.recorded.append((item_id, pr, tree_sha, verdict, list(findings)))
-        self._reviews.append(M.Review(item_id, tree_sha, verdict, list(findings)))
+        self.changes.append(change_id)
+        self._reviews.append(M.Review(item_id, tree_sha, verdict, list(findings), change_id))
 
     def paused(self):
         return self._paused

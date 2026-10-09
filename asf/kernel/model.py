@@ -117,7 +117,10 @@ class Check:
 @dataclasses.dataclass
 class PR:
     """One pull request against trunk. ``tree_sha`` is the head commit's tree: a rebase that
-    changes nothing keeps it, so a verdict keyed by it survives. ``behind``: the base moved past
+    changes nothing keeps it, so a verdict keyed by it survives. ``change_id`` is the PR's own
+    change: a hash of the diff from the merge base to the head, blind to line numbers, so a
+    merge of trunk into the branch (GitHub's "update branch") keeps it while a new commit on the
+    PR changes it ('' when unread). ``behind``: the base moved past
     the PR's base; ``conflicting``: GitHub cannot merge it as is. ``files`` are the paths the PR
     changes. ``auto_merge``: auto-merge is already enabled; ``merged``: it landed."""
     number: int
@@ -125,6 +128,7 @@ class PR:
     item_id: str
     head_sha: str = ''
     tree_sha: str = ''
+    change_id: str = ''
     behind: bool = False
     conflicting: bool = False
     files: list = dataclasses.field(default_factory=list)
@@ -151,7 +155,8 @@ class Session:
     ``result`` is one of :data:`RESULTS`; ``question`` is set when ``result == 'question'``;
     ``last_line`` is the last line it wrote; ``worktree`` is the checkout it holds. ``report`` is
     the whole result text of an ended session (a reviewer's verdict lines are read off it);
-    ``pr``/``tree_sha`` are the PR and head tree a review session was launched on; ``branch`` the
+    ``pr``/``tree_sha``/``change_id`` are the PR, head tree and PR change a review session was
+    launched on; ``branch`` the
     branch it was launched on.
 
     What an ended session's REPORT declares (:func:`asf.kernel.reports.read`): ``status`` is
@@ -171,6 +176,7 @@ class Session:
     report: str = ''
     pr: int = None
     tree_sha: str = ''
+    change_id: str = ''
     status: str = ''
     fields: dict = dataclasses.field(default_factory=dict)
     api_error: str = ''
@@ -179,13 +185,24 @@ class Session:
 
 @dataclasses.dataclass
 class Review:
-    """One reviewer's verdict on an item's PR, keyed by the head's tree. ``verdict`` is
-    ``approve`` or ``changes``; ``findings`` (for ``changes``) go back to the item as it returns
-    to Ready."""
+    """One reviewer's verdict on an item's PR, keyed by the head's tree and by the PR's own
+    change (``change_id``, '' on a verdict recorded before it was kept): it holds for a PR whose
+    tree or change equals it (:func:`verdict_holds`). ``verdict`` is ``approve`` or ``changes``;
+    ``findings`` (for ``changes``) go back to the item as it returns to Ready."""
     item_id: str
     tree_sha: str
     verdict: str
     findings: list = dataclasses.field(default_factory=list)
+    change_id: str = ''
+
+
+def verdict_holds(review, pr):
+    """Whether ``review`` is a verdict on ``pr`` as it stands: the same head tree or the same own
+    change (the caller matches the item). A branch update that merges trunk in moves the tree but
+    keeps the change, so an approval survives it; a new commit on the PR moves both."""
+    if review.tree_sha and review.tree_sha == pr.tree_sha:
+        return True
+    return bool(review.change_id) and review.change_id == pr.change_id
 
 
 @dataclasses.dataclass

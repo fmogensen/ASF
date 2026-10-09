@@ -208,6 +208,34 @@ class Rounds(unittest.TestCase):
         self.assertEqual(B.state(plan, 'E-0001'), State.STUCK)
 
 
+class ChangeKeyedVerdicts(unittest.TestCase):
+    """A verdict holds on the head tree or on the PR's own change: GitHub's "update branch"
+    (trunk merged in) moves the tree and keeps the change, so an approval survives it."""
+
+    def plan(self, tree, change, review):
+        f = B.facts([B.task('T-0001', state=State.LANDING)],
+                    prs=[B.pr(4, 'T-0001', tree=tree, change_id=change, auto_merge=True)],
+                    reviews=[review])
+        return decide(f, B.config())
+
+    def test_approved_then_updated_with_trunk_stays_landing(self):
+        plan = self.plan('tree-2', 'change-1', B.review('T-0001', tree='tree-1', change='change-1'))
+        self.assertEqual(B.state(plan, 'T-0001'), State.LANDING)
+        self.assertEqual(B.launched(plan, 'review'), [])
+
+    def test_approved_then_a_new_commit_goes_back_to_review(self):
+        plan = self.plan('tree-2', 'change-2', B.review('T-0001', tree='tree-1', change='change-1'))
+        self.assertEqual(B.state(plan, 'T-0001'), State.REVIEW)
+        self.assertEqual(B.launched(plan, 'review'), ['T-0001'])
+
+    def test_an_old_ledger_row_still_matches_on_its_tree(self):
+        plan = self.plan('tree-1', 'change-1', B.review('T-0001', tree='tree-1'))
+        self.assertEqual(B.state(plan, 'T-0001'), State.LANDING)
+        # and two unread changes are no match: an old row on another tree needs a review
+        plan = self.plan('tree-2', '', B.review('T-0001', tree='tree-1'))
+        self.assertEqual(B.state(plan, 'T-0001'), State.REVIEW)
+
+
 class Stories(unittest.TestCase):
 
     def test_no_stories_section_is_empty(self):

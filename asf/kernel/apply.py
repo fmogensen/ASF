@@ -16,8 +16,8 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   before the session is ended — a kernel session pushes its own branch, and this is the safety
   net; a refused push keeps the worktree;
 - a review session that ended has its report's verdict lines
-  (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree it
-  was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
+  (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree and
+  the PR change it was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
 
 Every brief comes from the ports' brief maker (:class:`asf.kernel.briefs.Briefer` on the real
 ports): the floor's brief builder, never text of the kernel's own.
@@ -34,7 +34,7 @@ from asf.kernel import actions as A
 from asf.kernel import ports as P
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import API_FAILED, CONFLICT, CONTAINERS, CRASH
-from asf.kernel.model import State
+from asf.kernel.model import State, verdict_holds
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
 NO_VERDICT = 'review: no VERDICT line'
@@ -143,16 +143,21 @@ class _Applier:
         return note
 
     def verdict(self, s):
-        """Record an ended review session's verdict on the ledger, keyed by the tree it read."""
+        """Record an ended review session's verdict on the ledger, keyed by the tree and the PR
+        change it read."""
         got = parse_verdict(s.report)
         pr = next((p for p in self.facts.prs if p.item_id == s.item_id and not p.merged
                    and (s.pr is None or p.number == s.pr)), None)
         tree = s.tree_sha or (pr.tree_sha if pr else '')
+        # the change read with the tree the session was launched on; a session launched before
+        # the change was kept takes the PR's only while its tree is still the one reviewed
+        same = pr is not None and (not s.tree_sha or s.tree_sha == pr.tree_sha)
+        change = s.change_id or (pr.change_id if same else '')
         if got is None or not tree:
             self.attempt(s.item_id, NO_VERDICT)
             return
         self.ports.record.record_review(s.item_id, s.pr or (pr.number if pr else None), tree,
-                                        got[0], got[1])
+                                        got[0], got[1], change)
 
     def MarkStuck(self, a):
         pass  # written with the item's state below (one card write per item)
@@ -189,10 +194,11 @@ class _Applier:
         findings = []
         if fix:
             findings = [f for r in self.facts.reviews
-                        if r.item_id == a.item_id and r.tree_sha == pr.tree_sha
+                        if r.item_id == a.item_id and verdict_holds(r, pr)
                         and r.verdict != 'approve' for f in r.findings]
             findings += [f for f in a.findings if f not in findings]
-        meta = {'pr': pr.number, 'tree': pr.tree_sha} if pr is not None else {}
+        meta = ({'pr': pr.number, 'tree': pr.tree_sha, 'change': pr.change_id}
+                if pr is not None else {})
         try:
             if self.ports.brief is None:
                 raise P.PortError('no brief maker on the ports')
