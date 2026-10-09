@@ -100,5 +100,37 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual([s.row.item_id for s in preview if s.starts], ['T-0002'])
 
 
+class TuneCappedTests(unittest.TestCase):
+    """B-84835: the live wave runs every starting row through ``tune_mod.place`` *after*
+    ``screen`` (:func:`asf.tick.step_wave.launch`); :func:`step_wave.would_start` — what the
+    dwell watchdog and ``asf status`` read — never did, so a row held back only by its kind's
+    tuned seat share still read STARTS, "would launch", there for as long as the tick kept
+    holding it back."""
+
+    def test_a_tune_held_row_never_reads_starts(self):
+        with mock.patch.object(step_wave, 'preview_row',
+                              side_effect=lambda _p, r, _i: pool_mod.Row(
+                                  step_wave.job_name('task', r.item_id), r.item_id,
+                                  kind='coder')):
+            screened = step_wave.screen(PRODUCT, [row('T-0001'), row('T-0002')], ITEMS, [], {}, 2,
+                                        act=False)
+        self.assertEqual([s.kind for s in screened], [step_wave.STARTS, step_wave.STARTS])
+        from asf import tune as tune_mod
+        cfg = {'tune': {'enabled': True, 'bounds': {'coder': {'seats': [1, 1]}}}}
+        with mock.patch.object(tune_mod, 'load_state',
+                              return_value={'kinds': {'coder': {'seats': 1}}}):
+            out = step_wave.tune_capped(PRODUCT, screened, [], ITEMS, cfg=cfg)
+        self.assertEqual([(s.row.item_id, s.kind) for s in out],
+                         [('T-0001', step_wave.STARTS), ('T-0002', step_wave.TUNE_HELD)])
+        self.assertTrue(out[0].starts)
+        self.assertFalse(out[1].starts)
+        self.assertIn('tune: coder seat share', out[1].why)
+
+    def test_untuned_rows_pass_through_unchanged(self):
+        screened = [step_wave.Screened(row('T-0001'), wrow=pool_mod.Row('task-t-0001', 'T-0001'))]
+        out = step_wave.tune_capped(PRODUCT, screened, [], ITEMS, cfg={})
+        self.assertEqual([(s.row.item_id, s.kind) for s in out], [('T-0001', step_wave.STARTS)])
+
+
 if __name__ == '__main__':
     unittest.main()

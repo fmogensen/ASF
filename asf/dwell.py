@@ -507,7 +507,10 @@ def launchable_idle(facts):
         return []
     out = []
     for s in screened:
-        if not s.row.launches or s.kind == step_wave.NO_SEAT:
+        # NO_SEAT: no free seat in the product's own share. TUNE_HELD: a free seat, but the
+        # self-tuning seat share for this row's kind is full — neither is an idle row, both
+        # self-resolve as soon as a running session of that kind ends (F-0313)
+        if not s.row.launches or s.kind in (step_wave.NO_SEAT, step_wave.TUNE_HELD):
             continue
         # the groom row speaks for the day's open questions, not for the item it happens to be
         # named after (the same exception asf.feeder.rows.hold_unlanded makes) — B-84837
