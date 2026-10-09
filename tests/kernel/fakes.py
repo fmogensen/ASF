@@ -15,7 +15,7 @@ class FakeRecord:
         self._answers, self._reviews = list(answers), list(reviews)
         self._paused = paused
         self.fail = set(fail)
-        self.writes, self.minted = [], []
+        self.writes, self.minted, self.recorded = [], [], []
 
     def items(self):
         out = {}
@@ -43,6 +43,10 @@ class FakeRecord:
 
     def reviews(self):
         return list(self._reviews)
+
+    def record_review(self, item_id, pr, tree_sha, verdict, findings):
+        self.recorded.append((item_id, pr, tree_sha, verdict, list(findings)))
+        self._reviews.append(M.Review(item_id, tree_sha, verdict, list(findings)))
 
     def paused(self):
         return self._paused
@@ -96,16 +100,17 @@ class FakeSessions:
     def __init__(self, sessions=(), fail=()):
         self._sessions = list(sessions)
         self.fail = set(fail)
-        self.launched, self.ended = [], []
+        self.launched, self.ended, self.meta = [], [], []
 
     def sessions(self):
         return copy.deepcopy(self._sessions)
 
-    def launch(self, kind, item_id, branch, brief):
+    def launch(self, kind, item_id, branch, brief, meta=None):
         if ('launch', item_id) in self.fail:
             raise P.PortError('no account with a free seat')
         job = '%s-%s' % (kind, item_id.lower())
-        self.launched.append((kind, item_id, branch, brief))
+        self.launched.append((kind, item_id, branch, getattr(brief, 'text', brief)))
+        self.meta.append(dict(meta or {}))
         self._sessions.append(M.Session(job=job, item_id=item_id, kind=kind))
         return job
 
@@ -114,5 +119,11 @@ class FakeSessions:
         self._sessions = [s for s in self._sessions if s.job != session.job]
 
 
-def ports(record=None, github=None, sessions=None):
-    return P.Ports(record or FakeRecord([]), github or FakeGitHub(), sessions or FakeSessions())
+def brief(item, launch, findings=(), pr=None):
+    """A stand-in brief maker: the kind, the item and the findings, one per line."""
+    return '\n'.join(['%s %s on %s' % (launch.kind, item.id, launch.branch)] + list(findings))
+
+
+def ports(record=None, github=None, sessions=None, briefer=brief):
+    return P.Ports(record or FakeRecord([]), github or FakeGitHub(), sessions or FakeSessions(),
+                   briefer)

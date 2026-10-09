@@ -81,6 +81,7 @@ class RecordPort(typing.Protocol):
     def specs_landed(self) -> dict: ...                 # Feature id -> spec text
     def answers(self) -> list: ...                      # [Answer]
     def reviews(self) -> list: ...                      # [Review] from the kernel's ledger
+    def record_review(self, item_id, pr, tree_sha, verdict, findings) -> None: ...  # append
     def paused(self) -> bool: ...
     def write_fields(self, item_id, fields) -> None: ...  # merge into the machine block
     def mint_story(self, feature_id, story_id, title, acceptance) -> None: ...
@@ -96,7 +97,7 @@ class GitHubPort(typing.Protocol):
 
 class SessionPort(typing.Protocol):
     def sessions(self) -> list: ...                     # [Session], every run not yet ended
-    def launch(self, kind, item_id, branch, brief) -> str: ...  # the job id
+    def launch(self, kind, item_id, branch, brief, meta) -> str: ...  # the job id
     def end(self, session, free_worktree) -> None: ...
 
 
@@ -215,10 +216,19 @@ class RealRecord:
                 if r.get('item') and r.get('text')]
 
     def reviews(self):
-        return [M.Review(str(r['item']), str(r['tree']), str(r['verdict']),
+        return [M.Review(str(r['item']), str(r.get('tree_sha') or r['tree']), str(r['verdict']),
                          [str(f) for f in as_list(r.get('findings'))])
                 for r in _jsonl(os.path.join(self.state_dir, REVIEWS_FILE))
-                if r.get('item') and r.get('tree') and r.get('verdict')]
+                if r.get('item') and (r.get('tree_sha') or r.get('tree')) and r.get('verdict')]
+
+    def record_review(self, item_id, pr, tree_sha, verdict, findings):
+        """Append one verdict to the review ledger: ``{item, pr, tree_sha, verdict, findings,
+        at}``."""
+        os.makedirs(self.state_dir, exist_ok=True)
+        line = json.dumps({'item': item_id, 'pr': pr, 'tree_sha': tree_sha, 'verdict': verdict,
+                           'findings': list(findings), 'at': now_iso()}, sort_keys=True)
+        with open(os.path.join(self.state_dir, REVIEWS_FILE), 'a', encoding='utf-8') as f:
+            f.write(line + '\n')
 
     def paused(self):
         from asf import pause
@@ -384,8 +394,9 @@ class RealGitHub:
 
     def reviews(self, prs):
         """GitHub's own reviews on each open PR's current head: ``APPROVED`` / ``CHANGES_REQUESTED``
-        on the head commit is a verdict on the head's tree."""
-        out = []
+        on the head commit is a verdict on the head's tree; plus the old floor's standing
+        approvals (:meth:`floor_approvals`)."""
+        out = self.floor_approvals(prs)
         for pr in prs:
             for rv in getattr(pr, 'latest_reviews', None) or []:
                 verdict = {'APPROVED': 'approve', 'CHANGES_REQUESTED': 'changes'}.get(rv.get('state'))
@@ -393,6 +404,32 @@ class RealGitHub:
                 if verdict and pr.tree_sha and oid == pr.head_sha:
                     body = (rv.get('body') or '').strip()
                     out.append(M.Review(pr.item_id, pr.tree_sha, verdict, [body] if body else []))
+        return out
+
+    def floor_approvals(self, prs):
+        """The old floor's approvals still standing: the newest review of the PR's item on its
+        branch or in the review store (:func:`asf.evidence.review.review_at`, read-only on the
+        product's checkout) that is approved and names the PR's head counts as an ``approve`` on
+        the head's tree. Its ``changes`` verdicts are not imported."""
+        from asf.evidence import review, review_store
+        repo = getattr(self.product, 'repo_dir', None)
+        if not repo or not os.path.isdir(repo):
+            return []
+        store, out = review_store.root(self.product), []
+        for pr in prs:
+            if not (pr.head_sha and pr.tree_sha):
+                continue
+            try:
+                rv = review.review_at(repo, self.product.conventions, 'origin/' + pr.branch,
+                                      pr.item_id, store=store)
+            except Exception:  # noqa: BLE001 — an unreadable old review is no verdict
+                continue
+            head = str((rv or {}).get('head') or '').lower()
+            if not (rv and rv.get('verdict') == review.APPROVED and len(head) >= 7):
+                continue
+            if pr.head_sha.lower().startswith(head) or \
+                    (review._git(repo, 'rev-parse', head + '^{tree}') or '').strip() == pr.tree_sha:
+                out.append(M.Review(pr.item_id, pr.tree_sha, 'approve', []))
         return out
 
     def _write(self, args, what):
@@ -449,7 +486,8 @@ class RealSessions:
                 job=run['job'], item_id=run['item'], kind=kind, pid=run.get('pid'), alive=alive,
                 ended=result is not None,
                 result='pushed' if pushed else ('report' if kind == 'review' else 'none'),
-                last_line=_last_line(result),
+                last_line=_last_line(result), report=str((result or {}).get('result') or ''),
+                pr=run.get('kernel_pr'), tree_sha=run.get('kernel_tree') or '',
                 worktree=run.get('worktree') or ''))
             out[-1].started = run.get('started') or ''
         return out
@@ -466,20 +504,28 @@ class RealSessions:
                 return acct
         raise PortError('no account with a free seat')
 
-    def launch(self, kind, item_id, branch, brief):
+    def launch(self, kind, item_id, branch, brief, meta=None):
+        """Spawn one session with ``brief`` (an :class:`asf.briefs.build.Brief`: its text, model
+        and grants); ``meta`` (``pr``, ``tree``) goes on the session's ledger row."""
         from asf.workers import pool, spawn
         acct = self._account()
         job = '%s-%s-%d' % (kind, item_id.lower(), int(time.time()))
         row = pool.Row(job, item_id, kind='task' if kind == 'build' else kind, branch=branch,
-                       title=item_id)
+                       title=item_id, model=getattr(brief, 'model', '') or '',
+                       add_dirs=getattr(brief, 'add_dirs', ()) or (),
+                       card_digest=getattr(brief, 'card_digest', '') or '')
         runtime = None
         if acct.role == 'cloud':
             from asf.workers import cloud  # the cloud runtime: remote.RemoteRuntime or actions
             runtime = cloud.lane_runtime(cloud.settings(self.cfg(), self.product), self.product)
         try:
-            spawn.spawn(self.product, row, acct, brief, runtime=runtime, cfg=self.cfg())
+            spawn.spawn(self.product, row, acct, getattr(brief, 'text', brief), runtime=runtime,
+                        cfg=self.cfg())
         except spawn.SpawnError as e:
             raise PortError('launch: %s' % e) from None
+        if meta:
+            pool.update_session(self.product, job, kernel_pr=meta.get('pr'),
+                                kernel_tree=meta.get('tree'))
         return job
 
     def end(self, session, free_worktree):
@@ -509,14 +555,17 @@ def _under(path, parent):
 # ---- the product's ports and knobs --------------------------------------------------------------
 
 class Ports:
-    """The three ports one tick uses."""
+    """The three ports one tick uses, and the brief maker ``brief(item, launch, findings, pr)``
+    a launch hands its session (:class:`asf.kernel.briefs.Briefer` on the real ports)."""
 
-    def __init__(self, record, github, sessions):
-        self.record, self.github, self.sessions = record, github, sessions
+    def __init__(self, record, github, sessions, brief=None):
+        self.record, self.github, self.sessions, self.brief = record, github, sessions, brief
 
 
 def real_ports(product):
-    return Ports(RealRecord(product), RealGitHub(product), RealSessions(product))
+    from asf.kernel.briefs import Briefer
+    return Ports(RealRecord(product), RealGitHub(product), RealSessions(product),
+                 Briefer(product))
 
 
 def config_for(product, cfg=None):

@@ -7,7 +7,13 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   'changes' findings on that PR's tree go to the card and the brief;
 - a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR is an attempt whose reason
   starts with :data:`asf.kernel.decide.CONFLICT`; a failed launch is an attempt ``launch: …``;
-- a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`.
+- a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`;
+- a review session that ended has its report's verdict lines
+  (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree it
+  was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
+
+Every brief comes from the ports' brief maker (:class:`asf.kernel.briefs.Briefer` on the real
+ports): the floor's brief builder, never text of the kernel's own.
 
 Idempotent: a state already on the card is not rewritten, a Stuck already recorded keeps its
 ``since``, a Story already on the record is not minted, and a launch for an item a live session
@@ -18,8 +24,12 @@ import dataclasses
 
 from asf.kernel import actions as A
 from asf.kernel import ports as P
+from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import CONFLICT, CONTAINERS, CRASH
 from asf.kernel.model import State
+
+#: the attempt a review session that ended without a ``VERDICT:`` line records
+NO_VERDICT = 'review: no VERDICT line'
 
 
 @dataclasses.dataclass
@@ -88,7 +98,21 @@ class _Applier:
             return 'not in the facts'
         if not s.ended:
             self.attempt(s.item_id, CRASH)
+        elif s.kind == 'review':
+            self.verdict(s)
         self.ports.sessions.end(s, a.free_worktree)
+
+    def verdict(self, s):
+        """Record an ended review session's verdict on the ledger, keyed by the tree it read."""
+        got = parse_verdict(s.report)
+        pr = next((p for p in self.facts.prs if p.item_id == s.item_id and not p.merged
+                   and (s.pr is None or p.number == s.pr)), None)
+        tree = s.tree_sha or (pr.tree_sha if pr else '')
+        if got is None or not tree:
+            self.attempt(s.item_id, NO_VERDICT)
+            return
+        self.ports.record.record_review(s.item_id, s.pr or (pr.number if pr else None), tree,
+                                        got[0], got[1])
 
     def MarkStuck(self, a):
         pass  # written with the item's state below (one card write per item)
@@ -124,9 +148,12 @@ class _Applier:
             findings = [f for r in self.facts.reviews
                         if r.item_id == a.item_id and r.tree_sha == pr.tree_sha
                         and r.verdict != 'approve' for f in r.findings]
+        meta = {'pr': pr.number, 'tree': pr.tree_sha} if pr is not None else {}
         try:
+            if self.ports.brief is None:
+                raise P.PortError('no brief maker on the ports')
             job = self.ports.sessions.launch(a.kind, a.item_id, a.branch,
-                                             brief(it, a, findings, pr))
+                                             self.ports.brief(it, a, findings, pr), meta)
         except Exception as e:
             self.attempt(a.item_id, 'launch: %s' % e)
             raise
@@ -160,8 +187,8 @@ class _Applier:
         parents = {it.parent for it in self.facts.items.values()}
         for iid, (state, stuck) in self.plan.states.items():
             it = self.facts.items.get(iid)
-            if it is None or (it.type in CONTAINERS and iid in parents):
-                continue
+            if it is None or state is State.PARKED or (it.type in CONTAINERS and iid in parents):
+                continue  # derived every tick, never stored
             upd = self.updates.get(iid, {})
             if P.STATE in upd:   # a launch this tick moved it already
                 continue
@@ -195,23 +222,3 @@ def apply(plan, facts, ports, now=None, log=print):
     """Do ``plan`` (decided on ``facts``) through ``ports``; return a :class:`Result`."""
     return _Applier(plan, facts, ports, now or P.now_iso(), log).run()
 
-
-def brief(it, launch, findings=(), pr=None):
-    """The brief one session gets: the item, the branch, and what this round must answer."""
-    lines = ['# %s %s — %s' % (launch.kind, it.id, it.title), '',
-             'Item: %s (%s). Branch: `%s`.' % (it.id, it.type, launch.branch)]
-    if pr is not None:
-        lines.append('Open PR: #%d (head %s).' % (pr.number, pr.head_sha[:12]))
-    if launch.kind == 'review':
-        lines.append('Review the PR head; record one verdict (approve or changes, with findings) '
-                     'keyed by the head tree.')
-    elif launch.kind == 'build':
-        lines.append('Work only within the declared writes: %s. Push the branch once, at the end.'
-                     % (', '.join(it.writes) or '(none declared)'))
-    else:
-        lines.append('Write the %s document for %s on this branch and push it.' % (launch.kind, it.id))
-    if findings:
-        lines += ['', '## Findings to answer'] + ['- %s' % f for f in findings]
-    if it.answers:
-        lines += ['', '## Operator answers'] + ['- %s' % a for a in it.answers]
-    return '\n'.join(lines) + '\n'

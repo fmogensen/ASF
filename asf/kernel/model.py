@@ -22,6 +22,9 @@ class State(enum.Enum):
     - ``LANDING``: an open PR approved on its head tree, waiting on required checks / auto-merge.
     - ``DONE``: its PR merged (a reopen moves a Done item back, and a new PR is accepted).
     - ``STUCK``: nothing the loop does will move it; :class:`Stuck` names the owner.
+    - ``PARKED``: the item, or an ancestor (Story, Feature, Epic), is ``priority: later`` — it is
+      invisible: no launch, no PR upkeep, no mint, never Stuck, never counted as blocking.
+      Derived every tick and never stored on the card, so un-parking finds the card as it was.
     """
     NEW = 'new'
     READY = 'ready'
@@ -30,6 +33,7 @@ class State(enum.Enum):
     LANDING = 'landing'
     DONE = 'done'
     STUCK = 'stuck'
+    PARKED = 'parked'
 
 
 #: who must act on a Stuck item: the loop itself, a session, CI, or the operator
@@ -61,8 +65,9 @@ class Item:
 
     ``parent`` is the one membership link: a Task belongs to the Story or Feature it names there,
     and to nothing it merely mentions in ``body``. ``rank`` orders launches (lower first; ``None``
-    is unranked). ``priority == 'later'`` makes the item invisible to every other item: nothing
-    waits on it and its ``writes`` hold no one. ``after`` lists the declared wait edges.
+    is unranked). ``priority == 'later'`` parks the item and every item under it
+    (:attr:`State.PARKED`): nothing waits on it and its ``writes`` hold no one. ``after`` lists
+    the declared wait edges.
     ``writes`` are the path globs the item declares it will change.
 
     ``state``/``stuck`` are what the card records now. ``attempts`` is the reason of each failed
@@ -129,7 +134,9 @@ class Session:
     launch kind (``build``, ``review``, ``spec``, ``plan``). ``alive`` is whether its pid answers;
     ``ended`` is whether it exited on its own (a dead pid that never ended is a crash).
     ``result`` is one of :data:`RESULTS`; ``question`` is set when ``result == 'question'``;
-    ``last_line`` is the last line it wrote; ``worktree`` is the checkout it holds."""
+    ``last_line`` is the last line it wrote; ``worktree`` is the checkout it holds. ``report`` is
+    the whole result text of an ended session (a reviewer's verdict lines are read off it);
+    ``pr``/``tree_sha`` are the PR and head tree a review session was launched on."""
     job: str
     item_id: str
     kind: str = 'build'
@@ -140,6 +147,9 @@ class Session:
     question: str = None
     last_line: str = ''
     worktree: str = ''
+    report: str = ''
+    pr: int = None
+    tree_sha: str = ''
 
 
 @dataclasses.dataclass

@@ -9,6 +9,12 @@ what ``decide`` should act on:
 - a PR whose item is not on the record is dropped (a branch naming a retired or foreign id);
 - a landed spec counts only while its Feature's card is not Done: a finished Feature's Stories
   are history, never minted afresh (the old record never minted the Stories of its early specs).
+
+The verdicts are the kernel's review ledger (``state/<product>/kernel-reviews.jsonl``, one row per
+reviewer report, keyed by the tree it read), GitHub's own reviews on the head, and the old floor's
+approvals that still name the head (:meth:`asf.kernel.ports.RealGitHub.floor_approvals`). Parked
+items (``priority: later`` on the item or an ancestor) are not filtered here: ``decide`` holds
+that rule, so it is the same everywhere.
 """
 from asf.kernel.model import Facts, State
 

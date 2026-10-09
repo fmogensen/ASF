@@ -5,8 +5,12 @@ item and the actions of one tick. The rules it holds, in the design's words:
 
 - Launch: Ready items in rank order alone, while ``config.max_sessions`` allows; ``facts.paused``
   means no :class:`Launch` at all. An item whose own errors repeat is Stuck; the lane never is.
-- Waits: only a declared ``after:`` edge between two non-``later`` items, and "two Building items
-  with overlapping ``writes``: one at a time". A ``priority: later`` item is invisible.
+- Waits: only a declared ``after:`` edge between two visible items, and "two Building items
+  with overlapping ``writes``: one at a time".
+- Parked: an item whose own ``priority``, or an ancestor's (through ``parent``), is ``later`` is
+  invisible everywhere: it is :attr:`State.PARKED` (Done stays Done), gets no launch, no PR upkeep
+  (update, rerun, auto-merge), no answer, no mint for its landed spec, is never Stuck, and never
+  counts in a ``blocked_count`` or holds anyone through ``after:`` or ``writes``.
 - Review: one reviewer per PR head; the verdict is keyed by the head's tree, so a rebase with the
   same tree keeps it. ``changes`` sends the item to Ready with the findings. Every PR without a
   verdict on its head tree gets a review, a document branch (``config.doc_branches``) included.
@@ -78,7 +82,9 @@ def decide(facts, config):
         if not s.alive:
             actions.append(A.EndSession(s.job, free_worktree=True))
 
-    judged = {iid: _judge(items[iid], facts, config, actions) for iid in sorted(items)}
+    parked = _parked(items)
+    judged = {iid: (_park(items[iid], facts, config) if iid in parked
+                    else _judge(items[iid], facts, config, actions)) for iid in sorted(items)}
     for iid, j in judged.items():
         old = items[iid]
         if j.state is State.STUCK and (old.state is not State.STUCK or old.stuck != j.stuck):
@@ -87,13 +93,13 @@ def decide(facts, config):
     children = _children(items)
     states = {}
     for iid in sorted(items):
-        _state_of(iid, items, judged, children, states, ())
-    _apply_waits(items, judged, children, states)
-    _count_blocked(items, states)
+        _state_of(iid, items, judged, children, states, (), parked)
+    _apply_waits(items, judged, children, states, parked)
+    _count_blocked(items, states, parked)
 
-    actions += _mint(facts)
+    actions += _mint(facts, parked)
     if not facts.paused:
-        actions += _launches(facts, config, judged, children, states)
+        actions += _launches(facts, config, judged, children, states, parked)
     actions.sort(key=lambda a: ORDER.index(type(a)))
     return A.Plan(states=states, actions=actions)
 
@@ -153,6 +159,27 @@ def _judge(it, facts, config, actions):
     if it.priority == 'later' or it.rank is None:
         return _Judged(State.NEW, hold=hold)
     return _Judged(State.READY, hold=hold)
+
+
+def _park(it, facts, config):
+    """A parked item's :class:`_Judged`: Done when it is Done, else Parked; every action its own
+    facts would ask for is dropped."""
+    j = _judge(it, facts, config, [])
+    return j if j.state is State.DONE else _Judged(State.PARKED, hold=True)
+
+
+def _parked(items):
+    """The ids of every item that is ``priority: later``, or under one through ``parent``."""
+    out = set()
+    for iid in items:
+        seen, cur = set(), iid
+        while cur in items and cur not in seen:
+            if items[cur].priority == 'later' or cur in out:
+                out.add(iid)
+                break
+            seen.add(cur)
+            cur = items[cur].parent
+    return out
 
 
 def _judge_pr(it, pr, attempts, facts, config, actions):
@@ -234,21 +261,28 @@ def _derived(iid, items, children):
     return items[iid].type in CONTAINERS and bool(children.get(iid))
 
 
-def _state_of(iid, items, judged, children, states, seen):
-    """Fill ``states[iid]``: a container with children takes its state from them; any other item
-    its pass-one state."""
+def _state_of(iid, items, judged, children, states, seen, parked):
+    """Fill ``states[iid]``: a container with children takes its state from its visible ones
+    (Parked when it has none, or is parked itself and not all Done); any other item its
+    pass-one state."""
     if iid in states:
         return states[iid]
     if not _derived(iid, items, children) or iid in seen:
         j = judged[iid]
         states[iid] = (j.state, j.stuck)
         return states[iid]
-    kids = [_state_of(c, items, judged, children, states, seen + (iid,)) for c in children[iid]]
+    kids = [(c, _state_of(c, items, judged, children, states, seen + (iid,), parked))
+            for c in children[iid]]
+    kids = [(c, k) for c, k in kids if k[0] is not State.PARKED]
+    if not kids or (iid in parked and len(kids) < len(children[iid])):
+        states[iid] = (State.PARKED, None)
+        return states[iid]
+    kids_ids, kids = [c for c, _ in kids], [k for _, k in kids]
     got = [s for s, _ in kids]
     if all(s is State.DONE for s in got):
         states[iid] = (State.DONE, None)
     elif all(s in (State.DONE, State.STUCK) for s in got):
-        stuck = [(c, k[1]) for c, k in zip(children[iid], kids) if k[0] is State.STUCK]
+        stuck = [(c, k[1]) for c, k in zip(kids_ids, kids) if k[0] is State.STUCK]
         reason = 'stuck: ' + ', '.join(c for c, _ in stuck)
         states[iid] = (State.STUCK, Stuck(reason, stuck[0][1].owner, stuck[0][1].next_action))
     else:
@@ -257,11 +291,11 @@ def _state_of(iid, items, judged, children, states, seen):
     return states[iid]
 
 
-def _visible(items, iid):
-    return iid in items and items[iid].priority != 'later'
+def _visible(items, iid, parked):
+    return iid in items and iid not in parked
 
 
-def _apply_waits(items, judged, children, states):
+def _apply_waits(items, judged, children, states, parked):
     """A Ready item with a declared ``after:`` edge to a visible item that is not Done waits (New);
     re-derive the containers above it."""
     changed = False
@@ -269,7 +303,7 @@ def _apply_waits(items, judged, children, states):
         it = items[iid]
         if states[iid][0] is not State.READY or _derived(iid, items, children):
             continue
-        if any(_visible(items, a) and states[a][0] is not State.DONE for a in it.after):
+        if any(_visible(items, a, parked) and states[a][0] is not State.DONE for a in it.after):
             judged[iid].state = State.NEW
             states[iid] = (State.NEW, None)
             changed = True
@@ -277,18 +311,18 @@ def _apply_waits(items, judged, children, states):
         for iid in [i for i in states if _derived(i, items, children)]:
             del states[iid]
         for iid in sorted(items):
-            _state_of(iid, items, judged, children, states, ())
+            _state_of(iid, items, judged, children, states, (), parked)
 
 
-def _count_blocked(items, states):
+def _count_blocked(items, states, parked):
     """Set ``blocked_count`` on every Stuck item: the visible, not-Done items that transitively
     wait on it through declared ``after:`` edges."""
     waiters = {}
     for iid in sorted(items):
-        if not _visible(items, iid):
+        if not _visible(items, iid, parked):
             continue
         for a in items[iid].after:
-            if _visible(items, a):
+            if _visible(items, a, parked):
                 waiters.setdefault(a, []).append(iid)
     for iid, (state, stuck) in states.items():
         if state is not State.STUCK:
@@ -305,17 +339,18 @@ def _count_blocked(items, states):
 
 # ---- the record and the launches ----------------------------------------------------------------
 
-def _mint(facts):
-    """A :class:`MintStory` for each Story a landed spec declares that the record lacks."""
+def _mint(facts, parked):
+    """A :class:`MintStory` for each Story a landed spec of a visible Feature declares that the
+    record lacks."""
     out = []
-    for fid in sorted(facts.specs_landed):
+    for fid in sorted(set(facts.specs_landed) - parked):
         for sid, story in declared_stories(facts.specs_landed[fid]).items():
             if sid not in facts.items:
                 out.append(A.MintStory(fid, sid, story['title'], list(story['acceptance'])))
     return out
 
 
-def _launches(facts, config, judged, children, states):
+def _launches(facts, config, judged, children, states, parked):
     """Reviews first, then Ready items, each in rank order, while sessions are free; a Ready item
     whose ``writes`` overlap a Building (or just launched) visible item waits its turn."""
     items = facts.items
@@ -323,9 +358,10 @@ def _launches(facts, config, judged, children, states):
     rank = lambda iid: (items[iid].rank is None, items[iid].rank or 0, iid)  # noqa: E731
     reviews = sorted((i for i, j in judged.items() if j.review_branch and not j.hold), key=rank)
     ready = sorted((i for i, j in judged.items()
-                    if states[i][0] is State.READY and not j.hold and _visible(items, i)
+                    if states[i][0] is State.READY and not j.hold and _visible(items, i, parked)
                     and not _derived(i, items, children)), key=rank)
-    busy = [items[i].writes for i in items if states[i][0] is State.BUILDING and _visible(items, i)]
+    busy = [items[i].writes for i in items
+            if states[i][0] is State.BUILDING and _visible(items, i, parked)]
     out = []
     for iid in reviews:
         if free <= 0:

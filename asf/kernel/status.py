@@ -2,11 +2,15 @@
 
 Three blocks, read-only: the Stuck items first (reason, owner, how many items wait on each, and
 how long it has been stuck), then the count of items per state, then the active sessions. The
-states are the ones ``decide`` reaches on the facts now (no action is applied); a Stuck item's age
-is from its card's ``kernel_stuck_since``, ``-`` until a tick has recorded it.
+states are the last tick's plan (``state/<product>/kernel-plan.json``, written by every applied
+tick), so the table costs no network call; ``live=True`` (``--live``), or no plan on disk yet,
+decides afresh on the facts now (no action is applied). A Stuck item's age is from its card's
+``kernel_stuck_since``, ``-`` until a tick has recorded it.
 """
 import collections
 import datetime
+import json
+import os
 
 from asf import mutation_guard
 from asf.kernel import ports as P
@@ -50,6 +54,23 @@ def rows(ports, config, now=None):
     return stuck, counts, sessions
 
 
+def rows_from_plan(data, record, now=None):
+    """The :func:`rows` triple from a saved plan (:func:`asf.kernel.loop.save_plan`)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    stuck, counts = [], collections.Counter()
+    for iid, row in (data.get('states') or {}).items():
+        counts[row.get('state')] += 1
+        if row.get('state') == State.STUCK.value:
+            since = record.card_fields(iid).get(P.STUCK_SINCE)
+            stuck.append((iid, row.get('reason', ''), row.get('owner', ''),
+                          int(row.get('blocked') or 0), _age(since, now) if since else '-'))
+    stuck.sort(key=lambda r: (-r[3], r[0]))
+    sessions = [(x.get('job'), x.get('item'), x.get('kind'), 'alive' if x.get('alive') else 'dead',
+                 _age(x['started'], now) if x.get('started') else '-')
+                for x in data.get('sessions') or []]
+    return stuck, counts, sessions
+
+
 def render(stuck, counts, sessions):
     """The three blocks as markdown tables (the console draws them as boxes)."""
     out = ['## Stuck', '', '| item | owner | blocks | age | reason |', '| --- | --- | --- | --- | --- |']
@@ -62,9 +83,24 @@ def render(stuck, counts, sessions):
     return '\n'.join(out)
 
 
-def status(product, ports=None, config=None, out=print):
-    from asf.kernel.loop import _product
+def status(product, ports=None, config=None, out=print, live=False, state_dir=None):
+    from asf import env
+    from asf.kernel.loop import PLAN_FILE, _product
     product = _product(product)
+    path = os.path.join(state_dir or os.path.join(env.ASF_HOME, 'state', product.name), PLAN_FILE)
+    data = None
+    if not live:
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = None
+    if data is not None:
+        record = ports.record if ports else P.RealRecord(product)
+        text = render(*rows_from_plan(data, record)) + '\n\n(the tick of %s; --live for now)' \
+            % data.get('at', '?')
+        out(text)
+        return text
     ports = ports or P.real_ports(product)
     config = config or P.config_for(product)
     text = render(*rows(ports, config))

@@ -9,6 +9,7 @@ takes no lock, prints the plan instead of applying it, and runs under
 import collections
 import contextlib
 import fcntl
+import json
 import os
 
 from asf.kernel import actions as A
@@ -19,6 +20,9 @@ from asf.kernel.facts import read_facts
 from asf.kernel.model import State
 
 LOCK_FILE = 'kernel.lock'
+
+#: the last tick's plan, for ``asf kernel status`` (``state/<product>/``)
+PLAN_FILE = 'kernel-plan.json'
 
 #: the Stuck items a summary names, most-blocking first
 TOP_STUCK = 10
@@ -86,6 +90,21 @@ def print_summary(summary, out=print):
         out('  FAILED %s — %s' % (what, why))
 
 
+def save_plan(state_dir, plan, facts):
+    """Write :data:`PLAN_FILE`: each judged item's state (and Stuck), and the sessions."""
+    from asf.kernel.ports import now_iso
+    data = {'at': now_iso(), 'states': {
+        iid: {'state': s.value, **({'reason': st.reason, 'owner': st.owner,
+                                    'blocked': st.blocked_count} if st else {})}
+        for iid, (s, st) in sorted(plan.states.items())},
+        'sessions': [{'job': x.job, 'item': x.item_id, 'kind': x.kind, 'alive': x.alive,
+                      'started': getattr(x, 'started', '')} for x in facts.sessions]}
+    path = os.path.join(state_dir, PLAN_FILE)
+    with open(path + '.tmp', 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+    os.replace(path + '.tmp', path)
+
+
 def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=print):
     """One tick of the kernel for ``product`` (a name or an :class:`asf.env.Product`). Returns the
     :func:`summarize` dict; ``{'locked': path}`` when another tick holds the lock."""
@@ -114,6 +133,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             publish = getattr(ports.record, 'publish', None)
             if publish and result.written:
                 publish('kernel: tick (%d card(s))' % len(result.written))
+            save_plan(state_dir, plan, facts)
     except Locked as e:
         out('kernel tick: another tick holds %s' % e)
         return {'locked': str(e)}

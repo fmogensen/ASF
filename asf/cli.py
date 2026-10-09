@@ -466,6 +466,8 @@ def build_parser():
     p_ktick.add_argument('--dry-run', action='store_true', help='print the plan; write nothing')
     p_kstatus = kernel_sub.add_parser('status', help='Stuck items, states and sessions')
     p_kstatus.add_argument('--product', required=True)
+    p_kstatus.add_argument('--live', action='store_true',
+                           help="decide afresh on the facts now (reads GitHub), not the last tick's plan")
     p_kpause = kernel_sub.add_parser('pause', help="hold the product's launches")
     p_kpause.add_argument('--product', required=True)
     p_kpause.add_argument('--reason', default='kernel pause', help='recorded with the pause')
@@ -590,7 +592,7 @@ def _kernel(args):
         return 1 if summary.get('locked') or summary.get('failed') else 0
     if args.kernel_command == 'status':
         from asf.kernel.status import status
-        status(args.product)
+        status(args.product, live=args.live)
         return 0
     from asf import env, pause
     name = env.load_product(args.product).name
