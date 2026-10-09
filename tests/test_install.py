@@ -3357,6 +3357,25 @@ class InstallStepsTests(HomeCase):
             result = install._step_scheduler(args)
         self.assertEqual(result, (1, 'asf scheduler install failed'))
 
+    def test_step_8_cron_prints_the_crontab_line_and_is_not_a_failure(self):
+        """B-0112: ``scheduler.cmd_scheduler`` returns 3 for a kind with no on-machine adapter
+        (cron: it only prints the line for the operator) — this must read as ``ok``, never
+        ``FAILED``."""
+        args = _install_args(scheduler='cron')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=3) as cmd, \
+                mock.patch.object(install.env, 'load_config',
+                                  return_value={'scheduler': {'kind': 'cron'}}):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (0, 'ok'))
+        cmd.assert_called_once()
+
+    def test_step_8_a_real_scheduler_install_failure_still_fails_under_cron(self):
+        """A genuine failure (anything but 0 or 3) is not swallowed by the cron carve-out."""
+        args = _install_args(scheduler='cron')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=1):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (1, 'asf scheduler install failed'))
+
     # ---- step 9: the plugin -----------------------------------------------------------
 
     def test_step_9_calls_plugin_install(self):
