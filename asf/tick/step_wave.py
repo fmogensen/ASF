@@ -846,7 +846,20 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
         if bypass:
             bypass_open = False                 # one bypass at a time, across the whole wave
         if act:
-            wrow, brief = build(row, bypass)
+            try:
+                wrow, brief = build(row, bypass)
+            except Exception as e:  # noqa: BLE001 — B-83573: one row's build never blocks
+                # every row behind it: a brief that fails to build crashed the whole wave step
+                # (run_asf_step catches it at the tick, so the wave launched nothing that tick),
+                # and the same row failed the same way every later tick — every launchable row
+                # behind it in plan order sat idle with its seat free, forever.
+                room += 1
+                if bypass:
+                    bypass_open = True
+                why = f'build failed: {type(e).__name__}: {e}'
+                out(f'wave: {job} {row.item_id} — {why}')
+                result.append(Screened(row, why, WAITS))
+                continue
             capped = 'parked' if relaunch_capped(product, row, wrow, out) else ''
         else:
             wrow, brief = preview_row(product, row, items), None

@@ -99,6 +99,27 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual([s.row.item_id for s in live if s.starts], ['T-0002'])
         self.assertEqual([s.row.item_id for s in preview if s.starts], ['T-0002'])
 
+    def test_a_build_failure_on_one_row_never_blocks_the_rows_behind_it(self):
+        # B-83573: a brief build failing for one row raised out of screen() uncaught, so the
+        # wave step failed before it ever reached the rows behind it in plan order — every one
+        # of them sat a launchable row idle with its seat free, forever, every tick.
+        planned = [row('T-0001'), row('T-0002'), row('T-0003')]
+
+        def build(r, bypass):
+            if r.item_id == 'T-0001':
+                raise ValueError('boom')
+            return (pool_mod.Row(step_wave.job_name('task', r.item_id), r.item_id),
+                    types.SimpleNamespace(text='brief', kind='task'))
+
+        ctx = types.SimpleNamespace(event=lambda *a, **k: None)
+        with mock.patch.object(step_wave, 'relaunch_assessment', side_effect=capped_for()):
+            live = step_wave.screen(PRODUCT, planned, ITEMS, [], {}, 2, None, False, act=True,
+                                    out=lambda _l: None, build=build, ctx=ctx)
+        self.assertEqual(self.verdicts(live), [('T-0001', step_wave.WAITS),
+                                               ('T-0002', step_wave.STARTS),
+                                               ('T-0003', step_wave.STARTS)])
+        self.assertEqual([s.row.item_id for s in live if s.starts], ['T-0002', 'T-0003'])
+
 
 if __name__ == '__main__':
     unittest.main()
