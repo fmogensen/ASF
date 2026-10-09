@@ -1133,14 +1133,17 @@ def delivery_note(repo, trunk, branch, members):
     return note + (f' — no commit for {", ".join(missing)}' if missing else '')
 
 
-def proves_refusal_text(card, items, root):
-    """The correction text for the ``proves`` refusal: the Task's Stories, their acceptance
-    bullets numbered (D2), and one trailer shaped as the fix — the first bullet found, or the
-    first Story listed when none of them has a readable one."""
+def proves_refusal_text(card, items, root, problems=()):
+    """The correction text for the ``proves`` refusal: ``validate()``'s own ``problems`` named
+    first — a claim naming a Story the Task does not list is a different mistake from writing no
+    claim at all, and the session cannot fix what it is not told — then the Task's Stories, their
+    acceptance bullets numbered (D2), and one trailer shaped as the fix — the first bullet found,
+    or the first Story listed when none of them has a readable one."""
     stories = card.get('stories') or []
     single = len(stories) == 1
-    lines = [f"no acceptance line proved: this Task lists {', '.join(stories)}, "
-             f"whose acceptance is"]
+    lines = [f'  {p}' for p in problems]
+    lines.append(f"no acceptance line proved: this Task lists {', '.join(stories)}, "
+                 f"whose acceptance is")
     example_story, example_line = stories[0], 1
     seen = False
     for sid in stories:
@@ -1184,12 +1187,12 @@ def lane_refusal(repo, trunk, branch, item, conv=None, members=(), items=None, r
     card = (items or {}).get(item) or {}
     if not (root and card.get('type') == 'task' and card.get('stories')):
         return None
-    claims = proves.claims_on_branch(lambda *a: H.sh(['git', *a], cwd=repo).stdout, trunk, branch)
-    tree = H.sh(['git', 'ls-tree', '-r', '--name-only', f'origin/{branch}'],
-               cwd=repo).stdout.split()
+    from asf import gitops
+    claims = proves.claims_on_branch(lambda *a: gitops.git(list(a), repo).stdout, trunk, branch)
+    tree = gitops.git(['ls-tree', '-r', '--name-only', f'origin/{branch}'], repo).stdout.split()
     _good, problems = proves.validate(claims, card, items, root, tree)
     if problems:
-        return 'proves', proves_refusal_text(card, items, root)
+        return 'proves', proves_refusal_text(card, items, root, problems)
     return None
 
 

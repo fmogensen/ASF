@@ -405,14 +405,15 @@ class LaneFixture(unittest.TestCase):
         with open(path, 'w', encoding='utf-8') as f:
             f.write(text)
 
-    def product(self, **conventions):
+    def product(self, backlog_dir=None, **conventions):
         conv = {'test_command': f'{shlex.quote(sys.executable)} -m unittest discover -s checks -p test_*.py',
                 'specs_dir': 'specs', 'plans_dir': 'plans', 'reviews_dir': 'reviews',
                 'lane': {'review': {'code': 'none'}},
                 'branch_prefixes': {'code': 'worker/', 'plan': 'plan/', 'spec': 'spec/'}}
         conv.update(conventions)
         return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
-                                      'conventions': conv, 'steps': {'batch': 'off'}})
+                                      'conventions': conv, 'steps': {'batch': 'off'},
+                                      'backlog_dir': backlog_dir})
 
     def push_lane(self, branch, files, subject):
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
@@ -3507,8 +3508,6 @@ class ProvesRefusalTests(unittest.TestCase):
         self.repo = tempfile.mkdtemp(prefix='proves-repo-')
         self.addCleanup(shutil.rmtree, self.repo, True)
         sh(['git', 'init', '-q', '-b', 'main'], cwd=self.repo)
-        sh(['git', 'config', 'user.email', 't@t'], cwd=self.repo)
-        sh(['git', 'config', 'user.name', 't'], cwd=self.repo)
         self.write(self.repo, 'a.txt', 'a\n')
         sh(['git', 'add', '-A'], cwd=self.repo)
         sh(['git', 'commit', '-qm', 'init'], cwd=self.repo)
@@ -3581,6 +3580,23 @@ class ProvesRefusalTests(unittest.TestCase):
         kind, _text = self.refusal()
         self.assertEqual(kind, 'proves')
 
+    def test_a_claim_on_a_story_the_task_does_not_list_is_refused(self):
+        self.items['S-7777'] = {'type': 'story', 'folder': 'stories', 'id': 'S-7777'}
+        self.branch([('feat(T-0123): the parser reads a Proves trailer\n\n'
+                      'Proves: S-7777 line 1 — tests/test_x.py::test_trailer',
+                      {'tests/test_x.py': 'x\n'})])
+        kind, text = self.refusal()
+        self.assertEqual(kind, 'proves')
+        self.assertIn("not this Task's", text)
+
+    def test_a_claim_past_the_end_of_the_acceptance_list_is_refused(self):
+        self.branch([('feat(T-0123): the parser reads a Proves trailer\n\n'
+                      'Proves: S-18750 line 99 — tests/test_x.py::test_trailer',
+                      {'tests/test_x.py': 'x\n'})])
+        kind, text = self.refusal()
+        self.assertEqual(kind, 'proves')
+        self.assertIn('no such line', text)
+
     def test_no_items_index_skips_the_refusal(self):
         # D4: a missing index must never stop every landing in the factory
         self.branch([('feat(T-0123): the parser reads a Proves trailer',
@@ -3609,6 +3625,49 @@ class ProvesRefusalTests(unittest.TestCase):
         self.branch([('feat(T-9999): wrong item', {'tests/test_x.py': 'x\n'})])
         kind, _text = self.refusal()
         self.assertEqual(kind, lifecycle.NAMING)
+
+
+class ProvesRefusalBlocksLanding(LaneFixture):
+    """F-0040 §2.5 end to end: a ``proves`` refusal is not only ``lane_refusal``'s return value
+    in isolation — ``PUSHED`` → ``BACK`` on any refusal (:func:`next_state`) keeps the branch out
+    of ``GATE`` and so out of ``land_ff``/the ``harvest: pr`` mark, exactly as a naming or merge
+    refusal would; the same branch lands once a commit on it carries a valid trailer."""
+
+    STORY = '## Acceptance\n- [ ] the parser reads a Proves trailer\n'
+
+    def setUp(self):
+        super().setUp()
+        self.root = tempfile.mkdtemp(prefix='proves-record-')
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.write(self.root, 'stories/s-0001.md', self.STORY)
+        self.items = {
+            'S-0001': {'type': 'story', 'folder': 'stories', 'id': 'S-0001'},
+            'T-0001': {'type': 'task', 'folder': 'tasks', 'id': 'T-0001', 'stories': ['S-0001']},
+        }
+
+    def test_a_proves_refusal_keeps_the_branch_out_of_gate_and_land_ff(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        p = self.product(backlog_dir=self.root)
+        lane.lane_pass(p, self.state_dir, items=self.items, out=lambda *_: None, root=self.root)
+        held = self.lane_of('worker/T-0001')
+        self.assertEqual(held['state'], lane.BACK)
+        self.assertEqual(held['reason'], 'kind=proves')
+        harvest.run_product_harvest(p, self.state_dir, items=self.items, out=lambda *_: None,
+                                    lane_pass=False)
+        self.assertNotEqual(self.lane_of('worker/T-0001')['state'], lane.MERGED)
+
+    def test_the_same_branch_with_a_trailer_lands(self):
+        self.push_lane_body('worker/T-0001', {'a.txt': 'a\n', 'tests/test_x.py': 'x\n'},
+                            'feat(T-0001): a',
+                            body='Proves: S-0001 line 1 — tests/test_x.py')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        p = self.product(backlog_dir=self.root)
+        lane.lane_pass(p, self.state_dir, items=self.items, out=lambda *_: None, root=self.root)
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.GATE)
+        harvest.run_product_harvest(p, self.state_dir, items=self.items, out=lambda *_: None,
+                                    lane_pass=False)
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.MERGED)
 
 
 if __name__ == '__main__':

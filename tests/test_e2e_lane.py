@@ -189,10 +189,14 @@ class LaneCase(unittest.TestCase):
     def green_trunk(self):
         return self.f.push('main', {'tests/test_trunk.py': None}, 'test: the trunk is green again')
 
-    def branch_by_hand(self, branch, item, title):
-        """``branch`` pushed and its PR opened by someone outside the factory."""
+    def branch_by_hand(self, branch, item, title, proves=None):
+        """``branch`` pushed and its PR opened by someone outside the factory. ``proves``: a
+        ``Proves:`` trailer line for a Task whose Story needs one (F-0040)."""
+        subject = f'feat({item}): {title}, by hand'
+        if proves:
+            subject += f'\n\n{proves}'
         head = self.f.push(branch, {'src/lines.py': LINES_PY, 'tests/test_lines.py': LINES_TEST},
-                           f'feat({item}): {title}, by hand')
+                           subject)
         return head, self.f.open_pr(branch, f'{item} — {title}')
 
     def ready_to_land(self, item, limit=4):
@@ -355,7 +359,9 @@ class PreexistingPR:
 
     def test_r19_s5_open_pr_is_adopted_not_rebuilt(self):
         f = self.f
-        _head, number = self.branch_by_hand('feature/T-0001', 'T-0001', 'count lines')
+        _head, number = self.branch_by_hand(
+            'feature/T-0001', 'T-0001', 'count lines',
+            proves='Proves: S-0001 line 1 — tests/test_lines.py::test_last_line')
         opened_by_hand = len(f.gh_calls('pr', 'create'))
         self.until(lambda: self.harvested('T-0001'), 5, 'the adopted PR lands')
         self.assertEqual(self.launches(item='T-0001', kind='coder'), [], 'a second coder')
@@ -531,7 +537,8 @@ class FootprintPartialFF(LaneCase):
         f = self.f
         f.runtime.queue('coder-t-0001', {
             'writes': {'{w0}': LINES_PY, '{w1}': LINES_TEST},
-            'commit': 'feat({item}): count lines, src/count.py still to change',
+            'commit': 'feat({item}): count lines, src/count.py still to change\n\n'
+                      'Proves: S-0001 line 1 — tests/test_lines.py::test_last_line',
             'status': 'partial', 'needs_writes': 'src/count.py',
             'left_out': 'src/count.py: count must share the splitter'})
         f.runtime.queue('correct', {
