@@ -105,13 +105,17 @@ class Check:
     """One check run on a PR head. ``status`` is GitHub's (``queued``, ``in_progress``,
     ``completed``); ``conclusion`` is set only when completed. Only a conclusion in
     :data:`RED_CONCLUSIONS` is red. ``failing_files`` are the files the failing tests live in or
-    exercise (empty when unknown); ``attempt`` is the run's attempt number (1 = never rerun)."""
+    exercise (empty when unknown); ``attempt`` is the run's attempt number (1 = never rerun).
+    ``failed_step`` is the name of the step that failed and ``log_tail`` the last lines of its
+    failed log ('' when unread): a fix round on a red with no known files carries them."""
     name: str
     status: str = 'completed'
     conclusion: str = None
     run_id: int = None
     failing_files: list = dataclasses.field(default_factory=list)
     attempt: int = 1
+    failed_step: str = ''
+    log_tail: str = ''
 
 
 @dataclasses.dataclass
@@ -244,7 +248,9 @@ class Config:
     ``doc_paths`` the path globs a document PR may change without needing a code review.
     ``max_sessions`` caps live sessions; ``max_attempts`` failed attempts on one reason make an
     item Stuck; ``max_fix_rounds`` red-driven rounds before Stuck; ``max_reruns`` reruns of a red
-    that touches none of the PR's files before Stuck(owner=ci). ``work_branch`` / ``fix_branch`` are the branch
+    that touches none of the PR's files before Stuck(owner=ci). ``required_checks`` are the check
+    names that gate the landing (``conventions.landing_checks``, else the base branch's rules on
+    GitHub): only a red among them is judged; empty means every check counts. ``work_branch`` / ``fix_branch`` are the branch
     prefixes of a build launch for a Task / a Bug with no open PR (a doc lane's prefix is the
     ``doc_branches`` entry named after its kind, e.g. ``spec/``). ``rank`` is ``inherit`` (a Task
     takes its nearest ancestor's rank) or ``own`` (only an item's own rank counts).
@@ -259,6 +265,7 @@ class Config:
     max_attempts: int = 2
     max_fix_rounds: int = 2
     max_reruns: int = 1
+    required_checks: tuple = ()
     rank: str = 'inherit'
     idle_alarm: bool = True
     idle_min_free: int = 1

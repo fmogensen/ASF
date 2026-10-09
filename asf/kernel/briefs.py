@@ -107,12 +107,20 @@ def brief_kind(launch, item, fix):
 
 def correction(findings, pr):
     """What a fix round answers: the review's findings, else the PR's red checks."""
-    from asf.kernel.decide import rebase_finding
+    from asf.kernel.decide import rebase_finding, red_findings
     rebase = [f for f in findings if rebase_finding(f)]
     if rebase and len(rebase) == len(findings):
         return 'the PR conflicts with its base:\n' + '\n'.join('- %s' % f for f in rebase)
-    if findings:
-        return 'the review asked for changes:\n' + '\n'.join('- %s' % f for f in findings)
+    red = red_findings(findings)
+    rest = [f for f in findings if f not in red]
+    out = []
+    if rest:
+        out.append('the review asked for changes:\n' + '\n'.join('- %s' % f for f in rest))
+    if red:
+        out.append('red required check(s) on PR #%s — fix the cause in this PR:\n'
+                   % (pr.number if pr else '?') + '\n'.join('- %s' % f for f in red))
+    if out:
+        return '\n\n'.join(out)
     reds = [c.name for c in (pr.checks if pr else ()) if c.conclusion in RED_CONCLUSIONS]
     return 'red check(s) on PR #%d: %s' % (pr.number, ', '.join(reds) or 'unknown')
 

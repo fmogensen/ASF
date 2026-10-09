@@ -245,6 +245,44 @@ class Helpers(unittest.TestCase):
         self.assertEqual(P.item_of_branch('spec/f-0313'), 'F-0313')
         self.assertIsNone(P.item_of_branch('main'))
 
+    def test_required_checks_come_from_landing_checks_first(self):
+        class GH:
+            def required_checks(self):
+                return ('from rules',)
+        named = env.Product('sample', {'conventions': {
+            'landing_checks': ['tests (3.12)', 'tests (3.13)']}})
+        self.assertEqual(P.config_for(named, github=GH()).required_checks,
+                         ('tests (3.12)', 'tests (3.13)'))
+        bare = env.Product('sample', {})
+        self.assertEqual(P.config_for(bare, github=GH()).required_checks, ('from rules',))
+        self.assertEqual(P.config_for(bare).required_checks, ())
+
+        class Broken:
+            def required_checks(self):
+                raise P.PortError('down')
+        self.assertEqual(P.config_for(bare, github=Broken()).required_checks, ())
+
+    def test_required_checks_read_off_the_branch_rules(self):
+        rules = [{'type': 'deletion'},
+                 {'type': 'required_status_checks', 'parameters': {'required_status_checks': [
+                     {'context': 'tests (3.12)'}, {'context': 'tests (3.13)'}]}}]
+
+        def run(argv, **kw):
+            if argv[1:3] == ['api', 'repos/o/r/rules/branches/main']:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(rules), '')
+            return subprocess.CompletedProcess(argv, 1, '', 'unexpected')
+        gh = P.RealGitHub(env.Product('sample', {'repo_slug': 'o/r'}), run=run)
+        self.assertEqual(gh.required_checks(), ('tests (3.12)', 'tests (3.13)'))
+
+    def test_failed_step_and_log_tail_from_a_failed_log(self):
+        log = ('tests (3.12)\tSet up\t2026-10-09T10:00:00.1Z ok\n'
+               'tests (3.12)\tno new raw call site\t2026-10-09T10:00:01.2Z '
+               '\x1b[31masf/x.py:3: raw call\x1b[0m\n'
+               'tests (3.12)\tno new raw call site\t2026-10-09T10:00:01.3Z exit 1\n')
+        self.assertEqual(P.failed_step(log),
+                         ('no new raw call site', 'asf/x.py:3: raw call\nexit 1'))
+        self.assertEqual(P.failed_step(''), ('', ''))
+
     def test_config_for_reads_the_conventions(self):
         cfg = P.config_for(env.Product('sample', {'conventions': {
             'branch_prefixes': {'code': 'w/', 'spec': 's/', 'plan': 'p/'}, 'specs_dir': 'sp'}}))

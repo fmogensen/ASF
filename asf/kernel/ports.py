@@ -357,6 +357,40 @@ def failing_files(log, files):
     return sorted(set(out))
 
 
+_LOG_STAMP = re.compile(r'^\ufeff?\d{4}-\d\d-\d\dT[\d:.]+Z ?')
+_ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+
+#: the lines of a failed log's tail a red's fix round carries
+LOG_TAIL_LINES = 30
+
+
+def failed_step(log, lines=LOG_TAIL_LINES):
+    """``(step, tail)`` of a ``gh run view --log-failed`` ``log`` (``job<TAB>step<TAB>line``):
+    the step of its last line and that step's last ``lines`` lines (timestamps and colour codes
+    dropped); ``('', '')`` when nothing reads."""
+    rows = [r.split('\t', 2) for r in str(log or '').splitlines()]
+    rows = [r for r in rows if len(r) == 3]
+    if not rows:
+        return '', ''
+    step = rows[-1][1].strip()
+    body = [_ANSI.sub('', _LOG_STAMP.sub('', r[2])).rstrip() for r in rows if r[1].strip() == step]
+    body = [b for b in body if b.strip()]
+    return step, '\n'.join(body[-lines:])
+
+
+def required_from_rules(rules):
+    """The check names of every ``required_status_checks`` rule in a branch-rules listing."""
+    out = []
+    for r in rules or ():
+        if not isinstance(r, dict) or r.get('type') != 'required_status_checks':
+            continue
+        for c in (r.get('parameters') or {}).get('required_status_checks') or ():
+            name = c.get('context') if isinstance(c, dict) else None
+            if name and name not in out:
+                out.append(str(name))
+    return tuple(out)
+
+
 class RealGitHub:
     """The product's repo (``repo_slug``) through :func:`asf.github.gh` with its ``auth_env``."""
 
@@ -458,6 +492,18 @@ class RealGitHub:
                        json=False)
         if log.ok:
             check.failing_files = failing_files(log.data or '', files)
+            check.failed_step, check.log_tail = failed_step(log.data or '')
+
+    def required_checks(self, branch=None):
+        """The check names GitHub's rules require on ``branch`` (the trunk by default): every
+        ``required_status_checks`` rule of ``rules/branches/<branch>``; ``()`` when unreadable."""
+        branch = branch or self.product.main
+        if not (self.slug and branch):
+            return ()
+        r = self._gh(['api', 'repos/%s/rules/branches/%s' % (self.slug, branch)])
+        if not r.ok or not isinstance(r.data, list):
+            return ()
+        return required_from_rules(r.data)
 
     def reviews(self, prs):
         """GitHub's own reviews on each open PR's current head: ``APPROVED`` / ``CHANGES_REQUESTED``
@@ -897,13 +943,32 @@ def real_ports(product):
                  Briefer(product))
 
 
-def config_for(product, cfg=None):
-    """The :class:`~asf.kernel.model.Config` of ``product``: branch prefixes and document roots
-    from its conventions; ``max_sessions``, ``rank`` and the idle alarm from its ``kernel:``
+def required_checks_for(product, github=None):
+    """The checks that gate ``product``'s landing: ``conventions.landing_checks``, else what
+    ``github`` (a port with ``required_checks``) reads off the base branch's rules, else ``()``
+    (every check counts)."""
+    named = product.conventions.get('landing_checks')
+    names = [str(named)] if isinstance(named, str) else [str(n) for n in named or ()]
+    if names:
+        return tuple(names)
+    reader = getattr(github, 'required_checks', None)
+    if reader is None:
+        return ()
+    try:
+        return tuple(reader() or ())
+    except Exception:  # noqa: BLE001 — an unreadable rule set means every check counts
+        return ()
+
+
+def config_for(product, cfg=None, github=None):
+    """The :class:`~asf.kernel.model.Config` of ``product``: branch prefixes, document roots and
+    the required checks (:func:`required_checks_for`, asking ``github`` when the conventions name
+    none) from its conventions; ``max_sessions``, ``rank`` and the idle alarm from its ``kernel:``
     block (:mod:`asf.kernel.settings`, each with its documented default)."""
     conv = product.conventions
     k = product.kernel
     return M.Config(
+        required_checks=required_checks_for(product, github),
         doc_branches=(conv.prefix('spec'), conv.prefix('plan')),
         doc_paths=tuple('%s/**' % d.rstrip('/') for d in (conv.specs_dir, conv.plans_dir,
                                                           conv.reviews_dir)),

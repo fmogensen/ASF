@@ -133,7 +133,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
     from asf import env, mutation_guard
     product = _product(product)
     ports = ports or P.real_ports(product)
-    config = config or P.config_for(product)
+    config = config or P.config_for(product, github=ports.github)
     state_dir = state_dir or os.path.join(env.ASF_HOME, 'state', product.name)
     if dry_run:
         with mutation_guard.active():

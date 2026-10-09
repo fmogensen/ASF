@@ -79,7 +79,8 @@ class EndSession:
 @dataclasses.dataclass
 class NoteItem:
     """Add ``text`` to ``item_id``'s notes: a question a session asked while its work moved on
-    anyway (a ``done`` REPORT with a pushed head). Shown by status; holds nothing."""
+    anyway (a ``done`` REPORT with a pushed head), or a red on a check that is not required.
+    Shown by status; holds nothing."""
     item_id: str
     text: str
 

@@ -4,7 +4,7 @@ that still lands, and the Stories parser's corners."""
 import unittest
 
 from asf.kernel import actions as A
-from asf.kernel.decide import decide
+from asf.kernel.decide import NEXT_ACTION, decide
 from asf.kernel.stories import declared_stories
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.kernel…` does not
@@ -125,6 +125,91 @@ class Rounds(unittest.TestCase):
         self.assertEqual(B.of(plan, A.Rerun), [])
         self.assertEqual(B.state(plan, 'T-0001'), State.READY)
         self.assertEqual(B.of(plan, A.EnableAutoMerge), [])
+
+    REQUIRED = ('tests (3.12)', 'tests (3.13)')
+
+    def _landing(self, checks, **kw):
+        return B.facts([B.task('T-0001', state=kw.pop('state', State.LANDING), **kw)],
+                       prs=[B.pr(4, 'T-0001', files=['src/a.py'], checks=checks)],
+                       reviews=[B.review('T-0001')])
+
+    def test_a_red_on_a_check_that_is_not_required_does_not_block_landing(self):
+        checks = [B.check('tests (3.12)'), B.check('tests (3.13)'),
+                  B.check('install-clean-linux', conclusion='failure', run_id=9, attempt=2,
+                          failing_files=['tests/test_other.py'])]
+        plan = decide(self._landing(checks), B.config(required_checks=self.REQUIRED))
+        self.assertEqual(B.state(plan, 'T-0001'), State.LANDING)
+        self.assertEqual([a.pr for a in B.of(plan, A.EnableAutoMerge)], [4])
+        self.assertEqual((B.of(plan, A.Rerun), B.of(plan, A.MarkStuck), B.launched(plan)),
+                         ([], [], []))
+        note, = B.of(plan, A.NoteItem)
+        self.assertIn('install-clean-linux', note.text)
+        self.assertIn('not a required check', note.text)
+
+    def test_with_no_required_checks_named_every_red_counts(self):
+        checks = [B.check('install-clean-linux', conclusion='failure', run_id=9,
+                          failing_files=['tests/test_other.py'])]
+        plan = decide(self._landing(checks), B.config())
+        self.assertEqual([r.run_id for r in B.of(plan, A.Rerun)], [9])
+
+    def test_a_required_red_off_the_pr_still_reruns_then_sticks_on_ci(self):
+        def world(attempt):
+            return self._landing([B.check('tests (3.12)', conclusion='failure', run_id=9,
+                                          attempt=attempt, failing_files=['tests/test_b.py'])])
+        cfg = B.config(required_checks=self.REQUIRED)
+        self.assertEqual([r.run_id for r in B.of(decide(world(1), cfg), A.Rerun)], [9])
+        plan = decide(world(2), cfg)
+        self.assertEqual(B.state(plan, 'T-0001'), State.STUCK)
+        self.assertEqual(B.stuck(plan, 'T-0001').owner, 'ci')
+
+    def test_a_required_red_on_the_prs_files_is_a_fix_round(self):
+        red = B.check('tests (3.13)', conclusion='failure', run_id=9, failing_files=['src/a.py'])
+        plan = decide(self._landing([red]), B.config(required_checks=self.REQUIRED))
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        launch, = B.of(plan, A.Launch)
+        self.assertTrue(launch.findings[0].startswith('red: tests (3.13)'))
+
+    def test_a_required_red_with_no_known_files_is_a_fix_round_with_step_and_log_tail(self):
+        red = B.check('tests (3.12)', conclusion='failure', run_id=9, attempt=1,
+                      failed_step='no new raw call site (the client ratchet)',
+                      log_tail='asf/x.py:3: raw call')
+        plan = decide(self._landing([red]), B.config(required_checks=self.REQUIRED))
+        self.assertEqual(B.of(plan, A.Rerun), [])
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        launch, = B.of(plan, A.Launch)
+        self.assertEqual(launch.branch, 'worker/T-0001')
+        finding, = launch.findings
+        self.assertIn('the client ratchet', finding)
+        self.assertIn('asf/x.py:3: raw call', finding)
+
+    def test_stuck_ci_on_a_red_that_is_not_required_is_rejudged_to_landing(self):
+        stuck = B.M.Stuck('red off the PR after 1 rerun(s): install-clean-linux', 'ci')
+        checks = [B.check('tests (3.12)'),
+                  B.check('install-clean-linux', conclusion='failure', run_id=9, attempt=2,
+                          failing_files=['tests/test_other.py'])]
+        plan = decide(self._landing(checks, state=State.STUCK, stuck=stuck),
+                      B.config(required_checks=self.REQUIRED))
+        self.assertEqual(B.state(plan, 'T-0001'), State.LANDING)
+        self.assertEqual([a.pr for a in B.of(plan, A.EnableAutoMerge)], [4])
+
+    def test_stuck_ci_on_a_required_red_with_no_known_files_is_rejudged_to_a_fix_round(self):
+        stuck = B.M.Stuck('red off the PR after 2 rerun(s): tests (3.12)', 'ci')
+        red = B.check('tests (3.12)', conclusion='failure', run_id=9, attempt=3,
+                      failed_step='ratchet', log_tail='boom')
+        plan = decide(self._landing([red], state=State.STUCK, stuck=stuck),
+                      B.config(required_checks=self.REQUIRED))
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        self.assertEqual(B.launched(plan), ['T-0001'])
+
+    def test_stuck_ci_on_a_required_red_off_the_pr_stays_stuck(self):
+        reason = 'red off the PR after 1 rerun(s): tests (3.12)'
+        red = B.check('tests (3.12)', conclusion='failure', run_id=9, attempt=2,
+                      failing_files=['tests/test_b.py'])
+        plan = decide(self._landing([red], state=State.STUCK, stuck=B.M.Stuck(reason, 'ci', NEXT_ACTION['ci'])),
+                      B.config(required_checks=self.REQUIRED))
+        self.assertEqual((B.state(plan, 'T-0001'), B.stuck(plan, 'T-0001').reason),
+                         (State.STUCK, reason))
+        self.assertEqual(B.of(plan, A.MarkStuck), [])
 
     def test_conflict_updates_then_gets_a_rebase_session_then_sticks_on_operator(self):
         from asf.kernel.decide import rebase_finding

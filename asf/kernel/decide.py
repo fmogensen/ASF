@@ -22,9 +22,15 @@ item and the actions of one tick. The rules it holds, in the design's words:
   (``config.doc_branches``) included.
 - Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch`.
   Every open PR's item is in Review or Landing (or Ready on a fix round, or Stuck) — never stateless.
-- Red: only ``failure``/``timed_out``. A red whose ``failing_files`` meet none of the PR's files
-  gets ``config.max_reruns`` reruns, then Stuck(owner=ci). A red meeting the PR's files sends it to
-  Ready (a fix round), at most ``config.max_fix_rounds``, then Stuck.
+- Red: only ``failure``/``timed_out``, and only on a required check (``config.required_checks``;
+  empty: every check counts). A red on any other check holds nothing: it is an item note
+  (:class:`NoteItem`, shown by status). A required red whose ``failing_files`` are known and all
+  outside the PR's files is off the PR: ``config.max_reruns`` reruns, then Stuck(owner=ci). Any
+  other required red — meeting the PR's files, or with no known files (a lint or ratchet step,
+  an unread log) — is on the PR: Ready (a fix round carrying the failed step and its log tail,
+  :func:`red_finding`), at most ``config.max_fix_rounds``, then Stuck. A recorded Stuck from an
+  off-PR red (:data:`RED_OFF`) is judged afresh every tick, so a red that is not required, or
+  whose files were unknown, goes back to Landing, Review or a fix round.
 - Conflict: a conflicting PR first gets :class:`UpdateBranch`; when that fails, one fix round —
   a ``correct`` session whose finding (:data:`REBASE`) is to rebase onto the base and resolve
   the conflicts. A PR that still conflicts after that session ended is Stuck(owner=operator).
@@ -135,6 +141,16 @@ DONE_STUCK = R.DONE + ':'
 #: its ``pushed:`` value claims a push and the branch is on origin it is re-judged to an OpenPR
 NO_PUSH_STUCK = 'done without a push: pushed: '
 
+#: the prefix of the Stuck reason of a required red off the PR that used up its reruns: judged
+#: afresh every tick (the check may not be required, or its files may not be known)
+RED_OFF = 'red off the PR after '
+
+#: the prefix of a red-driven fix round's finding (:func:`red_finding`)
+RED = 'red'
+
+#: the most characters of a failed log's tail a finding carries
+LOG_TAIL_MAX = 1500
+
 #: the card states whose pushed branch with no PR gets one (a build session held it, or its PR
 #: was being opened): a stale branch of a New or Ready item is never turned into a PR
 PR_STATES = (State.BUILDING, State.REVIEW, State.LANDING)
@@ -191,7 +207,7 @@ def _judge(it, facts, config, actions):
     """``it``'s :class:`_Judged` from its own card, sessions, PRs, reviews and answers; appends the
     item's own actions (answers, PR upkeep) to ``actions``."""
     stuck = (it.stuck if it.state is State.STUCK and not _legacy_conflict(it.stuck)
-             and R.meaningful(it.stuck.reason) else None)
+             and not _red_off(it.stuck) and R.meaningful(it.stuck.reason) else None)
     question = it.question
     hold = False
     for a in facts.answers:
@@ -222,11 +238,7 @@ def _judge(it, facts, config, actions):
                 ended_stuck = _stuck(R.no_report_reason(s.last_line), 'session')
         elif done_and_pushed(s, facts):
             pushed = s
-            note = pushed_note(s)
-            if note and note not in it.notes and not any(
-                    isinstance(a, A.NoteItem) and (a.item_id, a.text) == (it.id, note)
-                    for a in actions):
-                actions.append(A.NoteItem(it.id, note))
+            _note(it, pushed_note(s), actions)
         else:
             ended_stuck = _ended_stuck(s, open_pr) or ended_stuck
 
@@ -455,15 +467,20 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
         updated = True
 
     reds = [c for c in pr.checks if c.status == 'completed' and c.conclusion in RED_CONCLUSIONS]
-    own = [c for c in reds if set(c.failing_files) & set(pr.files)]
-    if own:
-        return _fix_round(it, pr, 'red: %s' % ', '.join(c.name for c in own), config)
+    gating = [c for c in reds if required(c.name, config)]
     for c in reds:
+        if c not in gating:
+            _note(it, ignored_red_note(pr, c), actions)
+    own = [c for c in gating if on_pr(c, pr)]
+    if own:
+        return _fix_round(it, pr, '%s: %s' % (RED, ', '.join(c.name for c in own)), config,
+                          [red_finding(c) for c in own])
+    for c in gating:
         if c.attempt - 1 < config.max_reruns:
             actions.append(A.Rerun(c.run_id))
         else:
-            return _Judged(State.STUCK, _stuck('red off the PR after %d rerun(s): %s'
-                                               % (c.attempt - 1, c.name), 'ci'))
+            return _Judged(State.STUCK, _stuck('%s%d rerun(s): %s'
+                                               % (RED_OFF, c.attempt - 1, c.name), 'ci'))
 
     verdict = None
     for r in facts.reviews:
@@ -478,6 +495,53 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
     if pr.behind and not pr.conflicting and not updated:
         actions.append(A.UpdateBranch(pr.number))
     return _Judged(State.LANDING)
+
+
+def required(name, config):
+    """Whether check ``name`` gates the landing: it is in ``config.required_checks``, or that set
+    is empty (nothing named: every check counts)."""
+    return not config.required_checks or name in config.required_checks
+
+
+def on_pr(check, pr):
+    """Whether red ``check`` is the PR's own: its failing files meet the PR's, or none are known
+    (a lint or ratchet step names no test file; an unread log names nothing). Only a red whose
+    files are all known and all outside the PR is off it."""
+    return not check.failing_files or bool(set(check.failing_files) & set(pr.files))
+
+
+def red_finding(check):
+    """The finding a fix round on red ``check`` carries: the check, its failed step and the tail
+    of its failed log (whatever of them was read)."""
+    head = '%s: %s' % (RED, check.name)
+    if check.failed_step:
+        head += ' — step %r failed' % check.failed_step
+    tail = str(check.log_tail or '').strip()
+    if len(tail) > LOG_TAIL_MAX:
+        tail = '…' + tail[-LOG_TAIL_MAX:]
+    return head + (':\n' + tail if tail else '')
+
+
+def red_findings(findings):
+    """The red-driven ones among ``findings``."""
+    return [f for f in findings if str(f).startswith(RED + ': ')]
+
+
+def ignored_red_note(pr, check):
+    """The note a red on a check that is not required leaves on its item."""
+    return 'PR #%d: %s is red but not a required check — ignored' % (pr.number, check.name)
+
+
+def _note(it, text, actions):
+    """Append a :class:`NoteItem` of ``text`` unless the card or this tick already holds it."""
+    if text and text not in it.notes and not any(
+            isinstance(a, A.NoteItem) and (a.item_id, a.text) == (it.id, text) for a in actions):
+        actions.append(A.NoteItem(it.id, text))
+
+
+def _red_off(stuck):
+    """Whether a recorded Stuck is a required red off the PR (:data:`RED_OFF`): judged afresh."""
+    return stuck is not None and stuck.owner == 'ci' and str(stuck.reason).startswith(RED_OFF)
 
 
 def _fix_round(it, pr, reason, config, findings=()):

@@ -120,7 +120,7 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
         out(text)
         return text
     ports = ports or P.real_ports(product)
-    config = config or P.config_for(product)
+    config = config or P.config_for(product, github=ports.github)
     stuck, counts, sessions, idle, notes = rows(ports, config, with_idle=True, with_notes=True)
     text = render(stuck, counts, sessions, idle=idle, notes=notes)
     out(text)
