@@ -636,7 +636,7 @@ def installed_release():
     release at all."""
     from asf import cli, drift
     tag = cli._release(cli._checkout_root(), cli._direct_url())
-    return tag, drift.installed_commit()
+    return (f'v{tag}' if tag else None), drift.installed_commit()
 
 
 def version_tuple(text):
