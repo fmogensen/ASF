@@ -111,8 +111,19 @@ exit 127
 
 
 def default_path(home=None):
-    """The dispatcher's path under ``home`` (default: the operator's HOME)."""
+    """The dispatcher's path under ``home`` (default: ``$HOME``, read at call time — so a process
+    run with a temp HOME resolves a path inside it, never the operator's)."""
     return os.path.join(os.path.expanduser(home or '~'), REL_PATH)
+
+
+def home_redirected(asf_home=None):
+    """True when ``asf_home`` (default :data:`asf.env.ASF_HOME`) is not the ASF home this
+    process's environment names (``$ASF_HOME``, else ``$HOME/.ASF``): the home was moved
+    in-process — a test pointing :data:`asf.env.ASF_HOME` at a temp dir while ``$HOME`` is still
+    the operator's. A dispatcher written then would bake the temp home into the operator's
+    ``~/.local/bin/asf``, so :func:`reassert` leaves the default path alone."""
+    named = os.environ.get('ASF_HOME') or os.path.join(os.path.expanduser('~'), '.ASF')
+    return os.path.realpath(asf_home or env.ASF_HOME) != os.path.realpath(named)
 
 
 def pipx_venvs():
@@ -262,12 +273,22 @@ def reassert(path=None):
     took the path back is moved aside and replaced (``pipx install --force`` recreates it, and
     nothing else in the factory notices — F-0283), and an out-of-date dispatcher is rewritten.
     ``(False, detail)`` with the ``NEEDS OPERATOR`` line for a foreign file, which is never
-    touched. Never raises."""
+    touched. Never raises.
+
+    Two more no-ops keep a pass from writing a dispatcher that is not its own: a default-resolved
+    call while :func:`home_redirected` (a test's in-process ASF home under the operator's HOME),
+    and a dispatcher at ``path`` that bakes a different ASF home than :data:`asf.env.ASF_HOME`
+    (another home's dispatcher is that home's install to rewrite, ``asf hooks install``)."""
+    if path is None and home_redirected():
+        return False, None
     path = path or default_path()
     try:
         if not os.path.lexists(path):
             return False, None
         if os.path.islink(path) and is_ours(os.path.realpath(path)):
+            return False, None
+        home = baked(path, 'HOME')
+        if home and os.path.realpath(home) != os.path.realpath(env.ASF_HOME):
             return False, None
         try:
             with open(path, 'rb') as f:

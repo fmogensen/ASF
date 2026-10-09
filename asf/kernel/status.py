@@ -50,7 +50,8 @@ def rows(ports, config, now=None, with_idle=False, with_notes=False):
         stuck.append((iid, st.reason, st.owner, st.blocked_count, _age(since, now) if since else '-'))
     stuck.sort(key=lambda r: (-r[3], r[0]))
     counts = collections.Counter(s.value for s, _ in plan.states.values())
-    sessions = [(s.job, s.item_id, s.kind, 'alive' if s.alive else 'dead',
+    from asf.workers import lifecycle  # the state word is lifecycle's (one classifier)
+    sessions = [(s.job, s.item_id, s.kind, 'alive' if s.alive else lifecycle.DEAD,
                  _age(getattr(s, 'started', ''), now) if getattr(s, 'started', '') else '-')
                 for s in facts.sessions]
     out = (stuck, counts, sessions) + ((plan.idle,) if with_idle else ())
@@ -71,7 +72,9 @@ def rows_from_plan(data, record, now=None):
             stuck.append((iid, row.get('reason', ''), row.get('owner', ''),
                           int(row.get('blocked') or 0), _age(since, now) if since else '-'))
     stuck.sort(key=lambda r: (-r[3], r[0]))
-    sessions = [(x.get('job'), x.get('item'), x.get('kind'), 'alive' if x.get('alive') else 'dead',
+    from asf.workers import lifecycle
+    sessions = [(x.get('job'), x.get('item'), x.get('kind'),
+                 'alive' if x.get('alive') else lifecycle.DEAD,
                  _age(x['started'], now) if x.get('started') else '-')
                 for x in data.get('sessions') or []]
     return stuck, counts, sessions
