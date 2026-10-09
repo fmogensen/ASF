@@ -17,12 +17,52 @@ State = B.State
 
 class Launches(unittest.TestCase):
 
-    def test_rank_order_lower_first_unranked_never(self):
+    def test_rank_order_lower_first_unranked_last(self):
         items = [B.task('T-0003', rank=3), B.task('T-0001', rank=1), B.task('T-0002', rank=2),
                  B.task('T-0004', rank=None)]
         plan = decide(B.facts(items), B.config())
-        self.assertEqual(B.launched(plan, 'build'), ['T-0001', 'T-0002', 'T-0003'])
-        self.assertEqual(B.state(plan, 'T-0004'), State.NEW)
+        self.assertEqual(B.launched(plan, 'build'), ['T-0001', 'T-0002', 'T-0003', 'T-0004'])
+        self.assertEqual(B.state(plan, 'T-0004'), State.READY)
+
+    def test_task_inherits_its_features_rank(self):
+        items = [B.item('F-0001', rank=4), B.item('S-0001', parent='F-0001'),
+                 B.task('T-0001', rank=None, parent='S-0001', state=State.NEW)]
+        plan = decide(B.facts(items), B.config())
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        self.assertEqual(B.launched(plan, 'build'), ['T-0001'])
+
+    def test_unranked_lineage_still_launches_after_ranked_work(self):
+        items = [B.item('F-0001'), B.task('T-0001', rank=None, parent='F-0001', state=State.NEW),
+                 B.item('F-0002', rank=9), B.task('T-0002', rank=None, parent='F-0002'),
+                 B.task('B-0001', rank=None, state=State.NEW)]
+        plan = decide(B.facts(items), B.config(max_sessions=5))
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        self.assertEqual(B.launched(plan, 'build'), ['T-0002', 'B-0001', 'T-0001'])
+
+    def test_launch_order_follows_feature_rank(self):
+        items = [B.item('F-0001', rank=5), B.item('F-0002', rank=2),
+                 B.task('T-0001', rank=None, parent='F-0001'),
+                 B.task('T-0003', rank=None, parent='F-0002'),
+                 B.task('T-0002', rank=None, parent='F-0002'),
+                 B.item('E-0001', rank=3), B.item('F-0003', parent='E-0001'),
+                 B.task('T-0004', rank=None, parent='F-0003')]
+        plan = decide(B.facts(items), B.config(max_sessions=9))
+        self.assertEqual(B.launched(plan, 'build'), ['T-0002', 'T-0003', 'T-0004', 'T-0001'])
+
+    def test_later_ancestor_still_parks_an_inheriting_task(self):
+        items = [B.item('F-0001', rank=1, priority='later'),
+                 B.task('T-0001', rank=None, parent='F-0001', state=State.NEW),
+                 B.task('T-0002', rank=None, state=State.NEW, priority='later')]
+        plan = decide(B.facts(items), B.config())
+        self.assertEqual(B.state(plan, 'T-0001'), State.PARKED)
+        self.assertEqual(B.state(plan, 'T-0002'), State.PARKED)
+        self.assertEqual(B.launched(plan), [])
+
+    def test_parent_cycle_ends_the_rank_walk(self):
+        items = [B.task('T-0001', rank=None, parent='T-0002'),
+                 B.task('T-0002', rank=None, parent='T-0001')]
+        plan = decide(B.facts(items), B.config())
+        self.assertEqual(B.launched(plan, 'build'), ['T-0001', 'T-0002'])
 
     def test_launch_limit_counts_live_sessions(self):
         items = [B.task('T-0001', state=State.BUILDING)] + [

@@ -15,7 +15,9 @@ class State(enum.Enum):
     """The one state of a Task or a Bug: ``New -> Ready -> Building -> Review -> Landing -> Done``,
     or ``Stuck`` from any of them (with a :class:`Stuck` saying why, whose move, and what next).
 
-    - ``NEW``: on the record, not yet launchable (not ranked, or its spec has not landed).
+    - ``NEW``: on the record, not yet launchable (a Feature or Epic with no rank in its lineage,
+      an open ``after:`` edge, or its spec has not landed). A Task or Bug inherits its nearest
+      ancestor's rank, and launches after ranked work when its lineage has none.
     - ``READY``: launchable — its declared ``after:`` edges are Done; may carry review findings.
     - ``BUILDING``: a live session holds it.
     - ``REVIEW``: an open PR whose head tree has no verdict yet.

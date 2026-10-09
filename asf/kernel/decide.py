@@ -3,7 +3,11 @@
 ``decide(facts, config) -> Plan`` reads nothing but its arguments and returns the state of every
 item and the actions of one tick. The rules it holds, in the design's words:
 
-- Launch: Ready items in rank order alone, while ``config.max_sessions`` allows; ``facts.paused``
+- New and Ready: an item is Ready once nothing else holds it and it is ranked — its own ``rank``,
+  else its nearest ancestor's through ``parent`` (Story, Feature, Epic). A Task or Bug whose whole
+  lineage is unranked is Ready too, after every ranked item: no rank never means never. Only an
+  unranked Feature or Epic (and a declared ``after:`` edge, or ``later``) keeps an item New.
+- Launch: Ready items in launch order alone — (effective rank, own rank, id), unranked last — while ``config.max_sessions`` allows; ``facts.paused``
   means no :class:`Launch` at all. An item whose own errors repeat is Stuck; the lane never is.
 - Waits: only a declared ``after:`` edge between two visible items, and "two Building items
   with overlapping ``writes``: one at a time".
@@ -186,9 +190,29 @@ def _judge(it, facts, config, actions):
         return j
     if it.state is State.DONE and not it.reopened:
         return _Judged(State.DONE)
-    if it.priority == 'later' or it.rank is None:
+    if it.priority == 'later' or (effective_rank(it.id, facts.items) is None
+                                  and it.type not in BUILDABLE):
         return _Judged(State.NEW, hold=hold)
     return _Judged(State.READY, hold=hold)
+
+
+def effective_rank(iid, items):
+    """``iid``'s own ``rank``, else its nearest ancestor's through ``parent`` (Story, Feature,
+    Epic), else None. A ``parent`` cycle ends the walk."""
+    seen, cur = set(), iid
+    while cur in items and cur not in seen:
+        if items[cur].rank is not None:
+            return items[cur].rank
+        seen.add(cur)
+        cur = items[cur].parent
+    return None
+
+
+def launch_order(iid, items):
+    """The key launches sort by: (effective rank, own rank, id), unranked (+inf) last."""
+    inf = float('inf')
+    eff, own = effective_rank(iid, items), items[iid].rank
+    return (inf if eff is None else eff, inf if own is None else own, iid)
 
 
 def _ended_stuck(s, open_pr):
@@ -432,11 +456,11 @@ def _mint(facts, parked):
 
 
 def _launches(facts, config, judged, children, states, parked):
-    """Reviews first, then Ready items, each in rank order, while sessions are free; a Ready item
+    """Reviews first, then Ready items, each in launch order (:func:`launch_order`), while sessions are free; a Ready item
     whose ``writes`` overlap a Building (or just launched) visible item waits its turn."""
     items = facts.items
     free = config.max_sessions - sum(1 for s in facts.sessions if s.alive)
-    rank = lambda iid: (items[iid].rank is None, items[iid].rank or 0, iid)  # noqa: E731
+    rank = lambda iid: launch_order(iid, items)  # noqa: E731
     reviews = sorted((i for i, j in judged.items() if j.review_branch and not j.hold), key=rank)
     ready = sorted((i for i, j in judged.items()
                     if states[i][0] is State.READY and not j.hold and _visible(items, i, parked)
