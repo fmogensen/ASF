@@ -84,7 +84,13 @@ configured: <key>)`.
 **Prod reads `deploy_sha.workflow`**: the deploy workflow whose newest successful run is prod,
 the same key the evidence pass reads for a Feature's `on-prod`. `conventions.deploy_workflow` and
 `ci.deploy_workflow` are read as aliases of it, so a file written for the old hint still loads;
-write new files with `deploy_sha.workflow` (or `deploy_sha.prod.workflow`).
+write new files with `deploy_sha.workflow` (or `deploy_sha.prod.workflow`). With none of these
+set, Prod reads `trunk is production — no deploy configured (B-0077)`: a package, library or
+tool that deploys nothing, not a missing key.
+
+**Runners with no self-hosted pool**: with neither `ci.runner_org` nor `ci.pool` declared,
+Runners reads `hosted — no self-hosted ci.pool or ci.runner_org declared` — hosted CI (GitHub's
+own runners) has no pool to read, not a missing key.
 
 **Deploys are set per environment** with `deploy_sha.dev.mode` and `deploy_sha.prod.mode`:
 
