@@ -496,6 +496,7 @@ def chain_no_cut(facts):
 
 
 def launchable_idle(facts):
+    from asf.feeder import rows as feeder_rows
     from asf.tick import step_wave
     got = facts.would_start()
     if not got:
@@ -507,6 +508,14 @@ def launchable_idle(facts):
     out = []
     for s in screened:
         if not s.row.launches or s.kind == step_wave.NO_SEAT:
+            continue
+        # B-84832: a job failing to spawn tick after tick still launches (the retry is what
+        # might succeed), so it screens as a plain start with a free seat forever — but
+        # asf.workers.wave.Failures already owns that state's own escalation (NEEDS OPERATOR at
+        # the second identical failure); "a seat is free" is not the real story here, and
+        # re-alarming it under this state only duplicates an already-owned one with a worse,
+        # misleading message.
+        if feeder_rows.FAILING_TO_SPAWN in s.row.action:
             continue
         why = s.why or "passes the wave's filter, not started yet"
         out.append(Finding('launchable_idle', s.row.item_id,

@@ -291,6 +291,22 @@ class ProbeTests(DwellTestCase):
                                   'launchable_idle')
         self.assertEqual(none_free, [])
 
+    def test_a_row_failing_to_spawn_is_not_launchable_idle(self):
+        # B-84832: T-83350 kept breaching launchable_idle every ~10 minutes — its job was really
+        # failing to spawn tick after tick (feeder_rows.failing_to_spawn marks its row so, and it
+        # still carries row.launches=True so the retry keeps trying); the wave's own spawn-failure
+        # path already escalates that (NEEDS OPERATOR at the second identical failure), so this
+        # watchdog's "a seat is free" framing is misleading noise on a state another path owns.
+        mk = lambda iid, action: feeder_rows.Row(
+            tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid, feature_id='F-1', action=action,
+            brief_kind='task', branch='', reason='')
+        failing = mk('T-83350', f'{feeder_rows.LAUNCH} — {feeder_rows.FAILING_TO_SPAWN}: '
+                                 'spawn failed: worktree busy ×2')
+        screened = [step_wave.Screened(failing), step_wave.Screened(mk('T-2', 'would launch'))]
+        got = self.by_state(self.found(FakeFacts(self.product, wave=(screened, 4, [{}]))),
+                            'launchable_idle')
+        self.assertEqual([f.key for f in got], ['T-2'])
+
     def test_a_pushed_branch_with_no_pr_ages_from_its_push(self):
         lane = {'worker/t-1': {'state': 'PUSHED', 'head': 'abc', 'at': iso(NOW - 11 * 60)},
                 'worker/t-2': {'state': 'PR_OPEN', 'head': 'abc', 'pr': 3,
