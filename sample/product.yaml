@@ -15,6 +15,8 @@ conventions:
       code: none          # the sample lands a Task on its gate alone, no review session
   intake_dir: cards
   default_bug_epic: E-0001
+  readme: README
+  readme_facts: readme-numbers.json
   branch_prefixes:
     code: feature/
     task: feature/

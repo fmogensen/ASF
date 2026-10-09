@@ -15,6 +15,8 @@ The learning loop: these sources file or bump a Bug, keyed on the typed `signatu
     24h's ended sessions (``outcome_signatures``)
   - metrics/sessions: the same item (or job, when it names none) ending the same failing class
     ``conventions.repeat_failure_n`` times or more in that window (``repeat_signatures``)
+  - the product's own README (``asf readme --check``): red, and stale past
+    ``README_STALE_DAYS`` (``readme_signatures``)
 A signature is left alone while it is still inside its own refile window — `refile_days` on the
 info dict, defaulting to one day — so a second run inside that window is a no-op instead of
 double-counting a still-open problem.
@@ -406,6 +408,43 @@ def repeat_signatures(root, now, conv=None):
     return out
 
 
+#: A red `asf readme --check` older than this many days past its own committed facts' `day` is
+#: a page a contributor forgot, not one a session is already mid-fixing.
+README_STALE_DAYS = 7
+
+
+def readme_signatures(root, now, conv=None):
+    """`readme/stale` once the committed README (`root`, a product's ``repo_dir``) is red under
+    ``asf readme --check`` *and* its committed facts' own ``day`` is more than
+    :data:`README_STALE_DAYS` behind `now` — a page merely a day stale files nothing. No span, no
+    facts file, or a page still fresh: no signature, never a crash."""
+    conv = conv or DEFAULTS
+    from asf.views import readme
+    try:
+        problems = readme.check(root, conv)
+    except OSError:
+        return {}
+    if not problems:
+        return {}
+    facts_path = os.path.join(root, conv.readme_facts)
+    if not os.path.isfile(facts_path):
+        return {}
+    with open(facts_path, encoding='utf-8') as f:
+        day = json.load(f).get('day')
+    if not day:
+        return {}
+    stale_days = (now.date() - datetime.date.fromisoformat(day)).days
+    if stale_days <= README_STALE_DAYS:
+        return {}
+    sig = 'readme/stale'
+    return {sig: {
+        'title': truncate(f'README stale: {problems[0]}', 120), 'severity': 'S3', 'runs': [],
+        'evidence': [f'{conv.readme}: {p}' for p in problems]
+                    + [f'facts day {day}, {stale_days}d behind now'],
+        'acceptance': [f'`asf readme --check` is green for `{conv.readme}`'],
+    }}
+
+
 #: A rule check that failed this many runs in a row is surfaced once as a factory-side problem.
 CHECK_FAILURE_RUNS_TO_SURFACE = 3
 LEDGER_NAME = 'rule-check-failures.json'
@@ -747,6 +786,9 @@ def cmd_file_bugs(args, root):
                                               shared=footprint.shared_globs(conv)))
     signatures.update(outcome_signatures(root, now, conv))
     signatures.update(repeat_signatures(root, now, conv))
+    readme_product = _product(args)
+    if readme_product is not None and readme_product.repo_dir:
+        signatures.update(readme_signatures(readme_product.repo_dir, now, conv))
     if rule_data is not None:
         report_check_failures(rule_data.get('broken') or [], ledger,
                               now.strftime('%Y-%m-%dT%H:%M:%SZ'))

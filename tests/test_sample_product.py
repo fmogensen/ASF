@@ -12,6 +12,9 @@ a held branch → the correction row → landed (with the trunk moving under it)
 ends "done" without pushing → held → the correction in the same worktree → landed. The test
 plays the session between ticks and asserts the tick's printed lines.
 """
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -20,9 +23,11 @@ import time
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import env, hermetic, scheduler, tokens
 from asf.metrics import metrics
+from asf.views import readme
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_sample_product` does not
     from test_scheduler import fake_clis
@@ -92,6 +97,9 @@ class SampleProductTest(unittest.TestCase):
         # green the same way a real, fully-installed product's is
         cls.console_permissions = cls.asf('console-permissions', 'install', '--product', 'sample',
                                           '--scope', 'user')
+        # the sample's README carries spans (F-0030 Task 6): a real install refreshes them once
+        # before `doctor` ever runs, the same as a contributor would after cutting the repo
+        cls.readme_refresh = cls.asf('readme', '--refresh', '--product', 'sample')
         cls.before = cls.asf('next', '--product', 'sample', '--json')
         cls.tick = cls.asf('tick', '--product', 'sample')
 
@@ -298,6 +306,58 @@ class SampleClocksTest(unittest.TestCase):
         clocks = scheduler.clocks(product)
         self.assertEqual([c.name for c in clocks],
                          ['record', 'dispatch', 'daily', 'shadow', 'wave'])
+
+
+class ReadmeRenderTests(unittest.TestCase):
+    """F-0030 §2.6/§2.7, Task 6: the renderer proven on a second product, not this repo's own
+    layout in disguise — a fresh copy of ``sample/repo`` and ``sample/backlog``, no git, no
+    subprocess: ``asf readme`` only ever reads and writes files."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf_readme_sample_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = os.path.join(self.tmp, 'repo')
+        self.backlog = os.path.join(self.tmp, 'backlog')
+        shutil.copytree(os.path.join(SAMPLE, 'repo'), self.repo)
+        shutil.copytree(os.path.join(SAMPLE, 'backlog'), self.backlog)
+        with open(os.path.join(SAMPLE, 'product.yaml'), encoding='utf-8') as f:
+            data = env.loads(f.read())
+        data['repo_dir'], data['backlog_dir'] = self.repo, self.backlog
+        self.product = env.Product('sample', data)
+
+    def _run(self, refresh=False, as_json=False):
+        args = argparse.Namespace(product='sample', refresh=refresh, json=as_json)
+        out = io.StringIO()
+        with mock.patch.object(env, 'load_product', return_value=self.product), \
+                contextlib.redirect_stdout(out):
+            rc = readme.cmd_readme(args, root=self.repo)
+        return rc, out.getvalue()
+
+    def test_refresh_fills_both_spans_and_check_is_green(self):
+        rc, out = self._run(refresh=True)
+        self.assertEqual(rc, 0, out)
+        with open(os.path.join(self.repo, 'README'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('<!--asf:n features_shipped-->0<!--/asf:n-->', text)
+        self.assertIn('<!--asf:block scoreboard-->', text)
+        facts_path = os.path.join(self.repo, 'readme-numbers.json')
+        with open(facts_path, encoding='utf-8') as f:
+            facts_data = json.load(f)
+        # the renderer, proven generic: only the spans sample's own README carries, never every
+        # number `facts()` can compute
+        self.assertEqual(sorted(facts_data['numbers']), ['features_shipped', 'scoreboard'])
+
+        rc, out = self._run(as_json=True)
+        self.assertEqual(rc, 0, out)
+        data = json.loads(out)
+        self.assertEqual((data['ok'], data['complaints']), (True, []))
+
+    def test_refresh_is_a_no_op_the_second_time(self):
+        self._run(refresh=True)
+        rc, out = self._run(refresh=True)
+        self.assertEqual(rc, 0)
+        self.assertIn('unchanged', out)
+        self.assertNotIn('rewritten', out)
 
 
 # ---- the failure paths, whole loop (F-0087) ----------------------------------------------
