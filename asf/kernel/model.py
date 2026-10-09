@@ -181,9 +181,12 @@ class Config:
     ``doc_paths`` the path globs a document PR may change without needing a code review.
     ``max_sessions`` caps live sessions; ``max_attempts`` failed attempts on one reason make an
     item Stuck; ``max_fix_rounds`` red-driven rounds before Stuck; ``max_reruns`` reruns of a red
-    that touches none of the PR's files before Stuck(owner=ci)."""
+    that touches none of the PR's files before Stuck(owner=ci). ``work_branch`` is the branch
+    prefix of a build launch for an item with no open PR (a doc lane's prefix is the
+    ``doc_branches`` entry named after its kind, e.g. ``spec/``)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
+    work_branch: str = 'work/'
     max_sessions: int = 8
     max_attempts: int = 2
     max_fix_rounds: int = 2
