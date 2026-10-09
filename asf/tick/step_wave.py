@@ -849,10 +849,10 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
             try:
                 wrow, brief = build(row, bypass)
             except Exception as e:  # noqa: BLE001 — one row's brief never costs the rest
-                # B-83575: build() used to raise straight out of screen(), aborting the wave
-                # before _wave() ever ran — a free seat and a launchable row sat idle, tick
-                # after tick, while the preview (preview_row, never the real brief builder)
-                # kept reporting the row as launchable (B-82809)
+                # B-83575/B-83573: build() used to raise straight out of screen(), aborting
+                # the wave before _wave() ever ran — a free seat and a launchable row sat idle,
+                # tick after tick, while the preview (preview_row, never the real brief builder)
+                # kept reporting the row as launchable (B-82809, B-82407)
                 room += 1
                 if bypass:
                     bypass_open = True
