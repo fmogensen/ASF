@@ -783,6 +783,27 @@ class RefusalWidenTests(WidenStepBase):
         self.assertEqual([(r.action, r.waits_on, r.launches) for r in self.rows()],
                          [('WAITS ON T-0002', 'T-0002', False)])
 
+    def test_a_refused_path_a_parked_later_task_writes_widens_and_corrects(self):
+        # B-82960: the only holder is an Active Task under a ``priority: later`` Feature whose
+        # writes: intersect — it holds no footprint, so the FIX → CORRECT row never waits on it
+        with open(os.path.join(self.root, 'features', 'F-0002.md'), 'w') as f:
+            f.write('---\nid: F-0002\ntype: feature\ntitle: parked\npriority: later\n---\n'
+                    '## Description\nx\n\n## History\n- made\n')
+        self.active('T-0002', 'lib/shared.py')
+        with open(os.path.join(self.root, 'tasks', 'T-0002.md')) as f:
+            text = f.read().replace('parent: F-0001', 'parent: F-0002')
+        with open(os.path.join(self.root, 'tasks', 'T-0002.md'), 'w') as f:
+            f.write(text)
+        _git(['add', '-A'], self.root)
+        _git(['commit', '-q', '-m', 'parked'], self.root)
+        self.assertEqual(self.items()['T-0002'].get('state'), 'Active')
+        self.refused()
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WIDEN}, self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py', 'lib/shared.py'])
+        self.assertEqual([(r.kind, r.waits_on, r.launches) for r in self.rows()],
+                         [(feeder_rows.FIX_CORRECT, '', True)])
+
     def test_a_refusal_at_the_cap_widens_rather_than_going_to_adjudication(self):
         # B-0140 marks the second identical refusal at_cap, and lifecycle.derive routes an
         # at_cap correction to ADJUDICATE. The widening runs first (step_health: health, then

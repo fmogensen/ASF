@@ -314,6 +314,15 @@ class Reaper(StoreHome):
         store.append(P, 'gates.jsonl', {})
         self.assertEqual(store.reap(P), [])
 
+    def test_ci_stall_and_ci_heartbeat_are_registered_and_not_orphans(self):
+        spec = registry.spec('ci-stall.json')
+        self.assertEqual((spec.owner, spec.kind, spec.ttl_days), ('asf.ci_stall', 'json', None))
+        self.assertEqual(registry.spec('ci-heartbeat.json').owner, 'asf.ci_heartbeat')
+        self.touch('ci-stall.json')
+        self.touch('ci-heartbeat.json')
+        self.touch('ci-cancels.json')
+        self.assertEqual(store.reap(P), [])
+
 
 _CHILD = textwrap.dedent('''
     import sys, time

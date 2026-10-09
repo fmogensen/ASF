@@ -139,7 +139,7 @@ def load(product):
     except (OSError, ValueError):
         data = {}
     data = data if isinstance(data, dict) else {}
-    for k in ('max', 'cpu', 'claims'):
+    for k in ('max', 'cpu', 'claims', 'pass'):
         if not isinstance(data.get(k), dict):
             data[k] = {}
     return data
@@ -298,16 +298,19 @@ def watch(product, apply=False, fetch_fn=None, src=None, now=None, out=print, ev
         md = 'report'
     src = src or ci_queue.GitHubSource(product)
     slug = product.repo_slug
-    stalls = cancels = 0
+    stalls = cancels = boxes_read = unreachable = 0
     cpu = {}
     for box in ci_heartbeat.boxes(product):
         hbs, err = fetch_fn(box, ci_heartbeat.target(box))
         if err:
+            unreachable += 1
             out(f'ci stall: ALARM box {box} unreachable — {err}')
             continue
         if not hbs:
+            unreachable += 1
             out(f'ci stall: ALARM box {box} has no heartbeat files')
             continue
+        boxes_read += 1
         ci_heartbeat.record(product.name, box, when=now)
         for hb in hbs:
             r = hb.get('runner') or '?'
@@ -350,6 +353,9 @@ def watch(product, apply=False, fetch_fn=None, src=None, now=None, out=print, ev
             out(f'ci stall: cancelled run {run_id} ({job} on {r}); its failed jobs re-run once '
                 f'it completes')
     data['cpu'] = cpu
+    data['pass'] = {'at': now, 'mode': md, 'stalls': stalls, 'cancels': cancels,
+                    'boxes': boxes_read, 'unreachable': unreachable,
+                    'legacy': None if legacy is None else int(legacy)}
     if md == 'act':
         _advance(product, src, data, now, out)
     data['claims'] = {k: c for k, c in data['claims'].items()

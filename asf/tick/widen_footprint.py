@@ -46,7 +46,7 @@ import os
 import re
 import subprocess
 
-from asf import approvals
+from asf import approvals, invariants
 from asf.feeder import footprint
 from asf.feeder import rows as feeder_rows
 from asf.feeder import widen
@@ -320,14 +320,18 @@ def running(product, items):
 def open_footprints(product, items):
     """``[(task_id, writes)]`` of every open Task a widening must not overlap: the Tasks in play
     (:func:`running`) first, then every Task ``Active`` in the record or with a correction pending
-    — ``asf check`` refuses two Active Tasks whose ``writes:`` intersect, running or not."""
+    — ``asf check`` refuses two Active Tasks whose ``writes:`` intersect, running or not.
+
+    A Task parked under a ``priority: later`` Feature or Epic is none of them (B-82960): I3 pairs
+    nothing with it and the feeder holds no footprint for it, so a widening onto its files is
+    no overlap — a ``waits`` on it would hold live work for as long as the freeze lasts."""
     path = pool_mod.sessions_path(product)
     out = running(product, items)
     seen = {t for t, _w in out}
     pending = set(lifecycle.corrections(path))
     for iid, t in sorted((items or {}).items()):
         if iid in seen or t.get('type') != 'task' or not t.get('writes') \
-                or lifecycle.closed_state(items, iid):
+                or lifecycle.closed_state(items, iid) or invariants.later_holder(items, iid):
             continue
         if t.get('state') == 'Active' or iid in pending:
             out.append((iid, list(t['writes'])))

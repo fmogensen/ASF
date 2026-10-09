@@ -350,6 +350,22 @@ class AClosedItemHoldsNoWidenedRow(unittest.TestCase):
     def test_an_open_owner_is_waited_on(self):
         self.assertEqual(self.row('Active').action, 'WAITS ON T-0195')
 
+    def test_an_owner_parked_under_a_later_feature_is_not_waited_on(self):
+        # B-82960: the only holder is an Active Task under a ``priority: later`` Feature with
+        # an intersecting footprint — it holds none, so the stored ``waits`` is stale
+        c = {'kind': 'footprint', 'verdict': 'waits', 'detail': 'T-0195', 'text': 't'}
+        items = self.items('Active')
+        items['T-0195']['parent'] = 'F-0009'
+        items['F-0009'] = {'id': 'F-0009', 'type': 'feature', 'priority': 'later'}
+        row = rows.footprint_row(items['T-0281'], product(), c, 2, '', 'worker/T-0281',
+                                 items=items)
+        self.assertEqual((row.kind, row.action), (rows.FIX_CORRECT, 'WAITS ON widen_footprint'))
+        # a Task parked under the same later card keeps its wait on its parked sibling
+        items['T-0281']['parent'] = 'F-0009'
+        row = rows.footprint_row(items['T-0281'], product(), c, 2, '', 'worker/T-0281',
+                                 items=items)
+        self.assertEqual(row.action, 'WAITS ON T-0195')
+
     def test_a_closed_card_in_play_holds_no_footprint(self):
         self.assertEqual(rows.running_footprints(self.items('Closed'), {'T-0195'}), [])
         self.assertEqual(rows.running_footprints(self.items('Active', True), {'T-0195'}), [])

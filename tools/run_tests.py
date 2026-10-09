@@ -55,6 +55,11 @@ VERDICT_RE = re.compile(r'^(OK|FAILED)(?: \((.*)\))?\s*$', re.M)
 #: ``expected failures=8`` counted as ``failures`` and turned a green run red.
 COUNT_RE = re.compile(r'(expected failures|unexpected successes|\w+)=(\d+)')
 TEST_DEF_RE = re.compile(r'^\s+(?:async )?def test_', re.M)
+FAIL_HEAD_RE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([\w.]+)\)\s*$', re.M)
+FRAME_RE = re.compile(r'^\s*File "([^"]*)", line (\d+),', re.M)
+#: The default extra attempt a red module gets, and the most red modules a run will retry.
+RETRY = 1
+RETRY_MAX = 4
 
 
 def default_shards():
@@ -253,6 +258,30 @@ def hook_digest(dirs):
     return out
 
 
+def flaky_rows(module, rc, output):
+    """The flaky rows a module's *first*, red attempt names: ``[(file, line, title)]``, one per
+    ``FAIL:``/``ERROR:`` block in ``output``, in the order they print. Pure: no process, no file,
+    no environment. A block with no frame under the module's own file falls back to line 1; an
+    attempt that never reached a summary (no block at all) yields one row naming the crash."""
+    own_file = f'tests/{module.replace(".", "/")}.py'
+    heads = list(FAIL_HEAD_RE.finditer(output or ''))
+    if not heads:
+        return [(own_file, 1, f'{module}: no summary (rc {rc})')]
+    rows = []
+    for i, head in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(output)
+        block = output[head.end():end]
+        title = '.'.join(head.group(1).split('.')[-2:])
+        file_, line = own_file, 1
+        for frame in FRAME_RE.finditer(block):
+            path = frame.group(1).replace(os.sep, '/')
+            if path == own_file or path.endswith('/' + own_file):
+                line = int(frame.group(2))
+                break
+        rows.append((file_, line, title))
+    return rows
+
+
 def hook_leaks(before, after):
     """The lines naming every hook file added, changed or removed between two digests; empty when
     the run left them all byte-identical."""
@@ -269,8 +298,11 @@ def hook_leaks(before, after):
     return sorted(lines)
 
 
-def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=None):
-    """Run the suite — or, with ``only``, just those modules of it; the exit status."""
+def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=None,
+       retry=RETRY, retry_max=RETRY_MAX):
+    """Run the suite — or, with ``only``, just those modules of it; the exit status. A red
+    module (up to ``retry_max`` of them) gets ``retry`` more attempts; one that goes green on a
+    retry is reported as flaky rather than red (D1-D8)."""
     tests_dir = os.path.abspath(tests_dir)
     root, package = os.path.split(tests_dir)
     shards = shards or default_shards()
@@ -282,11 +314,16 @@ def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=No
     dirs = hook_dirs(root)
     before = hook_digest(dirs)
     results = []
+    flaky = []
     started = time.monotonic()
 
-    def finish(module, proc):
+    def finish(module, proc, replace_at=None):
         output = proc.communicate()[0]
-        results.append((module, proc.returncode, output))
+        entry = (module, proc.returncode, output)
+        if replace_at is None:
+            results.append(entry)
+        else:
+            results[replace_at] = entry
         n, s, verdict, _c = parse(output)
         if proc.returncode != 0 or verdict != 'OK':
             out(f'--- {module}: {verdict or "no summary"} (rc {proc.returncode})')
@@ -311,10 +348,41 @@ def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=No
                 finish(m, p)
         if tail:
             finish('+'.join(tail), run_modules(tail, root, package, os.path.join(homes, 'serial')))
+
+        red = [m for m, rc, o in results if rc != 0 or parse(o)[2] != 'OK']
+        index = {m: i for i, (m, _rc, _o) in enumerate(results)}
+        if retry and red:
+            if len(red) > retry_max:
+                out(f'retry: skipped — {len(red)} red module(s) over the bound of {retry_max}')
+            else:
+                first = {m: (rc, o) for m, rc, o in results if m in red}
+                out('retry: ' + ', '.join(red))
+                running = []
+                queue = list(red)
+                while queue or running:
+                    while queue and len(running) < shards:
+                        module = queue.pop(0)
+                        running.append((module, run_modules([module], root, package,
+                                                            os.path.join(homes, module + '#2'))))
+                    done = [(m, p) for m, p in running if p.poll() is not None]
+                    if not done:
+                        time.sleep(0.05)
+                        continue
+                    for m, p in done:
+                        running.remove((m, p))
+                        finish(m, p, replace_at=index[m])
+                for m in red:
+                    _m, rc, o = results[index[m]]
+                    if rc == 0 and parse(o)[2] == 'OK':
+                        flaky.extend(flaky_rows(m, *first[m]))
     finally:
         shutil.rmtree(homes, ignore_errors=True)
     out('')
     out(summary(results, time.monotonic() - started, shards))
+    if flaky:
+        out(f'{len(flaky)} flaky')
+        for file_, line, title in flaky:
+            out(f'  {file_}:{line}:1 › {title}')
     leaks = hook_leaks(before, hook_digest(dirs))
     for line in leaks:
         out(f'hook leak: {line}')
@@ -334,6 +402,10 @@ def build_parser():
     p.add_argument('--touched', metavar='BASE',
                    help='only the test modules the changes since BASE touch (the pre-push gate: '
                         'every touched module whole, never the full suite)')
+    p.add_argument('--retry', type=int, default=RETRY,
+                   help=f'extra attempts for a red module (default {RETRY})')
+    p.add_argument('--retry-max', type=int, default=RETRY_MAX,
+                   help=f'no retry past this many red modules (default {RETRY_MAX})')
     return p
 
 
@@ -361,7 +433,8 @@ def main(argv=None):
         for m in tail:
             print(f'serial  {m}')
         return 0
-    return run(args.start_directory, args.shards, args.verbose, only=only)
+    return run(args.start_directory, args.shards, args.verbose, only=only,
+              retry=args.retry, retry_max=args.retry_max)
 
 
 if __name__ == '__main__':

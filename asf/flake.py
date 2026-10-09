@@ -206,6 +206,19 @@ def _ids(link):
     return (r.group(1) if r else None), (j.group(1) if j else None)
 
 
+def _run_ids(checks):
+    """The workflow run ids behind ``checks``, first-seen order — a check with no readable run
+    id is skipped, never an answer of its own."""
+    out = []
+    for c in checks or ():
+        if not isinstance(c, dict):
+            continue
+        rid = _ids(c.get('link') or c.get('html_url') or c.get('details_url'))[0]
+        if rid and rid not in out:
+            out.append(rid)
+    return out
+
+
 def _call(gh, args):
     """``gh <args>`` as an :class:`asf.github.Result`: through :func:`asf.github.gh`, or through
     ``gh`` when one is passed (``(rc, stdout, stderr)`` or a ``Result``). A ``gh`` that cannot
@@ -359,34 +372,37 @@ PHANTOM_PROBE_S = 600
 
 
 def infra_class(slug, checks, required=None, gh=None, state_dir=None, now=None):
-    """``(class, run id, attempt)`` when the one workflow run behind ``checks`` (their links) is an infra
-    red (:func:`classify_red`: a phantom or a lost runner), else None — a run that reads as a
-    test red, checks from two runs, a link with no run, or a run that cannot be read. With
-    ``state_dir`` the run is read at most once per :data:`PHANTOM_PROBE_S` (the caller polls a
-    pending head every pass)."""
-    rids = {_ids(c.get('link') or c.get('html_url') or c.get('details_url'))[0]
-            for c in checks or () if isinstance(c, dict)}
-    if len(rids) != 1 or None in rids:
-        return None
-    rid = rids.pop()
-    if state_dir:
-        now = now or _now()
-        data = load(state_dir, now)
-        probe = data['infra'].get(f'probe|{rid}') or {}
-        seen = _parse(probe.get('at'))
-        if seen is not None and (now - seen).total_seconds() < PHANTOM_PROBE_S:
-            return None
-        data['infra'][f'probe|{rid}'] = {'at': _iso(now)}
+    """``(class, run id, attempt)`` for the first run behind ``checks`` that is an infra red
+    (:func:`classify_red`: a phantom or a lost runner), else None — every run reads as a test
+    red, no link carries a run id, or none can be read.
+
+    A head carries checks from more than one workflow, so every run id the links name is read,
+    in the order they first appear (F-0295 C3). With ``state_dir`` each run is read at most once
+    per :data:`PHANTOM_PROBE_S` (the caller polls a pending head every pass); a run inside its
+    interval is skipped, and the others are still read."""
+    now = now or _now()
+    data = load(state_dir, now) if state_dir else None
+    answer = None
+    for rid in _run_ids(checks):
+        if data is not None:
+            seen = _parse((data['infra'].get(f'probe|{rid}') or {}).get('at'))
+            if seen is not None and (now - seen).total_seconds() < PHANTOM_PROBE_S:
+                continue    # read inside its interval: the other runs are still read
+            data['infra'][f'probe|{rid}'] = {'at': _iso(now)}
+        run, jobs = run_jobs(slug, rid, gh)
+        if run is None:
+            continue
+        cls = classify_red(run, jobs, required)
+        if cls in INFRA_CLASSES:
+            try:
+                attempt = int(run.get('run_attempt') or 1)
+            except (TypeError, ValueError):
+                attempt = 1
+            answer = (cls, rid, attempt)
+            break           # one head, one answer, one re-run (C5)
+    if data is not None:
         save(state_dir, data)
-    run, jobs = run_jobs(slug, rid, gh)
-    if run is None:
-        return None
-    cls = classify_red(run, jobs, required)
-    try:
-        attempt = int(run.get('run_attempt') or 1)
-    except (TypeError, ValueError):
-        attempt = 1
-    return (cls, rid, attempt) if cls in INFRA_CLASSES else None
+    return answer
 
 
 def run_live(slug, run_id, gh=None, required=None):

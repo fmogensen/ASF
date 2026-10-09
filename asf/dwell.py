@@ -405,8 +405,16 @@ def check_cancelled(facts):
             continue
         if any(str(c.get('status') or '').upper() in _RUNNING for c in checks):
             continue                           # something still runs on this head
+        # a matrix leg's own run failing for real (not cancelled) fails the whole run under the
+        # default fail-fast strategy: a sibling leg's CANCELLED is that collateral, not an infra
+        # fluke — rerunning it only cancels it again, forever, since the real failure persists.
+        failed_runs = {m.group(1) for c in checks
+                       if str(c.get('conclusion') or '').upper() == 'FAILURE'
+                       for m in [_RUN_ID_RE.search(str(c.get('detailsUrl') or ''))] if m}
         gone = [c for c in checks if str(c.get('conclusion') or '').upper() in CANCELLED
-                and (not required or lane_mod.required_name(c.get('name'), required))]
+                and (not required or lane_mod.required_name(c.get('name'), required))
+                and not any(m.group(1) in failed_runs
+                            for m in [_RUN_ID_RE.search(str(c.get('detailsUrl') or ''))] if m)]
         if not gone:
             continue
         ended = [parse_ts(c.get('completedAt')) for c in gone]

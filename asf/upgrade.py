@@ -429,16 +429,24 @@ def remote_head(url, run=subprocess.run, branch='main'):
 HEX40 = re.compile(r'[0-9a-fA-F]{40}$')
 
 
+#: The suffix ``git ls-remote`` puts on the extra line that names the commit an annotated tag
+#: points at. An unfiltered listing prints that line unasked; a listing given ref patterns
+#: prints it only for a pattern that matches it, so it is asked for by name (F-0303).
+PEEL = '^{}'
+
+
 def resolve_ref(url, ref, run=subprocess.run):
     """``ref`` as a commit, for the CI guard, ``write_pending`` and the marker (PD12): unchanged
-    when it already is a 40-hex sha, else the commit ``git ls-remote <url> <ref>`` names — the
-    dereferenced commit on a ``^{}`` line for an annotated tag, else the line's own sha. ``None``
-    when ``ref`` matches nothing on ``url``."""
+    when it already is a 40-hex sha, else the commit ``git ls-remote <url> <ref> <ref>^{}`` names
+    — the dereferenced commit on the ``^{}`` line for an annotated tag, else the line's own sha.
+    ``None`` when ``ref`` matches nothing on ``url``. The peel is asked for by name: a filtered
+    ``ls-remote`` prints it only for a pattern that matches it (F-0303)."""
     if not ref or HEX40.match(ref):
         return ref
-    text = _out(run, ['git', 'ls-remote', url, ref])
+    patterns = [ref] if ref.endswith(PEEL) else [ref, f'{ref}{PEEL}']
+    text = _out(run, ['git', 'ls-remote', url, *patterns])
     lines = [ln for ln in (text or '').splitlines() if ln.strip()]
-    deref = next((ln for ln in lines if ln.endswith('^{}')), None)
+    deref = next((ln for ln in lines if ln.endswith(PEEL)), None)
     line = deref or (lines[0] if lines else '')
     return line.split('\t')[0].strip() or None
 
@@ -1038,7 +1046,8 @@ def ci_verdict(url, sha, run=subprocess.run, checks=None):
     r = _gh(run, ['api', f'repos/{slug}/commits/{sha}/check-runs?per_page=100'])
     runs = r.data.get('check_runs') if r.ok and isinstance(r.data, dict) else None
     if not isinstance(runs, list):
-        return 'unknown', 'gh could not read the check runs'
+        why = r.reason or 'the answer is not a check-runs object'
+        return 'unknown', f'gh could not read the check runs ({why})'
     latest = {}
     for r in runs:
         if isinstance(r, dict) and r.get('name') in names:
