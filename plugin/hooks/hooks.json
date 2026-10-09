@@ -6,6 +6,10 @@
           {
             "type": "command",
             "command": "printf '%s\\n' 'ASF console rules: this session is the operator orchestrator. Delegate long or uncertain work instead of doing it inline, and never block on a running task; background work keeps the line moving. Act on a decision you can justify instead of asking permission for it. Park only what truly needs a person, and let the rest continue.'"
+          },
+          {
+            "type": "command",
+            "command": "PATH=\"$HOME/.local/bin:$PATH\"; ASF_BIN=$(command -v asf); if [ -n \"$ASF_BIN\" ]; then \"$ASF_BIN\" console-feed 2>&1 || true; fi"
           }
         ]
       }

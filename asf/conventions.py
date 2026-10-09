@@ -422,7 +422,10 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                # F-0112/T-0431: how this product's tick takes a new ASF release — auto | notify
                # (default) | off (asf.env.Product.upgrade). A flag, not a top-level PRODUCT_FIELDS
                # key: a new one is refused by tests.test_env.PinnedReader (PR #675).
-               'upgrade')
+               'upgrade',
+               # B-0121: this product's own override of `console.status_every` (asf.console_feed) —
+               # a duration, or `off`/`0` to disable the console's periodic FACTORY STATUS feed.
+               'status_every')
 
 
 

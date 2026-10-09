@@ -50,6 +50,7 @@ KNOWN_CONFIG_KEYS = frozenset({
     'tick.step_timeout_s', 'tick.budget_s', 'tick.wave_first', 'tick.every_n.*',
     'tick.deferred_max_age_s',
     'clocks.wave', 'clocks.wave.every',   # the wave's own clock (asf.tick.wave_clock, #54)
+    'console.status_every',    # the console's periodic FACTORY STATUS feed (asf.console_feed, B-0121)
     'network.probe', 'network.recover', 'network.watchdog', 'network.hosts',
     'workers.heartbeat_min', 'workers.heartbeat_missed', 'workers.heartbeat_grace_min',
     'workers.heartbeat_resumes',

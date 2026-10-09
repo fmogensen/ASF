@@ -377,6 +377,9 @@ conventions:
   #                      # is a doctor RED. This is the *release* channel; a product whose repo is
   #                      # ASF's own source is on the trunk channel instead, under approvals.upgrade
   #                      # above.
+  #   status_every: 5m  # this product's own override of config.yaml's `console.status_every`
+  #                      # (asf.console_feed, B-0121) — a duration, or off/0 to disable the
+  #                      # console's periodic FACTORY STATUS feed for just this product.
   #   groom:
   #     reask_days: 7     # asf.groom.sticky (default 7): days an answered groom question's
   #                       # digest stays sticky — unchanged, it is dropped from the report

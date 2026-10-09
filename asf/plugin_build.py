@@ -108,14 +108,25 @@ CONSOLE_RULES = (
     'Park only what truly needs a person, and let the rest continue.'
 )
 
+#: B-0121: the console's periodic FACTORY STATUS feed — the console half of B-0087, which built
+#: the per-tick digest and `asf watch` but never wired either into a console, leaving every
+#: operator to type `/loop 5m /asf:status` by hand. `asf console-feed` decides for itself
+#: whether the resolved product's `console.status_every` is off, and its own output
+#: (:func:`asf.console_feed.run`) is what tells the console to call it again — so this hook
+#: never has to know the interval, and a console with no `asf` on PATH yet runs a no-op.
+STATUS_FEED_COMMAND = ('PATH="$HOME/.local/bin:$PATH"; ASF_BIN=$(command -v asf); '
+                       'if [ -n "$ASF_BIN" ]; then "$ASF_BIN" console-feed 2>&1 || true; fi')
+
 
 def render_hooks_json():
     """``plugin/hooks/hooks.json`` — a Claude Code plugin hooks file, auto-loaded by every
-    console that installs the plugin. One ``SessionStart`` hook prints :data:`CONSOLE_RULES` to
-    stdout, which Claude Code folds into that session's context (B-0090)."""
-    command = f"printf '%s\\n' '{CONSOLE_RULES}'"
+    console that installs the plugin. One ``SessionStart`` hook prints :data:`CONSOLE_RULES`; a
+    second runs ``asf console-feed`` (:data:`STATUS_FEED_COMMAND`, B-0121) — both folded into
+    that session's context the moment it starts (B-0090)."""
+    hooks = [{'type': 'command', 'command': f"printf '%s\\n' '{CONSOLE_RULES}'"},
+             {'type': 'command', 'command': STATUS_FEED_COMMAND}]
     return json.dumps({
-        'hooks': {'SessionStart': [{'hooks': [{'type': 'command', 'command': command}]}]},
+        'hooks': {'SessionStart': [{'hooks': hooks}]},
     }, indent=2, ensure_ascii=False) + '\n'
 
 

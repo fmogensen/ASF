@@ -63,6 +63,16 @@ with. It never clones, fetches or runs anything — read-only, safe to leave ope
 operator is not using for anything else, `ctrl-c` to stop. `--poll <seconds>` sets how often it
 checks for a new line (default 5s).
 
+## The console's own status feed
+
+Every console that installs the plugin already gets this without being asked (B-0121): a
+`SessionStart` hook runs `asf console-feed --product <p>`, which prints the FACTORY STATUS table
+and the tick digest lines since this console's own last print, then names the interval to call
+it again at — the console keeps calling it on its own clock from there, the way `/loop 5m
+/asf:status` used to have to be typed by hand. `console.status_every` in `~/.ASF/config.yaml`
+sets that interval for every product (default `5m`); a product's own `conventions.flags.
+status_every` overrides it; either `off` or `0` turns the feed off for that product.
+
 ## The tables
 
 ### `/asf:status` — FACTORY STATUS
@@ -131,8 +141,9 @@ A deploy made from the provider's CLI carries no commit sha, so the line reads `
 The deployer names it once the deploy is done — `asf deploy record site <sha>` — and the line counts
 from it until a newer deployment appears without one. A deploy ASF dispatches records its own sha.
 
-To keep the table in front of you, type `/loop 5m /asf:status` in each product's Claude Code
-session: it reprints the status every five minutes until you stop it.
+The table is already kept in front of you: every console gets it every `console.status_every`
+on its own (see "The console's own status feed" above) — typing `/loop 5m /asf:status` by hand
+is no longer needed.
 
 ### `/asf:next` — NEXT
 

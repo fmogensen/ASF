@@ -20,9 +20,12 @@ fails when the tree drifts. Never edit `skills/*/SKILL.md` by hand.
 Every skill passes its arguments through (`/asf:status --product <p>`); without `--product` the
 CLI uses `$ASF_PRODUCT`, else `default_product` in `~/.ASF/config.yaml`.
 
-`hooks/hooks.json` (generated, like the skills) carries a `SessionStart` hook that prints the
+`hooks/hooks.json` (generated, like the skills) carries two `SessionStart` hooks: one prints the
 operator's console rules into every session that installs this plugin, so they ship in code
-instead of living only in an operator's own memory (B-0090).
+instead of living only in an operator's own memory (B-0090); the other runs `asf console-feed` —
+the FACTORY STATUS table and the tick digest lines since this console's last print, with the
+instruction to call it again at `console.status_every` (default 5m; `off` disables it) — so a
+console never has to remember `/loop 5m /asf:status` by hand (B-0121).
 
 ## Install
 

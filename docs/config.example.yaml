@@ -383,6 +383,13 @@ capacity:
 # clocks:
 #   wave:
 #     every: 1m
+
+# console.status_every: how often the console's own FACTORY STATUS feed (asf.console_feed,
+# `asf console-feed`) refreshes — a duration (`5m`, `90s`), or `off`/`0` to disable it for every
+# product. A product's own `conventions.flags.status_every` overrides this one for just it.
+# Replaces typing `/loop 5m /asf:status` by hand in each product's console (B-0121); default 5m.
+# console:
+#   status_every: 5m
 # clocks:
 #   wave: off
 
