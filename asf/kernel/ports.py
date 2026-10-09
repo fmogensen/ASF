@@ -120,7 +120,12 @@ class PortError(Exception):
 # ---- the record ---------------------------------------------------------------------------------
 
 def item_from_card(rec):
-    """One :class:`~asf.kernel.model.Item` from a ``load_items`` record."""
+    """One :class:`~asf.kernel.model.Item` from a ``load_items`` record.
+
+    A closed floor state wins over ``kernel_state``: a card the floor closed reads as ``Done``
+    however its last kernel run left it, so a stale ``ready`` or ``stuck`` does not put it back
+    on the floor's list. An open PR is unaffected — :func:`~asf.kernel.decide._judge` reaches
+    ``_judge_pr`` before it reads ``state is DONE``."""
     meta = rec['meta']
     from asf.record import frontmatter
     _typed, machine = frontmatter.split_machine(meta)
@@ -129,8 +134,10 @@ def item_from_card(rec):
         state = M.State(raw) if raw else None
     except ValueError:
         state = None
-    if state is None:
-        state = M.State.DONE if machine.get('state') in CLOSED_STATES else M.State.NEW
+    if machine.get('state') in CLOSED_STATES:
+        state = M.State.DONE
+    elif state is None:
+        state = M.State.NEW
     stuck = None
     if state is M.State.STUCK:
         stuck = M.Stuck(str(machine.get(STUCK_REASON) or 'stuck'),
@@ -350,10 +357,17 @@ def failing_files(log, files):
 
     The module is the prefix before the first capitalised part (the test class), so neither
     form's trailing parts are read as directories; a name with no capitalised part keeps the
-    old cut, one part short of the whole."""
+    old cut, one part short of the whole.
+
+    A dotted name that cannot be a module path at all is skipped rather than cut: unittest's
+    synthetic ``unittest.loader._FailedTest.test_x`` (an import that failed) and a name whose
+    first part is the class, not a module. Both would otherwise yield a file no PR holds; the
+    empty list is what lets ``on_pr`` read the red as the PR's own."""
     out = [f for f in files if f and f in log]
     for dotted in _TEST_MODULE.findall(log):
         parts = dotted.split('.')
+        if parts[:2] == ['unittest', 'loader'] or parts[0][:1].isupper():
+            continue
         cut = next((i for i, p in enumerate(parts) if i and p[:1].isupper()),
                    max(len(parts) - 1, 1))
         for n in range(len(parts), 0, -1):

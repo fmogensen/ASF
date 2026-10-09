@@ -68,6 +68,18 @@ class Record(unittest.TestCase):
         self.assertIs(items['F-0001'].state, M.State.DONE, 'an old Closed card reads as Done')
         self.assertEqual(self.record().specs_landed(), {'F-0001': '## Stories\n- S-0001: one\n'})
 
+    def test_a_closed_floor_state_wins_over_a_stale_kernel_state(self):
+        self.record().write_fields('T-0001', {P.STATE: 'stuck', P.STUCK_REASON: 'old round'})
+        self.assertIs(self.record().items()['T-0001'].state, M.State.STUCK)
+        path = os.path.join(self.root, 'tasks', 'T-0001.md')
+        with open(path) as f:
+            text = f.read()
+        with open(path, 'w') as f:
+            f.write(text.replace('state: New', 'state: Resolved'))
+        t = self.record().items()['T-0001']
+        self.assertEqual((t.state, t.stuck), (M.State.DONE, None),
+                         'a card the floor closed is not re-judged Ready or Stuck')
+
     def test_kernel_fields_round_trip_and_keep_the_rest(self):
         odd = 'conflict: PR #7: rc 1: "quoted", [bracket], a: colon'
         self.record().write_fields('T-0001', {
@@ -305,6 +317,11 @@ class Helpers(unittest.TestCase):
         # a deeper module the PR does hold is preferred over the cut
         self.assertEqual(P.failing_files('ERROR: t (a.b.c.Case.t)\n', ['a/b/c.py']), ['a/b/c.py'])
         self.assertEqual(P.failing_files('', ['src/a.py']), [])
+        # unittest's synthetic name for an import that failed is no module path: nothing reads,
+        # so the red is the PR's own rather than a file no PR holds
+        failed = 'ERROR: test_x (unittest.loader._FailedTest.test_x)\n'
+        self.assertEqual(P.failing_files(failed, ['tests/test_mod.py']), [])
+        self.assertEqual(P.failing_files('FAIL: t (Case.t)\n', ['tests/test_mod.py']), [])
 
     def test_config_for_reads_the_conventions(self):
         cfg = P.config_for(env.Product('sample', {'conventions': {
