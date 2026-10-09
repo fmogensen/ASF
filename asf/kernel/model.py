@@ -125,8 +125,9 @@ class PR:
     change: a hash of the diff from the merge base to the head, blind to line numbers, so a
     merge of trunk into the branch (GitHub's "update branch") keeps it while a new commit on the
     PR changes it ('' when unread). ``behind``: the base moved past
-    the PR's base; ``conflicting``: GitHub cannot merge it as is. ``files`` are the paths the PR
-    changes. ``auto_merge``: auto-merge is already enabled; ``merged``: it landed."""
+    the PR's base; ``conflicting``: GitHub cannot merge it as is (``mergeable`` CONFLICTING or
+    ``mergeStateStatus`` DIRTY; an UNKNOWN ``mergeable`` stays unknown). ``files`` are the
+    paths the PR changes. ``auto_merge``: auto-merge is already enabled; ``merged``: it landed."""
     number: int
     branch: str
     item_id: str

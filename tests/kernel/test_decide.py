@@ -211,7 +211,7 @@ class Rounds(unittest.TestCase):
                          (State.STUCK, reason))
         self.assertEqual(B.of(plan, A.MarkStuck), [])
 
-    def test_conflict_updates_then_gets_a_rebase_session_then_sticks_on_operator(self):
+    def test_conflict_gets_a_rebase_session_then_sticks_on_operator(self):
         from asf.kernel.decide import rebase_finding
 
         def world(attempts, findings=(), head='head-1', fix_rounds=0, **kw):
@@ -219,11 +219,8 @@ class Rounds(unittest.TestCase):
                                    findings=list(findings), fix_rounds=fix_rounds, **kw)],
                            prs=[B.pr(4, 'T-0001', conflicting=True, behind=True, head=head)],
                            reviews=[B.review('T-0001')])
-        first = decide(world([]), B.config())
-        self.assertEqual([u.pr for u in B.of(first, A.UpdateBranch)], [4])
-        self.assertEqual(B.state(first, 'T-0001'), State.LANDING)
-        # the update failed on the conflict: one fix round, a correct session that rebases
-        second = decide(world(['conflict: PR #4: update failed']), B.config())
+        # a conflicting PR is never updated: one fix round, a correct session that rebases
+        second = decide(world([]), B.config())
         self.assertEqual(B.of(second, A.UpdateBranch), [])
         self.assertEqual(B.state(second, 'T-0001'), State.READY)
         launch, = B.of(second, A.Launch)
@@ -348,8 +345,48 @@ class MergeTrain(unittest.TestCase):
                B.pr(4, 'T-0004', behind=True, conflicting=True)]
         plan = decide(B.facts(items, prs=prs, reviews=[B.review(i.id) for i in items]),
                       B.config(update_parallel=2))
-        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [4])
+        self.assertEqual(B.of(plan, A.UpdateBranch), [])
         self.assertEqual(list(plan.notes), ['T-0003'])
+        self.assertEqual(B.state(plan, 'T-0004'), State.READY)
+
+    def test_a_dirty_approved_pr_gets_no_update_but_a_rebase_session(self):
+        from asf.kernel.decide import rebase_finding
+        f = B.facts([B.task('T-0001', state=State.LANDING)],
+                    prs=[B.pr(4, 'T-0001', conflicting=True, auto_merge=True)],
+                    reviews=[B.review('T-0001')])
+        plan = decide(f, B.config(update_parallel=2))
+        self.assertEqual(B.of(plan, A.UpdateBranch), [])
+        launch, = B.of(plan, A.Launch)
+        self.assertEqual((launch.kind, launch.item_id, launch.branch),
+                         ('build', 'T-0001', 'worker/T-0001'))
+        self.assertTrue(rebase_finding(launch.findings[0], 4))
+
+    def test_thirteen_behind_and_two_dirty_update_the_two_best_ranked_behind(self):
+        dirty = [B.task('T-0201', state=State.LANDING, rank=100),
+                 B.task('T-0202', state=State.LANDING, rank=99)]
+        prs = [B.pr(201, 'T-0201', conflicting=True, auto_merge=True,
+                    checks=[B.check(status='in_progress')]),
+               B.pr(202, 'T-0202', conflicting=True, behind=False, auto_merge=True)]
+        plan = decide(self.world(extra=dirty, extra_prs=prs), B.config(update_parallel=2))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [13, 12])
+        self.assertEqual(B.state(plan, 'T-0201'), State.READY)
+        self.assertEqual(B.state(plan, 'T-0202'), State.READY)
+
+    def test_an_update_that_failed_on_a_merge_conflict_routes_the_head_to_a_rebase(self):
+        from asf.kernel.decide import conflict_attempt
+
+        def plan(head):
+            reason = conflict_attempt(4, 'head-1') + 'merge conflict between base and head'
+            f = B.facts([B.task('T-0001', state=State.LANDING, attempts=[reason])],
+                        prs=[B.pr(4, 'T-0001', behind=True, head=head, auto_merge=True)],
+                        reviews=[B.review('T-0001')])
+            return decide(f, B.config(update_parallel=2))
+        same = plan('head-1')   # GitHub's mergeable still UNKNOWN: the failed update decides
+        self.assertEqual(B.of(same, A.UpdateBranch), [])
+        self.assertEqual(B.state(same, 'T-0001'), State.READY)
+        self.assertEqual(B.launched(same, 'build'), ['T-0001'])
+        moved = plan('head-2')  # a new head is judged afresh
+        self.assertEqual([u.pr for u in B.of(moved, A.UpdateBranch)], [4])
 
     def test_a_pr_not_behind_needs_no_update(self):
         items = [B.task('T-0001', state=State.LANDING)]

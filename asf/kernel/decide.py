@@ -23,8 +23,8 @@ item and the actions of one tick. The rules it holds, in the design's words:
 - Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch` —
   a merge train: at most ``config.update_parallel`` Landing PRs are brought up to date at once.
   The behind, non-conflicting ones are taken in (effective rank, PR number) order; the free
-  places are ``update_parallel`` less the Landing PRs not behind whose required checks still run
-  on their head (an update in flight). The rest wait in Landing with the plan note
+  places are ``update_parallel`` less the non-conflicting Landing PRs not behind whose required
+  checks still run on their head (an update in flight). The rest wait in Landing with the plan note
   :data:`TRAIN_NOTE` ("queued for update (merge train, k of n)"), never written to the card.
   Behind is GitHub's ``mergeStateStatus == BEHIND`` only: a PR a non-strict base would merge as
   is never needs an update.
@@ -38,7 +38,9 @@ item and the actions of one tick. The rules it holds, in the design's words:
   :func:`red_finding`), at most ``config.max_fix_rounds``, then Stuck. A recorded Stuck from an
   off-PR red (:data:`RED_OFF`) is judged afresh every tick, so a red that is not required, or
   whose files were unknown, goes back to Landing, Review or a fix round.
-- Conflict: a conflicting PR first gets :class:`UpdateBranch`; when that fails, one fix round —
+- Conflict: a conflicting PR (GitHub's ``mergeable == CONFLICTING`` or ``mergeStateStatus ==
+  DIRTY``, or an update of its head that failed on a merge conflict) never gets
+  :class:`UpdateBranch` and never takes a merge-train place: it goes straight to one fix round —
   a ``correct`` session whose finding (:data:`REBASE`) is to rebase onto the base and resolve
   the conflicts. A PR that still conflicts after that session ended is Stuck(owner=operator).
 - Stuck: ``config.max_attempts`` failed attempts on one reason; a conflict the rebase session
@@ -68,8 +70,9 @@ item and the actions of one tick. The rules it holds, in the design's words:
   the record are minted; pending answers are applied at once.
 
 How the record keeps up (the applier's side of the contract): ``Item.fix_rounds`` counts the fix
-rounds already launched; a failed ``UpdateBranch`` on a conflicting PR is recorded as an attempt
-whose reason starts with :data:`CONFLICT`; a fix round's findings (a :data:`REBASE` one
+rounds already launched; a failed ``UpdateBranch`` whose error says "merge conflict" (or on a
+PR already conflicting) is recorded as an attempt :func:`conflict_attempt` (its reason starts
+with :data:`CONFLICT` and names the PR and head); a fix round's findings (a :data:`REBASE` one
 included) are written to ``Item.findings`` when it launches. An item whose session ended, or whose answer is applied,
 this tick is not relaunched until the next tick has read the record again.
 """
@@ -484,17 +487,13 @@ def _parked(items):
 
 def _judge_pr(it, pr, attempts, facts, config, actions):
     """The state of ``it`` holding open PR ``pr``: conflict, red checks, then the review."""
-    updated = False
-    if pr.conflicting:
+    if conflicting(pr, attempts):
         if any(rebase_finding(f, pr.number) for f in it.findings):
             reason = ('%s the rebase session could not resolve: PR #%d still conflicts on head %s'
                       % (CONFLICT, pr.number, pr.head_sha or '?'))
             return _Judged(State.STUCK, Stuck(reason, 'operator', CONFLICT_NEXT % pr.number))
-        if any(a.startswith(CONFLICT) for a in attempts):
-            return _fix_round(it, pr, '%s: PR #%d' % (CONFLICT, pr.number), config,
-                              [rebase_finding_for(pr.number)])
-        actions.append(A.UpdateBranch(pr.number))
-        updated = True
+        return _fix_round(it, pr, '%s: PR #%d' % (CONFLICT, pr.number), config,
+                          [rebase_finding_for(pr.number)])
 
     reds = [c for c in pr.checks if c.status == 'completed' and c.conclusion in RED_CONCLUSIONS]
     gating = [c for c in reds if required(c.name, config)]
@@ -522,12 +521,27 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
         return _fix_round(it, pr, 'review: changes requested', config)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
-    if pr.conflicting or updated:
-        return _Judged(State.LANDING)
     if pr.behind:
         return _Judged(State.LANDING, behind_pr=pr)
     return _Judged(State.LANDING, updating=any(
         c.status != 'completed' and required(c.name, config) for c in pr.checks))
+
+
+def conflict_attempt(pr_number, head_sha):
+    """The reason prefix of the attempt a failed update on a merge conflict leaves for PR
+    ``pr_number`` at head ``head_sha``: that head conflicts, whatever GitHub's lazy
+    ``mergeable`` says next tick."""
+    return '%s: PR #%d at %s: ' % (CONFLICT, pr_number, head_sha or '?')
+
+
+def conflicting(pr, attempts):
+    """Whether ``pr`` conflicts with its base: GitHub says so (``mergeable == CONFLICTING`` or
+    ``mergeStateStatus == DIRTY``, read into ``PR.conflicting``), or an update of its current
+    head already failed on a merge conflict (an attempt :func:`conflict_attempt`)."""
+    if pr.conflicting:
+        return True
+    return bool(pr.head_sha) and any(
+        str(a).startswith(conflict_attempt(pr.number, pr.head_sha)) for a in attempts)
 
 
 def required(name, config):

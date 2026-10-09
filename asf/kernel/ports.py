@@ -440,7 +440,8 @@ class RealGitHub:
         pr = M.PR(number=d['number'], branch=d['headRefName'], item_id=iid,
                   head_sha=d.get('headRefOid') or '',
                   behind=d.get('mergeStateStatus') == 'BEHIND',
-                  conflicting=d.get('mergeable') == 'CONFLICTING', files=files,
+                  conflicting=(d.get('mergeable') == 'CONFLICTING'
+                               or d.get('mergeStateStatus') == 'DIRTY'), files=files,
                   checks=[_check(c) for c in d.get('statusCheckRollup') or []],
                   auto_merge=bool(d.get('autoMergeRequest')))
         pr.tree_sha = self._tree(pr.head_sha)

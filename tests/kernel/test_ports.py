@@ -143,6 +143,20 @@ class GitHub(unittest.TestCase):
         self.assertEqual((merged.item_id, merged.merged), ('T-0002', True))
         self.assertEqual(gh.reviews(prs[:1]), [M.Review('T-0001', 'tree1', 'approve', [])])
 
+    def test_a_dirty_merge_state_is_a_conflict_and_unknown_stays_unknown(self):
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 1, '', 'no')
+        gh = P.RealGitHub(env.Product('sample', {'repo_slug': 'o/r'}), run=run)
+
+        def conflicting(mergeable, state):
+            return gh._open_pr({'number': 7, 'headRefName': 'worker/t-0001-slug',
+                                'headRefOid': 'h1', 'mergeable': mergeable,
+                                'mergeStateStatus': state}).conflicting
+        self.assertTrue(conflicting('UNKNOWN', 'DIRTY'))
+        self.assertTrue(conflicting('CONFLICTING', 'BLOCKED'))
+        self.assertFalse(conflicting('UNKNOWN', 'BEHIND'))
+        self.assertFalse(conflicting('MERGEABLE', 'CLEAN'))
+
     def test_change_id_is_blind_to_line_numbers_and_sees_a_new_commit(self):
         files = [{'filename': 'src/a.py', 'status': 'modified', 'sha': 'b1',
                   'patch': '@@ -1,2 +1,3 @@ def f():\n x = 1\n+y = 2\n z = 3'},

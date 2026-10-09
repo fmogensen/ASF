@@ -6,8 +6,9 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
 - a build launched on an open PR's branch is a fix round: ``kernel_fix_rounds`` + 1, and the
   'changes' findings on that PR's tree, plus the launch's own (a rebase round's), go to the card
   and the brief;
-- a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR is an attempt whose reason
-  starts with :data:`asf.kernel.decide.CONFLICT`; a failed launch is an attempt ``launch: …``;
+- a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR, or whose error says
+  "merge conflict", is an attempt :func:`asf.kernel.decide.conflict_attempt` (PR and head), so
+  the next tick routes the PR to its rebase session; a failed launch is an attempt ``launch: …``;
 - a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; one whose
   API failed before it reported is an attempt :data:`asf.kernel.decide.API_FAILED`;
 - an ended session that reported ``pushed: rebased <sha>`` (the floor's wording: "the factory
@@ -40,8 +41,8 @@ from asf.kernel import actions as A
 from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
-from asf.kernel.decide import (API_FAILED, CONFLICT, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT,
-                               NOT_PUSHED, host_pushes, no_report)
+from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
+                               conflict_attempt, host_pushes, no_report)
 from asf.kernel.model import State, Stuck, verdict_holds
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
@@ -200,8 +201,8 @@ class _Applier:
         try:
             self.ports.github.update_branch(a.pr)
         except Exception as e:
-            if pr is not None and pr.conflicting:
-                self.attempt(pr.item_id, '%s: PR #%d: %s' % (CONFLICT, a.pr, e))
+            if pr is not None and (pr.conflicting or 'merge conflict' in str(e).lower()):
+                self.attempt(pr.item_id, conflict_attempt(a.pr, pr.head_sha) + str(e))
             raise
 
     def EnableAutoMerge(self, a):
