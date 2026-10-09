@@ -4,7 +4,8 @@
 It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
 
 - a build launched on an open PR's branch is a fix round: ``kernel_fix_rounds`` + 1, and the
-  'changes' findings on that PR's tree go to the card and the brief;
+  'changes' findings on that PR's tree, plus the launch's own (a rebase round's), go to the card
+  and the brief;
 - a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR is an attempt whose reason
   starts with :data:`asf.kernel.decide.CONFLICT`; a failed launch is an attempt ``launch: …``;
 - a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`;
@@ -148,6 +149,7 @@ class _Applier:
             findings = [f for r in self.facts.reviews
                         if r.item_id == a.item_id and r.tree_sha == pr.tree_sha
                         and r.verdict != 'approve' for f in r.findings]
+            findings += [f for f in a.findings if f not in findings]
         meta = {'pr': pr.number, 'tree': pr.tree_sha} if pr is not None else {}
         try:
             if self.ports.brief is None:

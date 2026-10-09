@@ -154,6 +154,59 @@ class GitHub(unittest.TestCase):
                     write()
 
 
+class EndReview(unittest.TestCase):
+    """An ended review session's worktree is freed when its only dirty files are under the
+    product's reviews_dir (copied to state/<p>/kernel-reviews/<job>.md first); any other dirty
+    file keeps it."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.state = tempfile.mkdtemp()
+        for args in (['init', '-q', '-b', 'main'], ['config', 'user.email', 't@t'],
+                     ['config', 'user.name', 't'], ['commit', '-q', '--allow-empty', '-m', 'x']):
+            subprocess.run(['git'] + args, cwd=self.repo, check=True, capture_output=True)
+        self.wt = os.path.join(self.state, 'worktrees', 'review-t-0001')
+        subprocess.run(['git', 'worktree', 'add', '-q', '-b', 'r1', self.wt], cwd=self.repo,
+                       check=True, capture_output=True)
+        self.product = env.Product('sample', {'repo_dir': self.repo,
+                                              'conventions': {'reviews_dir': 'docs/reviews'}})
+
+    def write(self, rel, text):
+        path = os.path.join(self.wt, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+
+    def end(self):
+        from unittest import mock
+        s = M.Session(job='review-t-0001-1', item_id='T-0001', kind='review', alive=False,
+                      ended=True, result='report', worktree=self.wt)
+        with mock.patch('asf.env.state_dir', return_value=self.state), \
+                mock.patch('asf.workers.pool.update_session'), \
+                mock.patch('asf.workers.trash.kick'):
+            P.RealSessions(self.product).end(s, True)
+
+    def test_only_a_review_file_frees_the_worktree_and_keeps_the_file(self):
+        self.write('docs/reviews/1-t-0001.md', 'VERDICT: approve\n')
+        self.end()
+        self.assertFalse(os.path.exists(self.wt))
+        with open(os.path.join(self.state, P.REVIEW_COPIES_DIR, 'review-t-0001-1.md')) as f:
+            self.assertEqual(f.read(), 'VERDICT: approve\n')
+
+    def test_any_other_dirty_file_keeps_the_worktree(self):
+        self.write('docs/reviews/1-t-0001.md', 'VERDICT: approve\n')
+        self.write('src/a.py', 'x = 1\n')
+        with self.assertRaises(P.PortError) as e:
+            self.end()
+        self.assertIn('uncommitted', str(e.exception))
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertFalse(os.path.exists(os.path.join(self.state, P.REVIEW_COPIES_DIR)))
+
+    def test_dirty_paths_reads_renames_and_quotes(self):
+        self.assertEqual(P.dirty_paths('?? docs/reviews/a.md\nR  a -> "b c"\n'),
+                         ['docs/reviews/a.md', 'a', 'b c'])
+
+
 class Helpers(unittest.TestCase):
 
     def test_item_of_branch(self):

@@ -118,17 +118,30 @@ class Tick(unittest.TestCase):
         self.assertEqual(rec.fields['T-0001'][P.FIX_ROUNDS], 1)
         self.assertEqual(rec.fields['T-0001'][P.FINDINGS], ['C1: no test'])
 
-    def test_a_failed_update_on_a_conflict_is_an_attempt_then_stuck(self):
+    def test_a_failed_update_on_a_conflict_gets_a_rebase_session_then_stuck(self):
         rec = F.FakeRecord([B.task('T-0001', state=State.REVIEW)])
         gh = F.FakeGitHub(prs=[B.pr(7, 'T-0001', conflicting=True)], reviews=[B.review('T-0001')],
                           fail={('update_branch', 7)})
-        ports = F.ports(record=rec, github=gh)
+        sess = F.FakeSessions()
+        ports = F.ports(record=rec, github=gh, sessions=sess)
         self.tick(ports)
         self.assertTrue(rec.fields['T-0001'][P.ATTEMPTS][0].startswith('conflict: PR #7'))
         self.tick(ports)
+        (kind, iid, branch, brief), = sess.launched
+        self.assertEqual((kind, branch), ('build', 'worker/T-0001'))
+        self.assertIn('rebase the branch onto the base', brief)
+        self.assertEqual(rec.fields['T-0001'][P.FIX_ROUNDS], 1)
+        self.assertTrue(rec.fields['T-0001'][P.FINDINGS][0].startswith('rebase: PR #7'))
+        self.assertEqual(rec.fields['T-0001'][P.STATE], 'building')
+        for s in sess._sessions:   # the rebase session pushed and ended; the PR still conflicts
+            s.alive, s.ended, s.result = False, True, 'pushed'
+        self.tick(ports)
         self.assertEqual(rec.fields['T-0001'][P.STATE], 'stuck')
-        self.assertEqual(rec.fields['T-0001'][P.STUCK_OWNER], 'loop')
+        self.assertEqual(rec.fields['T-0001'][P.STUCK_OWNER], 'operator')
+        self.assertIn('could not resolve', rec.fields['T-0001'][P.STUCK_REASON])
+        self.assertTrue(rec.fields['T-0001'][P.STUCK_NEXT])
         self.assertTrue(rec.fields['T-0001'][P.STUCK_SINCE])
+        self.assertEqual(len(sess.launched), 1)
 
     def test_a_second_tick_on_the_same_world_writes_nothing_new(self):
         rec = F.FakeRecord([B.task('T-0001', state=State.REVIEW), B.task('T-0002', rank=None)])

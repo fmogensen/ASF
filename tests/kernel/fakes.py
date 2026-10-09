@@ -29,6 +29,7 @@ class FakeRecord:
             it.attempts = list(f.get(P.ATTEMPTS, it.attempts))
             it.fix_rounds = f.get(P.FIX_ROUNDS, it.fix_rounds)
             it.answers = list(f.get(P.ANSWERS, it.answers))
+            it.findings = list(f.get(P.FINDINGS, it.findings))
             out[iid] = it
         return out
 

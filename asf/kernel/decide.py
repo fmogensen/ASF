@@ -19,15 +19,19 @@ item and the actions of one tick. The rules it holds, in the design's words:
 - Red: only ``failure``/``timed_out``. A red whose ``failing_files`` meet none of the PR's files
   gets ``config.max_reruns`` reruns, then Stuck(owner=ci). A red meeting the PR's files sends it to
   Ready (a fix round), at most ``config.max_fix_rounds``, then Stuck.
-- Stuck: ``config.max_attempts`` failed attempts on one reason; a conflict the update cannot
-  resolve; a session question (owner=operator); a session that ended without a push
+- Conflict: a conflicting PR first gets :class:`UpdateBranch`; when that fails, one fix round —
+  a ``correct`` session whose finding (:data:`REBASE`) is to rebase onto the base and resolve
+  the conflicts. A PR that still conflicts after that session ended is Stuck(owner=operator).
+- Stuck: ``config.max_attempts`` failed attempts on one reason; a conflict the rebase session
+  could not resolve; a session question (owner=operator); a session that ended without a push
   (owner=session, its last line as reason). A dead pid ends the session and frees its worktree.
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
 How the record keeps up (the applier's side of the contract): ``Item.fix_rounds`` counts the fix
 rounds already launched; a failed ``UpdateBranch`` on a conflicting PR is recorded as an attempt
-whose reason starts with :data:`CONFLICT`. An item whose session ended, or whose answer is applied,
+whose reason starts with :data:`CONFLICT`; a fix round's findings (a :data:`REBASE` one
+included) are written to ``Item.findings`` when it launches. An item whose session ended, or whose answer is applied,
 this tick is not relaunched until the next tick has read the record again.
 """
 import dataclasses
@@ -45,6 +49,16 @@ BUILDABLE = ('task', 'bug')
 
 #: the reason prefix of a failed attempt to update a conflicting PR's branch
 CONFLICT = 'conflict'
+
+#: the prefix of the finding a rebase round carries (on the Launch, then on ``Item.findings``)
+REBASE = 'rebase'
+
+#: what a rebase round's session does, after the finding's prefix
+REBASE_ASK = ("rebase the branch onto the base, resolve the conflicts, keep the change's intent, "
+              "run the touched tests, push")
+
+#: what the operator does with a conflict the rebase session could not resolve
+CONFLICT_NEXT = 'rebase PR #%d onto its base by hand and push, or close it and reopen the item'
 
 #: a dead pid's attempt reason (the session never ended on its own)
 CRASH = 'session died'
@@ -71,6 +85,7 @@ class _Judged:
     review_branch: str = None
     branch: str = None
     hold: bool = False
+    findings: list = dataclasses.field(default_factory=list)
 
 
 def decide(facts, config):
@@ -109,7 +124,7 @@ def decide(facts, config):
 def _judge(it, facts, config, actions):
     """``it``'s :class:`_Judged` from its own card, sessions, PRs, reviews and answers; appends the
     item's own actions (answers, PR upkeep) to ``actions``."""
-    stuck = it.stuck if it.state is State.STUCK else None
+    stuck = it.stuck if it.state is State.STUCK and not _legacy_conflict(it.stuck) else None
     question = it.question
     hold = False
     for a in facts.answers:
@@ -186,9 +201,13 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
     """The state of ``it`` holding open PR ``pr``: conflict, red checks, then the review."""
     updated = False
     if pr.conflicting:
+        if any(rebase_finding(f, pr.number) for f in it.findings):
+            reason = ('%s the rebase session could not resolve: PR #%d still conflicts on head %s'
+                      % (CONFLICT, pr.number, pr.head_sha or '?'))
+            return _Judged(State.STUCK, Stuck(reason, 'operator', CONFLICT_NEXT % pr.number))
         if any(a.startswith(CONFLICT) for a in attempts):
-            return _Judged(State.STUCK, _stuck('%s: PR #%d still conflicts after an update'
-                                               % (CONFLICT, pr.number), 'loop'))
+            return _fix_round(it, pr, '%s: PR #%d' % (CONFLICT, pr.number), config,
+                              [rebase_finding_for(pr.number)])
         actions.append(A.UpdateBranch(pr.number))
         updated = True
 
@@ -218,12 +237,34 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
     return _Judged(State.LANDING)
 
 
-def _fix_round(it, pr, reason, config):
-    """Ready on ``pr``'s branch for one more fix round, or Stuck(operator) past the cap."""
+def _fix_round(it, pr, reason, config, findings=()):
+    """Ready on ``pr``'s branch for one more fix round (carrying ``findings`` into the launch),
+    or Stuck(operator) past the cap."""
     if it.fix_rounds + 1 > config.max_fix_rounds:
         return _Judged(State.STUCK, _stuck('%s after %d fix rounds' % (reason, it.fix_rounds),
                                            'operator'))
-    return _Judged(State.READY, branch=pr.branch)
+    return _Judged(State.READY, branch=pr.branch, findings=list(findings))
+
+
+def rebase_finding_for(pr_number):
+    """The finding a rebase round carries for PR ``pr_number``."""
+    return '%s: PR #%d conflicts with its base — %s' % (REBASE, pr_number, REBASE_ASK)
+
+
+def rebase_finding(finding, pr_number=None):
+    """Whether ``finding`` is a rebase round's (for PR ``pr_number``, when given)."""
+    head = '%s: PR #' % REBASE
+    if not str(finding).startswith(head):
+        return False
+    return pr_number is None or str(finding).startswith('%s%d ' % (head, pr_number))
+
+
+def _legacy_conflict(stuck):
+    """Whether a recorded Stuck is the old 'still conflicts after an update' one (owner=loop,
+    before the rebase round existed): it is judged afresh, so it gets its rebase session."""
+    return (stuck is not None and stuck.owner == 'loop'
+            and str(stuck.reason).startswith('%s: PR #' % CONFLICT)
+            and str(stuck.reason).endswith('still conflicts after an update'))
 
 
 def _repeated(attempts, limit):
@@ -374,7 +415,8 @@ def _launches(facts, config, judged, children, states, parked):
         if any(_overlap(items[iid].writes, w) for w in busy):
             continue
         kind = _kind(items[iid], facts)
-        out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config, items[iid])))
+        out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config, items[iid]),
+                            list(judged[iid].findings)))
         busy.append(items[iid].writes)
         free -= 1
     return out

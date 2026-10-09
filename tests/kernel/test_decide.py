@@ -86,18 +86,53 @@ class Rounds(unittest.TestCase):
         self.assertEqual(B.state(plan, 'T-0001'), State.READY)
         self.assertEqual(B.of(plan, A.EnableAutoMerge), [])
 
-    def test_conflict_updates_once_then_sticks_on_loop(self):
-        def world(attempts):
-            return B.facts([B.task('T-0001', state=State.LANDING, attempts=attempts)],
-                           prs=[B.pr(4, 'T-0001', conflicting=True, behind=True)],
+    def test_conflict_updates_then_gets_a_rebase_session_then_sticks_on_operator(self):
+        from asf.kernel.decide import rebase_finding
+
+        def world(attempts, findings=(), head='head-1', fix_rounds=0, **kw):
+            return B.facts([B.task('T-0001', state=State.LANDING, attempts=attempts,
+                                   findings=list(findings), fix_rounds=fix_rounds, **kw)],
+                           prs=[B.pr(4, 'T-0001', conflicting=True, behind=True, head=head)],
                            reviews=[B.review('T-0001')])
         first = decide(world([]), B.config())
         self.assertEqual([u.pr for u in B.of(first, A.UpdateBranch)], [4])
         self.assertEqual(B.state(first, 'T-0001'), State.LANDING)
-        second = decide(world(['conflict: update failed']), B.config())
+        # the update failed on the conflict: one fix round, a correct session that rebases
+        second = decide(world(['conflict: PR #4: update failed']), B.config())
         self.assertEqual(B.of(second, A.UpdateBranch), [])
-        self.assertEqual(B.state(second, 'T-0001'), State.STUCK)
-        self.assertEqual(B.stuck(second, 'T-0001').owner, 'loop')
+        self.assertEqual(B.state(second, 'T-0001'), State.READY)
+        launch, = B.of(second, A.Launch)
+        self.assertEqual((launch.kind, launch.branch), ('build', 'worker/T-0001'))
+        finding, = launch.findings
+        self.assertTrue(rebase_finding(finding, 4))
+        self.assertIn('rebase the branch onto the base', finding)
+        # that session ended and the PR still conflicts, on a new head or the same one
+        for head in ('head-2', 'head-1'):
+            third = decide(world(['conflict: PR #4: update failed'], [finding], head=head,
+                                 fix_rounds=1), B.config())
+            self.assertEqual(B.of(third, A.Launch), [])
+            self.assertEqual(B.of(third, A.UpdateBranch), [])
+            info = B.stuck(third, 'T-0001')
+            self.assertEqual(info.owner, 'operator')
+            self.assertTrue(info.reason.startswith('conflict the rebase session could not resolve'))
+            self.assertIn('PR #4', info.next_action)
+
+    def test_a_rebase_round_counts_against_the_fix_round_cap(self):
+        f = B.facts([B.task('T-0001', state=State.LANDING, fix_rounds=2,
+                            attempts=['conflict: PR #4: x'])],
+                    prs=[B.pr(4, 'T-0001', conflicting=True)], reviews=[B.review('T-0001')])
+        plan = decide(f, B.config(max_fix_rounds=2))
+        self.assertEqual(B.of(plan, A.Launch), [])
+        self.assertEqual(B.stuck(plan, 'T-0001').owner, 'operator')
+
+    def test_the_old_loop_stuck_on_a_conflict_gets_its_rebase_session(self):
+        old = B.M.Stuck('conflict: PR #4 still conflicts after an update', 'loop')
+        f = B.facts([B.task('T-0001', state=State.STUCK, stuck=old,
+                            attempts=['conflict: PR #4: x'])],
+                    prs=[B.pr(4, 'T-0001', conflicting=True)], reviews=[B.review('T-0001')])
+        plan = decide(f, B.config())
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        self.assertEqual(B.launched(plan, 'build'), ['T-0001'])
 
     def test_paused_still_lands_ends_and_answers(self):
         items = [B.task('T-0001', state=State.LANDING), B.task('T-0002', rank=1),

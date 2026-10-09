@@ -59,6 +59,10 @@ BUILD_KINDS = ('task', 'fix-bug', 'correct', 'adjudicate', 'build')
 #: the review ledger a kernel review session appends its verdict to (``state/<product>/``)
 REVIEWS_FILE = 'kernel-reviews.jsonl'
 
+#: where an ended review session's review file is kept (``state/<product>/``) before its
+#: worktree is freed: ``<job>.md``
+REVIEW_COPIES_DIR = 'kernel-reviews'
+
 #: the operator's answers ledger (``state/<product>/``), one JSON object per line
 ANSWERS_FILE = 'operator-answers.jsonl'
 
@@ -535,11 +539,54 @@ class RealSessions:
                   else lifecycle.DEAD_PID if not session.ended else lifecycle.NOT_PUSHED)
         pool.update_session(self.product, session.job, ended=now_iso(), end_reason=reason)
         wt = session.worktree
-        if free_worktree and wt and os.path.isdir(wt) and _under(wt, env.state_dir(self.product)):
-            ok, why = trash.discard(self.product.repo_dir, env.state_dir(self.product), wt,
-                                    check_clean=True)
+        state = env.state_dir(self.product)
+        if free_worktree and wt and os.path.isdir(wt) and _under(wt, state):
+            clean = True
+            if session.kind == 'review':
+                clean = not keep_review_files(wt, self.product.conventions.reviews_dir,
+                                              os.path.join(state, REVIEW_COPIES_DIR), session.job)
+            ok, why = trash.discard(self.product.repo_dir, state, wt, check_clean=clean)
             if not ok:
                 raise PortError('worktree kept: %s' % why)
+
+
+def dirty_paths(porcelain):
+    """The paths ``git status --porcelain`` output names (both sides of a rename)."""
+    out = []
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        for path in line[3:].split(' -> '):
+            path = path.strip()
+            if len(path) >= 2 and path[0] == path[-1] == '"':
+                path = path[1:-1]
+            out.append(path)
+    return out
+
+
+def keep_review_files(worktree, reviews_dir, dest_dir, job):
+    """An ended review session's worktree whose only uncommitted or untracked files are under
+    ``reviews_dir``: copy each of them into ``dest_dir`` (``<job>.md``, then ``<job>-2.md`` …) and
+    return True — the worktree may be freed. False (nothing copied) when the tree is clean, is
+    not a git worktree, or holds any other dirty file: it is kept to the clean check."""
+    import shutil
+    from asf import gitops
+    st = gitops.git(['status', '--porcelain', '--untracked-files=all'], worktree, timeout=60)
+    if not st.ok:
+        return False
+    paths = dirty_paths(st.stdout)
+    root = str(reviews_dir or '').strip('/') + '/'
+    if root == '/' or not paths or not all(p.startswith(root) for p in paths):
+        return False
+    os.makedirs(dest_dir, exist_ok=True)
+    n = 0
+    for path in sorted(set(paths)):
+        src = os.path.join(worktree, path)
+        if not os.path.isfile(src):
+            continue  # a deleted review file: nothing to keep
+        n += 1
+        shutil.copyfile(src, os.path.join(dest_dir, '%s%s.md' % (job, '' if n == 1 else '-%d' % n)))
+    return True
 
 
 def _last_line(result):

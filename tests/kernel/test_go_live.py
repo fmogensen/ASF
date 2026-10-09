@@ -142,6 +142,9 @@ class RealBriefs(unittest.TestCase):
 
     def test_kinds_map_onto_the_floor(self):
         bug, task = B.item('B-0001'), B.task('T-0001')
+        from asf.kernel.decide import rebase_finding_for
+        self.assertTrue(KB.correction([rebase_finding_for(4)], None).startswith(
+            'the PR conflicts with its base'))
         self.assertEqual(KB.brief_kind(A.Launch('build', 'B-0001', 'x'), bug, False), 'fix-bug')
         self.assertEqual(KB.brief_kind(A.Launch('build', 'T-0001', 'x'), task, False), 'coder')
         self.assertEqual(KB.brief_kind(A.Launch('build', 'T-0001', 'x'), task, True), 'correct')

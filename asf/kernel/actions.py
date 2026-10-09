@@ -11,10 +11,12 @@ import dataclasses
 @dataclasses.dataclass
 class Launch:
     """Start one session of ``kind`` (``build``, ``review``, ``spec``, ``plan``) for ``item_id`` on
-    ``branch``. The session gets the branch and a brief only; the host mints ids and writes cards."""
+    ``branch``. The session gets the branch and a brief only; the host mints ids and writes cards.
+    ``findings`` are what a fix round answers beyond the review's (a rebase round's ask)."""
     kind: str
     item_id: str
     branch: str
+    findings: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
