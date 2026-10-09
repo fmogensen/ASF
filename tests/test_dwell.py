@@ -64,6 +64,9 @@ class FakeFacts(dwell.Facts):
     def would_start(self):
         return self.kw.get('wave')
 
+    def account_room(self):
+        return self.kw.get('account_room', True)
+
     def holds(self):
         return self.kw.get('holds', []) if 'holds' in self.kw else super().holds()
 
@@ -290,6 +293,24 @@ class ProbeTests(DwellTestCase):
                                                        wave=(screened, 1, [{}]))),
                                   'launchable_idle')
         self.assertEqual(none_free, [])
+
+    def test_a_starting_row_with_no_account_room_is_not_counted_idle(self):
+        # B-84830: the product's own seat ceiling is no promise of an actual worker account —
+        # every local account already at its cap, machine-wide, is the pool's own ordinary wait
+        # (asf.workers.pool), not a row the wave is leaving idle
+        mk = lambda iid: feeder_rows.Row(
+            tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid, feature_id='F-1',
+            action='would launch', brief_kind='review', branch='', reason='')
+        screened = [step_wave.Screened(mk('T-1')), step_wave.Screened(mk('T-2'))]
+        got = self.by_state(self.found(FakeFacts(self.product, wave=(screened, 4, [{}]),
+                                                 account_room=False)),
+                            'launchable_idle')
+        self.assertEqual(got, [])
+        # the pool freeing a seat brings the alarm right back
+        got = self.by_state(self.found(FakeFacts(self.product, wave=(screened, 4, [{}]),
+                                                 account_room=True)),
+                            'launchable_idle')
+        self.assertEqual([f.key for f in got], ['T-1', 'T-2'])
 
     def test_a_pushed_branch_with_no_pr_ages_from_its_push(self):
         lane = {'worker/t-1': {'state': 'PUSHED', 'head': 'abc', 'at': iso(NOW - 11 * 60)},

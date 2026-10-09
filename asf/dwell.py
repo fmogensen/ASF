@@ -359,6 +359,24 @@ class Facts:
         from asf import approvals
         return approvals.open_holds(self.product)
 
+    def account_room(self):
+        """Whether some local worker account has room for one more session, machine-wide
+        (:meth:`asf.workers.pool.Pool.load` against its ``cap``) — read-only, no quota command:
+        a product's own seat ceiling (its fair share of the pool) is no promise of an actual
+        account, since the pool is shared with every other product on the host (F-0076). Every
+        local account already at its cap is an ordinary wait on the pool, not a launchable row
+        sitting idle (:mod:`asf.workers.pool`). A product with no local accounts configured, or
+        a pool read that fails, claims room (unchanged behaviour)."""
+        def read():
+            try:
+                from asf.workers import pool as pool_mod
+                p = pool_mod.Pool.from_config(env.load_config(), self.product)
+            except Exception:  # noqa: BLE001 — a pool that cannot be read never hides an alarm
+                return True
+            local = [a for a in p.accounts if a.role != 'cloud']
+            return not local or any(p.load(a) < a.cap for a in local)
+        return self._once('account_room', read)
+
 
 # ---- the probes: one per state, each a list of Findings ----------------------------------------
 
@@ -507,6 +525,11 @@ def launchable_idle(facts):
     out = []
     for s in screened:
         if not s.row.launches or s.kind == step_wave.NO_SEAT:
+            continue
+        if s.kind == step_wave.STARTS and not facts.account_room():
+            # the product's own seat ceiling is no promise of an actual account — every local
+            # account is already at its cap, machine-wide; that is the pool's ordinary wait
+            # (asf.workers.pool), not a row the wave itself is leaving idle
             continue
         why = s.why or "passes the wave's filter, not started yet"
         out.append(Finding('launchable_idle', s.row.item_id,
