@@ -734,8 +734,8 @@ def relaunch_capped(product, row, wrow, out=print):
 
 
 #: what :func:`screen` says of a row (``Screened.kind``): it starts, or why it does not
-STARTS, WAITS, HELD, CLOSED, PAUSED, HOST, NO_SEAT, CAPPED = (
-    '', 'waits', 'held', 'closed', 'paused', 'host', 'no seat', 'relaunch cap')
+STARTS, WAITS, HELD, CLOSED, PAUSED, HOST, NO_SEAT, CAPPED, TUNE_HELD = (
+    '', 'waits', 'held', 'closed', 'paused', 'host', 'no seat', 'relaunch cap', 'tune seat share')
 
 
 class Screened:
@@ -862,11 +862,43 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
     return result
 
 
+def tune_capped(product, screened, running, items, cfg=None):
+    """``screened`` with every truly-starting row :func:`asf.tune.place` would itself hold back
+    for its kind's seat share turned into a :data:`TUNE_HELD` wait, never :attr:`Screened.starts`
+    — the one hold :func:`screen` cannot see. The live wave (:func:`launch`) runs every starting
+    row through ``tune_mod.wave_hook`` *after* ``screen``, and this preview (:func:`would_start`,
+    read by ``asf status`` and the dwell watchdog, :mod:`asf.dwell`) never did, so a seat-shared
+    kind's row read "would launch" for as long as the tick kept holding it back — a watchdog
+    ``launchable_idle`` BREACH on a seat that was never free for that row (F-0313). Severity is
+    copied from ``items`` onto the preview's bare worker row first: :func:`place` exempts S1,
+    and :func:`preview_row` never sets it, unlike the live wave's own :func:`worker_row`."""
+    from asf import tune as tune_mod
+    starting = [s for s in screened if s.starts]
+    if not starting:
+        return screened
+    for s in starting:
+        if s.wrow.severity is None:
+            s.wrow.severity = (items.get(s.row.item_id) or {}).get('severity')
+    try:
+        kept = set(tune_mod.place(product, [s.wrow for s in starting], running, cfg=cfg,
+                                  out=_quiet))
+    except Exception:  # noqa: BLE001 — a tune fault never changes the preview
+        return screened
+    out = []
+    for s in screened:
+        if s.starts and s.wrow not in kept:
+            out.append(Screened(s.row, f'tune: {s.wrow.kind} seat share', TUNE_HELD, wrow=s.wrow))
+        else:
+            out.append(s)
+    return out
+
+
 def would_start(product, root, items=None):
     """``(screened, seats, running)`` — the wave this tick would run, previewed: the plan the
     wave cuts (the same ceiling, cloud seats, gate and holds) through :func:`screen` with
-    nothing acted on. What ``asf status`` counts as Ready to launch, and what the dwell
-    watchdog (:mod:`asf.dwell`) asks why a free seat stays free."""
+    nothing acted on, and the self-tuning seat share (:func:`tune_capped`) with it. What ``asf
+    status`` counts as Ready to launch, and what the dwell watchdog (:mod:`asf.dwell`) asks why a
+    free seat stays free."""
     from asf.views import index_reader
     if items is None:
         items, _generated = index_reader.load(root)
@@ -887,8 +919,9 @@ def would_start(product, root, items=None):
                                                    host_mod.guards_from_config(env.load_config()))
                        and not s1_bypass_live())
     held = approvals.parked(product)
-    return (screen(product, planned, items, running, held, seats, (host_held, host_why),
-                   bypass_open, act=False), seats, running)
+    screened = screen(product, planned, items, running, held, seats, (host_held, host_why),
+                      bypass_open, act=False)
+    return tune_capped(product, screened, running, items), seats, running
 
 
 def trunk_preflight(ctx, planned, items, out=print):

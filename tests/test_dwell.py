@@ -291,6 +291,20 @@ class ProbeTests(DwellTestCase):
                                   'launchable_idle')
         self.assertEqual(none_free, [])
 
+    def test_a_tune_held_row_is_not_reported_idle(self):
+        """B-84835/F-0313: a row screen() would start but the self-tuning seat share holds back
+        (step_wave.tune_capped, kind TUNE_HELD) is not an idle row — it self-resolves as soon as
+        a running session of its kind ends, the same as NO_SEAT."""
+        mk = lambda iid: feeder_rows.Row(tier=2, kind=feeder_rows.NO_STORIES, item_id=iid,
+                                         feature_id=iid, action='would launch',
+                                         brief_kind='spec', branch='', reason='')
+        screened = [step_wave.Screened(mk('F-0313'), 'tune: spec-amend seat share',
+                                       step_wave.TUNE_HELD),
+                    step_wave.Screened(mk('F-0002'))]
+        got = self.by_state(self.found(FakeFacts(self.product, wave=(screened, 4, [{}]))),
+                            'launchable_idle')
+        self.assertEqual([f.key for f in got], ['F-0002'])
+
     def test_a_pushed_branch_with_no_pr_ages_from_its_push(self):
         lane = {'worker/t-1': {'state': 'PUSHED', 'head': 'abc', 'at': iso(NOW - 11 * 60)},
                 'worker/t-2': {'state': 'PR_OPEN', 'head': 'abc', 'pr': 3,

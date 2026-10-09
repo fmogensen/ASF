@@ -506,7 +506,10 @@ def launchable_idle(facts):
         return []
     out = []
     for s in screened:
-        if not s.row.launches or s.kind == step_wave.NO_SEAT:
+        # NO_SEAT: no free seat in the product's own share. TUNE_HELD: a free seat, but the
+        # self-tuning seat share for this row's kind is full — neither is an idle row, both
+        # self-resolve as soon as a running session of that kind ends (F-0313)
+        if not s.row.launches or s.kind in (step_wave.NO_SEAT, step_wave.TUNE_HELD):
             continue
         why = s.why or "passes the wave's filter, not started yet"
         out.append(Finding('launchable_idle', s.row.item_id,
