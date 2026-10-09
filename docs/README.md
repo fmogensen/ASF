@@ -12,6 +12,7 @@ describes what the code does today and links to the rest.
   - [Upgrading](guide/upgrading.md) — releases, reinstalling at a tag, schema migrations, what is safe mid-run
   - [Troubleshooting](guide/troubleshooting.md) — every `NEEDS OPERATOR` line, and the common stalls
   - [The CI runner pool](guide/ci-runner-pool.md) — `ci.pool`: capability-only routing labels, the doctor's drift rows, `asf ci reconcile`, trials, the CI ceiling
+  - [Security checks](guide/security-checks.md) — `security.alerts`, what `R-0009` files and under which signature, the adoption card and shim, the doctor's `security` row
   - [Connectors](guide/connectors.md) — planned, not yet available
   - [Writing a connector](guide/writing-a-connector.md) — forge, CI, runtime, scheduler, quota and secrets as pluggable implementations
 - `specs/` — the design specs, one per release

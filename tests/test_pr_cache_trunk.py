@@ -10,9 +10,11 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from asf import env
-from asf.evidence import evidence, sources
+from asf import env, trunk_watch
+from asf.evidence import closing, evidence, sources
+from asf.record import frontmatter, ingest
 
 ID = ['-c', 'user.name=cache', '-c', 'user.email=cache@example.com']
 
@@ -105,6 +107,119 @@ class QueueLandedIsNotOpenTests(unittest.TestCase):
         out = evidence.id_evidence(product, [], prs, commits=commits, green=[])
         self.assertEqual((out.get('T-10485') or {}).get('open_prs') or [], [])
         self.assertEqual(out['T-10486']['open_prs'], [1047])
+
+
+class TrunkLandedRowTests(unittest.TestCase):
+    SHA = 'a' * 40
+
+    def test_landed_prs_reads_all_three_subject_forms(self):
+        for subject in ('merge-queue: #1046 (cloud/T-10485 @ 243ce531)',
+                        'feat: a thing (#1046)',
+                        'Merge pull request #1046 from org/b'):
+            self.assertEqual(trunk_watch.landed_prs([{'sha': self.SHA, 'subject': subject}]),
+                             {1046: self.SHA})
+
+    def test_landed_prs_is_empty_off_a_subject_naming_no_pr(self):
+        self.assertEqual(
+            trunk_watch.landed_prs([{'sha': self.SHA, 'subject': 'chore: nothing'}]), {})
+
+    def test_landed_prs_takes_both_row_shapes(self):
+        subject = 'merge-queue: #1046 (cloud/T-10485 @ 243ce531)'
+        self.assertEqual(trunk_watch.landed_prs([{'sha': self.SHA, 'subject': subject}]),
+                         {1046: self.SHA})
+        self.assertEqual(trunk_watch.landed_prs([(self.SHA, subject, ['f.txt'])]),
+                         {1046: self.SHA})
+
+    def test_the_newest_row_wins_when_two_rows_name_one_number(self):
+        newest, oldest = 'n' * 40, 'o' * 40
+        rows = [{'sha': newest, 'subject': 'merge-queue: #1046 (cloud/T-10485 @ 243ce531)'},
+                {'sha': oldest, 'subject': 'feat: a thing (#1046)'}]
+        self.assertEqual(trunk_watch.landed_prs(rows), {1046: newest})
+
+    def test_chosen_pr_prefers_the_merged_candidate_over_a_trunk_landed_one(self):
+        cand_prs = [{'number': 1046, 'state': 'MERGED'}]
+        merged = {1046: 'mergedsha'}
+        landed = {1046: 'trunksha'}
+        self.assertEqual(evidence.chosen_pr(cand_prs, merged, landed), (1046, 'MERGED', 'mergedsha'))
+
+    def test_chosen_pr_reads_a_trunk_landed_candidate_as_merged(self):
+        cand_prs = [{'number': 1046, 'state': 'OPEN'}]
+        self.assertEqual(evidence.chosen_pr(cand_prs, {}, {1046: self.SHA}),
+                         (1046, 'MERGED', self.SHA))
+
+    def test_chosen_pr_falls_back_to_the_newest_not_closed_candidate(self):
+        self.assertEqual(evidence.chosen_pr([{'number': 1046, 'state': 'OPEN'}], {}, {}),
+                         (1046, 'OPEN', None))
+        self.assertEqual(evidence.chosen_pr([{'number': 1046, 'state': 'CLOSED'}], {}, {}),
+                         (None, None, None))
+        self.assertEqual(evidence.chosen_pr([], {}, {}), (None, None, None))
+
+    def test_derived_states_before_and_after(self):
+        self.assertEqual(
+            closing.state_of('task', closing.Ev(merged_sha=self.SHA, green=True,
+                                                pr_state='MERGED')),
+            closing.Closing('Closed', 'landed-green'))
+        self.assertEqual(closing.state_of('task', closing.Ev(pr_state='OPEN')),
+                         closing.Closing('Active', 'in-flight'))
+        self.assertEqual(closing.state_of('task', closing.Ev(open_prs=(1046,))),
+                         closing.Closing('New', 'planned'))
+
+    def test_discover_reads_a_trunk_landed_pr_as_merged_not_open(self):
+        tmp = tempfile.mkdtemp(prefix='asf-pr-landed-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        origin = os.path.join(tmp, 'origin.git')
+        repo = os.path.join(tmp, 'repo')
+        git(tmp, 'init', '-q', '--bare', '-b', 'main', origin)
+        git(tmp, 'clone', '-q', origin, repo)
+        git(repo, 'config', 'core.hooksPath', os.devnull)
+
+        def land(path, content, subject):
+            full = os.path.join(repo, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, 'a') as f:
+                f.write(content + '\n')
+            git(repo, 'add', '-A')
+            git(repo, 'commit', '-q', '-m', subject)
+            git(repo, 'push', '-q', 'origin', 'main')
+            return git(repo, 'rev-parse', 'HEAD')
+
+        land('docs/plans/sample.md', '### Task 1\nthe first task.\n### Task 2\nthe second task.',
+             'seed: plan')
+        merge_sha = land('f.txt', 'x', 'merge-queue: #1046 (cloud/sample-t1 @ 243ce531)')
+
+        name = self.id().rsplit('.', 1)[-1]
+        product = env.Product(name, {'repo_slug': 'org/repo', 'repo_dir': repo, 'main': 'main',
+                                     'ci': 'none'})
+        prs = [{'number': 1046, 'state': 'OPEN', 'headRefName': 'worker/sample-t1'},
+              {'number': 2000, 'state': 'OPEN', 'headRefName': 'worker/sample-t2'}]
+        checked_file = os.path.join(tmp, 'none.txt')
+        with mock.patch.object(evidence, 'pr_list', return_value=prs):
+            ev1 = evidence.discover(product=product, checked_file=checked_file)
+            ev2 = evidence.discover(product=product, checked_file=checked_file)
+
+        landed_row = ev1['features']['sample']['tasks']['T1']
+        self.assertEqual(landed_row['pr_state'], 'MERGED')
+        self.assertEqual(landed_row['merged_sha'], merge_sha)
+        self.assertEqual(landed_row['pr'], 1046)
+
+        # a PR the trunk does not name keeps today's pr, pr_state and merged_sha
+        untouched_row = ev1['features']['sample']['tasks']['T2']
+        self.assertEqual(untouched_row['pr'], 2000)
+        self.assertEqual(untouched_row['pr_state'], 'OPEN')
+        self.assertIsNone(untouched_row['merged_sha'])
+
+        # a second pass over the same trunk reads the same row
+        self.assertEqual(ev2['features']['sample']['tasks']['T1'], landed_row)
+        self.assertEqual(ev2['features']['sample']['tasks']['T2'], untouched_row)
+
+        meta = frontmatter.FrontmatterDict(
+            {'id': 'T-10485', 'type': 'task', 'title': 'T-10485 item',
+            'links': {'prs': [1046]}, 'state': 'New'})
+        meta.machine_keys = {'state'}
+        canonical = {'T-10485': {'meta': meta}}
+        _new_state, closings, _derived, _stage, _task_ev, _evs = ingest.derive(
+            canonical, ev1, product=product)
+        self.assertEqual(closings['T-10485'].lines, (f"PR #1046 merged ({merge_sha[:9]})",))
 
 
 if __name__ == '__main__':

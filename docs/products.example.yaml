@@ -235,6 +235,32 @@ conventions:
   # customer_content:
   #   paths: [apps/site/app/legal/**, apps/site/content/**]
   #   forbidden_markers: ['(?i)\[\s*legal\s*:']
+  # the security block (asf/security): which of a diff's files are sensitive, and how the host's
+  # own secret- and dependency-scanning alerts are read as this factory's Bugs (R-0009, docs/guide
+  # /security-checks.md). All three keys are validated (conventions.validate_mapping) whether or
+  # not this block is set.
+  # security:
+  #   # class name -> globs: the precheck pass reads these to floor a sensitive diff's review
+  #   # level (default {} — nothing is sensitive).
+  #   paths:
+  #     auth: [apps/*/auth/**]
+  #     payments: [apps/*/billing/**]
+  #     secrets: ['**/*.pem', '**/*.key']
+  #     infra: [infra/**, terraform/**]
+  #     deploy: [.github/workflows/**]
+  #     pii: [apps/*/customers/**]
+  #   # hours a secret- or dependency-scanning read may age before an unread feed is itself a
+  #   # violation rather than a pass (R-0009; default 24). The value read, never the alerts.
+  #   alerts:
+  #     max_age_h: 24
+  #   # validated, but nothing reads it yet (the nightly exposed-port probe was cut from this
+  #   # Feature's reshape; docs/guide/security-checks.md says so).
+  #   ports:
+  #     boxes: [lane-1, lane-2]
+  #     workflow: probe-ports.yml
+  #     artifact: ports.json
+  #     max_age_h: 24
+  #     ports: [22, 443]
   # the PR lane: which landing class needs an approved ASF review before the gate (none |
   # required; default docs: none, code: required), and how long an open lane state may sit
   # unchanged and unheld before it is stale (<n>s|m|h|d, default 2d). One branch a tick takes a
@@ -364,7 +390,7 @@ conventions:
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:
-  provider: gh-actions   # gh-actions | other | none (no PR host: no repo_slug, no gh)
+  provider: gh-actions   # gh-actions | other | none (no PR host: no repo_slug, no gh) | vm
   # the gate: the command a branch must pass before harvest lands it (none: no test gate).
   test_command: make test
   # read as conventions.ci_workflow — the workflow whose runs on the trunk are the green
@@ -379,6 +405,13 @@ ci:
   # workflows: [tests.yml, lint]
   # read as conventions.ci_dev_job — the job in that workflow whose success marks the dev sha.
   dev_job: test
+  # F-0043: the two waste numbers the daily scorecard prints as value against target, and the
+  # volume below which it prints no verdict at all. Shown at their defaults.
+  targets:
+    cancelled_pct: 15    # cancelled runner minutes, as a share of all runner minutes
+    red_rate_pct: 15     # CI runs ending red, as a share of all runs
+    min_minutes: 60      # no verdict on cancelled_pct below this many runner-minutes in 7 days
+    min_runs: 20         # no verdict on red_rate_pct below this many runs in 7 days
   budgets:
     minutes_per_day: 500
   runner_org: acme
@@ -396,6 +429,18 @@ ci:
     - {runner: ci-1,  box: box-1, provider: alpha, size: 8c-16g, role: heavy, slots: 1}
     - {runner: ci-1b, box: box-1, provider: alpha, size: 8c-16g, role: light}
     - {runner: ci-2,  box: box-2, provider: beta,  size: 8c-24g, role: heavy}
+  # ci.provider: vm (asf.ci_vm) — external CI on any ssh-reachable machine, instead of the pool
+  # above: a named ssh target per host (`slots`, default 1, is how many jobs it runs at once;
+  # `root`, default .asf-ci under the ssh user's home, is the only place on the host this writes)
+  # and a named command per job (`required`, `timeout_min` default 45, and `labels` it needs a
+  # host's own labels to be a superset of).
+  # provider: vm
+  # hosts:
+  #   - {name: ci-1, ssh: ci-1.example, labels: [linux, heavy], slots: 2, root: /srv/asf-ci}
+  #   - {name: ci-2, ssh: ci-2.example, labels: [linux, light]}
+  # jobs:
+  #   lint: {command: 'make lint', required: true, timeout_min: 10, labels: [light]}
+  #   gate: {command: 'make test', required: true, timeout_min: 45, labels: [heavy]}
 
 # capacity: this product's share of the factory. Each is a ceiling, capped in turn by
 # config.yaml's capacity.total and by what worker_pool.accounts can host.
@@ -587,8 +632,9 @@ clocks:
 #   min_upgrades: 3                # auto-upgrades in the window, none failed, torn or rolled back
 #   hand_types: [fix, hotfix, revert]
 #   readme_sections: [Install, Quick start, Configuration, Upgrade]
-#   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product}
-#   requires: {install: [], upgrade: [], generic: [], docs: []}   # Features each criterion also needs landed
+#   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product,
+#              rehearsal: release rehearsal}
+#   requires: {install: [], upgrade: [], generic: [], docs: [], rehearsal: []}   # Features each criterion also needs landed
 #   blocking: []                   # Features that must be landed before a release
 #   floor:                         # criterion 9: no leftover older than its deadline; `off` disables a kind
 #     stale_pr_days: 3             # an open PR the lane marks STALE

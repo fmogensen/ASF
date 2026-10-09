@@ -14,6 +14,7 @@ the next tick does not raise it again.
 """
 import os
 
+from asf import pause as pause_mod
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -114,9 +115,10 @@ def dead_streak(path, job):
 
 
 def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None, reaped_empty=False):
-    """``corrected`` | ``operator`` | ``flagged`` (already raised) | ``closed`` | ``released``
-    for one dead session. ``items`` is the record's index: a dead run of a removed or done item is
-    only ended (health did that) — no cold retry, no hold, nothing sent back to a session.
+    """``corrected`` | ``operator`` | ``flagged`` (already raised) | ``closed`` | ``paused`` |
+    ``released`` for one dead session. ``items`` is the record's index: a dead run of a removed or
+    done item is only ended (health did that) — no cold retry, no hold, nothing sent back to a
+    session.
     ``reaped_empty``: health reaped the run's worktree with nothing in it (no commit, no branch)
     — a first death has nothing to retry or correct, and the item's own feeder row relaunches it
     (spec-f-1129: a hold there queued a correct session on a branch that never existed); a
@@ -127,6 +129,10 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None, reaped
         return 'flagged'
     if lifecycle.closed_state(items, session.get('item')):
         return 'closed'
+    if pause_mod.held(product):              # F-0137: a pause starts nothing, retries included
+        out(f"DEAD  {job:<24} launches paused: no cold retry — "
+            f"{session.get('item') or '?'} goes back to its own row")
+        return 'paused'
     if reaped_empty and not str(job).endswith('-correction') \
             and not died_before(pool_mod.sessions_path(product), job):
         out(f"DEAD  {job:<24} reaped empty: nothing to retry or correct — "

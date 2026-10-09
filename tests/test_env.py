@@ -288,6 +288,62 @@ class TestProductSchema(unittest.TestCase):
             os.path.dirname(__file__), '..', 'docs', 'products.example.yaml')).read()), [])
 
 
+class CiTargetsFieldTests(unittest.TestCase):
+    """T-0216 T1: ``ci.provider`` and ``ci.targets`` fold into the conventions (F-0043 §2.2)."""
+
+    def test_provider_and_targets_fold_in_and_the_unnamed_keys_keep_their_defaults(self):
+        p = env.Product('sample', {'ci': {'provider': 'gh-actions',
+                                           'targets': {'cancelled_pct': 8, 'min_runs': 5}}})
+        self.assertEqual(p.conventions.ci_provider, 'gh-actions')
+        self.assertEqual(p.conventions.ci_cancelled_target_pct, 8)
+        self.assertEqual(p.conventions.ci_min_runs, 5)
+        self.assertEqual((p.conventions.ci_red_target_pct, p.conventions.ci_min_minutes), (15, 60))
+
+    def test_a_conventions_key_of_the_same_name_still_wins(self):
+        p = env.Product('sample', {'ci': {'provider': 'gh-actions',
+                                           'targets': {'cancelled_pct': 8}},
+                                   'conventions': {'ci_provider': 'other',
+                                                   'ci_cancelled_target_pct': 1}})
+        self.assertEqual(p.conventions.ci_provider, 'other')
+        self.assertEqual(p.conventions.ci_cancelled_target_pct, 1)
+
+    def test_validate_product_text_accepts_targets_as_a_map(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            ci:
+              targets:
+                cancelled_pct: 8
+                min_runs: 5
+            """))
+        self.assertEqual(problems, [])
+
+    def test_validate_product_text_rejects_a_misshapen_targets(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            ci:
+              targets: 3
+            """))
+        self.assertIn((3, 'ci.targets', 'must be a map, not 3'), problems)
+
+    def test_validate_product_text_still_rejects_an_unknown_ci_key(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            ci:
+              made_up_key: 1
+            """))
+        self.assertIn((3, 'ci.made_up_key', env.UNKNOWN_KEY), problems)
+
+    def test_provider_none_is_the_literal_string_once_loaded(self):
+        # P6: `ci.provider: none` (a product without CI) loads as the four-character string,
+        # not a parsed falsy value — the guard a provider-label reader must apply is its own.
+        data = env.loads(_dedent("""
+            repo_slug: a/b
+            ci:
+              provider: none
+            """))
+        self.assertEqual(data['ci']['provider'], 'none')
+
+
 class ProductValidation(unittest.TestCase):
     def test_capacity_is_a_declared_field(self):
         problems = env.validate_product_text(_dedent("""
@@ -747,6 +803,14 @@ PINNED_NESTED_FIELDS = {
                           'min_upgrades', 'hand_types', 'readme_sections', 'ci_steps',
                           'requires', 'blocking'}),
 }
+#: Nested-section keys the live schema carries that PINNED_SHA does not: each is a checked
+#: field its own loader never declared, so it is UNKNOWN_KEY there too — a warning on that
+#: pinned product's `ci` row, never a refusal (verified against the pinned reader itself,
+#: T-0216). A product pinned to PINNED_SHA still loads a file carrying one; it just does not
+#: get the new behaviour until it upgrades. Grows only with a key proven to warn, not refuse.
+PINNED_WARNS_NOT_REFUSES = {
+    'ci': frozenset({'targets'}),  # F-0043 §2.2: ci.targets, folded by Product.conventions
+}
 PINNED_VALIDATED_CONVENTIONS = frozenset({
     'doc_paths', 'shared_paths', 'shared_writes', 'pre_push_check', 'worktree_setup',
     'auth_env', 'full_suite_commands', 'customer_content', 'security', 'feeder', 'lane',
@@ -808,12 +872,37 @@ class PinnedReader(unittest.TestCase):
 
     def test_no_product_key_the_pinned_reader_would_refuse(self):
         # A new top-level or checked-section key strands a product pinned to PINNED_SHA (its
-        # loader refuses it). Put a new switch under conventions.flags instead; drop the sha from
-        # tools/pinned-readers.txt only once no product runs it.
+        # loader refuses it) unless it is in PINNED_WARNS_NOT_REFUSES — proven there to be a
+        # warning, not a refusal. Put a new switch under conventions.flags instead; drop the sha
+        # from tools/pinned-readers.txt only once no product runs it.
         from tests import pinned
         if PINNED_SHA not in pinned.pinned_shas():
             self.skipTest(f'{PINNED_SHA} is no longer a pinned reader')
         self.assertLessEqual(set(env.PRODUCT_FIELDS), PINNED_PRODUCT_FIELDS)
         for section, fields in env.NESTED_FIELDS.items():
-            self.assertLessEqual(set(fields), PINNED_NESTED_FIELDS.get(section, frozenset()),
-                                 section)
+            allowed = (PINNED_NESTED_FIELDS.get(section, frozenset())
+                      | PINNED_WARNS_NOT_REFUSES.get(section, frozenset()))
+            self.assertLessEqual(set(fields), allowed, section)
+
+    def test_ci_targets_only_warns_at_the_pinned_reader(self):
+        # proves the PINNED_WARNS_NOT_REFUSES entry above: a file carrying ci.targets still
+        # loads clean under PINNED_SHA — an unknown-key warning, never a refusal (T-0216).
+        from tests import pinned
+        if PINNED_SHA not in pinned.pinned_shas():
+            self.skipTest(f'{PINNED_SHA} is no longer a pinned reader')
+        code = ("import json, sys; from asf import env\n"
+                "print(json.dumps(env.validate_product_text(sys.stdin.read())))")
+        product = _dedent("""
+            product: sample
+            repo_slug: acme/sample
+            repo_dir: /tmp/sample
+            main: main
+            ci:
+              provider: gh-actions
+              targets:
+                cancelled_pct: 8
+            """)
+        proc = pinned.run_pinned(PINNED_SHA, code, product)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        problems = json.loads(proc.stdout)
+        self.assertEqual(problems, [[7, 'ci.targets', env.UNKNOWN_KEY]])

@@ -2,6 +2,226 @@
 
 One entry per released version, newest first.
 
+## v0.1.270 — 2026-10-09
+
+### Features landed
+
+- The reader reads every run behind the checks — `_run_ids`, and one probe record per run id (#1254)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.270"`
+
+## v0.1.269 — 2026-10-09
+
+### Features landed
+
+- The peel asked for by name, the Unknown that says why, and a test real git answers (#1241)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.269"`
+
+## v0.1.268 — 2026-10-09
+
+### Features landed
+
+- Drift is visible — the sample product renders, doctor shows it, file-bugs files it (#1247)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.268"`
+
+## v0.1.267 — 2026-10-08
+
+### Features landed
+
+- Watchdog: a required check cancelled or timed out past 10 min — #1222@ff96aa716 (#1250)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.267"`
+
+## v0.1.266 — 2026-10-08
+
+### Bugs fixed
+
+- A footprint correction never waits on a priority-later Task (#1244)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.266"`
+
+## v0.1.265 — 2026-10-08
+
+### Bugs fixed
+
+- A priority-later Task holds no footprint and orders no live Task (#1239)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.265"`
+
+## v0.1.264 — 2026-10-08
+
+### Features landed
+
+- The criterion — the rehearsal in both gates, with its own step lookup (#1230)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.264"`
+
+## v0.1.263 — 2026-10-08
+
+### Features landed
+
+- The Task's own state reads the trunk, so a landed PR is Closed and not Active (#1221)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.263"`
+
+## v0.1.262 — 2026-10-08
+
+### Features landed
+
+- One `hooks.which_asf()`, so `install`, the `--dry-run` plan and the pre-launch refresh name the same asf (#1206)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.262"`
+
+## v0.1.261 — 2026-10-08
+
+### Features landed
+
+- The session shim's trunk check runs the pin or refuses the push (#1196)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.261"`
+
+## v0.1.260 — 2026-10-08
+
+### Bugs fixed
+
+- Staged-guard lets an intake note move to done/ after groom rewrote it (#1194)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.260"`
+
+## v0.1.259 — 2026-10-08
+
+### Features landed
+
+- `dispatch.reassert()` puts the dispatcher back, and `cmd_tick` calls it once per pass before the lock (#1190)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.259"`
+
+## v0.1.258 — 2026-10-08
+
+### Features landed
+
+- The hook body checks the asf it is about to exec, and `ensure_git_hooks` bakes the guard exactly when the product is pinned (#1189)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.258"`
+
+## v0.1.257 — 2026-10-08
+
+### Features landed
+
+- The readers the brief states and the check enforces, in one function each (#1183)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.257"`
+
+## v0.1.256 — 2026-10-08
+
+### Features landed
+
+- The doctor's `security` row, the guide, and the documented block (#1170)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.256"`
+
+## v0.1.255 — 2026-10-08
+
+### Features landed
+
+- The trunk's landed PR numbers become one fact both readers can import (#1171)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.255"`
+
+## v0.1.254 — 2026-10-08
+
+### Features landed
+
+- The two numbers, computed once, and the two rows that print them (#1155)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.254"`
+
+## v0.1.253 — 2026-10-08
+
+### Features landed
+
+- The two targets, the two floors and the provider are product configuration (#1127)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.253"`
+
+## v0.1.252 — 2026-10-08
+
+### Features landed
+
+- Watchdog: an approval hold no grant can release past 0 min — F-0040/touch_amendable_set (#1109)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.252"`
+
+## v0.1.251 — 2026-10-08
+
+### Features landed
+
+- `ci.provider: vm` is a configuration a product can hold — two keys, two blocks, and the file that refuses every way of saying it wrong (#1092)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.251"`
+
+## v0.1.250 — 2026-10-08
+
+### Features landed
+
+- The pause record, the one predicate, and the two verbs that write it (#1080)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.250"`
+
+## v0.1.249 — 2026-10-08
+
+### Features landed
+
+- Every mint in a record checkout with an origin is claimed on origin, over a floor read from origin's trunk (#1021)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.249"`
+
 ## v0.1.248 — 2026-10-08
 
 ### Features landed

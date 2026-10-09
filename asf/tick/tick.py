@@ -450,6 +450,10 @@ def cmd_tick(args, root=None):
     off = upgrade.checkout_off_main()
     if off:
         print(f'tick: warning — {off}', file=sys.stderr)
+    from asf import dispatch
+    changed, detail = dispatch.reassert()
+    if detail:
+        print(f'tick: dispatcher — {detail}', file=sys.stderr if not changed else sys.stdout)
     if upgrade.waiting(product.name):
         return 0  # a pending upgrade needs a gap between ticks: this one does not start
     # a move's drain holds only new merge-queue cuts (asf.merge_queue), never a launch (#32);

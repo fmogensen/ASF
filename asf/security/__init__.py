@@ -1,10 +1,10 @@
-"""asf.security — the security pass in three parts, all off ``conventions.security``: which of
-the product's own named classes a diff's files fall under (:mod:`asf.security.paths`), the host's
-own secret- and dependency-scanning feeds read as ASF's own Bugs, and the nightly probe of every
-box's exposed ports. Unset, nothing is sensitive and no check violates.
+"""asf.security — the security pass in two parts, all off ``conventions.security``: which of the
+product's own named classes a diff's files fall under (:mod:`asf.security.paths`, read by the
+precheck pass), and the host's own secret- and dependency-scanning feeds read as ASF's own Bugs
+(:mod:`asf.security.alerts`). Unset, nothing is sensitive and no feed is read.
 
 No line this package prints, holds or files ever carries a machine address or an alert value
-(D11, P20) — only what a check found: counts, classes, box labels.
+(D11, P20) — only what a check found: counts, classes, an age.
 """
 import os
 
@@ -26,3 +26,8 @@ def gh_env(product):
         if value:
             out[var] = value
     return out
+
+
+from asf.security.doctor import doctor_findings  # noqa: E402 — after gh_env, so the import
+# back into this half-initialized package (asf.security.alerts' own ``from asf.security import
+# gh_env``) finds it already defined; no cycle, no optional dependency.

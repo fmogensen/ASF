@@ -32,8 +32,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from asf import ci_jobs, ci_pool, env, gh_limit, github, gitpush, mutation_guard, refguard
 from asf import tokens
-from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
-                             Conventions)
+from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_CI_CANCELLED_TARGET_PCT, DEFAULT_CI_MIN_MINUTES,
+                             DEFAULT_CI_MIN_RUNS, DEFAULT_CI_RED_TARGET_PCT, DEFAULT_RELEASE_INSTALL,
+                             DEFAULT_RELEASE_MIN_INTERVAL, Conventions)
 from asf.record.core import ID_TOKEN_RE
 from asf.record import frontmatter
 from asf.record import match
@@ -55,6 +56,10 @@ CI_FIRST_RUN_DAYS = 7
 #: PD1): the tick has always asked for one day of sessions, and `--days N` overrides it exactly
 #: as it overrides the CI window, but neither is derived from the other.
 SESSION_DAYS = 1
+#: The window `ci_waste_numbers` and the two scorecard rows it feeds both read over.
+CI_TARGET_WINDOW_DAYS = 7
+#: The most lane/job lines one number's `split` carries.
+CI_SPLIT_CAP = 4
 KINDS = ('spec', 'review', 'fix', 'code', 'plan', 'preflight', 'probe', 'rebase', 'relaunch', 'launch',
          'tick', 'other')
 KIND_PREFIXES = (
@@ -600,6 +605,26 @@ def _pct(a, b):
     return 100 * a // max(1, b)
 
 
+def _conv_int(conv, key, default):
+    """(value, complaint) — the conventions' integer for `key`, or `default` and a sentence
+    naming what the product wrote instead. A `bool` is not an integer here: `isinstance(True, int)`
+    is True, and a product writing `targets: {cancelled_pct: true}` means it as a flag, never the
+    target 1."""
+    v = getattr(conv, key)
+    if isinstance(v, bool) or not isinstance(v, int):
+        return default, f"{v!r} is not a number"
+    return v, None
+
+
+def _ci_provider(conv):
+    """The product's CI provider, or `None` when it names none — `conv.ci_provider` is falsy, or
+    the literal string `'none'` that a product without CI writes there (`env.loads` does not
+    normalise it, since `_BOOL` maps only `true`/`false`/`null`/`~`)."""
+    conv = conv or DEFAULTS
+    p = conv.ci_provider
+    return None if not p or p == 'none' else p
+
+
 def _minutes(a, b):
     return round((b - a).total_seconds() / 60)
 
@@ -646,13 +671,135 @@ def intake_latency_rows(events, conv=None):
     return [('intake → decided', a, na), ('decided → first session', b, nb)]
 
 
-def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None, relaunches=None):
+def _ci_by_day(ci, extract):
+    """[(day, num, den), …] oldest first, days with a run only. `extract(r)` is the (num, den)
+    contribution of one run; a run whose `ts` will not parse is left out here but never out of
+    the totals its caller sums separately."""
+    buckets = {}
+    for r in ci:
+        ts = parse_ts(r.get('ts'))
+        if ts is None:
+            continue
+        day = ts.date().isoformat()
+        n, d = extract(r)
+        bn, bd = buckets.get(day, (0, 0))
+        buckets[day] = (bn + n, bd + d)
+    return [(day, *buckets[day]) for day in sorted(buckets)]
+
+
+def _ci_split(ci, den, extract):
+    """[(label, amount, pct of `den`), …] largest first, at most `CI_SPLIT_CAP`. `extract(r)` adds
+    its run's contribution into a `label: amount` counter; amounts of zero are dropped."""
+    totals = collections.Counter()
+    for r in ci:
+        extract(r, totals)
+    ordered = sorted((k, v) for k, v in totals.items() if v)
+    ordered.sort(key=lambda kv: (-kv[1], kv[0]))
+    return [(k, v, _pct(v, den)) for k, v in ordered[:CI_SPLIT_CAP]]
+
+
+def ci_waste_numbers(ci, conv=None):
+    """The two tracked CI numbers over one window of `ci` events. Pure: no clock, no io.
+
+    Returns a two-element list in scorecard order, `cancelled` then `red`, each a dict carrying
+    `key`, `label`, `provider`, `num`, `den`, `unit`, `pct`, `target`, `floor`, `verdict`,
+    `config`, `by_day` and `split`.
+
+    `pct` is `None` and `verdict` is `'no verdict'` when `den` is under `floor` (an empty window
+    included); otherwise `verdict` is `'over'` when `pct >= target`, else `'ok'`. `config` is a
+    sentence when the product's target (or floor) is not a number and its default was used
+    instead, else `None`. `split` is the lane a cancelled minute was spent in (`_kind_of_branch`)
+    for `cancelled`, and the job a red run failed in for `red` — largest first, at most
+    `CI_SPLIT_CAP` entries. Read with `.get` and a default throughout: the fourth source
+    (`file_bugs.ci_target_signatures`) hands this function unvalidated lines."""
+    conv = conv or DEFAULTS
+    provider = _ci_provider(conv)
+    minutes_total = sum(r.get('minutes') or 0 for r in ci)
+    cancelled_total = sum(r.get('cancelled_minutes') or 0 for r in ci)
+    runs_total = len(ci)
+    red_total = sum(1 for r in ci if r.get('conclusion') == 'failure')
+
+    def _cancelled_split(r, totals):
+        totals[_kind_of_branch(r, conv)] += r.get('cancelled_minutes') or 0
+
+    def _red_split(r, totals):
+        for j in r.get('jobs') or ():
+            if isinstance(j, dict) and j.get('conclusion') == 'failure':
+                totals[j.get('name')] += 1
+
+    table = (
+        ('cancelled', 'ci cancelled minutes', 'runner-minutes', cancelled_total, minutes_total,
+         'ci_cancelled_target_pct', DEFAULT_CI_CANCELLED_TARGET_PCT, 'ci_min_minutes', DEFAULT_CI_MIN_MINUTES,
+         lambda r: (r.get('cancelled_minutes') or 0, r.get('minutes') or 0), _cancelled_split),
+        ('red', 'ci red rate', 'runs', red_total, runs_total,
+         'ci_red_target_pct', DEFAULT_CI_RED_TARGET_PCT, 'ci_min_runs', DEFAULT_CI_MIN_RUNS,
+         lambda r: (1 if r.get('conclusion') == 'failure' else 0, 1), _red_split),
+    )
+    out = []
+    for key, label, unit, num, den, target_key, target_default, floor_key, floor_default, by_day_fn, split_fn in table:
+        target, t_complaint = _conv_int(conv, target_key, target_default)
+        floor, f_complaint = _conv_int(conv, floor_key, floor_default)
+        if den < floor:
+            pct, verdict = None, 'no verdict'
+        else:
+            pct = _pct(num, den)
+            verdict = 'over' if pct >= target else 'ok'
+        out.append({'key': key, 'label': label, 'provider': provider, 'num': num, 'den': den, 'unit': unit,
+                    'pct': pct, 'target': target, 'floor': floor, 'verdict': verdict,
+                    'config': t_complaint or f_complaint, 'by_day': _ci_by_day(ci, by_day_fn),
+                    'split': _ci_split(ci, den, split_fn)})
+    return out
+
+
+def _ci_target_row(day_n, week_n, provider):
+    """One `(metric, value, note)` row from a pair of `ci_waste_numbers` entries — `week_n`'s
+    (the seven-day window) for the value, `day_n`'s (today) for the note."""
+    label = week_n['label'] + (f" ({provider})" if provider else '')
+    if week_n['den'] == 0:
+        value = 'no runs in 7 days'
+    elif week_n['pct'] is None:
+        floor_unit = 'run' if week_n['unit'] == 'runs' else 'minute'
+        value = f"{week_n['den']} {week_n['unit']} (7d) — under the {week_n['floor']}-{floor_unit} floor"
+    else:
+        value = f"{week_n['pct']} % of {week_n['den']} {week_n['unit']} (7d)"
+    target_txt = f"target {week_n['target']} %"
+    if week_n['config']:
+        target_txt += f" (config: {week_n['config']})"
+    today_txt = '—' if day_n['pct'] is None else str(day_n['pct'])
+    parts = [f"{target_txt} — {week_n['verdict']}", f"today {today_txt} %"]
+    if week_n['split']:
+        if week_n['key'] == 'red':
+            parts.append(', '.join(f"{k} {v}/{week_n['den']}" for k, v, _p in week_n['split']))
+        else:
+            parts.append(', '.join(f"{k} {v}" for k, v, _p in week_n['split']))
+    return label, value, '; '.join(parts)
+
+
+def ci_target_rows(ci, conv=None, ci7=None):
+    """The two scorecard rows for `ci_waste_numbers`, `cancelled` then `red` — skipped entirely
+    when the window holds no runs and the product names no provider (`sample/`'s own case)."""
+    conv = conv or DEFAULTS
+    provider = _ci_provider(conv)
+    week_ci = ci7 or ci
+    day_nums = ci_waste_numbers(ci, conv)
+    week_nums = ci_waste_numbers(week_ci, conv)
+    rows = []
+    for day_n, week_n in zip(day_nums, week_nums):
+        if week_n['den'] == 0 and provider is None:
+            continue
+        rows.append(_ci_target_row(day_n, week_n, provider))
+    return rows
+
+
+def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None, relaunches=None, ci7=None):
     """The rows of the waste table, computed from the streams. `landing`, when given, is
     `(non_landing_share, usd_per_landed_item, landed_items)` from `improve.measure.table` and
     leads the table; `None` still leads, reading `—` with a note explaining why (the session
     registry is machine-local, so a rollup with no product cannot resolve it). `relaunches`,
     when given, is `improve.measure.table`'s `relaunches` block and renders the row right after
-    `landing`; `None` reads the same dash and the same note."""
+    `landing`; `None` reads the same dash and the same note. `ci7`, when given, is the seven-day
+    window `ci_target_rows` values the two CI-waste rows against; `None` means the caller has
+    only the day, and `ci` stands in for both."""
     conv = conv or DEFAULTS
     rows = []
     if landing is None:
@@ -748,6 +895,7 @@ def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None, rela
                  f"{len(runner_min)} runners seen, {sum(runner_min.values())} runner-minutes"))
     if events:
         rows.extend(intake_latency_rows(events, conv))
+    rows.extend(ci_target_rows(ci, conv, ci7))
     return rows
 
 
@@ -876,6 +1024,7 @@ def render_daily(root, day, items, conv=None, product=None):
     sessions = read_stream(root, 'sessions', [day])
     ticks = read_stream(root, 'ticks', [day])
     week = days_back(day, 7)
+    ci7 = read_stream(root, 'ci', week)
     landing = None
     relaunches = None
     if product is not None:
@@ -889,13 +1038,13 @@ def render_daily(root, day, items, conv=None, product=None):
     out = [f"# Factory scorecard {day}", '',
            f"generated: {day} — from metrics/ci ({len(ci)}), metrics/sessions ({len(sessions)}), metrics/ticks ({len(ticks)})", '',
            '## Waste', '', '| Metric | Value | Note |', '|---|---|---|']
-    for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week), landing, relaunches):
+    for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week), landing, relaunches, ci7=ci7):
         out.append(f"| {esc(m)} | {esc(v)} | {esc(n)} |".replace('|  |', '| |'))
     out += ['', f"## Cost per Feature (7 days)", '', f"{week[0]} … {week[-1]}; a Feature's row sums its Tasks, Stories and Bugs; "
             "a CI run's minutes are split over the items it names; "
             "tokens are four separate numbers and are never added together.", '']
     week_sessions = read_stream(root, 'sessions', week)
-    out += cost_table(items, read_stream(root, 'ci', week), week_sessions)
+    out += cost_table(items, ci7, week_sessions)
     rows = delivered_vs_single(items, week_sessions, day)
     if rows['delivered']['landed'] or rows['single']['landed']:
         out += ['', '## Delivered vs single (7 days)', ''] + delivered_table(rows)

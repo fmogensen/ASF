@@ -57,6 +57,12 @@ that it has not reverted since, and leaves no regression unreverted.
 unclassified red in the last ``reds_window`` PR runs. ``n/a`` (met) with no forge or no CI;
 *pending* (not met) while no PR run is recorded.
 
+**Release rehearsal green** (criterion 13, appended after 12 by :func:`compute`, read off its own
+step lookup rather than criteria 4 and 6's shared one — the step lives in ``release.yml``, not
+``tests.yml``): the newest finished trunk run that ran ``ci_steps.rehearsal`` has it green, and
+``requires.rehearsal`` landed. ``n/a`` (met) when the product configures neither
+``release.requires.rehearsal`` nor ``release.ci_steps.rehearsal``.
+
 Every threshold is ``release: {…}`` in the product file (:data:`DEFAULTS`). The criteria read CI
 from what the forge records; nothing is installed or run on the host.
 """
@@ -78,7 +84,7 @@ DEFAULTS = {
     'hand_types': ['fix', 'hotfix', 'revert'],
     'readme_sections': ['Install', 'Quick start', 'Configuration', 'Upgrade'],
     'ci_steps': {'install_from_zero': 'asf install, zero to green', 'generic': 'check generic',
-                 'second_product': 'sample product'},
+                 'second_product': 'sample product', 'rehearsal': 'release rehearsal'},
     'requires': {},
     'blocking': [],
 }
@@ -144,6 +150,7 @@ def settings(product):
         'generic': bool(req.get('generic') or steps.get('generic') or steps.get('second_product')),
         'docs': bool(req.get('docs') or isinstance(block.get('readme_sections'), list)),
         'blocking': bool(out['blocking']),
+        'rehearsal': bool(req.get('rehearsal') or steps.get('rehearsal')),
     }
     out['ci_off'] = _ci_off(product)
     out['notes'] = _changelog_on(product)
@@ -791,7 +798,12 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
 
     slug = product.repo_slug
     runs = ci_runs(slug, product.main, int(cfg['ci_runs']), gh_json) if slug else None
-    steps = step_run_steps(slug, runs, list(cfg['ci_steps'].values()), gh_json) if runs else None
+    # the rehearsal step lives in release.yml, not tests.yml like the three below: a shared
+    # lookup would read release.yml's run first and make criteria 4 and 6 see "did not run" on
+    # every trunk push, so it gets its own step_run_steps call into its own fact key
+    tests_steps = [cfg['ci_steps'][k] for k in ('install_from_zero', 'generic', 'second_product')]
+    steps = step_run_steps(slug, runs, tests_steps, gh_json) if runs else None
+    rehearsal_steps = step_run_steps(slug, runs, [cfg['ci_steps']['rehearsal']], gh_json) if runs else None
 
     tag = (git(repo, 'describe', '--tags', '--abbrev=0', '--exclude', '*-*', ref) or '').strip() or None
     readme = git(repo, 'show', f'{ref}:README.md') or ''
@@ -810,7 +822,7 @@ def gather(root, product, cfg, *, now=None, git=_git, gh_json=None, log_dir=None
         'floor': floor_facts(root, product, cfg, now, git=git, gh_json=gh_json),
         'seats': _ticks(root),
         'pr_ci': getattr(sf, 'ci', None) or [],
-        'upgrade': up, 'ci_runs': runs, 'ci_steps': steps,
+        'upgrade': up, 'ci_runs': runs, 'ci_steps': steps, 'rehearsal_steps': rehearsal_steps,
         'docs': {'headings': readme_headings(readme), 'tag': tag,
                  'changelog_section': section, 'changelog_notes': notes, 'changelog_kept': kept},
     }
@@ -863,9 +875,28 @@ def pr_ci_criterion(product, ci, as_of, claims=None):
                      + ', 0 unclassified reds)', met, ev)
 
 
+def rehearsal_criterion(f, cfg):
+    """Criterion 13, *Release rehearsal green*, in the shape of criteria 4 and 6 but read off its
+    own step lookup (:func:`gather`'s ``rehearsal_steps``): the step lives in ``release.yml``, not
+    ``tests.yml``, so it cannot share criteria 4 and 6's step lookup without them reading "did not
+    run" on every trunk push."""
+    name = 'Release rehearsal green'
+    if not applies(cfg, 'rehearsal'):
+        return _na('rehearsal', name, 'not configured (release.requires.rehearsal, '
+                                      'release.ci_steps.rehearsal)')
+    steps = f['rehearsal_steps']
+    pat = cfg['ci_steps']['rehearsal']
+    found, green = step_state(steps, pat)
+    req_ok, req_ev = _requires(f['items'], cfg, 'rehearsal')
+    ev = ('the forge did not answer' if steps is None else
+          f"CI step '{pat}' " + ('green' if green else 'red' if found else 'absent')
+          + ' on the latest main test run')
+    return Criterion('rehearsal', name, bool(green and req_ok), ev + req_ev)
+
+
 def compute(root, product, gate=None, **kw):
     """The gate's verdict: ``gate`` (``--gate``), else ``release.gate``, else ``1.0`` — every
-    criterion above; ``preview`` is :mod:`asf.release_preview`'s five."""
+    criterion above; ``preview`` is :mod:`asf.release_preview`'s six."""
     from asf import release_preview
     if release_preview.gate_of(product, gate) == 'preview':
         return release_preview.compute(product, **{k: v for k, v in kw.items()
@@ -875,6 +906,7 @@ def compute(root, product, gate=None, **kw):
     crit = evaluate(f, cfg)
     crit.append(tune_criterion(product, cfg['window_days'], f['as_of']))
     crit.append(pr_ci_criterion(product, f.get('pr_ci'), f['as_of']))
+    crit.append(rehearsal_criterion(f, cfg))
     return {'product': product.name, 'as_of': f['as_of'], 'gate': '1.0', 'window_days': cfg['window_days'],
             'ready': all(c.met for c in crit), 'criteria': [asdict(c) for c in crit]}
 

@@ -473,13 +473,13 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(met, {'stability': True, 'repair': True, 'ci': True, 'install': False,
                                    'upgrade': False, 'generic': False, 'docs': False, 'blocking': False,
                                    'floor': True, 'seats': False, 'tune': True,
-                                   'pr_ci': False})
+                                   'pr_ci': False, 'rehearsal': True})
             ev = {c['key']: c['evidence'] for c in out['criteria']}
             self.assertIn('1 auto-upgrade(s)', ev['upgrade'])       # dated 2026-09-24 12:00 UTC: in the window
             self.assertIn('F-0002 card', ev['blocking'])
             self.assertIn('CHANGELOG has v0.1.0 notes', ev['docs'])
             text = release.render(out)
-            self.assertIn('NOT READY — 5/12 met', text)
+            self.assertIn('NOT READY — 6/13 met', text)
             self.assertTrue(ev['repair'].startswith('n/a — nothing landed'), ev['repair'])
             self.assertTrue(ev['stability'].startswith('n/a — release.max_hand_fixes is off'))
             self.assertEqual(ev['tune'], 'n/a — tune.enabled is off')

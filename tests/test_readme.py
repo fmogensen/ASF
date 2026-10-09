@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -729,6 +730,82 @@ class TickStepLineProseTests(unittest.TestCase):
         text = self._read('docs/guide/getting-started.md')
         self.assertIn('YELLOW', text)
         self.assertIn('killed inside a step', text)
+
+
+class RuleCheckContractProseTests(unittest.TestCase):
+    """F-0119/T-0444: the `## Rule cards` section documents `asf pr-hygiene --lanes` as the
+    supported way for a product check to ask what ASF already owns — read from the checkout, not
+    a fixture (P16, D15)."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def _section(self, text, heading):
+        """A bash comment inside the check-script fence also starts with ``#``, so the
+        terminator search skips lines inside a fenced code block rather than trusting the
+        character alone."""
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.strip() == heading)
+        in_fence = False
+        for i in range(start + 1, len(lines)):
+            if lines[i].lstrip().startswith('```'):
+                in_fence = not in_fence
+            elif not in_fence and lines[i].startswith('#'):
+                return lines[start + 1:i]
+        raise AssertionError(f'no heading terminates {heading!r}')
+
+    def _bare_fence(self, lines):
+        start = next(i for i, l in enumerate(lines) if l.strip() == '```')
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == '```')
+        return lines[start + 1:end]
+
+    def _sh_fence(self, lines):
+        start = next(i for i, l in enumerate(lines) if l.strip() == '```sh')
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == '```')
+        return lines[start + 1:end]
+
+    def test_section_names_the_command_and_the_five_keys(self):
+        section = '\n'.join(self._section(self._read('docs/guide/product-config.md'),
+                                           '## Rule cards'))
+        self.assertIn('asf pr-hygiene', section)
+        self.assertIn('--lanes', section)
+        for key in ('`pr`', '`branch`', '`lane`', '`since`', '`action`'):
+            self.assertIn(key, section, key)
+
+    def test_section_names_the_three_exit_codes(self):
+        section = '\n'.join(self._section(self._read('docs/guide/product-config.md'),
+                                           '## Rule cards'))
+        self.assertIn('**0** with output', section)
+        self.assertIn('**0** with no\noutput when ASF owns nothing', section)
+        self.assertIn('**2** when the product or its state cannot be read', section)
+
+    def test_example_lines_parse_and_carry_the_five_keys(self):
+        section = self._section(self._read('docs/guide/product-config.md'), '## Rule cards')
+        lines = [l for l in self._bare_fence(section) if l.strip()]
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            entry = json.loads(line)
+            self.assertEqual(set(entry), {'pr', 'branch', 'lane', 'since', 'action'})
+
+    def test_check_script_parses(self):
+        section = self._section(self._read('docs/guide/product-config.md'), '## Rule cards')
+        script = '\n'.join(self._sh_fence(section)) + '\n'
+        with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as fh:
+            fh.write(script)
+            path = fh.name
+        try:
+            result = subprocess.run(['bash', '-n', path], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            os.unlink(path)
+
+    def test_check_script_names_a_real_product_not_the_placeholder(self):
+        section = self._section(self._read('docs/guide/product-config.md'), '## Rule cards')
+        script = self._sh_fence(section)
+        product_line = [l for l in script if l.strip().startswith('product=')][0]
+        self.assertIn('product=your-product', product_line)
+        self.assertNotIn('<p>', product_line.split('#')[0])
 
 
 if __name__ == '__main__':

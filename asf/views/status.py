@@ -537,14 +537,17 @@ def quota_lock_prefix(cfg):
 
 
 def paused_cell(cfg, product):
-    """``PAUSED``: each clock ``asf scheduler pause`` holds unloaded, with its reason, who and
-    when — no row while none is paused."""
-    from asf import scheduler
-    pauses = scheduler.read_pauses(product.name)
-    if not pauses:
-        return None
-    return '; '.join(f'{scheduler.label_for(product.name, clock, cfg)} '
-                     f'{scheduler.pause_text(record)}' for clock, record in sorted(pauses.items()))
+    """``PAUSED``: the product's launch pause (``asf pause``), then each clock ``asf scheduler
+    pause`` holds unloaded — reason, who and when for each. No row while nothing is paused."""
+    from asf import pause as pause_mod, scheduler
+    parts = []
+    record = pause_mod.held(product)
+    if record is not None:
+        parts.append(f'launches {pause_mod.text(record)} — `asf resume --product '
+                     f'{product.name}` lifts it; the tick still records and harvests')
+    parts += [f'{scheduler.label_for(product.name, clock, cfg)} {scheduler.pause_text(r)}'
+              for clock, r in sorted(scheduler.read_pauses(product.name).items())]
+    return '; '.join(parts) or None
 
 
 def cron_cell(cfg, product):

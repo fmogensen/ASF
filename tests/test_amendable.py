@@ -306,6 +306,25 @@ class HookTests(unittest.TestCase):
         refusals = [r for r in self.ledger() if r.get('event') == 'refused']
         self.assertEqual(len(refusals), 1, refusals)
 
+    def test_a_dropped_command_is_not_re_asked_for_the_same_command(self):
+        """B-0457: a command that names no file (``asf new rule``, ``asf set R-nnnn``, ``asf
+        hooks install``) classifies as ``touch_amendable_set`` through the ordinary matrix, not
+        through :func:`amendable.write_target` — and that matrix loop called ``refuse``
+        unconditionally, the same bug B-0351 closed for a file write. Once dropped, retrying the
+        identical command must still be refused, but must not reopen the hold."""
+        command = 'asf new rule --title x'
+        rc, _out = self.call('Bash', {'command': command})
+        self.assertEqual(rc, 2)
+        hold = f'{self.ITEM}/touch_amendable_set'
+        approvals.resolve('demo', hold, 'dropped')
+        self.assertEqual(approvals.open_holds('demo'), [])
+
+        rc, out = self.call('Bash', {'command': command})
+        self.assertEqual(rc, 2, out)                        # the command is still refused
+        self.assertEqual(approvals.open_holds('demo'), [])  # but the hold does not reopen
+        refusals = [r for r in self.ledger() if r.get('event') == 'refused']
+        self.assertEqual(len(refusals), 1, refusals)
+
     def test_negatives_pass_through(self):
         cases = [
             ('Read', {'file_path': 'rules/R-0042.md'}),

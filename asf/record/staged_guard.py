@@ -14,7 +14,12 @@ A staged deletion is refused when all of these hold:
 * origin's trunk still carries the path — a card the trunk already removed is no loss;
 * the branch did not create it: the path is in the merge base of ``HEAD`` and the trunk;
 * its text survives nowhere in the commit: intake's own move (``<intake dir>/done/<slug>.md``
-  carries the note's text under a ``→ <id>`` line) and a plain move both keep it, and pass.
+  carries the note's text under a ``→ <id>`` line) and a plain move both keep it, and pass;
+* and, for an intake note, the commit writes no ``done/`` note paired with it (F-0305): groom's
+  ``--apply`` rewrites a note's header lines before it moves it, so its ``HEAD`` text is gone
+  from the commit while the note plainly moved. A ``done/`` note paired by path (``<name>.md``,
+  or ``move_to_done``'s free ``<name>-<n>.md``) or by the note's title line (intake's mint names
+  ``done/`` by the title's slug, and keeps the title) is that move, whatever the text.
 
 No origin trunk to compare against is no refusal: the guard judges against what origin has, and
 says nothing it cannot back. A person who means a deletion sets :data:`ALLOW_VAR` for that one
@@ -86,6 +91,32 @@ def _staged(repo):
     return deleted, written
 
 
+def _title(text):
+    """The note's first non-blank line — its title, which every move to ``done/`` keeps."""
+    return next((l.strip() for l in (text or '').split('\n') if l.strip()), '')
+
+
+def _paired_done(path, text, written, written_text, intake_dir):
+    """The intake note ``path`` (``HEAD`` text ``text``) moved to ``<intake>/done/`` in this
+    commit — a written ``done/`` note of its name (``<name>.md``, ``<name>-<n>.md``) or carrying
+    its title line. A card outside intake is never paired."""
+    intake = (intake_dir or DEFAULT_INTAKE).strip('/')
+    folder, _, name = path.partition('/')
+    if folder != intake:
+        return False
+    stem, done = name[:-3], f'{intake}/done/'
+    title = _title(text)
+    for w in written:
+        if not w.startswith(done) or '/' in w[len(done):] or not w.endswith('.md'):
+            continue
+        got = w[len(done):-3]
+        if got == stem or (got.startswith(stem + '-') and got[len(stem) + 1:].isdigit()):
+            return True
+        if title and title in {l.strip() for l in (written_text.get(w) or '').split('\n')}:
+            return True
+    return False
+
+
 def _blob(repo, spec):
     p = _git(repo, ['cat-file', '-p', spec])
     return p.stdout if _ok(p) else None
@@ -110,7 +141,8 @@ def check(repo, trunk=None, intake_dir=None, environ=None):
         return []
     mb = _git(repo, ['merge-base', 'HEAD', ref])
     base = mb.stdout.strip() if _ok(mb) else ''
-    kept = [t for t in (_blob(repo, f':{w}') for w in written) if t]
+    written_text = {w: _blob(repo, f':{w}') for w in written}
+    kept = [t for t in written_text.values() if t]
     out = []
     for path in deleted:
         if not _exists(repo, ref, path) or not _exists(repo, base, path):
@@ -118,6 +150,8 @@ def check(repo, trunk=None, intake_dir=None, environ=None):
         text = (_blob(repo, f'HEAD:{path}') or '').strip()
         if text and any(text in t for t in kept):
             continue  # moved: intake's done/ note, or the same text under another name
+        if _paired_done(path, text, written, written_text, intake_dir):
+            continue  # moved to done/ after groom rewrote its header lines (F-0305)
         out.append(f'staged-guard: {path} is on {ref} and this commit deletes it — a stale tree '
                    f'or index drops a card another writer filed (F-0282). Restore it '
                    f'(git restore --staged --worktree -- {path}), or set {ALLOW_VAR}=1 for a '

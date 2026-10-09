@@ -1203,7 +1203,17 @@ def _enforce(stdin_text, environ, out, product, stdout=sys.stdout):
         c = CLASSES_BY_NAME[cls]
         if c.grantable and is_granted(prod, f'{item}/{cls}'):
             continue
-        refuse(prod, item, cls, level, job, tool_name, detail)
+        if c.grantable:
+            refuse(prod, item, cls, level, job, tool_name, detail)
+        else:
+            # B-0457: same as B-0351 for `amendable.write_target`'s `touch_amendable_set` — a
+            # command naming no file (`asf new rule`, `asf set R-nnnn`, `asf hooks install`)
+            # reaches `touch_amendable_set` through this matrix loop too. `refuse` unconditionally
+            # would reopen a hold the watchdog just dropped on every identical retry, and its
+            # `ungrantable_hold` (0 min, no grant can ever release it) would breach again right
+            # away, forever. `ask` skips the ledger write, and so the reopen, once this same
+            # command was last resolved dropped.
+            ask(prod, item, cls, level, job, tool_name, detail)
         refused.append((cls, level, detail))
     if not refused:
         _allow_if_read_only(prod, tool_name, tool_input, cwd, environ, stdout)

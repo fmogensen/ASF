@@ -75,6 +75,31 @@ def pr_of(subject):
     return None
 
 
+def landed_prs(commits):
+    """``{pr number: sha}`` — every PR the trunk's own commit subjects name as landed, by
+    :func:`pr_of` (``merge-queue: #<n> …``, ``… (#n)``, ``Merge pull request #<n> …``). The fact
+    that outranks a PR list read before the landing: the merge queue fast-forwards the trunk and
+    the host marks the PR merged after, so for a moment — and for as long as a cached copy of the
+    list lives — the trunk is ahead (F-0277).
+
+    ``commits``: ``{'sha', 'subject'}`` rows (:func:`first_parent`) or ``(sha, subject, …)``
+    tuples (:func:`asf.evidence.evidence.main_commits`), newest first; the newest wins. Pure."""
+    out = {}
+    for row in commits or ():
+        if isinstance(row, dict):
+            sha, subject = row.get('sha'), row.get('subject')
+        elif isinstance(row, (tuple, list)) and len(row) >= 2:
+            sha, subject = row[0], row[1]
+        else:
+            continue
+        if not sha:
+            continue
+        number = pr_of(subject)
+        if number is not None and number not in out:
+            out[number] = sha
+    return out
+
+
 def watched(product):
     """True when the product lands through the merge queue and has a checkout to read."""
     conv = getattr(product, 'conventions', None)

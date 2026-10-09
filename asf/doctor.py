@@ -70,6 +70,7 @@ import subprocess
 import time
 
 from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
+from asf import pause as pause_mod
 from asf.workers import lifecycle, pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -1135,6 +1136,40 @@ def check_drift(product, installed=None):
     return True, drift.line(d)
 
 
+def check_readme(product):
+    """``(ok, detail)``, or ``None`` to skip the row entirely — the committed README against its
+    committed facts (``asf readme --check --json``, F-0030 §2.7). Skipped for a product whose
+    README carries no span, or whose repo dir does not resolve. A page that has never been
+    refreshed at all — spans, but no committed facts file yet, nothing to have drifted *from* —
+    is ``'warn'`` (never red on its own); otherwise required, so a page a contributor forgot to
+    refresh after is RED, naming the first complaint."""
+    from asf.views import readme
+    repo_dir = product.repo_dir
+    if not repo_dir or not os.path.isdir(repo_dir):
+        return None
+    conv = product.conventions
+    try:
+        with open(os.path.join(repo_dir, conv.readme), encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return None
+    if not readme.spans(text):
+        return None
+    facts_path = os.path.join(repo_dir, conv.readme_facts)
+    if not os.path.isfile(facts_path):
+        return 'warn', f'{conv.readme_facts} is missing — run `asf readme --refresh`'
+    import json
+    try:
+        with open(facts_path, encoding='utf-8') as f:
+            facts_data = json.load(f)
+        problems = readme.complaints(text, facts_data, repo_dir)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if problems:
+        return False, f'{len(problems)} complaints — {problems[0]}'
+    return True, 'ok'
+
+
 def check_release(product, health=None):
     """(ok, detail) — the factory's own release rule (:func:`asf.version.health`): red when a
     merge to main that changed the package carries no ``v<x.y.z>`` tag, or ``CHANGELOG.md`` has
@@ -1449,6 +1484,10 @@ def scheduler_rows(cfg, product, jobs=None):
     marker = upgrade.held(product.name)
     if marker is not None:
         rows.append((YELLOW, 'upgrade', upgrade.held_label(marker)))
+    record = pause_mod.held(product)            # F-0137: the operator's own launch pause
+    if record is not None:
+        rows.append((YELLOW, 'PAUSED', f'launches {pause_mod.text(record)} — `asf resume '
+                     f'--product {product.name}` lifts it; the tick still records and harvests'))
     if 'interval_s' in (cfg.get('scheduler') or {}):
         rows.append((YELLOW, 'config',
                      'scheduler.interval_s is set but no longer read — clocks live in '
@@ -1624,6 +1663,9 @@ def run(product_name):
         rows.append(('network clock', False, host[0], host[1]))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
+    readme_result = check_readme(product)
+    if readme_result is not None:
+        rows.append(('readme', True, readme_result[0], readme_result[1]))
     ok, detail = check_release(product)
     rows.append(('release', True, ok, detail))
     for name, ok, detail in check_release_floor_seats(product):
@@ -1648,6 +1690,9 @@ def run(product_name):
     from asf import customer_content  # a product that deploys names its customer pages
     for ok, detail in customer_content.findings(product):
         rows.append(('customer content', False, ok, detail))
+    from asf import security  # the record's adoption of R-0009, and the age of its last feed read
+    for ok, detail in security.doctor_findings(product):
+        rows.append(('security', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     for required, ok, detail in check_ci_pool(product):
