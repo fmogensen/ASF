@@ -11,10 +11,16 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
 - a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; one whose
   API failed before it reported is an attempt :data:`asf.kernel.decide.API_FAILED`;
 - an ended session that reported ``pushed: rebased <sha>`` (the floor's wording: "the factory
-  publishes") and pushed nothing is pushed once by the host (``sessions.push_rebase``: the
-  worktree's HEAD must be that sha; ``--force-with-lease``; the push recorded on its push log)
-  before the session is ended — a kernel session pushes its own branch, and this is the safety
-  net; a refused push keeps the worktree;
+  publishes") and pushed nothing, or a ``done`` one whose worktree holds commits origin lacks
+  (:func:`asf.kernel.decide.host_pushes`: a rebase the session's sandbox would not force-push,
+  a push its hook timed out on), is pushed once by the host (``sessions.push_rebase``: the
+  worktree's HEAD must be that sha; ``--force-with-lease`` over origin's tip, only when that
+  tip is in the branch's own history or patch-equivalent to it; the push recorded on its push
+  log) before the session is ended — a kernel session pushes its own branch, and this is the
+  safety net; a refused push keeps the worktree, skips the item's OpenPR and leaves it
+  Stuck(owner=operator) on the refusal;
+- a session that ended without a REPORT is an attempt :data:`asf.kernel.decide.NO_REPORT` and
+  its worktree is kept: the relaunch continues on it;
 - a review session that ended has its report's verdict lines
   (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree and
   the PR change it was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
@@ -32,9 +38,11 @@ import re
 
 from asf.kernel import actions as A
 from asf.kernel import ports as P
+from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
-from asf.kernel.decide import API_FAILED, CONFLICT, CONTAINERS, CRASH
-from asf.kernel.model import State, verdict_holds
+from asf.kernel.decide import (API_FAILED, CONFLICT, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT,
+                               NOT_PUSHED, host_pushes, no_report)
+from asf.kernel.model import State, Stuck, verdict_holds
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
 NO_VERDICT = 'review: no VERDICT line'
@@ -50,6 +58,13 @@ def rebased_sha(s):
         return ''
     m = REBASED_RE.match(str((s.fields or {}).get('pushed') or ''))
     return m.group(1).lower() if m else ''
+
+
+def host_push_sha(s):
+    """The sha the host pushes for ended session ``s`` before ending it, else '': a reported
+    ``rebased <sha>``, else the worktree HEAD a ``done`` session left unpushed
+    (:func:`asf.kernel.decide.host_pushes`)."""
+    return rebased_sha(s) or (s.unpushed.lower() if host_pushes(s) else '')
 
 
 @dataclasses.dataclass
@@ -91,6 +106,7 @@ class _Applier:
     def __init__(self, plan, facts, ports, now, log):
         self.plan, self.facts, self.ports, self.now, self.log = plan, facts, ports, now, log
         self.updates = {}   # item id -> {machine key: value}
+        self.refused = {}   # item id -> why the host did not push its session's work
         self.result = Result()
 
     def field(self, iid, key, default):
@@ -132,12 +148,18 @@ class _Applier:
         elif s.api_error and not s.fields:
             self.attempt(s.item_id, API_FAILED)
         free, note = a.free_worktree, None
-        sha = rebased_sha(s)
+        if s.ended and s.kind != 'review' and no_report(s):
+            self.attempt(s.item_id, NO_REPORT)
+            free = False  # the relaunch continues on its worktree and branch
+        sha = host_push_sha(s)
         if sha:
             try:
                 note = self.ports.sessions.push_rebase(s, sha)
             except Exception as e:  # the worktree is kept: its commits are the work
-                free, note = False, 'rebase not pushed: %s' % (str(e) or type(e).__name__)
+                why = str(e) or type(e).__name__
+                free, note = False, 'rebase not pushed: %s' % why
+                if host_pushes(s):
+                    self.refused[s.item_id] = why
             self.log('%s %s — %s' % (s.job, s.item_id, note))
         self.ports.sessions.end(s, free)
         return note
@@ -166,6 +188,8 @@ class _Applier:
         self.ports.record.mint_story(a.feature_id, a.story_id, a.title, a.acceptance)
 
     def OpenPR(self, a):
+        if a.item_id in self.refused:
+            return 'skipped: the host push failed'
         return 'PR #%s' % self.ports.github.open_pr(a.branch, a.base, a.title, a.body)
 
     def Rerun(self, a):
@@ -235,7 +259,12 @@ class _Applier:
         """Each judged item's state and Stuck, onto this tick's updates where the card differs.
         A container with children is derived every tick and never stored."""
         parents = {it.parent for it in self.facts.items.values()}
-        for iid, (state, stuck) in self.plan.states.items():
+        states = dict(self.plan.states)
+        for iid, why in self.refused.items():  # decide counted on a push that did not happen
+            if iid in states:
+                states[iid] = (State.STUCK, Stuck(reason=R.cap(NOT_PUSHED + why), owner='operator',
+                                                  next_action=NEXT_ACTION['operator']))
+        for iid, (state, stuck) in states.items():
             it = self.facts.items.get(iid)
             if it is None or state is State.PARKED or (it.type in CONTAINERS and iid in parents):
                 continue  # derived every tick, never stored

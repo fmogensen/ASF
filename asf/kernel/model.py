@@ -162,7 +162,14 @@ class Session:
     What an ended session's REPORT declares (:func:`asf.kernel.reports.read`): ``status`` is
     ``done``, ``partial``, ``blocked`` or '' (no REPORT); ``fields`` is the parsed REPORT
     (``pushed``, ``commits``, ``tests``, ``left out``, …); ``question`` a ``NEEDS OPERATOR:`` line
-    that asks something; ``api_error`` the API failure that ended it before any REPORT, or ''."""
+    that asks something; ``api_error`` the API failure that ended it before any REPORT, or ''.
+
+    What its worktree holds that origin lacks (read once it ended, never for a review):
+    ``unpushed`` is the worktree's HEAD sha when its branch has commits origin's branch lacks and
+    origin's tip may be overwritten (an ancestor of HEAD or of an entry of the branch's reflog —
+    its pre-rebase history — or every one of its commits patch-equivalent to one here), so the
+    host pushes it with a lease; ``push_refused`` is why such a HEAD is not pushed (origin holds
+    a commit the local history never had), or ''."""
     job: str
     item_id: str
     kind: str = 'build'
@@ -181,6 +188,8 @@ class Session:
     fields: dict = dataclasses.field(default_factory=dict)
     api_error: str = ''
     branch: str = ''
+    unpushed: str = ''
+    push_refused: str = ''
 
 
 @dataclasses.dataclass

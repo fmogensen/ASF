@@ -32,8 +32,13 @@ item and the actions of one tick. The rules it holds, in the design's words:
   could not resolve; a session question (owner=operator); a session whose REPORT says
   ``partial`` or ``blocked`` (owner=session, or operator when it asks a ``NEEDS OPERATOR:``
   question), the reason in the report's own words (:func:`asf.kernel.reports.stuck_reason`); a
-  ``done`` session with no push and no open PR; a session that ended without a REPORT (owner=
-  session, "ended without a REPORT" plus its last line that says something). A ``done`` session
+  ``done`` session with no push and no open PR; a session that ended without a REPORT a second
+  time (owner=session, "ended without a REPORT" plus its last line that says something) — the
+  first is an attempt :data:`NO_REPORT`: its worktree and branch are kept and it is relaunched,
+  before any other Ready item, the ones that hold the most others first. A ``done`` session
+  whose worktree holds commits origin lacks (``Session.unpushed``) is pushed by the host with a
+  lease and counts as pushed; one whose origin branch holds commits its history never had
+  (``Session.push_refused``) is Stuck(owner=operator) on that reason. A ``done`` session
   that pushed a new head moves on (to Review) whatever ``NEEDS OPERATOR:`` line it also carries:
   the question becomes an item note (:class:`NoteItem`, shown by status) and holds nothing. A session whose API
   failed is an attempt :data:`API_FAILED` — relaunched, then Stuck(owner=loop). A dead pid ends
@@ -92,6 +97,14 @@ CRASH = 'session died'
 #: the attempt reason of a session whose API failed before it could report (retried, not a
 #: verdict on the work: ``config.max_attempts`` of them make the item Stuck(owner=loop))
 API_FAILED = 'the session API failed'
+
+#: the attempt reason of a session that ended without a REPORT: its first is relaunched (worktree
+#: and branch kept), its :data:`NO_REPORT_LIMIT`-th makes the item Stuck(owner=session)
+NO_REPORT = 'ended without a REPORT'
+NO_REPORT_LIMIT = 2
+
+#: the prefix of the Stuck reason of a done session whose unpushed work the host will not push
+NOT_PUSHED = 'not pushed: '
 
 #: one line per owner of what happens next, unless the card already says
 NEXT_ACTION = {
@@ -161,11 +174,11 @@ def decide(facts, config):
     for iid in sorted(items):
         _state_of(iid, items, judged, children, states, (), parked)
     _apply_waits(items, judged, children, states, parked)
-    _count_blocked(items, states, parked)
+    blocks = _count_blocked(items, states, parked)
 
     actions += _mint(facts, parked)
     launches, skipped = (([], {}) if facts.paused
-                         else _launches(facts, config, judged, children, states, parked))
+                         else _launches(facts, config, judged, children, states, parked, blocks))
     actions += launches
     actions.sort(key=lambda a: ORDER.index(type(a)))
     idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
@@ -203,6 +216,10 @@ def _judge(it, facts, config, actions):
         elif s.api_error and not s.fields:
             attempts.append(API_FAILED)
             api_detail = s.api_error
+        elif s.kind != 'review' and no_report(s):
+            attempts.append(NO_REPORT)
+            if attempts.count(NO_REPORT) >= NO_REPORT_LIMIT:
+                ended_stuck = _stuck(R.no_report_reason(s.last_line), 'session')
         elif done_and_pushed(s, facts):
             pushed = s
             note = pushed_note(s)
@@ -276,10 +293,30 @@ def done_and_pushed(s, facts=None):
     a bare sha, ``rebased <sha>``) with the session's branch on origin (``facts.branches``)."""
     if s.status != R.DONE:
         return False
-    if s.result == 'pushed':
+    if s.result == 'pushed' or host_pushes(s):
         return True
     return facts is not None and _claimed_on_origin((s.fields or {}).get('pushed'), s.item_id,
                                                     s.branch, facts)
+
+
+def host_pushes(s):
+    """Whether the host pushes ended session ``s``'s worktree HEAD (``Session.unpushed``) with a
+    lease before it is ended: a ``done``, non-review session that pushed nothing itself and whose
+    origin branch holds nothing its history never had."""
+    return (s.ended and s.kind != 'review' and s.status == R.DONE and s.result != 'pushed'
+            and bool(s.unpushed) and not s.push_refused)
+
+
+def no_report(s):
+    """Whether ended session ``s`` stopped without a REPORT (and without a question, an API
+    failure or a push of its own)."""
+    return (s.ended and not s.fields and not s.status and not s.question and not s.api_error
+            and s.result not in ('pushed', 'question'))
+
+
+def relaunch(it):
+    """Whether ``it``'s last attempt is a session that ended without a REPORT: relaunched first."""
+    return bool(it.attempts) and it.attempts[-1] == NO_REPORT
 
 
 def _claimed_on_origin(value, iid, branch, facts):
@@ -363,6 +400,8 @@ def _ended_stuck(s, open_pr):
     if s.status in (R.PARTIAL, R.BLOCKED):
         return _stuck(R.stuck_reason(s.status, s.fields, s.question),
                       'operator' if s.question else 'session')
+    if s.status == R.DONE and s.result != 'pushed' and s.push_refused:
+        return _stuck(R.cap(NOT_PUSHED + s.push_refused), 'operator')
     if s.result == 'question' or s.question:
         return _stuck(R.stuck_reason(s.status or 'question', s.fields, s.question)
                       if s.fields else (s.question or s.last_line or 'session asked a question'),
@@ -563,7 +602,8 @@ def _apply_waits(items, judged, children, states, parked):
 
 def _count_blocked(items, states, parked):
     """Set ``blocked_count`` on every Stuck item: the visible, not-Done items that transitively
-    wait on it through declared ``after:`` edges."""
+    wait on it through declared ``after:`` edges. Returns that count for every item that holds
+    any (Stuck or not)."""
     waiters = {}
     for iid in sorted(items):
         if not _visible(items, iid, parked):
@@ -571,17 +611,21 @@ def _count_blocked(items, states, parked):
         for a in items[iid].after:
             if _visible(items, a, parked):
                 waiters.setdefault(a, []).append(iid)
-    for iid, (state, stuck) in states.items():
-        if state is not State.STUCK:
-            continue
+    counts = {}
+    for iid in sorted(waiters):
         seen, todo = set(), list(waiters.get(iid, []))
         while todo:
             w = todo.pop()
-            if w in seen or w == iid or states[w][0] is State.DONE:
+            if w in seen or w == iid or w not in states or states[w][0] is State.DONE:
                 continue
             seen.add(w)
             todo += waiters.get(w, [])
-        stuck.blocked_count = len(seen)
+        if seen:
+            counts[iid] = len(seen)
+    for iid, (state, stuck) in states.items():
+        if state is State.STUCK:
+            stuck.blocked_count = counts.get(iid, 0)
+    return counts
 
 
 # ---- the record and the launches ----------------------------------------------------------------
@@ -597,18 +641,22 @@ def _mint(facts, parked):
     return out
 
 
-def _launches(facts, config, judged, children, states, parked):
+def _launches(facts, config, judged, children, states, parked, blocks=None):
     """``(launches, skipped)``: reviews first, then Ready items, each in launch order
-    (:func:`launch_order`), while sessions are free; a Ready item whose ``writes`` overlap a
+    (:func:`launch_order`) — a relaunch (:func:`relaunch`) before the rest, the one holding the
+    most others (``blocks``) first — while sessions are free; a Ready item whose ``writes`` overlap a
     Building (or just launched) visible item waits its turn (``skipped[iid] = 'overlap'``)."""
     items = facts.items
     free = _free(facts, config)
     inherit = config.rank != 'own'
+    blocks = blocks or {}
     rank = lambda iid: launch_order(iid, items, inherit)  # noqa: E731
+    first = lambda iid: ((0, -blocks.get(iid, 0)) if relaunch(items[iid]) else (1, 0),  # noqa: E731
+                         rank(iid))
     reviews = sorted((i for i, j in judged.items() if j.review_branch and not j.hold), key=rank)
     ready = sorted((i for i, j in judged.items()
                     if states[i][0] is State.READY and not j.hold and _visible(items, i, parked)
-                    and not _derived(i, items, children)), key=rank)
+                    and not _derived(i, items, children)), key=first)
     busy = [items[i].writes for i in items
             if states[i][0] is State.BUILDING and _visible(items, i, parked)]
     out, skipped = [], {}

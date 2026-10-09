@@ -169,7 +169,9 @@ class Scenarios(unittest.TestCase):
     def test_13_session_ended_without_push_is_stuck_on_session(self):
         s = B.session('j1', 'T-0001', alive=False, ended=True, result='none',
                       last_line='error: cannot import name widget')
-        f = B.facts([B.task('T-0001', state=State.BUILDING)], sessions=[s])
+        # the first no-REPORT end was relaunched (an attempt on the card); this is the second
+        f = B.facts([B.task('T-0001', state=State.BUILDING, attempts=['ended without a REPORT'])],
+                    sessions=[s])
         plan = decide(f, B.config())
         marks = [(m.item_id, m.owner, m.reason) for m in B.of(plan, A.MarkStuck)]
         self.assertEqual(marks, [('T-0001', 'session',

@@ -12,7 +12,7 @@ from asf.kernel import actions as A
 from asf.kernel import model as M
 from asf.kernel import ports as P
 from asf.kernel import reports as R
-from asf.kernel.decide import API_FAILED, decide
+from asf.kernel.decide import API_FAILED, NO_REPORT as NO_REPORT_ATTEMPT, decide
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.kernel…` does not
     from kernel import builders as B
@@ -197,7 +197,8 @@ class Decide(unittest.TestCase):
         self.assertTrue(info.reason.startswith('blocked: NEEDS OPERATOR: grant the deploy key'))
 
     def test_no_report_names_it_and_its_last_line(self):
-        info = B.stuck(self.plan(ended(NO_REPORT)), 'T-0001')
+        again = B.task('T-0001', state=State.BUILDING, attempts=[NO_REPORT_ATTEMPT])
+        info = B.stuck(self.plan(ended(NO_REPORT), item=again), 'T-0001')
         self.assertEqual((info.owner, info.reason),
                          ('session', 'ended without a REPORT: error: cannot import name widget '
                                      'from src.a'))
@@ -237,7 +238,8 @@ class Decide(unittest.TestCase):
 
     def test_no_reason_decide_writes_is_noise(self):
         s = B.session('j1', 'T-0001', alive=False, ended=True, result='none', last_line='```')
-        info = B.stuck(self.plan(s), 'T-0001')
+        again = B.task('T-0001', state=State.BUILDING, attempts=[NO_REPORT_ATTEMPT])
+        info = B.stuck(self.plan(s, item=again), 'T-0001')
         self.assertTrue(R.meaningful(info.reason))
         self.assertEqual(info.reason, 'ended without a REPORT')
 

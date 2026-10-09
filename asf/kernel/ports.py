@@ -588,9 +588,15 @@ class RealSessions:
                 continue
             kind = _kernel_kind(run.get('kind'))
             alive = lifecycle.pid_alive(run.get('pid'))
-            result = None if alive else runtime.read_result(run.get('log'))
+            result = None if alive else report_result(run.get('log'))
             pushed = not alive and pushlog.count(self.product, run['job']) > 0
             said = reports.read(result)
+            unpushed, refused = '', ''
+            if result is not None and kind != 'review' and not pushed \
+                    and said['status'] == reports.DONE:
+                unpushed, refused = unpushed_head(
+                    run.get('worktree') or '', run.get('branch') or '', self.product.main,
+                    refguard_listed(self.product))
             out.append(M.Session(
                 job=run['job'], item_id=run['item'], kind=kind, pid=run.get('pid'), alive=alive,
                 ended=result is not None, result=session_result(kind, pushed, said),
@@ -600,7 +606,8 @@ class RealSessions:
                 change_id=run.get('kernel_change') or '',
                 worktree=run.get('worktree') or '', branch=run.get('branch') or '',
                 status=said['status'],
-                fields=said['fields'], api_error=said['api_error']))
+                fields=said['fields'], api_error=said['api_error'],
+                unpushed=unpushed, push_refused=refused))
             out[-1].started = run.get('started') or ''
         return out
 
@@ -643,12 +650,14 @@ class RealSessions:
         return job
 
     def push_rebase(self, session, sha):
-        """The safety net for a session that reported ``pushed: rebased <sha>`` and stopped
-        (B-82658, B-83312): when its worktree still holds ``sha`` as HEAD, push it once to the
-        session's branch with ``--force-with-lease`` over origin's head read just before (a push
-        that would erase a commit origin holds is refused), and record the sha on the session's
+        """The safety net for a session that reported ``pushed: rebased <sha>``, or ended
+        ``done`` with commits origin lacks (``Session.unpushed``), and stopped (B-82658, B-83312,
+        T-0196): when its worktree still holds ``sha`` as HEAD, push it once to the session's
+        branch with ``--force-with-lease=<branch>:<origin's head read just before>`` — only when
+        that head is in the branch's own history (:func:`overwritable`; a push that would erase a
+        commit the local history never held is refused) — and record the sha on the session's
         push log. Returns a note; raises :class:`PortError` when it cannot or will not push."""
-        from asf import gitops, refguard
+        from asf import gitops, gitpush, refguard
         from asf.harvest import harvest
         from asf.workers import pushlog
         wt, branch = session.worktree, session.branch
@@ -669,10 +678,17 @@ class RealSessions:
         expected = harvest.remote_head(wt, branch)
         if expected == full:
             return 'origin/%s already at %s' % (branch, full[:12])
-        ok, why = harvest.push_branch(wt, full, branch, expected, self.product.main,
-                                      refguard.listed(self.product.conventions))
-        if not ok:
+        main, protected = self.product.main, refguard_listed(self.product)
+        why = (refguard.refusal(branch, 'push branch %s' % branch, main, protected, out=_quiet)
+               or overwritable(wt, full, expected, branch))
+        if why:
             raise PortError('rebased %s: %s' % (sha, why))
+        push = gitpush.push(['--force-with-lease=refs/heads/%s:%s' % (branch, expected), 'origin',
+                             '%s:refs/heads/%s' % (full, branch)], wt,
+                            guard=refguard.Guard(main, protected))
+        if push.returncode != 0:
+            tail = ((push.stderr or push.stdout or '').strip().splitlines() or [''])[-1]
+            raise PortError('rebased %s: push branch failed: %s' % (sha, tail))
         log = pushlog.path(self.product, session.job)
         os.makedirs(os.path.dirname(log), exist_ok=True)
         with open(log, 'a', encoding='utf-8') as f:
@@ -695,6 +711,117 @@ class RealSessions:
             ok, why = trash.discard(self.product.repo_dir, state, wt, check_clean=clean)
             if not ok:
                 raise PortError('worktree kept: %s' % why)
+
+
+def _quiet(_line):
+    """A sink for a refusal line the caller reports itself."""
+
+
+def refguard_listed(product):
+    """``product``'s protected refs (:func:`asf.refguard.listed`), None for the defaults."""
+    from asf import refguard
+    return refguard.listed(getattr(product, 'conventions', None))
+
+
+def report_result(log_path):
+    """The result record an ended session's REPORT is read off: the last run's ``result`` line
+    (:func:`asf.workers.runtime.read_result`), unless it holds no REPORT and an earlier result of
+    that same run does — a session that printed its REPORT and then answered a stale background
+    notification (T-0432: "That monitor has served its purpose…") reported all the same. None
+    while the run has not ended."""
+    from asf.workers import report, runtime
+    last = runtime.read_result(log_path)
+    if last is None or report.parse(str(last.get('result') or '')):
+        return last
+    found = None
+    with open(log_path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            try:
+                rec = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if runtime.launch_boundary(rec):
+                found = None
+            elif rec.get('type') == 'result' and report.parse(str(rec.get('result') or '')):
+                found = rec
+    return found or last
+
+
+#: how many entries of a branch's reflog :func:`overwritable` reads for its pre-rebase history
+REFLOG_DEPTH = 500
+
+
+def overwritable(wt, head, origin, branch):
+    """'' when pushing ``head`` over ``origin`` (origin's tip of ``branch``) loses nothing the
+    worktree's own history never held, else why not: ``origin`` is an ancestor of ``head`` (a
+    fast-forward), or of an entry of ``branch``'s reflog (the pre-rebase history the session
+    rewrote), or every commit it has that ``head`` lacks is patch-equivalent to one in ``head``
+    (``git cherry``). A tip that cannot be read even after a fetch is never overwritten."""
+    from asf import gitops
+    if not origin or origin == head:
+        return ''
+
+    def has(sha):
+        return gitops.git(['cat-file', '-e', '%s^{commit}' % sha], wt, timeout=60).ok
+
+    def ancestor(of):
+        return gitops.git(['merge-base', '--is-ancestor', origin, of], wt, timeout=60).ok
+
+    if not has(origin):
+        gitops.git(['fetch', '-q', 'origin', branch], wt, timeout=300)
+        if not has(origin):
+            return 'cannot read origin/%s at %s' % (branch, origin[:12])
+    if ancestor(head):
+        return ''
+    log = gitops.git(['log', '-g', '-n', str(REFLOG_DEPTH), '--format=%H',
+                      'refs/heads/%s' % branch], wt, timeout=60)
+    seen = set()
+    for sha in (log.data.split() if log.ok else []):
+        if sha not in seen:
+            seen.add(sha)
+            if ancestor(sha):
+                return ''
+    cherry = gitops.git(['cherry', head, origin], wt, timeout=120)
+    if not cherry.ok:
+        return 'cannot compare origin/%s with this branch: %s' % (branch, cherry.reason)
+    lost = [ln.split()[1][:9] for ln in cherry.stdout.splitlines() if ln.startswith('+')]
+    if not lost:
+        return ''
+    return ('origin/%s holds %d commit(s) this branch never had (%s) — fetch it and carry them '
+            'by hand, then push' % (branch, len(lost), ', '.join(lost[:5])))
+
+
+def unpushed_head(wt, branch, main='main', protected=None):
+    """``(head, refused)`` of an ended session's worktree ``wt`` on ``branch`` (its checked-out
+    branch when empty): ``head`` is the HEAD sha when it holds commits no origin ref has and
+    origin's ``branch`` is not already at or past it, else ''; ``refused`` is why that head is not
+    pushed (:func:`overwritable`), else ''. The trunk or a protected ref is never a target."""
+    from asf import gitops, refguard
+    from asf.harvest import harvest
+    if not wt or not os.path.isdir(wt):
+        return '', ''
+    got = gitops.git(['rev-parse', 'HEAD'], wt, timeout=60)
+    if not got.ok or not got.data:
+        return '', ''
+    head = got.data
+    if not branch:
+        ref = gitops.git(['rev-parse', '--abbrev-ref', 'HEAD'], wt, timeout=60)
+        branch = ref.data if ref.ok and ref.data != 'HEAD' else ''
+    if not branch or refguard.refusal(branch, 'push', main, protected, out=_quiet):
+        return '', ''
+    ahead = gitops.git(['rev-list', '--count', head, '--not', '--remotes=origin'], wt,
+                       timeout=60)
+    if not ahead.ok or not ahead.data.isdigit() or int(ahead.data) == 0:
+        return '', ''
+    origin = harvest.remote_head(wt, branch)
+    if origin == head:
+        return '', ''
+    if origin and gitops.git(['cat-file', '-e', '%s^{commit}' % origin], wt, timeout=60).ok and \
+            gitops.git(['merge-base', '--is-ancestor', head, origin], wt, timeout=60).ok:
+        return '', ''  # origin is at or past it
+    return head, overwritable(wt, head, origin, branch)
 
 
 def dirty_paths(porcelain):
