@@ -648,6 +648,20 @@ def _command_matches(cls_name, command, product, extra_patterns, run_text=None):
             or any(re.search(p, command) for p in extra_patterns))
 
 
+def _command_subject(cls, command):
+    """The stable part of a classified Bash command: the matched built-in pattern's own text,
+    not the attempt's variable arguments (a `--title`, a `--level`) — two retries that differ
+    only there are the same question (B-79745, as B-0351/B-0457 did for the write path's
+    relpath). Falls back to the full command when nothing built-in matched it (an extra
+    product pattern, read as written rather than :func:`_run_text`)."""
+    text = _run_text(command)
+    for p in _COMMAND_PATTERNS.get(cls, ()):
+        m = re.search(p, text)
+        if m:
+            return m.group(0)
+    return command[:120]
+
+
 def _classify_command(product, command):
     sig = signals(product)
     detail = command[:120]
@@ -1213,7 +1227,14 @@ def _enforce(stdin_text, environ, out, product, stdout=sys.stdout):
             # `ungrantable_hold` (0 min, no grant can ever release it) would breach again right
             # away, forever. `ask` skips the ledger write, and so the reopen, once this same
             # command was last resolved dropped.
-            ask(prod, item, cls, level, job, tool_name, detail)
+            # B-79745: "this same command" has to mean the matched pattern, not the full
+            # command — `asf new rule --title "x"` and `asf new rule --title "y"` are the same
+            # ungrantable question with a different title, and comparing the whole command (as
+            # the write path compares a stable `relpath`, never the content written) reopened
+            # the hold on every retry whose free-form argument text happened to differ.
+            subject = _command_subject(cls, tool_input.get('command') or '') \
+                if tool_name == 'Bash' else None
+            ask(prod, item, cls, level, job, tool_name, detail, subject=subject)
         refused.append((cls, level, detail))
     if not refused:
         _allow_if_read_only(prod, tool_name, tool_input, cwd, environ, stdout)

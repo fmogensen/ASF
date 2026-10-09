@@ -325,6 +325,25 @@ class HookTests(unittest.TestCase):
         refusals = [r for r in self.ledger() if r.get('event') == 'refused']
         self.assertEqual(len(refusals), 1, refusals)
 
+    def test_a_dropped_command_is_not_re_asked_for_the_same_pattern_with_different_arguments(self):
+        """B-79745: the matrix loop's dropped-match compared the *whole* command, so two asks
+        of the same ungrantable question — ``asf new rule --title "x"`` and ``asf new rule
+        --title "y"`` — were treated as different subjects and the hold the watchdog had just
+        dropped came straight back on the second one. The write path (B-0351) compares a
+        stable ``relpath``, never the content written; this matrix loop must compare the
+        matched pattern, never the free-form arguments next to it."""
+        rc, _out = self.call('Bash', {'command': 'asf new rule --title "first title"'})
+        self.assertEqual(rc, 2)
+        hold = f'{self.ITEM}/touch_amendable_set'
+        approvals.resolve('demo', hold, 'dropped')
+        self.assertEqual(approvals.open_holds('demo'), [])
+
+        rc, out = self.call('Bash', {'command': 'asf new rule --title "a different title"'})
+        self.assertEqual(rc, 2, out)                        # the command is still refused
+        self.assertEqual(approvals.open_holds('demo'), [])  # but the hold does not reopen
+        refusals = [r for r in self.ledger() if r.get('event') == 'refused']
+        self.assertEqual(len(refusals), 1, refusals)
+
     def test_negatives_pass_through(self):
         cases = [
             ('Read', {'file_path': 'rules/R-0042.md'}),
