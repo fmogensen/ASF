@@ -2,10 +2,12 @@
 (no deploy), against a temp ASF_HOME and a tiny record. No network: every row that would call
 ``gh`` is either unconfigured here or stubbed."""
 import datetime as dt
+import io
 import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -144,7 +146,7 @@ class StatusViewTests(ViewsTestCase):
     def test_unconfigured_rows_name_their_key_never_a_bare_dash(self):
         rows = self.rows({'scheduler': {'kind': 'none'}})
         self.assertEqual(rows['Runners'], '— (not configured: ci.provider (none))')
-        self.assertEqual(rows['Prod'], '— (not configured: deploy_sha.workflow)')
+        self.assertEqual(rows['Prod'], 'trunk is production — no deploy configured (B-0077)')
         self.assertEqual(rows['Quota 5h/7d'], '— (not configured: worker_pool.quota_command)')
         self.assertEqual(rows['Cron'], '— (not configured: scheduler.kind (none has no status adapter))')
         self.assertEqual(rows['Groom'], '— (not configured: approvals.groom)')
@@ -198,6 +200,23 @@ class StatusViewTests(ViewsTestCase):
                 cell = status.prod_cell(product)
             self.assertEqual(cell, '? (no successful deploy.yml run readable)', data)
             self.assertIn('deploy.yml', sh.call_args[0][0])
+
+    def test_prod_row_names_trunk_as_production_with_no_deploy_configured(self):
+        """B-0093: a product with hosted CI and no deploy (B-0077's `trunk is production`) is
+        not a misconfiguration — Prod must not say `not configured`."""
+        product = env.Product('p', {'ci': {'provider': 'github-actions'},
+                                    'repo_slug': 'x/y', 'repo_dir': self.tmp})
+        cell = status.prod_cell(product)
+        self.assertNotIn('not configured', cell)
+        self.assertIn('B-0077', cell)
+
+    def test_runners_row_names_hosted_ci_with_no_self_hosted_pool(self):
+        """B-0093: hosted CI (no `ci.runner_org`/`ci.pool` declared, nothing self-hosted to
+        track) is not a misconfiguration — Runners must not say `not configured`."""
+        product = env.Product('p', {'ci': {'provider': 'github-actions'},
+                                    'repo_slug': 'x/y', 'repo_dir': self.tmp})
+        cell = status.runners_cell(product)
+        self.assertNotIn('not configured', cell)
 
     def test_groom_row_reads_the_newest_digest(self):
         product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
@@ -589,6 +608,44 @@ class CapacityTable(ViewsTestCase):
             'batch': {'per_run': 8, 'parallel': 2, 'runners': 4},
             'deprecated': [],
         })
+
+
+class CapacityAllIsolatesInvalidProduct(ViewsTestCase):
+    """B-0098: one invalid product file under ~/.ASF/products/ must not blank the whole
+    ``capacity --all`` view — it becomes a single row naming ``asf doctor``, and the valid
+    products still render and count."""
+
+    def _write(self, name, text):
+        products = os.path.join(env.ASF_HOME, 'products')
+        os.makedirs(products, exist_ok=True)
+        with open(os.path.join(products, f'{name}.yaml'), 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def test_the_valid_product_still_renders_and_the_invalid_one_names_doctor(self):
+        self._write('web', 'product: web\n')
+        self._write('asf', 'product: asf\ncapacity:\n  sessions: TODO\n')
+        args = types.SimpleNamespace(all=True, product=None, json=False)
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            rc = capacity_view.cmd_capacity(args)
+        self.assertEqual(rc, 0)
+        lines = [ln for ln in out.getvalue().splitlines() if ln]
+        web_row = next(ln for ln in lines if ln.startswith('web '))
+        self.assertIn('default', web_row)
+        self.assertIn('asf  config invalid — asf doctor --product asf', lines)
+
+    def test_json_names_the_invalid_product_instead_of_raising(self):
+        self._write('web', 'product: web\n')
+        self._write('asf', 'product: asf\ncapacity:\n  sessions: TODO\n')
+        args = types.SimpleNamespace(all=True, product=None, json=True)
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            rc = capacity_view.cmd_capacity(args)
+        self.assertEqual(rc, 0)
+        data = json.loads(out.getvalue())
+        by_name = {row['product']: row for row in data}
+        self.assertIn('sessions', by_name['web'])
+        self.assertEqual(by_name['asf']['error'], 'config invalid — asf doctor --product asf')
 
 
 class StatusRow(ViewsTestCase):

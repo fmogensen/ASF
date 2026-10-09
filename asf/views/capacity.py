@@ -91,12 +91,18 @@ def _table(headers, rows):
     return [fmt(headers)] + [fmt(r) for r in rows]
 
 
+def _invalid_line(name):
+    return f'{name}  config invalid — asf doctor --product {name}'
+
+
 def render(products, cfg):
     dep = capacity.deprecations(cfg)
     header = (f"CAPACITY — operator total: sessions {_fmt(capacity.total_sessions(cfg))}, "
              f"ci {_fmt(capacity.total_ci(cfg))}")
+    valid = [p for p in products if not isinstance(p, str)]
+    invalid = [p for p in products if isinstance(p, str)]
     rows = []
-    for p in products:
+    for p in valid:
         row = _row(p, cfg)
         s, ci = row['sessions'], row['ci']
         bound = s['bound_by']
@@ -106,8 +112,8 @@ def render(products, cfg):
         rows.append((row['product'], s['ceiling'], s['inflight'], _fmt(s['free']), bound,
                     _fmt(ci['ceiling']), _fmt(ci['inflight']), _fmt(ci['free']),
                     ci['bound_by'] or '—', _batch_cell(row['batch'])))
-    lines = [header, ''] + _table(HEADERS, rows)
-    clouds = [(p.name, _row(p, cfg).get('cloud')) for p in products]
+    lines = [header, ''] + _table(HEADERS, rows) + [_invalid_line(name) for name in invalid]
+    clouds = [(p.name, _row(p, cfg).get('cloud')) for p in valid]
     clouds = [(name, c) for name, c in clouds if c]
     if clouds:  # the cloud lane, beside the local seats above
         lines.append('')
@@ -115,7 +121,7 @@ def render(products, cfg):
             where = f"{c['runtime']} on [{', '.join(c['runs_on'])}]"
             lines.append(f"cloud lane: {name} {c['inflight']}/{c['ceiling']} in flight, "
                          f"{c['free']} free ({where})")
-    pools = [(p.name, _classes(p)) for p in products]
+    pools = [(p.name, _classes(p)) for p in valid]
     pools = [(name, c) for name, c in pools if c]
     if pools:  # the CI runner pool by class (ci.pool `class:`), the unclassed last
         lines.append('')
@@ -132,13 +138,30 @@ def render(products, cfg):
 
 def as_json(products, cfg):
     dep = capacity.deprecations(cfg)
-    return [dict(_row(p, cfg), deprecated=dep) for p in products]
+    out = []
+    for p in products:
+        if isinstance(p, str):
+            out.append({'product': p, 'error': f'config invalid — asf doctor --product {p}',
+                       'deprecated': dep})
+        else:
+            out.append(dict(_row(p, cfg), deprecated=dep))
+    return out
 
 
 def _products_for(args, cfg):
+    """The products a capacity view renders: with ``--all``, every file under
+    ``~/.ASF/products/``, each loaded on its own — one that does not parse (an unfinished
+    template, an old field name) comes back as its bare name instead of stopping every other
+    product's row (B-0098)."""
     if getattr(args, 'all', False):
         from asf import schema
-        return [env.load_product(name) for name in schema._all_products()]
+        out = []
+        for name in schema._all_products():
+            try:
+                out.append(env.load_product(name))
+            except env.ConfigError:
+                out.append(name)
+        return out
     return [env.load_product(getattr(args, 'product', None))]
 
 
