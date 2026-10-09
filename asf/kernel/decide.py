@@ -35,6 +35,13 @@ item and the actions of one tick. The rules it holds, in the design's words:
   failed is an attempt :data:`API_FAILED` — relaunched, then Stuck(owner=loop). A dead pid ends
   the session and frees its worktree. No Stuck reason is ever empty, a code fence or noise
   (:func:`asf.kernel.reports.meaningful`); one recorded that way is judged afresh.
+- Documents: only a Feature with no children launches ``spec`` (``plan`` once its spec has
+  landed); a Story or Epic with no children is New and never launches.
+- Rank: ``config.rank`` ``inherit`` (the default) walks ``parent`` for a rank; ``own`` reads
+  only the item's own.
+- Idle: when ``config.idle_alarm`` is on, nothing launches, at least ``config.idle_min_free``
+  seats are free and visible Tasks/Bugs wait (New or Ready), the plan carries ``idle``: the free
+  seats, how many wait, and the top three reasons with counts (:data:`IDLE_REASONS`).
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -57,6 +64,10 @@ CONTAINERS = ('epic', 'feature', 'story')
 
 #: the item types a build session works on
 BUILDABLE = ('task', 'bug')
+
+#: the one item type a document lane (spec, then plan once its spec landed) launches for: a
+#: childless Story or Epic is New, never a spec
+DOCUMENTED = 'feature'
 
 #: the reason prefix of a failed attempt to update a conflicting PR's branch
 CONFLICT = 'conflict'
@@ -84,6 +95,15 @@ NEXT_ACTION = {
     'session': 'a session reads the reason and fixes the cause',
     'ci': 'fix or rerun the red check outside this PR',
     'operator': 'answer on the card',
+}
+
+#: why a waiting Task or Bug did not launch (the idle alarm's reasons)
+IDLE_REASONS = {
+    'after': 'waits on after:',
+    'overlap': 'file overlap',
+    'held': 'held this tick',
+    'paused': 'launches paused',
+    'new': 'not ready (new)',
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
@@ -128,10 +148,12 @@ def decide(facts, config):
     _count_blocked(items, states, parked)
 
     actions += _mint(facts, parked)
-    if not facts.paused:
-        actions += _launches(facts, config, judged, children, states, parked)
+    launches, skipped = (([], {}) if facts.paused
+                         else _launches(facts, config, judged, children, states, parked))
+    actions += launches
     actions.sort(key=lambda a: ORDER.index(type(a)))
-    return A.Plan(states=states, actions=actions)
+    idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
+    return A.Plan(states=states, actions=actions, idle=idle)
 
 
 # ---- pass one: each item on its own facts -------------------------------------------------------
@@ -190,15 +212,19 @@ def _judge(it, facts, config, actions):
         return j
     if it.state is State.DONE and not it.reopened:
         return _Judged(State.DONE)
-    if it.priority == 'later' or (effective_rank(it.id, facts.items) is None
+    if it.priority == 'later' or (effective_rank(it.id, facts.items, config.rank != 'own') is None
                                   and it.type not in BUILDABLE):
         return _Judged(State.NEW, hold=hold)
+    if it.type not in BUILDABLE and it.type != DOCUMENTED:
+        return _Judged(State.NEW, hold=hold)  # only a Feature gets a spec or plan launch
     return _Judged(State.READY, hold=hold)
 
 
-def effective_rank(iid, items):
-    """``iid``'s own ``rank``, else its nearest ancestor's through ``parent`` (Story, Feature,
-    Epic), else None. A ``parent`` cycle ends the walk."""
+def effective_rank(iid, items, inherit=True):
+    """``iid``'s own ``rank``, else (``inherit``) its nearest ancestor's through ``parent`` (Story,
+    Feature, Epic), else None. A ``parent`` cycle ends the walk."""
+    if not inherit:
+        return items[iid].rank if iid in items else None
     seen, cur = set(), iid
     while cur in items and cur not in seen:
         if items[cur].rank is not None:
@@ -208,10 +234,10 @@ def effective_rank(iid, items):
     return None
 
 
-def launch_order(iid, items):
+def launch_order(iid, items, inherit=True):
     """The key launches sort by: (effective rank, own rank, id), unranked (+inf) last."""
     inf = float('inf')
-    eff, own = effective_rank(iid, items), items[iid].rank
+    eff, own = effective_rank(iid, items, inherit), items[iid].rank
     return (inf if eff is None else eff, inf if own is None else own, iid)
 
 
@@ -456,34 +482,66 @@ def _mint(facts, parked):
 
 
 def _launches(facts, config, judged, children, states, parked):
-    """Reviews first, then Ready items, each in launch order (:func:`launch_order`), while sessions are free; a Ready item
-    whose ``writes`` overlap a Building (or just launched) visible item waits its turn."""
+    """``(launches, skipped)``: reviews first, then Ready items, each in launch order
+    (:func:`launch_order`), while sessions are free; a Ready item whose ``writes`` overlap a
+    Building (or just launched) visible item waits its turn (``skipped[iid] = 'overlap'``)."""
     items = facts.items
-    free = config.max_sessions - sum(1 for s in facts.sessions if s.alive)
-    rank = lambda iid: launch_order(iid, items)  # noqa: E731
+    free = _free(facts, config)
+    inherit = config.rank != 'own'
+    rank = lambda iid: launch_order(iid, items, inherit)  # noqa: E731
     reviews = sorted((i for i, j in judged.items() if j.review_branch and not j.hold), key=rank)
     ready = sorted((i for i, j in judged.items()
                     if states[i][0] is State.READY and not j.hold and _visible(items, i, parked)
                     and not _derived(i, items, children)), key=rank)
     busy = [items[i].writes for i in items
             if states[i][0] is State.BUILDING and _visible(items, i, parked)]
-    out = []
+    out, skipped = [], {}
     for iid in reviews:
         if free <= 0:
-            return out
+            return out, skipped
         out.append(A.Launch('review', iid, judged[iid].review_branch))
         free -= 1
     for iid in ready:
         if free <= 0:
             break
         if any(_overlap(items[iid].writes, w) for w in busy):
+            skipped[iid] = 'overlap'
             continue
         kind = _kind(items[iid], facts)
         out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config, items[iid]),
                             list(judged[iid].findings)))
         busy.append(items[iid].writes)
         free -= 1
-    return out
+    return out, skipped
+
+
+def _free(facts, config):
+    return config.max_sessions - sum(1 for s in facts.sessions if s.alive)
+
+
+def _idle(facts, config, judged, states, parked, skipped):
+    """The idle alarm (see the module doc), or None: why each waiting Task/Bug did not launch."""
+    free = _free(facts, config)
+    if not config.idle_alarm or free < max(config.idle_min_free, 1):
+        return None
+    items, reasons = facts.items, {}
+    for iid, (state, _st) in states.items():
+        it = items.get(iid)
+        if (it is None or it.type not in BUILDABLE or not _visible(items, iid, parked)
+                or state not in (State.NEW, State.READY)):
+            continue
+        if state is State.NEW:
+            why = ('after' if any(_visible(items, a, parked) and states[a][0] is not State.DONE
+                                  for a in it.after) else 'new')
+        elif facts.paused:
+            why = 'paused'
+        else:
+            why = skipped.get(iid) or ('held' if judged[iid].hold else 'new')
+        reasons[IDLE_REASONS[why]] = reasons.get(IDLE_REASONS[why], 0) + 1
+    if not reasons:
+        return None
+    top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+    return {'free': free, 'waiting': sum(reasons.values()), 'reasons': top}
 
 
 def _kind(it, facts):

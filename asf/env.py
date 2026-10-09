@@ -574,8 +574,10 @@ NESTED_FIELDS = {
 # ``ci.hosts``/``ci.jobs`` (asf.ci_vm: the ``ci.provider: vm`` config) are the same case — a
 # product only sets either after adopting a release that reads them, so the pinned reader this
 # key would strand never runs a file that carries it.
+# ``kernel`` (asf.kernel.settings: ASF 0.2's kernel block) is the same case at the top level: only
+# a product on a kernel release sets it, and its own keys are checked by that module.
 DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats',
-                                         'ci.hosts', 'ci.jobs'})
+                                         'ci.hosts', 'ci.jobs', 'kernel'})
 
 
 def _shape_ok(value, shape):
@@ -737,6 +739,12 @@ def product_problems(text):
     from asf import credentials as credentials_mod  # local: keeps env importable from credentials
     for dotted, why in credentials_mod.product_problems(data.get('credentials')):
         problems.append((lines.get('credentials', 0), dotted, why))
+    from asf.kernel import settings as kernel_settings  # `kernel:` (asf.kernel.settings)
+    k_errors, k_warnings = kernel_settings.problems(data.get('kernel'))
+    for dotted, why in k_errors:
+        problems.append((lines.get('kernel', 0), dotted, why))
+    for dotted, why in k_warnings:
+        warnings.append((lines.get('kernel', 0), dotted, why))
     # `conventions:` keeps unknown keys (asf.conventions), but the shaped ones are checked
     for key, why in conventions_mod.validate_mapping(data.get('conventions')):
         dotted = 'conventions.' + key
@@ -962,6 +970,12 @@ class Product:
         """``credentials:`` — the provider names this product needs
         (:mod:`asf.credentials`). ``[]`` when the product names none."""
         return self._get('credentials') or []
+
+    @property
+    def kernel(self):
+        """The ``kernel:`` block with every default filled in (:func:`asf.kernel.settings.read`)."""
+        from asf.kernel import settings
+        return settings.read(self._get('kernel'))
 
     def flag(self, name, default=None):
         """``conventions.flags.<name>``, else ``default`` (:meth:`Conventions.flag`). Every

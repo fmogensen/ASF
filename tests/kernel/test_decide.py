@@ -222,5 +222,64 @@ class Stories(unittest.TestCase):
         self.assertEqual(declared_stories(spec)['S-0001']['acceptance'], ['a'])
 
 
+class OnlyFeaturesGetDocuments(unittest.TestCase):
+
+    def test_a_story_with_no_tasks_gets_no_launch(self):
+        items = [B.item('F-0001', rank=1), B.task('T-0001', parent='F-0001', state=State.DONE),
+                 B.item('S-0005', parent='F-0001'), B.item('S-0006', rank=2)]
+        plan = decide(B.facts(items, specs_landed={'F-0001': ''}), B.config())
+        self.assertEqual(B.launched(plan), [])
+        self.assertEqual(B.state(plan, 'S-0005'), State.NEW)
+        self.assertEqual(B.state(plan, 'S-0006'), State.NEW)
+
+    def test_a_childless_epic_gets_no_launch_and_a_feature_still_does(self):
+        items = [B.item('E-0001', rank=1), B.item('F-0002', rank=2)]
+        plan = decide(B.facts(items), B.config())
+        self.assertEqual([(a.kind, a.item_id) for a in B.of(plan, A.Launch)], [('spec', 'F-0002')])
+
+
+class RankMode(unittest.TestCase):
+
+    def test_own_reads_only_the_items_own_rank(self):
+        items = [B.item('F-0001', rank=1), B.task('T-0001', rank=None, parent='F-0001'),
+                 B.task('T-0002', rank=5)]
+        self.assertEqual(B.launched(decide(B.facts(items), B.config()), 'build'),
+                         ['T-0001', 'T-0002'])
+        self.assertEqual(B.launched(decide(B.facts(items), B.config(rank='own')), 'build'),
+                         ['T-0002', 'T-0001'])
+
+    def test_own_keeps_an_unranked_feature_new(self):
+        items = [B.item('E-0001', rank=1), B.item('F-0001', parent='E-0001')]
+        self.assertEqual(B.launched(decide(B.facts(items), B.config())), ['F-0001'])
+        plan = decide(B.facts(items), B.config(rank='own'))
+        self.assertEqual((B.launched(plan), B.state(plan, 'F-0001')), ([], State.NEW))
+
+
+class IdleAlarm(unittest.TestCase):
+
+    def test_free_seats_waiting_work_and_no_launch_raise_it_with_reasons(self):
+        items = [B.task('T-0001', state=State.BUILDING, writes=['src/a.py']),
+                 B.task('T-0002', writes=['src/a.py']), B.task('T-0003', writes=['src/*']),
+                 B.task('T-0004', after=['T-0001'])]
+        f = B.facts(items, sessions=[B.session('j1', 'T-0001')])
+        plan = decide(f, B.config(max_sessions=4))
+        self.assertEqual(B.launched(plan), [])
+        self.assertEqual(plan.idle, {'free': 3, 'waiting': 3,
+                                     'reasons': [('file overlap', 2), ('waits on after:', 1)]})
+
+    def test_a_launch_or_full_seats_or_the_switch_keep_it_down(self):
+        self.assertIsNone(decide(B.facts([B.task('T-0001')]), B.config()).idle)
+        items = [B.task('T-0001', state=State.BUILDING), B.task('T-0002', after=['T-0001'])]
+        f = B.facts(items, sessions=[B.session('j1', 'T-0001')])
+        self.assertIsNone(decide(f, B.config(max_sessions=1)).idle)
+        self.assertIsNone(decide(f, B.config(idle_alarm=False)).idle)
+        self.assertIsNone(decide(f, B.config(max_sessions=3, idle_min_free=3)).idle)
+        self.assertEqual(decide(f, B.config(max_sessions=3, idle_min_free=2)).idle['free'], 2)
+
+    def test_paused_says_so(self):
+        f = B.facts([B.task('T-0001')], paused=True)
+        self.assertEqual(decide(f, B.config()).idle['reasons'], [('launches paused', 1)])
+
+
 if __name__ == '__main__':
     unittest.main()

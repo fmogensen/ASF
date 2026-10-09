@@ -473,6 +473,15 @@ def build_parser():
     p_kpause.add_argument('--reason', default='kernel pause', help='recorded with the pause')
     p_kresume = kernel_sub.add_parser('resume', help="lift the product's launch pause")
     p_kresume.add_argument('--product', required=True)
+    p_kinstall = kernel_sub.add_parser(
+        'install', help="write and load the tick and keep-alive launchd jobs from the product's "
+                        'kernel: block, running this venv')
+    p_kinstall.add_argument('--product', required=True)
+    p_kinstall.add_argument('--dry-run', action='store_true', help='print the plists; write nothing')
+    p_kwatch = kernel_sub.add_parser('watch', help='keep-alive: load the tick job, kick a stale one')
+    p_kwatch.add_argument('--product', required=True)
+    p_kgate = kernel_sub.add_parser('gate', help='the proof gate: PASS/FAIL per kernel.gate criterion')
+    p_kgate.add_argument('--product', required=True)
 
     p_capacity = sub.add_parser('capacity', help='the CAPACITY table: sessions and CI runs per product')
     g_capacity = p_capacity.add_mutually_exclusive_group()
@@ -585,7 +594,21 @@ EX_TEMPFAIL = 75
 
 
 def _kernel(args):
-    """``asf kernel tick|status|pause|resume --product P``."""
+    """``asf kernel tick|status|pause|resume|install|watch|gate --product P``."""
+    if args.kernel_command in ('install', 'watch', 'gate'):
+        from asf import env
+        product = env.load_product(args.product)
+        if args.kernel_command == 'install':
+            from asf.kernel import host
+            return host.install(product, dry_run=args.dry_run)
+        if args.kernel_command == 'watch':
+            from asf.kernel import host
+            rc, line = host.watch(product)
+            if sys.stdout.isatty():
+                print(line)
+            return rc
+        from asf.kernel import gate
+        return gate.gate(product)
     if args.kernel_command == 'tick':
         from asf.kernel.loop import tick
         summary = tick(args.product, dry_run=args.dry_run)

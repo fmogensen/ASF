@@ -76,6 +76,8 @@ class Plan:
     """The whole decision of one tick. ``states`` maps every item id the kernel judged (Tasks and
     Bugs, plus the derived state of every Feature and Story) to ``(State, Stuck or None)`` — the
     second is set exactly when the first is ``State.STUCK``. ``actions`` is the ordered list of
-    the action values above."""
+    the action values above. ``idle`` is the idle alarm (None when not raised): ``{'free': seats
+    free, 'waiting': Tasks/Bugs not launched, 'reasons': [(reason, count)], the top three}``."""
     states: dict = dataclasses.field(default_factory=dict)
     actions: list = dataclasses.field(default_factory=list)
+    idle: dict = None

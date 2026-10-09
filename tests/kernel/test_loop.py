@@ -197,6 +197,23 @@ class Status(unittest.TestCase):
         self.assertIn('| building | 1 |', text)
         self.assertIn('| j3 | T-0003 | build | alive |', text)
 
+    def test_the_idle_alarm_leads_the_status_and_survives_the_saved_plan(self):
+        rec = F.FakeRecord([B.task('T-0001', state=State.BUILDING, writes=['a.py']),
+                            B.task('T-0002', writes=['a.py'])])
+        sess = F.FakeSessions([B.session('j1', 'T-0001')])
+        out, tmp = [], tempfile.mkdtemp()
+        text = status.status(env.Product('sample', {}), ports=F.ports(record=rec, sessions=sess),
+                             config=B.config(max_sessions=3), out=out.append, live=True)
+        self.assertTrue(text.startswith('IDLE: 2 seat(s) free, 1 not launched — file overlap 1'))
+        lines = []
+        summary = loop.tick(env.Product('sample', {}), ports=F.ports(record=rec, sessions=sess),
+                            config=B.config(max_sessions=3), state_dir=tmp, out=lines.append)
+        self.assertEqual(summary['idle']['waiting'], 1)
+        self.assertIn('IDLE: 2 seat(s) free, 1 not launched — file overlap 1', lines)
+        text = status.status(env.Product('sample', {}), ports=F.ports(record=rec, sessions=sess),
+                             out=out.append, state_dir=tmp)
+        self.assertTrue(text.startswith('IDLE: 2 seat(s) free'))
+
 
 class Cli(unittest.TestCase):
 
@@ -206,7 +223,7 @@ class Cli(unittest.TestCase):
         a = p.parse_args(['kernel', 'tick', '--dry-run', '--product', 'x'])
         self.assertEqual((a.command, a.kernel_command, a.dry_run, a.product),
                          ('kernel', 'tick', True, 'x'))
-        for cmd in ('status', 'pause', 'resume'):
+        for cmd in ('status', 'pause', 'resume', 'install', 'watch', 'gate'):
             self.assertEqual(p.parse_args(['kernel', cmd, '--product', 'x']).kernel_command, cmd)
 
     def test_pause_and_resume_write_the_one_pause_flag(self):

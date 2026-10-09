@@ -34,8 +34,9 @@ def _cell(text, width=80):
     return text if len(text) <= width else text[:width - 1] + '…'
 
 
-def rows(ports, config, now=None):
-    """``(stuck rows, state counts, session rows)`` for the status table."""
+def rows(ports, config, now=None, with_idle=False):
+    """``(stuck rows, state counts, session rows)`` for the status table (plus the plan's idle
+    alarm, ``with_idle``)."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     with mutation_guard.active():
         facts = read_facts(ports)
@@ -51,7 +52,7 @@ def rows(ports, config, now=None):
     sessions = [(s.job, s.item_id, s.kind, 'alive' if s.alive else 'dead',
                  _age(getattr(s, 'started', ''), now) if getattr(s, 'started', '') else '-')
                 for s in facts.sessions]
-    return stuck, counts, sessions
+    return (stuck, counts, sessions, plan.idle) if with_idle else (stuck, counts, sessions)
 
 
 def rows_from_plan(data, record, now=None):
@@ -71,9 +72,12 @@ def rows_from_plan(data, record, now=None):
     return stuck, counts, sessions
 
 
-def render(stuck, counts, sessions):
-    """The three blocks as markdown tables (the console draws them as boxes)."""
-    out = ['## Stuck', '', '| item | owner | blocks | age | reason |', '| --- | --- | --- | --- | --- |']
+def render(stuck, counts, sessions, idle=None):
+    """The three blocks as markdown tables (the console draws them as boxes), the idle alarm
+    (:func:`asf.kernel.loop.idle_line`) first when it is raised."""
+    from asf.kernel.loop import idle_line
+    out = [idle_line(idle), ''] if idle else []
+    out += ['## Stuck', '', '| item | owner | blocks | age | reason |', '| --- | --- | --- | --- | --- |']
     out += ['| %s | %s | %d | %s | %s |' % (iid, owner, n, age, _cell(reason))
             for iid, reason, owner, n, age in stuck] or ['| - | - | 0 | - | nothing stuck |']
     out += ['', '## States', '', '| state | items |', '| --- | --- |']
@@ -97,12 +101,14 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
             data = None
     if data is not None:
         record = ports.record if ports else P.RealRecord(product)
-        text = render(*rows_from_plan(data, record)) + '\n\n(the tick of %s; --live for now)' \
+        text = render(*rows_from_plan(data, record), idle=data.get('idle')) \
+            + '\n\n(the tick of %s; --live for now)' \
             % data.get('at', '?')
         out(text)
         return text
     ports = ports or P.real_ports(product)
     config = config or P.config_for(product)
-    text = render(*rows(ports, config))
+    stuck, counts, sessions, idle = rows(ports, config, with_idle=True)
+    text = render(stuck, counts, sessions, idle=idle)
     out(text)
     return text

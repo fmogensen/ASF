@@ -205,12 +205,19 @@ class Config:
     item Stuck; ``max_fix_rounds`` red-driven rounds before Stuck; ``max_reruns`` reruns of a red
     that touches none of the PR's files before Stuck(owner=ci). ``work_branch`` / ``fix_branch`` are the branch
     prefixes of a build launch for a Task / a Bug with no open PR (a doc lane's prefix is the
-    ``doc_branches`` entry named after its kind, e.g. ``spec/``)."""
+    ``doc_branches`` entry named after its kind, e.g. ``spec/``). ``rank`` is ``inherit`` (a Task
+    takes its nearest ancestor's rank) or ``own`` (only an item's own rank counts).
+    ``idle_alarm``/``idle_min_free``: the plan carries an ``idle`` record when at least that many
+    seats are free, work waits and nothing launches. The product file's ``kernel:`` block sets
+    them (:mod:`asf.kernel.settings`)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
     fix_branch: str = ''
-    max_sessions: int = 8
+    max_sessions: int = 6
     max_attempts: int = 2
     max_fix_rounds: int = 2
     max_reruns: int = 1
+    rank: str = 'inherit'
+    idle_alarm: bool = True
+    idle_min_free: int = 1

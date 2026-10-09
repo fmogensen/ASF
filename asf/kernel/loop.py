@@ -70,12 +70,24 @@ def summarize(plan, facts, result=None, dry_run=False):
         'failed': [(describe(a) if not isinstance(a, tuple) else 'write %s' % a[1], why)
                    for a, why in (result.failed if result else [])],
         'written': list(result.written) if result else [],
+        'idle': plan.idle,
     }
+
+
+def idle_line(idle):
+    """The idle alarm as one line (``IDLE: 3 seat(s) free, 5 not launched — waits on after: 3,
+    file overlap: 2``), or '' when ``idle`` is None."""
+    if not idle:
+        return ''
+    return 'IDLE: %d seat(s) free, %d not launched — %s' % (
+        idle['free'], idle['waiting'], ', '.join('%s %d' % (r, n) for r, n in idle['reasons']))
 
 
 def print_summary(summary, out=print):
     out('kernel tick%s: %s' % (' (dry run)' if summary['dry_run'] else '',
                               ', '.join('%s %d' % kv for kv in summary['states'].items()) or 'no items'))
+    if summary.get('idle'):
+        out(idle_line(summary['idle']))
     if summary['paused']:
         out('launches paused')
     out('actions: %s' % (', '.join('%s %d' % kv for kv in sorted(summary['actions'].items()))
@@ -98,7 +110,8 @@ def save_plan(state_dir, plan, facts):
                                     'blocked': st.blocked_count} if st else {})}
         for iid, (s, st) in sorted(plan.states.items())},
         'sessions': [{'job': x.job, 'item': x.item_id, 'kind': x.kind, 'alive': x.alive,
-                      'started': getattr(x, 'started', '')} for x in facts.sessions]}
+                      'started': getattr(x, 'started', '')} for x in facts.sessions],
+        'idle': plan.idle}
     path = os.path.join(state_dir, PLAN_FILE)
     with open(path + '.tmp', 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=1, sort_keys=True)

@@ -666,17 +666,16 @@ def real_ports(product):
 
 def config_for(product, cfg=None):
     """The :class:`~asf.kernel.model.Config` of ``product``: branch prefixes and document roots
-    from its conventions; ``max_sessions`` from its ``capacity.sessions`` when that is a number."""
+    from its conventions; ``max_sessions``, ``rank`` and the idle alarm from its ``kernel:``
+    block (:mod:`asf.kernel.settings`, each with its documented default)."""
     conv = product.conventions
-    cap = (product._get('capacity') or {}).get('sessions')
-    try:
-        max_sessions = int(cap)
-    except (TypeError, ValueError):
-        max_sessions = M.Config.max_sessions
+    k = product.kernel
     return M.Config(
         doc_branches=(conv.prefix('spec'), conv.prefix('plan')),
         doc_paths=tuple('%s/**' % d.rstrip('/') for d in (conv.specs_dir, conv.plans_dir,
                                                           conv.reviews_dir)),
         work_branch=conv.prefix('code'), fix_branch=conv.prefix('fix'),
-        max_sessions=max_sessions)
+        max_sessions=int(k['launch']['max_sessions']), rank=k['launch']['rank'],
+        idle_alarm=bool(k['idle_alarm']['enabled']),
+        idle_min_free=int(k['idle_alarm']['min_free_seats']))
 

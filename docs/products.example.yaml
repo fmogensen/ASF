@@ -454,6 +454,28 @@ capacity:
     parallel: 2       # batches in flight at once (harvest: PRs in a GitHub merge queue)
     runners: 4        # runner slots one run may claim
 
+# kernel: ASF 0.2's kernel (asf.kernel.settings). Every key shown is its default; leave the block
+# out to take them all. `asf kernel install` writes the two launchd jobs from tick/watch,
+# `asf kernel watch` is the keep-alive, `asf kernel gate` checks the proof criteria.
+kernel:
+  tick:
+    interval_s: 120         # the tick job runs every this many seconds
+  launch:
+    max_sessions: 6         # live sessions the tick launches up to
+    rank: inherit           # inherit: a Task takes its nearest ancestor's rank; own: only its own
+  watch:
+    interval_s: 600         # the keep-alive job runs every this many seconds
+    stale_after_s: 900      # a plan older than this, and no tick running: kickstart the tick
+  idle_alarm:
+    enabled: true           # the plan carries an `idle` record when seats are free, work waits,
+    min_free_seats: 1       # and nothing launches; tick prints IDLE, status shows it on top
+  gate:
+    window_h: 24            # first-push-green is measured over PRs opened in the last window_h
+    first_push_green_min: 0.7
+    landed_min: 5           # Tasks/Bugs landed via kernel PRs since `since`
+    silent_stuck_max: 0     # Stuck items with no reason or no owner
+    # since: 2026-10-09T14:00:00Z   # the proof's start
+
 # token_caps: runaway ceilings on one run's tokens, per dimension, never summed. `default` applies
 # to every job kind; a kind (spec, review, fix, code, plan, ...) narrows or widens single dimensions.
 # A cap is a whole number of tokens, or `off` for none. Leave the block out for the built-in caps.
