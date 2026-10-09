@@ -87,6 +87,7 @@ def _plan(root, product):
     from asf.feeder import rows as feeder_rows
     from asf.feeder import tiers
     from asf.record import plan_order
+    from asf import pause as pause_mod
     from asf.tick import step_wave
     from asf.views import index_reader as ix
     from asf.workers import host as host_mod
@@ -129,7 +130,8 @@ def _plan(root, product):
                        and not step_wave.s1_bypass_live())
     screened = step_wave.screen(product, planned, planning_items, running,
                                 inputs.get('held') or set(),
-                                seats, (host_held, host_why), bypass_open, act=False)
+                                seats, (host_held, host_why), bypass_open, act=False,
+                                paused=pause_mod.held(product))
     return Plan(product=product, items=items, rows=rows, inputs=inputs, capacity=cap,
                inflight=running, gate=tiers.gate(rows, uncut, held=inputs.get('held')),
                screened=screened)
