@@ -144,7 +144,7 @@ class StatusViewTests(ViewsTestCase):
     def test_unconfigured_rows_name_their_key_never_a_bare_dash(self):
         rows = self.rows({'scheduler': {'kind': 'none'}})
         self.assertEqual(rows['Runners'], '— (not configured: ci.provider (none))')
-        self.assertEqual(rows['Prod'], '— (not configured: deploy_sha.workflow)')
+        self.assertEqual(rows['Prod'], 'trunk is production — no deploy configured (B-0077)')
         self.assertEqual(rows['Quota 5h/7d'], '— (not configured: worker_pool.quota_command)')
         self.assertEqual(rows['Cron'], '— (not configured: scheduler.kind (none has no status adapter))')
         self.assertEqual(rows['Groom'], '— (not configured: approvals.groom)')
@@ -198,6 +198,23 @@ class StatusViewTests(ViewsTestCase):
                 cell = status.prod_cell(product)
             self.assertEqual(cell, '? (no successful deploy.yml run readable)', data)
             self.assertIn('deploy.yml', sh.call_args[0][0])
+
+    def test_prod_row_names_trunk_as_production_with_no_deploy_configured(self):
+        """B-0093: a product with hosted CI and no deploy (B-0077's `trunk is production`) is
+        not a misconfiguration — Prod must not say `not configured`."""
+        product = env.Product('p', {'ci': {'provider': 'github-actions'},
+                                    'repo_slug': 'x/y', 'repo_dir': self.tmp})
+        cell = status.prod_cell(product)
+        self.assertNotIn('not configured', cell)
+        self.assertIn('B-0077', cell)
+
+    def test_runners_row_names_hosted_ci_with_no_self_hosted_pool(self):
+        """B-0093: hosted CI (no `ci.runner_org`/`ci.pool` declared, nothing self-hosted to
+        track) is not a misconfiguration — Runners must not say `not configured`."""
+        product = env.Product('p', {'ci': {'provider': 'github-actions'},
+                                    'repo_slug': 'x/y', 'repo_dir': self.tmp})
+        cell = status.runners_cell(product)
+        self.assertNotIn('not configured', cell)
 
     def test_groom_row_reads_the_newest_digest(self):
         product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
