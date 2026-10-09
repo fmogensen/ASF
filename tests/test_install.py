@@ -2517,6 +2517,39 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(self._asf_call(), 'install --product demo')
         self.assertIn(f'install: product demo, release v0.3.0 from {self.remote}', r.stdout)
 
+    def test_an_unreachable_repo_fails_tag_resolution_with_needs_operator(self):
+        """B-0113: with no ref, resolving the newest tag runs ``git ls-remote`` before pipx is
+        ever reached; an unreachable repo must not fall through ``set -e`` silently with git's
+        own exit code — it names NEEDS OPERATOR, exits 2, and pipx is never invoked."""
+        bad_remote = os.path.join(self.tmp, 'no-such-remote.git')
+        r = self._run(['demo'], ASF_REPO_URL=bad_remote)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('install: NEEDS OPERATOR:', r.stderr)
+        self.assertIn(bad_remote, r.stderr)
+        self.assertFalse(os.path.exists(self.pipx_log))
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_a_failing_pipx_names_needs_operator_with_its_last_stderr_line(self):
+        """B-0113: pipx itself failing (the ref unresolvable, the network down, the spec
+        rejected …) must not fall through ``set -e`` with pipx's own exit code and no guidance —
+        it names NEEDS OPERATOR, carries pipx's last stderr line, and exits 2."""
+        self._write_scripts()
+        pipx_path = os.path.join(self.bin_dir, 'pipx')
+        with open(pipx_path, 'w') as f:
+            f.write('#!/bin/sh\n'
+                    'echo "pipx: looking for spec" >&2\n'
+                    'echo "pipx: ERROR: could not find a version that satisfies the '
+                    'requirement" >&2\n'
+                    'exit 1\n')
+        os.chmod(pipx_path, 0o755)
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
+                           text=True, **_operator_tty(), env=self._env(), timeout=60)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn('install: NEEDS OPERATOR: pipx install of deadbeef failed', r.stderr)
+        self.assertIn('could not find a version that satisfies the requirement', r.stderr)
+        self.assertIn('check the ref and network', r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+
     def test_a_second_argument_pins_the_ref_with_no_tag_resolution(self):
         r = self._run(['demo', 'deadbeef'])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -3320,6 +3353,25 @@ class InstallStepsTests(HomeCase):
 
     def test_step_8_install_failure_is_not_masked_by_the_read_back(self):
         args = _install_args(scheduler='launchd')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=1):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (1, 'asf scheduler install failed'))
+
+    def test_step_8_cron_prints_the_crontab_line_and_is_not_a_failure(self):
+        """B-0112: ``scheduler.cmd_scheduler`` returns 3 for a kind with no on-machine adapter
+        (cron: it only prints the line for the operator) — this must read as ``ok``, never
+        ``FAILED``."""
+        args = _install_args(scheduler='cron')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=3) as cmd, \
+                mock.patch.object(install.env, 'load_config',
+                                  return_value={'scheduler': {'kind': 'cron'}}):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (0, 'ok'))
+        cmd.assert_called_once()
+
+    def test_step_8_a_real_scheduler_install_failure_still_fails_under_cron(self):
+        """A genuine failure (anything but 0 or 3) is not swallowed by the cron carve-out."""
+        args = _install_args(scheduler='cron')
         with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=1):
             result = install._step_scheduler(args)
         self.assertEqual(result, (1, 'asf scheduler install failed'))
