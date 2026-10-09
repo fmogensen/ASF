@@ -264,6 +264,14 @@ RECORD_ERROR_PLACES = 10
 #: leave that specific in the class, splitting one defect into one class per specific (B-0132).
 _QUOTED_RE = re.compile(r"(?<![A-Za-z0-9])'[^']*'|\"[^\"]*\"")
 _ITEM_ID_RE = ID_TOKEN_RE
+#: B-0138: classes this source never files, because the tick already owns their fix. I3's
+#: unordered-overlap message (`asf.record.check`) is ordered away every tick by
+#: `asf.tick.widen_footprint.serialize_overlaps`, which the health step runs ahead of this one
+#: (`asf.tick.tick`'s `record-tail`) — a standing instance is the next tick's to clear, not a
+#: person's, and a Bug filed for it could never go quiet (`asf.evidence.closing`'s quiet rule
+#: needs a fix commit landed and referencing it, and there is none to write): filing one here
+#: only turns a self-healing overlap into permanent noise.
+RECORD_ERROR_SELF_HEALED = ("writes: … intersects Active task …'s …",)
 
 
 def error_class(message):
@@ -291,6 +299,9 @@ def record_error_signatures(root, findings=None, canonical=None, shared=()):
     ``default_bug_epic`` is already reported once (``usable_bug_epic``), and filing a Bug about
     it would make every run file a Bug about the Bug the last run filed.
 
+    A class in :data:`RECORD_ERROR_SELF_HEALED` is skipped too (B-0138): the tick already clears
+    every instance of it on its own, so there is no standing debt here for a Bug to own.
+
     ``shared``: the product's ``conventions.shared_paths``, passed straight to
     ``record_findings`` — a Bug is never filed for an overlap the feeder already exempts."""
     if findings is None:
@@ -306,6 +317,8 @@ def record_error_signatures(root, findings=None, canonical=None, shared=()):
         if path in filed_here:
             continue
         klass = error_class(message)
+        if klass in RECORD_ERROR_SELF_HEALED:
+            continue
         sig = RECORD_ERROR_SIG.format(klass=klass)
         d = out.setdefault(sig, {
             'title': truncate(f"Record error: {klass}", 120), 'severity': 'S3',
