@@ -858,6 +858,8 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
                     bypass_open = True
                 why = f'brief build failed: {(str(e) or type(e).__name__).splitlines()[0]}'
                 say(f'waits    {job:<24} {row.item_id:<10} — {why}')
+                import traceback
+                say(traceback.format_exc().rstrip())
                 result.append(Screened(row, why, WAITS))
                 continue
             capped = 'parked' if relaunch_capped(product, row, wrow, out) else ''
