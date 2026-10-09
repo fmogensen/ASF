@@ -258,6 +258,26 @@ class GreenBatch(QueueRepo):
         self.assertEqual(self.batches(), [])
         self.assertNotIn(batch['ref'], self.heads())
 
+    def test_required_jobs_skipped_while_their_run_is_in_flight_are_pending_not_red(self):
+        # F-0328, a product batch 053bccd: ``changes`` green, ``rules`` still running (queued
+        # behind runner contention), the required jobs behind it read ``skipped`` — the run
+        # has not judged them yet: the batch stands, nothing is sent back or dropped
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [
+            check_run('changes'), check_run('rules', None, 'in_progress'),
+            check_run('gate', 'skipped'), check_run('gate-tests', 'skipped'),
+            check_run('m6-e2e', 'skipped'), check_run('m8-e2e', 'skipped'),
+            check_run('m3b-e2e', 'skipped')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [], self.lines)
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']], self.lines)
+        self.assertIn(batch['ref'], self.heads())
+        self.assertFalse(any('red on' in l for l in self.lines), self.lines)
+        state, why = merge_queue.verdict(self.gh.checks[batch['sha']], ('gate', 'gate-tests'))
+        self.assertEqual(state, 'pending')
+        self.assertIn('in progress', why)
+
     def test_dry_run_cuts_nothing(self):
         ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append if hasattr(self, 'lines')
                        else print, dry_run=True, items={})
