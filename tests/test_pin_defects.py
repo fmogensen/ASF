@@ -21,7 +21,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import doctor, env, hooks, redact, scheduler
+from asf import dispatch, doctor, env, hooks, redact, scheduler
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.scheduler import Clock
@@ -350,6 +350,217 @@ class CloudSafeHooksTest(unittest.TestCase):
         self.assertFalse(os.path.exists(flag))
         self.assertIn('asf-redaction-unchecked', githooks.ASF_HOOK)   # the names stay in step
         self.assertIn(f'"{redact.UNCHECKED_TRAILER}"', githooks.ASF_HOOK)
+
+
+# ---- 5. the hook checks the asf it is about to exec while its product is pinned (F-0283) ------
+
+class PinGuardHookBodyTest(unittest.TestCase):
+    """S-76254: while a product is pinned, a hook written for it runs a candidate ``asf`` only
+    when that file carries the dispatcher's marker (F-0283); unpinned, the body is inert and
+    behaves exactly as before. Reuses :class:`CloudSafeHooksTest`'s fixture — a throwaway repo
+    with a tracked ``.githooks`` as ``core.hooksPath`` and a fake ``HOME`` — plus a fake
+    ``ASF_HOME`` so ``ensure_git_hooks`` can be driven across a pin being added and removed."""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix='asf-pinguard-'))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = os.path.join(self.tmp, 'repo')
+        subprocess.run(['git', 'init', '-q', self.repo], check=True)
+        self.hooks_dir = os.path.join(self.repo, '.githooks')
+        os.makedirs(self.hooks_dir)
+        git(self.repo, 'config', 'core.hooksPath', '.githooks')
+        self.home = os.path.join(self.tmp, 'home')
+        os.makedirs(self.home)
+        self.asf_home = os.path.join(self.tmp, 'ASF')
+        os.makedirs(self.asf_home)
+        patch = mock.patch.object(env, 'ASF_HOME', self.asf_home)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.product = env.Product('demo', {'repo_dir': self.repo})
+
+    def dispatcher(self, path, tag='DISPATCHER'):
+        """A file that reads as the dispatcher's to :func:`asf.hooks._git_hook_body`'s guard —
+        built from :func:`asf.dispatch.render`'s own first three lines (where the marker lands,
+        P7), never a hand-copied marker string — and otherwise just echoes its argv."""
+        head = dispatch.render('/x', '/y', '', '', '/usr/bin/python3').splitlines()[:3]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write('\n'.join(head) + f'\necho "{tag} $*" >&2\nexit 0\n')
+        os.chmod(path, 0o755)
+        return path
+
+    def write_hook(self, name, asf_path, pin_required, product='demo'):
+        path = os.path.join(self.hooks_dir, name)
+        with open(path, 'w') as f:
+            f.write(hooks._git_hook_body(name, asf_path, product, pin_required))
+        os.chmod(path, 0o755)
+        return path
+
+    def run_hook(self, path):
+        return subprocess.run(['sh', path], cwd=self.repo, input='', text=True,
+                              capture_output=True, env={'HOME': self.home, 'PATH': '/usr/bin:/bin'})
+
+    def pin(self, product='demo'):
+        state = os.path.join(self.asf_home, 'state', product)
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, 'install.json'), 'w') as f:
+            f.write('{"sha": "%s", "venv": "%s"}' % ('a' * 40, os.path.join(self.tmp, 'venv')))
+
+    def unpin(self, product='demo'):
+        shutil.rmtree(os.path.join(self.asf_home, 'state', product), ignore_errors=True)
+
+    # ---- P12: the four host states a pinned hook runs under ----
+
+    def test_a_dispatcher_at_the_path_runs(self):
+        asf_path = self.dispatcher(os.path.join(self.tmp, 'opt', 'asf'))
+        path = self.write_hook('pre-commit', asf_path, True)
+        p = self.run_hook(path)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn('DISPATCHER redact --pre-commit --product demo', p.stderr)
+
+    def test_a_non_dispatcher_with_the_repos_own_check_warns_once_and_runs_it(self):
+        shared = stub(os.path.join(self.tmp, 'shared'), 'asf')
+        stub(os.path.join(self.repo, 'tools', 'checks'), 'redact.sh',
+             'echo "repo check $*" >&2; exit 0')
+        path = self.write_hook('pre-commit', shared, True)
+        p = self.run_hook(path)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stderr.count("is not asf's dispatcher"), 1, p.stderr)
+        self.assertIn('repo check --pre-commit', p.stderr)
+        self.assertNotIn('REDACTION REFUSED', p.stderr)
+
+    def test_a_non_dispatcher_with_no_repo_check_warns_then_refuses(self):
+        shared = stub(os.path.join(self.tmp, 'shared'), 'asf')
+        path = self.write_hook('pre-commit', shared, True)
+        p = self.run_hook(path)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertEqual(p.stderr.count("is not asf's dispatcher"), 1, p.stderr)
+        self.assertIn("REDACTION REFUSED (pre-commit) — no asf that is demo's build and no "
+                      "tools/checks/redact.sh here", p.stderr)
+
+    def test_no_asf_at_all_refuses_with_the_standing_line(self):
+        path = self.write_hook('pre-push', os.path.join(self.tmp, 'gone', 'asf'), True)
+        p = self.run_hook(path)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("REDACTION REFUSED (pre-push) — no asf that is demo's build and no "
+                      "tools/checks/redact.sh here", p.stderr)
+        self.assertNotIn("is not asf's dispatcher", p.stderr)  # no file there: nothing to warn about
+
+    # ---- C4: at most one warning line per hook run ----
+
+    def test_both_candidates_resolving_to_the_same_file_warn_once(self):
+        shared = os.path.join(self.home, '.local', 'bin', 'asf')
+        stub(os.path.dirname(shared), os.path.basename(shared))
+        path = self.write_hook('pre-commit', shared, True)
+        p = self.run_hook(path)
+        self.assertEqual(p.returncode, 1, p.stderr)  # no redact.sh here either: refused
+        self.assertEqual(p.stderr.count("is not asf's dispatcher"), 1, p.stderr)
+
+    def test_a_home_symlink_to_the_dispatcher_passes_with_no_warning(self):
+        real = self.dispatcher(os.path.join(self.tmp, 'opt', 'asf'))
+        link = os.path.join(self.home, '.local', 'bin', 'asf')
+        os.makedirs(os.path.dirname(link))
+        os.symlink(real, link)
+        path = self.write_hook('pre-commit', '/operator/.local/bin/asf', True)  # absent: silent
+        p = self.run_hook(path)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("is not asf's dispatcher", p.stderr)
+        self.assertIn('DISPATCHER redact --pre-commit --product demo', p.stderr)
+
+    # ---- C5: the unpinned body is inert ----
+
+    def test_an_unpinned_body_runs_a_non_dispatcher_unchanged(self):
+        shared = stub(os.path.join(self.tmp, 'shared'), 'asf')
+        path = self.write_hook('pre-push', shared, False)
+        p = self.run_hook(path)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("is not asf's dispatcher", p.stderr)
+
+    # ---- P11: the recognisers read both bodies as they read the old one ----
+
+    def test_the_recognisers_read_both_pin_states_of_both_bodies(self):
+        for pin_required in (True, False):
+            for name in hooks.GIT_HOOK_NAMES:
+                body = hooks._git_hook_body(name, '/opt/p/bin/asf', 'demo', pin_required)
+                self.assertTrue(hooks.is_git_hook_ours(body, name), (pin_required, name))
+                self.assertEqual(hooks.hook_entry(body, name), '/opt/p/bin/asf',
+                                 (pin_required, name))
+                self.assertIsNone(hooks.init_hook_upgrade(body, name), (pin_required, name))
+                self.assertIsNone(hooks.staged_check_upgrade(body, name), (pin_required, name))
+
+    # ---- stale_own_hook across a pin added and removed ----
+
+    def test_stale_own_hook_rewrites_across_a_pin_added_and_removed(self):
+        asf_path = self.dispatcher(os.path.join(self.tmp, 'opt', 'asf'))
+        unpinned = hooks._git_hook_body('pre-push', asf_path, 'demo', False)
+        pinned = hooks._git_hook_body('pre-push', asf_path, 'demo', True)
+        self.assertNotEqual(unpinned, pinned)
+        self.assertEqual(hooks.stale_own_hook(unpinned, 'pre-push', asf_path, 'demo', True), pinned)
+        self.assertEqual(
+            hooks.stale_own_hook(pinned, 'pre-push', asf_path, 'demo', False), unpinned)
+        self.assertIsNone(hooks.stale_own_hook(pinned, 'pre-push', asf_path, 'demo', True))
+        self.assertIsNone(hooks.stale_own_hook(unpinned, 'pre-push', asf_path, 'demo', False))
+
+    # ---- ensure_git_hooks bakes the guard exactly when state/<p>/install.json exists ----
+
+    def test_ensure_git_hooks_bakes_the_guard_exactly_when_pinned(self):
+        asf_path = self.dispatcher(os.path.join(self.tmp, 'opt', 'asf'))
+        path = os.path.join(self.hooks_dir, 'pre-commit')
+
+        rc, detail = hooks.ensure_git_hooks(self.product, which=lambda n: asf_path)
+        self.assertTrue(rc, detail)
+        with open(path) as f:
+            unpinned_text = f.read()
+        self.assertIn("pin_marker=''", unpinned_text)
+        self.assertEqual(unpinned_text, hooks._git_hook_body('pre-commit', asf_path, 'demo', False))
+
+        self.pin()
+        rc, detail = hooks.ensure_git_hooks(self.product, which=lambda n: asf_path)
+        self.assertTrue(rc, detail)
+        with open(path) as f:
+            pinned_text = f.read()
+        self.assertNotIn("pin_marker=''", pinned_text)
+        self.assertEqual(pinned_text, hooks._git_hook_body('pre-commit', asf_path, 'demo', True))
+
+        # a second run, still pinned: changes nothing
+        rc, detail = hooks.ensure_git_hooks(self.product, which=lambda n: asf_path)
+        self.assertTrue(rc, detail)
+        with open(path) as f:
+            self.assertEqual(f.read(), pinned_text)
+
+        self.unpin()
+        rc, detail = hooks.ensure_git_hooks(self.product, which=lambda n: asf_path)
+        self.assertTrue(rc, detail)
+        with open(path) as f:
+            self.assertEqual(f.read(), unpinned_text)
+
+        # a second run, still unpinned: changes nothing
+        rc, detail = hooks.ensure_git_hooks(self.product, which=lambda n: asf_path)
+        self.assertTrue(rc, detail)
+        with open(path) as f:
+            self.assertEqual(f.read(), unpinned_text)
+
+    def test_a_foreign_hook_is_left_untouched_and_refused_even_when_pinned(self):
+        self.pin()
+        path = os.path.join(self.hooks_dir, 'pre-commit')
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\necho mine\n')
+        os.chmod(path, 0o755)
+        asf_path = self.dispatcher(os.path.join(self.tmp, 'opt', 'asf'))
+        rc, detail = hooks.ensure_git_hooks(self.product, which=lambda n: asf_path)
+        self.assertFalse(rc)
+        self.assertIn('NEEDS OPERATOR', detail)
+        with open(path) as f:
+            self.assertEqual(f.read(), '#!/bin/sh\necho mine\n')
+
+    def test_a_withheld_path_is_still_skipped_when_pinned(self):
+        self.pin()
+        asf_path = self.dispatcher(os.path.join(self.tmp, 'opt', 'asf'))
+        path = os.path.join(self.hooks_dir, 'pre-commit')
+        rc, detail = hooks.ensure_git_hooks(self.product, which=lambda n: asf_path,
+                                            withhold=(path,))
+        self.assertTrue(rc, detail)
+        self.assertFalse(os.path.exists(path))
 
 
 class LandingRecheckTest(unittest.TestCase):

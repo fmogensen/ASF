@@ -182,8 +182,12 @@ if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
     # product's pre-push check runs once more on that merge (asf.workers.trunkmerge)
     if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PRODUCT" ]; then
         cli="$HOME/.local/bin/asf"
-        [ -x "$cli" ] || cli=$(command -v asf 2>/dev/null)
-        if [ -n "$cli" ]; then
+        if [ -x "$cli" ] && ! head -n 3 "$cli" 2>/dev/null | grep -qF '# asf dispatcher'; then
+            msg="asf: push refused — $cli is not asf's dispatcher; asf hooks install --product $ASF_PRODUCT"
+            echo "$msg" >&2
+            asf_refused "hook refused" "$msg"
+            rc=1
+        elif [ -x "$cli" ]; then
             out=$(printf '%s\n' "$input" \
                 | "$cli" trunk-check --pre-push --product "$ASF_PRODUCT" 2>&1)
             rc=$?

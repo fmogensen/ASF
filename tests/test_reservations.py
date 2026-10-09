@@ -123,6 +123,43 @@ class Bookings(unittest.TestCase):
         self.assertEqual(bookings, [])
         self.assertTrue(why)
 
+    def test_declared_reads_only_the_numbered_globs(self):
+        seqs = reservations.sequences(
+            _product(sequences={'bands': 'docs/decisions/NNNN-*.md'}).conventions)
+        item = {'writes': ['docs/decisions/0289-x.md', 'docs/decisions/*', 'asf/x.py']}
+        self.assertEqual(reservations.declared(item, seqs), [('bands', 289)])
+
+    def test_writes_bookings_reads_the_same_numbers_as_declared(self):
+        """D10: one reader, so the brief and the hold can never name different numbers."""
+        seqs = reservations.sequences(
+            _product(sequences={'bands': 'docs/decisions/NNNN-*.md'}).conventions)
+        items = {'T-0100': {'id': 'T-0100', 'type': 'task', 'state': 'Active',
+                            'writes': ['docs/decisions/0289-x.md', 'docs/decisions/*']}}
+        bookings = reservations.writes_bookings(
+            _product(sequences={'bands': 'docs/decisions/NNNN-*.md'}), items, seqs)
+        self.assertEqual(sorted((b.sequence, b.number) for b in bookings),
+                         reservations.declared(items['T-0100'], seqs))
+
+
+class Honour(unittest.TestCase):
+
+    def test_a_closed_sequence_refuses_a_number_the_card_does_not_hold(self):
+        self.assertEqual(reservations.unhonoured([('bands', 320)], [('bands', 319)]),
+                         [('bands', [320], 319)])
+
+    def test_a_sequence_the_card_names_no_number_in_is_open(self):
+        self.assertEqual(reservations.unhonoured([], [('bands', 319)]), [])
+
+    def test_a_card_that_has_not_booked_yet_is_clean(self):
+        self.assertEqual(reservations.unhonoured([('bands', 320)], []), [])
+
+    def test_honour_refusal_names_the_reserved_number_first(self):
+        kind, text = reservations.honour_refusal(
+            [('bands', [320], 319)], {'bands': ('docs/decisions', None, 4)})
+        self.assertEqual(kind, reservations.RESERVED)
+        self.assertIn('holds bands 0320', text)
+        self.assertIn('books 0319', text)
+
 
 class Holdings(unittest.TestCase):
 
@@ -389,6 +426,50 @@ class AgainstGit(unittest.TestCase):
         self.assertEqual(reservations.holder(holds, 'bands', 289), 'main')
         self.assertEqual(reservations.clashes(holds, 'worker/T-0289-c'),
                           [('bands', 289, 'main')])
+
+
+class PrePushRev(unittest.TestCase):
+    """The two pre-push cases (P8/P15): a revision not yet on origin, read directly rather than
+    through ``origin/<ref>`` — the whole reason :func:`asf.reservations._added` and
+    :func:`asf.reservations.booked` take any revision (PD9)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='reservations_prepush_')
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def _repo_with_trunk(self):
+        origin, repo = os.path.join(self.root, 'origin.git'), os.path.join(self.root, 'repo')
+        _git(['init', '-q', '--bare', '-b', 'main', origin], self.root)
+        _git(['clone', '-q', origin, repo], self.root)
+        for k, v in (('user.name', 'T'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            _git(['config', k, v], repo)
+        self._commit(repo, 'docs/decisions/0288-a.md')
+        _git(['push', '-q', 'origin', 'HEAD:main'], repo)
+        return repo
+
+    def _write(self, repo, relpath):
+        _write(repo, relpath, 'x\n')
+
+    def _commit(self, repo, relpath):
+        self._write(repo, relpath)
+        _git(['add', '-A'], repo)
+        _git(['commit', '-qm', relpath], repo)
+
+    def test_booked_reads_a_branch_that_is_on_no_remote(self):
+        """P8/P15: the pre-push moment. HEAD in this worktree, never origin/<ref>."""
+        repo = self._repo_with_trunk()                       # origin/main carries 0288-*.md
+        self._commit(repo, 'docs/decisions/0289-x.md')       # committed, never pushed
+        seqs = reservations.sequences(
+            _product(sequences={'bands': 'docs/decisions/NNNN-*.md'}).conventions)
+        self.assertEqual(reservations.booked(repo, 'main', 'HEAD', seqs), [('bands', 289)])
+
+    def test_pending_added_sees_an_uncommitted_file(self):
+        repo = self._repo_with_trunk()
+        self._write(repo, 'docs/decisions/0290-y.md')        # never added
+        seqs = reservations.sequences(
+            _product(sequences={'bands': 'docs/decisions/NNNN-*.md'}).conventions)
+        self.assertEqual(reservations.pending_added(repo, seqs), [('bands', 290)])
 
 
 if __name__ == '__main__':

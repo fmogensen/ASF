@@ -26,7 +26,8 @@ GREEN_STEPS = ['install from zero, Linux container (pipx, doctor green)',
                'install from zero, macOS fresh HOME (pipx, doctor green)',
                'a minimal product, end to end',
                'README-only first-user run (Quick start to a landed Task, stub runtime)',
-               'check generic', 'privacy sweep (no operator paths, e-mails or private links)']
+               'check generic', 'privacy sweep (no operator paths, e-mails or private links)',
+               'release rehearsal']
 README = '# P\n## Install\n## Quick start\n## Feedback\nIssues.\n'
 NOTES = '# Release notes\n## v0.1.0-preview\n- first\n'
 KNOWN = '# Known issues\n## Not yet met for 1.0\n- x\n'
@@ -101,11 +102,11 @@ class GateSelectionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             rp.gate_of(product({'gate': 'beta'}))
 
-    def test_release_compute_with_the_preview_gate_prints_only_the_five(self):
+    def test_release_compute_with_the_preview_gate_prints_only_the_six(self):
         git, gh = fakes()
         d = release.compute('/no-record', product({'gate': 'preview'}), now=NOW, git=git, gh_json=gh)
         self.assertEqual([c['key'] for c in d['criteria']],
-                         ['install', 'minimal', 'readme', 'privacy', 'ship'])
+                         ['install', 'minimal', 'readme', 'privacy', 'ship', 'rehearsal'])
         self.assertEqual(d['gate'], 'preview')
         self.assertIn('(gate preview)', release.render(d))
 

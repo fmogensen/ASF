@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import env, merge_queue
+from asf import dispatch, env, merge_queue
 from asf.workers import githooks, spawn
 from asf.workers.pool import Row
 
@@ -190,11 +190,15 @@ class ARefusedPushIsWrittenDown(PrePushAllow):
 
     def test_a_trunk_check_refusal_is_written_too(self):
         cli = os.path.join(self.tmp, '.local', 'bin', 'asf')
-        os.makedirs(os.path.dirname(cli))
-        with open(cli, 'w', encoding='utf-8') as f:
+        fallback = os.path.join(self.tmp, 'fallback-cli')
+        with open(fallback, 'w', encoding='utf-8') as f:
             f.write('#!/bin/sh\ncat >/dev/null\necho "trunk-check: pre-push failed on the merge" >&2\n'
                     'exit 1\n')
-        os.chmod(cli, 0o755)
+        os.chmod(fallback, 0o755)
+        rc, detail = dispatch.install(path=cli, asf_home=os.path.join(self.tmp, 'dispatch-home'),
+                                       venvs=os.path.join(self.tmp, 'dispatch-venvs'),
+                                       default_product='', cli=fallback)
+        self.assertEqual(rc, 0, detail)
         e = dict(self.env, ASF_PRODUCT='p')
         p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, e)
         self.assertNotEqual(p.returncode, 0)
@@ -228,6 +232,77 @@ class ARefusedPushIsWrittenDown(PrePushAllow):
             self.assertIn('pushes only to factory branches', p.stderr)
             self.assertEqual(_git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt,
                                   e).returncode, 0)
+
+
+class ASFHookNamesNoUnpinnedAsf(unittest.TestCase):
+    """S-76258, C12: the shim's trunk check names only $HOME/.local/bin/asf — never the global,
+    unpinned build a bare ``command -v asf`` would find."""
+
+    def test_command_v_asf_appears_nowhere_in_the_shim(self):
+        self.assertNotIn('command -v asf', githooks.ASF_HOOK)
+
+    def test_the_marker_the_shim_greps_is_the_dispatchers_own(self):   # PD8
+        self.assertTrue(dispatch.MARKER.startswith('# asf dispatcher'))
+
+
+class TrunkCheckRunsThePinOrRefuses(PrePushAllow):
+    """S-76258 §5: the pre-push trunk check runs only a file at ``$HOME/.local/bin/asf`` that is
+    asf's own dispatcher (:data:`asf.dispatch.MARKER`) — anything else there refuses the push
+    outright, naming the path and the remedy; no file there skips the check, as today."""
+
+    def setUp(self):
+        super().setUp()
+        self.env['ASF_PRODUCT'] = 'p'
+        self.cli = os.path.join(self.tmp, '.local', 'bin', 'asf')
+        self.log = os.path.join(self.tmp, 'gates', 'job.refusals')
+        os.makedirs(os.path.dirname(self.log))
+        self.env['ASF_REFUSAL_LOG'] = self.log
+
+    def lines(self):
+        import json
+        try:
+            with open(self.log, encoding='utf-8') as f:
+                return [json.loads(l) for l in f if l.strip()]
+        except OSError:
+            return []
+
+    def install_dispatcher(self, fallback_cli):
+        rc, detail = dispatch.install(path=self.cli, asf_home=os.path.join(self.tmp, 'dispatch-home'),
+                                       venvs=os.path.join(self.tmp, 'dispatch-venvs'),
+                                       default_product='', cli=fallback_cli)
+        self.assertEqual(rc, 0, detail)
+
+    def test_a_dispatcher_at_the_path_runs_the_trunk_check_and_the_push_goes(self):
+        fallback = os.path.join(self.tmp, 'fallback-cli')
+        with open(fallback, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\ncat >/dev/null\nexit 0\n')
+        os.chmod(fallback, 0o755)
+        self.install_dispatcher(fallback)
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.heads(), ['cloud/T-0001'])
+        self.assertEqual(self.lines(), [])
+
+    def test_a_non_dispatcher_file_at_the_path_refuses_the_push(self):
+        os.makedirs(os.path.dirname(self.cli), exist_ok=True)
+        with open(self.cli, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\necho hi\n')
+        os.chmod(self.cli, 0o755)
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, self.env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(self.cli, p.stderr)
+        self.assertIn('asf hooks install --product p', p.stderr)
+        self.assertEqual(self.heads(), [])
+        [rec] = self.lines()
+        self.assertEqual(rec['kind'], 'hook refused')
+        self.assertIn(self.cli, rec['line'])
+        self.assertIn('asf hooks install --product p', rec['line'])
+
+    def test_no_file_at_the_path_skips_the_trunk_check_as_today(self):
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.heads(), ['cloud/T-0001'])
+        self.assertEqual(self.lines(), [])
 
 
 if __name__ == '__main__':

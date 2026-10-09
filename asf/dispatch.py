@@ -252,6 +252,42 @@ def install(path=None, asf_home=None, venvs=None, default_product=None, cli=None
     return 0, f'dispatcher: {path} written (default {cli}){kept}'
 
 
+def reassert(path=None):
+    """Put the dispatcher back at ``path`` when something took it: ``(changed, detail)``.
+
+    ``(False, None)`` — nothing to do — when the path does not exist (a host with no factory CLI
+    is not this function's business), when it is a link to a dispatcher (an agent home's link to
+    the operator's path, :func:`asf.workers.runtime.link_factory_cli`), or when the dispatcher
+    there is already what :func:`render` writes. Otherwise :func:`install` runs: a pipx link that
+    took the path back is moved aside and replaced (``pipx install --force`` recreates it, and
+    nothing else in the factory notices — F-0283), and an out-of-date dispatcher is rewritten.
+    ``(False, detail)`` with the ``NEEDS OPERATOR`` line for a foreign file, which is never
+    touched. Never raises."""
+    path = path or default_path()
+    try:
+        if not os.path.lexists(path):
+            return False, None
+        if os.path.islink(path) and is_ours(os.path.realpath(path)):
+            return False, None
+        try:
+            with open(path, 'rb') as f:
+                before = f.read()
+        except OSError:
+            before = None
+        rc, detail = install(path)
+        if rc != 0:
+            return False, detail
+        try:
+            with open(path, 'rb') as f:
+                after = f.read()
+        except OSError:
+            after = None
+        changed = after != before
+        return changed, detail if changed else None
+    except OSError as e:
+        return False, f'NEEDS OPERATOR: the dispatcher at {path} could not be written ({e})'
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) == 2 and argv[0] == '--product-of-dir':

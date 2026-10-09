@@ -179,9 +179,18 @@ class PackageTest(unittest.TestCase):
         with open(seen) as f:
             self.assertEqual(f.read(), '')
 
+    #: What `asf.__version__` may be: a release (`0.1.262`) or, past the tag, the dev form
+    #: :func:`asf.version.pep440` documents — `0.1.262.post4+g1f80f6749`. Both are versions; a raw
+    #: `git describe` line (`v0.1.262-4-g1f80f6749`) and the `0.0.0` fallback are not.
+    VERSION_RE = r'^\d+\.\d+\.\d+(\.post\d+\+g[0-9a-f]+)?$'
+
     def test_version_is_semver(self):
-        self.assertRegex(asf.__version__, r'^\d+\.\d+\.\d+$')
-        self.assertRegex('v' + asf.__version__, r'^v\d+\.\d+\.\d+$')
+        # a checkout that is not sitting on a release tag is the documented dev version, not
+        # `x.y.z`: `pep440` returns `0.1.9.post4+g205123f` past a tag, by design. Asserting bare
+        # semver made these two cases red on every commit but a tagged one — including a clean
+        # `origin/main` — so they refused every push whose touched set reached this module.
+        self.assertRegex(asf.__version__, self.VERSION_RE)
+        self.assertRegex('v' + asf.__version__, '^v' + self.VERSION_RE[1:])
 
     def test_version_flag(self):
         from asf import cli
@@ -189,7 +198,11 @@ class PackageTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             cli.main(['--version'])
         self.assertEqual(out.getvalue().strip(), f'asf {cli.version_string()}')
-        self.assertRegex(cli.version_string(), r'^(v\d+\.\d+\.\d+(\+\d+)?|\d+\.\d+\.\d+)( \(\w+\))?$')
+        # `version_string()` is `<version> (<sha>)`, and its version is `cli._release`'s
+        # `x.y.z`/`x.y.z+42` or `asf.__version__`'s `x.y.z`/`x.y.z.postN+gsha`. It never carries a
+        # `v`, so the landed `(\+\d+)?` sat on the one alternative that could not be reached.
+        self.assertRegex(cli.version_string(),
+                         r'^v?\d+\.\d+\.\d+(\+\d+|\.post\d+\+g[0-9a-f]+)?( \(\w+\))?$')
 
     def test_workflow_installs_and_runs_the_suite(self):
         with open(os.path.join(REPO, '.github', 'workflows', 'tests.yml')) as f:
@@ -726,6 +739,8 @@ class UpgradeToTests(HomeCase):
         run.answers[('git', 'ls-remote')] = (
             f'{"a" * 40}\trefs/tags/{self.TAG}\n{self.SHA}\trefs/tags/{self.TAG}^{{}}\n')
         self.assertEqual(upgrade.resolve_ref(self.URL, self.TAG, run=run), self.SHA)
+        self.assertEqual([c for c in run.calls if c[:2] == ['git', 'ls-remote']],
+                         [['git', 'ls-remote', self.URL, self.TAG, f'{self.TAG}^{{}}']])
 
     def test_an_unknown_tag_does_not_resolve(self):
         run = FakeRun()

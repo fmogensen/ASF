@@ -305,8 +305,15 @@ def _digit_complaints(text, found):
 
 
 def _link_complaints(text, root):
+    """A relative link or an inline-code path a human wrote by hand, resolved under `root`: a
+    span's own body is never read here (`skip`) — a block's rendered rows cite record paths
+    (`metrics/sessions`) that live under the record, not under `root`, and are data, never a
+    typed path to go stale."""
+    skip = [(s.start, s.end) for s in spans(text)]
     problems = []
     for m in _LINK.finditer(text):
+        if _in_ranges(m.start(1), skip):
+            continue
         target = m.group(1).split('#', 1)[0].strip()
         if _skip_target(target):
             continue
@@ -314,6 +321,8 @@ def _link_complaints(text, root):
             problems.append('line %d: link target %r does not exist under the repo root'
                             % (_line_of(text, m.start(1)), m.group(1)))
     for m in _INLINE_CODE.finditer(text):
+        if _in_ranges(m.start(), skip):
+            continue
         content = m.group(1)
         if '/' not in content or _skip_target(content) or _in_fence(text, m.start()):
             continue
@@ -335,10 +344,15 @@ def _budget_complaints(text):
 
 
 def _heading_complaints(text):
+    """A page that has started on the three-part structure must finish it: any one of
+    `HEADINGS` present commits it to all three, in order. A page that carries none of them
+    (a second product's own README, never meant to argue-model-manual) is not held to it."""
     positions = {}
     for i, line in enumerate(text.splitlines()):
         if line.strip() in HEADINGS and line.strip() not in positions:
             positions[line.strip()] = i
+    if not positions:
+        return []
     missing = [h for h in HEADINGS if h not in positions]
     if missing:
         return ['heading %r is missing' % h for h in missing]
@@ -351,8 +365,8 @@ def complaints(text, facts, root):
     """§2.1's five checks over `text`, one string per problem, empty when the page is sound:
     a span whose body differs from its fact (and a fact with no span); a digit run in prose
     outside a span, inline code, a link target and `LITERALS`; a relative link or path that does
-    not resolve under `root`; the line and byte budget; the three part headings, absent or out
-    of order."""
+    not resolve under `root`; the line and byte budget; the three part headings — missing or out
+    of order once the page has started on any one of them, never required of a page with none."""
     found = spans(text)
     numbers = facts.get('numbers', {}) if isinstance(facts, dict) else {}
     return (_drift_complaints(found, numbers) + _digit_complaints(text, found)
@@ -417,6 +431,8 @@ def cmd_readme(args, root=None):
             return 0
         record_root = resolve_record(args)
         data = facts(record_root, repo_dir, product=product_name)
+        span_keys = {s.key for s in spans(text)}
+        data['numbers'] = {k: v for k, v in data['numbers'].items() if k in span_keys}
         facts_path = os.path.join(repo_dir, conv.readme_facts)
         facts_changed = metrics.write_if_changed(facts_path, json.dumps(data, indent=2,
                                                                         sort_keys=True) + '\n')

@@ -221,14 +221,36 @@ def _after_of(meta):
     return sorted(str(a) for a in (meta.get('after') or ()))
 
 
+#: the ``priority:`` value a product puts work aside with (the feeder's ``rows.LATER``)
+LATER = 'later'
+
+
+def later_holder(metas, iid):
+    """The id of the nearest card in ``iid``'s ``parent:`` chain — itself first, then its Feature,
+    then its Epic — whose ``priority:`` is ``later``, else None. ``metas``: ``{id: meta}`` (the
+    record, or the feeder's items)."""
+    seen = set()
+    while iid and iid not in seen:
+        seen.add(iid)
+        cur = metas.get(iid)
+        if cur is None:
+            return None
+        if str(cur.get('priority') or '').strip().lower() == LATER:
+            return iid
+        iid = cur.get('parent')
+    return None
+
+
 def overlap_tasks(metas):
-    """``{id: {'type', 'state', 'writes', 'after', 'removed', 'evidence'}}`` — a record's metas
-    (whichever of typed or machine block each field lives in) normalised into the shape
+    """``{id: {'type', 'state', 'writes', 'after', 'removed', 'evidence', 'later'}}`` — a record's
+    metas (whichever of typed or machine block each field lives in) normalised into the shape
     :func:`unordered_overlaps` takes, ``state`` read through :func:`_state` so a machine-block
-    value and a plain dict's top-level one are read alike."""
+    value and a plain dict's top-level one are read alike. ``later``: the ``priority: later``
+    card the Task is parked under (:func:`later_holder`), else None (B-82960)."""
     return {iid: {'type': m.get('type'), 'state': _state(m), 'writes': _flat_writes(m.get('writes')),
                   'after': m.get('after') or (), 'removed': m.get('removed'),
-                  'evidence': m.get('evidence') or ()}
+                  'evidence': m.get('evidence') or (),
+                  'later': later_holder(metas, iid) if m.get('type') == 'task' else None}
             for iid, m in metas.items()}
 
 
@@ -288,7 +310,9 @@ def unordered_overlaps(tasks, shared=()):
     Active or not: a Closed or removed one is no pair of its own but may still be a link in an
     ``after:`` chain. ``shared``: the product's ``conventions.shared_paths`` — a glob either side
     of the pair covers is skipped, so two Tasks whose only common glob is a declared lockfile are
-    no pair at all (the feeder does not serialise them either).
+    no pair at all (the feeder does not serialise them either). A Task parked under a
+    ``priority: later`` Feature or Epic (``later``) is no pair either: it holds no footprint
+    while the product has put it aside, and the feeder does not start it (B-82960).
 
     ``owner`` is the one of the pair that already has a pushed branch or an open PR
     (:func:`has_pushed_work`) — the hold never falls on it: a Task mid-build, its PR open, is
@@ -303,7 +327,7 @@ def unordered_overlaps(tasks, shared=()):
     edges = _after_edges(tasks)
     active = sorted((iid, _writes_of(t)) for iid, t in tasks.items()
                     if t.get('type') == 'task' and not t.get('removed')
-                    and t.get('state') == 'Active' and t.get('writes'))
+                    and t.get('state') == 'Active' and t.get('writes') and not t.get('later'))
     out = []
     for i, (a, wa) in enumerate(active):
         for b, wb in active[i + 1:]:

@@ -615,6 +615,28 @@ def _prod_mode(product):
     return deploy.mode(product, 'prod')
 
 
+def chosen_pr(cand_prs, merged, landed):
+    """``(number, pr_state, merged_sha)`` — the PR a plan's Task row is derived from, or
+    ``(None, None, None)``.
+
+    A candidate the PR list says MERGED first, at its ``merged`` sha; then one the trunk already
+    carries as landed (``landed``: :func:`asf.trunk_watch.landed_prs`), read as ``MERGED`` at the
+    trunk's sha whatever the list still says — a PR list read before a merge-queue landing says
+    OPEN, and ``pr_state`` is the only PR field the Task's ``in-flight`` rule reads, so a stale row
+    is 40 min of a landed Task kept Active (F-0277); then the first candidate that is not CLOSED,
+    at its own state."""
+    for p in cand_prs:
+        if p.get("state") == "MERGED":
+            return p["number"], "MERGED", merged.get(p["number"])
+    for p in cand_prs:
+        if p["number"] in landed:
+            return p["number"], "MERGED", landed[p["number"]]
+    for p in cand_prs:
+        if p.get("state") != "CLOSED":
+            return p["number"], p.get("state"), None
+    return None, None, None
+
+
 def discover(product=None, checked_file=None):
     """The raw evidence `backlog.py ingest` needs, gathered fresh from the product repo and gh."""
     product = product or env.load_product()
@@ -778,6 +800,9 @@ def discover(product=None, checked_file=None):
 
     task_tree_paths = []
     task_rows = {}
+    from asf import trunk_watch
+    commits = main_commits(product)
+    landed = trunk_watch.landed_prs(commits)
     for it in inits.values():
         slug = it["slug"]
         alias_stem = re.sub(r"-\d+$", "", (it["alias"] or "").lower()) or None
@@ -794,21 +819,17 @@ def discover(product=None, checked_file=None):
                     claimed.add(br)
             cand_prs = [p for c in cand for pre in [code] + prefixes["legacy"]
                         for p in pr_by_head.get(f"{pre}{c}", [])]
-            merged_pr = next((p for p in cand_prs if p.get("state") == "MERGED"), None)
             n = tid[1:]
-            landed = (declared_done
-                      or f"task-{n}-report.md" in briefs
-                      or any(f"{c}-writer-report.md" in main_reviews for c in cand)
-                      or any(re.fullmatch(rf"{re.escape(c)}-review-r\d+\.md", r)
-                             for c in cand for r in main_reviews))
-            open_pr = next((p for p in cand_prs if p.get("state") != "CLOSED"), None)
-            chosen_pr = merged_pr or open_pr
+            landed_doc = (declared_done
+                          or f"task-{n}-report.md" in briefs
+                          or any(f"{c}-writer-report.md" in main_reviews for c in cand)
+                          or any(re.fullmatch(rf"{re.escape(c)}-review-r\d+\.md", r)
+                                 for c in cand for r in main_reviews))
+            number, pr_state, merged_sha = chosen_pr(cand_prs, merged, landed)
             rows.append({
-                "id": tid, "cand": cand, "branch": br,
-                "pr": chosen_pr.get("number") if chosen_pr else None,
-                "pr_state": chosen_pr.get("state") if chosen_pr else None,
-                "merged_sha": merged.get(chosen_pr.get("number")) if merged_pr else None,
-                "landed_no_branch": landed and not br,
+                "id": tid, "cand": cand, "branch": br, "pr": number,
+                "pr_state": pr_state, "merged_sha": merged_sha,
+                "landed_no_branch": landed_doc and not br,
             })
             if br:
                 task_tree_paths.append(f"origin/{br}:{reviews_dir}")
@@ -925,7 +946,6 @@ def discover(product=None, checked_file=None):
                     checked.add(int(m.group(1)))
 
     main_sha = sh(f"git rev-parse {main_ref}", product=product)
-    commits = main_commits(product)
     merges = merge_facts(product)
     proves_refused = {}
 
