@@ -291,6 +291,26 @@ class ProbeTests(DwellTestCase):
                                   'launchable_idle')
         self.assertEqual(none_free, [])
 
+    def test_a_launchable_row_is_not_idle_when_every_account_is_quota_stopped(self):
+        """The combined seat count (local + cloud) says 4 are free, but every pool account is
+        blocked (an auth error, same as a quota stop) — no account can actually take a launch,
+        so there is no real free seat and the check says nothing (B-84834: the preview's seat
+        math never read the pool's own band, so it kept alarming while the wave kept refusing
+        every row for the same reason, seats notwithstanding)."""
+        from asf.workers import account_auth
+        with open(env.config_path(), 'w', encoding='utf-8') as f:
+            f.write("worker_pool:\n  accounts:\n    - {name: acct-a, cap: 1}\n"
+                    "    - {name: acct-b, cap: 1}\n")
+        account_auth.block('acct-a')
+        account_auth.block('acct-b')
+        mk = lambda iid, action='would launch': feeder_rows.Row(
+            tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid, feature_id='F-1', action=action,
+            brief_kind='task', branch='', reason='')
+        screened = [step_wave.Screened(mk('T-1'))]
+        got = self.by_state(self.found(FakeFacts(self.product, wave=(screened, 4, [{}]))),
+                            'launchable_idle')
+        self.assertEqual(got, [])
+
     def test_a_pushed_branch_with_no_pr_ages_from_its_push(self):
         lane = {'worker/t-1': {'state': 'PUSHED', 'head': 'abc', 'at': iso(NOW - 11 * 60)},
                 'worker/t-2': {'state': 'PR_OPEN', 'head': 'abc', 'pr': 3,

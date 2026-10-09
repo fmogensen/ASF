@@ -495,12 +495,29 @@ def chain_no_cut(facts):
                        else '(the chain is empty)'))]
 
 
+def _usable_now():
+    """The pool's quota-aware ceiling right now (:func:`asf.capacity.usable_slots`) — None
+    without a configured pool account, so the raw seat count stands unclamped."""
+    from asf import capacity as capacity_mod
+    try:
+        cfg = env.load_config()
+    except env.ConfigError:
+        return None
+    return capacity_mod.usable_slots(cfg)
+
+
 def launchable_idle(facts):
     from asf.tick import step_wave
     got = facts.would_start()
     if not got:
         return []
     screened, seats, running = got
+    # the preview's seat count is raw session slots, blind to the pool's own band (B-84834): every
+    # account stopped or blocked still read as "N seat(s) free" and alarmed on a row the wave was
+    # refusing for the same reason every tick — clamp to what the pool can actually take now
+    usable = _usable_now()
+    if usable is not None:
+        seats = min(seats, usable)
     free = seats - len(running)
     if free <= 0:
         return []
