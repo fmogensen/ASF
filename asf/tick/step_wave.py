@@ -876,12 +876,14 @@ def would_start(product, root, items=None):
     r = capacity_mod.resolve(product)
     cloud = cloud_settings(product)
     ready = cloud_readiness(product, cloud)
-    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    cloud_load = cloud_pool_load(product) if cloud.on else 0
+    _held, _hold, extra = split_hold(cloud, ready, False, '', cloud_load=cloud_load)
     inputs = plan_inputs(product, root, items)
     seats = r.sessions + extra
     planned, _dropped = gated_plan(items, product, running, seats, inputs, out=_quiet)
     host_held, host_why, reading = host_hold(planned)
-    host_held, _local, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, _local, _extra = split_hold(cloud, ready, host_held, host_why,
+                                           cloud_load=cloud_load)
     bypass_open = bool(host_held
                        and host_mod.load_only_hold(reading,
                                                    host_mod.guards_from_config(env.load_config()))
@@ -980,15 +982,35 @@ def local_seats(sessions, running):
     return max(0, sessions - sum(1 for r in running if not cloud_mod.is_cloud(r)))
 
 
-def split_hold(cloud, ready, host_held, host_why):
+def split_hold(cloud, ready, host_held, host_why, cloud_load=0):
     """``(host_held, local_hold, extra seats)``: a ready cloud lane takes the host hold off its
     own rows — the hold becomes ``local_hold`` (the local lane only) — and adds its seats beside
-    the local ones; an off or unready lane leaves the hold on every row and adds none."""
+    the local ones; an off or unready lane leaves the hold on every row and adds none.
+
+    ``cloud_load`` (:func:`cloud_pool_load`): ``max_inflight`` is the lane's ceiling, not this
+    moment's free seats — another product's cloud runs, or a foreign one, spend the same shared
+    accounts (B-83576: a product short on its own local seats read 8 cloud seats free while the
+    lane's accounts already carried 9 of its 8 — every one of them someone else's)."""
     lane_open = cloud.on and bool(ready and ready[0])
-    extra = cloud.max_inflight if lane_open else 0
+    extra = max(0, cloud.max_inflight - cloud_load) if lane_open else 0
     if host_held and lane_open:
         return False, host_why, extra
     return host_held, '', extra
+
+
+def cloud_pool_load(product):
+    """The cloud lane's live load across every product and foreign session
+    (:meth:`asf.workers.pool.Pool.cloud_load`), for :func:`split_hold`'s ``cloud_load`` — an
+    account's cap is the machine's, not this product's (F-0076 S-8154), and an unreadable
+    config or session table is read as no load, never a reason to refuse."""
+    try:
+        cfg = env.load_config()
+    except env.ConfigError:
+        return 0
+    try:
+        return pool_mod.Pool.from_config(cfg, product).cloud_load()
+    except Exception:  # noqa: BLE001 — a seat count never fails on this
+        return 0
 
 
 def top_cause(whys):

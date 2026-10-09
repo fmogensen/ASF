@@ -757,6 +757,35 @@ class StepWaveLanes(unittest.TestCase):
         off = cloud.settings({})
         self.assertEqual(step_wave.split_hold(off, (False, 'off'), True, 'h'), (True, '', 0))
 
+    def test_cloud_load_nets_against_max_inflight_not_this_products_own_count(self):
+        """B-83576: ``max_inflight`` is the lane's ceiling, not this moment's free seats — a
+        product short on its own local seats must not also read cloud seats free that other
+        products', or foreign, sessions already hold on the same shared accounts."""
+        from asf.tick import step_wave
+        s = cloud.settings({'cloud': dict(ON, default=True)})  # max_inflight: 2
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, '', cloud_load=0), (False, '', 2))
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, '', cloud_load=1), (False, '', 1))
+        # the lane's accounts already carry its whole ceiling (or more): no seat is free
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, '', cloud_load=2), (False, '', 0))
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, '', cloud_load=9), (False, '', 0))
+
+    def test_cloud_pool_load_reads_the_pools_own_count(self):
+        """``cloud_pool_load`` is what feeds ``split_hold``'s ``cloud_load`` — the pool's load
+        across every product (:meth:`asf.workers.pool.Pool.cloud_load`), not this product's own
+        session count."""
+        from asf.tick import step_wave
+        product = env.Product('p', {'main': 'main'})
+        fake_pool = mock.Mock()
+        fake_pool.cloud_load.return_value = 5
+        with mock.patch.object(pool_mod.Pool, 'from_config', return_value=fake_pool) as fc:
+            self.assertEqual(step_wave.cloud_pool_load(product), 5)
+        fc.assert_called_once()
+        # an unreadable config or pool is no load, never a reason to refuse every row
+        with mock.patch.object(env, 'load_config', side_effect=env.ConfigError('bad')):
+            self.assertEqual(step_wave.cloud_pool_load(product), 0)
+        with mock.patch.object(pool_mod.Pool, 'from_config', side_effect=RuntimeError('boom')):
+            self.assertEqual(step_wave.cloud_pool_load(product), 0)
+
 
 class Readiness(unittest.TestCase):
     def product(self):
