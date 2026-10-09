@@ -58,9 +58,12 @@ secret holds; its quota bands and 5h headroom apply as for any launch.
 
 **Host pressure** holds the local lane only: a cloud row runs nothing here, and is bounded by
 ``max_inflight`` and its account's quota instead. The fair share bounds the local lane: the wave
-step adds ``max_inflight`` seats beside the share and hands the wave the share's free local seats
-(``local_seats``: the share less the local sessions live), so the local accounts never take the
-cloud's seats; the status row reads ``sessions <local>/<share>, cloud <n>/<max_inflight>``.
+step adds the lane's free seats beside the share (``max_inflight`` less :func:`inflight_all`,
+the lane's live runs across every product — B-83574: counting the whole ``max_inflight`` kept a
+launchable row idle past a seat that read free but another product already held) and hands the
+wave the share's free local seats (``local_seats``: the share less the local sessions live), so
+the local accounts never take the cloud's seats; the status row reads ``sessions <local>/<share>,
+cloud <n>/<max_inflight>``.
 
 **Readiness** (:func:`readiness`, read once per wave — never per row): the lane takes launches
 only while the doctor's critical checks pass (:func:`checks`: the lane is on, the token secret's
@@ -922,6 +925,20 @@ def inflight(product_name):
     from asf.workers import pool as pool_mod
     return sum(1 for r in lifecycle.latest(pool_mod.sessions_path(product_name)).values()
                if is_cloud(r) and lifecycle.occupies(r))
+
+
+def inflight_all():
+    """The cloud lane's live runs across every product on this host (:func:`asf.workers.
+    lifecycle.live_all`, F-0076) — what the pool's own cap check (:meth:`asf.workers.pool.
+    Pool.cloud_load`) counts against ``max_inflight``. A product's own ledger alone
+    (:func:`inflight`) misses every other product's cloud runs, so the wave's seat math
+    (:func:`asf.tick.step_wave.split_hold`) kept adding the lane's whole ``max_inflight`` as
+    free seats while the lane was already full elsewhere — a launchable row sat idle past the
+    seat's own free reading, seats that were never free (B-83574)."""
+    import os
+    from asf import env
+    from asf.workers import lifecycle
+    return sum(1 for r in lifecycle.live_all(os.path.join(env.ASF_HOME, 'state')) if is_cloud(r))
 
 
 #: ``asf cloud doctor``'s mode row, per mode

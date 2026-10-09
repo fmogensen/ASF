@@ -876,12 +876,14 @@ def would_start(product, root, items=None):
     r = capacity_mod.resolve(product)
     cloud = cloud_settings(product)
     ready = cloud_readiness(product, cloud)
-    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    cloud_inflight = cloud_mod.inflight_all() if cloud.on else 0
+    _held, _hold, extra = split_hold(cloud, ready, False, '', inflight=cloud_inflight)
     inputs = plan_inputs(product, root, items)
     seats = r.sessions + extra
     planned, _dropped = gated_plan(items, product, running, seats, inputs, out=_quiet)
     host_held, host_why, reading = host_hold(planned)
-    host_held, _local, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, _local, _extra = split_hold(cloud, ready, host_held, host_why,
+                                           inflight=cloud_inflight)
     bypass_open = bool(host_held
                        and host_mod.load_only_hold(reading,
                                                    host_mod.guards_from_config(env.load_config()))
@@ -980,12 +982,15 @@ def local_seats(sessions, running):
     return max(0, sessions - sum(1 for r in running if not cloud_mod.is_cloud(r)))
 
 
-def split_hold(cloud, ready, host_held, host_why):
+def split_hold(cloud, ready, host_held, host_why, inflight=0):
     """``(host_held, local_hold, extra seats)``: a ready cloud lane takes the host hold off its
-    own rows — the hold becomes ``local_hold`` (the local lane only) — and adds its seats beside
-    the local ones; an off or unready lane leaves the hold on every row and adds none."""
+    own rows — the hold becomes ``local_hold`` (the local lane only) — and adds its free seats
+    beside the local ones (``max_inflight`` less ``inflight``, the lane's live runs across every
+    product — :func:`asf.workers.cloud.inflight_all`; B-83574: counting only ``max_inflight``
+    added seats this product's own wave had no claim to, while another product's cloud runs
+    already held them); an off or unready lane leaves the hold on every row and adds none."""
     lane_open = cloud.on and bool(ready and ready[0])
-    extra = cloud.max_inflight if lane_open else 0
+    extra = max(0, cloud.max_inflight - inflight) if lane_open else 0
     if host_held and lane_open:
         return False, host_why, extra
     return host_held, '', extra
@@ -1151,7 +1156,8 @@ def launch(ctx, out=print):
     # ones too) off the sum, so what is left is the free local seats plus the free cloud ones
     cloud = cloud_settings(product)
     ready = cloud_readiness(product, cloud)     # once per tick, never per row
-    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    cloud_inflight = cloud_mod.inflight_all() if cloud.on else 0
+    _held, _hold, extra = split_hold(cloud, ready, False, '', inflight=cloud_inflight)
     inputs = plan_inputs(product, ctx.record_root(), items)
     # a Task whose writes: reach the amendable set launches nothing: say it to the console once
     approvals.announce_console_amends(
@@ -1185,7 +1191,8 @@ def launch(ctx, out=print):
     note_seats(ctx, r.sessions, cloud, running, wanted_n,
                host_why if host_held else top_cause(waits))
     # a loaded host still starts cloud sessions: nothing of theirs runs here
-    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why,
+                                               inflight=cloud_inflight)
     # an S1 item's row passes the LOAD half of the guard — never memory/swap pressure, and at
     # most one such bypass live at a time, across every product (asf.workers.host.load_only_hold)
     s1_bypass_open = (host_held
