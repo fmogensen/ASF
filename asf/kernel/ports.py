@@ -963,7 +963,8 @@ def required_checks_for(product, github=None):
 def config_for(product, cfg=None, github=None):
     """The :class:`~asf.kernel.model.Config` of ``product``: branch prefixes, document roots and
     the required checks (:func:`required_checks_for`, asking ``github`` when the conventions name
-    none) from its conventions; ``max_sessions``, ``rank`` and the idle alarm from its ``kernel:``
+    none) from its conventions; ``max_sessions``, ``rank``, the idle alarm and the merge train's
+    ``update_parallel`` from its ``kernel:``
     block (:mod:`asf.kernel.settings`, each with its documented default)."""
     conv = product.conventions
     k = product.kernel
@@ -975,5 +976,6 @@ def config_for(product, cfg=None, github=None):
         work_branch=conv.prefix('code'), fix_branch=conv.prefix('fix'),
         max_sessions=int(k['launch']['max_sessions']), rank=k['launch']['rank'],
         idle_alarm=bool(k['idle_alarm']['enabled']),
-        idle_min_free=int(k['idle_alarm']['min_free_seats']))
+        idle_min_free=int(k['idle_alarm']['min_free_seats']),
+        update_parallel=int(k['landing']['update_parallel']))
 

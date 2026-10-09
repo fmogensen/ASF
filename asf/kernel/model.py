@@ -255,7 +255,9 @@ class Config:
     ``doc_branches`` entry named after its kind, e.g. ``spec/``). ``rank`` is ``inherit`` (a Task
     takes its nearest ancestor's rank) or ``own`` (only an item's own rank counts).
     ``idle_alarm``/``idle_min_free``: the plan carries an ``idle`` record when at least that many
-    seats are free, work waits and nothing launches. The product file's ``kernel:`` block sets
+    seats are free, work waits and nothing launches. ``update_parallel`` is the merge train's
+    length: at most that many Landing PRs are brought up to date (or still run their checks after
+    one) at once. The product file's ``kernel:`` block sets
     them (:mod:`asf.kernel.settings`)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
@@ -269,3 +271,4 @@ class Config:
     rank: str = 'inherit'
     idle_alarm: bool = True
     idle_min_free: int = 1
+    update_parallel: int = 2

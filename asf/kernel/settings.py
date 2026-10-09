@@ -8,6 +8,7 @@ What used to live in a hand-written script, two hand-written plists and a note i
       launch:     {max_sessions: 6,           # live sessions the tick launches up to
                    rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
+      landing:    {update_parallel: 2}        # the merge train: Landing PRs updated at once
       watch:      {interval_s: 600,           # the keep-alive job's StartInterval
                    stale_after_s: 900}        # a plan older than this, and no tick running: kick
       idle_alarm: {enabled: true,             # Plan.idle when seats are free and nothing launches
@@ -27,6 +28,7 @@ import datetime
 SPEC = {
     'tick': {'interval_s': (120, int)},
     'launch': {'max_sessions': (6, int), 'rank': ('inherit', ('inherit', 'own'))},
+    'landing': {'update_parallel': (2, int)},
     'watch': {'interval_s': (600, int), 'stale_after_s': (900, int)},
     'idle_alarm': {'enabled': (True, bool), 'min_free_seats': (1, int)},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
@@ -97,6 +99,10 @@ def problems(block):
             else None
         if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < MIN_INTERVAL_S:
             errors.append(('kernel.%s.interval_s' % section, 'must be at least %d' % MIN_INTERVAL_S))
+    v = (block.get('landing') or {}).get('update_parallel') \
+        if isinstance(block.get('landing'), dict) else None
+    if isinstance(v, int) and not isinstance(v, bool) and v < 1:
+        errors.append(('kernel.landing.update_parallel', 'must be at least 1'))
     return errors, warnings
 
 

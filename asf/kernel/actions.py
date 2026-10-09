@@ -98,7 +98,10 @@ class Plan:
     Bugs, plus the derived state of every Feature and Story) to ``(State, Stuck or None)`` — the
     second is set exactly when the first is ``State.STUCK``. ``actions`` is the ordered list of
     the action values above. ``idle`` is the idle alarm (None when not raised): ``{'free': seats
-    free, 'waiting': Tasks/Bugs not launched, 'reasons': [(reason, count)], the top three}``."""
+    free, 'waiting': Tasks/Bugs not launched, 'reasons': [(reason, count)], the top three}``.
+    ``notes`` maps an item id to this tick's notes that are never written to its card (a behind
+    PR the merge train holds back: :data:`asf.kernel.decide.TRAIN_NOTE`)."""
     states: dict = dataclasses.field(default_factory=dict)
     actions: list = dataclasses.field(default_factory=list)
     idle: dict = None
+    notes: dict = dataclasses.field(default_factory=dict)

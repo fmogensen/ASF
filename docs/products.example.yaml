@@ -463,6 +463,9 @@ kernel:
   launch:
     max_sessions: 6         # live sessions the tick launches up to
     rank: inherit           # inherit: a Task takes its nearest ancestor's rank; own: only its own
+  landing:
+    update_parallel: 2      # the merge train: at most this many behind Landing PRs are updated
+                            # (and re-run CI) at once, by rank then oldest PR; the rest wait
   watch:
     interval_s: 600         # the keep-alive job runs every this many seconds
     stale_after_s: 900      # a plan older than this, and no tick running: kickstart the tick

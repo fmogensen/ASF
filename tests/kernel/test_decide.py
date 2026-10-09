@@ -293,6 +293,72 @@ class Rounds(unittest.TestCase):
         self.assertEqual(B.state(plan, 'E-0001'), State.STUCK)
 
 
+class MergeTrain(unittest.TestCase):
+    """At most ``update_parallel`` behind Landing PRs are updated at once, by rank then oldest."""
+
+    def world(self, n=13, extra=(), extra_prs=()):
+        # T-0101..T-0113, ranks descending so rank order differs from PR/id order
+        items = [B.task('T-%04d' % (100 + i), state=State.LANDING, rank=n + 1 - i)
+                 for i in range(1, n + 1)] + list(extra)
+        prs = [B.pr(i, 'T-%04d' % (100 + i), behind=True, auto_merge=True)
+               for i in range(1, n + 1)] + list(extra_prs)
+        return B.facts(items, prs=prs, reviews=[B.review(i.id) for i in items])
+
+    def test_thirteen_behind_with_two_places_update_the_two_best_ranked(self):
+        from asf.kernel.decide import TRAIN_NOTE
+        plan = decide(self.world(), B.config(update_parallel=2))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [13, 12])
+        self.assertTrue(all(B.state(plan, 'T-%04d' % (100 + i)) is State.LANDING
+                            for i in range(1, 14)))
+        self.assertEqual(len(plan.notes), 11)
+        self.assertEqual(plan.notes['T-0111'], [TRAIN_NOTE % (3, 13)])
+        self.assertNotIn('T-0113', plan.notes)
+        self.assertEqual(B.of(plan, A.NoteItem), [])
+
+    def test_ties_on_rank_go_to_the_oldest_pr(self):
+        items = [B.task('T-0001', state=State.LANDING, rank=1),
+                 B.task('T-0002', state=State.LANDING, rank=1),
+                 B.task('T-0003', state=State.LANDING, rank=1)]
+        prs = [B.pr(9, 'T-0001', behind=True), B.pr(5, 'T-0002', behind=True),
+               B.pr(7, 'T-0003', behind=True)]
+        plan = decide(B.facts(items, prs=prs, reviews=[B.review(i.id) for i in items]),
+                      B.config(update_parallel=2))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [5, 7])
+
+    def test_one_update_already_running_its_checks_leaves_one_place(self):
+        running = B.task('T-0200', state=State.LANDING, rank=50)
+        pr = B.pr(20, 'T-0200', auto_merge=True,
+                  checks=[B.check('tests', status='in_progress')])
+        plan = decide(self.world(extra=[running], extra_prs=[pr]), B.config(update_parallel=2))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [13])
+
+    def test_a_pending_check_that_is_not_required_holds_no_place(self):
+        running = B.task('T-0200', state=State.LANDING, rank=50)
+        pr = B.pr(20, 'T-0200', checks=[B.check('lint', status='queued'), B.check('tests')])
+        plan = decide(self.world(extra=[running], extra_prs=[pr]),
+                      B.config(update_parallel=2, required_checks=('tests',)))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [13, 12])
+
+    def test_a_full_train_updates_nothing_and_conflicts_keep_their_path(self):
+        items = [B.task('T-0001', state=State.LANDING), B.task('T-0002', state=State.LANDING),
+                 B.task('T-0003', state=State.LANDING), B.task('T-0004', state=State.LANDING)]
+        prs = [B.pr(1, 'T-0001', checks=[B.check(status='queued')]),
+               B.pr(2, 'T-0002', checks=[B.check(status='in_progress')]),
+               B.pr(3, 'T-0003', behind=True),
+               B.pr(4, 'T-0004', behind=True, conflicting=True)]
+        plan = decide(B.facts(items, prs=prs, reviews=[B.review(i.id) for i in items]),
+                      B.config(update_parallel=2))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [4])
+        self.assertEqual(list(plan.notes), ['T-0003'])
+
+    def test_a_pr_not_behind_needs_no_update(self):
+        items = [B.task('T-0001', state=State.LANDING)]
+        plan = decide(B.facts(items, prs=[B.pr(1, 'T-0001')], reviews=[B.review('T-0001')]),
+                      B.config(update_parallel=2))
+        self.assertEqual(B.of(plan, A.UpdateBranch), [])
+        self.assertEqual(plan.notes, {})
+
+
 class ChangeKeyedVerdicts(unittest.TestCase):
     """A verdict holds on the head tree or on the PR's own change: GitHub's "update branch"
     (trunk merged in) moves the tree and keeps the change, so an approval survives it."""

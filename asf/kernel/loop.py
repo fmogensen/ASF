@@ -103,8 +103,11 @@ def print_summary(summary, out=print):
 
 
 def plan_notes(plan, facts):
-    """``{item id: [note]}``: each item's notes on its card plus this tick's :class:`NoteItem`s."""
+    """``{item id: [note]}``: each item's notes on its card plus this tick's :class:`NoteItem`s
+    and the plan's own notes (``Plan.notes``, never written to a card)."""
     out = {iid: list(it.notes) for iid, it in facts.items.items() if it.notes}
+    for iid, texts in sorted((getattr(plan, 'notes', None) or {}).items()):
+        out.setdefault(iid, []).extend(t for t in texts if t not in out[iid])
     for a in plan.actions:
         if isinstance(a, A.NoteItem) and a.text not in out.setdefault(a.item_id, []):
             out[a.item_id].append(a.text)

@@ -20,7 +20,14 @@ item and the actions of one tick. The rules it holds, in the design's words:
   so does an update that merges trunk in (the change is the same). ``changes`` sends the item to
   Ready with the findings. Every PR without a verdict on its head gets a review, a document branch
   (``config.doc_branches``) included.
-- Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch`.
+- Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch` —
+  a merge train: at most ``config.update_parallel`` Landing PRs are brought up to date at once.
+  The behind, non-conflicting ones are taken in (effective rank, PR number) order; the free
+  places are ``update_parallel`` less the Landing PRs not behind whose required checks still run
+  on their head (an update in flight). The rest wait in Landing with the plan note
+  :data:`TRAIN_NOTE` ("queued for update (merge train, k of n)"), never written to the card.
+  Behind is GitHub's ``mergeStateStatus == BEHIND`` only: a PR a non-strict base would merge as
+  is never needs an update.
   Every open PR's item is in Review or Landing (or Ready on a fix round, or Stuck) — never stateless.
 - Red: only ``failure``/``timed_out``, and only on a required check (``config.required_checks``;
   empty: every check counts). A red on any other check holds nothing: it is an item note
@@ -151,6 +158,10 @@ RED = 'red'
 #: the most characters of a failed log's tail a finding carries
 LOG_TAIL_MAX = 1500
 
+#: the plan note of a behind Landing PR the merge train holds back this tick (its place in the
+#: queue, of how many are behind)
+TRAIN_NOTE = 'queued for update (merge train, %d of %d)'
+
 #: the card states whose pushed branch with no PR gets one (a build session held it, or its PR
 #: was being opened): a stale branch of a New or Ready item is never turned into a PR
 PR_STATES = (State.BUILDING, State.REVIEW, State.LANDING)
@@ -166,6 +177,8 @@ class _Judged:
     branch: str = None
     hold: bool = False
     findings: list = dataclasses.field(default_factory=list)
+    behind_pr: object = None
+    updating: bool = False
 
 
 def decide(facts, config):
@@ -192,13 +205,30 @@ def decide(facts, config):
     _apply_waits(items, judged, children, states, parked)
     blocks = _count_blocked(items, states, parked)
 
+    train, notes = _merge_train(items, judged, config)
+    actions += train
     actions += _mint(facts, parked)
     launches, skipped = (([], {}) if facts.paused
                          else _launches(facts, config, judged, children, states, parked, blocks))
     actions += launches
     actions.sort(key=lambda a: ORDER.index(type(a)))
     idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
-    return A.Plan(states=states, actions=actions, idle=idle)
+    return A.Plan(states=states, actions=actions, idle=idle, notes=notes)
+
+
+def _merge_train(items, judged, config):
+    """``(UpdateBranch actions, {item: [note]})`` of the merge train: the behind Landing PRs in
+    (effective rank, PR number) order, as many as ``config.update_parallel`` less the updates in
+    flight allows; the rest get :data:`TRAIN_NOTE`."""
+    behind = sorted((iid for iid, j in judged.items() if j.behind_pr is not None),
+                    key=lambda iid: (launch_order(iid, items, config.rank != 'own')[0],
+                                     judged[iid].behind_pr.number))
+    running = sum(1 for j in judged.values() if j.updating)
+    free = max(0, config.update_parallel - running)
+    actions = [A.UpdateBranch(judged[iid].behind_pr.number) for iid in behind[:free]]
+    notes = {iid: [TRAIN_NOTE % (k, len(behind))]
+             for k, iid in enumerate(behind, 1) if k > free}
+    return actions, notes
 
 
 # ---- pass one: each item on its own facts -------------------------------------------------------
@@ -492,9 +522,12 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
         return _fix_round(it, pr, 'review: changes requested', config)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
-    if pr.behind and not pr.conflicting and not updated:
-        actions.append(A.UpdateBranch(pr.number))
-    return _Judged(State.LANDING)
+    if pr.conflicting or updated:
+        return _Judged(State.LANDING)
+    if pr.behind:
+        return _Judged(State.LANDING, behind_pr=pr)
+    return _Judged(State.LANDING, updating=any(
+        c.status != 'completed' and required(c.name, config) for c in pr.checks))
 
 
 def required(name, config):

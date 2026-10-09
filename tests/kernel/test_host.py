@@ -72,26 +72,35 @@ class Settings(unittest.TestCase):
                           k['watch']['interval_s'], k['watch']['stale_after_s']),
                          (120, 6, 'inherit', 600, 900))
         self.assertEqual(k['idle_alarm'], {'enabled': True, 'min_free_seats': 1})
+        self.assertEqual(k['landing'], {'update_parallel': 2})
+        self.assertEqual(P.config_for(env.Product('sample', {'repo_slug': 'o/r'})).update_parallel,
+                         2)
         self.assertEqual(k['gate'], {'window_h': 24, 'first_push_green_min': 0.7, 'landed_min': 5,
                                      'silent_stuck_max': 0, 'since': None})
 
     def test_a_malformed_value_refuses_the_load_and_an_unknown_key_warns(self):
         text = ('product: sample\nrepo_slug: o/r\nkernel:\n  launch:\n    rank: random\n'
-                '  tick:\n    interval_s: 5\n  gate:\n    since: soon\n    extra: 1\n')
+                '  tick:\n    interval_s: 5\n  gate:\n    since: soon\n    extra: 1\n'
+                '  landing:\n    update_parallel: two\n')
         errors, warnings = env.product_problems(text)
         self.assertEqual(sorted(k for _l, k, _w in errors),
-                         ['kernel.gate.since', 'kernel.launch.rank', 'kernel.tick.interval_s'])
+                         ['kernel.gate.since', 'kernel.landing.update_parallel',
+                          'kernel.launch.rank', 'kernel.tick.interval_s'])
+        zero = 'product: sample\nrepo_slug: o/r\nkernel:\n  landing:\n    update_parallel: 0\n'
+        self.assertEqual([k for _l, k, _w in env.product_problems(zero)[0]],
+                         ['kernel.landing.update_parallel'])
         self.assertEqual([k for _l, k, _w in warnings], ['kernel.gate.extra'])
 
     def test_a_well_formed_block_loads_clean_and_reaches_the_config(self):
         text = ('product: sample\nrepo_slug: o/r\nkernel:\n  launch:\n    max_sessions: 3\n'
                 '    rank: own\n  idle_alarm:\n    min_free_seats: 2\n'
+                '  landing:\n    update_parallel: 4\n'
                 '  gate:\n    since: 2026-10-09T14:00:00Z\n')
         self.assertEqual(env.product_problems(text), ([], []))
         product = env.Product('sample', env.loads(text))
         cfg = P.config_for(product)
-        self.assertEqual((cfg.max_sessions, cfg.rank, cfg.idle_alarm, cfg.idle_min_free),
-                         (3, 'own', True, 2))
+        self.assertEqual((cfg.max_sessions, cfg.rank, cfg.idle_alarm, cfg.idle_min_free,
+                          cfg.update_parallel), (3, 'own', True, 2, 4))
         self.assertEqual(product.kernel['gate']['since'],
                          datetime.datetime(2026, 10, 9, 14, tzinfo=datetime.timezone.utc))
 
