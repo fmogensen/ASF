@@ -297,6 +297,27 @@ class StagedCheckTests(unittest.TestCase):
         self.assertEqual(self.git(self.root, 'status', '--porcelain'), '')
         self.assertEqual(self.asf('check', '--staged').returncode, 0)
 
+    def test_new_story_for_a_building_feature_commits(self):
+        # F-0318: a Story minted for a Feature already building has no Task listing it yet (a
+        # Task's `stories:` cannot name it before it exists) — a warning, never a refusal
+        write_item(self.root, 'F-0002', 'feature', 'Building', parent='E-0001',
+                   machine_lines=['schema_version: 1', 'state: Active', 'stage: building 0/1',
+                                  'stage_since: 2026-01-01T00:00:00Z',
+                                  'updated: 2026-01-01T00:00:00Z'])
+        self.asf('index')
+        self.git(self.root, 'add', '-A')
+        self.git(self.root, 'commit', '-qm', 'F-0002')
+        before = self.head()
+        r = self.asf('new', 'story', '--title', 'A late story', '--parent', 'F-0002',
+                     '--acceptance', 'x')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotEqual(self.head(), before, r.stderr)
+        new_id = r.stdout.strip().splitlines()[-1]
+        self.assertIn(f'stories/{new_id}.md',
+                      self.git(self.root, 'show', '--name-only', '--format=', 'HEAD').split())
+        whole = self.asf('check')
+        self.assertIn(f'warning: story {new_id} has no Task listing it in stories:', whole.stdout)
+
     def test_set_blocked_by_commits_the_targets_backlinks(self):
         r = self.asf('set', 'F-0001', 'blockedBy=D-0001')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

@@ -96,9 +96,51 @@ HEADING = re.compile(r'^#{1,6}[ \t]+\S', re.MULTILINE)
 CHECKBOX = re.compile(r'^[ \t]*[-*][ \t]+\[[ xX]\][ \t]*(?P<line>\S.*?)[ \t]*$')
 
 
+#: a ``- S-29501: <title>`` bullet in a ``## Stories`` section — the same declaration as the
+#: heading form, its acceptance the ``- [ ]`` lines indented beneath it (F-0318)
+STORY_BULLET = re.compile(r'^(?P<indent>[ \t]*)[-*][ \t]+\**[ \t]*(?P<id>S-\d{4,})\**[ \t]*[:.—-]'
+                          r'[ \t]*\**[ \t]*(?P<title>\S[^\n]*)$')
+
+
+def _width(indent):
+    return len(indent.expandtabs(4))
+
+
+def _bullet_stories(prose):
+    """The ``- S-…: <title>`` bullets of the ``## Stories`` section(s) of ``prose``, each with
+    the checkbox lines indented beneath it."""
+    out = {}
+    inside = False
+    cur = None  # (id, indent width) of the bullet whose acceptance lines are being read
+    for line in prose.splitlines():
+        if HEADING.match(line):
+            cur = None
+            if line.startswith('## '):
+                inside = bool(STORIES_HEADING.match(line))
+            continue
+        if not inside:
+            continue
+        m = STORY_BULLET.match(line)
+        if m and not CHECKBOX.match(line):
+            cur = (m.group('id'), _width(m.group('indent')))
+            out.setdefault(cur[0], {'title': m.group('title').strip(' *'), 'acceptance': []})
+            continue
+        if cur is None or not line.strip():
+            continue
+        indent = _width(line[:len(line) - len(line.lstrip())])
+        c = CHECKBOX.match(line)
+        if indent <= cur[1]:
+            cur = None  # a sibling (or shallower) line ends the bullet
+        elif c:
+            out[cur[0]]['acceptance'].append(c.group('line'))
+    return out
+
+
 def declared_stories(text):
     """``{S-id: {'title', 'acceptance': [line, …]}}`` — every ``### S-…: <title>`` heading in
-    ``text`` (code left out), with the checkbox lines under it up to the next heading."""
+    ``text`` (code left out), with the checkbox lines under it up to the next heading; and every
+    ``- S-…: <title>`` bullet of a ``## Stories`` section, with the checkbox lines indented
+    beneath it (F-0318). A heading wins over a bullet for the same id."""
     prose = _prose(text)
     bounds = [h.start() for h in HEADING.finditer(prose)]
     out = {}
@@ -106,6 +148,8 @@ def declared_stories(text):
         end = next((b for b in bounds if b > m.start()), len(prose))
         lines = [c.group('line') for c in map(CHECKBOX.match, prose[m.end():end].splitlines()) if c]
         out.setdefault(m.group('id'), {'title': m.group('title').strip(' *'), 'acceptance': lines})
+    for sid, d in _bullet_stories(prose).items():
+        out.setdefault(sid, d)
     return out
 
 

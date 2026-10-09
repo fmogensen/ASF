@@ -185,12 +185,13 @@ class T10GateScenario(unittest.TestCase):
         self.assertEqual(len(overlap_lines), 1, check.stdout)
 
         # one repeated signature -> one Bug; and one Bug per class of standing record error the
-        # `check` above printed — the uncovered Story and the writes: overlap (B-0132)
-        self.assertIn('3 filed', file_bugs.stdout)
+        # `check` above printed — the writes: overlap (B-0132). The uncovered Story is a warning
+        # since F-0318 (groom reports it), so no Bug is filed for it
+        self.assertIn('2 filed', file_bugs.stdout)
         bug_files = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')]
-        # F-0003's inbox-report Bug is separate from the auto-filed ones — four Bugs total,
-        # one from the inbox card and three from file-bugs
-        self.assertEqual(len(bug_files), 4, bug_files)
+        # F-0003's inbox-report Bug is separate from the auto-filed ones — three Bugs total,
+        # one from the inbox card and two from file-bugs
+        self.assertEqual(len(bug_files), 3, bug_files)
 
         # one inbox file -> one card, one answered groom file -> one applied answer
         self.assertIn('applied 1', groom.stdout)

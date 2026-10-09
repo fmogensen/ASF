@@ -424,7 +424,10 @@ def record_findings(root, scrub=None, layout=True, shared=(), pats=None, docs_de
             if crec['meta'].get('type') != 'story':
                 continue
             if cid not in task_story_ids:
-                add(rec, find_line(rec, 'id'), f"story {cid} has no Task listing it in stories:")
+                # F-0318: a warning, never a refusal — a Story minted for a building Feature
+                # commits before the Task that lists it can (that Task's `stories:` must name a
+                # card that exists), so refusing here left no order that commits
+                warn(rec, find_line(rec, 'id'), f"story {cid} has no Task listing it in stories:")
 
     # Active task writes: overlap — the one definition (asf.invariants.unordered_overlaps)
     tasks = invariants.overlap_tasks({iid: rec['meta'] for iid, rec in canonical.items()})

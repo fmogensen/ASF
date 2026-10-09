@@ -10,6 +10,7 @@ from unittest import mock
 from asf import env
 from asf.evidence import evidence
 from asf.record import frontmatter
+from asf.record import idcheck
 from asf.record import plan_tasks
 
 GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
@@ -153,6 +154,38 @@ coverage: 1/1 stories''').replace('stories: S-0001, S-0009', 'stories: S-0001, S
             self.root, None, ev, out=self.lines.append,
             read_ref=lambda ref: spec if 'specs/' in ref else plan)
         self.assertEqual(made, ['S-29501', 'T-0001', 'T-0002'], self.lines)
+
+    BULLET = DECL.replace('### S-29501: the reader reads\n- [ ] it reads the file\n'
+                          '- [ ] it refuses a broken one',
+                          '- S-29501: the reader reads\n  - [ ] it reads the file\n'
+                          '  - [ ] it refuses a broken one')
+
+    def test_a_bullet_form_declaration_is_minted_with_its_acceptance(self):
+        # F-0318: a spec's `- S-n: title` bullet, its `- [ ]` lines indented beneath, declares
+        # the Story as the `### S-n: title` heading does
+        self.assertIn('- S-29501: the reader reads\n  - [ ] it reads', self.BULLET)
+        made = self.mint(text=self.BULLET)
+        self.assertEqual(made, ['S-29501', 'T-0001', 'T-0002'], self.lines)
+        meta, body = read(self.root, 'story', 'S-29501')
+        self.assertEqual((meta['title'], meta['parent']), ('the reader reads', 'F-0001'))
+        self.assertIn('- [ ] it reads the file\n- [ ] it refuses a broken one', body)
+
+    def test_declared_stories_reads_bullets_and_stops_at_a_sibling(self):
+        text = ('## Stories\n\n- S-29501: the reader reads\n  - [ ] it reads\n'
+                '- S-29502: the writer writes\n  - [ ] it writes\n  - [x] it flushes\n'
+                '- [ ] a loose checkbox\n\n## Notes\n- S-29503: not a Stories section\n')
+        self.assertEqual(idcheck.declared_stories(text), {
+            'S-29501': {'title': 'the reader reads', 'acceptance': ['it reads']},
+            'S-29502': {'title': 'the writer writes', 'acceptance': ['it writes', 'it flushes']}})
+
+    def test_a_fenced_bullet_declaration_is_still_ignored(self):
+        text = '## Stories\n\n```\n- S-29501: an example\n  - [ ] shown, not declared\n```\n'
+        self.assertEqual(idcheck.declared_stories(text), {})
+        fenced = self.BULLET.replace('- S-29501: the reader reads\n  - [ ] it reads the file\n'
+                                     '  - [ ] it refuses a broken one',
+                                     '```\n- S-29501: the reader reads\n```\n')
+        self.assertNotIn('S-29501', self.mint(text=fenced))
+        self.assertFalse(os.path.exists(os.path.join(self.root, 'stories', 'S-29501.md')))
 
 
 class HeaderRoute(unittest.TestCase):
