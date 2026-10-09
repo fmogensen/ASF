@@ -1291,12 +1291,14 @@ def launch_now(ctx, out=print):
     r = capacity_mod.resolve(product)
     cloud = cloud_settings(product)
     ready = cloud_readiness(product, cloud)
-    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    cloud_inflight = cloud_mod.inflight_all() if cloud.on else 0
+    _held, _hold, extra = split_hold(cloud, ready, False, '', inflight=cloud_inflight)
     inputs = plan_inputs(product, root, items)
     planned, _dropped = gated_plan(items, product, running, r.sessions + extra, inputs, out=out)
     held = approvals.parked(product)
     host_held, host_why, reading = host_hold(planned)
-    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why,
+                                               inflight=cloud_inflight)
     s1_bypass_open = (host_held
                       and host_mod.load_only_hold(reading, host_mod.guards_from_config(env.load_config()))
                       and not s1_bypass_live())
