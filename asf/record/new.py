@@ -171,6 +171,8 @@ def cmd_new(args, root):
         meta['area'] = args.area
     if args.legacy_id:
         meta['legacy_id'] = args.legacy_id
+    if getattr(args, 'in_progress', None):
+        meta['in_progress_by'] = args.in_progress
     if type_ == 'task':
         meta['writes'] = writes
     for key, sub, value in sets:

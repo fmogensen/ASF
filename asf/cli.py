@@ -195,6 +195,9 @@ def build_parser():
     p_new.add_argument('--priority', choices=['need', 'nice', 'later'])
     p_new.add_argument('--area')
     p_new.add_argument('--legacy-id')
+    p_new.add_argument('--in-progress', metavar='WHO',
+                       help='mark the card in_progress_by WHO (operator, or a session id) — '
+                            'B-0070: suppresses its own rows until it lands or clears')
     p_new.add_argument('--body-file')
     p_new.add_argument('--force', action='store_true')
     p_new.add_argument('--product')
