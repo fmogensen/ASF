@@ -99,7 +99,8 @@ if [ "$MODE" != no-package ]; then
 command -v pipx >/dev/null 2>&1 || die "pipx is not installed — brew install pipx (or python3 -m pip install --user pipx)"
 
 if [ -z "$REF" ]; then
-  TAG_REFS="$(git ls-remote --tags --refs "$REPO_URL" 'v*')"
+  TAG_REFS="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" ||
+    die "listing tags at $REPO_URL failed — check the ref and network"
   REF="$(python3 - "$TAG_REFS" <<'RESOLVE_TAG'
 import re, sys
 pattern = re.compile(r"v\d+\.\d+\.\d+")
@@ -166,7 +167,15 @@ try:
         spec = local_path
     else:
         spec = f'git+{repo_url}@{ref}'
-    subprocess.run(['pipx', 'install', '--force', spec], check=True, stdout=subprocess.DEVNULL)
+    result = subprocess.run(['pipx', 'install', '--force', spec], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        last_lines = [l for l in result.stderr.splitlines() if l.strip()]
+        last_line = last_lines[-1] if last_lines else '(pipx printed nothing to stderr)'
+        print(f'install: NEEDS OPERATOR: pipx install of {ref} failed — {last_line}; '
+              'check the ref and network', file=sys.stderr)
+        sys.exit(98)  # distinct from the lock timeout (99): the message above is already printed
 except subprocess.CalledProcessError as e:
     sys.exit(e.returncode or 1)
 finally:
@@ -174,6 +183,8 @@ finally:
 PY
 if [ "$rc" -eq 99 ]; then
   die "a running tick of $PRODUCT still held its lock after ${INSTALL_LOCK_WAIT_S}s — wait for it to finish, then rerun"
+elif [ "$rc" -eq 98 ]; then
+  exit 2
 elif [ "$rc" -ne 0 ]; then
   die "pipx install --force (ref $REF from $REPO_URL) failed (exit $rc) while holding $PRODUCT's tick lock"
 fi

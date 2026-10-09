@@ -2517,6 +2517,39 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(self._asf_call(), 'install --product demo')
         self.assertIn(f'install: product demo, release v0.3.0 from {self.remote}', r.stdout)
 
+    def test_an_unreachable_repo_fails_tag_resolution_with_needs_operator(self):
+        """B-0113: with no ref, resolving the newest tag runs ``git ls-remote`` before pipx is
+        ever reached; an unreachable repo must not fall through ``set -e`` silently with git's
+        own exit code — it names NEEDS OPERATOR, exits 2, and pipx is never invoked."""
+        bad_remote = os.path.join(self.tmp, 'no-such-remote.git')
+        r = self._run(['demo'], ASF_REPO_URL=bad_remote)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('install: NEEDS OPERATOR:', r.stderr)
+        self.assertIn(bad_remote, r.stderr)
+        self.assertFalse(os.path.exists(self.pipx_log))
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_a_failing_pipx_names_needs_operator_with_its_last_stderr_line(self):
+        """B-0113: pipx itself failing (the ref unresolvable, the network down, the spec
+        rejected …) must not fall through ``set -e`` with pipx's own exit code and no guidance —
+        it names NEEDS OPERATOR, carries pipx's last stderr line, and exits 2."""
+        self._write_scripts()
+        pipx_path = os.path.join(self.bin_dir, 'pipx')
+        with open(pipx_path, 'w') as f:
+            f.write('#!/bin/sh\n'
+                    'echo "pipx: looking for spec" >&2\n'
+                    'echo "pipx: ERROR: could not find a version that satisfies the '
+                    'requirement" >&2\n'
+                    'exit 1\n')
+        os.chmod(pipx_path, 0o755)
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
+                           text=True, **_operator_tty(), env=self._env(), timeout=60)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn('install: NEEDS OPERATOR: pipx install of deadbeef failed', r.stderr)
+        self.assertIn('could not find a version that satisfies the requirement', r.stderr)
+        self.assertIn('check the ref and network', r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+
     def test_a_second_argument_pins_the_ref_with_no_tag_resolution(self):
         r = self._run(['demo', 'deadbeef'])
         self.assertEqual(r.returncode, 0, r.stderr)
