@@ -2,10 +2,12 @@
 (no deploy), against a temp ASF_HOME and a tiny record. No network: every row that would call
 ``gh`` is either unconfigured here or stubbed."""
 import datetime as dt
+import io
 import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -606,6 +608,44 @@ class CapacityTable(ViewsTestCase):
             'batch': {'per_run': 8, 'parallel': 2, 'runners': 4},
             'deprecated': [],
         })
+
+
+class CapacityAllIsolatesInvalidProduct(ViewsTestCase):
+    """B-0098: one invalid product file under ~/.ASF/products/ must not blank the whole
+    ``capacity --all`` view — it becomes a single row naming ``asf doctor``, and the valid
+    products still render and count."""
+
+    def _write(self, name, text):
+        products = os.path.join(env.ASF_HOME, 'products')
+        os.makedirs(products, exist_ok=True)
+        with open(os.path.join(products, f'{name}.yaml'), 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def test_the_valid_product_still_renders_and_the_invalid_one_names_doctor(self):
+        self._write('web', 'product: web\n')
+        self._write('asf', 'product: asf\ncapacity:\n  sessions: TODO\n')
+        args = types.SimpleNamespace(all=True, product=None, json=False)
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            rc = capacity_view.cmd_capacity(args)
+        self.assertEqual(rc, 0)
+        lines = [ln for ln in out.getvalue().splitlines() if ln]
+        web_row = next(ln for ln in lines if ln.startswith('web '))
+        self.assertIn('default', web_row)
+        self.assertIn('asf  config invalid — asf doctor --product asf', lines)
+
+    def test_json_names_the_invalid_product_instead_of_raising(self):
+        self._write('web', 'product: web\n')
+        self._write('asf', 'product: asf\ncapacity:\n  sessions: TODO\n')
+        args = types.SimpleNamespace(all=True, product=None, json=True)
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            rc = capacity_view.cmd_capacity(args)
+        self.assertEqual(rc, 0)
+        data = json.loads(out.getvalue())
+        by_name = {row['product']: row for row in data}
+        self.assertIn('sessions', by_name['web'])
+        self.assertEqual(by_name['asf']['error'], 'config invalid — asf doctor --product asf')
 
 
 class StatusRow(ViewsTestCase):
