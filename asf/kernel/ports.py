@@ -28,6 +28,8 @@ marker), so every old writer carries them through byte for byte
 - ``kernel_findings``: the review findings handed to the next fix round.
 - ``kernel_answers``: the operator answers already applied; ``kernel_question``: the open one.
 - ``kernel_reopened``: ``true`` when a Done item was reopened (a new PR is accepted).
+- ``kernel_notes``: the questions a session asked while its work moved on anyway (a ``done``
+  REPORT with a pushed head) — shown by ``asf kernel status``, holding nothing.
 """
 import datetime
 import json
@@ -45,8 +47,9 @@ STATE, ATTEMPTS, FIX_ROUNDS = 'kernel_state', 'kernel_attempts', 'kernel_fix_rou
 FINDINGS, ANSWERS, QUESTION = 'kernel_findings', 'kernel_answers', 'kernel_question'
 STUCK_REASON, STUCK_OWNER = 'kernel_stuck_reason', 'kernel_stuck_owner'
 STUCK_NEXT, STUCK_SINCE, REOPENED = 'kernel_stuck_next', 'kernel_stuck_since', 'kernel_reopened'
+NOTES = 'kernel_notes'
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
-               FINDINGS, ANSWERS, QUESTION, REOPENED)
+               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES)
 
 #: the card types the kernel judges (decisions and rules are never work)
 WORK_TYPES = ('epic', 'feature', 'story', 'task', 'bug')
@@ -139,7 +142,8 @@ def item_from_card(rec):
         fix_rounds=int(machine.get(FIX_ROUNDS) or 0),
         findings=[str(f) for f in as_list(machine.get(FINDINGS))],
         answers=[str(a) for a in as_list(machine.get(ANSWERS))],
-        question=machine.get(QUESTION) or None, reopened=bool(machine.get(REOPENED)))
+        question=machine.get(QUESTION) or None, reopened=bool(machine.get(REOPENED)),
+        notes=[str(n) for n in as_list(machine.get(NOTES))])
 
 
 def _jsonl(path):
@@ -527,8 +531,10 @@ class RealSessions:
             from asf.workers import cloud  # the cloud runtime: remote.RemoteRuntime or actions
             runtime = cloud.lane_runtime(cloud.settings(self.cfg(), self.product), self.product)
         try:
+            # no heartbeat: the kernel judges liveness by pid and REPORT, and the beat loop's
+            # writes under the shared .git are what a sandboxed session is refused (B-0098)
             spawn.spawn(self.product, row, acct, getattr(brief, 'text', brief), runtime=runtime,
-                        cfg=self.cfg())
+                        cfg=self.cfg(), heartbeat=False)
         except spawn.SpawnError as e:
             raise PortError('launch: %s' % e) from None
         if meta:

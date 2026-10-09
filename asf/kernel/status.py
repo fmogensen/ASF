@@ -1,7 +1,8 @@
 """asf.kernel.status — the kernel's status table (ASF 0.2).
 
 Three blocks, read-only: the Stuck items first (reason, owner, how many items wait on each, and
-how long it has been stuck), then the count of items per state, then the active sessions. The
+how long it has been stuck), then the count of items per state, then the active sessions — and,
+when any item has one, a fourth: the notes (a question a session asked while its work moved on). The
 states are the last tick's plan (``state/<product>/kernel-plan.json``, written by every applied
 tick), so the table costs no network call; ``live=True`` (``--live``), or no plan on disk yet,
 decides afresh on the facts now (no action is applied). A Stuck item's age is from its card's
@@ -34,9 +35,9 @@ def _cell(text, width=80):
     return text if len(text) <= width else text[:width - 1] + '…'
 
 
-def rows(ports, config, now=None, with_idle=False):
+def rows(ports, config, now=None, with_idle=False, with_notes=False):
     """``(stuck rows, state counts, session rows)`` for the status table (plus the plan's idle
-    alarm, ``with_idle``)."""
+    alarm, ``with_idle``, then the ``{item: [note]}`` map, ``with_notes``)."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     with mutation_guard.active():
         facts = read_facts(ports)
@@ -52,7 +53,11 @@ def rows(ports, config, now=None, with_idle=False):
     sessions = [(s.job, s.item_id, s.kind, 'alive' if s.alive else 'dead',
                  _age(getattr(s, 'started', ''), now) if getattr(s, 'started', '') else '-')
                 for s in facts.sessions]
-    return (stuck, counts, sessions, plan.idle) if with_idle else (stuck, counts, sessions)
+    out = (stuck, counts, sessions) + ((plan.idle,) if with_idle else ())
+    if with_notes:
+        from asf.kernel.loop import plan_notes
+        out += (plan_notes(plan, facts),)
+    return out
 
 
 def rows_from_plan(data, record, now=None):
@@ -72,9 +77,9 @@ def rows_from_plan(data, record, now=None):
     return stuck, counts, sessions
 
 
-def render(stuck, counts, sessions, idle=None):
+def render(stuck, counts, sessions, idle=None, notes=None):
     """The three blocks as markdown tables (the console draws them as boxes), the idle alarm
-    (:func:`asf.kernel.loop.idle_line`) first when it is raised."""
+    (:func:`asf.kernel.loop.idle_line`) first when it is raised, the notes last when any."""
     from asf.kernel.loop import idle_line
     out = [idle_line(idle), ''] if idle else []
     out += ['## Stuck', '', '| item | owner | blocks | age | reason |', '| --- | --- | --- | --- | --- |']
@@ -84,6 +89,10 @@ def render(stuck, counts, sessions, idle=None):
     out += ['| %s | %d |' % (s.value, counts.get(s.value, 0)) for s in State]
     out += ['', '## Sessions', '', '| job | item | kind | pid | age |', '| --- | --- | --- | --- | --- |']
     out += ['| %s | %s | %s | %s | %s |' % r for r in sessions] or ['| - | - | - | - | - |']
+    noted = [(iid, n) for iid in sorted(notes or {}) for n in notes[iid]]
+    if noted:
+        out += ['', '## Notes', '', '| item | note |', '| --- | --- |']
+        out += ['| %s | %s |' % (iid, _cell(n, 120)) for iid, n in noted]
     return '\n'.join(out)
 
 
@@ -101,14 +110,15 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
             data = None
     if data is not None:
         record = ports.record if ports else P.RealRecord(product)
-        text = render(*rows_from_plan(data, record), idle=data.get('idle')) \
+        text = render(*rows_from_plan(data, record), idle=data.get('idle'),
+                      notes=data.get('notes')) \
             + '\n\n(the tick of %s; --live for now)' \
             % data.get('at', '?')
         out(text)
         return text
     ports = ports or P.real_ports(product)
     config = config or P.config_for(product)
-    stuck, counts, sessions, idle = rows(ports, config, with_idle=True)
-    text = render(stuck, counts, sessions, idle=idle)
+    stuck, counts, sessions, idle, notes = rows(ports, config, with_idle=True, with_notes=True)
+    text = render(stuck, counts, sessions, idle=idle, notes=notes)
     out(text)
     return text

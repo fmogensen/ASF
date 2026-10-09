@@ -79,6 +79,8 @@ def describe(action):
         return 'end session %s%s' % (action.job, ' + free worktree' if action.free_worktree else '')
     if isinstance(action, A.ApplyAnswer):
         return 'answer %s' % action.item_id
+    if isinstance(action, A.NoteItem):
+        return 'note %s: %s' % (action.item_id, action.text)
     return repr(action)
 
 
@@ -97,7 +99,7 @@ class _Applier:
         if it is None:
             return default
         return {P.ATTEMPTS: list(it.attempts), P.FIX_ROUNDS: it.fix_rounds,
-                P.ANSWERS: list(it.answers)}.get(key, default)
+                P.ANSWERS: list(it.answers), P.NOTES: list(it.notes)}.get(key, default)
 
     def set(self, iid, **fields):
         self.updates.setdefault(iid, {}).update(fields)
@@ -111,6 +113,11 @@ class _Applier:
         answers = self.field(a.item_id, P.ANSWERS, [])
         if a.text not in answers:
             self.set(a.item_id, **{P.ANSWERS: answers + [a.text], P.QUESTION: None})
+
+    def NoteItem(self, a):
+        notes = self.field(a.item_id, P.NOTES, [])
+        if a.text not in notes:
+            self.set(a.item_id, **{P.NOTES: notes + [a.text]})
 
     def EndSession(self, a):
         s = next((s for s in self.facts.sessions if s.job == a.job), None)

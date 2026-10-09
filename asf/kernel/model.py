@@ -76,7 +76,9 @@ class Item:
     attempt, oldest first (a launch error, a push-less session end); ``fix_rounds`` counts the
     red-driven rounds already spent; ``findings`` are the open review findings carried into the
     next launch; ``answers`` are operator answers already written to the card; ``question`` is
-    the open question a session asked. ``reopened`` is set when a Done item was reopened.
+    the open question a session asked. ``notes`` are the questions a session asked while its work
+    still moved on (a ``done`` REPORT with a pushed head): kept for status, holding nothing.
+    ``reopened`` is set when a Done item was reopened.
     """
     id: str
     type: str = 'task'
@@ -95,6 +97,7 @@ class Item:
     answers: list = dataclasses.field(default_factory=list)
     question: str = None
     reopened: bool = False
+    notes: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

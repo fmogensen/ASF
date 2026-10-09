@@ -10,7 +10,11 @@ their names. The kernel adds three things the floor's text does not carry: :data
 kernel session pushes its own branch, a rebase with `--force-with-lease`; the floor's "the factory
 publishes" wording is rewritten, its templates untouched), the operator's answers
 already on the card, and — for a review — :data:`VERDICT_RULE`, the lines :func:`parse_verdict`
-reads back off the session's report.
+reads back off the session's report. It also drops the floor's heartbeat wording
+(:data:`_HEARTBEAT_REWRITES`): a kernel session is launched with no beat loop — the kernel judges
+liveness by pid and REPORT — so its brief names no HEARTBEAT command, no ``refs/asf/hb/`` ref and
+no notes file (B-0098: a sandbox refused the loop's write under the shared .git, and the session
+stopped on it).
 """
 import dataclasses
 import importlib
@@ -66,9 +70,23 @@ _FLOOR_REWRITES = (
 )
 
 
+#: the floor's heartbeat wording, gone from a kernel brief (the kernel launches no beat loop)
+_HEARTBEAT_REWRITES = (
+    (re.compile(r'^## The heartbeat, the marker, and the report$', re.M),
+     '## Progress, the marker, and the report'),
+    (re.compile(r'\s*The heartbeat belongs to the runtime, never to a loop you must keep alive:'
+                r'.*?or a `NEEDS OPERATOR`\.', re.S), ''),
+    (re.compile(r'\s*The heartbeat is the runtime\'s: a beat that cannot start never ends your '
+                r'session\.'), ''),
+)
+
+
 def kernel_push_text(text, branch, main='main'):
     """``text`` (a floor brief) with every "the factory publishes a rebase" line rewritten to the
-    kernel's rule, and :data:`PUSH_RULE` appended: a kernel session pushes its own branch."""
+    kernel's rule, the floor's heartbeat wording dropped, and :data:`PUSH_RULE` appended: a kernel
+    session pushes its own branch."""
+    for pat, repl in _HEARTBEAT_REWRITES:
+        text = pat.sub(repl, text)
     for pat, repl in _FLOOR_REWRITES:
         text = pat.sub(lambda m, r=repl: m.expand(r.replace('{branch}', branch)), text)
     return (text.rstrip('\n') + '\n\n' + PUSH_RULE.format(branch=branch, main=main) + '\n')

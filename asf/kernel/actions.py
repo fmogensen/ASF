@@ -65,6 +65,14 @@ class EndSession:
 
 
 @dataclasses.dataclass
+class NoteItem:
+    """Add ``text`` to ``item_id``'s notes: a question a session asked while its work moved on
+    anyway (a ``done`` REPORT with a pushed head). Shown by status; holds nothing."""
+    item_id: str
+    text: str
+
+
+@dataclasses.dataclass
 class ApplyAnswer:
     """Write the operator's answer ``text`` to ``item_id``'s card and clear its question."""
     item_id: str

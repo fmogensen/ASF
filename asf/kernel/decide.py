@@ -31,7 +31,9 @@ item and the actions of one tick. The rules it holds, in the design's words:
   ``partial`` or ``blocked`` (owner=session, or operator when it asks a ``NEEDS OPERATOR:``
   question), the reason in the report's own words (:func:`asf.kernel.reports.stuck_reason`); a
   ``done`` session with no push and no open PR; a session that ended without a REPORT (owner=
-  session, "ended without a REPORT" plus its last line that says something). A session whose API
+  session, "ended without a REPORT" plus its last line that says something). A ``done`` session
+  that pushed a new head moves on (to Review) whatever ``NEEDS OPERATOR:`` line it also carries:
+  the question becomes an item note (:class:`NoteItem`, shown by status) and holds nothing. A session whose API
   failed is an attempt :data:`API_FAILED` — relaunched, then Stuck(owner=loop). A dead pid ends
   the session and frees its worktree. No Stuck reason is ever empty, a code fence or noise
   (:func:`asf.kernel.reports.meaningful`); one recorded that way is judged afresh.
@@ -107,7 +109,7 @@ IDLE_REASONS = {
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
-ORDER = (A.ApplyAnswer, A.EndSession, A.MarkStuck, A.MintStory, A.Rerun, A.UpdateBranch,
+ORDER = (A.ApplyAnswer, A.EndSession, A.NoteItem, A.MarkStuck, A.MintStory, A.Rerun, A.UpdateBranch,
          A.EnableAutoMerge, A.Launch)
 
 
@@ -187,6 +189,12 @@ def _judge(it, facts, config, actions):
         elif s.api_error and not s.fields:
             attempts.append(API_FAILED)
             api_detail = s.api_error
+        elif done_and_pushed(s):
+            note = pushed_note(s)
+            if note and note not in it.notes and not any(
+                    isinstance(a, A.NoteItem) and (a.item_id, a.text) == (it.id, note)
+                    for a in actions):
+                actions.append(A.NoteItem(it.id, note))
         else:
             ended_stuck = _ended_stuck(s, open_pr) or ended_stuck
 
@@ -239,6 +247,18 @@ def launch_order(iid, items, inherit=True):
     inf = float('inf')
     eff, own = effective_rank(iid, items, inherit), items[iid].rank
     return (inf if eff is None else eff, inf if own is None else own, iid)
+
+
+def done_and_pushed(s):
+    """Whether ended session ``s`` reported ``done`` and pushed a new head: its work moves on
+    whatever question it also asked (B-0098)."""
+    return s.status == R.DONE and s.result == 'pushed'
+
+
+def pushed_note(s):
+    """The note a done-and-pushed session's ``NEEDS OPERATOR:`` line leaves on its item, or ''."""
+    q = ' '.join(str(s.question or '').split())
+    return '%s: NEEDS OPERATOR: %s' % (s.job, R.cap(q)) if q else ''
 
 
 def _ended_stuck(s, open_pr):

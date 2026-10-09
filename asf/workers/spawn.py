@@ -39,7 +39,7 @@ from asf import env, refguard
 from asf import hooks
 from asf import progress
 from asf.workers import githooks
-from asf.workers import heartbeat
+from asf.workers import heartbeat as heartbeat_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import pushlog
@@ -1202,8 +1202,10 @@ def _preflight_push_auth(product, account, product_auth_env):
                      clear=account_auth.enable_hint(account.name))
 
 
-def spawn(product, row, account, brief_text, runtime=None, cfg=None):
-    """Launch one row on ``account``. Returns the session record written to the ledger."""
+def spawn(product, row, account, brief_text, runtime=None, cfg=None, heartbeat=True):
+    """Launch one row on ``account``. Returns the session record written to the ledger.
+    ``heartbeat=False`` launches without the beat (no HEARTBEAT block, no ``heartbeat_min``):
+    the 0.2 kernel judges a session by its pid and REPORT."""
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
     passthrough = env.env_passthrough(cfg)
@@ -1246,7 +1248,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     sid = lifecycle.session_id(product.name, row.job, started)
     # every runtime beats (asf.workers.heartbeat): the runtime hands the session the rule from
     # job.heartbeat — a local one after the brief, a cloud one in its CLOUD block
-    beat = heartbeat.settings(cfg, product, 'cloud' if cloud else 'local')
+    beat = heartbeat_mod.settings(cfg, product, 'cloud' if cloud else 'local') if heartbeat \
+        else None
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)
@@ -1286,7 +1289,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
               'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or '',
               'cause': getattr(row, 'cause', '') or '',
-              'heartbeat_min': beat.interval_min}
+              'heartbeat_min': beat.interval_min if beat is not None else None}
     launch_head = _launch_head(product.repo_dir, branch)
     if launch_head:
         # the head a held branch was handed back on: the loop guard counts launches on one sha

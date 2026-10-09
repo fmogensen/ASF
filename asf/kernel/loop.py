@@ -102,6 +102,15 @@ def print_summary(summary, out=print):
         out('  FAILED %s — %s' % (what, why))
 
 
+def plan_notes(plan, facts):
+    """``{item id: [note]}``: each item's notes on its card plus this tick's :class:`NoteItem`s."""
+    out = {iid: list(it.notes) for iid, it in facts.items.items() if it.notes}
+    for a in plan.actions:
+        if isinstance(a, A.NoteItem) and a.text not in out.setdefault(a.item_id, []):
+            out[a.item_id].append(a.text)
+    return out
+
+
 def save_plan(state_dir, plan, facts):
     """Write :data:`PLAN_FILE`: each judged item's state (and Stuck), and the sessions."""
     from asf.kernel.ports import now_iso
@@ -111,7 +120,7 @@ def save_plan(state_dir, plan, facts):
         for iid, (s, st) in sorted(plan.states.items())},
         'sessions': [{'job': x.job, 'item': x.item_id, 'kind': x.kind, 'alive': x.alive,
                       'started': getattr(x, 'started', '')} for x in facts.sessions],
-        'idle': plan.idle}
+        'idle': plan.idle, 'notes': plan_notes(plan, facts)}
     path = os.path.join(state_dir, PLAN_FILE)
     with open(path + '.tmp', 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=1, sort_keys=True)
