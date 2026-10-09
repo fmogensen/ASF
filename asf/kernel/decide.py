@@ -23,8 +23,14 @@ item and the actions of one tick. The rules it holds, in the design's words:
   a ``correct`` session whose finding (:data:`REBASE`) is to rebase onto the base and resolve
   the conflicts. A PR that still conflicts after that session ended is Stuck(owner=operator).
 - Stuck: ``config.max_attempts`` failed attempts on one reason; a conflict the rebase session
-  could not resolve; a session question (owner=operator); a session that ended without a push
-  (owner=session, its last line as reason). A dead pid ends the session and frees its worktree.
+  could not resolve; a session question (owner=operator); a session whose REPORT says
+  ``partial`` or ``blocked`` (owner=session, or operator when it asks a ``NEEDS OPERATOR:``
+  question), the reason in the report's own words (:func:`asf.kernel.reports.stuck_reason`); a
+  ``done`` session with no push and no open PR; a session that ended without a REPORT (owner=
+  session, "ended without a REPORT" plus its last line that says something). A session whose API
+  failed is an attempt :data:`API_FAILED` — relaunched, then Stuck(owner=loop). A dead pid ends
+  the session and frees its worktree. No Stuck reason is ever empty, a code fence or noise
+  (:func:`asf.kernel.reports.meaningful`); one recorded that way is judged afresh.
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -38,6 +44,7 @@ import dataclasses
 import fnmatch
 
 from asf.kernel import actions as A
+from asf.kernel import reports as R
 from asf.kernel.model import OWNERS, RED_CONCLUSIONS, State, Stuck
 from asf.kernel.stories import declared_stories
 
@@ -63,10 +70,14 @@ CONFLICT_NEXT = 'rebase PR #%d onto its base by hand and push, or close it and r
 #: a dead pid's attempt reason (the session never ended on its own)
 CRASH = 'session died'
 
+#: the attempt reason of a session whose API failed before it could report (retried, not a
+#: verdict on the work: ``config.max_attempts`` of them make the item Stuck(owner=loop))
+API_FAILED = 'the session API failed'
+
 #: one line per owner of what happens next, unless the card already says
 NEXT_ACTION = {
     'loop': 'the loop retries once its facts change',
-    'session': 'a session reads the last line and fixes the cause',
+    'session': 'a session reads the reason and fixes the cause',
     'ci': 'fix or rerun the red check outside this PR',
     'operator': 'answer on the card',
 }
@@ -124,7 +135,8 @@ def decide(facts, config):
 def _judge(it, facts, config, actions):
     """``it``'s :class:`_Judged` from its own card, sessions, PRs, reviews and answers; appends the
     item's own actions (answers, PR upkeep) to ``actions``."""
-    stuck = it.stuck if it.state is State.STUCK and not _legacy_conflict(it.stuck) else None
+    stuck = (it.stuck if it.state is State.STUCK and not _legacy_conflict(it.stuck)
+             and R.meaningful(it.stuck.reason) else None)
     question = it.question
     hold = False
     for a in facts.answers:
@@ -135,22 +147,23 @@ def _judge(it, facts, config, actions):
     sessions = [s for s in facts.sessions if s.item_id == it.id]
     live = [s for s in sessions if s.alive]
     attempts = list(it.attempts)
-    ended_stuck = None
+    prs = [p for p in facts.prs if p.item_id == it.id]
+    open_pr = max((p for p in prs if not p.merged), key=lambda p: p.number, default=None)
+    ended_stuck, api_detail = None, ''
     for s in sessions:
         if s.alive:
             continue
         hold = True
         if not s.ended:
             attempts.append(CRASH)
-        elif s.result == 'question':
-            ended_stuck = _stuck(s.question or s.last_line or 'session asked a question',
-                                 'operator')
-        elif s.result == 'none':
-            ended_stuck = _stuck(s.last_line or 'session ended without a push or a report',
-                                 'session')
+        elif s.kind == 'review':
+            continue  # a reviewer's verdict is read off its report by the applier
+        elif s.api_error and not s.fields:
+            attempts.append(API_FAILED)
+            api_detail = s.api_error
+        else:
+            ended_stuck = _ended_stuck(s, open_pr) or ended_stuck
 
-    prs = [p for p in facts.prs if p.item_id == it.id]
-    open_pr = max((p for p in prs if not p.merged), key=lambda p: p.number, default=None)
     if open_pr is None and any(p.merged for p in prs) and not it.reopened:
         return _Judged(State.DONE)
     if stuck:
@@ -164,6 +177,8 @@ def _judge(it, facts, config, actions):
         return _Judged(State.BUILDING if builds else State.REVIEW, hold=True)
     repeated = _repeated(attempts, config.max_attempts)
     if repeated:
+        if repeated == API_FAILED and api_detail:
+            repeated = '%s: %s' % (API_FAILED, api_detail)
         return _Judged(State.STUCK, _stuck(repeated, 'loop'))
     if open_pr is not None:
         j = _judge_pr(it, open_pr, attempts, facts, config, actions)
@@ -174,6 +189,29 @@ def _judge(it, facts, config, actions):
     if it.priority == 'later' or it.rank is None:
         return _Judged(State.NEW, hold=hold)
     return _Judged(State.READY, hold=hold)
+
+
+def _ended_stuck(s, open_pr):
+    """The Stuck an ended (not review) session leaves its item in, from what its REPORT says, or
+    None when the normal flow goes on (a push, or ``done`` on an open PR)."""
+    if s.status in (R.PARTIAL, R.BLOCKED):
+        return _stuck(R.stuck_reason(s.status, s.fields, s.question),
+                      'operator' if s.question else 'session')
+    if s.result == 'question' or s.question:
+        return _stuck(R.stuck_reason(s.status or 'question', s.fields, s.question)
+                      if s.fields else (s.question or s.last_line or 'session asked a question'),
+                      'operator')
+    if s.result == 'pushed':
+        return None
+    if s.status == R.DONE:
+        if open_pr is not None:
+            return None  # its PR is judged on GitHub's facts
+        pushed = ' '.join(str(s.fields.get('pushed') or '').split())
+        return _stuck('done without a push%s' % (': pushed: %s' % pushed if pushed else ''),
+                      'session')
+    if s.fields:
+        return _stuck(R.stuck_reason(s.status, s.fields), 'session')
+    return _stuck(R.no_report_reason(s.last_line), 'session')
 
 
 def _park(it, facts, config):
@@ -276,8 +314,10 @@ def _repeated(attempts, limit):
 
 
 def _stuck(reason, owner):
+    """A Stuck on ``owner`` whose reason always says something (:func:`asf.kernel.reports.clean`)."""
     assert owner in OWNERS, owner
-    return Stuck(reason, owner, NEXT_ACTION[owner])
+    return Stuck(R.clean(reason, 'stuck on the %s with no readable reason' % owner), owner,
+                 NEXT_ACTION[owner])
 
 
 def _keep(stuck):

@@ -172,7 +172,8 @@ class Scenarios(unittest.TestCase):
         f = B.facts([B.task('T-0001', state=State.BUILDING)], sessions=[s])
         plan = decide(f, B.config())
         marks = [(m.item_id, m.owner, m.reason) for m in B.of(plan, A.MarkStuck)]
-        self.assertEqual(marks, [('T-0001', 'session', 'error: cannot import name widget')])
+        self.assertEqual(marks, [('T-0001', 'session',
+                                  'ended without a REPORT: error: cannot import name widget')])
         self.assertEqual(B.state(plan, 'T-0001'), State.STUCK)
 
     def test_14_reopened_done_item_accepts_a_new_pr(self):

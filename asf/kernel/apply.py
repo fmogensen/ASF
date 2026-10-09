@@ -8,7 +8,8 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   and the brief;
 - a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR is an attempt whose reason
   starts with :data:`asf.kernel.decide.CONFLICT`; a failed launch is an attempt ``launch: …``;
-- a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`;
+- a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; one whose
+  API failed before it reported is an attempt :data:`asf.kernel.decide.API_FAILED`;
 - a review session that ended has its report's verdict lines
   (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree it
   was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
@@ -26,7 +27,7 @@ import dataclasses
 from asf.kernel import actions as A
 from asf.kernel import ports as P
 from asf.kernel.briefs import parse_verdict
-from asf.kernel.decide import CONFLICT, CONTAINERS, CRASH
+from asf.kernel.decide import API_FAILED, CONFLICT, CONTAINERS, CRASH
 from asf.kernel.model import State
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
@@ -101,6 +102,8 @@ class _Applier:
             self.attempt(s.item_id, CRASH)
         elif s.kind == 'review':
             self.verdict(s)
+        elif s.api_error and not s.fields:
+            self.attempt(s.item_id, API_FAILED)
         self.ports.sessions.end(s, a.free_worktree)
 
     def verdict(self, s):

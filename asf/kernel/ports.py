@@ -37,6 +37,7 @@ import time
 import typing
 
 from asf.kernel import model as M
+from asf.kernel import reports
 from asf.record.core import ID_TOKEN_RE, as_list, canonicalize, is_retired, load_items
 
 #: the machine-block keys the kernel owns (see the module docstring)
@@ -486,13 +487,15 @@ class RealSessions:
             alive = lifecycle.pid_alive(run.get('pid'))
             result = None if alive else runtime.read_result(run.get('log'))
             pushed = not alive and pushlog.count(self.product, run['job']) > 0
+            said = reports.read(result)
             out.append(M.Session(
                 job=run['job'], item_id=run['item'], kind=kind, pid=run.get('pid'), alive=alive,
-                ended=result is not None,
-                result='pushed' if pushed else ('report' if kind == 'review' else 'none'),
-                last_line=_last_line(result), report=str((result or {}).get('result') or ''),
+                ended=result is not None, result=session_result(kind, pushed, said),
+                question=said['question'] or None, last_line=said['last_line'],
+                report=str((result or {}).get('result') or ''),
                 pr=run.get('kernel_pr'), tree_sha=run.get('kernel_tree') or '',
-                worktree=run.get('worktree') or ''))
+                worktree=run.get('worktree') or '', status=said['status'],
+                fields=said['fields'], api_error=said['api_error']))
             out[-1].started = run.get('started') or ''
         return out
 
@@ -589,9 +592,17 @@ def keep_review_files(worktree, reviews_dir, dest_dir, job):
     return True
 
 
-def _last_line(result):
-    lines = str((result or {}).get('result') or '').strip().splitlines()
-    return lines[-1].strip() if lines else ''
+def session_result(kind, pushed, said):
+    """How a session ended (:data:`asf.kernel.model.RESULTS`) from its push and what it said
+    (:func:`asf.kernel.reports.read`): a push wins; a review reports; then a question, a REPORT,
+    or none."""
+    if pushed:
+        return 'pushed'
+    if kind == 'review':
+        return 'report'
+    if said['question']:
+        return 'question'
+    return 'report' if said['fields'] else 'none'
 
 
 def _under(path, parent):

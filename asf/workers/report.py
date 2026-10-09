@@ -142,6 +142,18 @@ def failure(text):
     return None
 
 
+def operator_question(text):
+    """The first ``NEEDS OPERATOR:`` line in ``text`` that asks something, or ''. A ``none``
+    (``none — <a note>``, ``omit``, ``n/a``) asks nothing, nor does a reshape's ``does not split``
+    answer (:func:`no_split`)."""
+    for m in OPERATOR_RE.finditer(str(text or '')):
+        what = m.group('what').strip()
+        if NO_QUESTION_RE.match(what) or NO_SPLIT_RE.match(m.group(0)):
+            continue  # "none" asks nothing; "does not split" is an answer, not a question
+        return what
+    return ''
+
+
 def needs_input(text):
     """The question a result's own text declares, or None: the first ``NEEDS OPERATOR:`` line that
     asks something, else the ``status: blocked`` report's own words (its ``left out:``, else its
@@ -156,10 +168,8 @@ def needs_input(text):
     it (P8). No phrase list: a run that says "waiting for CI" in passing is not waiting for a
     human, and a list of such phrases flags the wrong sessions for ever (D5, D11)."""
     text = str(text or '')
-    for m in OPERATOR_RE.finditer(text):
-        what = m.group('what').strip()
-        if NO_QUESTION_RE.match(what) or NO_SPLIT_RE.match(m.group(0)):
-            continue  # "none" asks nothing; "does not split" is an answer, not a question
+    what = operator_question(text)
+    if what:
         if _claims_writes(text):
             return None  # a `needs writes:` claim is answered by the widening rule, not a person
         return what

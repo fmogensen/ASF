@@ -136,7 +136,12 @@ class Session:
     ``result`` is one of :data:`RESULTS`; ``question`` is set when ``result == 'question'``;
     ``last_line`` is the last line it wrote; ``worktree`` is the checkout it holds. ``report`` is
     the whole result text of an ended session (a reviewer's verdict lines are read off it);
-    ``pr``/``tree_sha`` are the PR and head tree a review session was launched on."""
+    ``pr``/``tree_sha`` are the PR and head tree a review session was launched on.
+
+    What an ended session's REPORT declares (:func:`asf.kernel.reports.read`): ``status`` is
+    ``done``, ``partial``, ``blocked`` or '' (no REPORT); ``fields`` is the parsed REPORT
+    (``pushed``, ``commits``, ``tests``, ``left out``, …); ``question`` a ``NEEDS OPERATOR:`` line
+    that asks something; ``api_error`` the API failure that ended it before any REPORT, or ''."""
     job: str
     item_id: str
     kind: str = 'build'
@@ -150,6 +155,9 @@ class Session:
     report: str = ''
     pr: int = None
     tree_sha: str = ''
+    status: str = ''
+    fields: dict = dataclasses.field(default_factory=dict)
+    api_error: str = ''
 
 
 @dataclasses.dataclass
