@@ -669,7 +669,28 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     if ctx.stale_reason:
         print(f"RECORD STALE — {ctx.stale_reason}\n")
     summary.run(ctx, chosen, ran=ran)
+    write_status_snapshot(ctx)
     return rc
+
+
+def write_status_snapshot(ctx):
+    """The tick's last act: ``state/<product>/status.txt``, for every session's status line
+    (``asf status --line``). At the end, not in the ``record`` step, because the two rows a
+    session watches are the two the ``wave`` changed (D1, F-0118). Best-effort, like the summary
+    above it: one line and nothing else when it fails, never the tick's exit code."""
+    from asf.views import status
+    product = ctx.product
+    root = ctx.record_root() if ctx.has_record else (product.backlog_dir or None)
+    if not root or not os.path.isdir(root):
+        print('tick: status snapshot not written (no record to render)')
+        return
+    try:
+        status.write_snapshot(root, product)
+    except Exception as e:  # noqa: BLE001 — a status line is never worth a failed tick
+        with contextlib.suppress(OSError):
+            tmp = status.snapshot_path(product) + f'.{os.getpid()}.tmp'
+            os.remove(tmp)
+        print(f'tick: status snapshot not written ({type(e).__name__}: {e})')
 
 
 DEFAULT_WAVE_FIRST = True

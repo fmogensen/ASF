@@ -750,12 +750,12 @@ def i14_cell(product, now=None):
     return f"{count} report line(s) in 24 h (i14: {mode})"
 
 
-def render(root, product, cfg=None):
+def rows(root, product, cfg=None):
+    """``[(name, cell)]`` — every FACTORY STATUS row that has something to say, in table order.
+    One unreadable cell becomes ``? (<Error>: …)`` and never loses the rest; a cell that answers
+    ``None`` is a row that only speaks up when something is wrong, and is dropped (F-0118 I1)."""
     cfg = env.load_config() if cfg is None else cfg
-    now = datetime.datetime.now().strftime('%H:%M')
-    out = [f"**FACTORY STATUS {now}**", ""]
-    out.append("| Metric | Now |")
-    out.append("|---|---|")
+    out = []
     for name, cell in (('Stale', lambda: stale_cell(root, product)),
                        ('Wave latency', lambda: wave_latency_cell(product)),
                        ('Version', lambda: version_cell(product=product)),
@@ -794,11 +794,85 @@ def render(root, product, cfg=None):
             text = f"? ({type(e).__name__}: {e})"
         if text is None:  # a row that only speaks up when something is wrong
             continue
-        out.append(f"| {name} | {text} |")
+        out.append((name, text))
+    return out
+
+
+def render(root, product, cfg=None):
+    cfg = env.load_config() if cfg is None else cfg
+    now = datetime.datetime.now().strftime('%H:%M')
+    out = [f"**FACTORY STATUS {now}**", "", "| Metric | Now |", "|---|---|"]
+    out += [f"| {name} | {text} |" for name, text in rows(root, product, cfg)]
     return "\n".join(out) + "\n"
 
 
 def cmd_status(args, root):
     product = env.load_product(getattr(args, 'product', None))
     print(render(root, product), end='')
+    return 0
+
+
+#: The snapshot's filename, under ``env.state_dir(product)`` — host state, one per product
+#: (F-0118 I3).
+SNAPSHOT = 'status.txt'
+STAMP_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
+
+#: The snapshot's first line. ``ts`` is when the tick rendered it; ``stale_after_s`` is the
+#: horizon *it* resolved (D3) — the reader never recomputes either.
+_HEADER_RE = re.compile(r'^# asf status (?P<product>\S+) ts=(?P<ts>\S+) stale_after_s=(?P<horizon>\d+)$')
+
+
+def snapshot_path(product):
+    return os.path.join(env.state_dir(product), SNAPSHOT)
+
+
+def snapshot_text(root, product, cfg=None, now=None, stale_after_s=None):
+    """The compact form of the FACTORY STATUS table: a header line (D3) and one ``Name: cell``
+    line per row, no markdown — a status line is not a table (D6)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    horizon = int(stale_after_s if stale_after_s is not None else 2 * _record_period_s(product))
+    head = (f"# asf status {product.name} ts={now.strftime(STAMP_FORMAT)} "
+            f"stale_after_s={horizon}")
+    body = [f"{name}: {' · '.join(text.splitlines())}" for name, text in rows(root, product, cfg)]
+    return "\n".join([head] + body) + "\n"
+
+
+def write_snapshot(root, product, cfg=None, now=None):
+    """Write the snapshot atomically (D11): a per-process temp file beside it, then
+    ``os.replace`` — a reader sees one whole snapshot or the previous one, never a partial file.
+    Returns the path. A failed write leaves the temp file behind rather than a truncated
+    snapshot; the caller removes it and reports."""
+    path = snapshot_path(product)
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(snapshot_text(root, product, cfg, now))
+    os.replace(tmp, path)
+    return path
+
+
+def line_text(product_name, now=None):
+    """The status line's whole output: the age line, then the snapshot body. One file read, one
+    subtraction — no config, no record, no subprocess (D3, D7)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        with open(snapshot_path(product_name), encoding='utf-8') as f:
+            lines = f.read().splitlines()
+        m = _HEADER_RE.match(lines[0]) if lines else None
+        if not m:
+            raise ValueError('no header')
+        when = datetime.datetime.strptime(m.group('ts'), STAMP_FORMAT).replace(
+            tzinfo=datetime.timezone.utc)
+    except (OSError, ValueError):
+        return f"ASF {product_name} · no tick yet\n"
+    age_s = max((now - when).total_seconds(), 0)
+    stale = ' · STALE' if age_s > int(m.group('horizon')) else ''
+    head = f"ASF {m.group('product')} · tick {_age(age_s)}{stale}"
+    return "\n".join([head] + lines[1:]) + "\n"
+
+
+def cmd_status_line(args):
+    """``asf status --line`` — always 0: a non-zero exit from a status-line command is noise in
+    a session with no reader to act on it (D7)."""
+    name = getattr(args, 'product', None) or env.default_product_name()
+    print(line_text(name), end='')
     return 0

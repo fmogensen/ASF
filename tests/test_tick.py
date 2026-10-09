@@ -16,6 +16,7 @@ from unittest import mock
 
 from asf import capacity, ci_queue, dispatch, env
 from asf.tick import shadow, steps, summary, tick
+from asf.views import status
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_tick` does not
     from gitfixture import Template
@@ -1177,6 +1178,87 @@ class SummaryTests(TickTestCase):
         tick_line = [l for l in out.splitlines() if l.startswith('TICK — ')][0]
         self.assertIn('record ok', tick_line)
         self.assertIn('commit FAILED (push refused)', tick_line)
+
+
+class StatusSnapshotTests(TickTestCase):
+    """F-0118: the tick's last act is a snapshot of the FACTORY STATUS table, written atomically,
+    for every session's status line (``asf status --line``)."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(tick, 'write_tick_line', lambda ctx, ran: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def snapshot_path(self):
+        return status.snapshot_path(env.load_product('sample'))
+
+    def test_tick_writes_a_parseable_snapshot_with_one_line_per_row(self):
+        rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        path = self.snapshot_path()
+        self.assertTrue(os.path.exists(path))
+        with open(path, encoding='utf-8') as f:
+            lines = f.read().splitlines()
+        self.assertRegex(lines[0], r'^# asf status sample ts=\S+ stale_after_s=\d+$')
+        expected = status.rows(self.record_path(), env.load_product('sample'))
+        self.assertEqual(len(lines) - 1, len(expected))
+
+    def test_write_snapshot_goes_through_os_replace_a_failed_one_leaves_only_a_tmp(self):
+        """``status.write_snapshot`` called directly (not through a tick): a failed ``os.replace``
+        must never leave a partial ``status.txt`` — only the temp file it wrote first (PD8)."""
+        product = env.load_product('sample')
+        with mock.patch('os.replace', side_effect=OSError('disk gone')):
+            with self.assertRaises(OSError):
+                status.write_snapshot(self.operator, product)
+        path = status.snapshot_path(product)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(len(glob.glob(path + '.*.tmp')), 1)
+
+    def test_a_second_tick_replaces_the_snapshot_in_place_with_a_fresh_ts(self):
+        self.run_tick(steps='record')
+        path = self.snapshot_path()
+        with open(path, encoding='utf-8') as f:
+            first = f.read().splitlines()[0]
+        time.sleep(1.1)
+        self.run_tick(steps='record')
+        with open(path, encoding='utf-8') as f:
+            second = f.read().splitlines()[0]
+        self.assertNotEqual(first, second)
+
+    def test_a_render_that_raises_prints_one_line_leaves_the_rc_and_no_tmp_behind(self):
+        with mock.patch.object(status, 'write_snapshot', side_effect=ValueError('boom')):
+            rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertEqual(untimed(out).rstrip('\n').split('\n')[-1],
+                         'tick: status snapshot not written (ValueError: boom)')
+        product = env.load_product('sample')
+        self.assertEqual(glob.glob(status.snapshot_path(product) + '.*.tmp'), [])
+
+    def test_no_record_and_no_backlog_dir_leaves_an_existing_snapshot_untouched(self):
+        product = env.load_product('sample')
+        path = status.snapshot_path(product)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('existing content\n')
+
+        class FakeProduct:
+            name = 'sample'
+            backlog_dir = None
+
+        class FakeCtx:
+            has_record = False
+            product = FakeProduct()
+
+            def record_root(self):
+                raise AssertionError('must not clone the record just to draw a status line')
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            tick.write_status_snapshot(FakeCtx())
+        with open(path, encoding='utf-8') as f:
+            after = f.read()
+        self.assertEqual(after, 'existing content\n')
+        self.assertIn('tick: status snapshot not written (no record to render)', out.getvalue())
 
 
 class StepTimingTests(TickTestCase):
