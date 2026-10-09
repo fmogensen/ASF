@@ -10,6 +10,7 @@ import unittest
 from asf import env
 from asf.kernel import model as M
 from asf.kernel import ports as P
+from tests.kernel import builders as B
 
 CARD = """---
 id: T-0001

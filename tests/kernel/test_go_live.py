@@ -122,7 +122,7 @@ class RealBriefs(unittest.TestCase):
         sess = self.launch([B.task('T-0001', state=State.REVIEW)],
                            prs=[B.pr(7, 'T-0001', head='h' * 40)])
         (kind, _iid, branch, text), = sess.launched
-        self.assertEqual((kind, branch), ('review', 'work/T-0001'))
+        self.assertEqual((kind, branch), ('review', 'worker/T-0001'))
         self.assertIn('## Your job: review T-0001', text)
         self.assertIn('kind: review', text)
         self.assertIn('#7, head `%s`' % ('h' * 40), text)

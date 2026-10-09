@@ -374,7 +374,7 @@ def _launches(facts, config, judged, children, states, parked):
         if any(_overlap(items[iid].writes, w) for w in busy):
             continue
         kind = _kind(items[iid], facts)
-        out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config)))
+        out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config, items[iid])))
         busy.append(items[iid].writes)
         free -= 1
     return out
@@ -386,10 +386,12 @@ def _kind(it, facts):
     return 'plan' if it.id in facts.specs_landed else 'spec'
 
 
-def _branch(kind, iid, config):
+def _branch(kind, iid, config, item=None):
     for prefix in config.doc_branches:
         if prefix.strip('/') == kind:
             return prefix + iid
+    if item is not None and item.type == 'bug':
+        return config.fix_branch + iid
     return config.work_branch + iid
 
 

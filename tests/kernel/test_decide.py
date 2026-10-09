@@ -67,7 +67,7 @@ class Rounds(unittest.TestCase):
         plan = decide(f, B.config())
         self.assertEqual(B.state(plan, 'T-0001'), State.READY)
         self.assertEqual([(a.kind, a.branch) for a in B.of(plan, A.Launch)],
-                         [('build', 'work/T-0001')])
+                         [('build', 'worker/T-0001')])
 
     def test_fix_round_cap_sticks_on_operator(self):
         f = B.facts([B.task('T-0001', state=State.REVIEW, fix_rounds=2)],

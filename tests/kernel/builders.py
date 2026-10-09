@@ -17,6 +17,8 @@ DOC_PATHS = ('docs/**',)
 def config(**kw):
     kw.setdefault('doc_branches', DOC_BRANCHES)
     kw.setdefault('doc_paths', DOC_PATHS)
+    kw.setdefault('work_branch', 'worker/')
+    kw.setdefault('fix_branch', 'fix/')
     return M.Config(**kw)
 
 
@@ -38,7 +40,7 @@ def check(name='test', conclusion='success', status='completed', run_id=1, **kw)
 
 def pr(number, item_id, branch=None, tree='tree-1', head='head-1', files=None, checks=None,
        **kw):
-    return M.PR(number=number, branch=branch or 'work/%s' % item_id, item_id=item_id,
+    return M.PR(number=number, branch=branch or 'worker/%s' % item_id, item_id=item_id,
                 head_sha=head, tree_sha=tree, files=list(files or ['src/a.py']),
                 checks=list(checks if checks is not None else [check()]), **kw)
 

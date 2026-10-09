@@ -581,5 +581,6 @@ def config_for(product, cfg=None):
         doc_branches=(conv.prefix('spec'), conv.prefix('plan')),
         doc_paths=tuple('%s/**' % d.rstrip('/') for d in (conv.specs_dir, conv.plans_dir,
                                                           conv.reviews_dir)),
-        work_branch=conv.prefix('code'), max_sessions=max_sessions)
+        work_branch=conv.prefix('code'), fix_branch=conv.prefix('fix'),
+        max_sessions=max_sessions)
 

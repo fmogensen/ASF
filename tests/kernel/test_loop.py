@@ -37,9 +37,9 @@ class Tick(unittest.TestCase):
         ports = F.ports(record=rec)
         summary = self.tick(ports)
         self.assertEqual([(k, i, b) for k, i, b, _ in ports.sessions.launched],
-                         [('build', 'T-0001', 'work/T-0001')])
+                         [('build', 'T-0001', 'worker/T-0001')])
         self.assertEqual(rec.fields['T-0001'][P.STATE], 'building')
-        self.assertEqual(summary['launches'], [('build', 'T-0001', 'work/T-0001')])
+        self.assertEqual(summary['launches'], [('build', 'T-0001', 'worker/T-0001')])
         self.assertTrue(os.path.exists(os.path.join(self.tmp, loop.LOCK_FILE)))
 
     def test_an_approved_pr_gets_auto_merge_and_lands(self):
@@ -104,7 +104,7 @@ class Tick(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, loop.LOCK_FILE)))
         self.assertEqual(summary['actions'], {'EndSession': 1, 'EnableAutoMerge': 1,
                                               'Launch': 1, 'MintStory': 1})
-        self.assertIn('would launch build T-0001 on work/T-0001', self.lines)
+        self.assertIn('would launch build T-0001 on worker/T-0001', self.lines)
 
     def test_a_fix_round_counts_and_carries_the_findings(self):
         rec = F.FakeRecord([B.task('T-0001', state=State.REVIEW)])
@@ -113,7 +113,7 @@ class Tick(unittest.TestCase):
         sess = F.FakeSessions()
         self.tick(F.ports(record=rec, github=gh, sessions=sess))
         (kind, iid, branch, brief), = sess.launched
-        self.assertEqual((kind, branch), ('build', 'work/T-0001'))
+        self.assertEqual((kind, branch), ('build', 'worker/T-0001'))
         self.assertIn('C1: no test', brief)
         self.assertEqual(rec.fields['T-0001'][P.FIX_ROUNDS], 1)
         self.assertEqual(rec.fields['T-0001'][P.FINDINGS], ['C1: no test'])
