@@ -254,7 +254,9 @@ def wave_active(product):
 
 def active_products(name):
     """The names of the products with an active wave, ``name`` always among them. A product file
-    that does not load is not counted."""
+    that does not load is not counted (never as a zero-capacity partner) and names itself in one
+    warning line on stderr (B-0098) — the pool's cross-product load is never blanked by it."""
+    import sys
     from asf import schema
     out = {name}
     for other in schema._all_products():
@@ -263,7 +265,8 @@ def active_products(name):
         try:
             if wave_active(env.load_product(other)):
                 out.add(other)
-        except Exception:  # noqa: BLE001 — a broken sibling file must not stop this product
+        except Exception as e:  # noqa: BLE001 — a broken sibling file must not stop this product
+            print(f'capacity: {other} config invalid, skipped — {e}', file=sys.stderr)
             continue
     return sorted(out)
 
