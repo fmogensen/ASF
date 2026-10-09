@@ -91,6 +91,22 @@ def read(result):
     }
 
 
+#: a REPORT's ``pushed:`` value that claims a push: ``yes [<sha>]``, ``rebased <sha>`` or a bare
+#: 40-hex sha (the sha is captured when given)
+PUSHED_YES_RE = re.compile(r'^\s*(?:yes\b[\s:,;-]*(?P<y>[0-9a-fA-F]{7,40})?|rebased\s+(?P<r>[0-9a-fA-F]{7,40})\b'
+                           r'|(?P<b>[0-9a-fA-F]{40})\b)')
+
+
+def pushed_claim(value):
+    """What a REPORT's ``pushed:`` line claims: ``(True, sha)`` for ``yes``, ``yes <sha>``,
+    ``rebased <sha>`` or a bare 40-hex sha (``sha`` lower-case, '' when none was given);
+    ``(False, '')`` for ``no …``, ``none`` or anything else."""
+    m = PUSHED_YES_RE.match(str(value or '').strip('` '))
+    if not m:
+        return False, ''
+    return True, (m.group('y') or m.group('r') or m.group('b') or '').lower()
+
+
 def _first(value):
     return ' '.join(str(value or '').split())
 

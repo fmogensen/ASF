@@ -82,6 +82,59 @@ class Decide(unittest.TestCase):
         self.assertEqual([a.branch for a in B.of(plan, A.OpenPR)], ['fix/B-0098'])
 
 
+class ReportedPush(unittest.TestCase):
+    """A session that pushed itself (no host push-log entry) and reported ``pushed: yes <sha>``,
+    a bare sha or ``rebased <sha>`` is pushed once its branch is on origin (B-0106, B-0112,
+    B-0117); ``no …`` / ``none`` is not."""
+
+    SHA = 'a1db77e34cc73fc67f4ac21ae528991a5038e91c'
+    ORIGIN = [Branch('fix/B-0098', 'B-0098', SHA)]
+
+    def _self_pushed(self, pushed):
+        return B.session('j1', 'B-0098', alive=False, ended=True, result='report',
+                         status='done', branch='fix/B-0098',
+                         fields={'status': 'done', 'pushed': pushed})
+
+    def test_the_claim_parse(self):
+        from asf.kernel import reports as R
+        for value, want in (('yes ' + self.SHA, (True, self.SHA)), ('yes', (True, '')),
+                            ('yes: 2B865DE1D', (True, '2b865de1d')), (self.SHA, (True, self.SHA)),
+                            ('rebased 616e0b67b — the factory publishes', (True, '616e0b67b')),
+                            ('no — committed only', (False, '')), ('none', (False, '')),
+                            ('', (False, '')), (None, (False, '')), ('nope', (False, ''))):
+            self.assertEqual(R.pushed_claim(value), want, value)
+
+    def test_each_claimed_form_on_origin_opens_the_pr(self):
+        for pushed in ('yes ' + self.SHA, 'yes', self.SHA, 'rebased a1db77e34'):
+            plan = decide(B.facts([_bug()], sessions=[self._self_pushed(pushed)],
+                                  branches=self.ORIGIN), B.config())
+            self.assertEqual([a.branch for a in B.of(plan, A.OpenPR)], ['fix/B-0098'], pushed)
+            self.assertEqual(B.of(plan, A.MarkStuck), [], pushed)
+            self.assertEqual(B.state(plan, 'B-0098'), State.REVIEW, pushed)
+
+    def test_a_not_pushed_line_or_no_branch_on_origin_is_stuck(self):
+        for pushed, branches in (('no — committed only', self.ORIGIN), ('none', self.ORIGIN),
+                                 ('yes ' + self.SHA, [])):
+            plan = decide(B.facts([_bug()], sessions=[self._self_pushed(pushed)],
+                                  branches=branches), B.config())
+            self.assertEqual(B.of(plan, A.OpenPR), [], pushed)
+            self.assertTrue(B.stuck(plan, 'B-0098').reason.startswith('done without a push'))
+
+    def test_an_item_stuck_on_a_claimed_push_is_rejudged_to_open_pr(self):
+        stuck = Stuck('done without a push: pushed: yes ' + self.SHA, 'session')
+        plan = decide(B.facts([_bug(state=State.STUCK, stuck=stuck)], branches=self.ORIGIN),
+                      B.config())
+        self.assertEqual([a.branch for a in B.of(plan, A.OpenPR)], ['fix/B-0098'])
+        self.assertEqual(B.state(plan, 'B-0098'), State.REVIEW)
+        # no branch on origin, or a "no" line: it stays Stuck
+        for reason, branches in (('done without a push: pushed: yes ' + self.SHA, []),
+                                 ('done without a push: pushed: no', self.ORIGIN)):
+            it = _bug(state=State.STUCK, stuck=Stuck(reason, 'session'))
+            plan = decide(B.facts([it], branches=branches), B.config())
+            self.assertEqual(B.of(plan, A.OpenPR), [], reason)
+            self.assertEqual(B.state(plan, 'B-0098'), State.STUCK, reason)
+
+
 class Loop(unittest.TestCase):
 
     def tick(self, ports):

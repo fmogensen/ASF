@@ -116,6 +116,10 @@ ORDER = (A.ApplyAnswer, A.EndSession, A.NoteItem, A.MarkStuck, A.MintStory, A.Op
 #: a done-and-pushed session moved on): with its branch pushed it is re-judged to an OpenPR
 DONE_STUCK = R.DONE + ':'
 
+#: the prefix of the Stuck reason a ``done`` REPORT whose push the kernel did not see left: when
+#: its ``pushed:`` value claims a push and the branch is on origin it is re-judged to an OpenPR
+NO_PUSH_STUCK = 'done without a push: pushed: '
+
 #: the card states whose pushed branch with no PR gets one (a build session held it, or its PR
 #: was being opened): a stale branch of a New or Ready item is never turned into a PR
 PR_STATES = (State.BUILDING, State.REVIEW, State.LANDING)
@@ -197,7 +201,7 @@ def _judge(it, facts, config, actions):
         elif s.api_error and not s.fields:
             attempts.append(API_FAILED)
             api_detail = s.api_error
-        elif done_and_pushed(s):
+        elif done_and_pushed(s, facts):
             pushed = s
             note = pushed_note(s)
             if note and note not in it.notes and not any(
@@ -263,10 +267,27 @@ def launch_order(iid, items, inherit=True):
     return (inf if eff is None else eff, inf if own is None else own, iid)
 
 
-def done_and_pushed(s):
+def done_and_pushed(s, facts=None):
     """Whether ended session ``s`` reported ``done`` and pushed a new head: its work moves on
-    whatever question it also asked (B-0098)."""
-    return s.status == R.DONE and s.result == 'pushed'
+    whatever question it also asked (B-0098). The push is the host's push log
+    (``result == 'pushed'``), or the REPORT's ``pushed:`` line claiming one (``yes <sha>``,
+    a bare sha, ``rebased <sha>``) with the session's branch on origin (``facts.branches``)."""
+    if s.status != R.DONE:
+        return False
+    if s.result == 'pushed':
+        return True
+    return facts is not None and _claimed_on_origin((s.fields or {}).get('pushed'), s.item_id,
+                                                    s.branch, facts)
+
+
+def _claimed_on_origin(value, iid, branch, facts):
+    """Whether a ``pushed:`` ``value`` claims a push and ``iid``'s branch (``branch`` when named,
+    else any) is on origin: the origin branch is at that sha or has moved past it."""
+    claimed, _sha = R.pushed_claim(value)
+    if not claimed:
+        return False
+    names = {b.name for b in facts.branches if b.item_id == iid}
+    return branch in names if branch else bool(names)
 
 
 def pushed_note(s):
@@ -288,6 +309,8 @@ def _pr_branch(it, sessions, pushed, stuck, ended_stuck, facts, config):
 
     - a session that ended ``done`` and pushed this tick: its branch;
     - a Stuck recorded from a ``done`` REPORT (:data:`DONE_STUCK`) whose branch is on origin;
+    - a ``done without a push`` Stuck (:data:`NO_PUSH_STUCK`) whose ``pushed:`` claims a push and
+      whose branch is on origin;
     - a card in :data:`PR_STATES`, no session ended this tick, its branch on origin."""
     if pushed is not None:
         return pushed.branch or pushed_branch(it.id, facts, config, it) or \
@@ -298,7 +321,13 @@ def _pr_branch(it, sessions, pushed, stuck, ended_stuck, facts, config):
     if not branch:
         return None
     if stuck is not None:
-        return branch if str(stuck.reason).startswith(DONE_STUCK) else None
+        reason = str(stuck.reason)
+        if reason.startswith(DONE_STUCK):
+            return branch
+        if reason.startswith(NO_PUSH_STUCK) and \
+                _claimed_on_origin(reason[len(NO_PUSH_STUCK):], it.id, branch, facts):
+            return branch
+        return None
     return branch if it.state in PR_STATES else None
 
 
