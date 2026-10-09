@@ -559,7 +559,7 @@ class RowsTest(unittest.TestCase):
         self.assertEqual([(r.item_id, r.tier, r.brief_kind, r.branch) for r in bugs],
                          [('B-0001', 0, 'fix-bug', 'fix/B-0001'), ('B-0002', 1, 'fix-bug', 'fix/B-0002')])
 
-    def test_in_progress_by_gets_no_row_at_all(self):
+    def test_a_card_in_progress_by_the_operator_emits_no_row(self):
         """B-0070: an item `in_progress_by` the operator (or a session) gets no row of any
         kind — never a launch, never a WAITS ON — so the lane cannot duplicate a fix already
         being carried by hand."""
