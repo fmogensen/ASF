@@ -110,7 +110,7 @@ class GitHub(unittest.TestCase):
     def test_open_prs_map_to_the_model(self):
         listing = [{'number': 7, 'headRefName': 'worker/t-0001-slug', 'headRefOid': 'h1',
                     'mergeable': 'CONFLICTING', 'mergeStateStatus': 'BEHIND',
-                    'autoMergeRequest': None, 'files': [{'path': 'src/a.py'}],
+                    'autoMergeRequest': None, 'isDraft': True, 'files': [{'path': 'src/a.py'}],
                     'statusCheckRollup': [
                         {'__typename': 'CheckRun', 'name': 'tests', 'status': 'COMPLETED',
                          'conclusion': 'FAILURE',
@@ -121,7 +121,10 @@ class GitHub(unittest.TestCase):
                        [{'number': 3, 'headRefName': 'worker/T-0002', 'headRefOid': 'h0'}]),
                    ('api', 'repos/o/r/git/commits/h1'): json.dumps({'tree': {'sha': 'tree1'}}),
                    ('api', 'repos/o/r/actions/runs/55'): json.dumps({'run_attempt': 2}),
-                   ('run', 'view', '55'): 'FAIL: test_x (tests.test_a.Case)\n src/a.py:3\n'}
+                   # both unittest name forms: the three-part one, and the four-part one Python
+                   # 3.12 and later print (the method is appended to the case)
+                   ('run', 'view', '55'): ('FAIL: test_x (tests.test_a.Case)\n src/a.py:3\n'
+                                           'ERROR: test_y (tests.test_b.Case.test_y)\n')}
         calls = []
 
         def run(argv, **kw):
@@ -137,9 +140,16 @@ class GitHub(unittest.TestCase):
         open_pr, merged = prs
         self.assertEqual((open_pr.item_id, open_pr.tree_sha, open_pr.conflicting, open_pr.behind,
                           open_pr.files), ('T-0001', 'tree1', True, True, ['src/a.py']))
+        # the draft flag is asked for and read: nothing lands a draft
+        self.assertIn('isDraft', P.PR_FIELDS)
+        listed, = [a for a in calls if a[:2] == ['pr', 'list'] and '--state' in a
+                   and a[a.index('--state') + 1] == 'open']
+        self.assertIn('isDraft', listed[listed.index('--json') + 1].split(','))
+        self.assertTrue(open_pr.draft)
         c, = open_pr.checks
         self.assertEqual((c.conclusion, c.run_id, c.attempt, c.failing_files),
-                         ('failure', 55, 2, ['src/a.py', 'tests/test_a.py']))
+                         ('failure', 55, 2,
+                          ['src/a.py', 'tests/test_a.py', 'tests/test_b.py']))
         self.assertEqual((merged.item_id, merged.merged), ('T-0002', True))
         self.assertEqual(gh.reviews(prs[:1]), [M.Review('T-0001', 'tree1', 'approve', [])])
 
@@ -282,6 +292,19 @@ class Helpers(unittest.TestCase):
         self.assertEqual(P.failed_step(log),
                          ('no new raw call site', 'asf/x.py:3: raw call\nexit 1'))
         self.assertEqual(P.failed_step(''), ('', ''))
+
+    def test_failing_files_read_both_unittest_name_forms(self):
+        # Python 3.12 and later print the method as a fourth part: a fixed cut one short of the
+        # whole name turned that into tests/test_mod/Case.py, a file no PR ever holds
+        three = 'FAIL: test_x (tests.test_mod.Case)\n'
+        four = 'FAIL: test_x (tests.test_mod.Case.test_x)\n'
+        for log in (three, four):
+            self.assertEqual(P.failing_files(log, []), ['tests/test_mod.py'], log)
+            self.assertEqual(P.failing_files(log, ['tests/test_mod.py']), ['tests/test_mod.py'],
+                             log)
+        # a deeper module the PR does hold is preferred over the cut
+        self.assertEqual(P.failing_files('ERROR: t (a.b.c.Case.t)\n', ['a/b/c.py']), ['a/b/c.py'])
+        self.assertEqual(P.failing_files('', ['src/a.py']), [])
 
     def test_config_for_reads_the_conventions(self):
         cfg = P.config_for(env.Product('sample', {'conventions': {

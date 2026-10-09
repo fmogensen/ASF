@@ -112,6 +112,21 @@ class ReportedPush(unittest.TestCase):
             self.assertEqual(B.of(plan, A.MarkStuck), [], pushed)
             self.assertEqual(B.state(plan, 'B-0098'), State.REVIEW, pushed)
 
+    def test_a_claimed_sha_is_checked_against_the_origin_head(self):
+        # a push the hook refused, reported as `pushed: yes <sha>`: the branch is on origin from
+        # an earlier round, at another head. The claim is not a push, and no PR is opened on the
+        # previous round's code (B-82960)
+        stale = [Branch('fix/B-0098', 'B-0098', 'f' * 40)]
+        plan = decide(B.facts([_bug()], sessions=[self._self_pushed('yes ' + self.SHA)],
+                              branches=stale), B.config())
+        self.assertEqual(B.of(plan, A.OpenPR), [])
+        self.assertTrue(B.stuck(plan, 'B-0098').reason.startswith('done without a push'))
+        # a head origin never read holds nothing against the claim
+        unread = [Branch('fix/B-0098', 'B-0098', '')]
+        plan = decide(B.facts([_bug()], sessions=[self._self_pushed('yes ' + self.SHA)],
+                              branches=unread), B.config())
+        self.assertEqual([a.branch for a in B.of(plan, A.OpenPR)], ['fix/B-0098'])
+
     def test_a_not_pushed_line_or_no_branch_on_origin_is_stuck(self):
         for pushed, branches in (('no — committed only', self.ORIGIN), ('none', self.ORIGIN),
                                  ('yes ' + self.SHA, [])):

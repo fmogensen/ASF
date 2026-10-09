@@ -98,6 +98,18 @@ class Launches(unittest.TestCase):
         self.assertEqual(B.launched(plan), [])
         self.assertEqual(B.state(plan, 'T-0002'), State.NEW)
 
+    def test_an_after_edge_to_a_container_parked_by_its_children_holds_nobody(self):
+        # the Feature is not itself `later`: it derives Parked because its only child is. A
+        # waiter read off `priority` alone saw a live holder and stayed New for ever (B-82960)
+        items = [B.item('F-0001'), B.task('T-0001', parent='F-0001', priority='later'),
+                 B.task('T-0002', rank=1, after=['F-0001'])]
+        plan = decide(B.facts(items), B.config())
+        self.assertEqual(B.state(plan, 'F-0001'), State.PARKED)
+        self.assertEqual(B.state(plan, 'T-0001'), State.PARKED)
+        self.assertEqual(B.state(plan, 'T-0002'), State.READY)
+        self.assertEqual(B.launched(plan, 'build'), ['T-0002'])
+
+
 
 class Rounds(unittest.TestCase):
 
@@ -125,6 +137,37 @@ class Rounds(unittest.TestCase):
         self.assertEqual(B.of(plan, A.Rerun), [])
         self.assertEqual(B.state(plan, 'T-0001'), State.READY)
         self.assertEqual(B.of(plan, A.EnableAutoMerge), [])
+
+    def test_an_approved_draft_is_held_out_of_landing_with_a_note(self):
+        # GitHub refuses auto-merge on a draft and its refusal records no attempt: planning it
+        # every tick left the item in Landing for ever, silently (B-82960)
+        f = B.facts([B.task('T-0001', state=State.REVIEW)],
+                    prs=[B.pr(4, 'T-0001', draft=True)], reviews=[B.review('T-0001')])
+        plan = decide(f, B.config())
+        self.assertEqual(B.of(plan, A.EnableAutoMerge), [])
+        self.assertEqual(B.state(plan, 'T-0001'), State.REVIEW)
+        self.assertEqual(B.launched(plan), [])  # no second reviewer either: it is held
+        note, = B.of(plan, A.NoteItem)
+        self.assertIn('PR #4 is a draft', note.text)
+        self.assertIn('held out of Landing', note.text)
+        # marked ready for review, the same facts land it
+        ready = decide(B.facts([B.task('T-0001', state=State.REVIEW)], prs=[B.pr(4, 'T-0001')],
+                               reviews=[B.review('T-0001')]), B.config())
+        self.assertEqual([a.pr for a in B.of(ready, A.EnableAutoMerge)], [4])
+        self.assertEqual(B.state(ready, 'T-0001'), State.LANDING)
+
+    def test_a_draft_still_gets_its_review_and_its_fix_rounds(self):
+        # only the landing is held: a draft under review is reviewed, and a red on it is fixed
+        plan = decide(B.facts([B.task('T-0001', state=State.REVIEW)],
+                              prs=[B.pr(4, 'T-0001', draft=True)]), B.config())
+        self.assertEqual([(a.kind, a.item_id) for a in B.of(plan, A.Launch)],
+                         [('review', 'T-0001')])
+        red = B.check('test', conclusion='failure', run_id=8, failing_files=['src/a.py'])
+        fix = decide(B.facts([B.task('T-0001', state=State.LANDING)],
+                             prs=[B.pr(4, 'T-0001', draft=True, checks=[red])],
+                             reviews=[B.review('T-0001')]), B.config())
+        self.assertEqual(B.state(fix, 'T-0001'), State.READY)
+        self.assertEqual(B.of(fix, A.NoteItem), [])
 
     REQUIRED = ('tests (3.12)', 'tests (3.13)')
 
@@ -388,6 +431,18 @@ class IdleAlarm(unittest.TestCase):
         self.assertIsNone(decide(f, B.config(idle_alarm=False)).idle)
         self.assertIsNone(decide(f, B.config(max_sessions=3, idle_min_free=3)).idle)
         self.assertEqual(decide(f, B.config(max_sessions=3, idle_min_free=2)).idle['free'], 2)
+
+    def test_a_waiter_held_only_by_a_parked_container_is_not_counted_as_waiting_on_after(self):
+        # F-0001 derives Parked from its only child: it holds nobody, so T-0002's own reason for
+        # not launching is the file overlap, never the after: edge (B-82960)
+        items = [B.item('F-0001'), B.task('T-0001', parent='F-0001', priority='later'),
+                 B.task('T-0003', state=State.BUILDING, writes=['src/a.py']),
+                 B.task('T-0002', rank=1, after=['F-0001'], writes=['src/a.py'])]
+        f = B.facts(items, sessions=[B.session('j1', 'T-0003')])
+        plan = decide(f, B.config(max_sessions=3))
+        self.assertEqual(B.launched(plan), [])
+        self.assertEqual(plan.idle, {'free': 2, 'waiting': 1,
+                                     'reasons': [('file overlap', 1)]})
 
     def test_paused_says_so(self):
         f = B.facts([B.task('T-0001')], paused=True)

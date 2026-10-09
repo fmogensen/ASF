@@ -20,7 +20,8 @@ class State(enum.Enum):
       ancestor's rank, and launches after ranked work when its lineage has none.
     - ``READY``: launchable — its declared ``after:`` edges are Done; may carry review findings.
     - ``BUILDING``: a live session holds it.
-    - ``REVIEW``: an open PR whose head tree has no verdict yet.
+    - ``REVIEW``: an open PR whose head tree has no verdict yet — or one approved while it is
+      still a draft, held here (nothing lands a draft) until its owner marks it ready.
     - ``LANDING``: an open PR approved on its head tree, waiting on required checks / auto-merge.
     - ``DONE``: its PR merged (a reopen moves a Done item back, and a new PR is accepted).
     - ``STUCK``: nothing the loop does will move it; :class:`Stuck` names the owner.
@@ -126,7 +127,8 @@ class PR:
     merge of trunk into the branch (GitHub's "update branch") keeps it while a new commit on the
     PR changes it ('' when unread). ``behind``: the base moved past
     the PR's base; ``conflicting``: GitHub cannot merge it as is. ``files`` are the paths the PR
-    changes. ``auto_merge``: auto-merge is already enabled; ``merged``: it landed."""
+    changes. ``auto_merge``: auto-merge is already enabled; ``draft``: its owner parked it as a
+    draft, which GitHub refuses to auto-merge; ``merged``: it landed."""
     number: int
     branch: str
     item_id: str
@@ -138,6 +140,7 @@ class PR:
     files: list = dataclasses.field(default_factory=list)
     checks: list = dataclasses.field(default_factory=list)
     auto_merge: bool = False
+    draft: bool = False
     merged: bool = False
 
 

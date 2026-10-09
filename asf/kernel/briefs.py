@@ -31,7 +31,8 @@ The kernel reads this review's verdict from your final message, not from the rev
 the REPORT block, print exactly one line `VERDICT: approve` or `VERDICT: changes`, then one line
 `FINDINGS: <file:line — the exact fix>` per finding the author must answer (none for an approve),
 and nothing after them — this overrides "nothing after it" above. A review that ends without a
-`VERDICT:` line counts as no review and is run again."""
+`VERDICT:` line counts as no review and is run again. The verdict block the review section above
+asks for (`verdict: approved`) reads as the same verdict, so the two can never disagree."""
 
 #: the kernel's push rule: a session publishes its own branch — the kernel never pushes a rebase
 #: for it (B-82658, B-83312). Appended to every kernel brief; overrides the floor's text above.
@@ -92,7 +93,10 @@ def kernel_push_text(text, branch, main='main'):
     return (text.rstrip('\n') + '\n\n' + PUSH_RULE.format(branch=branch, main=main) + '\n')
 
 
-VERDICT_RE = re.compile(r'^\s*VERDICT:\s*(approve|changes)\s*$', re.M | re.I)
+#: a verdict line: the kernel's own ``VERDICT: approve`` and the review template's
+#: ``verdict: approved`` (asf/briefs/templates/review.md), with or without a trailing remark —
+#: both briefs reach the same reviewer, so both forms are read (``approved`` -> ``approve``)
+VERDICT_RE = re.compile(r'^\s*VERDICT:\s*(approve|approved|changes)\b.*$', re.M | re.I)
 FINDING_RE = re.compile(r'^\s*FINDINGS?:\s*(.*?)\s*$', re.I)
 
 
@@ -171,8 +175,10 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
 
 
 def parse_verdict(text):
-    """``(verdict, findings)`` from a review session's report: the last ``VERDICT:`` line
-    (``approve`` or ``changes``) and the ``FINDINGS:`` lines after it; ``None`` when it has none."""
+    """``(verdict, findings)`` from a review session's report: the last verdict line
+    (:data:`VERDICT_RE` — ``approve``, ``approved`` or ``changes``, a trailing remark allowed) and
+    the ``FINDINGS:`` lines after it; ``None`` when it has none. ``approved`` reads as
+    ``approve``: the ledger holds one word per verdict."""
     found = list(VERDICT_RE.finditer(text or ''))
     if not found:
         return None
@@ -182,7 +188,8 @@ def parse_verdict(text):
         m = FINDING_RE.match(line)
         if m and m.group(1) and m.group(1).lower() not in ('none', 'n/a', '-'):
             findings.append(m.group(1))
-    return last.group(1).lower(), findings
+    verdict = last.group(1).lower()
+    return ('approve' if verdict == 'approved' else verdict), findings
 
 
 class Briefer:

@@ -9,18 +9,22 @@ item and the actions of one tick. The rules it holds, in the design's words:
   unranked Feature or Epic (and a declared ``after:`` edge, or ``later``) keeps an item New.
 - Launch: Ready items in launch order alone — (effective rank, own rank, id), unranked last — while ``config.max_sessions`` allows; ``facts.paused``
   means no :class:`Launch` at all. An item whose own errors repeat is Stuck; the lane never is.
-- Waits: only a declared ``after:`` edge between two visible items, and "two Building items
-  with overlapping ``writes``: one at a time".
+- Waits: only a declared ``after:`` edge to an item that is neither Done nor Parked, and "two
+  Building items with overlapping ``writes``: one at a time".
 - Parked: an item whose own ``priority``, or an ancestor's (through ``parent``), is ``later`` is
   invisible everywhere: it is :attr:`State.PARKED` (Done stays Done), gets no launch, no PR upkeep
   (update, rerun, auto-merge), no answer, no mint for its landed spec, is never Stuck, and never
-  counts in a ``blocked_count`` or holds anyone through ``after:`` or ``writes``.
+  counts in a ``blocked_count`` or holds anyone through ``after:`` or ``writes``. A container
+  whose every visible child is parked *derives* :attr:`State.PARKED` the same way, and holds
+  nobody either: an ``after:`` edge to it is read off that state, not off ``priority`` alone.
 - Review: one reviewer per PR head; the verdict is keyed by the head's tree and by the PR's own
   change (``change_id``), and holds when either matches: a rebase with the same tree keeps it, and
   so does an update that merges trunk in (the change is the same). ``changes`` sends the item to
   Ready with the findings. Every PR without a verdict on its head gets a review, a document branch
   (``config.doc_branches``) included.
-- Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch`.
+- Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch`. An
+  approved *draft* lands nothing — GitHub refuses auto-merge on a draft — so it is held in
+  Review with an item note (:class:`NoteItem`) until its owner marks it ready for review.
   Every open PR's item is in Review or Landing (or Ready on a fix round, or Stuck) — never stateless.
 - Red: only ``failure``/``timed_out``, and only on a required check (``config.required_checks``;
   empty: every check counts). A red on any other check holds nothing: it is an item note
@@ -333,12 +337,18 @@ def relaunch(it):
 
 def _claimed_on_origin(value, iid, branch, facts):
     """Whether a ``pushed:`` ``value`` claims a push and ``iid``'s branch (``branch`` when named,
-    else any) is on origin: the origin branch is at that sha or has moved past it."""
-    claimed, _sha = R.pushed_claim(value)
+    else any) is on origin *at the sha the claim names*: a claim naming a sha counts only when an
+    origin branch's head is that sha (the report's sha may be short, so a prefix counts), which is
+    what tells a real push from a refused one reported as ``pushed: yes <sha>``. A claim naming no
+    sha, or a head origin did not read, counts on the branch alone."""
+    claimed, sha = R.pushed_claim(value)
     if not claimed:
         return False
-    names = {b.name for b in facts.branches if b.item_id == iid}
-    return branch in names if branch else bool(names)
+    mine = [b for b in facts.branches
+            if b.item_id == iid and (b.name == branch if branch else True)]
+    if not mine:
+        return False
+    return not sha or any(not b.head_sha or b.head_sha.lower().startswith(sha) for b in mine)
 
 
 def pushed_note(s):
@@ -490,6 +500,11 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
         return _Judged(State.REVIEW, review_branch=pr.branch)
     if verdict.verdict != 'approve':
         return _fix_round(it, pr, 'review: changes requested', config)
+    if pr.draft:
+        # GitHub refuses auto-merge on a draft and the refusal records no attempt: an approved
+        # draft is held here, not planned at every tick, until its owner marks it ready
+        _note(it, draft_note(pr), actions)
+        return _Judged(State.REVIEW, hold=True)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
     if pr.behind and not pr.conflicting and not updated:
@@ -530,6 +545,12 @@ def red_findings(findings):
 def ignored_red_note(pr, check):
     """The note a red on a check that is not required leaves on its item."""
     return 'PR #%d: %s is red but not a required check — ignored' % (pr.number, check.name)
+
+
+def draft_note(pr):
+    """The note an approved draft PR leaves on its item: it is held out of Landing."""
+    return ('PR #%d is a draft, parked by its owner — approved, held out of Landing until it is '
+            'marked ready for review' % pr.number)
 
 
 def _note(it, text, actions):
@@ -645,15 +666,24 @@ def _visible(items, iid, parked):
     return iid in items and iid not in parked
 
 
+def _held_by(a, items, states, parked):
+    """Whether an ``after:`` target ``a`` still holds its waiter: it is visible and neither Done
+    nor Parked. A container every child of which is parked *derives* :attr:`State.PARKED` without
+    being in ``parked`` itself, and a parked holder holds nobody — so the state is what is read
+    here, not the set alone."""
+    return (_visible(items, a, parked)
+            and states[a][0] not in (State.DONE, State.PARKED))
+
+
 def _apply_waits(items, judged, children, states, parked):
-    """A Ready item with a declared ``after:`` edge to a visible item that is not Done waits (New);
-    re-derive the containers above it."""
+    """A Ready item with a declared ``after:`` edge to a visible item that is neither Done nor
+    Parked waits (New); re-derive the containers above it."""
     changed = False
     for iid in sorted(items):
         it = items[iid]
         if states[iid][0] is not State.READY or _derived(iid, items, children):
             continue
-        if any(_visible(items, a, parked) and states[a][0] is not State.DONE for a in it.after):
+        if any(_held_by(a, items, states, parked) for a in it.after):
             judged[iid].state = State.NEW
             states[iid] = (State.NEW, None)
             changed = True
@@ -759,8 +789,8 @@ def _idle(facts, config, judged, states, parked, skipped):
                 or state not in (State.NEW, State.READY)):
             continue
         if state is State.NEW:
-            why = ('after' if any(_visible(items, a, parked) and states[a][0] is not State.DONE
-                                  for a in it.after) else 'new')
+            why = ('after' if any(_held_by(a, items, states, parked) for a in it.after)
+                   else 'new')
         elif facts.paused:
             why = 'paused'
         else:

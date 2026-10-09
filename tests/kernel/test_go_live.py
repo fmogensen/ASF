@@ -191,7 +191,15 @@ class VerdictRoundTrip(unittest.TestCase):
         self.assertEqual(KB.parse_verdict(REPORT % 'approve'),
                          ('approve', ['src/a.py:3 — guard the None']))
         self.assertEqual(KB.parse_verdict('VERDICT: changes\nFINDINGS: none\n'), ('changes', []))
-        self.assertIsNone(KB.parse_verdict('verdict: approved (in prose)'))
+        # the review template's own block form, in the same brief: `approved`, and a trailing
+        # remark after either word (B-82960 — read as NO_VERDICT, it wedged the item Stuck)
+        for text in ('```verdict\nverdict: approved\nhead: abc\nasks: []\n```\n',
+                     'VERDICT: approved — nothing blocking\n',
+                     'verdict: approve (the gate is green)\n'):
+            self.assertEqual(KB.parse_verdict(text), ('approve', []), text)
+        self.assertEqual(KB.parse_verdict('verdict: changes — see C1 below\n'), ('changes', []))
+        self.assertIsNone(KB.parse_verdict('VERDICT: maybe\n'))
+        self.assertIsNone(KB.parse_verdict('the verdict is approved, in prose\n'))
 
     def test_an_approve_lands_the_item_on_the_next_tick(self):
         rec, gh, sess, ports, tick = self.run_ticks(REPORT % 'approve')
@@ -219,6 +227,22 @@ class VerdictRoundTrip(unittest.TestCase):
         rec, *_ = self.run_ticks('REPORT\nstatus: done\n')
         self.assertEqual(rec.fields['T-0001'][P.ATTEMPTS], [NO_VERDICT])
         self.assertFalse(os.path.exists(os.path.join(self.state, P.REVIEWS_FILE)))
+
+    def test_the_review_templates_own_verdict_block_is_a_verdict(self):
+        """The block the review brief asks for is the block the kernel reads: the template's own
+        line, taken from the file, parses as an approve and reaches the ledger (B-82960)."""
+        import os.path
+
+        from asf import briefs as briefs_pkg
+        path = os.path.join(os.path.dirname(briefs_pkg.__file__), 'templates', 'review.md')
+        with open(path, encoding='utf-8') as f:
+            template = f.read()
+        line, = [ln for ln in template.splitlines() if ln.strip().startswith('verdict: ')]
+        rec, *_ = self.run_ticks('REPORT\nitem: T-0001\nkind: review\nstatus: done\n'
+                                 '```verdict\n%s\nhead: h1\nasks: []\n```\n' % line.strip())
+        self.assertEqual(rec.fields['T-0001'].get(P.ATTEMPTS, []), [])
+        with open(os.path.join(self.state, P.REVIEWS_FILE)) as f:
+            self.assertEqual(json.loads(f.readline())['verdict'], 'approve')
 
 
 class ApprovalSurvivesUpdate(unittest.TestCase):

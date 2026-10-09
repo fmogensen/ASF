@@ -303,7 +303,7 @@ class RealRecord:
 
 #: the open-PR fields one ``gh pr list`` reads
 PR_FIELDS = ('number', 'headRefName', 'headRefOid', 'baseRefName', 'mergeable',
-             'mergeStateStatus', 'autoMergeRequest', 'files', 'statusCheckRollup',
+             'mergeStateStatus', 'autoMergeRequest', 'isDraft', 'files', 'statusCheckRollup',
              'latestReviews')
 _HUNK = re.compile(r'^@@[^@]*@@')
 
@@ -345,13 +345,20 @@ def _check(c):
 
 def failing_files(log, files):
     """The PR ``files`` a failed run's ``log`` names, plus each failing unittest's module file
-    (``FAIL: test_x (pkg.test_mod.Case)`` -> ``pkg/test_mod.py``) — empty when nothing reads."""
+    (``FAIL: test_x (pkg.test_mod.Case)`` and ``FAIL: test_x (pkg.test_mod.Case.test_x)``, the
+    form Python 3.12 and later print, both -> ``pkg/test_mod.py``) — empty when nothing reads.
+
+    The module is the prefix before the first capitalised part (the test class), so neither
+    form's trailing parts are read as directories; a name with no capitalised part keeps the
+    old cut, one part short of the whole."""
     out = [f for f in files if f and f in log]
     for dotted in _TEST_MODULE.findall(log):
         parts = dotted.split('.')
+        cut = next((i for i, p in enumerate(parts) if i and p[:1].isupper()),
+                   max(len(parts) - 1, 1))
         for n in range(len(parts), 0, -1):
             path = '/'.join(parts[:n]) + '.py'
-            if path in files or n == len(parts) - 1:
+            if path in files or n == cut:
                 out.append(path)
                 break
     return sorted(set(out))
@@ -442,7 +449,7 @@ class RealGitHub:
                   behind=d.get('mergeStateStatus') == 'BEHIND',
                   conflicting=d.get('mergeable') == 'CONFLICTING', files=files,
                   checks=[_check(c) for c in d.get('statusCheckRollup') or []],
-                  auto_merge=bool(d.get('autoMergeRequest')))
+                  auto_merge=bool(d.get('autoMergeRequest')), draft=bool(d.get('isDraft')))
         pr.tree_sha = self._tree(pr.head_sha)
         pr.change_id = self._change(d.get('baseRefName') or self.product.main, pr.head_sha)
         pr.latest_reviews = d.get('latestReviews') or []
