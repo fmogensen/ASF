@@ -9,10 +9,13 @@ Every row is filled from what exists, or says which key would fill it —
   and ``over the N min limit`` past the dwell watchdog's ``wave_latency``; no row before a wave;
 * **Version** — the ``asf`` running (``asf --version``) and asf's newest release tag, with its age;
 * **Runners** — the CI provider's runner pool (``ci.runner_org``), busy per class of ``ci.pool``,
-  from the same live read and count as the CI queue's ``free`` (:mod:`asf.ci_queue`);
+  from the same live read and count as the CI queue's ``free`` (:mod:`asf.ci_queue`); ``hosted``
+  — never ``not configured`` — when neither is declared (B-0093: hosted CI has no pool to read);
 * **Prod** — how far ``main`` is ahead of the last successful ``deploy_sha.workflow`` run, and
   what prod waits on (:func:`asf.harvest.deploy.lines`: a red trunk, a running or failed deploy,
   a green sha waiting in ``manual`` mode), then each managed dev environment's own line;
+  ``trunk is production`` — never ``not configured`` — with no deploy configured at all (B-0077,
+  B-0093);
 * **Tune** — the self-tuning loop's live trials and freeze (:mod:`asf.tune`); no row while it
   is off and has never changed anything;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
@@ -181,7 +184,9 @@ def runners_cell(product, source=None):
     pool = ci_pool.load_pool(product)
     org = ci.get('runner_org')
     if not org and not pool:
-        return not_configured('ci.runner_org')
+        # a declared provider with no self-hosted org/pool is hosted CI (GitHub-provided
+        # runners): there is no runner pool to read, by design — never "not configured" (B-0093)
+        return 'hosted — no self-hosted ci.pool or ci.runner_org declared'
     src = source or connectors.ci().source(product)
     try:
         runners = src.runners()
@@ -201,7 +206,10 @@ DEPLOY_WORKFLOW_KEY = 'deploy_sha.workflow'
 def prod_cell(product):
     workflow = product.conventions.get('deploy_workflow')
     if not workflow:
-        return not_configured(DEPLOY_WORKFLOW_KEY)
+        # no deploy_sha.workflow at all is B-0077's other valid state: a product that deploys
+        # nothing ships its green trunk — never "not configured" for a key there is nothing to
+        # set (B-0093)
+        return 'trunk is production — no deploy configured (B-0077)'
     if not product.repo_slug or not product.repo_dir:
         return not_configured('repo_slug')
     out_j = _sh(['gh', 'run', 'list', '-R', product.repo_slug, '--workflow', workflow,
