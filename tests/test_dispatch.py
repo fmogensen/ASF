@@ -338,6 +338,53 @@ class Reassert(Fixture):
         self.assertTrue(changed, detail)
         self.assertTrue(dispatch.is_ours(self.path))
 
+    def test_a_default_call_under_a_redirected_asf_home_leaves_the_operators_dispatcher(self):
+        """The leak (a tick test rewrote the operator's ``~/.local/bin/asf`` to bake its temp ASF
+        home): ``$HOME`` is the operator's, :data:`asf.env.ASF_HOME` a temp dir — a
+        default-resolved ``reassert`` writes nothing, even over a drifted dispatcher."""
+        with open(self.path) as f:
+            drifted = f.read().replace('ASF_DISPATCH_DEFAULT_PRODUCT=',
+                                       'ASF_DISPATCH_DEFAULT_PRODUCT=stale # ', 1)
+        with open(self.path, 'w') as f:
+            f.write(drifted)
+        mtime = os.stat(self.path).st_mtime_ns
+        elsewhere = os.path.join(self.tmp, 'test-asf-home')
+        environ = {k: v for k, v in os.environ.items() if k != 'ASF_HOME'}
+        environ['HOME'] = self.home
+        with mock.patch.dict(os.environ, environ, clear=True), \
+                mock.patch.object(env, 'ASF_HOME', elsewhere):
+            self.assertEqual(dispatch.default_path(), self.path)
+            self.assertTrue(dispatch.home_redirected())
+            self.assertEqual(dispatch.reassert(), (False, None))
+        with open(self.path) as f:
+            self.assertEqual(f.read(), drifted)
+        self.assertEqual(os.stat(self.path).st_mtime_ns, mtime)
+
+    def test_a_default_call_under_its_own_asf_home_still_reasserts(self):
+        with open(self.path) as f:
+            current = f.read()
+        with open(self.path, 'w') as f:
+            f.write(current.replace('ASF_DISPATCH_DEFAULT_PRODUCT=',
+                                    'ASF_DISPATCH_DEFAULT_PRODUCT=stale # ', 1))
+        environ = {k: v for k, v in os.environ.items() if k != 'ASF_HOME'}
+        environ['HOME'] = self.home
+        with mock.patch.dict(os.environ, environ, clear=True):
+            self.assertFalse(dispatch.home_redirected())
+            changed, detail = dispatch.reassert()
+        self.assertTrue(changed, detail)
+        with open(self.path) as f:
+            self.assertEqual(f.read(), current)
+
+    def test_a_dispatcher_baking_another_asf_home_is_left_alone(self):
+        with open(self.path) as f:
+            current = f.read()
+        mtime = os.stat(self.path).st_mtime_ns
+        with mock.patch.object(env, 'ASF_HOME', os.path.join(self.tmp, 'other-asf-home')):
+            self.assertEqual(dispatch.reassert(self.path), (False, None))
+        with open(self.path) as f:
+            self.assertEqual(f.read(), current)
+        self.assertEqual(os.stat(self.path).st_mtime_ns, mtime)
+
     def test_an_os_error_from_install_never_raises(self):
         with mock.patch.object(dispatch, 'install', side_effect=OSError('read-only file system')):
             changed, detail = dispatch.reassert(self.path)

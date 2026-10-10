@@ -30,9 +30,11 @@ for that product. A fact that carries its own time (a check's ``completedAt``, a
 first pass that saw it (``state/<product>/dwell.json``, cleared when the state ends).
 
 Each breach is one ``watchdog: BREACH …`` line. Run by the tick (:func:`run_step`) it is also
-a ``watchdog`` ledger event and one Bug per ``(state, key)`` (signature ``watchdog <state>:
-<key>``, bumped at most once a day — :mod:`asf.tick.file_bugs`), and the two actions act. ``asf
-watchdog`` (:func:`cmd_watchdog`) reports only: it acts on nothing and files nothing.
+a ``watchdog`` ledger event and one Bug per state — the symptom class, signature ``watchdog
+<state>``, never the instance key (:func:`asf.groom.inbox.symptom_class`): a breach of a state
+whose Bug is open appends its key's evidence to that Bug and adds one to its ``count:`` (a key
+already on it adds nothing) — and the two actions act. ``asf watchdog`` (:func:`cmd_watchdog`)
+reports only: it acts on nothing and files nothing.
 """
 import datetime
 import fcntl
@@ -359,6 +361,14 @@ class Facts:
         from asf import approvals
         return approvals.open_holds(self.product)
 
+    def rerun_ids(self):
+        """Ids of the runs the CI queue's trunk/S1 relief cancelled and already holds to
+        re-run on its own (:func:`asf.ci_queue.rerun_ids`) — :func:`check_cancelled` defers to
+        it the way :func:`asf.harvest.lane.pr_checks` already does: that cancel is no verdict
+        on the code, and watchdog re-running (or alarming on) it races the relief's own plan."""
+        from asf import ci_queue
+        return self._once('rerun_ids', lambda: ci_queue.rerun_ids(self.state_dir))
+
 
 # ---- the probes: one per state, each a list of Findings ----------------------------------------
 
@@ -415,6 +425,7 @@ def check_cancelled(facts):
     if prs is None:
         return []
     required = facts.required()
+    held = facts.rerun_ids()
     from asf.harvest import lane as lane_mod
     out = []
     for pr in prs:
@@ -433,6 +444,9 @@ def check_cancelled(facts):
         gone = [c for c in checks if str(c.get('conclusion') or '').upper() in CANCELLED
                 and (not required or lane_mod.required_name(c.get('name'), required))
                 and not any(m.group(1) in failed_runs
+                            for m in [_RUN_ID_RE.search(str(c.get('detailsUrl') or ''))] if m)
+                # the CI queue's relief already holds this run to re-run on its own
+                and not any(m.group(1) in held
                             for m in [_RUN_ID_RE.search(str(c.get('detailsUrl') or ''))] if m)]
         if not gone:
             continue
@@ -686,26 +700,46 @@ def check(product, facts=None, act=False, out=print, root=None):
     return found
 
 
-def bug_info(f):
-    """The Bug a breach files (:func:`asf.tick.file_bugs._file_or_bump_bug`'s ``info``)."""
+def signature(f):
+    """A breach's Bug signature: its state — the symptom class, never the instance key."""
+    return f'watchdog {f.state}'
+
+
+def evidence(f):
+    """The evidence line a breach puts on its state's Bug: its key first (a key already on the
+    Bug is not added again)."""
+    return f'{f.key} — {_iso(time.time())} {f.line()}'
+
+
+def bug_info(f, more=()):
+    """The Bug a breach of ``f``'s state files (:func:`asf.tick.file_bugs.file_new_bug`'s
+    ``info``), with the evidence of ``f`` and the ``more`` breaches of the same state."""
     what = BY_NAME[f.state][4]
-    return {'title': f'Watchdog: {what} past {f.limit_min} min — {f.key}',
+    return {'title': f'Watchdog: {what} past {f.limit_min} min',
             'severity': 'S3', 'runs': [],
-            'evidence': [f'{_iso(time.time())} {f.line()}'],
-            'acceptance': [f'no `{f.state}` breach on {f.key} for a day']}
+            'evidence': [evidence(x) for x in [f, *more]],
+            'acceptance': [f'no `{f.state}` breach for a day']}
 
 
 def file_cards(product, root, breaches, out=print):
-    """One Bug per ``(state, key)`` breached, filed or bumped at most once a day — under the
-    product's ``file_bug`` approval level; another level only says what it would file."""
+    """One Bug per breached state (:func:`signature`) — under the product's ``file_bug``
+    approval level; another level only says what it would file. With that state's Bug open
+    (:func:`asf.groom.inbox.open_bug_of_class`, an older ``watchdog <state>: <key>`` one too) each
+    key not on it yet is appended as evidence and counted (``bumped``; none new: ``skipped``);
+    else one Bug is filed carrying every key."""
     from asf import approvals
+    from asf.groom import inbox
     from asf.record.core import canonicalize, load_items, today
     from asf.record.index import do_index
     from asf.tick import file_bugs
     if not breaches or not root:
         return {}
     level = approvals.level_of(product, 'file_bug')
-    sigs = {f'watchdog {f.state}: {f.key}': f for f in breaches}
+    by_state = {}
+    for f in breaches:
+        if f.key not in [x.key for x in by_state.get(signature(f), [])]:
+            by_state.setdefault(signature(f), []).append(f)
+    sigs = dict(by_state)
     if level != 'auto':
         for sig in sorted(sigs):
             out(f'held file_bug on {sig} — widen approvals: file_bug in products/<p>.yaml')
@@ -714,9 +748,16 @@ def file_cards(product, root, breaches, out=print):
     canonical, _dupes = canonicalize(by_id)
     epic, _why = file_bugs.usable_bug_epic(canonical, product.conventions.get('default_bug_epic'))
     outcomes = {}
-    for sig, f in sorted(sigs.items()):
-        outcomes[sig] = file_bugs._file_or_bump_bug(root, canonical, sig, bug_info(f), today(),
-                                                    default_bug_epic=epic)
+    for sig, fs in sorted(sigs.items()):
+        rec = inbox.open_bug_of_class(canonical, sig)
+        if rec is not None:
+            body = rec.get('body') or rec.get('text') or ''
+            new = [evidence(f) for f in fs if f'{f.key} — ' not in body]
+            added = inbox.add_evidence(rec, new, today(), who='watchdog') if new else 0
+            outcomes[sig] = 'bumped' if added else 'skipped'
+            continue
+        outcomes[sig] = file_bugs.file_new_bug(root, canonical, sig, bug_info(fs[0], fs[1:]),
+                                               today(), default_bug_epic=epic)
         if outcomes[sig] == 'filed':
             by_id, _errors = load_items(root)
             canonical, _dupes = canonicalize(by_id)

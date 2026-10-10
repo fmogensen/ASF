@@ -119,6 +119,9 @@ DIRECT_BUILD = 'DIRECT → BUILD'
 #: the brief kinds of those two rows, and the branch kind of the direct lane
 SPEC_PLAN_KIND = 'spec-plan'
 DIRECT = 'direct'
+#: the branch kinds a Feature's own lane branch carries (:func:`lane_rows`): the direct lane's
+#: one branch, and the two document lanes. A Task's or Bug's branch is never one of these.
+FEATURE_LANES = (DIRECT, 'spec', 'plan')
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
 #: a Feature with no Story may not be planned (``feeder.stories_before_plan``): its next step is a
@@ -139,6 +142,9 @@ WAITS_LANDING = 'WAITS ON landing'
 #: a correction already adjudicated at this same hold (B-0128): no session, no round, until the
 #: PR merges or closes, or a new push moves the head
 WAITS_MERGE = 'WAITS ON merge'
+#: a correction a rule pass ruled on this same finding (F-0300): no session, no round — the
+#: lane's merge gate runs on the head as it stands and the ruling is what answers the review
+WAITS_GATE = 'WAITS ON gate'
 #: a pushed item sent BACK with no correction pending (:func:`pushed_rows`)
 WAITS_LANE = 'WAITS ON lane'
 #: an Epic past its typed budget (F-0052): this module owns the action word, asf.budget the money
@@ -158,6 +164,10 @@ RESHAPE = 'RESHAPE → PLAN'
 #: a Feature's pending ``reshape:`` (:mod:`asf.record.replan`): one session re-plans its open Tasks
 REPLAN = 'RESHAPE → REPLAN'
 REPLAN_KIND = 'replan'
+#: the suffix :func:`replan_branch` adds to a Feature id, and the one string
+#: :func:`is_replan_branch` reads back: a replan is on the plan lane, under a name that is not
+#: the Feature's own plan branch
+REPLAN_SUFFIX = '-replan'
 #: the ``waits_on`` of a code row whose Feature waits on its replan
 WAITS_REPLAN = 'replan'
 #: a Feature its own session holds (a replan, a spec-amend, a correction): one reason row,
@@ -255,6 +265,9 @@ class Row:
     reason: str
     waits_on: str = ''
     correction: str = ''
+    #: the lane's own ``kind`` for the correction above, as it wrote it on the hold — the fact
+    #: the cloud lane's routing reads (:data:`asf.workers.cloud.REWRITE_KINDS`, F-0289)
+    correction_kind: str = ''
     #: a PUSHED → REVIEW row only: the round the reviewer writes
     review_round: int = 0
     #: the GROOM → ADJUDICATE row only (§2.5, PD8): the groom day, the record clone's groom
@@ -931,7 +944,8 @@ def footprint_row(item, product, c, tier, fid, branch, items=None):
         return Row(tier=tier, kind=RESHAPE, item_id=iid, feature_id=fid, action=LAUNCH,
                    brief_kind='reshape', branch=branch_for(product, 'plan', iid),
                    reason=item.get('reshape') or detail
-                   or f"footprint: needs {' '.join(c.get('needs') or ())}")
+                   or f"footprint: needs {' '.join(c.get('needs') or ())}",
+                   correction_kind=c.get('kind') or '')
     if verdict == 'approval':
         action, waits, why = f'WAITS ON approval {detail}', 'approval', \
             f'footprint needs a path under {detail}: approvals decide'
@@ -942,7 +956,8 @@ def footprint_row(item, product, c, tier, fid, branch, items=None):
         action, waits, why = 'WAITS ON widen_footprint', 'widen', \
             f"footprint needs {' '.join(c.get('needs') or ())}: the rule decides next tick"
     return Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=action,
-               brief_kind='correct', branch=branch, reason=why, waits_on=waits)
+               brief_kind='correct', branch=branch, reason=why, waits_on=waits,
+               correction_kind=c.get('kind') or '')
 
 
 def _owner_done(items, owner):
@@ -1007,7 +1022,7 @@ def correction_amend(product, item, c):
     return None if c.get('kind') == FOOTPRINT else hit
 
 
-def correction_rows(items, product, busy, corrections):
+def correction_rows(items, product, busy, corrections, waived=None):
     """``corrections`` is ``{item: {kind, text, rounds, same, at, branch, ruled}}`` — a branch
     the harvest held (the row runs on that branch when it is given). ``same`` is how many holds in
     a row name this one finding (:func:`asf.workers.lifecycle.repeats`; a caller that passes none
@@ -1037,7 +1052,8 @@ def correction_rows(items, product, busy, corrections):
         if c.get('parked'):  # a Task that wrote nothing twice waits for a person, not a session
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
                            action=f'{PARKED} {c.get("reason") or c["kind"]}', brief_kind='correct',
-                           branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
+                           branch=branch, reason=c.get('reason') or 'parked', waits_on='operator',
+                           correction_kind=c.get('kind') or ''))
             continue
         # a correction of an item whose writes: reach the amendable set is the console's too
         # when it needs an amendable file: a session relaunched on it only buys the hook's
@@ -1057,7 +1073,8 @@ def correction_rows(items, product, busy, corrections):
             out.append(Row(tier=tier, kind=CONFLICT, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='rebase', branch=branch, correction=c['text'],
                            reason=f"{branch} is {behind} commits behind the trunk: rebase it "
-                                  f"before the correction ({c.get('kind')}) is tried on it"))
+                                  f"before the correction ({c.get('kind')}) is tried on it",
+                           correction_kind=c.get('kind') or ''))
             continue
         if c.get('operator_ruling'):
             # ``asf correct`` at the cap: ONE code session on the Task's own branch carries the
@@ -1068,7 +1085,8 @@ def correction_rows(items, product, busy, corrections):
                            action=LAUNCH, brief_kind='correct', branch=branch,
                            correction=c['text'], ruling=True,
                            reason="operator ruling at the round cap: one code session "
-                                  "carries it out"))
+                                  "carries it out",
+                           correction_kind=c.get('kind') or ''))
             continue
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
         rounds_cap = config_keys.value('harvest.round_cap', CORRECTION_ROUNDS)
@@ -1077,7 +1095,8 @@ def correction_rows(items, product, busy, corrections):
                            item_id=iid, feature_id=fid or iid, action=LAUNCH, brief_kind=doc,
                            branch=branch, correction=c['text'],
                            reason=f"the lane held it ({c['kind']}), round {rounds}: the {doc} "
-                                  f"cannot land as it stands"))
+                                  f"cannot land as it stands",
+                           correction_kind=c.get('kind') or ''))
             continue
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch, items=items))
@@ -1090,12 +1109,21 @@ def correction_rows(items, product, busy, corrections):
                 out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
                                action=action, brief_kind='correct', branch=branch,
                                reason=f"adjudicated ({c.get('kind')}): waits on the PR to merge "
-                                      f"or close, or a new push", waits_on='merge'))
+                                      f"or close, or a new push", waits_on='merge',
+                               correction_kind=c.get('kind') or ''))
+                continue
+            if iid in (waived or {}):  # F-0300: a rule pass ruled this finding — no adjudicate
+                out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
+                               action=WAITS_GATE, brief_kind='correct', branch=branch,
+                               reason=f"ruled by the rule pass ({c.get('kind')}) on this same "
+                                      f"finding: the gate runs on the head as it stands",
+                               waits_on='gate'))
                 continue
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch, correction=c['text'],
                            reason=f"held {same} times on the same finding ({c.get('kind')}): "
-                                  f"adjudicate, not another correction"))
+                                  f"adjudicate, not another correction",
+                           correction_kind=c.get('kind') or ''))
         elif c.get('kind') == INCOMPLETE and item.get('delivers'):
             # a delivery branch a member of which no commit names: the same lead, the same
             # brief, the hold's text under it — the session continues from the branch's head
@@ -1104,11 +1132,13 @@ def correction_rows(items, product, busy, corrections):
                            feature_id=f['id'] if f else fid, action=LAUNCH,
                            brief_kind='delivery-code', branch=branch, correction=c['text'],
                            reason=f"the lane held it ({INCOMPLETE}), round {rounds}: continue "
-                                  f"the delivery from the head of {branch}"))
+                                  f"the delivery from the head of {branch}",
+                           correction_kind=c.get('kind') or ''))
         else:
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='correct', branch=branch, correction=c['text'],
-                           reason=f"harvest held it ({c.get('kind')}), round {rounds}: back to a session"))
+                           reason=f"harvest held it ({c.get('kind')}), round {rounds}: back to a session",
+                           correction_kind=c.get('kind') or ''))
     return out, ids
 
 
@@ -1141,9 +1171,10 @@ def lane_rows(items, product, busy, occupancy):
             item = {'id': iid, 'type': 'task'}
         elif not item or not is_open(item) or iid in busy or item.get('blocked'):
             continue
-        direct = (item.get('type') == 'feature'
-                  and _conventions(product).branch_kind(h.get('branch') or '') == DIRECT)
-        if item.get('type') not in ('task', 'bug') and not direct:
+        feature_lane = (item.get('type') == 'feature'
+                        and _conventions(product).branch_kind(h.get('branch') or '')
+                        in FEATURE_LANES)
+        if item.get('type') not in ('task', 'bug') and not feature_lane:
             continue
         f = None if foreign else feature_of(items, item)
         fid, branch, number = (f['id'] if f else ''), h.get('branch') or '', h.get('pr')
@@ -1523,7 +1554,7 @@ def console_member_row(items, product, mid, fid, landed_shas=None):
     return row
 
 
-def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None):
+def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None, waived=None):
     """Every Feature's rows, in Feature order (:func:`feature_order`: Epic rank, rank, id).
     ``running`` grows as PLAN → CODE rows are handed out, so two ready Tasks sharing a file never
     both launch. ``occupancy`` (:func:`asf.workers.lifecycle.occupancy`): a spec or plan whose
@@ -1536,10 +1567,11 @@ def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None
              and not (f.get('delivers') or f.get('delivered_by'))]
     for f in sorted(feats, key=lambda v: feature_order(items, v)):
         if not f.get('blocked'):
-            out.extend(_one_feature_rows(items, product, f, busy, running, landed_shas, occupancy))
+            out.extend(_one_feature_rows(items, product, f, busy, running, landed_shas, occupancy,
+                                         waived))
             continue
         mine = _one_feature_rows(items, product, f, busy, copy.copy(running), landed_shas,
-                                 occupancy)
+                                 occupancy, waived)
         out.extend(blocked_row(r, f) if r.launches else r for r in mine)
     return out
 
@@ -1552,7 +1584,7 @@ def blocked_row(row, item):
                                reason='blocked by ' + (', '.join(blockers) or 'an open item'))
 
 
-def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
+def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy, waived=None):
     """One decided, open Feature's rows (:func:`feature_rows`)."""
     out = []
     limit = stalemate_round(product)
@@ -1565,7 +1597,7 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
             out.append(row)
             return out
     doc, rnd = review_round(f)
-    if doc and rnd >= limit:
+    if doc and rnd >= limit and fid not in (waived or {}):
         if fid not in busy:
             out.append(Row(tier=2, kind=STALEMATE, item_id=fid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch_for(product, doc, fid),
@@ -1631,6 +1663,13 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
         if gate:
             out.append(no_stories_row(f, product, occupancy, stage))
         out.extend(task_rows(items, product, f, busy, running, landed_shas))
+    if lane_speaks(fid, occupancy):
+        # the lane holds the Feature's own branch: its PUSHED → REVIEW / PUSHED → LAND row
+        # (:func:`lane_rows`) is the row. A `building` Feature keeps its Task rows. Every
+        # PUSHED_LAND/APPROVED_LAND emitter reachable from here (`_doc_row`, `replan_row`,
+        # `direct_row`, `spec_plan_row`, `land_doc_row`) is the Feature's own; `task_rows` emits
+        # neither (PD5).
+        out = [r for r in out if r.kind not in (PUSHED_LAND, APPROVED_LAND)]
     return out
 
 
@@ -1676,8 +1715,19 @@ def held_feature_row(items, feature, occupancy):
 def replan_branch(product, fid):
     """The replan's branch: the plan lane, under a name that is not the Feature's own plan
     branch — the ingest reads ``<plan prefix><id>`` as the Feature's plan, and a replan is not
-    that document (:data:`asf.record.replan.SUBDIR`)."""
-    return branch_for(product, 'plan', f'{fid}-replan')
+    that document (:data:`asf.record.replan.SUBDIR`). Inverse: :func:`is_replan_branch`."""
+    return branch_for(product, 'plan', f'{fid}{REPLAN_SUFFIX}')
+
+
+def is_replan_branch(product, branch):
+    """True for a branch :func:`replan_branch` minted: the plan lane, under a name ending
+    :data:`REPLAN_SUFFIX`. The replan is its own document
+    (``<plans_dir>/replans/<fid>-<digest>.md``, :data:`asf.record.replan.SUBDIR`) and never the
+    Feature's plan, so a reader that asks ``branch_kind(branch) == 'plan'`` in order to say
+    something about *the Feature's plan* asks this first (F-0317)."""
+    conv = _conventions(product)
+    b = branch or ''
+    return conv.branch_kind(b) == 'plan' and conv.strip_prefix(b).endswith(REPLAN_SUFFIX)
 
 
 def _tasks_in_flight(items, feature, occupancy):
@@ -1777,6 +1827,14 @@ def hold_unreadable(rows, items):
     return out
 
 
+def lane_speaks(fid, occupancy):
+    """True while the lane holds ``fid`` in a state :func:`lane_rows` draws a row for — its
+    ``REVIEW`` (a session) or any other open landing state (a wait). The Feature's own document
+    and landing rows step aside for that row: one item, one row."""
+    occ = occupancy or {}
+    return fid in (occ.get('review') or {}) or fid in (occ.get('landing') or {})
+
+
 def direct_row(feature, product, occupancy):
     """A ``lane: direct`` Feature's one row: DIRECT → BUILD, a session that builds it end to end
     on ``<branch_prefixes.direct><id>``; once that branch is pushed, a PUSHED → LAND row that
@@ -1784,7 +1842,7 @@ def direct_row(feature, product, occupancy):
     (:func:`lane_rows` speaks for it then)."""
     fid, occ = feature['id'], occupancy or {}
     branch = branch_for(product, DIRECT, fid)
-    if fid in (occ.get('review') or {}) or fid in (occ.get('landing') or {}):
+    if lane_speaks(fid, occ):
         return None
     why = (occ.get('branches') or {}).get(branch) or (occ.get('waiting_landing') or {}).get(fid)
     if why:
@@ -2561,7 +2619,7 @@ def doc_lane_landed(product, occupancy):
 
 def candidates(index, product, inflight, attempts=None, occupancy=None, groom_state=None,
                landed_shas=None, decision_limit=None, adjudicated=None, unverified_landed=None,
-               unverified_on_trunk=None, now=None):
+               unverified_on_trunk=None, now=None, waived=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's order (:func:`feature_order`: Epic rank, Feature rank, id), then within a Feature
     the stalemate, branch housekeeping, new work.
@@ -2596,7 +2654,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     items.trunk_unverified = set(unverified_on_trunk or ()) if roots else set()
     items.console_aside = set()
     args = (index, items, product, inflight, attempts, occupancy, groom_state, landed_shas,
-            decision_limit, adjudicated, unverified_landed, now, roots)
+            decision_limit, adjudicated, unverified_landed, now, roots, waived)
     ordered = _candidates(*args)
     if console_wait(product) == CONSOLE_WAIT_ASIDE:
         for _ in range(CONSOLE_PASSES):
@@ -2616,7 +2674,7 @@ CONSOLE_PASSES = 4
 
 
 def _candidates(index, items, product, inflight, attempts, occupancy, groom_state, landed_shas,
-                decision_limit, adjudicated, unverified_landed, now, roots):
+                decision_limit, adjudicated, unverified_landed, now, roots, waived=None):
     """:func:`candidates`' one pass over a prepared map."""
     occ = occupancy or {}
     corrections = occ.get('corrections') or {}
@@ -2626,7 +2684,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     limit = stalemate_round(product)
     stalled = {f['id'] for f in ix.of_type(items, 'feature') if review_round(f)[1] >= limit}
     running = running_footprints(items, busy)
-    corrected, spoken = correction_rows(items, product, busy, corrections)
+    corrected, spoken = correction_rows(items, product, busy, corrections, waived)
     rows = corrected + lane_rows(items, product, live | spoken, occ)
     held_by = {**{i: 'session running' for i in inflight_ids(inflight)},
                **dict(occ.get('waiting_landing') or {}), **dict(occ.get('busy') or {})}
@@ -2652,7 +2710,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     # a lead a correction row speaks for gets no delivery row too: one session per branch
     rows += delivery_rows(items, product, busy | spoken, running, landed_shas)
     rows += feature_rows(items, product, (busy - docs_waiting) | tasks_spoken, running,
-                         landed_shas, occ)
+                         landed_shas, occ, waived)
     rows += undecided_rows(items, product, busy, decision_limit)
     rows += epic_rows(items, product, busy)
     # a skipped S1/S2 Bug's WAITS row only where no other row already speaks for it
@@ -2735,28 +2793,75 @@ def open_pr_of(item):
 
 
 def pushed_ids(items, occupancy):
-    """The open Tasks and Bugs whose work is pushed: the lifecycle holds them in a lane state, a
-    wait on the lane or a correction (:data:`PUSHED_KEYS`), or the record names an open PR on
-    them. Each one is owed a row in every plan (:func:`pushed_rows`, :func:`orphaned_pushed`)."""
+    """The open Tasks, Bugs and Features whose work is pushed: the lifecycle holds them in a lane
+    state, a wait on the lane or a correction (:data:`PUSHED_KEYS`), or — a Task/Bug only — the
+    record names an open PR on them (a Feature's evidence never carries one: C4). Each one is
+    owed a row in every plan (:func:`pushed_rows`, :func:`orphaned_pushed`).
+
+    A Feature is in the set only while an occupancy entry names a *branch* for it
+    (:func:`_lane_branch`) — the one fact :func:`pushed_rows` draws its row from, so the set
+    never owes a row that function must then refuse. A correction on its own names no branch,
+    and on a Feature it need not mean anything was pushed: a document session that ends with
+    nothing to land is held with one while the lane reaps its branch empty. Its FIX → CORRECT
+    row (:func:`correction_rows`) is what speaks for it, and calling that pushed work would put
+    every row of its Feature — its correction and its next document session alike — ahead of a
+    Feature whose branch the lane really holds (:func:`_candidates`' order: finish before you
+    start)."""
     occ = occupancy or {}
     named = set()
     for key in PUSHED_KEYS:
         named |= set(occ.get(key) or ())
     return {iid for iid, v in (items or {}).items()
-            if isinstance(v, dict) and v.get('type') in ('task', 'bug') and is_open(v)
-            and (iid in named or open_pr_of(v))}
+            if isinstance(v, dict) and is_open(v)
+            and (v.get('type') == 'feature' and iid in named and _lane_branch(occ, iid)
+                 or v.get('type') in ('task', 'bug') and (iid in named or open_pr_of(v)))}
+
+
+def _lane_branch(occupancy, iid):
+    """The branch an occupancy entry names for ``iid``: the one its ``review``, ``landing`` or
+    ``back`` record carries, else the lane's own ``lanes`` map, else ``''``. A correction names
+    none — it says a session must run again, not where its work sits."""
+    occ = occupancy or {}
+    for key in ('review', 'landing', 'back'):
+        h = (occ.get(key) or {}).get(iid)
+        if h and h.get('branch'):
+            return h['branch']
+    for branch, rec in (occ.get('lanes') or {}).items():
+        if rec.get('item') == iid:
+            return branch
+    return ''
+
+
+def _pushed_branch(items, product, occupancy, iid):
+    """The branch ``iid``'s pushed work sits on: the one an occupancy entry names for it
+    (:func:`_lane_branch` — ``review``, ``landing``, ``back``, or the lane's own ``lanes``
+    map), else the item's lane branch by its type (:func:`_branch_of`). A Feature's branch is
+    only ever the lane's: nothing derives `spec/`/`plan/`/`direct` from the type alone (C5)."""
+    branch = _lane_branch(occupancy, iid)
+    if branch:
+        return branch
+    item = items.get(iid) or {}
+    if item.get('type') == 'feature':
+        return ''
+    kind = 'task' if item.get('type') == 'task' else 'fix'
+    return _branch_of(item, product, kind)
 
 
 def pushed_rows(items, product, pushed, occupancy, spoken):
     """A non-launching PUSHED → LAND row for each pushed item (:func:`pushed_ids`) no other row
     and no live session speaks for (``spoken``) — never a silent PR: a blocked one waits on its
     blocker, one finished and awaiting harvest says so, and an open PR no run holds waits on the
-    lane, which takes run-less branches up (:meth:`asf.harvest.lane.Lane.orphan_claims`)."""
+    lane, which takes run-less branches up (:meth:`asf.harvest.lane.Lane.orphan_claims`). A
+    Feature no occupancy entry names a branch for gets no row: its own document row already
+    speaks for it (C5)."""
     occ = occupancy or {}
     waiting = occ.get('waiting_landing') or {}
     out = []
     for iid in sorted(set(pushed) - set(spoken)):
         item = items.get(iid) or {}
+        branch = _pushed_branch(items, product, occ, iid)
+        if item.get('type') == 'feature' and not branch:
+            continue
         kind = 'task' if item.get('type') == 'task' else 'fix'
         f = _task_feature(items, item) if kind == 'task' else feature_of(items, item)
         number = open_pr_of(item)
@@ -2773,7 +2878,7 @@ def pushed_rows(items, product, pushed, occupancy, spoken):
             action = f'{WAITS_LANDING}: {what} open, no run holds it — the lane takes it up'
         row = Row(tier=review_tier(item), kind=PUSHED_LAND, item_id=iid,
                   feature_id=f['id'] if f else '', action=action, brief_kind='review',
-                  branch=_branch_of(item, product, kind), reason='pushed work, no other row')
+                  branch=branch, reason='pushed work, no other row')
         out.append(blocked_row(row, item) if item.get('blocked') else row)
     return out
 
@@ -3100,7 +3205,7 @@ def failing_to_spawn(rows, failing):
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
               groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
               s1_first=True, gate=None, bandwidth=None, adjudicated=None,
-              unverified_landed=None, failing=None, unverified_on_trunk=None):
+              unverified_landed=None, failing=None, unverified_on_trunk=None, waived=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
     ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
@@ -3116,7 +3221,7 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
                       groom_state=groom_state, landed_shas=landed_shas,
                       decision_limit=decision_limit, adjudicated=adjudicated,
                       unverified_landed=unverified_landed,
-                      unverified_on_trunk=unverified_on_trunk)
+                      unverified_on_trunk=unverified_on_trunk, waived=waived)
     if exclude:
         from asf.invariants import row_key
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]

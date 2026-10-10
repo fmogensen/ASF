@@ -407,6 +407,23 @@ class SharedPathI3Tests(StageTestCase):
         self.assertIsNone(set_typed(self.rec('T-0004'), {'writes': ['src/q.py', 'docs/registry.md']},
                                     writer='set', product=product))
 
+    def test_comma_and_space_separated_writes_values_normalize_the_same(self):
+        # B-121288: `writes="a, b"` split on whitespace alone and kept the comma (`["a,", "b"]`)
+        import io
+        import types
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest import mock
+        from asf.record import setfield
+        self.active_task('T-0003', 'src/z.py')
+        for raw in ('writes=a, b', 'writes=a b'):
+            args = types.SimpleNamespace(id='T-0003', assignments=[raw], product=None)
+            with mock.patch('asf.record.check.product_of', return_value=self.product), \
+                    redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                rc = setfield.cmd_set(args, self.root)
+            self.assertEqual(rc, 0, raw)
+            self.assertEqual(meta(self.root, self.rec('T-0003')['relpath'])['writes'],
+                              ['a', 'b'], raw)
+
     def test_asf_check_exits_0_over_the_declared_set(self):
         from asf.record.check import cmd_check
         self.active_task('T-0003', 'uv.lock')  # the shared-only pair the set must exempt

@@ -363,5 +363,152 @@ class BatchedMint(unittest.TestCase):
         self.assertEqual(read(root, 'task', 'T-0003')[0]['writes'], ['asf/record/reader2.py'])
 
 
+PROSE = ''.join(f'Step {i}: the prose a reviewed plan carries, line after line of it.\n'
+                for i in range(120))
+LONG_PLAN = f"""# Plan F-0001
+
+### Task 1: the long reader
+stories: S-0001
+writes: asf/record/reader.py, tests/test_reader.py
+after: none
+
+**Files**
+
+- `asf/record/reader.py`
+
+**Steps**
+
+{PROSE}
+**Gate**
+
+```bash
+python3 -m unittest tests.test_reader -v
+bash tools/check_generic.sh
+```
+
+**Acceptance** (the spec's fences, byte for byte)
+
+**S-0001 — the reader reads**
+
+```bash
+python3 -m unittest -v \\
+  tests.test_reader.ReaderTests
+```
+
+- a wrapped bullet that names
+  tests/test_reader.py::Wrapped
+
+## What this plan leaves unbuilt
+
+nothing
+"""
+
+
+class AcceptanceCarried(PlanTasksTests):
+    """F-0343 (2026-10-10): the 57 Tasks minted from merged plans were born with an empty
+    ``- [ ]`` Acceptance — the minter never passed one — and a description cut at 4000
+    characters, past which a long Task's Gate and Acceptance sat. The Definition of Ready held
+    every one New and the kernel spent groom-fill sessions re-deriving what the plan said."""
+
+    def test_a_long_task_carries_its_acceptance_and_gate_whole(self):
+        from asf.kernel import dor
+        self.assertGreater(len(LONG_PLAN), plan_tasks.DESCRIPTION_CHARS)
+        self.assertEqual(self.mint(text=LONG_PLAN), ['T-0001'])
+        _meta, body = read(self.root, 'task', 'T-0001')
+        self.assertEqual(dor.acceptance_lines(body), [
+            'S-0001 — the reader reads: `python3 -m unittest -v tests.test_reader.ReaderTests`',
+            'a wrapped bullet that names tests/test_reader.py::Wrapped'])
+        self.assertEqual(dor.gate_lines(body), ['python3 -m unittest tests.test_reader -v',
+                                                'bash tools/check_generic.sh'])
+        desc = body.split('## Description\n', 1)[1].split('\n## Acceptance', 1)[0]
+        for line in ('stories: S-0001', 'writes: asf/record/reader.py, tests/test_reader.py',
+                     'after: none', '**Acceptance** (the spec\'s fences, byte for byte)',
+                     '  tests.test_reader.ReaderTests'):
+            self.assertIn(line, desc)
+        self.assertIn('prose cut at 4000 characters — the whole Task is in docs/plans/f-0001.md',
+                      desc)
+        self.assertNotIn('What this plan leaves unbuilt', desc.split('**Acceptance**')[1])
+        self.assertNotIn('Step 119:', desc)  # the prose is what was cut
+        self.assertLessEqual(len(desc.strip()), plan_tasks.DESCRIPTION_CHARS)
+
+    def test_a_short_task_keeps_its_body_whole_and_gains_its_acceptance(self):
+        text = PLAN.replace('**Gate**: python3 -m unittest tests.test_reader',
+                            '**Gate**: python3 -m unittest tests.test_reader\n\n'
+                            '**Acceptance**\n\n- [ ] it reads — tests/test_reader.py::ReaderTests')
+        self.mint(text=text)
+        from asf.kernel import dor
+        _meta, body = read(self.root, 'task', 'T-0001')
+        self.assertEqual(dor.acceptance_lines(body), ['it reads — tests/test_reader.py::ReaderTests'])
+        self.assertIn('**Steps**: write it', body)
+        # a Task with no acceptance block keeps the empty line the DoR sends to groom-fill
+        self.assertEqual(dor.acceptance_lines(read(self.root, 'task', 'T-0002')[1]), [])
+
+    def old_card(self, iid='T-0001', acceptance='- [ ] \n', state='New'):
+        """A card the way the minter wrote it before F-0343: the description cut at 4000 and an
+        empty Acceptance."""
+        from asf.tick.migrate import plan_task_records
+        body = plan_task_records(LONG_PLAN)[0]['body'].strip()[:4000]
+        meta = ('---\nid: %s\ntype: task\ntitle: the long reader\nparent: F-0001\n'
+                'decided: true\nlinks: {plan: docs/plans/f-0001.md}\n'
+                'writes: [asf/record/reader.py, tests/test_reader.py]\nstories: [S-0001]\n'
+                '# ---- machine ----\nschema_version: 1\nstate: %s\n'
+                'stage_since: 2026-10-10T17:35:48Z\nupdated: 2026-10-10T17:40:47Z\n'
+                'kernel_dor_fills: 1\n---\n' % (iid, state))
+        path = os.path.join(self.root, 'tasks', f'{iid}.md')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(meta + f'## Description\n{body}\n\n## Acceptance\n{acceptance}\n'
+                    '## Non-goals\n\n## History\n- 2026-10-10: created (plan F-0001)\n\n'
+                    '## Children\n\n## Backlinks\n')
+        return path
+
+    def test_a_task_minted_with_an_empty_acceptance_is_repaired_once_from_its_plan(self):
+        from asf.kernel import dor
+        path = self.old_card()
+        self.assertEqual(self.mint(text=LONG_PLAN), [])  # the Feature has its Task: no new card
+        meta, body = read(self.root, 'task', 'T-0001')
+        self.assertEqual(len(dor.acceptance_lines(body)), 2)
+        self.assertEqual(dor.gate_lines(body)[0], 'python3 -m unittest tests.test_reader -v')
+        self.assertIn('plan-tasks: acceptance and the Gate/Acceptance blocks the 4000-char cut '
+                      'dropped carried from docs/plans/f-0001.md (F-0343)', body)
+        self.assertEqual(meta['kernel_dor_fills'], 1)
+        self.assertEqual(meta['state'], 'New')
+        self.assertEqual(self.lines, ['plan-tasks: acceptance carried onto 1 Task(s) from their '
+                                      'plans: T-0001'])
+        with open(path, encoding='utf-8') as f:
+            once = f.read()
+        self.lines.clear()
+        self.mint(text=LONG_PLAN)  # idempotent: the card has its acceptance now
+        with open(path, encoding='utf-8') as f:
+            self.assertEqual(f.read(), once)
+        self.assertEqual(self.lines, [])
+
+    def test_a_groom_filled_card_is_left_alone(self):
+        path = self.old_card(acceptance='- [ ] the fill — tests/test_reader.py::Filled\n')
+        with open(path, encoding='utf-8') as f:
+            before = f.read()
+        self.mint(text=LONG_PLAN)
+        with open(path, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(self.lines, [])
+
+    def test_a_retired_card_is_left_alone(self):
+        path = self.old_card()
+        with open(path, encoding='utf-8') as f:
+            text = f.read().replace('stories: [S-0001]\n', 'stories: [S-0001]\nremoved: merged into T-0002\n')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        self.mint(text=LONG_PLAN)
+        with open(path, encoding='utf-8') as f:
+            self.assertEqual(f.read(), text)
+
+    def test_a_started_card_is_left_alone(self):
+        path = self.old_card(state='Active')
+        with open(path, encoding='utf-8') as f:
+            before = f.read()
+        self.mint(text=LONG_PLAN)
+        with open(path, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+
+
 if __name__ == '__main__':
     unittest.main()

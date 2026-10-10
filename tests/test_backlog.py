@@ -234,12 +234,14 @@ class SetCommandTests(unittest.TestCase):
         self.assertEqual(meta['links'], {'spec': 'docs/specs/x.md'})
         self.assertEqual(meta['severity'], 'S2')
 
-    def test_set_refuses_a_value_that_does_not_round_trip(self):
-        before = self.read()
+    def test_set_writes_a_multi_line_value_on_one_line_that_reads_back(self):
+        # B-0084's unwritable value: the writer now escapes the newline, so the card stays
+        # readable and the value round-trips (the refusal stays for any that would not)
         r = run(['set', 'B-0001', 'decided=first line\nsecond line'], self.root)
-        self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn('decided', r.stderr)
-        self.assertEqual(self.read(), before)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('decided: "first line\\nsecond line"\n', self.read())
+        meta, _ = frontmatter.parse(self.read())
+        self.assertEqual(meta['decided'], 'first line\nsecond line')
 
     def test_set_refuses_a_field_the_type_does_not_have(self):
         before = self.read()

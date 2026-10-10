@@ -43,7 +43,7 @@ def installed_plugin_dir():
 
 # Operator views: print the table verbatim and stop.
 VIEWS = ('status', 'next', 'backlog', 'roadmap', 'parity', 'prod', 'sessions', 'doctor', 'capacity',
-         'scorecard', 'release-readiness')
+         'scorecard', 'release-readiness', 'console-feed')
 
 # Operator dialogues: print, then a follow-up the skill carries out with the operator.
 DIALOGUES = {
@@ -109,13 +109,25 @@ CONSOLE_RULES = (
 )
 
 
+#: B-0121: the second ``SessionStart`` hook — ``console-feed-hint`` prints nothing (and does
+#: nothing) unless a product resolves and its ``console.status_every`` is not ``off``, so a
+#: console with no ASF product configured sees no new line. No operator action starts this: the
+#: hook's own stdout is the instruction, folded into context the same way CONSOLE_RULES already
+#: is (B-0090) — "no session has to remember to start a loop" is true because the loop starts
+#: itself here, not because the operator remembered to type ``/loop 5m /asf:status``.
+FEED_HOOK_COMMAND = ('PATH="$HOME/.local/bin:$PATH"; ASF_BIN=$(command -v asf); '
+                     'if [ -n "$ASF_BIN" ]; then "$ASF_BIN" console-feed-hint 2>&1 || true; fi')
+
+
 def render_hooks_json():
     """``plugin/hooks/hooks.json`` — a Claude Code plugin hooks file, auto-loaded by every
     console that installs the plugin. One ``SessionStart`` hook prints :data:`CONSOLE_RULES` to
-    stdout, which Claude Code folds into that session's context (B-0090)."""
-    command = f"printf '%s\\n' '{CONSOLE_RULES}'"
+    stdout, which Claude Code folds into that session's context (B-0090); a second runs
+    :data:`FEED_HOOK_COMMAND`, which starts the FACTORY STATUS feed loop (B-0121)."""
+    rules_command = f"printf '%s\\n' '{CONSOLE_RULES}'"
     return json.dumps({
-        'hooks': {'SessionStart': [{'hooks': [{'type': 'command', 'command': command}]}]},
+        'hooks': {'SessionStart': [{'hooks': [{'type': 'command', 'command': rules_command}]},
+                                   {'hooks': [{'type': 'command', 'command': FEED_HOOK_COMMAND}]}]},
     }, indent=2, ensure_ascii=False) + '\n'
 
 

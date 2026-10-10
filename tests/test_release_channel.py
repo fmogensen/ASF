@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -167,6 +168,79 @@ class LatestReleaseIsReadOnceAnHourTests(_HomeCase):
         self.assertEqual(sha, 'b' * 40)   # the peeled commit, never the tag object's own sha
 
 
+class TheInstallSourceUrlIsReadOnceAnHourTests(_HomeCase):
+    """The read-only views take the install's own source url off the cache on the release
+    cache's hour (D4). Every ``pipx`` call writes a timestamped log file into the operator's
+    home (``~/.local/state/pipx/log``, or ``$PIPX_HOME/logs``), and this url is read by every
+    tick's release line and every ``asf doctor`` row: uncached, they pile those logs up for an
+    answer that changes only when the install is replaced — and a second ``asf install`` over
+    one home stopped being a no-op (``tests.test_install_e2e``'s own
+    ``test_second_run_writes_nothing_new``)."""
+
+    SPEC = {'venvs': {'asf-factory': {'metadata': {'main_package': {
+        'package_or_url': 'git+https://example.invalid/x.git@v0.1.62'}}}}}
+    LOCAL = {'venvs': {'asf-factory': {'metadata': {'main_package': {
+        'package_or_url': '/checkout'}}}}}   # a directory install records no git url at all
+
+    def _run(self, calls, spec=None):
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout=json.dumps(self.SPEC if spec is None else spec),
+                             stderr='')
+        return run
+
+    def test_three_cached_reads_inside_the_hour_ask_pipx_once(self):
+        calls = []
+        run = self._run(calls)
+        now = 1_000_000.0
+        for at in (now, now + 10, now + 20):
+            self.assertEqual(upgrade.repo_url(run, cached=True, now=at),
+                             'https://example.invalid/x.git')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:2], ['pipx', 'list'])
+
+    def test_a_cached_read_past_the_hour_asks_again(self):
+        calls = []
+        run = self._run(calls)
+        now = 1_000_000.0
+        upgrade.repo_url(run, cached=True, now=now)
+        upgrade.repo_url(run, cached=True, now=now + upgrade.RELEASE_POLL_S + 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_an_install_reads_it_uncached_every_time(self):
+        calls = []
+        run = self._run(calls)
+        self.assertEqual(upgrade.repo_url(run), 'https://example.invalid/x.git')
+        self.assertEqual(upgrade.repo_url(run), 'https://example.invalid/x.git')
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(os.path.exists(upgrade.source_path()))  # an install caches nothing
+
+    def test_a_directory_install_caches_the_empty_answer_and_the_fallback_stays_live(self):
+        calls = []
+        run = self._run(calls, spec=self.LOCAL)
+        now = 1_000_000.0
+        with mock.patch.dict(os.environ, {'ASF_REPO_URL': 'https://example.invalid/a.git'}):
+            self.assertEqual(upgrade.repo_url(run, cached=True, now=now),
+                             'https://example.invalid/a.git')
+        with mock.patch.dict(os.environ, {'ASF_REPO_URL': 'https://example.invalid/b.git'}):
+            self.assertEqual(upgrade.repo_url(run, cached=True, now=now + 10),
+                             'https://example.invalid/b.git')
+        self.assertEqual(len(calls), 1)   # the empty answer is the one a checkout gives forever
+
+    def test_two_ticks_release_lines_inside_the_hour_ask_pipx_once(self):
+        calls = []
+        run = self._run(calls)
+        product = env.Product('p', {'repo_slug': 'a/b',
+                                    'conventions': {'flags': {'upgrade': 'off'}}})
+        now = 1_000_000.0
+        with mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.62', 'a' * 40)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', 'b' * 40)):
+            for at in (now, now + 10):
+                ctx = types.SimpleNamespace(product=product, upgrade_line=None)
+                upgrade.release_report(ctx, out=lambda _line: None, now=at, run=run)
+        self.assertEqual(len(calls), 1)
+
+
 class MidLandingTests(_HomeCase):
     """D7/PD14: ``occupancy(...)['landing']`` is what "mid-landing" means; an unreadable ledger
     holds the install — it returns ``[]``, the same shape as "nothing is landing", but the
@@ -238,6 +312,161 @@ class TagInstallVerifiesByShaTests(unittest.TestCase):
         rc, out, m_ci = self._install(self.SHA, None, installed=self.SHA)
         self.assertEqual(rc, 0)
         self.assertEqual(m_ci.call_args.args[1], self.SHA)
+
+
+class ReleaseReportPolicyTests(_HomeCase):
+    """T-0433/S-69307: the factory line names current/BEHIND/release unreadable on every policy
+    — `off` included — a tag no newer than the install is `'none'`, and every exception is
+    caught rather than stopping the tick."""
+
+    def _product(self, policy='notify'):
+        return env.Product('p', {'repo_slug': 'a/b', 'conventions': {'flags': {'upgrade': policy}}})
+
+    def _run(self, policy, tag, old, sha='a' * 40, old_sha='b' * 40):
+        ctx = types.SimpleNamespace(product=self._product(policy), upgrade_line=None)
+        out = []
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=(tag, sha)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=(old, old_sha)):
+            result = upgrade.release_report(ctx, out=out.append)
+        return result, out, ctx
+
+    def test_an_off_policy_still_prints_the_factory_line(self):
+        result, out, _ctx = self._run('off', 'v0.1.63', 'v0.1.62')
+        self.assertEqual(result, 'none')
+        self.assertIn('factory: asf v0.1.62 @ bbbbbbb · release v0.1.63 · BEHIND', out)
+        self.assertFalse(any('UPGRADE AVAILABLE' in ln for ln in out), out)
+
+    def test_the_factory_line_names_current_behind_or_unreadable(self):
+        _, out, _ = self._run('off', 'v0.1.62', 'v0.1.62')
+        self.assertIn('factory: asf v0.1.62 @ bbbbbbb · release v0.1.62 · current', out)
+
+        _, out, _ = self._run('off', 'v0.1.63', 'v0.1.62')
+        self.assertIn('factory: asf v0.1.62 @ bbbbbbb · release v0.1.63 · BEHIND', out)
+
+        _, out, _ = self._run('off', 'v0.1.63', None, old_sha=None)
+        self.assertIn('factory: asf unknown @ unknown · release v0.1.63 · release unreadable', out)
+
+    def test_a_tag_no_newer_than_installed_is_none(self):
+        result, out, ctx = self._run('notify', 'v0.1.62', 'v0.1.62')
+        self.assertEqual(result, 'none')
+        self.assertFalse(any('UPGRADE AVAILABLE' in ln for ln in out), out)
+        self.assertIsNone(ctx.upgrade_line)
+
+    def test_every_exception_is_caught_and_reported(self):
+        ctx = types.SimpleNamespace(product=self._product('notify'), upgrade_line=None)
+        out = []
+        with mock.patch.object(upgrade, 'repo_url', side_effect=ValueError('boom')):
+            result = upgrade.release_report(ctx, out=out.append)
+        self.assertEqual(result, 'none')
+        self.assertEqual(out, ['factory: release check failed (boom)'])
+
+
+class NotifiesOncePerTagTests(_HomeCase):
+    """T-0433/S-69307: the channel state round-trips; a fresh tag notifies once then falls
+    silent; a newer tag notifies again."""
+
+    def _product(self, policy='notify'):
+        return env.Product('p', {'repo_slug': 'a/b', 'conventions': {'flags': {'upgrade': policy}}})
+
+    def _ctx(self, policy='notify'):
+        return types.SimpleNamespace(product=self._product(policy), upgrade_line=None)
+
+    def _run(self, ctx, tag, old):
+        out = []
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=(tag, 'a' * 40)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=(old, 'b' * 40)):
+            result = upgrade.release_report(ctx, out=out.append)
+        return result, out
+
+    def test_the_state_file_round_trips(self):
+        product = self._product()
+        self.assertEqual(upgrade._read_release_state(product), {})
+        upgrade._write_release_state(product, {'notified': 'v0.1.63'})
+        self.assertEqual(upgrade._read_release_state(product), {'notified': 'v0.1.63'})
+
+    def test_a_fresh_tag_notifies_once_then_falls_silent(self):
+        ctx = self._ctx()
+        result, out = self._run(ctx, 'v0.1.63', 'v0.1.62')
+        self.assertEqual(result, 'notified')
+        self.assertIn('UPGRADE AVAILABLE v0.1.62 → v0.1.63', out)
+        self.assertEqual(ctx.upgrade_line, 'UPGRADE AVAILABLE v0.1.62 → v0.1.63')
+
+        ctx2 = self._ctx()
+        result2, out2 = self._run(ctx2, 'v0.1.63', 'v0.1.62')
+        self.assertEqual(result2, 'none')
+        self.assertFalse(any('UPGRADE AVAILABLE' in ln for ln in out2), out2)
+        self.assertIsNone(ctx2.upgrade_line)
+
+    def test_a_newer_tag_notifies_again(self):
+        self._run(self._ctx(), 'v0.1.63', 'v0.1.62')
+        ctx2 = self._ctx()
+        result, out = self._run(ctx2, 'v0.1.64', 'v0.1.62')
+        self.assertEqual(result, 'notified')
+        self.assertIn('UPGRADE AVAILABLE v0.1.62 → v0.1.64', out)
+
+
+class TheTwoChannelsAreExclusiveTests(_HomeCase):
+    """D3: the fork in `asf.tick.tick._run_steps` is chosen by `drift.is_factory_source`, never
+    by a product's own declaration — and `auto` still falls through to `notify` until Task 4
+    replaces it (PD15)."""
+
+    def _product(self, repo_dir=None, policy=None):
+        data = {'repo_slug': 'a/b', 'ci': {'provider': 'none'}}
+        if repo_dir is not None:
+            data['repo_dir'] = repo_dir
+        if policy is not None:
+            data['conventions'] = {'flags': {'upgrade': policy}}
+        return env.Product('p', data)
+
+    def _repo(self, package_name):
+        repo = os.path.join(self.tmp, f'repo-{package_name}')
+        os.makedirs(repo, exist_ok=True)
+        with open(os.path.join(repo, 'pyproject.toml'), 'w', encoding='utf-8') as f:
+            f.write(f'[project]\nname = "{package_name}"\n')
+        return repo
+
+    def _run(self, product):
+        from asf.tick import tick as tick_mod
+        ctx = tick_mod.Context(product)
+        with mock.patch('asf.drift.report') as dr, \
+                mock.patch.object(upgrade, 'release_report', return_value='none') as rr, \
+                mock.patch('asf.tick.summary.run'):
+            tick_mod._run_steps(mock.Mock(), product, ctx, [], None)
+        return dr, rr
+
+    def test_the_fork_is_chosen_by_is_factory_source(self):
+        dr, rr = self._run(self._product(repo_dir=self._repo('asf-factory')))
+        dr.assert_called_once()
+        rr.assert_not_called()
+
+        dr, rr = self._run(self._product(repo_dir=self._repo('customer')))
+        dr.assert_not_called()
+        rr.assert_called_once()
+
+        # `is_factory_source('')` reads a relative `pyproject.toml` off the cwd (`os.path.join('',
+        # 'pyproject.toml')`) — a bare directory with none, so this product with no `repo_dir` at
+        # all is unambiguously not the factory's own source.
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            dr, rr = self._run(self._product(repo_dir=None))
+        finally:
+            os.chdir(cwd)
+        dr.assert_not_called()
+        rr.assert_called_once()
+
+    def test_auto_falls_through_to_notify_for_now(self):
+        product = self._product(repo_dir=self._repo('customer'), policy='auto')
+        out = []
+        ctx = types.SimpleNamespace(product=product, upgrade_line=None)
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', 'a' * 40)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', 'b' * 40)):
+            result = upgrade.release_report(ctx, out=out.append)
+        self.assertEqual(result, 'notified')
+        self.assertIn('UPGRADE AVAILABLE v0.1.62 → v0.1.63', out)
 
 
 if __name__ == '__main__':

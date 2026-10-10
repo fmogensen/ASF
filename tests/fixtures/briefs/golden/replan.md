@@ -11,6 +11,8 @@ Spec: `docs/specs/checkout-resilience.md` (312 lines)
 Plan: `docs/plans/checkout-resilience.md` (188 lines)
 Writes (the footprint this job may touch): (none declared)
 Tests named by the card: (none named)
+Stories of the Feature, with their acceptance lines:
+S-0001 Hold the order and retry once: 1 `tests/test_checkout.py::test_timeout_retries_fallback` passes.
 Sessions in flight: (none)
 Specs live in `docs/specs`, plans in `docs/plans`, reviews in `docs/reviews`.
 Branch prefixes: fix → `fix`, plan → `plan`, spec → `spec`, task → `task`.
@@ -58,7 +60,7 @@ Binding: the groom's reshape decision on F-0001 — (none) — under the approve
 `docs/specs/checkout-resilience.md` and the plan `docs/plans/checkout-resilience.md`. The decision is the scope: carry it out, add none.
 
 The Feature's Tasks as the record holds them:
-- T-0001 [New] Record every payment attempt; writes: app/checkout/attempts.py, tests/test_checkout.py; after: none
+- T-0001 [New] Record every payment attempt; stories: none; writes: app/checkout/attempts.py, tests/test_checkout.py; after: none
 
 A landed Task is kept exactly as it is, and so is every commit already on a Task's branch: a
 replan re-cuts the work still to do, it never reverts work done. An open Task you keep, rewrite
@@ -86,7 +88,9 @@ lands and writes the cards itself — you write no card. Its format is binding, 
 
 Every open Task above appears exactly once, as a `### Task` or a `### Drop` section. A Task's
 `writes:` names every file its acceptance needs. Two Tasks whose `writes:` intersect run one
-after the other.
+after the other. A kept Task's `stories:` stays the ids the record holds for it unless the
+decision moves the work, and each section's Acceptance is written against the numbered Story
+lines in the preamble above.
 
 If the decision cannot be carried out without adding scope the spec does not carry, write no
 replan and say so: `NEEDS OPERATOR: F-0001 — <what the decision leaves open>`.

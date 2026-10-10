@@ -141,7 +141,10 @@ class HooksInstallWritesTheDispatcher(unittest.TestCase):
             else:
                 rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
                                         which=raw_which, cfg=self.cfg)
-            which = hooks.which_asf(dispatcher, raw_which)
+            # no dispatcher: the default path resolves inside the temp dir, where none is —
+            # never the operator's ~/.local/bin/asf, which may be one
+            with mock.patch.object(dispatch, 'default_path', return_value=self.dispatcher):
+                which = hooks.which_asf(dispatcher, raw_which)
             expected = hooks.runnable_asf(which)[0]
             with open(pre_push) as f:
                 self.assertIn(expected, f.read())

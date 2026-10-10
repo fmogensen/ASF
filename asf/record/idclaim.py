@@ -188,6 +188,26 @@ def claim_one(repo, prefix, claimant, floor=0, remote='origin', attempts=ATTEMPT
     return f'{prefix}-{lo:04d}'
 
 
+def claim_exact(repo, iid, claimant, remote='origin'):
+    """Claim the one id ``iid`` (``T-0999``) itself, a block of one at its own number — for an id
+    a landed document already cites that no claim covers and the record does not hold. True when
+    origin now holds this claim; False when another claim covers it, or origin refused the
+    create-only push (someone took the ref first). A failed fetch raises :class:`ClaimError`."""
+    m = re.match(r'^([A-Z])-(\d+)$', iid or '')
+    if not m:
+        return False
+    prefix, n = m.group(1), int(m.group(2))
+    fetch(repo, remote)
+    if covers(claims(repo), iid) is not None:
+        return False
+    ref = ref_for(prefix, n)
+    sha = _commit(repo, prefix, n, n, claimant)
+    if not _push_create(repo, remote, {ref: sha}):
+        return False
+    fetch(repo, remote)
+    return _git(repo, 'rev-parse', '--verify', '-q', ref).stdout.strip() == sha
+
+
 def range_text(blocks, order=None):
     """``{'S': (lo, hi)}`` → ``S:5000-5049,T:...`` (the ``BACKLOG_ID_RANGE`` form)."""
     keys = order or sorted(blocks)

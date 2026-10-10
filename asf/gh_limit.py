@@ -66,6 +66,12 @@ def latched():
     return _state['latched']
 
 
+def unlatch():
+    """Lift this process's latch (a caller that waited out a secondary limit retries); the
+    budget and the read memo stay."""
+    _state.update(latched=None, latched_at=0.0, said=False)
+
+
 def reset():
     """Forget the latch, the cached budget and the read memo (tests)."""
     _state.update(latched=None, latched_at=0.0, said=False, budget={}, low_said=False, memo={})

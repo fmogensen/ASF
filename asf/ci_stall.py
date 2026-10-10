@@ -27,7 +27,8 @@ limit had not followed it). This is that watch, inside the package:
   --failed``); a run that has not completed :data:`GIVE_UP_S` after its cancel is given up on.
 * **The mode** is the same file the operator script reads, ``<ASF home>/state/ci-heartbeat/mode``
   (``act`` or ``report``; env ``CI_HB_MODE`` over it; default ``report``). In ``report`` a stall
-  is printed and nothing is cancelled.
+  is printed and nothing new is cancelled — but a cancel this watch already made is still
+  finished, in either mode.
 * **One watcher at a time.** While the operator script still runs, its ``claims.json`` in the
   same directory moves every minute; this watch refuses to act while that file moved in the
   last :data:`LEGACY_QUIET_S` seconds, and says so — both acting on one stall would cancel and
@@ -286,22 +287,54 @@ def _gh(src, args):
 
 def _advance(product, src, data, now, out):
     """Every cancelled claim whose run has completed is re-run once (its failed jobs); one not
-    completed :data:`GIVE_UP_S` after its cancel is given up on."""
+    completed :data:`GIVE_UP_S` after its cancel is given up on. A ``cancel-failed`` or
+    ``rerun-failed`` claim is retried, once a pass, while its ``tries`` is under
+    :data:`RERUN_TRIES`; refused that many times it keeps its state, stops being retried, and is
+    stamped ``given_up_at`` — the stamp a doctor row (:func:`doctor_rows`) now names instead of a
+    line nobody read. A ``gave-up`` claim is never cancelled again and never re-run."""
+    from asf import ci_queue
     for key, c in data['claims'].items():
-        if c.get('state') != 'cancelled':
-            continue
-        ok, status = _gh(src, ['run', 'view', str(c['run']), '-R', product.repo_slug,
-                               '--json', 'status', '-q', '.status'])
-        if ok and str(status).strip() == 'completed':
+        state = c.get('state')
+        if state == 'cancelled':
+            ok, status = _gh(src, ['run', 'view', str(c['run']), '-R', product.repo_slug,
+                                   '--json', 'status', '-q', '.status'])
+            if ok and str(status).strip() == 'completed':
+                ok2, why = _gh(src, ['run', 'rerun', str(c['run']), '-R', product.repo_slug,
+                                     '--failed'])
+                c.update(state='rerun' if ok2 else 'rerun-failed', rerun_at=now)
+                out(f"ci stall: re-ran the failed jobs of run {c['run']} ({c.get('job')})"
+                    if ok2 else f"ci stall: re-run of run {c['run']} refused — {why}")
+            elif now - float(c.get('cancelled_at') or now) > GIVE_UP_S:
+                c['state'] = 'gave-up'
+                out(f"ci stall: gave up on run {c['run']} — still {status or '?'} "
+                    f'{GIVE_UP_S // 60} min after its cancel')
+        elif state == 'cancel-failed' and c.get('tries', 1) < RERUN_TRIES:
+            c['tries'] = c.get('tries', 1) + 1
+            done = ci_queue._cancel_run(src, product, c['run'], 'in_progress')
+            if done:
+                c.update(state='cancelled', cancelled_at=now)
+                ci_queue.claim_cancel(env.state_dir(product.name), c['run'], 'stall',
+                                      job=c.get('job'), runner=c.get('runner'),
+                                      by='stall-watch')
+                out(f"ci stall: cancelled run {c['run']} on retry {c['tries']} of {RERUN_TRIES}")
+                continue
+            if c['tries'] >= RERUN_TRIES:
+                c['given_up_at'] = now
+            out(f"ci stall: cancel of run {c['run']} refused again (try {c['tries']} of "
+                f'{RERUN_TRIES}) — {done.detail}')
+        elif state == 'rerun-failed' and c.get('tries', 1) < RERUN_TRIES:
+            c['tries'] = c.get('tries', 1) + 1
             ok2, why = _gh(src, ['run', 'rerun', str(c['run']), '-R', product.repo_slug,
                                  '--failed'])
-            c.update(state='rerun' if ok2 else 'rerun-failed', rerun_at=now)
-            out(f"ci stall: re-ran the failed jobs of run {c['run']} ({c.get('job')})"
-                if ok2 else f"ci stall: re-run of run {c['run']} refused — {why}")
-        elif now - float(c.get('cancelled_at') or now) > GIVE_UP_S:
-            c['state'] = 'gave-up'
-            out(f"ci stall: gave up on run {c['run']} — still {status or '?'} "
-                f'{GIVE_UP_S // 60} min after its cancel')
+            if ok2:
+                c.update(state='rerun', rerun_at=now)
+                out(f"ci stall: re-ran the failed jobs of run {c['run']} on retry {c['tries']} "
+                    f'of {RERUN_TRIES}')
+                continue
+            if c['tries'] >= RERUN_TRIES:
+                c['given_up_at'] = now
+            out(f"ci stall: re-run of run {c['run']} refused again (try {c['tries']} of "
+                f'{RERUN_TRIES}) — {why}')
 
 
 def watch(product, apply=False, fetch_fn=None, src=None, now=None, out=print, events=None):
@@ -378,10 +411,10 @@ def watch(product, apply=False, fetch_fn=None, src=None, now=None, out=print, ev
     data['pass'] = {'at': now, 'mode': md, 'stalls': stalls, 'cancels': cancels,
                     'boxes': boxes_read, 'unreachable': unreachable,
                     'legacy': None if legacy is None else int(legacy)}
-    if md == 'act':
-        _advance(product, src, data, now, out)
+    _advance(product, src, data, now, out)   # a cancel already made is finished in either mode
     data['claims'] = {k: c for k, c in data['claims'].items()
-                      if now - float(c.get('claimed_at') or now) < 2 * REFRESH_S}
+                      if now - float(c.get('claimed_at') or now)
+                      < (BAD_KEEP_S if c.get('state') in BAD_STATES else 2 * REFRESH_S)}
     save(product, data)
     return stalls, cancels
 

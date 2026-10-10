@@ -275,7 +275,8 @@ def load_config():
     from asf.workers import cloud  # local: the cloud lane's module imports this one
     from asf.tick import network
     from asf.workers import heartbeat
-    problems = (validate_worker_pool(cfg) + cloud.config_problems((cfg or {}).get('cloud'))
+    problems = (validate_worker_pool(cfg) + validate_operator(cfg)
+                + cloud.config_problems((cfg or {}).get('cloud'))
                 + heartbeat.config_problems((cfg or {}).get('workers'))
                 + network.config_problems(cfg))
     if problems:
@@ -297,7 +298,9 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_worker_pool(cfg):
     """``worker_pool.env_passthrough`` (a list of environment variable names) and each
     account's ``home`` (a path), ``isolate_home`` (true | false), ``home_seed`` (a list of
-    paths) and ``auth_env`` (``{VARIABLE: file}``) checked: ``[(dotted key, problem)]``, empty when well-formed or absent."""
+    paths), ``auth_env`` (``{VARIABLE: file}``), ``identity`` (``{name, email}``) and
+    ``provider`` (a provider-kind name) checked:
+    ``[(dotted key, problem)]``, empty when well-formed or absent."""
     pool = (cfg or {}).get('worker_pool')
     if not isinstance(pool, dict):
         return []
@@ -319,6 +322,9 @@ def validate_worker_pool(cfg):
         home = acct.get('home')
         if home is not None and (not isinstance(home, str) or not home.strip()):
             problems.append((label + '.home', f'must be a path, not {home!r}'))
+        provider = acct.get('provider')
+        if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+            problems.append((label + '.provider', f'must be a provider-kind name, not {provider!r}'))
         isolate = acct.get('isolate_home')
         if isolate is not None and not isinstance(isolate, bool):
             problems.append((label + '.isolate_home', f'must be true or false, not {isolate!r}'))
@@ -347,6 +353,16 @@ def validate_worker_pool(cfg):
                     elif not isinstance(path, str) or not path.strip():
                         problems.append((label + '.auth_env',
                                          f'{name} must name a file, not {path!r}'))
+        identity = acct.get('identity')
+        if identity is not None:
+            if not isinstance(identity, dict):
+                problems.append((label + '.identity',
+                                 f'must map name and email to strings, not {identity!r}'))
+            else:
+                for field in ('name', 'email'):
+                    if field in identity and not isinstance(identity[field], str):
+                        problems.append((label + '.identity',
+                                         f'{field} must be a string, not {identity[field]!r}'))
     return problems
 
 
@@ -408,6 +424,40 @@ def account_auth_env(acct):
     The mapping names files, never values: a secret never sits in config.yaml."""
     auth = (acct or {}).get('auth_env') or {}
     return {str(k): os.path.expanduser(str(v)) for k, v in auth.items()} if isinstance(auth, dict) else {}
+
+
+def account_identity(acct):
+    """An account's ``identity``: the ``{name, email}`` map it names, or None when unset. Each
+    half is validated at load (:func:`validate_worker_pool`), so a malformed map never reaches
+    here quietly — :func:`asf.identity.agent_identity` falls back to the agent default per half
+    this leaves empty."""
+    identity = (acct or {}).get('identity')
+    return identity if isinstance(identity, dict) else None
+
+
+def operator_config(cfg):
+    """The shared config's top-level ``operator``: the ``{name, email}`` map it names, or None
+    when absent. Validated at load (:func:`validate_operator`), so a value here is always a
+    well-formed map."""
+    operator = (cfg or {}).get('operator')
+    return operator if isinstance(operator, dict) else None
+
+
+def validate_operator(cfg):
+    """``operator`` (``{name, email}``, :func:`asf.identity.operator_identity`'s override)
+    checked: ``[(dotted key, problem)]``, empty when well-formed or absent. Absent is D4's
+    day-one case — the check falls back to the operator's global git config — so a malformed
+    value is the only problem raised here, never a silent fall back to the default."""
+    operator = (cfg or {}).get('operator')
+    if operator is None:
+        return []
+    if not isinstance(operator, dict):
+        return [('operator', f'must map name and email to strings, not {operator!r}')]
+    problems = []
+    for field in ('name', 'email'):
+        if field in operator and not isinstance(operator[field], str):
+            problems.append(('operator', f'{field} must be a string, not {operator[field]!r}'))
+    return problems
 
 
 def product_auth_env(product):
@@ -574,8 +624,14 @@ NESTED_FIELDS = {
 # ``ci.hosts``/``ci.jobs`` (asf.ci_vm: the ``ci.provider: vm`` config) are the same case — a
 # product only sets either after adopting a release that reads them, so the pinned reader this
 # key would strand never runs a file that carries it.
+# ``kernel`` (asf.kernel.settings: ASF 0.2's kernel block) is the same case at the top level: only
+# a product on a kernel release sets it, and its own keys are checked by that module.
+# ``release.channels`` (asf.channels.settings, F-0308) is a map of its own five thresholds,
+# never registered in RELEASE_FIELDS or NESTED_FIELDS — a registered sub-key is what the pinned
+# reader refuses (PD7), and `check()` validates one level only, so the keys inside the map are
+# never read by it either way.
 DOCUMENTED_UNCHECKED_FIELDS = frozenset({'release.gate', 'release.floor', 'release.seats',
-                                         'ci.hosts', 'ci.jobs'})
+                                         'release.channels', 'ci.hosts', 'ci.jobs', 'kernel'})
 
 
 def _shape_ok(value, shape):
@@ -737,6 +793,12 @@ def product_problems(text):
     from asf import credentials as credentials_mod  # local: keeps env importable from credentials
     for dotted, why in credentials_mod.product_problems(data.get('credentials')):
         problems.append((lines.get('credentials', 0), dotted, why))
+    from asf.kernel import settings as kernel_settings  # `kernel:` (asf.kernel.settings)
+    k_errors, k_warnings = kernel_settings.problems(data.get('kernel'))
+    for dotted, why in k_errors:
+        problems.append((lines.get('kernel', 0), dotted, why))
+    for dotted, why in k_warnings:
+        warnings.append((lines.get('kernel', 0), dotted, why))
     # `conventions:` keeps unknown keys (asf.conventions), but the shaped ones are checked
     for key, why in conventions_mod.validate_mapping(data.get('conventions')):
         dotted = 'conventions.' + key
@@ -962,6 +1024,12 @@ class Product:
         """``credentials:`` — the provider names this product needs
         (:mod:`asf.credentials`). ``[]`` when the product names none."""
         return self._get('credentials') or []
+
+    @property
+    def kernel(self):
+        """The ``kernel:`` block with every default filled in (:func:`asf.kernel.settings.read`)."""
+        from asf.kernel import settings
+        return settings.read(self._get('kernel'))
 
     def flag(self, name, default=None):
         """``conventions.flags.<name>``, else ``default`` (:meth:`Conventions.flag`). Every

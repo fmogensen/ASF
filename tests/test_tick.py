@@ -38,12 +38,17 @@ def _args(**kw):
 TIMING_RE = re.compile(r'^(\[(?:step|record):[a-z-]+\]|tick: total|tick: wave latency) \d+\.\ds')
 #: F-0142's start line — a per-step log line too, so `untimed` strips it with the rest
 STEP_START_RE = re.compile(r'^\[step:[a-z-]+\] start ')
+#: T-0433: the tick's version/release-check line (`asf.drift.report` / `asf.upgrade.release_report`)
+#: — printed once, before any step, on every tick; `untimed` strips it with the rest.
+FACTORY_LINE_RE = re.compile(r'^factory: ')
 
 
 def untimed(out):
-    """``out`` without the per-step and per-record-part timing lines and the tick's total."""
+    """``out`` without the per-step and per-record-part timing lines, the tick's total, and the
+    version/release-check line."""
     return ''.join(l for l in out.splitlines(True)
-                   if not (TIMING_RE.match(l.rstrip('\n')) or STEP_START_RE.match(l)))
+                   if not (TIMING_RE.match(l.rstrip('\n')) or STEP_START_RE.match(l)
+                           or FACTORY_LINE_RE.match(l)))
 
 
 def steps_only(out):
@@ -104,6 +109,15 @@ class TickTestCase(unittest.TestCase):
         self.write_product(self.product_yaml)
         self.write_config('')
 
+        # every pass re-asserts the dispatcher (dispatch.reassert): it resolves inside this test's
+        # temp dir, never the operator's ~/.local/bin/asf (a tick test once rewrote that one to
+        # bake this temp dir's ASF home)
+        self.dispatcher_home = os.path.join(self.tmp, 'dispatcher-home')
+        patcher = mock.patch.object(
+            dispatch, 'default_path',
+            lambda home=None: os.path.join(home or self.dispatcher_home, dispatch.REL_PATH))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = mock.patch.object(tick, 'run_step0', _fake_step0)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -430,6 +444,49 @@ class RecordHealthStaleStatusTests(TickTestCase):
         product = env.load_product('sample')
         self.assertIsNone(record_health.line(product))
         self.assertIsNone(status.stale_cell(self.operator, product))
+
+
+class ReleaseChannelTickTests(unittest.TestCase):
+    """T-0433: once `upgrade.release_report` returns `'installed'`, `'rolled-back'` or
+    `'failed'`, the tick ends right there — the same shape the trunk channel's own
+    install-and-end already uses (P2) — and the trunk channel is never reached in the same
+    tick, the two channels being exclusive (D3)."""
+
+    def setUp(self):
+        # a `repo_dir` that holds no `pyproject.toml` at all: `drift.is_factory_source` must
+        # answer False on its own merits, never on a relative read of the suite's own cwd
+        # (`asf`'s own checkout, `is_factory_source('')`'s accidental True elsewhere).
+        self.tmp = tempfile.mkdtemp(prefix='release_tick_test_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.product = env.Product('p', {'repo_slug': 'a/b', 'ci': {'provider': 'none'},
+                                         'repo_dir': self.tmp})
+
+    def run_tick(self, result):
+        from asf import drift, upgrade
+        out = io.StringIO()
+        ctx = tick.Context(self.product)
+        with contextlib.redirect_stdout(out), \
+                mock.patch.object(upgrade, 'release_report', return_value=result), \
+                mock.patch.object(drift, 'report') as dr, \
+                mock.patch('asf.tick.summary.run'):
+            rc = tick._run_steps(mock.Mock(), self.product, ctx, [], None)
+        dr.assert_not_called()
+        return rc, out.getvalue().splitlines()
+
+    def test_an_installed_or_failed_release_waits_a_tick(self):
+        for result in ('installed', 'rolled-back', 'failed'):
+            with self.subTest(result=result):
+                rc, lines = self.run_tick(result)
+                self.assertEqual(rc, 0)
+                self.assertIn(
+                    'tick: the install was changed under this tick; its steps run on the next tick',
+                    lines)
+
+    def test_none_or_notified_or_held_does_not_end_the_tick_early(self):
+        for result in ('none', 'notified', 'held'):
+            with self.subTest(result=result):
+                _rc, lines = self.run_tick(result)
+                self.assertFalse(any('was changed under this tick' in ln for ln in lines), lines)
 
 
 def _write_index(root, generated):
@@ -1624,6 +1681,39 @@ class DispatcherReassertTests(TickTestCase):
         self.assertIn("tick: dispatcher — NEEDS OPERATOR: /x/.local/bin/asf is not asf's dispatcher\n",
                       err.getvalue())
         self.assertIn('committed and pushed', out)  # the refusal never stops the tick
+
+    def test_a_pass_under_a_temp_home_never_writes_the_operators_dispatcher(self):
+        """The leak guard: the real ``reassert`` (no patch), the real ``default_path`` resolving
+        ``$HOME`` — a fake operator HOME holding a dispatcher that bakes the operator's own ASF
+        home — while this test's ASF home is a temp dir. The pass leaves that file byte- and
+        mtime-identical."""
+        operator = os.path.join(self.tmp, 'operator-home')
+        os.makedirs(os.path.join(operator, '.ASF'))
+        cli = os.path.join(self.tmp, 'cli', 'bin', 'asf')
+        os.makedirs(os.path.dirname(cli))
+        with open(cli, 'w') as f:
+            f.write('#!/bin/sh\n')
+        os.chmod(cli, 0o755)
+        real = os.path.join(operator, dispatch.REL_PATH)
+        rc, detail = dispatch.install(real, asf_home=os.path.join(operator, '.ASF'),
+                                      default_product='sample', cli=cli)
+        self.assertEqual(rc, 0, detail)
+        old = os.stat(real).st_mtime_ns - 10_000_000_000
+        os.utime(real, ns=(old, old))
+        with open(real, 'rb') as f:
+            before = f.read()
+        ident = {'GIT_AUTHOR_NAME': 'ci', 'GIT_AUTHOR_EMAIL': 'ci@localhost',
+                 'GIT_COMMITTER_NAME': 'ci', 'GIT_COMMITTER_EMAIL': 'ci@localhost'}
+        with mock.patch.dict(os.environ, {'HOME': operator, **ident}), \
+                mock.patch.object(dispatch, 'default_path', lambda home=None: os.path.join(
+                    os.path.expanduser(home or '~'), dispatch.REL_PATH)):
+            self.assertEqual(dispatch.default_path(), real)
+            rc, out = self.run_tick(steps='record')
+        self.assertNotIn('tick: dispatcher', out)
+        with open(real, 'rb') as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(os.stat(real).st_mtime_ns, old)
+        self.assertFalse(os.path.lexists(os.path.join(self.dispatcher_home, dispatch.REL_PATH)))
 
     def test_dry_run_does_not_call_reassert(self):
         with mock.patch.object(dispatch, 'reassert') as m:

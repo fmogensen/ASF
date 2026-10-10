@@ -1086,6 +1086,102 @@ class ProvesBriefTests(unittest.TestCase):
                       'or none — <why>>', text)
 
 
+class ReplanStoriesTests(unittest.TestCase):
+    """F-0317 Task 3 (S-102508): the replan brief carries the Feature's Stories with their
+    acceptance lines — the fuller twin of the one-line `Stories of the Feature:` every other
+    Story kind keeps byte for byte."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.makedirs(os.path.join(self.tmp, 'stories'))
+        self.product = Product('sample', {'backlog_dir': self.tmp})
+
+    def _story_card(self, sid, title, bullets):
+        body = f'---\nid: {sid}\ntype: story\ntitle: {title}\n---\n## Acceptance\n'
+        body += ''.join(f'- [ ] {b}\n' for b in bullets)
+        with open(os.path.join(self.tmp, 'stories', f'{sid}.md'), 'w', encoding='utf-8') as f:
+            f.write(body)
+
+    def test_replan_is_among_the_story_kinds(self):
+        self.assertIn('replan', preamble_mod.STORY_KINDS)
+        self.assertEqual(preamble_mod.STORY_ACCEPTANCE_KINDS, ('replan',))
+
+    def test_the_replan_golden_carries_the_heading_and_the_numbered_block(self):
+        with open(os.path.join(GOLDEN, 'replan.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn(
+            'Stories of the Feature, with their acceptance lines:\n'
+            'S-0001 Hold the order and retry once: 1 '
+            '`tests/test_checkout.py::test_timeout_retries_fallback` passes.', text)
+
+    def test_numbering_matches_card_bullets_of_the_same_card_item_for_item(self):
+        self._story_card('S-1', 'first', ['a', 'b'])
+        self._story_card('S-2', 'second', ['c'])
+        items = {
+            'S-1': {'id': 'S-1', 'type': 'story', 'folder': 'stories', 'title': 'first'},
+            'S-2': {'id': 'S-2', 'type': 'story', 'folder': 'stories', 'title': 'second'},
+        }
+        feature = {'id': 'F-1', 'children': ['S-1', 'S-2']}
+        lines = preamble_mod.feature_story_lines(self.product, items, feature)
+        self.assertEqual(lines, 'S-1 first: 1 a;\n    2 b\nS-2 second: 1 c')
+        root = self.product.backlog_dir
+        self.assertEqual(
+            preamble_mod.proves_mod.card_bullets(root, items['S-1']), ['a', 'b'])
+        self.assertEqual(
+            preamble_mod.proves_mod.card_bullets(root, items['S-2']), ['c'])
+
+    def test_a_story_whose_card_cannot_be_read_keeps_its_line_with_a_marker(self):
+        items = {'S-9': {'id': 'S-9', 'type': 'story', 'folder': 'stories', 'title': 'ghost'}}
+        feature = {'id': 'F-1', 'children': ['S-9']}
+        lines = preamble_mod.feature_story_lines(self.product, items, feature)
+        self.assertEqual(lines, 'S-9 ghost: (acceptance not readable)')
+
+    def test_a_task_carrying_two_stories_renders_both_ids(self):
+        items = {
+            'F-1': {'id': 'F-1', 'type': 'feature', 'children': ['T-1', 'T-2']},
+            'T-1': {'id': 'T-1', 'type': 'task', 'title': 'first', 'stories': ['S-1', 'S-2'],
+                    'writes': [], 'after': []},
+            'T-2': {'id': 'T-2', 'type': 'task', 'title': 'second', 'writes': [], 'after': []},
+        }
+        ctx = build_mod.replan_context(product(), items['F-1'], items)
+        lines = ctx['feature_tasks'].splitlines()
+        self.assertIn('stories: S-1, S-2', lines[0])
+
+    def test_a_task_that_lists_no_story_renders_stories_none(self):
+        items = {
+            'F-1': {'id': 'F-1', 'type': 'feature', 'children': ['T-2']},
+            'T-2': {'id': 'T-2', 'type': 'task', 'title': 'second', 'writes': [], 'after': []},
+        }
+        ctx = build_mod.replan_context(product(), items['F-1'], items)
+        self.assertIn('stories: none', ctx['feature_tasks'])
+        with open(os.path.join(GOLDEN, 'replan.md'), encoding='utf-8') as f:
+            self.assertIn(
+                '- T-0001 [New] Record every payment attempt; stories: none; writes: '
+                'app/checkout/attempts.py, tests/test_checkout.py; after: none', f.read())
+
+    def test_a_feature_with_no_story_emits_neither_the_heading_nor_an_empty_line(self):
+        self.assertEqual(
+            preamble_mod.feature_story_lines(self.product, {}, {'id': 'F-1', 'children': []}), '')
+        facts = dict(preamble_mod.collect(product(), ROWS['replan'], index(), [], REPO_FACTS),
+                     kind='replan')
+        facts['stories'] = []
+        facts['story_acceptance'] = ''
+        # the shipped fixture's Feature does carry a Story, so the no-Story case is checked
+        # against state_lines directly rather than against the golden brief
+        lines = preamble_mod.state_lines(product(), facts)
+        self.assertFalse(any('Stories of the Feature' in l for l in lines))
+
+    def test_other_story_kinds_keep_the_one_line_form_byte_for_byte(self):
+        for kind in ('spec', 'spec-amend', 'plan', 'spec-plan', 'review', 'direct'):
+            with self.subTest(kind=kind):
+                with open(os.path.join(GOLDEN, f'{kind}.md'), encoding='utf-8') as f:
+                    text = f.read()
+                self.assertIn('Stories of the Feature: S-0001 Hold the order and retry once',
+                              text)
+                self.assertNotIn('Stories of the Feature, with their acceptance lines', text)
+
+
 class CardDigestTests(unittest.TestCase):
     """F-0090 D4: the digest changes when what a brief states changes, and only then."""
 
@@ -1317,6 +1413,18 @@ class KindModelGrantTest(unittest.TestCase):
     def test_a_groom_brief_grants_the_intake_directory_its_inbox_lines_name(self):
         brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
         self.assertIn('inbox', brief.add_dirs)
+
+    def test_a_spec_amend_brief_grants_the_record_root_for_asf_new_story(self):
+        brief = briefs.build(product(), ROWS['spec-amend'], index(), [], REPO_FACTS)
+        self.assertIn(RECORD, brief.add_dirs)
+
+    def test_a_plain_spec_brief_grants_no_record_root(self):
+        brief = briefs.build(product(), ROWS['spec'], index(), [], REPO_FACTS)
+        self.assertNotIn(RECORD, brief.add_dirs)
+
+    def test_add_dirs_for_spec_amend_needs_no_row_and_degrades_without_a_product(self):
+        self.assertEqual(build_mod.add_dirs_for(None, kind='spec-amend'), [])
+        self.assertEqual(build_mod.add_dirs_for(Product('bare', {}), kind='spec-amend'), [])
 
 
 class ModelMapThroughTheProductFileTests(unittest.TestCase):

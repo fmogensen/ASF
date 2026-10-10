@@ -545,6 +545,73 @@ class DecisionsCellTests(ViewsTestCase):
         self.assertEqual(names[names.index('Ready to launch') + 1], 'Decisions')
 
 
+class RulePassCellTests(ViewsTestCase):
+    def _product(self, flag='on'):
+        return env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
+                                 'deploy_sha': 'none', 'conventions': {'flags': {'rule_pass': flag}}})
+
+    def _event(self, day, rule):
+        path = os.path.join(self.root, 'metrics', 'events', f'{day}.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'kind': 'rule_pass', 'item': 'F-0001', 'rule': rule,
+                                 'finding': '', 'where': 'correction', 'cite': ''}) + '\n')
+
+    def rows(self, product):
+        text = status.render(self.root, product, cfg={'scheduler': {'kind': 'none'}})
+        return [ln.split(' | ')[0].lstrip('| ') for ln in text.splitlines() if ln.startswith('| ')], \
+            {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+             for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+
+    def test_three_events_name_the_count_both_splits_and_the_sessions(self):
+        today = dt.date.today().isoformat()
+        self._event(today, 'commit-shape')
+        self._event(today, 'wording')
+        self._event(today, 'precedent')
+        product = self._product()
+        self.assertEqual(status.rule_pass_cell(self.root, product),
+                         '3 ruled in 7d — cosmetic 2 (commit-shape 1, wording 1), precedent 1; '
+                         '3 adjudicate sessions not spawned')
+
+    def test_flag_off_and_flag_on_with_no_event_are_both_none(self):
+        today = dt.date.today().isoformat()
+        self.assertIsNone(status.rule_pass_cell(self.root, self._product(flag='off')))
+        self._event(today, 'commit-shape')
+        self.assertIsNone(status.rule_pass_cell(self.root, self._product(flag='off')))
+        empty_root = os.path.join(self.tmp, 'empty-record')
+        self.assertIsNone(status.rule_pass_cell(empty_root, self._product()))
+
+    def test_outside_window_not_counted_and_a_malformed_day_is_skipped(self):
+        today = dt.date.today().isoformat()
+        old_day = (dt.date.today() - dt.timedelta(days=8)).isoformat()
+        bad_day = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        self._event(today, 'commit-shape')
+        self._event(old_day, 'wording')
+        bad_path = os.path.join(self.root, 'metrics', 'events', f'{bad_day}.jsonl')
+        with open(bad_path, 'w', encoding='utf-8') as f:
+            f.write('{\n')
+        self.assertEqual(status.rule_pass_cell(self.root, self._product()),
+                         '1 ruled in 7d — cosmetic 1 (commit-shape 1); '
+                         '1 adjudicate sessions not spawned')
+
+    def test_the_cards_own_mix_is_the_windows_own_tally(self):
+        today = dt.date.today().isoformat()
+        for _ in range(5):
+            self._event(today, 'commit-shape')
+        for _ in range(3):
+            self._event(today, 'wording')
+        for _ in range(3):
+            self._event(today, 'precedent')
+        self.assertEqual(status.rule_pass_cell(self.root, self._product()),
+                         '11 ruled in 7d — cosmetic 8 (commit-shape 5, wording 3), precedent 3; '
+                         '11 adjudicate sessions not spawned')
+
+    def test_the_row_sits_directly_after_decisions(self):
+        self._event(dt.date.today().isoformat(), 'commit-shape')
+        names, _ = self.rows(self._product())
+        self.assertEqual(names[names.index('Decisions') + 1], 'Rule pass')
+
+
 class RecordCellTests(ViewsTestCase):
     def _index(self, extra):
         items = dict(INDEX['items'])

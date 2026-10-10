@@ -37,7 +37,14 @@ PRE_PUSH = lifecycle.HOOK_REFUSED            # 'hook refused'
 REFGUARD = 'refguard'
 PUSH_ALLOW = 'push-allow'
 REDACTION = 'redaction'
-KINDS = (NAMING, PRE_PUSH, REFGUARD, PUSH_ALLOW, REDACTION)
+#: git's own refusal of a push that would rewrite the branch: the session rebased and the
+#: standing rules forbid the force that would land it, so the head — and the report commit on
+#: it — never reaches origin. On the factory host the factory publishes it (B-0056); in the
+#: cloud lane there is nothing to publish from, and the run ends "without the report commit"
+#: (F-0289). The routing rule keeps such work off the lane; this names the one case it cannot,
+#: a trunk that moved under a live run.
+NON_FAST_FORWARD = 'non-fast-forward'
+KINDS = (NAMING, PRE_PUSH, REFGUARD, PUSH_ALLOW, REDACTION, NON_FAST_FORWARD)
 
 #: The correction kinds that are a refusal ASF made at the door, not a finding about the work (C6).
 CORRECTION_KINDS = (lifecycle.NAMING, lifecycle.COPIES, 'merge', 'conflict',
@@ -57,6 +64,7 @@ _PATTERNS = (
     (REFGUARD, re.compile(r'REF GUARD(?: \(warn\))?: refused')),
     (NAMING, re.compile(r'commits do not name ')),
     (REDACTION, re.compile(r'redact: \S+:\d+ |REDACTION REFUSED')),
+    (NON_FAST_FORWARD, re.compile(r'\(non-fast-forward\)|Updates were rejected because the tip')),
 )
 
 
@@ -150,6 +158,16 @@ def from_record(run):
         out.append(Refusal(kind, _first_line(corr.get('text')), str(corr.get('at') or ''),
                            'correction'))
     return out
+
+
+def describes_the_ask(refusal):
+    """True when ``refusal`` came off the record as a correction whose answer rewrites the
+    branch (:data:`asf.workers.cloud.REWRITE_KINDS`): it names what the lane asked the session
+    for, never what stopped it. A dead cloud run carrying one is the case where the run's own
+    log must be read as well — git's refusal of the rewritten push is only there (F-0289 C7)."""
+    from asf.workers import cloud
+    return refusal is not None and refusal.where == 'correction' \
+        and refusal.kind in cloud.REWRITE_KINDS
 
 
 def recognise(text):

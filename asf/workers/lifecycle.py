@@ -142,6 +142,12 @@ RETRY_CLASSES = (HOOK_REFUSED, NETWORK_ERROR)
 NETWORK_RE = re.compile(r'could not resolve host|connection (?:reset|refused|timed out|closed)|'
                         r'network is unreachable|unable to access|operation timed out|early eof|'
                         r'remote end hung up|ssl_error|gnutls', re.I)
+#: In-tick backoff (seconds) for :func:`publish`'s own retry of a transient network refusal
+#: (B-0097): short enough together never to hold a health tick, long enough for a DNS blip —
+#: the signature this card was filed on resolved inside a minute — to clear within it. Exhausted,
+#: the refusal falls through to the next tick's health pass, which tries again from the
+#: session's worktree (``NETWORK_ERROR`` in :func:`asf.workers.health.push_retry`).
+PUBLISH_RETRY_BACKOFF_S = (1.0, 2.0)
 #: The end_reason of a run a spent window cut short (asf.workers.headroom).
 QUOTA_EXHAUSTED_REASON = f'failed: {headroom.QUOTA_EXHAUSTED}'
 #: The end_reason of a run an auth error refused on its account (asf.workers.account_auth).
@@ -1387,23 +1393,29 @@ def correction_of(path, item):
 PR_CACHE = 'cache-prs.json'
 
 
-def ended_prs(state_dir):
-    """``{number: {'state', 'head'}}`` of every PR the evidence pass last saw MERGED or CLOSED,
-    read off its cache (no ``gh``); ``{}`` when there is none or it cannot be read. A merged or
-    closed PR is over: :func:`occupancy` never lets a lane record still naming it ask for a
-    review, a landing or a correction (the lane catches up on its own next pass)."""
+def ended_prs(state_dir, landed=()):
+    """``{number: {'state', 'head'}}`` of every PR that is over: the rows the evidence pass last
+    saw MERGED or CLOSED on its cache, plus every number in ``landed``
+    (:func:`asf.trunk_watch.landed_prs`) as MERGED, whatever its cached row says — the trunk
+    carries the merge, and the cache is a copy of an older answer (F-0277). ``{}`` when there is
+    no cache and ``landed`` is empty."""
     try:
         with open(os.path.join(state_dir, PR_CACHE)) as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return {}
-    out = {}
+        data = []
+    out, heads = {}, {}
     for p in data if isinstance(data, list) else ():
         if not isinstance(p, dict):
             continue
         state, number = str(p.get('state') or '').upper(), p.get('number')
-        if state in ('MERGED', 'CLOSED') and isinstance(number, int):
-            out[number] = {'state': state, 'head': p.get('headRefOid') or None}
+        if not isinstance(number, int):
+            continue
+        heads[number] = p.get('headRefOid') or None
+        if state in ('MERGED', 'CLOSED'):
+            out[number] = {'state': state, 'head': heads[number]}
+    for number in landed or ():
+        out[number] = {'state': 'MERGED', 'head': heads.get(number)}
     return out
 
 
@@ -2127,8 +2139,26 @@ def _rewrite_account_names(wt, remote_sha, findings):
     return bool(new) and _git(['reset', '-q', '--hard', new], wt).returncode == 0
 
 
+def _push_retrying(args, wt, limit, guard, sleep=time.sleep, backoff=PUBLISH_RETRY_BACKOFF_S):
+    """``gitpush.push``, retried right here with backoff (B-0097) while the only thing refusing
+    it is a transient network error — a blip the tick's own retry clears far more often than it
+    survives to the next one. A non-network refusal (the hook, auth, a rejected ref) returns on
+    its first try, same as before this retry existed. ``sleep`` is overridden by tests."""
+    from asf import gitpush
+    p = gitpush.push(args, wt, timeout=limit, guard=guard)
+    for delay in backoff:
+        if p.returncode == 0:
+            break
+        text = git_error((p.stderr or '') + chr(10) + (p.stdout or ''))
+        if not NETWORK_RE.search(text):
+            break
+        sleep(delay)
+        p = gitpush.push(args, wt, timeout=limit, guard=guard)
+    return p
+
+
 def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None,
-            droppable=None, transplant=False):
+            droppable=None, transplant=False, sleep=time.sleep):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -2161,6 +2191,11 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     The old tip's archive carries no new code and skips the product's pre-push hook; the
     branch's own push runs it. Each push is killed after ``push_timeout_s`` (default
     :func:`asf.gitpush.push_timeout`): a hook or a network hang never holds the tick.
+    The branch's own push is retried in place, with backoff, while a transient network error
+    (B-0097) is the only thing refusing it (:func:`_push_retrying`,
+    :data:`PUBLISH_RETRY_BACKOFF_S`); a refusal that is still network after the backoff falls
+    through to the caller, whose own next-tick retry (:func:`asf.workers.health.push_retry`)
+    picks it up from there. A non-network refusal is never retried here.
     Before any push, the archive included, :func:`_redaction_findings` runs the same scan the
     hook would; a finding refuses the push right there with a precise ``redact: <file>:<line>
     …`` correction (:func:`asf.redact.correction`, F-0035) rather than the hook's generic
@@ -2265,7 +2300,7 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
-    p = gitpush.push(args, wt, timeout=limit, guard=refguard.Guard(main, protected))
+    p = _push_retrying(args, wt, limit, refguard.Guard(main, protected), sleep=sleep)
     if p.returncode != 0:
         hook_findings = redact.parse_finding_lines(f'{p.stderr or ""}\n{p.stdout or ""}')
         if hook_findings:
@@ -2667,8 +2702,13 @@ def push_failure(text):
 #: rules into the state dir's answers file and is told the repository is not its work, so it
 #: never commits. An ``epic-features`` session is the same shape (F-0094): its one write is
 #: ``asf inbox`` into the record, never a commit to its branch, so a session that files its
-#: cards perfectly must not be judged on a push it was never going to make.
-NO_LANDING_KINDS = ('groom', 'groom-clerk', 'epic-features')
+#: cards perfectly must not be judged on a push it was never going to make. A kernel
+#: ``groom-fill`` session (:mod:`asf.kernel.dor`) only judges a card and ends with its verdict
+#: block, which the kernel applies to the record (2026-10-10: the stop gate refused its stop
+#: twice for a branch it was told never to push, and its final message lost the verdict).
+#: An ``intake-decide`` session (:mod:`asf.kernel.intake`) is the same shape: it ends with its
+#: verdict block, which the kernel applies to the record.
+NO_LANDING_KINDS = ('groom', 'groom-clerk', 'epic-features', 'groom-fill', 'intake-decide')
 
 #: Kinds whose work is a file the factory takes off the branch, not a commit on it: a review
 #: session writes ``docs/reviews/<n>-<item>.md`` in its worktree and leaves it uncommitted for

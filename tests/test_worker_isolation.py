@@ -104,7 +104,10 @@ class IsolatedSession(Home):
             self.assertTrue(os.path.islink(os.path.join(seen['HOME'], '.local', 'bin', 'asf')))
             self.assertEqual(os.listdir(os.path.join(seen['HOME'], '.local', 'bin')), ['asf'])
         with open(os.path.join(seen['HOME'], '.gitconfig'), encoding='utf-8') as f:
-            self.assertEqual(f.read(), runtime_mod.GITCONFIG_MARK + '\n[user]\n\tname = op\n')
+            # F-0116: the session's .gitconfig names the agent, never the operator ("op") whose
+            # own global config seeded this home's HOME above
+            self.assertEqual(f.read(), runtime_mod.GITCONFIG_MARK + '\n[user]\n\tname = asf worker\n'
+                             '\temail = asf-worker@localhost\n')
 
     def test_passthrough_names_reach_the_session(self):
         acct = pool_mod.Account('acct-a', config_dir='/cfg/acct-a')

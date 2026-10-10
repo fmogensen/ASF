@@ -70,6 +70,9 @@ class FakeFacts(dwell.Facts):
     def live_refs(self):
         return self.kw.get('live')
 
+    def rerun_ids(self):
+        return self.kw.get('rerun_ids', frozenset())
+
 
 class DwellTestCase(unittest.TestCase):
     def setUp(self):
@@ -448,6 +451,19 @@ class CancelledCheckTests(DwellTestCase):
         self.assertEqual(self.by_state(self.found(FakeFacts(self.product, prs=prs)),
                                        'check_cancelled'), [])
 
+    def test_a_run_the_ci_queue_holds_to_rerun_is_not_watched(self):
+        # B-82809: the trunk/S1 relief cancels a run and holds it to re-run on its own
+        # (ci_queue.rerun_ids) — that cancel is no verdict on the code, pr_checks already reads
+        # it as pending. The watchdog must defer to it too, or it re-runs (racing the relief's
+        # own plan) and, past the once-per-head mark, breaches every pass for a cancel the
+        # relief was already handling.
+        prs = [pr(1, 'a' * 40, [check('tests', 'CANCELLED', run='991')])]
+        with mock.patch.object(github, 'gh') as gh:
+            found = self.found(FakeFacts(self.product, prs=prs, rerun_ids=frozenset({'991'})),
+                               act=True)
+        gh.assert_not_called()
+        self.assertEqual(self.by_state(found, 'check_cancelled'), [])
+
 
 class UngrantableHoldTests(DwellTestCase):
     def test_an_ungrantable_hold_is_dropped_and_a_grantable_one_alarms_never(self):
@@ -482,18 +498,21 @@ class StepAndCliTests(DwellTestCase):
         self.assertEqual(events[0][1]['state'], 'tick_running')
         self.assertEqual([f.state for f in cards.call_args[0][2]], ['tick_running'])
 
-    def test_a_breach_is_one_bug_per_state_and_key(self):
+    def test_a_breach_is_one_bug_per_state(self):
         f = dwell.Finding('runner_offline', 'r1', 'runner r1 is offline')
         f.limit_min, f.age_s = 10, 900
+        g = dwell.Finding('runner_offline', 'r2', 'runner r2 is offline')
+        g.limit_min, g.age_s = 10, 900
         info = dwell.bug_info(f)
         self.assertEqual(info['severity'], 'S3')        # an alarm, never an auto-launched fix
-        with mock.patch('asf.tick.file_bugs._file_or_bump_bug', return_value='filed') as file_, \
+        with mock.patch('asf.tick.file_bugs.file_new_bug', return_value='filed') as file_, \
                 mock.patch('asf.record.core.load_items', return_value=({}, [])), \
                 mock.patch('asf.record.index.do_index'), \
                 mock.patch.object(approvals, 'level_of', return_value='auto'):
-            out = dwell.file_cards(self.product, self.tmp, [f, f], out=lambda _l: None)
-        self.assertEqual(out, {'watchdog runner_offline: r1': 'filed'})
+            out = dwell.file_cards(self.product, self.tmp, [f, f, g], out=lambda _l: None)
+        self.assertEqual(out, {'watchdog runner_offline': 'filed'})
         self.assertEqual(file_.call_count, 1)
+        self.assertEqual(len(file_.call_args[0][3]['evidence']), 2)
 
     def test_a_held_file_bug_level_files_nothing(self):
         f = dwell.Finding('runner_offline', 'r1', 'x')
@@ -502,7 +521,7 @@ class StepAndCliTests(DwellTestCase):
                 mock.patch('asf.tick.file_bugs._file_or_bump_bug') as file_:
             dwell.file_cards(self.product, self.tmp, [f], out=lines.append)
         file_.assert_not_called()
-        self.assertEqual(lines, ['held file_bug on watchdog runner_offline: r1 — widen '
+        self.assertEqual(lines, ['held file_bug on watchdog runner_offline — widen '
                                  'approvals: file_bug in products/<p>.yaml'])
 
     def test_the_cli_reports_and_exits_1_on_a_breach(self):

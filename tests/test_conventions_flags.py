@@ -13,6 +13,8 @@ from asf import conventions
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: module constants that end in FLAG but are not ``flags:`` names
 NOT_FLAGS = {'UNCHECKED_FLAG'}
+#: string values that are not ``flags:`` names (asf.kernel.waits.FLAG is the over-target mark)
+NOT_FLAG_VALUES = {'⚠'}
 
 
 def flags_read():
@@ -48,7 +50,8 @@ class KnownFlags(unittest.TestCase):
         self.assertIn('store_shared', flags_read())
 
     def test_every_flag_read_in_asf_is_known(self):
-        missing = {n: f for n, f in flags_read().items() if n not in conventions.KNOWN_FLAGS}
+        missing = {n: f for n, f in flags_read().items() if n not in conventions.KNOWN_FLAGS
+               and n not in NOT_FLAG_VALUES}
         self.assertEqual(missing, {}, 'add each to conventions.KNOWN_FLAGS and the flags docs')
 
 

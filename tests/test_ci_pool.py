@@ -163,7 +163,7 @@ class WorkflowJobNames(unittest.TestCase):
 
     def test_this_repos_own_workflow_declares_its_job(self):
         path = os.path.join(ROOT, '.github', 'workflows', 'tests.yml')
-        self.assertEqual(ci_pool.parse_job_names(open(path).read()), ['checks', 'part', 'tests'])
+        self.assertEqual(ci_pool.parse_job_names(open(path).read()), ['changes', 'checks', 'part', 'tests'])
 
     def test_job_keys_and_literal_names_are_declared(self):
         text = '\n'.join([

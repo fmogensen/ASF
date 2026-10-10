@@ -1153,6 +1153,70 @@ def check_drift(product, installed=None):
     return True, drift.line(d)
 
 
+#: ``asf.upgrade`` attributes F-0112 Tasks 2/3/5 add, that :func:`check_upgrade` depends on but
+#: this checkout's footprint (T-0436) may not touch — see that function's own docstring.
+_RELEASE_CHANNEL_ATTRS = ('installed_release', 'releases_path', '_read_release_state', 'newer')
+
+
+def _release_cache_entry(url):
+    """The shared release cache's entry for ``url`` (``{'tag', 'sha', 'at'}``), or ``{}`` — a
+    direct read of :func:`asf.upgrade.releases_path`, never :func:`asf.upgrade.latest_release`:
+    the doctor row costs no network of its own (F-0112 S-69310)."""
+    from asf import upgrade
+    import json
+    try:
+        with open(upgrade.releases_path(), encoding='utf-8') as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return (cache or {}).get(url) or {}
+
+
+def check_upgrade(product):
+    """(ok, detail) — the ``upgrade`` row (F-0112 S-69310): the release channel's policy against
+    the newest known ASF release, read entirely off the shared cache and this product's own
+    channel state — no ``git ls-remote`` of its own. RED for a declared policy word that is none
+    of ``auto``/``notify``/``off`` (quoting the word verbatim, D2), or when the last release
+    install was rolled back and that release is still the newest known one. A product whose repo
+    is the factory's own source is on the trunk channel instead, under ``approvals.upgrade``, and
+    is never RED for an ``upgrade:`` key it does not read (D3) — the same structural question the
+    tick's fork asks (:func:`asf.drift.is_factory_source`).
+
+    Assumes F-0112 Tasks 2/3/5's ``asf/upgrade.py`` (``releases_path``, ``installed_release``,
+    ``_read_release_state``) as specced; not yet landed on this checkout (T-0436's ``needs
+    writes``). Until they do, :data:`_RELEASE_CHANNEL_ATTRS` is missing off :mod:`asf.upgrade`
+    and the row reads ok and says so, rather than raising out of every ``asf doctor`` run."""
+    from asf import upgrade
+    repo = product.repo_dir
+    if repo and os.path.isdir(repo) and drift.is_factory_source(repo):
+        word = str((product.approvals or {}).get('upgrade', '')).lower()
+        return True, (f"trunk channel (this repo is the factory's own source) — "
+                      f"approvals.upgrade: {word}")
+    declared = product.upgrade_declared
+    if declared is not None and str(declared).strip().lower() not in env.UPGRADE_POLICIES:
+        return False, f'upgrade: "{declared}" is not auto|notify|off — reading it as notify'
+    policy = product.upgrade
+    if not all(hasattr(upgrade, name) for name in _RELEASE_CHANNEL_ATTRS):
+        return True, f'{policy} (F-0112 release channel not landed on this install yet)'
+    old, _old_sha = upgrade.installed_release()
+    # `cached=True`: the row costs no network and no `pipx` of its own either — this one is run
+    # by hand, by CI and by every tick's health step, and an uncached read leaves a pipx log in
+    # the operator's home each time (asf.upgrade.repo_url)
+    entry = _release_cache_entry(upgrade.repo_url(cached=True))
+    tag = entry.get('tag')
+    state = upgrade._read_release_state(product)
+    last = (state or {}).get('last') or {}
+    if last.get('result') == 'rolled-back' and tag and last.get('to') == tag:
+        return False, (f'{tag} was rolled back after a RED doctor; held at '
+                       f'{last.get("from")} (see the filed Bug)')
+    if old is None:
+        return True, f'{policy} · installed release unreadable'
+    if tag and upgrade.newer(tag, old):
+        age = format_age(_age_s_since(entry.get('at')))
+        return True, f'{policy} · running {old} · newest release {tag} available (read {age} ago)'
+    return True, f'{policy} · running {old} · current'
+
+
 def check_readme(product):
     """``(ok, detail)``, or ``None`` to skip the row entirely — the committed README against its
     committed facts (``asf readme --check --json``, F-0030 §2.7). Skipped for a product whose
@@ -1680,6 +1744,8 @@ def run(product_name):
         rows.append(('network clock', False, host[0], host[1]))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
+    ok, detail = check_upgrade(product)
+    rows.append(('upgrade', True, ok, detail))
     readme_result = check_readme(product)
     if readme_result is not None:
         rows.append(('readme', True, readme_result[0], readme_result[1]))

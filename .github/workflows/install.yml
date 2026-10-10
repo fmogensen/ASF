@@ -25,6 +25,12 @@ on:
 permissions:
   contents: read
 
+# One run per pull request head ref (a new push cancels the running one); on main the running
+# run finishes and a newer push replaces any still pending (see tests.yml).
+concurrency:
+  group: install-${{ github.event_name == 'pull_request' && format('pr-{0}', github.head_ref) || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   linux-container:
     runs-on: ubuntu-latest

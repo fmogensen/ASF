@@ -386,6 +386,54 @@ class VerdictBlock(unittest.TestCase):
         self.assertIn('is not the branch head', review.block_problem(block(), 'b' * 40))
 
 
+class RecoveredFromAReport(unittest.TestCase):
+    """F-0313 S-84455: a finished session's REPORT carries its verdict block and nothing else;
+    :func:`review.recovered_review` turns that into a review text every reader reads alike."""
+
+    HEAD = 'fc5c6ecd4'
+
+    def test_an_approved_block_reads_approved_with_the_block_flag_off(self):
+        text = review.recovered_review(block('approved', self.HEAD), self.HEAD)
+        self.assertEqual(review.verdict_of(text), review.APPROVED)
+
+    def test_the_same_text_reads_approved_on_and_its_head_is_the_blocks(self):
+        text = review.recovered_review(block('approved', self.HEAD), self.HEAD)
+        self.assertEqual(review.verdict_of(text, block=True), review.APPROVED)
+        self.assertEqual(review.head_of(text, block=True), self.HEAD.lower())
+
+    def test_a_changes_block_reads_changes_under_both_and_asks_something(self):
+        text = review.recovered_review(block('changes', self.HEAD, '[C1]'), self.HEAD)
+        self.assertEqual(review.verdict_of(text), review.CHANGES)
+        self.assertEqual(review.verdict_of(text, block=True), review.CHANGES)
+        self.assertFalse(review.asks_nothing(text))
+
+    def test_the_blocks_asks_are_carried_into_the_text(self):
+        text = review.recovered_review(block('changes', self.HEAD, '[C1, C2]'), self.HEAD)
+        self.assertEqual(review.verdict_block(text).asks, ('C1', 'C2'))
+
+    def test_no_block_or_an_invalid_head_returns_empty(self):
+        self.assertEqual(review.recovered_review('verdict: approved\n', self.HEAD), '')
+        self.assertEqual(review.recovered_review(block(head='<sha>'), self.HEAD), '')
+
+    def test_two_blocks_the_first_valid_one_wins(self):
+        report = block('approved | changes') + block('changes', 'b' * 40) + block()
+        text = review.recovered_review(report, self.HEAD)
+        self.assertEqual(review.verdict_of(text, block=True), review.CHANGES)
+
+    def test_no_check_table_and_the_recovered_heading_and_head(self):
+        text = review.recovered_review(block('approved', self.HEAD), self.HEAD)
+        self.assertEqual(reviews.parse(text), ([], []))
+        self.assertIn(review.RECOVERED, text)
+        self.assertEqual(review.head_of(text), self.HEAD.lower())
+
+    def test_the_head_is_the_callers_not_one_the_report_names_elsewhere(self):
+        other = 'a' * 40
+        text = review.recovered_review(block('approved', other), self.HEAD)
+        self.assertEqual(review.head_of(text), self.HEAD.lower())
+        self.assertEqual(review.head_of(text, block=True), self.HEAD.lower())
+        self.assertNotIn(other, text)
+
+
 class JudgeStaleAndCarry(unittest.TestCase):
     """A block names the head it read: on that head it is the verdict; on a rebuilt head of the
     same patch over the trunk it carries (``carried_from``); on other code it is ``Stale``."""

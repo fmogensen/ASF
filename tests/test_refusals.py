@@ -46,7 +46,8 @@ class TheRefusalModule(_Home):
         self.assertEqual(refusals.NAMING, lifecycle.NAMING)
         self.assertEqual(refusals.PRE_PUSH, lifecycle.HOOK_REFUSED)
         self.assertEqual(refusals.KINDS,
-                         ('naming', 'hook refused', 'refguard', 'push-allow', 'redaction'))
+                         ('naming', 'hook refused', 'refguard', 'push-allow', 'redaction',
+                          'non-fast-forward'))
         self.assertEqual(refusals.CLAUSE_MAX, 200)
 
     def test_the_path_stays_under_gates(self):

@@ -63,8 +63,9 @@ import inspect
 import os
 import re
 import subprocess
+import types
 
-from asf import approvals, budget, env
+from asf import approvals, budget, env, trunk_watch
 from asf import pause as pause_mod
 from asf import tune as tune_mod
 from asf import capacity as capacity_mod
@@ -88,6 +89,9 @@ _GROOM_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
 #: wave (this product's or another's — :func:`s1_bypass_live`) can see one is still live.
 HOST_LOAD_BYPASS_FIELD = 'host_load_bypass'
 
+#: how far back the wave step reads the trunk for landed PR numbers (:func:`occupancy`)
+TRUNK_LANDED_DAYS = 2
+
 
 def capacity(product=None):
     return capacity_mod.resolve(product or env.load_product()).sessions
@@ -104,13 +108,29 @@ def attempts(product):
     return lifecycle.attempts(pool_mod.sessions_path(product))
 
 
+def trunk_landed(product):
+    """``{pr number: sha}`` the trunk carries as landed within :data:`TRUNK_LANDED_DAYS`
+    (:func:`asf.trunk_watch.landed_prs` over :func:`asf.trunk_watch.first_parent`); ``{}`` when
+    git cannot read it — unknown is never "not landed"."""
+    repo = getattr(product, 'repo_dir', None)
+    if not repo:
+        return {}
+    commits = trunk_watch.first_parent(os.path.expanduser(repo), product.main,
+                                        days=TRUNK_LANDED_DAYS)
+    if commits is None:
+        return {}
+    return trunk_watch.landed_prs(commits)
+
+
 def occupancy(product):
     """The one answer to "is this item busy?" (:func:`asf.workers.lifecycle.occupancy`): live
     runs, work waiting to land, the lane's states (off the run lines), pending corrections — a
-    lane record naming a PR the evidence pass saw merged or closed held over by nothing
+    lane record naming a PR the evidence pass saw merged or closed, or the trunk itself already
+    carries as landed (:func:`trunk_landed`), held over by nothing
     (:func:`asf.workers.lifecycle.ended_prs`)."""
     path = pool_mod.sessions_path(product)
-    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path)),
+    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path),
+                                                                landed=trunk_landed(product)),
                                on_origin=lambda branches: on_origin(product, branches))
 
 
@@ -295,6 +315,52 @@ def _triage_wanted():
             and getattr(lifecycle, 'round_log', None) is not None)
 
 
+def _bare_row(iid, item, product):
+    """The minimum :class:`~asf.feeder.rows.Row` :func:`asf.evidence.rulepass.dispute` reads —
+    ``item_id``, ``branch``, ``brief_kind='adjudicate'`` — built here rather than carried by a
+    planned row, so :func:`waivers` can ask the question for every item, not only the ones the
+    feeder already turned into an adjudicate row this tick. ``branch`` is the pending
+    correction's own when one is open, else the product's own name for this item's spec/plan/task
+    branch (:func:`asf.feeder.rows.branch_for`)."""
+    from asf.feeder import rows as feeder_rows
+    corr = lifecycle.correction_of(pool_mod.sessions_path(product), iid)
+    if corr:
+        branch = corr.get('branch') or feeder_rows.branch_for(
+            product, 'fix' if item.get('type') == 'bug' else 'task', iid)
+    else:
+        doc, _rnd = feeder_rows.review_round(item)
+        branch = feeder_rows.branch_for(product, doc, iid) if doc else ''
+    return types.SimpleNamespace(item_id=iid, branch=branch, brief_kind='adjudicate')
+
+
+def waivers(product, root, index):
+    """``{item: stamp}`` — the items a standing rule-pass ruling already waives (F-0300, C7):
+    the one fact :func:`asf.feeder.rows.correction_rows` and :func:`asf.feeder.rows.feature_rows`
+    read, as a membership, so neither reads a review or a card itself (C11). Built here, not in
+    the feeder, because this is the only caller holding both the product and the filesystem
+    (P19): for every item in ``index``, :func:`asf.evidence.rulepass.dispute` says what (if
+    anything) is disputed about it, and :func:`asf.evidence.rulepass.waived` says whether that
+    exact finding is already settled on the card. ``{}`` with the flag off
+    (:func:`asf.evidence.rulepass.enabled`), and an item whose dispute or card cannot be read is
+    skipped, never raised (PD10: the correction branch needs no review read at all, since
+    ``dispute`` answers ``None`` for it before ever reading one)."""
+    from asf.evidence import rulepass
+    from asf.feeder import rows as feeder_rows
+    out = {}
+    if not rulepass.enabled(product):
+        return out
+    items = feeder_rows.items_of(index) if index else {}
+    for iid, item in items.items():
+        try:
+            d = rulepass.dispute(product, _bare_row(iid, item, product), items)
+            at = rulepass.waived(product, iid, d.finding) if d else ''
+            if at:
+                out[iid] = at
+        except Exception:  # noqa: BLE001 — no waiver is no stand-down, never an error
+            continue
+    return out
+
+
 def plan_inputs(product, root, index=None):
     """The ledger's and the record's facts ``plan_rows`` takes beside the index — one place, so
     the tick, ``asf next`` and the status cell plan the same rows. ``index`` is the loaded
@@ -322,6 +388,7 @@ def plan_inputs(product, root, index=None):
             'unverified_on_trunk': unverified_on_trunk(product, occ, unverified),
             'adjudicated': adjudications(product, index, tries),
             'failing': failing(product),
+            'waived': waivers(product, root, index),
             **triage}
 
 
@@ -654,6 +721,7 @@ def worker_row(row, brief, items, host_load_bypass=False):
                         add_dirs=getattr(brief, 'add_dirs', None) or (),
                         card_digest=getattr(brief, 'card_digest', '') or '',
                         host_load_bypass=host_load_bypass,
+                        correction_kind=getattr(row, 'correction_kind', '') or '',
                         local_only=cloud_mod.truthy(item.get('local_only')))
 
 
@@ -734,8 +802,15 @@ def relaunch_capped(product, row, wrow, out=print):
 
 
 #: what :func:`screen` says of a row (``Screened.kind``): it starts, or why it does not
-STARTS, WAITS, HELD, CLOSED, PAUSED, HOST, NO_SEAT, CAPPED = (
-    '', 'waits', 'held', 'closed', 'paused', 'host', 'no seat', 'relaunch cap')
+STARTS, WAITS, HELD, CLOSED, PAUSED, HOST, NO_SEAT, CAPPED, RULED = (
+    '', 'waits', 'held', 'closed', 'paused', 'host', 'no seat', 'relaunch cap', 'ruled')
+
+#: §2.3 — ``wave_state``'s own gates: how many New Task ids it names, so an idle wave's line
+#: never grows without bound on a backlog that is mostly New.
+GATE_CAP = 10
+#: §2.3 — the gate :func:`wave_state` names when the feeder planned no row at all (an empty
+#: ``screened``) while New Tasks exist anyway — nothing else in ``screened`` to blame instead.
+NO_ROW = 'no row planned'
 
 
 class Screened:
@@ -785,12 +860,14 @@ def _preview_capped(product, row, wrow):
 
 
 def screen(product, planned, items, running, held, seats, host=None, bypass_open=False,
-           act=False, out=print, build=None, ctx=None, paused=None):
+           act=False, out=print, build=None, ctx=None, paused=None, record_root=None):
     """``[Screened]`` — the wave's one per-row filter over ``planned``, in plan order: a row
     that does not launch (``WAITS ON …``); an item an approval hold parks (``held``,
     :func:`asf.approvals.parked`); one whose work is verified on the trunk
     (:func:`asf.workers.trunkclose.closes_before_launch`); the operator's own launch pause
-    (``paused`` — :func:`asf.pause.held`, holding every row, S1 included, F-0137); the
+    (``paused`` — :func:`asf.pause.held`, holding every row, S1 included, F-0137); an adjudicate
+    row the rule pass rules before it is spawned (:func:`asf.evidence.rulepass.apply`, F-0300) —
+    it takes no seat, so the seat it would have taken goes to the next candidate; the
     host-pressure hold (``host`` — ``(held, why)`` — which an S1 row may pass once while
     ``bypass_open``); no seat left of ``seats`` less ``running``; the relaunch cap
     (:func:`relaunch_capped`). What passes all of them starts.
@@ -798,7 +875,14 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
     The live wave (``act``) prints each ``waits`` line, closes and parks as each check says, and
     builds each starting row's brief and worker row through ``build(row, bypass)``. The status
     cell's preview (``act`` false, :func:`would_start`) runs the same checks in the same order
-    and changes nothing — so "Ready to launch N" is the N rows this wave would start."""
+    and changes nothing — so "Ready to launch N" is the N rows this wave would start.
+    ``record_root`` is the bound method that materializes the record clone (``ctx.record_root``),
+    not its value, so no clone is made on a tick that rules nothing; with no ``record_root`` the
+    rule pass runs dry and writes nothing, whatever ``act`` is. On the preview (``act`` false) a
+    ruling always stands the row down, quietly; on the live wave, a ruling with no ``record_root``
+    (the wave-clock path, :func:`launch_now`) is never filed, so it never binds the gate — the row
+    starts, as today, with one line saying why (PD5)."""
+    from asf.evidence import rulepass
     host_held, host_why = tuple(host or (False, ''))[:2]
     say = out if act else _quiet
     room = max(0, seats - len(running))
@@ -830,6 +914,23 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
             say(f'waits    {job:<24} {row.item_id:<10} — {why}')
             result.append(Screened(row, why, PAUSED))
             continue
+        if row.brief_kind == 'adjudicate':
+            ruled = rulepass.apply(product, row, items, say,
+                                   root=record_root() if (act and record_root) else None,
+                                   dry_run=not (act and record_root))
+            if ruled and (not act or record_root):
+                if act and ctx is not None:
+                    ctx.event('rule_pass', item=row.item_id, rule=','.join(ruled.rules),
+                              finding=' '.join(ruled.finding), where=ruled.where,
+                              cite=', '.join(ruled.cites))
+                say(f'ruled    {job:<24} {row.item_id:<10} — {ruled.why}')
+                result.append(Screened(row, ruled.why, RULED))
+                continue
+            if ruled:
+                # PD5: the wave-clock path (launch_now, no record_root) never files a ruling —
+                # a filed-but-unwritten RULED would hold the row down forever, so it starts today
+                out(f'ruled    {job:<24} {row.item_id:<10} — {ruled.why} (no record root — '
+                    f'starts unruled)')
         bypass = bypass_open and (items.get(row.item_id) or {}).get('severity') == 'S1'
         if host_held and not bypass:             # a loaded host takes no new session this tick
             why = f'held: {host_why}'
@@ -875,6 +976,38 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
         started += 1
         result.append(Screened(row, bypass=bypass, wrow=wrow, brief=brief))
     return result
+
+
+def wave_state(screened, held, items, launching=0):
+    """§2.3 — the one fact the wave knows and nothing else does: that it launched nothing (or
+    not), that New Tasks existed anyway, and which gate held the rows it planned but did not
+    launch. Pure — :func:`launch` is the only caller, right after it knows ``worker_rows``.
+
+    ``{'idle': bool, 'new_tasks': int, 'new_task_ids': [...], 'gates': {gate: count}}`` —
+    ``gates`` counts a non-starting ``screened`` entry under: its ``row.waits_on`` (``WAITS``,
+    falling back to the first word of ``row.action`` for a row without one set); the held
+    class alone, not the level (``HELD``); else the kind string itself (``CLOSED``, ``HOST``,
+    ``NO_SEAT``, ``CAPPED``). An empty ``screened`` with New Tasks still open names
+    :data:`NO_ROW` instead — there is nothing else in it to blame."""
+    new_task_ids = sorted(iid for iid, item in items.items()
+                          if item.get('type') == 'task' and item.get('state', 'New') == 'New')
+    new_tasks = len(new_task_ids)
+    gates = {}
+    if screened:
+        for s in screened:
+            if s.starts:
+                continue
+            if s.kind == WAITS:
+                gate = s.row.waits_on or s.row.action.split()[0]
+            elif s.kind == HELD:
+                gate = f'held {held[s.row.item_id][0]}'
+            else:
+                gate = s.kind
+            gates[gate] = gates.get(gate, 0) + 1
+    elif new_tasks:
+        gates = {NO_ROW: new_tasks}
+    return {'idle': not launching, 'new_tasks': new_tasks,
+            'new_task_ids': new_task_ids[:GATE_CAP], 'gates': gates}
 
 
 def would_start(product, root, items=None):
@@ -1231,10 +1364,12 @@ def launch(ctx, out=print):
                        repo_facts=_repo_facts(product, row, items, running))
         return worker_row(row, brief, items, host_load_bypass=bypass), brief
     screened = screen(product, planned, items, running, held, seats, (host_held, host_why),
-                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx, paused=paused)
+                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx, paused=paused,
+                      record_root=ctx.record_root)
     starting = [s for s in screened if s.starts]
     bypassed = any(s.bypass for s in starting)
     worker_rows = [s.wrow for s in starting]
+    ctx.wave = wave_state(screened, held, items, launching=len(worker_rows))
     # the self-tuning loop (asf.tune): its pass, then the tuned model and seat share per kind
     worker_rows = tune_mod.wave_hook(product, worker_rows, running, out=out, event=ctx.event)
     texts = {s.wrow.job: s.brief.text for s in starting}

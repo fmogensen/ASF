@@ -69,6 +69,9 @@ REASON_NO_QUOTA = ('NEEDS OPERATOR: no account under quota — wait for a window
                    'add an account under worker_pool.accounts (see: asf workers quota)')
 REASON_COOLDOWN = 'quota cooldown — one job at a time'
 
+#: an account naming no ``provider`` is this one kind (F-0138)
+DEFAULT_PROVIDER = 'default'
+
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -78,7 +81,8 @@ def now_iso():
 
 class Account:
     def __init__(self, name, role='local', cap=1, caps=None, home=None, config_dir=None,
-                 home_seed=(), isolate_home=env.DEFAULT_ISOLATE_HOME, auth_env=None):
+                 home_seed=(), isolate_home=env.DEFAULT_ISOLATE_HOME, auth_env=None,
+                 identity=None, provider=None):
         self.name = name
         self.role = role or 'local'
         self.cap = int(cap if cap is not None else 1)
@@ -92,13 +96,22 @@ class Account:
         #: ``auth_env``: ``{VARIABLE: file}`` — each file's content is that variable in this
         #: account's sessions (:func:`asf.workers.runtime.auth_env_values`)
         self.auth_env = dict(auth_env or {})
+        #: ``identity``: a ``{name, email}`` map overriding what this account's sessions commit
+        #: as (:func:`asf.identity.agent_identity`), or None for the agent default
+        self.identity = dict(identity) if identity else None
+        #: ``provider``: the provider *kind* — an opaque operator label naming what sort of
+        #: account this is, so accounts that share a window scale share one estimate (F-0138).
+        #: The window's dollars are read per kind (``quota_guards.window_usd.<provider>``);
+        #: accounts that name none are one kind, :data:`DEFAULT_PROVIDER`.
+        self.provider = str(provider or DEFAULT_PROVIDER)
 
     @classmethod
     def from_dict(cls, d):
         return cls(d['name'], role=d.get('role'), cap=d.get('cap', 1), caps=d.get('caps'),
                    home=d.get('home'), config_dir=d.get('config_dir'),
                    home_seed=env.account_home_seed(d), isolate_home=env.isolate_home(d),
-                   auth_env=env.account_auth_env(d))
+                   auth_env=env.account_auth_env(d), identity=env.account_identity(d),
+                   provider=d.get('provider'))
 
     def __repr__(self):
         return f'Account({self.name!r}, role={self.role!r}, cap={self.cap})'
@@ -128,7 +141,8 @@ class Row:
 
     def __init__(self, job, item, state='', action='', title='', model='', kind=None,
                  severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=(),
-                 card_digest='', cloud_ok=False, host_load_bypass=False, local_only=False):
+                 card_digest='', cloud_ok=False, host_load_bypass=False, correction_kind='',
+                 local_only=False):
         self.job = job
         self.item = item
         self.state = state
@@ -155,6 +169,10 @@ class Row:
         #: the row never leaves the host (its item's ``local_only: true``;
         #: :func:`asf.workers.cloud.local_only`)
         self.local_only = bool(local_only)
+        #: the lane's ``kind`` for the correction this row answers — a rewrite of the branch's
+        #: history has no channel back from the cloud lane
+        #: (:data:`asf.workers.cloud.REWRITE_KINDS`, F-0289)
+        self.correction_kind = correction_kind or ''
         #: this launch is the one S1 row passing the host guard's LOAD hold (the wave step's own
         #: rule, :func:`asf.tick.step_wave.s1_bypass_live`) — carried onto the session ledger so
         #: a later wave can see the bypass is still live.
@@ -175,7 +193,8 @@ class Row:
                    kind=d.get('kind'), severity=d.get('severity'), feature=d.get('feature'),
                    lane=d.get('lane'), branch=d.get('branch'), test=d.get('test'),
                    cloud_ok=d.get('cloud_ok') or d.get('cloud-ok'),
-                   host_load_bypass=d.get('host_load_bypass'), local_only=d.get('local_only'))
+                   host_load_bypass=d.get('host_load_bypass'),
+                   correction_kind=d.get('correction_kind'), local_only=d.get('local_only'))
 
     def __repr__(self):
         return f'Row({self.state} → {self.action} {self.item} {self.job})'
@@ -402,6 +421,10 @@ class Pool:
         if account.name not in self._usage:
             self._usage[account.name] = self.quota.read(account)
         return self._usage[account.name]
+
+    def providers(self):
+        """``{account name: its provider kind}`` — what a sample line is attributed to."""
+        return {a.name: a.provider for a in self.accounts}
 
     def limit(self, account):
         """The reset a session limit stopped ``account`` until (ISO), or None."""

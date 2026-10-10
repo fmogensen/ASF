@@ -12,10 +12,12 @@ its running sessions + this launch`` stays under the 5h guard (:meth:`asf.worker
 * the fixed :data:`DEFAULT_COST` table while history is thin (fewer than :data:`MIN_RUNS` runs of
   that kind and family with a known cost, or no dollar value for a window);
 * else the median dollars (``total_cost_usd`` of a run's ``result`` line) of its recent runs over
-  ``quota_guards.five_h_usd`` — the dollars of 100% of a window. Not configured, it is estimated
-  from history (:func:`five_h_usd_from_samples`): the pool's own ``five_h_pct`` readings
-  (``~/.ASF/state/quota-samples.jsonl``, one line per account read by a tick's wave) against the
-  dollars the account's runs spent between two readings of one window.
+  ``quota_guards.five_h_usd`` — the dollars of 100% of a window, read per provider *kind*
+  (``quota_guards.window_usd.<provider>``, :meth:`CostTable.share`) now that two accounts on
+  different plan sizes do not share one window scale. Not configured, it is estimated from
+  history (:func:`five_h_usd_from_samples`, :func:`five_h_usd_by_provider`): the pool's own
+  ``five_h_pct`` readings (``~/.ASF/state/quota-samples.jsonl``, one line per account read by a
+  tick's wave) against the dollars the account's runs spent between two readings of one window.
 
 A running session holds :data:`RUNNING_ALLOWANCE` (``quota_guards.running_allowance``) of its
 own estimate — what it has spent so far is already in the reading.
@@ -35,6 +37,7 @@ import re
 import statistics
 
 from asf import config_keys, env
+from asf.workers import quota
 
 QUOTA_EXHAUSTED = 'quota-exhausted'
 #: The CLI's texts for a spent window: the session limit, the usage limit, a rate limit (the
@@ -70,6 +73,11 @@ MIN_DELTA = 2         # points a reading must move for an interval to count
 MAX_GAP = datetime.timedelta(minutes=90)
 HISTORY = datetime.timedelta(days=7)
 SAMPLES_KEEP = 5000
+
+#: The length of each window as a multiple of the 5h one — where a long window's dollars come
+#: from when the operator names none (F-0138 In 4). Computed from
+#: :data:`asf.workers.quota.WINDOW_LENGTH`, so the two can never drift.
+WINDOW_RATIO = {w: quota.WINDOW_LENGTH[w] / quota.WINDOW_LENGTH['five_h'] for w in quota.WINDOW_KEYS}
 
 
 def now_utc():
@@ -235,14 +243,26 @@ def reset_label(until):
 # ---- the cost of one launch ---------------------------------------------------------
 
 class CostTable:
-    """``cost(kind, model)`` → percent of a 5h window. ``shares`` overrides :data:`DEFAULT_COST`
-    per ``(kind, family)``; ``source`` is ``default`` or ``history``."""
+    """``cost(kind, model)`` → percent of a 5h window, as before. ``share(kind, model, provider,
+    window)`` → percent of *that* window on *that* provider kind, or None when the window has no
+    known dollars and no default share (D6).
 
-    def __init__(self, shares=None, five_h_usd=None, allowance=RUNNING_ALLOWANCE):
+    ``window_usd`` is ``{provider: {window: usd}}`` — the operator's
+    ``quota_guards.window_usd``, exactly as configured; ``learned_usd`` is ``{provider: usd}``,
+    a kind's own 5h window as :func:`five_h_usd_by_provider` read it, and ``five_h_usd`` the
+    configured pool-wide scalar. The three are tiers of one chain, never merged into each other
+    (:meth:`_window_usd`). ``usd`` is ``{(kind, family): median dollars}``. ``shares`` overrides
+    :data:`DEFAULT_COST` per ``(kind, family)``; ``source`` is ``default`` or ``history``."""
+
+    def __init__(self, shares=None, five_h_usd=None, allowance=RUNNING_ALLOWANCE,
+                 window_usd=None, usd=None, learned_usd=None):
         self.shares = dict(shares or {})
         self.five_h_usd = five_h_usd
         self.allowance = float(allowance)
         self.source = 'history' if self.shares else 'default'
+        self.window_usd = {k: dict(v) for k, v in (window_usd or {}).items()}
+        self.usd = dict(usd or {})
+        self.learned_usd = dict(learned_usd or {})
 
     def cost(self, kind, model):
         fam = family(model)
@@ -253,50 +273,105 @@ class CostTable:
         table = cost.get(fam) or cost['*']
         return table.get(kind, table['*'])
 
+    def _window_usd(self, provider, window):
+        """The dollars of 100% of ``window`` on ``provider``'s own scale — the spec's ``## The
+        design`` §2 chain, six branches, first hit wins: the operator's exact
+        ``quota_guards.window_usd[provider][window]``; that kind's *configured* ``five_h`` ×
+        :data:`WINDOW_RATIO`; the configured pool-wide :attr:`five_h_usd` × the same ratio; that
+        kind's *learned* ``five_h`` × the ratio; the learned pool-wide ``five_h`` × the ratio;
+        ``None``. A kind the operator configured outranks every learned reading; a kind's own
+        learned window outranks the pool-wide one it was learned beside."""
+        per = self.window_usd.get(provider) or {}
+        if per.get(window) is not None:
+            return per[window]
+        ratio = WINDOW_RATIO.get(window)
+        if not ratio:
+            return None
+        if per.get('five_h') is not None:
+            return per['five_h'] * ratio
+        for dollars in (self.five_h_usd, self.learned_usd.get(provider),
+                        self.learned_usd.get('default')):
+            if dollars:
+                return dollars * ratio
+        return None
 
-def estimate(runs, five_h_usd=None, allowance=RUNNING_ALLOWANCE):
+    def share(self, kind, model, provider, window):
+        """Percent of ``window`` one ``(kind, model)`` launch spends, on ``provider``'s own
+        scale: the launch's own dollars over that window's dollars when both are known; else,
+        for ``five_h``, today's answer (:meth:`cost`); else, for a longer window, that same
+        5h share spread over it by :data:`WINDOW_RATIO`; else ``None`` — a window named in a
+        reading but priced nowhere (D6)."""
+        fam = family(model)
+        usd = self.usd.get((kind, fam))
+        window_usd = self._window_usd(provider, window)
+        if usd is not None and window_usd:
+            return _num(usd * 100.0 / window_usd)
+        if window == 'five_h':
+            return self.cost(kind, model)
+        ratio = WINDOW_RATIO.get(window)
+        if ratio:
+            return round(self.cost(kind, model) / ratio, 1)
+        return None
+
+
+def estimate(runs, window_usd=None, allowance=RUNNING_ALLOWANCE, five_h_usd=None,
+             learned_usd=None):
     """A :class:`CostTable` from ``runs`` (dicts with ``kind``, ``model``, ``usd`` and, for the
-    order, ``started``): each ``(kind, family)`` with :data:`MIN_RUNS` known costs gets the median
-    of its :data:`RECENT_RUNS` newest over ``five_h_usd``, rounded to half a point, at least 1."""
-    if not five_h_usd or five_h_usd <= 0:
-        return CostTable(five_h_usd=None, allowance=allowance)
+    order, ``started``): each ``(kind, family)`` with :data:`MIN_RUNS` known costs gets the
+    median dollars of its :data:`RECENT_RUNS` newest (:attr:`CostTable.usd`), learned whether or
+    not any pool-wide dollars are known. Only over a known pool-wide window — ``five_h_usd`` as
+    configured, else the ``default`` kind's learned ``five_h`` — does that same median also
+    become a share of the window, rounded to half a point, at least 1 (:attr:`CostTable.shares`).
+    ``window_usd`` and ``learned_usd`` pass through to the table unchanged, as the separate tiers
+    they are (:meth:`CostTable._window_usd`)."""
+    pool_wide = five_h_usd or (learned_usd or {}).get('default')
+    have_five_h = bool(pool_wide) and pool_wide > 0
     groups = {}
     for r in sorted(runs, key=lambda r: str(r.get('started') or '')):
         if r.get('usd') is None or not r.get('kind'):
             continue
         groups.setdefault((r['kind'], family(r.get('model'))), []).append(float(r['usd']))
-    shares = {}
+    shares, usd = {}, {}
     min_runs = config_keys.value('quota_guards.min_runs', MIN_RUNS)
-    for key, usd in groups.items():
-        if len(usd) < min_runs:
+    for key, amounts in groups.items():
+        if len(amounts) < min_runs:
             continue
-        pct = statistics.median(usd[-RECENT_RUNS:]) * 100.0 / five_h_usd
-        shares[key] = max(1, _num(round(pct * 2) / 2))
-    return CostTable(shares, five_h_usd=five_h_usd, allowance=allowance)
+        dollars = statistics.median(amounts[-RECENT_RUNS:])
+        usd[key] = dollars
+        if have_five_h:
+            pct = dollars * 100.0 / pool_wide
+            shares[key] = max(1, _num(round(pct * 2) / 2))
+    return CostTable(shares, five_h_usd=five_h_usd if (five_h_usd and five_h_usd > 0) else None,
+                     allowance=allowance, window_usd=window_usd, usd=usd,
+                     learned_usd=learned_usd)
 
 
-def five_h_usd_from_samples(samples, runs):
-    """The dollars of a whole 5h window, from ``samples`` (``{ts, account, five_h_pct}``) and
-    ``runs`` (``{account, started, ended, usd}``): for two consecutive readings of one account in
-    one window (the reading rose by at least :data:`MIN_DELTA`, at most :data:`MAX_GAP` apart),
-    the dollars its runs spent between them — each run's cost spread evenly over its span — per
-    point moved. An interval a run of unknown cost overlaps (still running, no result) is
-    skipped. The median over at least :data:`MIN_PAIRS` intervals × 100, else None."""
-    by_acct = {}
+def five_h_usd_by_provider(samples, runs):
+    """``{provider: usd}`` — the dollars of a whole 5h window, per provider kind, from
+    ``samples`` (``{ts, account, provider, five_h_pct}``) and ``runs`` (``{account, started,
+    ended, usd}``): for two consecutive readings of one account in one window (the reading rose
+    by at least :data:`MIN_DELTA`, at most :data:`MAX_GAP` apart), the dollars its runs spent
+    between them — each run's cost spread evenly over its span — per point moved. An interval a
+    run of unknown cost overlaps (still running, no result) is skipped. A sample naming no
+    ``provider`` folds into ``'default'``. Each kind's median over at least :data:`MIN_PAIRS` of
+    its own intervals × 100; a kind with fewer has no entry."""
+    by_acct, acct_provider = {}, {}
     for s in samples:
         t = parse_ts(s.get('ts'))
         if t is None or s.get('five_h_pct') is None or not s.get('account'):
             continue
         by_acct.setdefault(s['account'], []).append((t, float(s['five_h_pct'])))
+        acct_provider[s['account']] = s.get('provider') or 'default'
     spans = {}
     for r in runs:
         start = parse_ts(r.get('started'))
         if start is None or not r.get('account'):
             continue
         spans.setdefault(r['account'], []).append((start, parse_ts(r.get('ended')), r.get('usd')))
-    ratios = []
+    ratios = {}
     for acct, pts in by_acct.items():
         pts.sort()
+        provider = acct_provider.get(acct, 'default')
         for (ta, pa), (tb, pb) in zip(pts, pts[1:]):
             if not (datetime.timedelta(0) < tb - ta <= MAX_GAP) or pb - pa < MIN_DELTA:
                 continue
@@ -313,10 +388,16 @@ def five_h_usd_from_samples(samples, runs):
                 lap = (min(end, tb) - max(start, ta)).total_seconds()
                 usd += float(cost) * max(lap, 0.0) / span
             if known and usd > 0:
-                ratios.append(usd / (pb - pa))
-    if len(ratios) < MIN_PAIRS:
-        return None
-    return round(statistics.median(ratios) * 100.0, 2)
+                ratios.setdefault(provider, []).append(usd / (pb - pa))
+    return {p: round(statistics.median(r) * 100.0, 2) for p, r in ratios.items()
+           if len(r) >= MIN_PAIRS}
+
+
+def five_h_usd_from_samples(samples, runs):
+    """Back-compat wrapper (D9): :func:`five_h_usd_by_provider`'s ``default`` entry — the
+    pool-wide dollars of a whole 5h window, as read before provider kinds existed, or when no
+    sample names one."""
+    return five_h_usd_by_provider(samples, runs).get('default')
 
 
 # ---- history off disk -----------------------------------------------------------------
@@ -325,12 +406,18 @@ def samples_path():
     return os.path.join(env.ASF_HOME, 'state', 'quota-samples.jsonl')
 
 
-def record_samples(usage, now=None):
-    """Append one ``{ts, account, five_h_pct}`` line per account read (``{name: usage|None}``);
-    the file is cut back to its newest :data:`SAMPLES_KEEP` lines when it grows past twice
-    that. A write that fails only loses the sample."""
+def record_samples(usage, providers=None, now=None):
+    """Append one ``{ts, account, provider, five_h_pct, seven_d_pct, seven_d_model_pct}`` line
+    per account read (``{name: usage|None}``); ``providers`` is ``{account: provider kind}``
+    (:meth:`asf.workers.pool.Pool.providers`) — an account it names none for, or that ``providers``
+    itself is not given for, folds into ``'default'``. The file is cut back to its newest
+    :data:`SAMPLES_KEEP` lines when it grows past twice that. A write that fails only loses the
+    sample."""
     ts = iso(now or now_utc())
-    lines = [json.dumps({'ts': ts, 'account': a, 'five_h_pct': u.get('five_h_pct')})
+    providers = providers or {}
+    lines = [json.dumps({'ts': ts, 'account': a, 'provider': providers.get(a) or 'default',
+                         'five_h_pct': u.get('five_h_pct'), 'seven_d_pct': u.get('seven_d_pct'),
+                         'seven_d_model_pct': u.get('seven_d_model_pct')})
              for a, u in sorted(usage.items())
              if isinstance(u, dict) and u.get('five_h_pct') is not None]
     if not lines:
@@ -449,9 +536,25 @@ def history_runs(state_root=None, now=None):
     return out
 
 
+def _account_providers(cfg):
+    """``{account name: its provider kind}`` read straight off ``worker_pool.accounts`` — the
+    config's own mapping, current even for a sample line an older kind, or none, was written
+    under."""
+    accounts = ((cfg or {}).get('worker_pool') or {}).get('accounts') or []
+    return {a['name']: str(a.get('provider') or 'default') for a in accounts
+           if isinstance(a, dict) and a.get('name')}
+
+
 def table_from_config(cfg, now=None):
     """The :class:`CostTable` a tick's wave places by: ``quota_guards.five_h_usd`` when set, else
-    the window's dollars estimated from the samples; the fixed table when neither is known."""
+    the window's dollars estimated from the samples; the fixed table when neither is known. Each
+    window's dollars are read per provider kind (``quota_guards.window_usd.<provider>``) and
+    learned per kind beside it (:func:`five_h_usd_by_provider`) — each sample's account mapped
+    through the config's own ``{account: provider}`` first, so a kind's dollars are learned from
+    its own accounts' intervals even when the sample line predates provider kinds. The configured
+    table and the learned one are handed over as the separate tiers they are: what the operator
+    configured, pool-wide included, outranks every learned reading (:meth:`CostTable._window_usd`).
+    """
     g = (cfg or {}).get('quota_guards') or {}
     g = g if isinstance(g, dict) else {}
     allowance = g.get('running_allowance', RUNNING_ALLOWANCE)
@@ -459,7 +562,15 @@ def table_from_config(cfg, now=None):
         runs = history_runs(now=now)
     except Exception:  # noqa: BLE001 — history is an improvement on the table, never a blocker
         return CostTable(allowance=allowance)
-    usd = g.get('five_h_usd')
-    if not usd:
-        usd = five_h_usd_from_samples(read_samples(since=(now or now_utc()) - HISTORY), runs)
-    return estimate(runs, five_h_usd=float(usd) if usd else None, allowance=allowance)
+    account_provider = _account_providers(cfg)
+    samples = read_samples(since=(now or now_utc()) - HISTORY)
+    mapped = [dict(s, provider=account_provider.get(s.get('account'), s.get('provider')))
+             for s in samples]
+    learned = five_h_usd_by_provider(mapped, runs)
+    configured = g.get('window_usd')
+    configured = configured if isinstance(configured, dict) else {}
+    window_usd = {provider: dict(per) for provider, per in configured.items()
+                 if isinstance(per, dict) and per}
+    five_h_usd = g.get('five_h_usd')
+    return estimate(runs, window_usd=window_usd or None, learned_usd=learned or None,
+                    five_h_usd=float(five_h_usd) if five_h_usd else None, allowance=allowance)

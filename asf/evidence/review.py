@@ -202,6 +202,45 @@ def block_problem(text, head):
     return ''
 
 
+#: The heading a recovered review carries, so a reader of one knows it was not written as a file.
+RECOVERED = 'Recovered verdict'
+
+
+def recovered_review(report, head, item='', n=0, source='the session REPORT'):
+    """A review text built from the verdict block in a finished session's ``report``, bound to
+    ``head`` — or '' when the report carries no valid block (:func:`verdict_block`).
+
+    The text carries its ``verdict:`` line, its ``head:`` line and the block verbatim, so it
+    reads the same under every ``flags.verdict_block`` setting (F-0313 P11): at ``off`` the
+    table answers first and there is none, so the ``verdict:`` line does; past ``off`` the block
+    does. It carries no check table: a row with no evidence counts as ``fail`` (the review
+    template), and a recovery has no evidence to put in one.
+    """
+    v = verdict_block(report)
+    if v is None:
+        return ''
+    asks_list = ', '.join(v.asks)
+    asks_line = asks_list or 'none'
+    asks_block = f'[{asks_list}]'
+    return (
+        f'# {RECOVERED} — {item} review round {n}\n'
+        '\n'
+        'The review session finished and its review could not be filed from its worktree. '
+        f'This verdict is the one {source} printed, recovered by the harvest (F-0313). It '
+        'carries no check table.\n'
+        '\n'
+        f'verdict: {v.kind}\n'
+        f'head: {head}\n'
+        f'asks: {asks_line}\n'
+        '\n'
+        '```verdict\n'
+        f'verdict: {v.kind}\n'
+        f'head: {head}\n'
+        f'asks: {asks_block}\n'
+        '```\n'
+    )
+
+
 def worktree_review(conv, wt, item):
     """``(round, path, text)`` of the newest review of ``item`` in worktree ``wt`` — the file a
     review session writes at ``conventions.review_path`` and leaves uncommitted — or None."""

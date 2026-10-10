@@ -580,7 +580,12 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
         if new_body != body2:
             writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         return 'bumped'
+    return file_new_bug(root, canonical, sig, info, date, default_bug_epic)
 
+
+def file_new_bug(root, canonical, sig, info, date, default_bug_epic=None):
+    """Write a new Bug keyed on ``sig`` from ``info`` (title, severity, evidence, runs,
+    acceptance); ``'filed'``."""
     typed = {
         'title': info['title'], 'severity': info['severity'], 'found_in': info.get('found_in', 'ci'),
         'signature': sig, 'count': 1, 'last_filed': date,

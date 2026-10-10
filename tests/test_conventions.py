@@ -17,7 +17,7 @@ class DefaultsTests(unittest.TestCase):
         c = Conventions()
         self.assertEqual(c.branch_prefixes,
                          {'code': 'worker/', 'fix': 'fix/', 'spec': 'spec/', 'plan': 'plan/',
-                          'direct': 'cloud/direct-', 'legacy': []})
+                          'direct': 'cloud/direct-', 'revert': 'revert/', 'legacy': []})
         self.assertEqual((c.specs_dir, c.plans_dir, c.reviews_dir),
                          ('docs/specs', 'docs/plans', 'docs/reviews'))
         self.assertEqual(c.review_pattern, '{reviews_dir}/{n}-{slug}.md')
@@ -185,7 +185,7 @@ class PathTests(unittest.TestCase):
 class ForbiddenPatternsTests(unittest.TestCase):
     def test_one_pattern_per_path_shaped_default(self):
         patterns = conv_mod.forbidden_patterns()
-        self.assertEqual(len(patterns), 13)
+        self.assertEqual(len(patterns), 14)
         self.assertIn("['\"]" + re.escape('cloud/direct-'), patterns)
         self.assertIn("['\"]" + re.escape(conv_mod.DEFAULT_RELEASE_INSTALL), patterns)
         self.assertIn("['\"]worker/", patterns)
@@ -218,13 +218,13 @@ class ForbiddenPatternsTests(unittest.TestCase):
         # forbidden_patterns() walks string defaults containing '/', '{' or '#' (P14); a
         # dict-valued default like DEFAULT_SAVINGS is never a path-shaped literal.
         self.assertIsInstance(conv_mod.DEFAULT_SAVINGS, dict)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 14)
 
     def test_the_heavy_share_default_and_the_two_labels_add_no_pattern(self):
         # DEFAULT_HEAVY_SHARE_PCT is an int, and HEAVY/LIGHT are not DEFAULT_* names — neither
         # is a path-shaped string default, so the count is unmoved (F-0101 §1.3 P13).
         self.assertIsInstance(conv_mod.DEFAULT_HEAVY_SHARE_PCT, int)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 14)
 
 
 class CheckConventionsScriptTests(unittest.TestCase):
@@ -436,6 +436,29 @@ class BudgetConventionTests(unittest.TestCase):
             self.assertEqual(rel, os.path.join('asf', 'conventions.py'), (rel, pattern))
 
 
+class LegacyBackfillKeys(unittest.TestCase):
+    def test_legacy_branch_is_a_declared_field(self):
+        c = Conventions.from_mapping({'legacy_branch': r'(?P<slug>[a-z-]+)-t(?P<task>\d+)'})
+        self.assertEqual(c.legacy_branch, r'(?P<slug>[a-z-]+)-t(?P<task>\d+)')
+        self.assertIn('legacy_branch', Conventions.field_names())
+        self.assertEqual(conv_mod.validate_mapping(
+            {'legacy_branch': r'(?P<slug>[a-z-]+)-t(?P<task>\d+)'}), [])
+
+    def test_a_misshapen_legacy_branch_is_exactly_one_problem(self):
+        for data in ({'legacy_branch': 12}, {'legacy_branch': ''}, {'legacy_branch': '('},
+                     {'legacy_branch': r'(?P<other>[a-z-]+)'}):
+            problems = conv_mod.validate_mapping(data)
+            self.assertEqual(len(problems), 1, data)
+            self.assertEqual(problems[0][0], 'legacy_branch', data)
+
+    def test_legacy_review_is_not_declared_and_is_kept_verbatim(self):
+        self.assertNotIn('legacy_review', Conventions.field_names())
+        self.assertEqual(conv_mod.validate_mapping({'legacy_review': 'x'}), [])
+        c = Conventions.from_mapping({'legacy_review': 'x'})
+        self.assertEqual(c.extra, {'legacy_review': 'x'})
+        self.assertEqual(c.get('legacy_review'), 'x')
+
+
 class SelfBugThresholdTests(unittest.TestCase):
     def test_the_defaults_are_ten_twenty_two_six(self):
         c = Conventions()
@@ -452,6 +475,63 @@ class SelfBugThresholdTests(unittest.TestCase):
         c = Conventions()
         self.assertEqual(c.get('repeat_failure_n'), c.repeat_failure_n)
         self.assertEqual(c['idle_wave_ticks'], c.idle_wave_ticks)
+
+
+class PrePushChecksTests(unittest.TestCase):
+    """F-0301 S-77504: `conventions.pre_push_checks` — the reader shape of `security_paths`, and
+    its validator beside `security.paths`."""
+
+    RULE = {'paths': ['asf/**', 'tests/**'],
+           'run': 'python3 tools/run_tests.py --touched origin/main --shards 2',
+           'why': 'every test module that covers a file you touched, each module whole'}
+
+    def test_reads_as_a_list_of_rules_in_declaration_order(self):
+        second = {'paths': ['asf/schema.py'], 'run': 'python3 -m asf.schema --check', 'why': 'w'}
+        c = Conventions.from_mapping({'pre_push_checks': [self.RULE, second]})
+        self.assertEqual(c.pre_push_checks(), [self.RULE, second])
+
+    def test_unset_not_a_list_and_a_list_of_non_rules_all_read_as_empty(self):
+        self.assertEqual(Conventions().pre_push_checks(), [])
+        self.assertEqual(Conventions.from_mapping({'pre_push_checks': 'nope'}).pre_push_checks(), [])
+        self.assertEqual(Conventions.from_mapping(
+            {'pre_push_checks': ['not-a-rule', 1, None]}).pre_push_checks(), [])
+
+    def test_a_malformed_rule_is_dropped_never_run(self):
+        good = dict(self.RULE)
+        no_run = {'paths': ['a/**'], 'run': '', 'why': 'w'}
+        bad_paths = {'paths': ['a/**', 1], 'run': 'x', 'why': 'w'}
+        bad_why = {'paths': ['a/**'], 'run': 'x', 'why': 123}
+        c = Conventions.from_mapping({'pre_push_checks': [good, no_run, bad_paths, bad_why]})
+        self.assertEqual(c.pre_push_checks(), [good])
+
+    def test_why_defaults_to_empty_string_when_unset(self):
+        c = Conventions.from_mapping({'pre_push_checks': [{'paths': ['a/**'], 'run': 'x'}]})
+        self.assertEqual(c.pre_push_checks(), [{'paths': ['a/**'], 'run': 'x', 'why': ''}])
+
+    def test_validate_mapping_passes_the_documented_block(self):
+        self.assertEqual(conv_mod.validate_mapping({'pre_push_checks': [self.RULE]}), [])
+
+    def test_validate_mapping_reports_a_value_that_is_not_a_list(self):
+        probs = dict(conv_mod.validate_mapping({'pre_push_checks': 'nope'}))
+        self.assertIn('pre_push_checks', probs)
+
+    def test_validate_mapping_reports_a_rule_that_is_not_a_map(self):
+        probs = conv_mod.validate_mapping({'pre_push_checks': ['nope']})
+        self.assertTrue(any(k == 'pre_push_checks[0]' for k, _ in probs))
+
+    def test_validate_mapping_reports_no_run_bad_paths_and_non_string_why(self):
+        probs = dict(conv_mod.validate_mapping({'pre_push_checks': [
+            {'paths': ['a/**'], 'run': '', 'why': 'w'}]}))
+        self.assertIn('pre_push_checks[0].run', probs)
+        probs = dict(conv_mod.validate_mapping({'pre_push_checks': [
+            {'paths': 'not-a-list', 'run': 'x', 'why': 'w'}]}))
+        self.assertIn('pre_push_checks[0].paths', probs)
+        probs = dict(conv_mod.validate_mapping({'pre_push_checks': [
+            {'paths': ['a/**'], 'run': 'x', 'why': 7}]}))
+        self.assertIn('pre_push_checks[0].why', probs)
+
+    def test_the_key_is_documented_in_validate_mappings_docstring(self):
+        self.assertIn('pre_push_checks', conv_mod.validate_mapping.__doc__)
 
 
 if __name__ == '__main__':

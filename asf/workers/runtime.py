@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import threading
 
-from asf import budget, detach, env, hermetic, tokens
+from asf import budget, detach, env, hermetic, identity as identity_mod, tokens
 from asf.connectors import claude_code
 from asf.connectors.claude_code import ClaudeCodeRuntime  # noqa: F401 — its old home
 from asf.workers import account_auth, headroom, report
@@ -71,6 +71,9 @@ class Job:
         # the heartbeat a session off this host is told to keep (asf.workers.heartbeat.Settings),
         # or None: asf.workers.cloud.cloud_brief writes its rule into the CLOUD block
         self.heartbeat = None
+        # the ledger row's kind (``review``, ``task`` …), or None: a cloud review's CLOUD block
+        # sends its verdict to its own ref, never the branch (asf.workers.cloud.cloud_brief)
+        self.kind = None
 
     @property
     def session(self):
@@ -168,7 +171,7 @@ def _copy_file(src, dst):
 
 #: The first line of the minimal ``.gitconfig`` :func:`seed_home` writes into an isolated home
 #: that got none from ``home_seed``: the file is ASF's, rewritten at every launch.
-GITCONFIG_MARK = '# written by asf: the session identity only (user.name/user.email)'
+GITCONFIG_MARK = '# written by asf: the agent identity only (user.name/user.email, F-0116)'
 
 
 def operator_git_identity(operator_home=None):
@@ -189,17 +192,24 @@ def operator_git_identity(operator_home=None):
     return tuple(out)
 
 
-def write_identity_gitconfig(home, operator_home=None):
-    """Give an isolated ``home`` a ``.gitconfig`` holding only the operator's ``user.name`` and
-    ``user.email`` — nothing else from the operator's config (no credential helper, no
-    include). A ``.gitconfig`` that ``home_seed`` put there is left alone; ASF's own is
-    rewritten. Returns the path written, or None."""
+def write_identity_gitconfig(home, acct=None):
+    """Give an isolated ``home`` a ``.gitconfig`` holding only the agent's ``user.name`` and
+    ``user.email`` (:func:`asf.identity.agent_identity`, F-0116) — never the operator's, and
+    nothing else from anyone's config (no credential helper, no include). A ``.gitconfig`` that
+    ``home_seed`` put there is left alone; ASF's own is rewritten. Returns the path written, or
+    None.
+
+    Kept at all, given the identity also travels as ``GIT_CONFIG_*`` (:func:`build_env`, which
+    outranks this file and everything a product's ``worktree_setup`` sets): it is what an
+    operator sees when they ``cat`` the session home to answer "what does this thing commit as",
+    and it covers any git invocation that reaches the session home without going through
+    :func:`build_env`."""
     path = os.path.join(home, '.gitconfig')
     if os.path.exists(path):
         with open(path, encoding='utf-8', errors='replace') as f:
             if f.readline().rstrip('\n') != GITCONFIG_MARK:
                 return None
-    name, email = operator_git_identity(operator_home)
+    name, email = identity_mod.agent_identity(acct)
     lines = [GITCONFIG_MARK, '[user]']
     lines += [f'\tname = {name}'] if name else []
     lines += [f'\temail = {email}'] if email else []
@@ -246,7 +256,7 @@ def _seed_home(acct, operator_home=None):
         else:
             _copy_file(src, dst)
     if os.path.realpath(home) != os.path.realpath(operator_home):
-        write_identity_gitconfig(home, operator_home)
+        write_identity_gitconfig(home, acct)
         link_factory_cli(home, operator_home)
     return home, missing
 
@@ -443,8 +453,11 @@ def build_env(job, base=None):
     HTTPS credential for the code host taken from ``GH_TOKEN`` when it is one of them
     (:func:`git_credential_config`). When the job has a ``hooks_dir``,
     ``core.hooksPath`` is set to it, so every commit the session makes picks up its
-    ``ASF-Session`` trailer hook (F-0076). No PYTHONPATH: a session runs the product's code,
-    not this package."""
+    ``ASF-Session`` trailer hook (F-0076), and beside it the account's own identity
+    (:func:`asf.identity.git_config_pairs`, F-0116) — through the same ``GIT_CONFIG_*`` channel,
+    which outranks the session home's ``.gitconfig`` and any repo-local ``user.name``, so the
+    session always commits and signs off as itself, never the operator. No PYTHONPATH: a session
+    runs the product's code, not this package."""
     acct = job.account
     # ASF_HOME rides along: the session's HOME is its own, so ``~/.ASF`` there is empty, and the
     # approvals hook (``asf hook approvals``) run inside the session must read the factory's
@@ -453,6 +466,7 @@ def build_env(job, base=None):
     identity.update(job.env)
     auth = auth_env_values(acct, job.product_auth_env)
     git_config = [('core.hooksPath', job.hooks_dir)] if job.hooks_dir else []
+    git_config += identity_mod.git_config_pairs(acct)      # the session commits as itself (F-0116)
     git_config += git_credential_config(auth)
     out = hermetic.build(base, home=session_home(acct), identity=identity, pythonpath=False,
                          git_config=git_config, mode='worker', passthrough=job.passthrough)

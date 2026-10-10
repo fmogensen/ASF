@@ -380,6 +380,20 @@ def rules_log(*findings):
     return '\n'.join('\ufeff' * (i == 0) + stamp + l for i, l in enumerate(lines)) + '\n'
 
 
+def traceback_log(path, lineno=10, func='test_x'):
+    """A failed ``python3 -m unittest`` job's log: the step's header group, one Python traceback
+    frame naming the failing test's own file (read into ``test_paths``, not ``paths`` \u2014
+    ``_PATH_LINE_RE`` cannot see a ``", line N"`` frame), the runner's error. ``paths`` still
+    gets this same path, at line 0, through the existing bare-path fallback (no other line of
+    this log carries a ``path:line`` for it to defer to) \u2014 which is what keeps :func:`merge_queue.
+    blame`'s own early return from firing before the hop ever runs."""
+    stamp = '2026-10-02T06:37:57.1639137Z '
+    lines = ['##[group]Run python3 -m unittest', 'shell: /usr/bin/bash -e {0}', '##[endgroup]',
+             f'File "{path}", line {lineno}, in {func}', 'AssertionError: boom',
+             '##[error]Process completed with exit code 1.', 'Post job cleanup.']
+    return '\n'.join('\ufeff' * (i == 0) + stamp + l for i, l in enumerate(lines)) + '\n'
+
+
 class Culprit(QueueRepo):
     """One member's real defect fails the batch: the failing job's log names its files, so it
     goes back alone (job, step, lines) and the innocent members are cut again at once."""
@@ -533,6 +547,397 @@ class Culprit(QueueRepo):
         self.assertEqual(self.backs, [])
         self.assertEqual([[m['branch'] for m in b['members']] for b in self.batches()],
                          [['worker/T-0001'], ['worker/T-0002']])
+
+
+class TestPathsTests(QueueRepo):
+    """``test_paths``: the failing test's own file, read off a traceback frame or a unittest
+    header — separately from ``paths``, and never resolved against a tree (PD3)."""
+
+    def setUp(self):
+        super().setUp()
+        self.push_main({'tests/test_audit.py': 'x\n'}, 'add a test module')
+
+    @staticmethod
+    def log(lines):
+        stamp = '2026-10-02T06:37:57.1639137Z '
+        body = ['##[group]Run x', 'shell: /bin/bash', '##[endgroup]'] + list(lines) \
+            + ['##[error]Process completed with exit code 1.']
+        return '\n'.join(stamp + l for l in body) + '\n'
+
+    def findings(self, lines, job='101'):
+        roots = merge_queue.flake.batch_checks([job_run('rules', job)])
+        self.gh.logs[job] = self.log(lines)
+        return merge_queue.failure_findings(SLUG, roots)
+
+    def test_an_absolute_traceback_frame_is_kept_verbatim(self):
+        line = 'File "/home/x/work/o/p/tests/test_audit.py", line 42, in t'
+        (item,) = self.findings([line])
+        self.assertEqual(item['paths'], [])
+        self.assertIn(('/home/x/work/o/p/tests/test_audit.py', 42, line), item['test_paths'])
+
+    def test_a_relative_traceback_frame_is_kept_verbatim(self):
+        line = 'File "tests/test_audit.py", line 42, in t'
+        (item,) = self.findings([line])
+        self.assertIn(('tests/test_audit.py', 42, line), item['test_paths'])
+
+    def test_a_unittest_header_gives_py_candidates_longest_first_at_line_0(self):
+        line = 'FAIL: test_x (tests.test_audit.AuditGap.test_x)'
+        (item,) = self.findings([line])
+        self.assertEqual(item['test_paths'], [
+            ('tests/test_audit/AuditGap/test_x.py', 0, line),
+            ('tests/test_audit/AuditGap.py', 0, line),
+            ('tests/test_audit.py', 0, line)])
+
+    def test_a_check_whose_log_does_not_read_keeps_both_empty(self):
+        roots = merge_queue.flake.batch_checks([job_run('rules', '999')])
+        (item,) = merge_queue.failure_findings(SLUG, roots)
+        self.assertEqual((item['paths'], item['test_paths']), ([], []))
+
+    def test_the_direct_readings_three_shapes_keep_their_paths_unaffected(self):
+        cases = {
+            'tests/test_audit.py:42: AssertionError':
+                [('tests/test_audit.py', 42, 'tests/test_audit.py:42: AssertionError')],
+            'FAILED tests/test_audit.py::C::t':
+                [('tests/test_audit.py', 0, 'FAILED tests/test_audit.py::C::t')],
+            'FAIL  src/audit.test.ts > name':
+                [('src/audit.test.ts', 0, 'FAIL  src/audit.test.ts > name')],
+        }
+        for job, (line, want) in enumerate(cases.items()):
+            with self.subTest(line=line):
+                (item,) = self.findings([line], job=str(job))
+                self.assertEqual(item['paths'], want)
+                self.assertEqual(item['test_paths'], [])
+
+    def test_repo_path_resolves_the_absolute_runner_spelling(self):
+        ln = self.lane()
+        batch = {'base': self.heads()['main']}
+        got = merge_queue.repo_path(ln, batch, '/home/x/work/o/p/tests/test_audit.py')
+        self.assertEqual(got, 'tests/test_audit.py')
+
+    def test_repo_path_gives_none_for_a_path_the_tree_does_not_hold(self):
+        ln = self.lane()
+        batch = {'base': self.heads()['main']}
+        self.assertIsNone(merge_queue.repo_path(ln, batch, '/usr/lib/python3.12/unittest/case.py'))
+
+    def test_repo_path_memoises_the_git_reads(self):
+        ln = self.lane()
+        batch = {'base': self.heads()['main']}
+        memo = {}
+        path = '/home/x/work/o/p/tests/test_audit.py'
+        with mock.patch.object(merge_queue.gitops, 'git', wraps=merge_queue.gitops.git) as git:
+            merge_queue.repo_path(ln, batch, path, memo)
+            first = git.call_count
+            merge_queue.repo_path(ln, batch, path, memo)
+        self.assertEqual(git.call_count, first)
+        self.assertEqual(memo[(ln.repo, batch['base'], path)], 'tests/test_audit.py')
+
+
+class CoversTests(unittest.TestCase):
+    """``covers`` is pure, and discriminates by a dotted module name, an import, or a test's own
+    stem — :func:`tools.run_tests.touched_modules`'s predicate read backwards (P13)."""
+
+    def test_an_import_from_the_parent_package_covers_the_module(self):
+        text = 'from asf.audit import rows\n\nclass T(TestCase):\n    def test_rows(self): pass\n'
+        self.assertEqual(merge_queue.covers(text, 'tests/test_audit.py',
+                                            ['asf/audit.py', 'asf/release.py']), ['asf/audit.py'])
+
+    def test_a_test_named_for_the_module_covers_it_with_no_import_at_all(self):
+        text = 'class AuditGap(TestCase):\n    def test_nothing(self): pass\n'
+        self.assertEqual(merge_queue.covers(text, 'tests/test_audit.py', ['asf/audit.py']),
+                         ['asf/audit.py'])
+
+    def test_the_test_leaf_prefix_rule_covers_the_module(self):
+        text = 'class T(TestCase):\n    def test_nothing(self): pass\n'
+        self.assertEqual(merge_queue.covers(text, 'tests/test_audit_rows.py', ['asf/audit.py']),
+                         ['asf/audit.py'])
+
+    def test_an_init_module_is_covered_by_its_dotted_package_name(self):
+        text = 'asf.a.b does the thing\n'
+        self.assertEqual(merge_queue.covers(text, 'tests/test_b.py', ['asf/a/b/__init__.py']),
+                         ['asf/a/b/__init__.py'])
+
+    def test_a_changed_non_source_file_is_covered_by_nothing(self):
+        text = 'from asf.audit import rows\n'
+        self.assertEqual(merge_queue.covers(text, 'tests/test_audit.py',
+                                            ['README.md', 'docs/x.md']), [])
+
+
+class CoverBlameTests(QueueRepo):
+    """``cover_blame``: a test file no member changed names the member whose files it covers —
+    the fallback :func:`blame` takes when the direct reading named nobody."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_main({'tests/test_audit.py': 'from asf.audit import rows\n'}, 'add the test')
+        self.push_lane('worker/T-0001', {'asf/audit.py': 'def rows(): pass\n'}, 'feat: audit')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        self.push_lane('worker/T-0003', {'c.txt': 'c\n'}, 'feat: c')
+
+    def entries(self):
+        return [self.entry('worker/T-0001', 1, 'T-0001', files=('asf/audit.py',)),
+                self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',)),
+                self.entry('worker/T-0003', 3, 'T-0003', files=('c.txt',))]
+
+    def red_on_the_test(self, sha, job):
+        self.gh.checks[sha] = [job_run('rules', job), check_run('gate', 'skipped'),
+                               check_run('gate-tests', 'skipped')]
+        self.gh.logs[job] = traceback_log('tests/test_audit.py')
+        self.gh.steps[job] = 'gate:fast (brand parity)'
+
+    def found_and_members(self):
+        """A real batch, its members, and the failing job's finding — the inputs ``cover_blame``
+        and ``blame`` take, built the way :func:`asf.merge_queue.run` builds them."""
+        ln = self.lane()
+        self.queue_pass(ln, self.entries())
+        (batch,) = self.batches()
+        self.red_on_the_test(batch['sha'], '101')
+        roots = merge_queue.flake.batch_checks([self.gh.checks[batch['sha']][0]])
+        found = merge_queue.failure_findings(SLUG, roots)
+        members = [merge_queue._member_facts(batch, m, {}) for m in batch['members']]
+        return ln, batch, members, found
+
+    def test_the_member_that_changed_the_covered_module_is_named_the_others_are_not(self):
+        ln, batch, members, found = self.found_and_members()
+        named, tests = merge_queue.cover_blame(ln, batch, members, found)
+        self.assertEqual(list(named), ['worker/T-0001'])
+        self.assertEqual(tests['worker/T-0001'], 'tests/test_audit.py')
+
+    def test_the_recorded_entry_is_the_members_own_file_not_the_tests(self):
+        ln, batch, members, found = self.found_and_members()
+        named, _tests = merge_queue.cover_blame(ln, batch, members, found)
+        line = 'File "tests/test_audit.py", line 10, in test_x'
+        self.assertEqual(named['worker/T-0001'], [('asf/audit.py', 0, line)])
+
+    def test_blame_returns_the_map_covered_true_and_sends_back_the_members_own_files(self):
+        ln, batch, members, found = self.found_and_members()
+        named, covered = merge_queue.blame(ln, batch, members, found)
+        self.assertEqual((list(named), covered), (['worker/T-0001'], True))
+
+    def test_an_absolute_only_traceback_still_reaches_the_hop(self):
+        """P4: an absolute-path traceback frame with no other ``path:line`` in the log leaves
+        ``item['paths']`` empty (``_BARE_PATH_RE`` cannot start a match on it, unlike the
+        relative frame :func:`found_and_members` uses) — ``blame`` must fall through to
+        :func:`cover_blame` instead of returning empty on the empty ``paths`` early."""
+        ln = self.lane()
+        self.queue_pass(ln, self.entries())
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [job_run('rules', '101'), check_run('gate', 'skipped'),
+                                        check_run('gate-tests', 'skipped')]
+        self.gh.logs['101'] = traceback_log('/home/x/work/o/p/tests/test_audit.py')
+        self.gh.steps['101'] = 'gate:fast (brand parity)'
+        roots = merge_queue.flake.batch_checks([self.gh.checks[batch['sha']][0]])
+        found = merge_queue.failure_findings(SLUG, roots)
+        self.assertEqual(found[0]['paths'], [])
+        members = [merge_queue._member_facts(batch, m, {}) for m in batch['members']]
+        named, covered = merge_queue.blame(ln, batch, members, found)
+        self.assertEqual((list(named), covered), (['worker/T-0001'], True))
+
+    def test_a_full_red_cycle_sends_the_covered_member_back_with_its_own_file(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_on_the_test(batch['sha'], '101')
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.red_on_the_test(batch['sha'], '102')
+        self.queue_pass(self.lane(), [])
+        self.assertEqual([b for b, _k, _t, _f in self.backs], ['worker/T-0001'])
+        _b, _k, _text, files = self.backs[0]
+        self.assertEqual(files, ['asf/audit.py'])
+
+    def test_a_test_path_that_is_a_members_own_diff_is_skipped_never_a_hop(self):
+        ln, batch, members, found = self.found_and_members()
+        # T-0001 itself changes the test file: the direct reading had its say (D4)
+        members[0]['files'] = ['asf/audit.py', 'tests/test_audit.py']
+        with mock.patch.object(merge_queue, '_member_files',
+                               lambda _ln, _b, f: set(f.get('files') or ())):
+            named, tests = merge_queue.cover_blame(ln, batch, members, found)
+        self.assertEqual((named, tests), ({}, {}))
+
+    def test_a_test_that_covers_every_member_blame_returns_empty_the_batch_still_splits(self):
+        ln, batch, members, found = self.found_and_members()
+        with mock.patch.object(merge_queue, 'covers', lambda _text, _tp, files: list(files)):
+            named, covered = merge_queue.blame(ln, batch, members, found)
+        self.assertEqual((named, covered), ({}, False))
+
+    def test_a_log_path_that_resolves_to_nothing_in_the_tree_names_nobody(self):
+        ln, batch, members, _found = self.found_and_members()
+        found = [{'test_paths': [('/usr/lib/python3.12/unittest/case.py', 0, 'x')]}]
+        named, tests = merge_queue.cover_blame(ln, batch, members, found)
+        self.assertEqual((named, tests), ({}, {}))
+
+    def test_an_unreadable_test_blob_names_nobody(self):
+        ln, batch, members, found = self.found_and_members()
+        real = merge_queue.gitops.git
+
+        def fake(args, repo):
+            if args[:1] == ['show']:
+                return mock.Mock(ok=False, stdout='')
+            return real(args, repo)
+
+        with mock.patch.object(merge_queue.gitops, 'git', side_effect=fake):
+            named, tests = merge_queue.cover_blame(ln, batch, members, found)
+        self.assertEqual((named, tests), ({}, {}))
+
+    def test_repo_path_reduces_an_absolute_runner_path(self):
+        ln, batch, _members, _found = self.found_and_members()
+        self.assertEqual(
+            merge_queue.repo_path(ln, batch, '/home/x/work/o/p/tests/test_audit.py'),
+            'tests/test_audit.py')
+        self.assertIsNone(
+            merge_queue.repo_path(ln, batch, '/usr/lib/python3.12/unittest/case.py'))
+
+    def test_hold_culprit_writes_a_row_for_a_direct_culprit_not_a_cover_one(self):
+        ln, batch, members, found = self.found_and_members()
+        direct_named, direct_covered = merge_queue.blame(
+            ln, batch, members,
+            [{'paths': [('asf/audit.py', 10, 'x')], 'test_paths': []}])
+        self.assertFalse(direct_covered)
+        cover_named, cover_covered = merge_queue.blame(ln, batch, members, found)
+        self.assertTrue(cover_covered)
+        for named, covered in ((direct_named, direct_covered), (cover_named, cover_covered)):
+            state_dir = tempfile.mkdtemp(prefix='culprits_')
+            self.addCleanup(shutil.rmtree, state_dir, ignore_errors=True)
+            ln.state_dir = state_dir
+            if not covered:
+                merge_queue.hold_culprits(ln, [members[0]], ['gate'])
+            self.assertEqual(bool(merge_queue.load_culprits(state_dir)), not covered)
+
+
+class DropReasonTests(QueueRepo):
+    """The drop reason names the culprit and how it was found (§6, §7) — the gate ledger row and
+    the cancel claim's ``why`` unaffected (D2, P11)."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_lane('worker/T-0001', {'apps/site/day-bars.tsx': 'x\n'}, 'feat: bars')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        self.push_lane('worker/T-0003', {'c.txt': 'c\n'}, 'feat: c')
+
+    def entries(self):
+        return [self.entry('worker/T-0001', 1, 'T-0001', files=('apps/site/day-bars.tsx',)),
+                self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',)),
+                self.entry('worker/T-0003', 3, 'T-0003', files=('c.txt',))]
+
+    def red_upstream(self, sha, job, *findings):
+        self.gh.checks[sha] = [job_run('rules', job), check_run('gate', 'skipped'),
+                               check_run('gate-tests', 'skipped')]
+        self.gh.logs[job] = rules_log(*findings)
+        self.gh.steps[job] = 'gate:fast (brand parity)'
+
+    def dropped_lines(self):
+        return [l for l in self.lines if 'dropped —' in l]
+
+    def red_ledger_rows(self):
+        path = os.path.join(self.state_dir, 'gates.jsonl')
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding='utf-8') as fh:
+            return [json.loads(l)['line'] for l in fh]
+
+    def test_a_direct_culprit_names_its_own_file_in_the_drop_line(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_upstream(batch['sha'], '101', 'apps/site/day-bars.tsx:10')
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.red_upstream(batch['sha'], '102', 'apps/site/day-bars.tsx:10')
+        self.queue_pass(self.lane(), [])
+        (line,) = self.dropped_lines()
+        self.assertIn("#1's (its files, named in the failing job's log)", line)
+        self.assertTrue(any(f"red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+
+    def red_hop(self, sha, job):
+        self.gh.checks[sha] = [job_run('rules', job), check_run('gate', 'skipped'),
+                               check_run('gate-tests', 'skipped')]
+        self.gh.logs[job] = traceback_log('tests/test_bars.py')
+        self.gh.steps[job] = 'gate:fast (brand parity)'
+
+    def test_a_hop_culprit_names_the_covering_test_in_the_drop_line(self):
+        self.push_main({'tests/test_bars.py': 'apps.site.day-bars\n'}, 'add a test')
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_hop(batch['sha'], '101')
+        self.queue_pass(self.lane(), [])
+        self.red_hop(batch['sha'], '102')
+        self.queue_pass(self.lane(), [])
+        (line,) = self.dropped_lines()
+        self.assertIn("#1's (the failing test tests/test_bars.py covers its files)", line)
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        ((b, kind, text, _files),) = self.backs
+        self.assertEqual((b, kind), ('worker/T-0001', 'gate'))
+        self.assertIn('the failing test tests/test_bars.py covers files only this PR changes', text)
+
+    def test_the_cancel_claim_carries_the_same_why_as_the_drop_line(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_upstream(batch['sha'], '101', 'apps/site/day-bars.tsx:10')
+        self.queue_pass(self.lane(), [])
+        self.red_upstream(batch['sha'], '102', 'apps/site/day-bars.tsx:10')
+        live = [{'id': 55, 'status': 'in_progress', 'head_branch': batch['ref']}]
+        with mock.patch.object(merge_queue, '_workflow_runs', return_value=live), \
+             mock.patch.object(merge_queue.ci_queue, 'claim_cancel') as claim, \
+             mock.patch.object(merge_queue.run_cancel, 'cancel', return_value=None):
+            self.queue_pass(self.lane(), [])
+        (line,) = self.dropped_lines()
+        why = line.split('dropped — ', 1)[1]
+        self.assertTrue(claim.called)
+        self.assertEqual(claim.call_args.kwargs.get('why'), why[:200])
+
+    def test_with_no_culprit_the_drop_line_is_unchanged(self):
+        self.queue_pass(self.lane(), self.entries()[1:] + self.entries()[:1])
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        lines = self.dropped_lines()
+        self.assertTrue(lines)
+        for line in lines:
+            why = line.split('dropped — ', 1)[1]
+            self.assertTrue(why.startswith('red on '))
+            self.assertNotIn("'s (", why)
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+
+    def test_red_on_the_trunk_too_the_drop_line_is_unchanged(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('rules', 'failure'), check_run('gate', 'skipped'),
+                                        check_run('gate-tests', 'skipped')]
+        with mock.patch.object(lane.GitHubHost, 'trunk_red',
+                               lambda _self, names: {'rules': 'f' * 40} if 'rules' in names else {}):
+            self.queue_pass(self.lane(), [])
+        (line,) = self.dropped_lines()
+        why = line.split('dropped — ', 1)[1]
+        self.assertTrue(why.startswith('red on '))
+        self.assertNotIn("'s (", why)
+        self.assertEqual(self.batches(), [])
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+
+    def test_a_lone_member_whose_log_named_no_file_keeps_the_unchanged_drop_line(self):
+        self.queue_pass(self.lane(), self.entries()[:1])
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        (line,) = self.dropped_lines()
+        why = line.split('dropped — ', 1)[1]
+        self.assertTrue(why.startswith('red on '))
+        self.assertNotIn("'s (", why)
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+
+    def test_culprit_texts_head_names_the_covering_test_for_a_hop_culprit(self):
+        self.push_main({'tests/test_bars.py': 'apps.site.day-bars\n'}, 'add a test')
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_hop(batch['sha'], '101')
+        self.queue_pass(self.lane(), [])
+        self.red_hop(batch['sha'], '102')
+        self.queue_pass(self.lane(), [])
+        ((_b, _k, text, _f),) = self.backs
+        self.assertIn('the failing test tests/test_bars.py covers files only this PR changes, '
+                      'the others are cut again without it', text)
 
 
 class EscapeSequences(unittest.TestCase):

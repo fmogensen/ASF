@@ -292,7 +292,13 @@ def add_dirs_for(product, row=None, kind=None):
     worktree, expanded but not checked (the runtime is what fails on a missing one).
 
     A ``groom`` or ``groom-clerk`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
-    session reads the one and writes the other, and neither sits inside its worktree."""
+    session reads the one and writes the other, and neither sits inside its worktree.
+
+    A ``spec-amend`` row (:data:`asf.feeder.rows.NO_STORIES`) also grants the record root
+    (``product.backlog_dir``): the template tells the session to mint any Story the Feature
+    lacks with ``asf new story``, and that writes outside the worktree exactly as ``asf inbox``
+    does (groom's own grant, above) — without this the session has no way to reach the one
+    directory the one write it is told to make requires."""
     grants = []
     if product is not None:
         raw = product._get('job_grants') if hasattr(product, '_get') else None
@@ -307,6 +313,9 @@ def add_dirs_for(product, row=None, kind=None):
         for d in dirs:
             if d and d not in grants:
                 grants.append(d)
+    if kind == 'spec-amend' and product is not None and product.backlog_dir:
+        if product.backlog_dir not in grants:
+            grants.append(product.backlog_dir)
     return grants
 
 
@@ -548,9 +557,11 @@ def replan_context(product, feature, items):
         after = ', '.join(t.get('after') or ()) or 'none'
         lead = (f"; delivers {', '.join(t['delivers'])}" if t.get('delivers') else
                 f"; delivered by {t['delivered_by']}" if t.get('delivered_by') else '')
+        stories = ', '.join(t.get('stories') or ()) or 'none'
         lines.append(f"- {t['id']} [{'landed — keep' if done else t.get('state') or 'New'}] "
-                     f"{' '.join(str(t.get('title') or '').split())}; writes: "
-                     f"{', '.join(t.get('writes') or ()) or '(none)'}; after: {after}{lead}")
+                     f"{' '.join(str(t.get('title') or '').split())}; stories: {stories}; "
+                     f"writes: {', '.join(t.get('writes') or ()) or '(none)'}; after: {after}"
+                     f"{lead}")
     return {
         'reshape': how or '(none)',
         'reshape_digest': d or '(none)',
