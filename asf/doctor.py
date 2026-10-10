@@ -69,7 +69,8 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
+from asf import (approvals, clockinstall, conventions, drift, env, gitops, hooks, schema,
+                 scheduler, tokens)
 from asf import pause as pause_mod
 from asf.workers import lifecycle, pool
 
@@ -120,14 +121,30 @@ def _project_name(repo_dir):
         return None
 
 
+def _git_common_dir(repo):
+    """The repo's shared ``.git`` dir, real-pathed — the same for every ``git worktree`` of one
+    repo, so two worktrees of the same checkout compare equal even though their own paths don't."""
+    if not repo or not os.path.isdir(repo):
+        return None
+    r = gitops.git(['rev-parse', '--git-common-dir'], repo)
+    if not r.ok or not r.data:
+        return None
+    return os.path.realpath(r.data if os.path.isabs(r.data) else os.path.join(repo, r.data))
+
+
 def is_factory_repo(product):
     """True when the product's repo is the ASF package's own source: the checkout it runs from
-    (real paths compared), or — since the clocks run the installed package, never the checkout —
-    the repo whose pyproject names the distribution the running package was installed as."""
+    (real paths compared), a ``git worktree`` of that same checkout (B-0144: the clock itself
+    runs one, never the checkout — :mod:`asf.snapshot` — so the shared ``.git`` common dir is
+    compared too), or — since an install carries no ``.git`` at all — the repo whose pyproject
+    names the distribution the running package was installed as."""
     repo = product.repo_dir
     if not repo:
         return False
     if os.path.realpath(repo) == os.path.realpath(package_root()):
+        return True
+    repo_git = _git_common_dir(repo)
+    if repo_git is not None and repo_git == _git_common_dir(package_root()):
         return True
     name = _project_name(repo)
     return bool(name) and name in installed_dist_names()

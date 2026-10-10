@@ -531,6 +531,7 @@ stage_limits:
   bug_S1: 10m
   bug_S2: 24h
   undecided_close: 14d
+  operator_hours: 2h
 
 # size classes: how a Task's footprint maps to a train/lane.
 size_classes:

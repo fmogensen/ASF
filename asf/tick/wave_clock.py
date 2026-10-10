@@ -124,9 +124,12 @@ def every_s(cfg=None):
 
 
 def note_ran(product, now=None):
-    """Record that this job just ran — read back by :func:`ran_recently` (the product's own tick
-    skips its wave step while this is recent) — whether or not it launched anything: a run that
-    found nothing to launch, or that errored, still means the clock is alive and due again soon."""
+    """Record that this job just completed without raising — read back by :func:`ran_recently`
+    (the product's own tick skips its wave step while this is recent) — whether or not it
+    launched anything: a run that found nothing to launch still means the clock is alive and
+    due again soon. Never called for a run that raised (B-84831): a clock that errors every
+    time would otherwise mark itself "recent" forever, and the tick's own wave step would skip
+    forever behind it, leaving a launchable row idle with a free seat with no way out."""
     rec = {'at': _stamp(now)}
     path = marker_path(product)
     tmp = f'{path}.tmp-{os.getpid()}'
@@ -184,7 +187,11 @@ def run(product, out=print):
     """One run of the wave job: plan and spawn (:func:`asf.tick.step_wave.launch_now`) under this
     job's own lock, never the product's tick lock. Returns 0 whether or not anything launched;
     only a lock already held, or ``clocks.wave: off``, makes it a no-op (also 0 — a clock that
-    exits non-zero for finding nothing to do pages an operator for no reason)."""
+    exits non-zero for finding nothing to do pages an operator for no reason). A run that raises
+    leaves no marker (B-84831): :func:`note_ran` fires only once this call is known to have
+    completed, so a clock stuck erroring every time goes stale and the product's own tick
+    (:func:`asf.tick.tick.wave_job_recent`) takes over launching again instead of skipping
+    behind it forever."""
     if off():
         out('wave: clocks.wave is off — nothing to do')
         return 0
@@ -195,14 +202,15 @@ def run(product, out=print):
     try:
         from asf.tick import step_wave
         ctx = _Context(product)
-        return step_wave.launch_now(ctx, out=out)
+        rc = step_wave.launch_now(ctx, out=out)
+        note_ran(product)
+        return rc
     except Exception as e:  # noqa: BLE001 — a scheduled clock never dies silently mid-log
         import traceback
         out(f'wave: FAILED {(str(e) or type(e).__name__).splitlines()[0]}')
         out(traceback.format_exc().rstrip())
         return 1
     finally:
-        note_ran(product)
         lock.close()
 
 
