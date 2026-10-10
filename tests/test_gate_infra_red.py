@@ -97,7 +97,8 @@ class InfraGate(unittest.TestCase):
                             and 'never a correct round' in l for l in self.lines))
 
         # read again on the same head, after the re-run concluded (a new attempt, same cause):
-        # no second ``run rerun``, one watchdog BREACH line, still no send_back
+        # no second ``run rerun``, one watchdog BREACH line, still no send_back — and the red
+        # branch's call carries no state_dir, so the run is read again rather than throttled
         before = len(self.lines)
         runs['777'] = run(attempt=2)
         how, got = self._gate(host, checks, runs=runs, jobs=jobs)
@@ -106,6 +107,7 @@ class InfraGate(unittest.TestCase):
         self.assertEqual(len(self._reruns()), 0)
         self.assertEqual(self.send_back_calls, [])
         self.assertTrue(any('BREACH' in l for l in self.lines[before:]))
+        self.assertTrue(any(c[0] == 'api' and 'actions/runs/777' in c[1] for c in self.calls))
 
         # a third read on that same head is quiet: no run rerun, no second BREACH
         before = len(self.lines)
