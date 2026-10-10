@@ -95,6 +95,13 @@ class PlanTasksTests(unittest.TestCase):
         self.assertEqual(self.mint(), [])
         self.assertEqual(sorted(os.listdir(os.path.join(self.root, 'tasks'))), ['T-0001.md', 'T-0002.md'])
 
+    def test_a_five_digit_story_id_still_links_f_0133(self):
+        write_item(self.root, 'S-37300', 'story', 'Five digits', parent='F-0001')
+        text = PLAN.replace('stories: S-0001, S-0009', 'stories: S-37300, S-0009')
+        self.mint(text=text)
+        meta, _ = read(self.root, 'task', 'T-0001')
+        self.assertEqual(meta['stories'], ['S-37300'])  # S-0009 is not in the record
+
     def test_a_plan_still_on_its_branch_mints_nothing(self):
         self.assertEqual(self.mint(self.ev(on_main=False)), [])
         self.assertEqual(os.listdir(os.path.join(self.root, 'tasks')), [])
