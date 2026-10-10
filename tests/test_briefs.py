@@ -649,6 +649,31 @@ class PreambleTest(unittest.TestCase):
         self.assertEqual(conv.reviews_dir, 'docs/reviews')
 
 
+class RegressionCheckBlockTests(unittest.TestCase):
+    """S-80459: the fix-bug brief carries the pre-fix base and the command the lane will run,
+    `{base}` already substituted so the session runs exactly what the lane will run — and
+    carries neither when the product's gate is off."""
+
+    def test_a_gated_product_carries_the_trunk_sha_as_the_base(self):
+        p = product(conventions={'flags': {'regression': {'check': 'on'}}})
+        text = briefs.build(p, ROWS['fix-bug'], index(), [], REPO_FACTS).text
+        self.assertIn('checkout of `abc1234`', text)
+
+    def test_the_command_is_already_base_substituted(self):
+        p = product(conventions={
+            'flags': {'regression': {'check': 'on', 'command': 'pytest --base {base}'}}})
+        text = briefs.build(p, ROWS['fix-bug'], index(), [], REPO_FACTS).text
+        self.assertIn('pytest --base abc1234', text)
+        self.assertNotIn('{base}', text)
+
+    def test_the_block_is_empty_for_a_product_with_the_gate_off(self):
+        text = briefs.build(product(), ROWS['fix-bug'], index(), [], REPO_FACTS).text
+        self.assertNotIn('The lane checks it mechanically', text)
+        p = product(conventions={'flags': {'regression': {'check': 'off'}}})
+        text = briefs.build(p, ROWS['fix-bug'], index(), [], REPO_FACTS).text
+        self.assertNotIn('The lane checks it mechanically', text)
+
+
 class PrePushGateTests(unittest.TestCase):
     """F-0235: the brief names the exact push-free command that runs what this repo's pre-push
     hook runs — asf's own hook's push-free twin when the hook is asf's, the hook's own path

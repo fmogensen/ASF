@@ -455,6 +455,30 @@ def pre_push_block(product):
     return '\n\n' + PRE_PUSH_RULE.format(command=command) if command else ''
 
 
+#: The lane's own regression check, named right after :data:`PRE_PUSH_RULE`: the pre-fix base it
+#: grafts the branch's tests onto and the command it runs there, so a session can run exactly
+#: what the lane will run before it pushes. Rendered as its own paragraph, only when the
+#: product's ``regression.check`` flag is on.
+REGRESSION_CHECK_RULE = ("The lane checks it mechanically: in a checkout of `{base}` with your "
+                         "branch's test files grafted on, it runs\n  `{command}`\nand holds the "
+                         "branch back to you unless a case fails there and passes on your head.")
+
+
+def regression_block(product, facts):
+    """A blank line and :data:`REGRESSION_CHECK_RULE` naming the pre-fix base and the resolved
+    ``regression.command`` (``{base}`` already substituted, so the session runs exactly what the
+    lane will run), or ``''`` when `product` is None or ``regression.check`` is not ``on`` — the
+    template places it right after :func:`pre_push_block`, so a gate left off leaves no trace."""
+    if product is None:
+        return ''
+    conv = preamble_mod.conventions(product)
+    if conv.flag('regression.check') != 'on':
+        return ''
+    base = (facts['head'] or '').split()[0] or preamble_mod.UNKNOWN
+    command = (conv.flag('regression.command') or conv.test_command or '').replace('{base}', base)
+    return '\n\n' + REGRESSION_CHECK_RULE.format(base=base, command=command)
+
+
 def _external_ci(product):
     if product is None:
         return False
@@ -481,6 +505,7 @@ def context(product, row, kind, facts):
         'gate_before_push': gate_before_push(product),
         'gate_before_push_direct': gate_before_push_direct(product),
         'pre_push_check': pre_push_block(product),
+        'regression_check': regression_block(product, facts),
         'pre_push_doc': pre_push_doc_block(product, kind),
         'test_command': preamble_mod.conventions(product).test_command
         or '(none set — run the tests you add)',
