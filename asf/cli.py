@@ -468,6 +468,13 @@ def build_parser():
     p_kstatus.add_argument('--product', required=True)
     p_kstatus.add_argument('--live', action='store_true',
                            help="decide afresh on the facts now (reads GitHub), not the last tick's plan")
+    p_kwaits = kernel_sub.add_parser(
+        'waits', help='every wait measured: per class now/p50/p90/max/item-hours, the oldest '
+                      'waits, the biggest one (the wait ledger and the last plan; no GitHub)')
+    p_kwaits.add_argument('--product', required=True)
+    p_kwaits.add_argument('--since', help='the window start (ISO-8601; default: 24 h ago)')
+    p_kwaits.add_argument('--live', action='store_true',
+                          help='the current waits from the facts now (reads GitHub)')
     p_kpause = kernel_sub.add_parser('pause', help="hold the product's launches")
     p_kpause.add_argument('--product', required=True)
     p_kpause.add_argument('--reason', default='kernel pause', help='recorded with the pause')
@@ -594,7 +601,7 @@ EX_TEMPFAIL = 75
 
 
 def _kernel(args):
-    """``asf kernel tick|status|pause|resume|install|watch|gate --product P``."""
+    """``asf kernel tick|status|waits|pause|resume|install|watch|gate --product P``."""
     if args.kernel_command in ('install', 'watch', 'gate'):
         from asf import env
         product = env.load_product(args.product)
@@ -616,6 +623,14 @@ def _kernel(args):
     if args.kernel_command == 'status':
         from asf.kernel.status import status
         status(args.product, live=args.live)
+        return 0
+    if args.kernel_command == 'waits':
+        from asf.kernel.waits import waits
+        try:
+            waits(args.product, since=args.since, live=args.live)
+        except ValueError as e:
+            print(e)
+            return 2
         return 0
     from asf import env, pause
     name = env.load_product(args.product).name

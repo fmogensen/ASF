@@ -30,6 +30,12 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    min_free_seats: 1}
       gate:       {window_h: 24, first_push_green_min: 0.7, landed_min: 5,
                    silent_stuck_max: 0, since: 2026-10-09T14:00:00Z}   # asf kernel gate
+      waits:      {targets: {seat: 10m, ci: 10m, review: 30m, train: 30m, merge: 10m,
+                             conflict: 0m, stuck: 0m}}   # per wait class (asf.kernel.waits):
+                                              # a wait older than its class's target is ⚠ in
+                                              # ``asf kernel waits`` and counted on the tick line;
+                                              # after and parked have none unless set. A duration
+                                              # is 30s, 10m, 2h, 1d or whole seconds
 
 :func:`problems` validates the block for :func:`asf.env.product_problems` (a value of the wrong
 type refuses the load; an unknown key is a warning); :func:`read` returns the block with every
@@ -50,6 +56,34 @@ MODEL_KINDS = {'coder': LIGHT_MODEL, 'fix-bug': LIGHT_MODEL, 'correct': LIGHT_MO
 #: allowed words, ``'time'`` (an ISO-8601 time, or unset), ``'text'`` (a non-empty string) or
 #: ``'globs'`` (a list of path globs) or ``'words'`` (a list of names). A default of None is "unset" (``launch.local_max``:
 #: ``max_sessions``).
+#: the default target of each wait class (:mod:`asf.kernel.waits`), as a duration
+WAIT_TARGETS = {'seat': '10m', 'ci': '10m', 'review': '30m', 'train': '30m', 'merge': '10m',
+                'conflict': '0m', 'stuck': '0m'}
+
+#: the wait classes a target may name (``stuck`` covers every ``stuck:<owner>``)
+WAIT_CLASSES = ('seat', 'ci', 'review', 'train', 'merge', 'conflict', 'stuck', 'after', 'parked')
+
+_UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+
+
+def parse_duration(value):
+    """Seconds of ``value`` (``30s``, ``10m``, ``2h``, ``1d``, or whole seconds), else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value if value >= 0 else None
+    text = str(value or '').strip().lower()
+    if text[-1:] in _UNITS:
+        num, unit = text[:-1].strip(), _UNITS[text[-1]]
+    else:
+        num, unit = text, 1
+    try:
+        n = float(num)
+    except ValueError:
+        return None
+    return n * unit if n >= 0 else None
+
+
 SPEC = {
     'tick': {'interval_s': (120, int)},
     'launch': {'max_sessions': (6, int), 'rank': ('inherit', ('inherit', 'own')),
@@ -63,6 +97,7 @@ SPEC = {
     'idle_alarm': {'enabled': (True, bool), 'min_free_seats': (1, int)},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time')},
+    'waits': {'targets': (WAIT_TARGETS, 'targets')},
 }
 
 #: the intervals launchd is handed must be at least this many seconds
@@ -104,6 +139,12 @@ def _bad(value, kind):
         ok = isinstance(value, (list, tuple)) and all(isinstance(g, str) and g.strip()
                                                       for g in value)
         return '' if ok else 'must be a list of brief kinds (coder, fix-bug, spec, plan, ...)'
+    if kind == 'targets':
+        ok = isinstance(value, dict) and all(
+            k in WAIT_CLASSES and (v is None or parse_duration(v) is not None)
+            for k, v in value.items())
+        return '' if ok else ('must map wait classes (%s) to durations like 10m'
+                              % ', '.join(WAIT_CLASSES))
     if kind == 'globs':
         ok = isinstance(value, (list, tuple)) and all(isinstance(g, str) and g.strip()
                                                       for g in value)
@@ -154,12 +195,15 @@ def read(block):
         given = (block or {}).get(section) if isinstance(block, dict) else None
         if not isinstance(given, dict):
             continue
-        for key, (_d, kind) in keys.items():
+        for key, (default, kind) in keys.items():
             v = given.get(key)
             if v is not None and not _bad(v, kind):
-                out[section][key] = (parse_time(v) if kind == 'time' else
+                out[section][key] = (dict(default, **v) if kind == 'targets' else
+                                     parse_time(v) if kind == 'time' else
                                      [str(g).strip() for g in v] if kind in ('globs', 'words') else
                                      v.strip() if kind == 'text' else v)
+    out['waits']['targets'] = {k: parse_duration(v) for k, v in out['waits']['targets'].items()
+                               if v is not None}
     out['review']['light_paths'] = list(out['review']['light_paths'])
     out['launch']['cloud_kinds'] = list(out['launch']['cloud_kinds'])
     if out['launch']['local_max'] is None:

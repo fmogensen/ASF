@@ -6,7 +6,8 @@ when any item has one, a fourth: the notes (a question a session asked while its
 states are the last tick's plan (``state/<product>/kernel-plan.json``, written by every applied
 tick), so the table costs no network call; ``live=True`` (``--live``), or no plan on disk yet,
 decides afresh on the facts now (no action is applied). A Stuck item's age is from its card's
-``kernel_stuck_since``, ``-`` until a tick has recorded it.
+``kernel_stuck_since``, ``-`` until a tick has recorded it. The biggest wait
+(:func:`asf.kernel.waits.biggest_line`, from the wait ledger) heads the table.
 """
 import collections
 import datetime
@@ -102,8 +103,13 @@ def render(stuck, counts, sessions, idle=None, notes=None):
 def status(product, ports=None, config=None, out=print, live=False, state_dir=None):
     from asf import env
     from asf.kernel.loop import PLAN_FILE, _product
+    from asf.kernel import waits
     product = _product(product)
     path = os.path.join(state_dir or os.path.join(env.ASF_HOME, 'state', product.name), PLAN_FILE)
+    try:
+        top = waits.biggest_line(waits.summary(product, state_dir=state_dir)) + '\n\n'
+    except Exception as e:  # noqa: BLE001 — a bad ledger never hides the status
+        top = 'biggest wait: unreadable — %s\n\n' % (str(e) or type(e).__name__)
     data = None
     if not live:
         try:
@@ -113,7 +119,7 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
             data = None
     if data is not None:
         record = ports.record if ports else P.RealRecord(product)
-        text = render(*rows_from_plan(data, record), idle=data.get('idle'),
+        text = top + render(*rows_from_plan(data, record), idle=data.get('idle'),
                       notes=data.get('notes')) \
             + '\n\n(the tick of %s; --live for now)' \
             % data.get('at', '?')
@@ -122,6 +128,6 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
     ports = ports or P.real_ports(product)
     config = config or P.config_for(product, github=ports.github)
     stuck, counts, sessions, idle, notes = rows(ports, config, with_idle=True, with_notes=True)
-    text = render(stuck, counts, sessions, idle=idle, notes=notes)
+    text = top + render(stuck, counts, sessions, idle=idle, notes=notes)
     out(text)
     return text

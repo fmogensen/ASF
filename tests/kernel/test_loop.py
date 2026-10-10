@@ -221,7 +221,9 @@ class Status(unittest.TestCase):
         out, tmp = [], tempfile.mkdtemp()
         text = status.status(env.Product('sample', {}), ports=F.ports(record=rec, sessions=sess),
                              config=B.config(max_sessions=3), out=out.append, live=True)
-        self.assertTrue(text.startswith('IDLE: 2 seat(s) free, 1 not launched — file overlap 1'))
+        self.assertTrue(text.startswith('biggest wait (2h): '), 'the biggest wait heads it')
+        self.assertTrue(text.split('\n\n')[1].startswith(
+            'IDLE: 2 seat(s) free, 1 not launched — file overlap 1'))
         lines = []
         summary = loop.tick(env.Product('sample', {}), ports=F.ports(record=rec, sessions=sess),
                             config=B.config(max_sessions=3), state_dir=tmp, out=lines.append)
@@ -229,7 +231,7 @@ class Status(unittest.TestCase):
         self.assertIn('IDLE: 2 seat(s) free, 1 not launched — file overlap 1', lines)
         text = status.status(env.Product('sample', {}), ports=F.ports(record=rec, sessions=sess),
                              out=out.append, state_dir=tmp)
-        self.assertTrue(text.startswith('IDLE: 2 seat(s) free'))
+        self.assertTrue(text.split('\n\n')[1].startswith('IDLE: 2 seat(s) free'))
 
 
 class Cli(unittest.TestCase):

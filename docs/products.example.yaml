@@ -504,6 +504,15 @@ kernel:
     landed_min: 5           # Tasks/Bugs landed via kernel PRs since `since`
     silent_stuck_max: 0     # Stuck items with no reason or no owner
     # since: 2026-10-09T14:00:00Z   # the proof's start
+  waits:
+    targets:                # per wait class (`asf kernel waits`): a wait older than its target is
+      seat: 10m             # flagged ⚠ there and counted on the tick line ("over-target waits");
+      ci: 10m               # classes: seat (Ready, no seat), ci (checks running), review (awaiting
+      review: 30m           # a verdict), train (queued for update), merge (green, waiting on
+      train: 30m            # GitHub), conflict, stuck (every stuck:<owner>), after (a dependency),
+      merge: 10m            # parked. after and parked have no target unless set. A duration is
+      conflict: 0m          # 30s, 10m, 2h, 1d or whole seconds
+      stuck: 0m
 
 # token_caps: runaway ceilings on one run's tokens, per dimension, never summed. `default` applies
 # to every job kind; a kind (spec, review, fix, code, plan, ...) narrows or widens single dimensions.

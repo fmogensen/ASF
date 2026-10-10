@@ -100,6 +100,8 @@ def print_summary(summary, out=print):
         out('  launch %s %s on %s' % (kind, iid, branch))
     for what, why in summary['failed']:
         out('  FAILED %s — %s' % (what, why))
+    if summary.get('waits'):
+        out(summary['waits'])
 
 
 def plan_notes(plan, facts):
@@ -146,6 +148,19 @@ def sync_cloud(ports, out=print):
         out('kernel tick: cloud sync failed — %s' % (str(e) or type(e).__name__))
 
 
+def measure_waits(product, state_dir, plan, facts, config, write=True, out=print):
+    """Append the tick's wait changes to the ledger (:func:`asf.kernel.waits.record`) and return
+    the tick line (``over-target waits: N, biggest: <class>``); a failure is one line, never the
+    tick's end."""
+    from asf.kernel import waits
+    try:
+        _new, records = waits.record(state_dir, plan, facts, config, write=write)
+        return waits.tick_line(waits.report(records, targets=waits._targets(product)))
+    except Exception as e:  # noqa: BLE001 — the measure never stops the tick
+        out('kernel tick: wait ledger failed — %s' % (str(e) or type(e).__name__))
+        return ''
+
+
 def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=print):
     """One tick of the kernel for ``product`` (a name or an :class:`asf.env.Product`). Returns the
     :func:`summarize` dict; ``{'locked': path}`` when another tick holds the lock."""
@@ -161,6 +176,8 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
         for a in plan.actions:
             out('would %s' % describe(a))
         summary = summarize(plan, facts, dry_run=True)
+        summary['waits'] = measure_waits(product, state_dir, plan, facts, config, write=False,
+                                         out=out)
         print_summary(summary, out)
         return summary
     try:
@@ -179,9 +196,11 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
                 except Exception as e:  # a refused or failed record commit never ends the tick
                     out('publish FAILED: %s' % (str(e).splitlines() or [type(e).__name__])[0])
             save_plan(state_dir, plan, facts)
+            waits_line = measure_waits(product, state_dir, plan, facts, config, out=out)
     except Locked as e:
         out('kernel tick: another tick holds %s' % e)
         return {'locked': str(e)}
     summary = summarize(plan, facts, result)
+    summary['waits'] = waits_line
     print_summary(summary, out)
     return summary
