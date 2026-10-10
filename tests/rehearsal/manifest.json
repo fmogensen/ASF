@@ -1,0 +1,81 @@
+{
+  "asf_version": "0.0.0",
+  "branches": [
+    "worker/T-00001",
+    "fix/T-00001",
+    "spec/T-00001",
+    "plan/T-00001",
+    "revert/T-00001"
+  ],
+  "built_at": "2026-10-10T17:23:47Z",
+  "cards": {
+    "bugs": 48,
+    "decisions": 10,
+    "epics": 6,
+    "features": 24,
+    "rules": 11,
+    "stories": 22,
+    "tasks": 64
+  },
+  "intake": {
+    "done": [
+      "done-note-1.md",
+      "done-note-2.md",
+      "done-note-3.md",
+      "open-note-1.md"
+    ],
+    "mismatch": {
+      "done": "open-note-1.md",
+      "note": "open-note-1.md"
+    },
+    "open": [
+      "open-note-1.md",
+      "open-note-2.md"
+    ]
+  },
+  "intake_dir": "inbox",
+  "merges": [
+    "B-00001 \u2014 ullamco duis cillum proident ali (#1201)",
+    "D-0001 \u2014 ullamco duis cillum proident ali (#1202)",
+    "E-0001 \u2014 ullamco duis cillum proident ali (#1203)",
+    "F-0001 \u2014 ullamco duis cillum proident ali (#1204)",
+    "R-0001 \u2014 ullamco duis cillum proident ali (#1205)",
+    "S-00001 \u2014 ullamco duis cillum proident ali (#1206)",
+    "T-00001 \u2014 ullamco duis cillum proident ali (#1207)"
+  ],
+  "refs": [
+    {
+      "annotated": true,
+      "date": "2026-10-10",
+      "message": "ad nisi culpa nostrud ea des",
+      "name": "v0.1.0",
+      "prerelease": false
+    },
+    {
+      "annotated": true,
+      "date": "2026-10-10",
+      "message": "sit qui proident do cupidatat est id ex",
+      "name": "v0.1.1",
+      "prerelease": false
+    },
+    {
+      "annotated": false,
+      "date": "2026-10-10",
+      "message": "",
+      "name": "v0.1.2-rc1",
+      "prerelease": true
+    }
+  ],
+  "refs_annotated": 2,
+  "refs_total": 3,
+  "source_sha": "79a05b13d315a567c1a8599b02cbe79d619259b4",
+  "widest_id": {
+    "B": "B-00001",
+    "D": "D-0001",
+    "E": "E-0001",
+    "F": "F-0001",
+    "R": "R-0001",
+    "S": "S-00001",
+    "T": "T-00001"
+  }
+}

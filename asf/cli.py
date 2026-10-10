@@ -624,6 +624,8 @@ def build_parser():
     merge_queue.register(sub)
     from asf import product_check
     product_check.register(sub)
+    from asf import rehearsal
+    rehearsal.register(sub)
 
     return p
 
@@ -948,6 +950,9 @@ def _main(argv=None):
             return cmd_console_feed(args, view_root)
     if args.command == 'kernel':
         return _kernel(args)
+    if args.command == 'rehearse':
+        from asf.rehearsal import cmd_rehearse
+        return cmd_rehearse(args, root)
     if args.command == 'capacity':
         from asf.views.capacity import cmd_capacity
         return cmd_capacity(args)
