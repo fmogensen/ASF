@@ -4,7 +4,9 @@ The stage limits (README's "Stale" rule) come from the product yaml's `stage_lim
 like `3d`, `24h`, `45m`), each key falling back to `DEFAULT_LIMITS`, and are checked against
 `stage_since`, the one clock ingest already keeps for every item. `card_undecided`/`undecided_close` read `decided`; a
 Feature's spec/plan/build limits read `stage`; `task_active` and the two Bug severities read
-`state`.
+`state`; `operator_hours` (B-0070) reads `in_progress_by` — any open card typed
+``in_progress_by: operator`` past the limit is named stale, so a hand-held fix the lane would
+otherwise duplicate does not sit unflagged forever.
 """
 import datetime
 import json
@@ -34,6 +36,7 @@ DEFAULT_LIMITS = {
     'bug_S1': '10m',
     'bug_S2': '24h',
     'undecided_close': '14d',
+    'operator_hours': '2h',
 }
 
 
@@ -136,6 +139,9 @@ def find_stale(canonical, limits, now):
                 consider(iid, label, age, 'bug_S1')
             elif sev == 'S2':
                 consider(iid, label, age, 'bug_S2')
+
+        if typed.get('in_progress_by') == 'operator' and state not in CLOSED_LIKE:
+            consider(iid, label, age, 'operator_hours')
 
     out.sort(key=lambda r: r[0])
     return out

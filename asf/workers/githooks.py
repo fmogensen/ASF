@@ -107,7 +107,17 @@ if [ -n "$own" ]; then
         *) top=$(git rev-parse --show-toplevel 2>/dev/null) && own="$top/$own" ;;
     esac
 else
-    common=$(git rev-parse --git-common-dir 2>/dev/null) && own="$common/hooks"
+    # core.hooksPath was never configured at all — the self-hosted asf repo's own case
+    # (B-83472): nothing ever ran `asf init` here to point it at the tracked .githooks/. That
+    # directory is still the product's own hook (asf.hooks.GIT_HOOK_GLOBS), so it is tried
+    # before the plain, unconfigured hooks dir — never overriding an explicit config, however
+    # incomplete, which is left to fall through as it always has.
+    top=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [ -n "$top" ] && [ -x "$top/.githooks/$name" ]; then
+        own="$top/.githooks"
+    else
+        common=$(git rev-parse --git-common-dir 2>/dev/null) && own="$common/hooks"
+    fi
 fi
 
 same=0

@@ -1359,5 +1359,59 @@ class EpicOverBudgetQuestionTests(unittest.TestCase):
         self.assertEqual(groom._line_sections(text).get('E-0001'), 'over_budget')
 
 
+class OperatorStaleQuestionTests(unittest.TestCase):
+    """B-0070: the lane must not duplicate a fix the operator already carries by hand — a card
+    `in_progress_by: operator` past `stage_limits.operator_hours` (default 2h) is named stale."""
+
+    def setUp(self):
+        self.root = make_repo()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def canonical(self):
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        return canonical
+
+    def test_one_line_per_card_held_past_the_limit(self):
+        write_item(self.root, 'B-0001', 'bug', 'Held by hand',
+                  typed_lines=['decided: true', 'severity: S3', 'in_progress_by: operator'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        lines = groom.groom_operator_stale_section(self.canonical(), None)
+        self.assertEqual(len(lines), 1, lines)
+        line = lines[0]
+        self.assertTrue(line.startswith('- [ ] B-0001 Held by hand — '), line)
+        self.assertIn('in progress by the operator for', line)
+        self.assertIn('> 2h', line)
+        self.assertIn('land it', line)
+        self.assertIn('hand it back to the lane (clear `in_progress_by`)', line)
+        self.assertIn('close it (`no: <why>`)', line)
+        self.assertTrue(line.endswith('→ answer: ____'), line)
+
+    def test_a_card_with_no_in_progress_by_is_not_asked(self):
+        write_item(self.root, 'B-0001', 'bug', 'Untouched',
+                  typed_lines=['decided: true', 'severity: S3'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        self.assertEqual(groom.groom_operator_stale_section(self.canonical(), None), [])
+
+    def test_a_closed_card_is_not_asked(self):
+        write_item(self.root, 'B-0001', 'bug', 'Landed already',
+                  typed_lines=['decided: true', 'severity: S3', 'in_progress_by: operator'],
+                  machine_lines=['state: Closed', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        self.assertEqual(groom.groom_operator_stale_section(self.canonical(), None), [])
+
+    def test_a_product_stage_limits_override_is_read(self):
+        write_item(self.root, 'B-0001', 'bug', 'Held by hand',
+                  typed_lines=['decided: true', 'severity: S3', 'in_progress_by: operator'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        product = env.Product('demo', {'stage_limits': {'operator_hours': '2000h'}})
+        self.assertEqual(groom.groom_operator_stale_section(self.canonical(), product), [])
+
+
 if __name__ == '__main__':
     unittest.main()
