@@ -41,6 +41,13 @@ DOC_ROUND = ('## This is a fix round on PR #{pr} (head `{head}`)\n\n'
              'write it again. Answer {correction}\n\n'
              'Change only what the findings ask, keep the rest of the document as it stands, and '
              'push the same branch; the PR stays open and is reviewed again on its new head.')
+#: a plan launched on its Feature's approved, unmerged spec PR (``Config.plan_on_approve``)
+EARLY_SPEC = ('## The spec is approved but not merged yet\n\n'
+              'The trunk does not hold the spec yet: it is approved on `origin/{branch}` at '
+              '`{head}`. Read it from there — `git fetch origin {branch} && git show '
+              '{head}:{path}` — wherever this brief names the spec\'s path. Do not merge, '
+              'cherry-pick or copy the spec into your branch: your PR adds the plan only, and it '
+              'is reviewed once the spec has landed, against the spec that merged.')
 #: the least room the operator's answers keep in a brief whose findings fill the cap.
 FINDINGS_ANSWERS_FLOOR = 500
 
@@ -466,6 +473,12 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
                             model=getattr(launch, 'model', '') or model_for(product, kind)
                             or b.model)
     extra = []
+    head = getattr(launch, 'spec_head', '')
+    if launch.kind == 'plan' and head:
+        conv = product.conventions
+        extra += [EARLY_SPEC.format(branch=conv.prefix('spec') + item.id, head=head,
+                                    path='%s/%s.md' % (conv.specs_dir.strip('/'),
+                                                       item.id.lower())), '']
     if launch.kind in DOC_KINDS and pr is not None:
         extra += [DOC_ROUND.format(pr=pr.number, head=pr.head_sha or '?', branch=launch.branch,
                                    correction='the review findings below.' if findings

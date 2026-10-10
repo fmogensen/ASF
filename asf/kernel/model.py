@@ -352,7 +352,8 @@ class Facts:
     (:mod:`asf.kernel.dor`) checks a card's ``writes`` against them.
     ``notes`` are the inbox notes intake asked a question about (:mod:`asf.kernel.intake`: key
     -> an Item of type ``note``, its title, body and question), ``intake_tries`` the
-    intake-decide sessions launched per key."""
+    intake-decide sessions launched per key. ``last_jobs`` maps an item to its last session's
+    job id (launch order, ended runs too; a job id starts with its kind)."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -380,6 +381,7 @@ class Facts:
     trunk_files: frozenset = None
     notes: dict = dataclasses.field(default_factory=dict)
     intake_tries: dict = dataclasses.field(default_factory=dict)
+    last_jobs: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -445,7 +447,9 @@ class Config:
     (or its PR's files) hit a glob, or its PR's diff is over that many lines
     (:func:`asf.kernel.decide.high_risk`): its review runs on ``strong_model``, no second high PR
     with overlapping writes lands beside it, and after a high merge the next high one waits until
-    the trunk's required checks on that merge are green (none: off — the bare model's default)."""
+    the trunk's required checks on that merge are green (none: off — the bare model's default).
+    ``plan_on_approve``: a Feature's plan launches once its spec PR is approved on its current
+    head, before it merges (:func:`asf.kernel.decide.early_plans`; off — the bare default)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -491,3 +495,4 @@ class Config:
     intake_branch: str = 'intake-decide/'
     risk_high: tuple = ()
     risk_large_lines: int = 0
+    plan_on_approve: bool = False

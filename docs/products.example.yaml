@@ -500,6 +500,9 @@ kernel:
     max_open_prs: 30        # the WIP cap: while the items holding an open PR (Review, Landing, a
                             # fix round) exceed it, no new build, plan or spec launches — their
                             # seats go to finishing work; the tick logs `WIP CAP: ...` (0: off)
+    plan_on_approve: true   # a Feature's plan launches once its spec PR is approved on its current
+                            # head, not once it merged: the plan reads the spec off the spec
+                            # branch, its PR is reviewed once the spec landed (false: it waits)
   github:
     retry_delays_s: [2, 5, 10]   # a GitHub read that fails transiently (a 5xx, a timeout, a
                             # dropped connection, a secondary rate limit) is tried again after

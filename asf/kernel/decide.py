@@ -88,7 +88,10 @@ item and the actions of one tick. The rules it holds, in the design's words:
 - Documents: only a Feature with no Task or Bug under it launches ``spec`` (``plan`` once its
   spec has landed — on trunk, or its spec PR merged): Stories minted from its spec leave its
   document lane its own (:func:`_derived`). A merged spec PR never closes a Feature
-  (:func:`_spec_only`). A Story or Epic with no children is New and never launches. A Story's
+  (:func:`_spec_only`). With ``config.plan_on_approve`` the plan launches as soon as the spec
+  PR is approved on its head (:func:`early_plans`); the spec PR stays the one judged
+  (:func:`item_pr`) and the plan PR is reviewed once the spec landed. A Story or Epic with no
+  children is New and never launches. A Story's
   children are the Tasks under it through ``parent`` and those naming it on ``stories:``.
 - Rank: ``config.rank`` ``inherit`` (the default) walks ``parent`` for a rank; ``own`` reads
   only the item's own.
@@ -416,8 +419,7 @@ def decide(facts, config):
         if (cls == 'merge' and facts.strict and j is not None and j.state is State.LANDING
                 and iid not in risky
                 and j.behind_pr is None and not j.updating):
-            j.behind_pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
-                              key=lambda p: p.number, default=None)
+            j.behind_pr = item_pr(iid, facts, config)
     train, notes = _merge_train(items, judged, config, blocks, facts.now,
                                 first={i for i, (c, _a) in due.items() if c in ('train', 'merge')})
     for iid, why in list(unready.items()) + list(risky.items()):
@@ -437,6 +439,10 @@ def decide(facts, config):
     launches, skipped = (([], {}) if facts.paused
                          else _launches(facts, config, judged, children, states, parked, blocks,
                                         due, queued, wip, unready))
+    if not facts.paused and config.plan_on_approve:
+        early, opened = early_plans(facts, config, judged, parked, launches)
+        launches += early
+        actions += opened
     actions += launches
     actions += _intake(facts, config, launches, parked_all)
     actions.sort(key=lambda a: ORDER.index(type(a)))
@@ -550,11 +556,14 @@ def _judge(it, facts, config, actions, parked=()):
             actions.append(A.PushStranded(s.job, it.id))
             return _Judged(State.REVIEW, hold=True)
 
-    # an intake-decide session only judges the card's decision: it never moves its state
-    sessions = [s for s in facts.sessions if s.item_id == it.id and s.kind != intake.KIND]
-    live = [s for s in sessions if s.alive]
     prs = [p for p in facts.prs if p.item_id == it.id]
-    open_pr = max((p for p in prs if not p.merged), key=lambda p: p.number, default=None)
+    open_pr = item_pr(it.id, facts, config)
+    # an intake-decide session only judges the card's decision: it never moves its state; nor
+    # does a plan launched while the Feature's spec PR is still open (:func:`early_plans`)
+    early = _is_spec_pr(open_pr, config)
+    sessions = [s for s in facts.sessions if s.item_id == it.id and s.kind != intake.KIND
+                and not (early and s.kind == 'plan')]
+    live = [s for s in sessions if s.alive]
     ended_stuck, api_detail, pushed, asked = None, '', None, None
     for s in sessions:
         if s.alive:
@@ -752,9 +761,21 @@ def blocked_on(it, stuck, text, facts, parked=()):
 RISK = 'risk: '
 
 
-def _open_pr_of(iid, facts):
-    return max((p for p in facts.prs if p.item_id == iid and not p.merged),
-               key=lambda p: p.number, default=None)
+def _open_pr_of(iid, facts, config=None):
+    return item_pr(iid, facts, config)
+
+
+def item_pr(iid, facts, config=None):
+    """The open PR item ``iid`` is judged on: its spec PR while one is open — a Feature's
+    documents land in order, so the plan PR an approved spec let open beside it
+    (:func:`early_plans`) waits for the spec to land and is then reviewed against it — else its
+    newest open PR (None when it has none)."""
+    prs = [p for p in facts.prs if p.item_id == iid and not p.merged]
+    spec = _lane_prefix(config, 'spec') if config is not None else None
+    first = [p for p in prs if spec and p.branch.startswith(spec)]
+    if first:
+        return min(first, key=lambda p: p.number)
+    return max(prs, key=lambda p: p.number, default=None)
 
 
 def _hits(paths, globs):
@@ -804,7 +825,7 @@ def hold_risky(items, judged, facts, config, actions):
     high = {}
     for iid in sorted(judged):
         if judged[iid].state is State.LANDING:
-            pr = _open_pr_of(iid, facts)
+            pr = _open_pr_of(iid, facts, config)
             if pr is not None and high_risk(items[iid], pr, config):
                 high[iid] = pr
     if not high:
@@ -1655,7 +1676,7 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
             queued[iid] = 'seat'
             continue
         if cls == 'review':
-            pr = _open_pr_of(iid, facts)
+            pr = _open_pr_of(iid, facts, config)
             out.append(A.Launch('review', iid, judged[iid].review_branch, local=iid in due,
                                 model=config.strong_model if high_risk(items[iid], pr, config)
                                 else ''))
@@ -1737,6 +1758,61 @@ def _kind(it, facts, config=None):
 
 def _lane_prefix(config, kind):
     return next((p for p in config.doc_branches if p.strip('/') == kind), None)
+
+
+def _is_spec_pr(pr, config):
+    """Whether open ``pr`` is on the spec lane."""
+    spec = _lane_prefix(config, 'spec')
+    return pr is not None and not pr.merged and bool(spec) and pr.branch.startswith(spec)
+
+
+def early_plans(facts, config, judged, parked, launches):
+    """``(launches, opens)`` of the plans that start before their spec merged
+    (``Config.plan_on_approve``). A visible Feature whose open spec PR carries an ``approve``
+    verdict on its current head (it is Landing), with no open plan PR, no live plan session and
+    no plan tried since that verdict (its last job is not a plan: one that ended with no push is
+    not relaunched until the spec moves or lands), launches ``plan`` on its plan branch carrying
+    the spec head (:attr:`asf.kernel.actions.Launch.spec_head`: its brief reads the spec off the
+    spec branch) — on a seat ``launches`` left free, never past the WIP cap. A plan session that
+    ended ``done`` and pushed while the spec PR is still open gets its PR opened beside it; the
+    spec PR stays the one the Feature is judged on (:func:`item_pr`), so the plan PR is reviewed
+    only once the spec has landed — against the spec that merged, whatever fix round moved its
+    head meanwhile. A running plan is never cancelled."""
+    items = facts.items
+    out, opens = [], []
+    free = _free(facts, config) - len(launches)
+    cap = config.max_open_prs
+    on_pr = {p.item_id for p in facts.prs if not p.merged}
+    over = cap is not None and open_prs(judged, on_pr) > cap
+    plan_lane = _lane_prefix(config, 'plan')
+    if not plan_lane:
+        return [], []
+    started = {a.item_id for a in launches}
+    for iid in sorted(items, key=lambda i: launch_order(i, items, config.rank != 'own')):
+        it = items[iid]
+        if it.type != DOCUMENTED or not _visible(items, iid, parked):
+            continue
+        spec = item_pr(iid, facts, config)
+        if not _is_spec_pr(spec, config):
+            continue
+        if any(p.item_id == iid and not p.merged and p.branch.startswith(plan_lane)
+               for p in facts.prs):
+            continue
+        mine = [s for s in facts.sessions if s.item_id == iid and s.kind == 'plan']
+        ended = next((s for s in mine if not s.alive and done_and_pushed(s, facts)), None)
+        if ended is not None:
+            opens.append(open_pr_action(it, ended.branch or plan_lane + iid, ended))
+            continue
+        if (mine or iid in started or judged[iid].state is not State.LANDING
+                or str((facts.last_jobs or {}).get(iid) or '').startswith('plan-')
+                or [r.verdict for r in facts.reviews
+                    if r.item_id == iid and verdict_holds(r, spec)][-1:] != ['approve']):
+            continue
+        if over or free <= 0:
+            continue
+        out.append(A.Launch('plan', iid, plan_lane + iid, spec_head=spec.head_sha or ''))
+        free -= 1
+    return out, opens
 
 
 def _spec_only(it, prs, config):
@@ -1890,8 +1966,7 @@ def ci_stalls(facts, config, states):
         age = stuck_age_h(since, facts.now)
         if age is None or age * 3600 <= bound:
             continue
-        pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
-                 key=lambda p: p.number, default=None)
+        pr = item_pr(iid, facts, config)
         runs = sorted({c.run_id for c in (pr.checks if pr else [])
                        if c.status != 'completed' and required(c.name, config) and c.run_id})
         if runs:
@@ -2106,8 +2181,7 @@ def _stalled(iid, state, stuck, facts, config, j, queued, stalled):
         if j.review_branch is None:
             return ''  # a fresh head or a PR opened this tick: judged on the next tick's facts
         return 'Review, launches paused' if facts.paused else 'Review, no reviewer launched'
-    pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
-             key=lambda p: p.number, default=None)
+    pr = item_pr(iid, facts, config)
     if pr is None:
         return 'Landing with no open PR'
     if j.updating or j.behind_pr is not None or any(c.status != 'completed' for c in pr.checks):

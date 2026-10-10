@@ -90,9 +90,9 @@ def is_wait(cls):
 
 # -- classify -------------------------------------------------------------------------------------
 
-def _open_pr(iid, facts):
-    prs = [p for p in facts.prs if p.item_id == iid and not p.merged]
-    return max(prs, key=lambda p: p.number) if prs else None
+def _open_pr(iid, facts, config=None):
+    from asf.kernel.decide import item_pr
+    return item_pr(iid, facts, config)
 
 
 def _required(name, config):
@@ -116,7 +116,7 @@ def classify(iid, state, stuck, facts, config, notes=None):
         return 'after', ', '.join(it.after) if it and it.after else ''
     if state is State.READY:
         return 'seat', ''
-    pr = _open_pr(iid, facts)
+    pr = _open_pr(iid, facts, config)
     if pr is None:
         return ('review' if state is State.REVIEW else 'merge'), ''
     if pr.conflicting:
