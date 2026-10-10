@@ -1512,6 +1512,56 @@ class PrsStepTests(StepsTestCase):
         self.assertEqual(self.lane_of('fix/B-0002')['state'], 'MERGED')
 
 
+class ProvesBlockTests(StepsTestCase):
+    """``title_and_body``'s ``## Proves`` block (F-0040 §2.4): one bullet per claim the branch's
+    own commits carry, between the card's ``## Acceptance`` checkboxes and the closing line —
+    absent, with no stray heading, on a branch with no claim or with ``repo``/``trunk`` left
+    ``None`` (the shape a real pull request gets today, :mod:`asf.harvest.lane` leaving them
+    unset and appending its own ``## Proves`` from ``commits_note`` instead)."""
+
+    def setUp(self):
+        super().setUp()
+        _git(['pull', '-q', 'origin', 'main'], self.operator)
+        self.item = INDEX['items']['B-0001']
+
+    def push_commits(self, branch, messages):
+        _git(['checkout', '-q', '-b', branch, 'main'], self.repo)
+        for i, msg in enumerate(messages):
+            with open(os.path.join(self.repo, f"{branch.replace('/', '_')}_{i}"), 'w') as f:
+                f.write(f'{i}\n')
+            _git(['add', '-A'], self.repo)
+            _git(['commit', '-q', '-m', msg], self.repo)
+        _git(['push', '-q', 'origin', branch], self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+
+    def test_proves_block_between_acceptance_and_closing_line(self):
+        self.push_commits('worker/B-0001', [
+            'task(B-0001): the one commit\n\nProves: S-0077 line 1 — tests/test_a.py'])
+        _, body = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0001',
+                                           repo=self.repo, trunk='main')
+        self.assertIn(
+            '- [ ] the named test passes\n- [ ] no regression\n\n'
+            '## Proves\n- S-0077 line 1 — tests/test_a.py\n\n'
+            'Opened by the tick from `worker/B-0001`.\n', body)
+
+    def test_absent_with_no_stray_heading_when_the_branch_has_no_claim(self):
+        self.push_commits('worker/B-0002', ['task(B-0001): no claim here'])
+        _, body = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0002',
+                                           repo=self.repo, trunk='main')
+        self.assertNotIn('## Proves', body)
+        self.assertIn('## Acceptance', body)
+
+    def test_absent_when_repo_or_trunk_is_none(self):
+        self.push_commits('worker/B-0003', [
+            'task(B-0001): claimed\n\nProves: S-0077 line 1 — tests/test_a.py'])
+        _, no_repo = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0003',
+                                              trunk='main')
+        _, no_trunk = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0003',
+                                               repo=self.repo)
+        self.assertNotIn('## Proves', no_repo)
+        self.assertNotIn('## Proves', no_trunk)
+
+
 # ---- harvest ----------------------------------------------------------------------
 
 class HarvestStepTests(StepsTestCase):
