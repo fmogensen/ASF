@@ -1642,6 +1642,17 @@ class WaitsOnWhatActuallyHoldsIt(unittest.TestCase):
         self.assertEqual(r.waits_on, 'session')
         self.assertEqual(r.reason, 'S1 open, decided: session fix-bug-b-9999 running')
 
+    def test_a_stale_inflight_record_never_outranks_a_real_harvest_wait(self):
+        """The merge order's other pairing (§1): with no ``occ['busy']`` entry for the id,
+        ``occ['waiting_landing']`` still wins over an ``--inflight`` what-if — a session the
+        real ledger already calls finished and awaiting harvest is never relabelled ``session``
+        just because a (now stale) ``--inflight`` snapshot still lists it as running."""
+        occupancy = self.bare(waiting_landing={'B-0001': lifecycle.FINISHED_WAIT})
+        r = self.only_wait(self.cand(inflight=[dict(S1_SESSION, job='fix-bug-b-0001')],
+                                     occupancy=occupancy))
+        self.assertEqual(r.waits_on, 'harvest')
+        self.assertEqual(r.reason, 'S1 open, decided: finished, awaiting harvest')
+
     def test_the_feeder_and_the_ledger_write_the_same_sentence(self):
         self.assertEqual(rows.FINISHED_WAIT, lifecycle.FINISHED_WAIT)
         d = tempfile.mkdtemp()
