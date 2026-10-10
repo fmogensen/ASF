@@ -14,20 +14,24 @@ channel only chooses among the tags that exist and delays when it chooses.
 * **edge** — the newest tag whose :func:`asf.upgrade.ci_verdict` is ``green``. No ceremony, no
   wait, and never a tag whose CI is red or unread (``clear`` is not green —
   :func:`asf.upgrade.ci_state` answers it for a sha with no runs at all).
-* **stable** — ``stable_rows``: the weekly cadence, 48 h on edge, the rehearsal check and no
+* **stable** — :func:`stable_rows`: the weekly cadence, 48 h on edge, the rehearsal check and no
   S1, each met or unmet with its evidence; promoted only when all four are met.
 
-This module holds the resolver — the constants, the ordering key, the pure line parser every
-consumer shares, the one ``git ls-remote`` that feeds it, and ``settings``, the overlay for the
-one settings key the later criteria read their thresholds from — the channel log, and the edge
-half: :func:`edge_candidate` and :func:`publish`. The stable gate and the daily part are later
-Tasks of the same plan (``docs/plans/f-0308.md``).
+This module holds the resolver, the channel log, the edge half and the stable gate — the
+constants, the ordering key, the pure line parser every consumer shares, the one ``git
+ls-remote`` that feeds it, ``settings`` (the overlay for the settings keys the criteria read
+their thresholds from), the log's read/write/note helpers, :func:`edge_candidate` and
+:func:`publish`, and :func:`stable_rows`/:func:`s1_in_window`. The daily part is a later Task of
+the same plan (``docs/plans/f-0308.md``).
 """
+import datetime
 import re
 import subprocess
 
 from asf import cli
 from asf.state import store
+
+UTC = datetime.timezone.utc
 
 #: the two channels, in the order a report prints them
 NAMES = ('edge', 'stable')
@@ -192,3 +196,143 @@ def publish(product, name, commit, run=subprocess.run, out=print):
     p = gitpush.push(['-q', 'origin', target], product.repo_dir, guard=guard, refs_only=True,
                      log=lambda line: out(f'channels: {line}'))
     return (True, '') if p.returncode == 0 else (False, _last_line(p.stderr) or f'rc {p.returncode}')
+
+
+# ------------------------------------------------------------- the stable gate --
+
+def _parse(value):
+    """An aware UTC :class:`datetime.datetime` for ``value`` — already one, or an ISO 8601
+    string (``Z`` or an explicit offset). ``None`` when it is neither, or unreadable."""
+    if isinstance(value, datetime.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        d = datetime.datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+    return (d if d.tzinfo else d.replace(tzinfo=UTC)).astimezone(UTC)
+
+
+def _hours_since(value, now):
+    """Hours between ``value`` (an ISO stamp, or a ``datetime``) and ``now``, or ``None`` when
+    ``value`` cannot be read."""
+    d = _parse(value)
+    return None if d is None else (now - d).total_seconds() / 3600
+
+
+def s1_in_window(root, since, now=None):
+    """``[(id, title, when)]`` — every Bug of severity S1 in the record whose ``stage_since`` or
+    ``updated`` falls at or after ``since`` (and at or before ``now``, when given): an S1 raised,
+    reopened or moved while the candidate sat on edge, open or closed again since (D9). The
+    typed machine fields are read, never ``## History``: its dates are days, and the window is
+    hours. Most severe first is moot (every row is S1); sorted by id."""
+    from asf.record.core import canonicalize, load_items
+    lo, hi = _parse(since), (_parse(now) if now is not None else None)
+    by_id, _errors = load_items(root)
+    canonical, _dupes = canonicalize(by_id)
+    rows = []
+    for iid, rec in sorted(canonical.items()):
+        fm = rec.get('meta') or {}
+        if str(fm.get('type') or '').lower() != 'bug':
+            continue
+        if str(fm.get('severity') or '').upper() != 'S1':
+            continue
+        when = None
+        for field in ('stage_since', 'updated'):
+            raw = fm.get(field)
+            d = _parse(raw)
+            if d is None or (lo is not None and d < lo) or (hi is not None and d > hi):
+                continue
+            when = raw
+            break
+        if when is not None:
+            rows.append((iid, str(fm.get('title') or '').strip(), when))
+    return rows
+
+
+def _cadence_row(log, now, opts):
+    from asf.release import Criterion
+    days = opts['stable_every_days']
+    stable = log.get('stable') or {}
+    age_h = _hours_since(stable.get('at'), now) if stable.get('at') else None
+    if age_h is None:
+        return Criterion('cadence', 'Cadence (days since the last stable release)', True,
+                         'no stable release yet')
+    age_d = age_h / 24
+    tag = stable.get('tag') or '?'
+    if age_d >= days:
+        return Criterion('cadence', 'Cadence (days since the last stable release)', True,
+                         f'last promoted {tag} {age_d:.0f} d ago (every {days} d)')
+    return Criterion('cadence', 'Cadence (days since the last stable release)', False,
+                     f'{tag} promoted {age_d:.0f} d ago — due in {days - age_d:.0f} d')
+
+
+def _dwell_row(log, candidate, now, opts):
+    from asf.release import Criterion
+    tag, commit = candidate
+    hours = opts['edge_dwell_h']
+    entry = next((e for e in (log.get('edge_log') or []) if e.get('commit') == commit), None)
+    if entry is None:
+        return Criterion('dwell', 'Dwell (hours published on edge)', False,
+                         f'{tag} never published to edge')
+    age_h = _hours_since(entry.get('at'), now)
+    if age_h is None:
+        return Criterion('dwell', 'Dwell (hours published on edge)', False,
+                         f'{tag} never published to edge')
+    return Criterion('dwell', 'Dwell (hours published on edge)', age_h >= hours,
+                     f'{tag} on edge {age_h:.0f} h ({hours} h)')
+
+
+def _rehearsal_row(product, candidate, opts, run):
+    from asf.release import Criterion
+    tag, commit = candidate
+    name = opts['rehearsal_check']
+    if str(name).strip().lower() == 'off':
+        return Criterion('rehearsal', 'Rehearsal (the named check succeeded)', True,
+                         'n/a (release.channels.rehearsal_check off)')
+    from asf import upgrade
+    slug = getattr(product, 'repo_slug', None)
+    url = f'https://github.com/{slug}' if slug else ''
+    verdict, detail = upgrade.ci_verdict(url, commit, run=run, checks=[name])
+    return Criterion('rehearsal', 'Rehearsal (the named check succeeded)', verdict == 'green',
+                     detail)
+
+
+def _no_s1_row(root, log, candidate, now, opts):
+    from asf.release import Criterion
+    from asf import release_preview
+    _tag, commit = candidate
+    entry = next((e for e in (log.get('edge_log') or []) if e.get('commit') == commit), None)
+    since = entry.get('at') if entry else None
+    if since is not None:
+        windowed = s1_in_window(root, since, now=now)
+        if windowed:
+            iid, _title, when = windowed[0]
+            return Criterion('no_s1', 'No S1 (open, or touched since the candidate reached '
+                             'edge)', False, f'{iid} raised {str(when)[:10]} (S1)')
+    opens = release_preview.open_defects(root, ('S1',))
+    if opens:
+        iid, _title, sev = opens[0]
+        return Criterion('no_s1', 'No S1 (open, or touched since the candidate reached edge)',
+                         False, f'{iid} open ({sev})')
+    return Criterion('no_s1', 'No S1 (open, or touched since the candidate reached edge)', True,
+                     f'no S1 since {since}' if since else 'no S1')
+
+
+def stable_rows(product, root, log, candidate, now, opts=None, run=subprocess.run):
+    """``[Criterion]`` for promoting ``candidate`` (a ``(tag, commit)`` off the edge log) to
+    stable: the cadence, the dwell, the rehearsal and the S1 window — in that order, each with
+    the evidence an operator reads instead of asking. ``candidate`` ``None`` (or with no tag or
+    no commit) makes every row unmet with one evidence line saying why there is no candidate."""
+    from asf.release import Criterion
+    opts = opts if opts is not None else settings(product)
+    if not candidate or not candidate[0] or not candidate[1]:
+        why = 'no candidate: edge has not published a tag yet'
+        return [Criterion('cadence', 'Cadence (days since the last stable release)', False, why),
+                Criterion('dwell', 'Dwell (hours published on edge)', False, why),
+                Criterion('rehearsal', 'Rehearsal (the named check succeeded)', False, why),
+                Criterion('no_s1', 'No S1 (open, or touched since the candidate reached edge)',
+                         False, why)]
+    now = _parse(now) or now
+    return [_cadence_row(log, now, opts), _dwell_row(log, candidate, now, opts),
+            _rehearsal_row(product, candidate, opts, run),
+            _no_s1_row(root, log, candidate, now, opts)]
