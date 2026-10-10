@@ -255,6 +255,8 @@ def read_facts(ports):
     heads = getattr(ports.github, 'open_heads', None) if not github_error else None
     files = getattr(record, 'trunk_files', None)
     trunk_files = files() if files else None
+    look_notes = getattr(record, 'notes', None)
+    look_tries = getattr(record, 'intake_tries', None)
     return Facts(unreadable=dict(look_bad() or {}) if look_bad else {},
                  items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
@@ -264,4 +266,6 @@ def read_facts(ports):
                  github_error=github_error, orphan_prs=orphans, strict=strict, main=main,
                  seats=seats,
                  trunk_files=trunk_files,
+                 notes=dict(look_notes() or {}) if look_notes else {},
+                 intake_tries=dict(look_tries() or {}) if look_tries else {},
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

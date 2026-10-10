@@ -8,8 +8,12 @@ from asf.kernel import model as M
 
 class FakeRecord:
 
-    def __init__(self, items, specs=None, answers=(), reviews=(), paused=False, fail=()):
+    def __init__(self, items, specs=None, answers=(), reviews=(), paused=False, fail=(),
+                 notes=(), tries=None):
         self._items = {i.id: i for i in items}
+        self._notes = {n.id: n for n in notes}
+        self.tries = dict(tries or {})
+        self.decided = []
         self.fields = {i.id: {} for i in items}
         self._specs = dict(specs or {})
         self._answers, self._reviews = list(answers), list(reviews)
@@ -103,6 +107,30 @@ class FakeRecord:
         self.superseded.append((item_id, by))
         it = self._items[item_id]
         it.state, it.priority = M.State.DONE, 'later'
+
+    def notes(self):
+        return copy.deepcopy(self._notes)
+
+    def intake_tries(self):
+        return dict(self.tries)
+
+    def count_intake(self, key):
+        self.tries[key] = self.tries.get(key, 0) + 1
+
+    def decide_intake(self, key, verdict):
+        if ('decide', key) in self.fail:
+            raise P.PortError('%s: refused' % key)
+        self.decided.append((key, verdict))
+        if key in self._notes:
+            del self._notes[key]
+        elif key in self._items:
+            it = self._items[key]
+            it.decided = True
+            if verdict.decision == 'close':
+                it.state, it.priority = M.State.DONE, 'later'
+            elif verdict.set_priority:
+                it.priority = verdict.decision
+        return 'decided %s' % verdict.decision
 
     def mint_story(self, feature_id, story_id, title, acceptance):
         self.minted.append((feature_id, story_id, title, list(acceptance)))

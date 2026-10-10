@@ -187,6 +187,7 @@ import re
 from asf.kernel import actions as A
 from asf.kernel import dor as D
 from asf.kernel import idclaims
+from asf.kernel import intake
 from asf.kernel import resolvers
 from asf.kernel import mainline
 from asf.kernel import needed
@@ -203,7 +204,7 @@ CONTAINERS = ('epic', 'feature', 'story')
 BUILDABLE = ('task', 'bug')
 
 #: the session kinds that only read and judge: they never push, open a PR or hold a build
-READ_ONLY = ('review', D.GROOM_FILL)
+READ_ONLY = ('review', D.GROOM_FILL, intake.KIND)
 
 #: the one item type a document lane (spec, then plan once its spec landed) launches for: a
 #: childless Story or Epic is New, never a spec
@@ -266,7 +267,7 @@ IDLE_REASONS = {
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
 ORDER = (A.FileInbox, A.ApplyAnswer, A.ClearStuck, A.WaitOn, A.EndSession, A.PushStranded,
-         A.NoteItem, A.Satisfied, A.MarkStuck, A.MintStory, A.ArchiveAndReset, A.ClosePR,
+         A.NoteItem, A.Satisfied, A.MarkStuck, A.MintStory, A.Decide, A.ArchiveAndReset, A.ClosePR,
          A.CancelRun, A.RevertPR, A.FileBug, A.OpenPR, A.Rerun, A.UpdateBranch,
          A.EnableAutoMerge, A.MergePR, A.Launch)
 
@@ -436,6 +437,7 @@ def decide(facts, config):
                          else _launches(facts, config, judged, children, states, parked, blocks,
                                         due, queued, wip, unready))
     actions += launches
+    actions += _intake(facts, config, launches, parked_all)
     actions.sort(key=lambda a: ORDER.index(type(a)))
     idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
     found = breaches(due, over_age, actions, facts, config, states, judged, queued, stalled_ci)
@@ -547,7 +549,8 @@ def _judge(it, facts, config, actions, parked=()):
             actions.append(A.PushStranded(s.job, it.id))
             return _Judged(State.REVIEW, hold=True)
 
-    sessions = [s for s in facts.sessions if s.item_id == it.id]
+    # an intake-decide session only judges the card's decision: it never moves its state
+    sessions = [s for s in facts.sessions if s.item_id == it.id and s.kind != intake.KIND]
     live = [s for s in sessions if s.alive]
     prs = [p for p in facts.prs if p.item_id == it.id]
     open_pr = max((p for p in prs if not p.merged), key=lambda p: p.number, default=None)
@@ -1673,6 +1676,21 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
     if held and wip is not None:
         wip.update({'open': n_open, 'cap': cap, 'held': held})
     return out, skipped
+
+
+def _intake(facts, config, launches, parked):
+    """The intake step (:func:`asf.kernel.intake.plan`): a :class:`Decide` for each card the
+    code decides, and an ``intake-decide`` :class:`Launch` for each the sessions judge, on the
+    seats ``launches`` left free."""
+    if not config.intake:
+        return []
+    decisions, asks = intake.plan(facts, config, {a.item_id for a in launches},
+                                  _free(facts, config) - len(launches), parked)
+    goals = intake.goals(facts.items)
+    return ([A.Decide(key, v.decision, v.kind, v.parent, v.severity, v.reason, v.by,
+                      v.set_priority) for key, v in decisions]
+            + [A.Launch(intake.KIND, key, config.intake_branch + key, list(goals))
+               for key in asks])
 
 
 def _free(facts, config):

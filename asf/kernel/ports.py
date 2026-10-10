@@ -55,6 +55,7 @@ import time
 import typing
 
 from asf.kernel import dor as dor_mod
+from asf.kernel import intake as intake_mod
 from asf.kernel import model as M
 from asf.kernel import reports
 from asf.kernel.decide import READ_ONLY
@@ -90,6 +91,9 @@ WORK_TYPES = ('epic', 'feature', 'story', 'task', 'bug')
 CLOSED_STATES = ('Closed', 'Resolved')
 
 #: the old session kinds that are a build in the kernel's words
+#: the state file of the intake-decide sessions launched per key (``state/<product>/``)
+INTAKE_TRIES_FILE = 'kernel-intake-tries.json'
+
 BUILD_KINDS = ('task', 'fix-bug', 'correct', 'adjudicate', 'build')
 
 #: the review ledger a kernel review session appends its verdict to (``state/<product>/``)
@@ -203,7 +207,9 @@ def item_from_card(rec):
         stuck_since=(str(machine.get(STUCK_SINCE)) if stuck is not None and machine.get(STUCK_SINCE)
                      else None),
         plan=_plan_link(meta), created=_created(meta, machine, rec.get('body') or ''),
-        signature=str(meta.get('signature') or ''))
+        signature=str(meta.get('signature') or ''),
+        decided=meta.get('decided') is True or is_retired(meta),
+        severity=str(meta.get('severity') or ''))
 
 
 #: a History line that dates the card (``- 2026-09-24: created (inbox) …``)
@@ -611,6 +617,165 @@ class RealRecord:
                        {'title': self._scrub(title), 'parent': feature_id},
                        '', today(), 'kernel: declared by the landed spec',
                        acceptance=self._scrub(list(acceptance)), shape=('parent-feature', 'story'))
+
+    # ---- intake (:mod:`asf.kernel.intake`) ------------------------------------------------------
+
+    def _bug_epic(self):
+        conv = getattr(self.product, 'conventions', None)
+        try:
+            return conv.get('default_bug_epic') if conv is not None else None
+        except AttributeError:
+            return None
+
+    def mint_inbox(self):
+        """The groom's own minting path (:func:`asf.groom.inbox.process_inbox`): every inbox note
+        the shape rules read becomes a card (``decided: false``), the rest get their
+        ``## Question``. Returns the new ids; the cards are read afresh after."""
+        from asf.groom import inbox
+        from asf.record.core import today
+        if not os.path.isdir(os.path.join(self.root or '', self._intake())):
+            return []
+        created = inbox.process_inbox(self.root, self._load(), today(),
+                                      default_bug_parent=self._bug_epic(),
+                                      intake_dir=self._intake())
+        self._cards = None
+        return created
+
+    def inbox_count(self):
+        """How many notes sit in the intake dir (read only: a dry run's count)."""
+        d = os.path.join(self.root or '', self._intake())
+        try:
+            return sum(1 for n in os.listdir(d) if n.endswith('.md')
+                       and os.path.isfile(os.path.join(d, n)))
+        except OSError:
+            return 0
+
+    def notes(self):
+        """``{key: Item}``: every inbox note that carries a ``## Question`` — type ``note``, its
+        title, its text and the question (:mod:`asf.kernel.intake`)."""
+        from asf.groom import inbox
+        from asf.kernel import intake
+        d = os.path.join(self.root or '', self._intake())
+        out = {}
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            return out
+        for name in names:
+            path = os.path.join(d, name)
+            if not name.endswith('.md') or not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding='utf-8') as f:
+                    text = f.read()
+            except OSError:
+                continue
+            if not inbox._has_question(text):
+                continue
+            body, question = inbox._split_question(text)
+            title = inbox.parse_inbox_file(body).title or name[:-3]
+            key = intake.note_key(name)
+            out[key] = M.Item(id=key, type=intake.NOTE, title=title, body=body.strip(),
+                              question=' '.join(str(question or '').split()) or None)
+        return out
+
+    def _tries_path(self):
+        return os.path.join(self.state_dir, INTAKE_TRIES_FILE)
+
+    def intake_tries(self):
+        """``{key: n}``: the intake-decide sessions launched per card or note."""
+        try:
+            with open(self._tries_path(), encoding='utf-8') as f:
+                got = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return {str(k): int(v) for k, v in got.items() if str(v).isdigit()} \
+            if isinstance(got, dict) else {}
+
+    def count_intake(self, key):
+        """One more intake-decide session for ``key``."""
+        tries = self.intake_tries()
+        tries[key] = tries.get(key, 0) + 1
+        os.makedirs(self.state_dir, exist_ok=True)
+        tmp = self._tries_path() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(tries, f, indent=1, sort_keys=True)
+        os.replace(tmp, self._tries_path())
+
+    def decide_intake(self, key, v):
+        """Apply the intake verdict ``v`` (:class:`asf.kernel.intake.Verdict`) to ``key``: a
+        card through the groom's answer grammar (:func:`asf.groom.groom.apply_groom_answers`) and
+        its ``priority:``; a note through the inbox's (:func:`asf.groom.inbox.apply_answer`),
+        then minted, and the new card decided the same way. Returns a note."""
+        from asf.kernel import intake
+        if intake.is_note(key):
+            return self._decide_note(key, v)
+        rec = self._rec(key)
+        words = intake.answer_words(item_from_card(rec), v)
+        self._groom_answer(key, rec, words, v)
+        self._reread(rec)
+        pri = intake.priority_of(v)
+        if pri and str(rec['meta'].get('priority') or '') != pri:
+            from asf.record.core import today
+            from asf.record.setfield import set_typed
+            err = set_typed(rec, {'priority': pri}, writer='kernel', product=self.product,
+                            history=['- %s intake: priority → %s (%s)' % (today(), pri, v.by)])
+            self._reread(rec)
+            if err:
+                raise PortError(err)
+        return 'answered %s%s' % ('; '.join(words), ', priority %s' % pri if pri else '')
+
+    @staticmethod
+    def _reread(rec):
+        """Bring one cached card up to date with its file after a writer outside this port."""
+        from asf.record import frontmatter
+        with open(rec['path'], encoding='utf-8') as f:
+            text = f.read()
+        rec['meta'], rec['body'] = frontmatter.parse(text, path=rec['relpath'])
+        rec['text'] = text
+
+    def _groom_answer(self, key, rec, words, v):
+        import tempfile
+        from asf.groom import groom
+        from asf.record.core import today
+        title = ' '.join(str(rec['meta'].get('title') or '').split())
+        fd, path = tempfile.mkstemp(suffix='.answers')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                for w in words:
+                    f.write('- [ ] %s %s — intake → answer: adjudicator: %s\n'
+                            % (key, title, ' '.join(self._scrub(w).split())))
+            groom.apply_groom_answers(self.root, self._load(), path, today(),
+                                      adjudicator_job=v.by, product=self.product)
+        finally:
+            os.remove(path)
+
+    def _decide_note(self, key, v):
+        from asf.groom import inbox
+        from asf.kernel import intake
+        from asf.record.core import today
+        notes = self.notes()
+        note = notes.get(key)
+        if note is None:
+            raise PortError('%s: no such note with a question in the inbox' % key)
+        clauses = intake.note_clauses(note, v)
+        ok, why = inbox.apply_answer(self.root, intake.note_name(key), clauses, today(),
+                                     'intake %s' % v.by, intake_dir=self._intake())
+        if not ok:
+            raise PortError('%s: %s' % (key, why or 'the answer was not applied'))
+        if v.decision == 'close':
+            return 'note closed'
+        created = self.mint_inbox()
+        cards = self._load()
+        mine = [i for i in created if ' '.join(str(cards[i]['meta'].get('title') or '').split())
+                == ' '.join(str(note.title or '').split())]
+        if not mine:
+            again = self.notes().get(key)
+            return 'answered %s; not minted: %s' % (
+                clauses, again.question if again is not None else 'no card')
+        import dataclasses
+        out = self.decide_intake(mine[0], dataclasses.replace(v, parent=''))
+        return 'answered %s; minted %s, %s' % (clauses, mine[0], out)
 
     def publish(self, message):
         """Commit and push what this tick wrote, through the record's one push. Every card the
@@ -1459,7 +1624,7 @@ class RealSessions:
             kind = _kernel_kind(run.get('kind'))
             alive = lifecycle.pid_alive(run.get('pid'))  # a cloud token: the remote run's status
             result = None if alive else report_result(run.get('log'))
-            if result is not None and kind == dor_mod.GROOM_FILL:
+            if result is not None and kind in (dor_mod.GROOM_FILL, intake_mod.KIND):
                 result = dict(result, result=run_text(run.get('log')))
             in_cloud = cloudpid.is_token(run.get('pid'))
             pushed = not alive and pushlog.count(self.product, run['job']) > 0
@@ -2138,6 +2303,10 @@ def config_for(product, cfg=None, github=None):
         dor=bool(k['dor']['enabled']), dor_fill_per_tick=int(k['dor']['fill_per_tick']),
         dor_max_fills=int(k['dor']['max_fills']),
         dor_max_concurrent=int(k['dor']['max_concurrent']), groom_branch=conv.prefix('groom-fill'),
+        intake=bool(k['intake']['enabled']),
+        intake_decide_per_tick=int(k['intake']['decide_per_tick']),
+        intake_max_tries=int(k['intake']['max_tries']),
+        intake_branch=conv.prefix(intake_mod.KIND),
         risk_high=tuple(k['risk']['high']), risk_large_lines=int(k['risk']['large_lines']))
 
 

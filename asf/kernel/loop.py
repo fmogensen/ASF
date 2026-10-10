@@ -29,6 +29,7 @@ import json
 import os
 
 from asf.kernel import actions as A
+from asf.kernel import intake
 from asf.kernel import ports as P
 from asf.kernel.apply import apply, describe
 from asf.kernel.decide import blind_plan, decide
@@ -99,6 +100,10 @@ def summarize(plan, facts, result=None, dry_run=False):
         'pending': sorted(iid for iid, texts in (getattr(plan, 'notes', None) or {}).items()
                           if PENDING in texts),
         'dor': getattr(plan, 'dor', None),
+        'intake': {'decided': (len(result.intake) if result is not None
+                               else sum(1 for a in plan.actions if isinstance(a, A.Decide))),
+                   'launched': sum(1 for a in plan.actions
+                                   if isinstance(a, A.Launch) and a.kind == intake.KIND)},
     }
 
 
@@ -145,6 +150,34 @@ def dor_line(held):
         '%s %d' % kv for kv in sorted(gaps.items(), key=lambda kv: (-kv[1], kv[0]))[:4]))
 
 
+def intake_line(summary):
+    """``intake: minted M, decided N, launched K intake-decide session(s)`` — this tick's intake
+    (:mod:`asf.kernel.intake`), or '' when it did nothing."""
+    got = summary.get('intake') or {}
+    minted, decided, launched = (summary.get('minted') or 0, got.get('decided') or 0,
+                                 got.get('launched') or 0)
+    if not (minted or decided or launched):
+        return ''
+    return 'intake: minted %d, decided %d, launched %d intake-decide session(s)' % (
+        minted, decided, launched)
+
+
+def mint_inbox(ports, out=print):
+    """The groom's minting path through the record port (``mint_inbox``): the new card ids, one
+    line when there are any; a failure is one line, never the tick's end."""
+    mint = getattr(ports.record, 'mint_inbox', None)
+    if mint is None:
+        return []
+    try:
+        created = list(mint() or [])
+    except Exception as e:  # noqa: BLE001 — intake never stops the tick
+        out('kernel tick: inbox mint failed — %s' % (str(e) or type(e).__name__))
+        return []
+    if created:
+        out('intake: minted %s' % ', '.join(created))
+    return created
+
+
 def breach_line(b):
     """``BREACH <item> <class> <age> -> <action>`` of one :attr:`Plan.breaches` record."""
     from asf.kernel.waits import dur
@@ -179,6 +212,8 @@ def print_summary(summary, out=print):
         out('proving-tests check pending: %s' % ', '.join(summary['pending']))
     if summary.get('dor'):
         out(dor_line(summary['dor']))
+    if intake_line(summary):
+        out(intake_line(summary))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:
@@ -327,14 +362,14 @@ def seat_line(facts, config, ports):
         _free(facts, config), ' — %s' % note if note else '')
 
 
-def blind_tick(facts, ports, out=print):
+def blind_tick(facts, ports, out=print, minted=()):
     """Apply the blind plan of ``facts`` (see the module doc); the tick's summary."""
     plan = blind_plan(facts)
     result = apply(plan, facts, ports, log=out, judged=False)
     publish = getattr(ports.record, 'publish', None)
-    if publish and result.written:
+    if publish and (result.written or minted):
         try:
-            publish('kernel: blind tick (%d card(s))' % len(result.written))
+            publish('kernel: blind tick (%d card(s))' % (len(result.written) + len(minted)))
         except Exception as e:  # a refused or failed record commit never ends the tick
             out('publish FAILED: %s' % (str(e).splitlines() or [type(e).__name__])[0])
     held = sum(1 for s in facts.sessions if not s.alive and s.ended)
@@ -369,6 +404,10 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
         for a in plan.actions:
             out('would %s' % describe(a))
         out(seat_line(facts, config, ports))
+        count = getattr(ports.record, 'inbox_count', None)
+        if count is not None:
+            out('intake (dry run): %d note(s) in the inbox, %d with a question — the rest are '
+                'minted on a real tick' % (count(), len(facts.notes)))
         summary = summarize(plan, facts, dry_run=True)
         summary['waits'] = measure_waits(product, state_dir, plan, facts, config, write=False,
                                          out=out)
@@ -384,15 +423,17 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             if snapshot:
                 snapshot()
             sync_cloud(ports, out)
+            minted = mint_inbox(ports, out) if config.intake else []
             facts = read_facts(ports)
             if facts.github_error:
-                return blind_tick(facts, ports, out)
+                return blind_tick(facts, ports, out, minted)
             plan = decide(read_waits(facts, state_dir, _min_samples(product)), config)
             result = apply(plan, facts, ports, log=out)
             publish = getattr(ports.record, 'publish', None)
-            if publish and result.written:
+            if publish and (result.written or result.intake or minted):
                 try:
-                    publish('kernel: tick (%d card(s))' % len(result.written))
+                    publish('kernel: tick (%d card(s))' % len(
+                        set(result.written) | set(result.intake) | set(minted)))
                 except Exception as e:  # a refused or failed record commit never ends the tick
                     out('publish FAILED: %s' % (str(e).splitlines() or [type(e).__name__])[0])
             save_plan(state_dir, plan, facts)
@@ -402,6 +443,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
         out('kernel tick: another tick holds %s' % e)
         return {'locked': str(e)}
     summary = summarize(plan, facts, result)
+    summary['minted'] = len(minted)
     summary['waits'] = waits_line
     summary['main_moves'] = moves_lines
     print_summary(summary, out)
