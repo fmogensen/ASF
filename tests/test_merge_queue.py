@@ -714,6 +714,17 @@ class CoverBlameTests(QueueRepo):
         named, covered = merge_queue.blame(ln, batch, members, found)
         self.assertEqual((list(named), covered), (['worker/T-0001'], True))
 
+    def test_a_full_red_cycle_sends_the_covered_member_back_with_its_own_file(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_on_the_test(batch['sha'], '101')
+        self.queue_pass(self.lane(), [])            # re-run first (flake triage)
+        self.red_on_the_test(batch['sha'], '102')
+        self.queue_pass(self.lane(), [])
+        self.assertEqual([b for b, _k, _t, _f in self.backs], ['worker/T-0001'])
+        _b, _k, _text, files = self.backs[0]
+        self.assertEqual(files, ['asf/audit.py'])
+
     def test_a_test_path_that_is_a_members_own_diff_is_skipped_never_a_hop(self):
         ln, batch, members, found = self.found_and_members()
         # T-0001 itself changes the test file: the direct reading had its say (D4)
@@ -833,6 +844,8 @@ class DropReasonTests(QueueRepo):
         self.queue_pass(self.lane(), [])
         (line,) = self.dropped_lines()
         self.assertIn("#1's (the failing test tests/test_bars.py covers its files)", line)
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
         ((b, kind, text, _files),) = self.backs
         self.assertEqual((b, kind), ('worker/T-0001', 'gate'))
         self.assertIn('the failing test tests/test_bars.py covers files only this PR changes', text)
