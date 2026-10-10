@@ -914,7 +914,16 @@ class WidenFootprintUnchangedByTheWireTests(unittest.TestCase):
     def test_neither_module_byte_changed_against_origin_main(self):
         import subprocess
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        out = subprocess.run(['git', 'diff', '--exit-code', 'origin/main', '--',
+        if subprocess.run(['git', 'rev-parse', '--verify', '-q', 'origin/main'], cwd=repo_root,
+                          capture_output=True).returncode != 0:
+            # a shallow single-ref checkout (CI's part jobs) has no origin/main locally yet
+            subprocess.run(['git', 'fetch', '-q', '--depth=1', 'origin', 'main'], cwd=repo_root,
+                           capture_output=True)
+        # the fork point, not origin/main's own tip — a landing on main after this branch forked
+        # must never read as this branch having touched the file
+        base = subprocess.run(['git', 'merge-base', 'origin/main', 'HEAD'], cwd=repo_root,
+                              capture_output=True, text=True).stdout.strip()
+        out = subprocess.run(['git', 'diff', '--exit-code', base, '--',
                               'asf/tick/widen_footprint.py', 'asf/feeder/widen.py'],
                              cwd=repo_root, capture_output=True)
         self.assertEqual(out.returncode, 0, out.stdout.decode() + out.stderr.decode())
