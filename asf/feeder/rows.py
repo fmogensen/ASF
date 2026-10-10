@@ -1550,13 +1550,15 @@ def console_member_row(items, product, mid, fid, landed_shas=None):
     return row
 
 
-def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None, waived=None):
+def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None, waived=None,
+                 spoken=()):
     """Every Feature's rows, in Feature order (:func:`feature_order`: Epic rank, rank, id).
     ``running`` grows as PLAN → CODE rows are handed out, so two ready Tasks sharing a file never
     both launch. ``occupancy`` (:func:`asf.workers.lifecycle.occupancy`): a spec or plan whose
     work is pushed and waiting to land is not starved (PUSHED → LAND). A blocked Feature
     (``blockedBy`` an open item) launches nothing: each row it would have is a ``WAITS ON
-    <blocker>`` row, like a blocked Bug's (B-0058), and it claims no footprint (F-1129)."""
+    <blocker>`` row, like a blocked Bug's (B-0058), and it claims no footprint (F-1129).
+    ``spoken`` is the ``item_id`` of every row already drawn (:func:`held_feature_row`)."""
     out = []
     feats = [f for f in ix.of_type(items, 'feature')
              if f.get('decided') is True and is_open(f)
@@ -1564,10 +1566,10 @@ def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None
     for f in sorted(feats, key=lambda v: feature_order(items, v)):
         if not f.get('blocked'):
             out.extend(_one_feature_rows(items, product, f, busy, running, landed_shas, occupancy,
-                                         waived))
+                                         waived, spoken))
             continue
         mine = _one_feature_rows(items, product, f, busy, copy.copy(running), landed_shas,
-                                 occupancy, waived)
+                                 occupancy, waived, spoken)
         out.extend(blocked_row(r, f) if r.launches else r for r in mine)
     return out
 
@@ -1580,7 +1582,8 @@ def blocked_row(row, item):
                                reason='blocked by ' + (', '.join(blockers) or 'an open item'))
 
 
-def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy, waived=None):
+def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy, waived=None,
+                      spoken=()):
     """One decided, open Feature's rows (:func:`feature_rows`)."""
     out = []
     limit = stalemate_round(product)
@@ -1607,7 +1610,7 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy, 
         else:
             # F-0274: the Feature's Task rows are held while its own session runs — say so, on
             # one row, rather than every open Task vanishing from the table with no reason
-            row = held_feature_row(items, f, occupancy)
+            row = held_feature_row(items, f, occupancy, spoken)
             if row is not None:
                 out.append(row)
         return out
@@ -1689,14 +1692,19 @@ def holder_of(occupancy, fid):
     return 'a session', 'session'
 
 
-def held_feature_row(items, feature, occupancy):
+def held_feature_row(items, feature, occupancy, spoken=()):
     """The one non-launching row of a Feature its own session holds (F-0274): ``WAITS ON <job>
-    (<kind>)``, naming the open Tasks it holds. None when it holds no open Task, or while another
-    row speaks for the Feature:
-    the lane's review or landing state (:func:`lane_rows`), or a correction on it
-    (:func:`correction_rows`)."""
+    (<kind>)``, naming the open Tasks it holds. None when it holds no open Task, or when
+    ``spoken`` — the ``item_id`` of every row already drawn before this one (a correction's, a
+    lane's, a branch's, a groom's) — already names the Feature: a row that speaks for it has
+    already stepped in, so this one does not speak again. The occupancy itself is not asked:
+    ``correction_rows`` drops every correction whose item is busy, and this path is only ever
+    reached because the Feature is busy, so its ``corrections`` key can never be the row that
+    answers for it here. ``review``/``landing`` need no test either — ``docs_waiting`` subtracts
+    such a Feature from ``busy`` before :func:`feature_rows` ever calls this, and the lane's own
+    PUSHED → LAND row (:func:`lane_rows`) is what speaks for it instead."""
     fid, occ = feature['id'], occupancy or {}
-    if any(fid in (occ.get(k) or {}) for k in ('review', 'landing', 'corrections')):
+    if fid in set(spoken or ()):
         return None
     held = [t['id'] for t in ix.feature_tasks(items, feature) if is_open(t)]
     if not held:   # nothing vanished: the session is the Feature's one row of work
@@ -2695,7 +2703,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     # a lead a correction row speaks for gets no delivery row too: one session per branch
     rows += delivery_rows(items, product, busy | spoken, running, landed_shas)
     rows += feature_rows(items, product, (busy - docs_waiting) | tasks_spoken, running,
-                         landed_shas, occ, waived)
+                         landed_shas, occ, waived, {r.item_id for r in rows})
     rows += undecided_rows(items, product, busy, decision_limit)
     rows += epic_rows(items, product, busy)
     # a skipped S1/S2 Bug's WAITS row only where no other row already speaks for it
