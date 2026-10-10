@@ -107,6 +107,11 @@ class Record(unittest.TestCase):
 
 class GitHub(unittest.TestCase):
 
+    def setUp(self):
+        # RealGitHub._changes is a process-wide memo: other test modules leave (o/r, main, h1) in it
+        P.RealGitHub._changes.clear()
+        self.addCleanup(P.RealGitHub._changes.clear)
+
     def test_open_prs_map_to_the_model(self):
         listing = [{'number': 7, 'headRefName': 'worker/t-0001-slug', 'headRefOid': 'h1',
                     'mergeable': 'CONFLICTING', 'mergeStateStatus': 'BEHIND',
