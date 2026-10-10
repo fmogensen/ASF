@@ -129,29 +129,43 @@ def deliverable_of(conv, branch, item):
     return None
 
 
+def _own_reviews(conv, item):
+    """The glob of ``item``'s own review files — ``docs/reviews/*-t-0080.md``. Every lane branch
+    carries them: a review round writes its file on the branch it reviews, whatever the kind, so
+    they are inside every grant and no card declares them (:func:`grant_for`)."""
+    return conv.review_path((item or '').lower(), '*') if item else None
+
+
 def grant_for(conv, branch, item, card):
     """The globs a session on ``branch`` may write, or None when none is declared.
 
     1. ``card['grant']``, when the card carries one — a Task's or a Feature's, as typed.
     2. else, for a lane whose deliverable is one document (``spec``, ``plan``):
-       ``[deliverable_of(...), conv.review_path(slug, '*')]`` — the document it exists to write,
-       and the review files of its own item, which later rounds write on the same branch.
+       ``[deliverable_of(...)]`` — the document it exists to write.
     3. else, ``card['writes']`` — the footprint, which is what every Task card today means.
     4. else None: nothing in the record says what this branch may write, so nothing is asserted
        about it.
+
+    An answer is never only that: ``item``'s own review files (:func:`_own_reviews`) are added
+    to every declared grant. A review round writes its file on the branch it reviews — a Task's
+    lane branch as much as a Feature's spec branch — so a grant without them would hold every
+    branch a reviewer has read, and no ``writes:`` or ``grant:`` in the record declares them.
 
     ``None`` and ``[]`` are different answers and stay so: ``None`` is *undeclared* and holds
     nothing; ``[]`` would be *may write nothing*, which no card can currently express.
     """
     card = card or {}
-    if card.get('grant'):
-        return list(card['grant'])
     deliverable = deliverable_of(conv, branch, item)
-    if deliverable:
-        return [deliverable, conv.review_path((item or '').lower(), '*')]
-    if card.get('writes'):
-        return list(card['writes'])
-    return None
+    if card.get('grant'):
+        declared = list(card['grant'])
+    elif deliverable:
+        declared = [deliverable]
+    elif card.get('writes'):
+        declared = list(card['writes'])
+    else:
+        return None
+    reviews = _own_reviews(conv, item)
+    return declared + ([reviews] if reviews and reviews not in declared else [])
 
 
 class Edge(tuple):

@@ -145,8 +145,8 @@ import subprocess
 import tempfile
 import time
 
-from asf import (approvals, attestation, ci_flight, ci_pool, customer_content, env, gitpush,
-                 refguard, reviews, run_cancel, tree_green)
+from asf import (approvals, attestation, boundary, ci_flight, ci_pool, customer_content,
+                 env, gitpush, refguard, reviews, run_cancel, tree_green)
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -442,9 +442,13 @@ def shared_hits(conv, files):
 
 # ---- git facts about one branch (moved from harvest) --------------------------------------------
 
-def touched_files(repo, trunk, branch):
-    """The files ``origin/<branch>`` changed since it left the trunk."""
-    r = H.sh(['git', 'diff', '--name-only', f'origin/{trunk}...origin/{branch}'], cwd=repo)
+def touched_files(repo, trunk, branch, renames=True):
+    """The files ``origin/<branch>`` changed since it left the trunk. ``renames=False`` passes
+    ``--no-renames``, so a file moved out of a glob is read as the delete it is *and* as its new
+    path — both judged (F-0026's boundary screen); every other caller keeps git's default rename
+    detection."""
+    r = H.sh(['git', 'diff', '--name-only'] + ([] if renames else ['--no-renames'])
+             + [f'origin/{trunk}...origin/{branch}'], cwd=repo)
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
@@ -1382,7 +1386,7 @@ def _amend_facts(fields, lane, f, branch, touched=()):
 
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
                          touched=(), conv=None, own=False, read=None, head=None, finding=None,
-                         main=None, lane=None, f=None):
+                         main=None, lane=None, f=None, outside=()):
     """Hold ``branch`` and hand it back to its session (:func:`asf.workers.lifecycle.hold`).
     ``'held'`` — or ``'foreign'`` for a red naming only files outside its footprint (no round),
     or ``'timed-out'`` for a gate that ran out of time (no round). ``own``: the red is this
@@ -1391,7 +1395,9 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
     ``lane``/``f``: the pass and the branch's facts — with them, under ``flags.mechanical: on``,
     a cause in :data:`asf.harvest.mechanical.MECHANICAL` is tried by code first
     (:func:`asf.harvest.mechanical.apply`): ``'mechanical'`` when it resolved it (no hold), else
-    the hold's text carries what the lane tried."""
+    the hold's text carries what the lane tried. ``outside``: F-0026's boundary hold — every
+    out-of-grant path, carried whole on the correction's ``outside`` key where the text's
+    ``(+N more)`` abbreviates it; with none the correction is byte-for-byte what it was."""
     job = record.get('job') or branch
     if kind == 'gate' and text.startswith(H.TIMED_OUT):  # B-0082: a clock is not a defect
         out(f'{H.TIMED_OUT} {branch}: {text} — retried next tick')
@@ -1430,7 +1436,8 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
         out(line)
         return 'held'
     fields, line = lifecycle.hold(H.sessions_path(state_dir), dict(record, branch=branch, job=job),
-                                  kind, text, now_iso(), head=head, finding=finding, main=main)
+                                  kind, text, now_iso(), head=head, finding=finding, main=main,
+                                  extra={'outside': list(outside)} if outside else None)
     _amend_facts(fields, lane, f, branch, touched)
     H.mark_session(state_dir, job, **fields, branch=branch)
     out(line)
@@ -1895,6 +1902,12 @@ class Lane:
                 f['refusal'] = incomplete_refusal(repo, trunk, b, built, run)
                 if f['refusal']:  # the hold's finding: the members still missing (progress is a new finding)
                     f['incomplete'] = members_named(repo, trunk, b, built)[1]
+            if not f['refusal']:
+                # F-0026 §2.4/§2.7: the boundary screen, after the lane refusal and before the
+                # approvals class, the rebase and the gate — and the re-admission of a hold the
+                # record has since answered. A branch outside its grant never enters a combined
+                # head, so it can never land inside somebody else's push (B-0040)
+                self.boundary_screen(f)
         f['customer'] = customer_content.touched(conv, f['files'])
         # a customer page is never landed unread: its diff needs a review whatever its class
         f['review_required'] = f['review_required'] or bool(f['customer'])
@@ -1959,6 +1972,49 @@ class Lane:
                 and reads_red(rec.get('state'), f.get('ended'), f.get('correction')):
             f['checks_red'] = self.host.head_red(f, pr['number'])
         return f
+
+    # ---- the boundary screen (F-0026 §2.4, §2.7) ------------------------------------------
+
+    def boundary_screen(self, f):
+        """``f``'s branch judged against its **grant** — what a session on it may write
+        (:func:`asf.boundary.grant_for`), which is not the footprint its card reserves.
+
+        ``conventions.boundary`` (:func:`asf.boundary.mode`) says what a diff that leaves the
+        grant costs: ``hold`` makes it the branch's refusal, so it goes BACK with a ``boundary``
+        correction carrying every out-of-grant path on ``outside`` and never enters a combined
+        head; ``warn`` prints the line and lets it through; ``off`` never reads the diff at all.
+        The diff is read with ``--no-renames`` (:func:`touched_files`), so a file moved out of
+        the grant is judged at both of its paths. Nothing on origin is touched either way:
+        nothing is reverted and nothing is lost.
+
+        The same read answers §2.7: a branch held at the boundary whose grant the record has
+        since widened is **re-admitted** here, by the harvest itself, with no second session —
+        and the round it already spent is not refunded (§1.4).
+        """
+        b, item, conv = f['branch'], f.get('item'), self.conv
+        mode = boundary.mode(conv)
+        if mode == boundary.OFF:
+            return
+        card = (self.items or {}).get(item or '') or {}
+        if boundary.grant_for(conv, b, item, card) is None:
+            return  # nothing in the record says what this branch may write: nothing is asserted
+        edge = boundary.refusal(conv, b, item, card,
+                                touched_files(self.repo, self.trunk, b, renames=False))
+        if edge is None:
+            if (f.get('correction') or {}).get('kind') == boundary.BOUNDARY_KIND:
+                why = f'{b}: its grant now covers the diff'
+                if self.dry_run:
+                    self.out(f'DRY: would re-admit {why}')
+                    return
+                H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b,
+                               correction=None, branch=b)
+                f['correction'] = None   # the transition below reads the cleared state
+                self.out(f're-admitted {why}')
+            return
+        if mode == boundary.WARN:
+            self.out(f'boundary {b}: {edge[1]}')
+            return
+        f['refusal'], f['outside'] = edge, boundary.outside_of(edge)
 
     # ---- orphans --------------------------------------------------------------------------
 
@@ -2497,8 +2553,14 @@ class Lane:
         else:
             sha = self.trunk_sha
             extras = f.get('extras') or []
-            note = f'; not its deliverable, dropped with the branch: {", ".join(extras)}' \
-                if extras else ''
+            note = ''
+            if extras:
+                # §2.5: nothing is discarded. The extras are on archive/<b> before the lane
+                # branch is deleted; a refused archive keeps the branch and lands nothing
+                kept = self.keep_extras(f, extras)
+                if kept is None:
+                    return None
+                note = f'; not its deliverable — {", ".join(extras)} kept on {kept}'
             line = f'landed {b}: already on {self.trunk} at {sha[:7]}{note}{dnote}'
         if self.dry_run:
             self.out(f'DRY: would mark {b} landed — {line}')
@@ -2533,6 +2595,43 @@ class Lane:
             if self.host.close(pr['number'], why):
                 self.out(f"prs: closed PR #{pr['number']} — {why}")
 
+    def push_archive(self, b, message):
+        """``(sha, kept)``: one ``[skip ci]`` commit over ``origin/<b>`` carrying its tree
+        (:func:`archive_commit`, or :func:`api_archive_commit` on a host that makes it through
+        the API with no push at all), pushed to ``refs/heads/archive/<b>``. ``kept`` is False
+        when the commit could not be made or the push was refused — the caller then leaves the
+        lane branch where it is: a branch is never deleted before its archive exists."""
+        slug = self.ref_host()
+        if slug:  # the archive commit is made on the host too: no push at all
+            tip = H.sh(['git', 'rev-parse', f'origin/{b}'], cwd=self.repo).stdout.strip()
+            sha = api_archive_commit(slug, self.repo, tip, message) if tip else ''
+            done = lambda: api_archive_stands(slug, b, sha, tip)  # noqa: E731
+        else:
+            sha, done = archive_commit(self.repo, b, message), None
+        keep = self.ref_push(f'{sha}:refs/heads/archive/{b}', f'archive {b}',
+                             done=done) if sha else False
+        return sha, keep
+
+    def keep_extras(self, f, extras):
+        """F-0026 §2.5: the files ``f``'s branch carried past the deliverable the trunk already
+        holds, kept on ``archive/<branch>`` — the one path in this factory that discarded content
+        with the branch it deleted. The archive ref's name, or None when the commit could not be
+        made or its push was refused: then one line is printed and the lane branch is left in
+        place, unlanded, because the archive must exist before the branch can go."""
+        b, item = f['branch'], f.get('item')
+        ref = f'archive/{b}'
+        if self.dry_run:
+            return ref
+        label = item or b.rsplit('/', 1)[-1]
+        sha, keep = self.push_archive(b, f'archive({label}): {b} — its deliverable is on '
+                                         f'{self.trunk}; kept for {", ".join(extras)} [skip ci]')
+        if not keep:
+            self.out(f'held {b}: its extras ({", ".join(extras)}) could not be '
+                     f'{"pushed" if sha else "made"} as {ref} — the branch is left in place')
+            self.results[b] = 'held'
+            return None
+        return ref
+
     def archive(self, f, why):
         b, item = f['branch'], f.get('item')
         if self.dry_run:
@@ -2544,15 +2643,7 @@ class Lane:
             return self.drop_legacy(f, why, legacy)
         label = item or b.rsplit('/', 1)[-1]
         message = f'archive({label}): {b} — {why}; superseded, kept for reference [skip ci]'
-        slug = self.ref_host()
-        if slug:  # the archive commit is made on the host too: no push at all
-            tip = H.sh(['git', 'rev-parse', f'origin/{b}'], cwd=self.repo).stdout.strip()
-            sha = api_archive_commit(slug, self.repo, tip, message) if tip else ''
-            done = lambda: api_archive_stands(slug, b, sha, tip)  # noqa: E731
-        else:
-            sha, done = archive_commit(self.repo, b, message), None
-        keep = self.ref_push(f'{sha}:refs/heads/archive/{b}', f'archive {b}',
-                             done=done) if sha else False
+        sha, keep = self.push_archive(b, message)
         if not keep:
             self.out(f'held {b}: archive could not be '
                      f'{"pushed" if sha else "made"}')
@@ -3338,7 +3429,8 @@ class Lane:
         table = {'lane': self, 'f': f} if kind != 'review' else {}
         self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out,
                                                head=f.get('head'), finding=finding,
-                                               main=self.trunk, **table)
+                                               main=self.trunk,
+                                               outside=f.get('outside') or (), **table)
         if self.results[b] == 'mechanical':
             return f.get('prev')
         f['correction'] = {'kind': kind, 'text': text}

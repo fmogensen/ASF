@@ -81,12 +81,30 @@ class GrantForTests(unittest.TestCase):
     def test_the_cards_own_grant_wins(self):
         card = {'grant': ['asf/boundary.py'], 'writes': ['asf/**']}
         self.assertEqual(boundary.grant_for(self.conv, 'worker/T-0080', 'T-0080', card),
-                         ['asf/boundary.py'])
+                         ['asf/boundary.py', 'docs/reviews/*-t-0080.md'])
 
     def test_falls_back_to_the_footprint(self):
         card = {'writes': ['asf/harvest/**', 'tests/test_harvest.py']}
         self.assertEqual(boundary.grant_for(self.conv, 'worker/T-0080', 'T-0080', card),
-                         ['asf/harvest/**', 'tests/test_harvest.py'])
+                         ['asf/harvest/**', 'tests/test_harvest.py',
+                          'docs/reviews/*-t-0080.md'])
+
+    def test_every_grant_holds_the_items_own_review_files(self):
+        """A review round writes its file on the branch it reviews, whatever the lane's kind,
+        and no card declares that path — so a grant without it would hold every branch a
+        reviewer has read."""
+        for card in ({'writes': ['asf/boundary.py']}, {'grant': ['asf/boundary.py']}):
+            self.assertIsNone(boundary.refusal(
+                self.conv, 'worker/T-0080', 'T-0080', card,
+                ['asf/boundary.py', 'docs/reviews/1-t-0080.md']), card)
+        # another item's review file is outside it, like any other path
+        edge = boundary.refusal(self.conv, 'worker/T-0080', 'T-0080',
+                                {'writes': ['asf/boundary.py']},
+                                ['docs/reviews/1-t-0099.md'])
+        self.assertEqual(boundary.outside_of(edge), ('docs/reviews/1-t-0099.md',))
+
+    def test_a_grant_is_never_only_the_review_glob(self):
+        self.assertIsNone(boundary.grant_for(self.conv, 'worker/T-0080', 'T-0080', {}))
 
     def test_a_spec_branch_with_no_card_grant(self):
         got = boundary.grant_for(self.conv, 'spec/F-0026', 'F-0026', {})

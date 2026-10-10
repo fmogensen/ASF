@@ -12,7 +12,7 @@ from unittest import mock
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNNER = os.path.join(REPO_ROOT, 'tools', 'run_tests.py')
 
-from asf import env, reviews
+from asf import boundary, env, reviews
 from asf.conventions import Conventions
 from asf.evidence import evidence
 from asf.harvest import harvest, lane
@@ -597,11 +597,12 @@ class ProductHarvestTests(unittest.TestCase):
             f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
                                 'end_reason': 'finished' if rc == 0 else 'failed', 'rc': rc}) + '\n')
 
-    def harvest(self, product, bug_root=None, timings=False):
-        """``(results, lines)``; the gate's own timing lines only with ``timings``."""
+    def harvest(self, product, bug_root=None, timings=False, items=None):
+        """``(results, lines)``; the gate's own timing lines only with ``timings``. ``items``:
+        the record's index, when a case needs the cards read (a ``grant:``, F-0026)."""
         lines = []
         results = harvest.run_product_harvest(product, self.state_dir, bug_root=bug_root,
-                                              out=lines.append)
+                                              out=lines.append, items=items)
         return results, (lines if timings else [l for l in lines
                                                 if not l.startswith(('gate: ', 'lane: '))])
 
@@ -610,6 +611,11 @@ class ProductHarvestTests(unittest.TestCase):
 
     def origin_has(self, branch):
         return bool(sh(['git', 'branch', '--list', branch], cwd=self.origin).stdout.strip())
+
+    def file_at(self, branch, rel):
+        """``rel`` as ``branch`` has it on origin, or None."""
+        r = sh(['git', 'show', f'{branch}:{rel}'], cwd=self.origin)
+        return r.stdout if r.returncode == 0 else None
 
     def record(self, branch):
         return harvest.sessions_by_branch(self.state_dir).get(branch) or {}
@@ -806,10 +812,16 @@ class ProductHarvestTests(unittest.TestCase):
         results, lines = self.harvest(self.product(branch_prefixes={'spec': 'spec/', 'code': 'worker/'}))
         lines = [l for l in lines if not l.startswith('harvest: ')]
         self.assertEqual(results, {'spec/F-0001': 'landed'})
+        # F-0026 §2.5: the ruling the branch also carried is kept on archive/<branch>, never
+        # dropped with the lane branch the landing deletes
         self.assertEqual(lines, [f'landed spec/F-0001: already on main at {before[:7]}; not its '
-                                 f'deliverable, dropped with the branch: docs/reviews/1-f-0001-ruling.md'])
+                                 f'deliverable — docs/reviews/1-f-0001-ruling.md kept on '
+                                 f'archive/spec/F-0001'])
         self.assertEqual(self.origin_main(), before)  # no gate, no push: nothing to land
         self.assertFalse(self.origin_has('spec/F-0001'))
+        self.assertTrue(self.origin_has('archive/spec/F-0001'))
+        self.assertEqual(self.file_at('archive/spec/F-0001', 'docs/reviews/1-f-0001-ruling.md'),
+                         'no finding\n')
         rec = self.record('spec/F-0001')
         self.assertEqual(rec['harvested'], before)
         self.assertFalse(rec.get('correction'))
@@ -1873,7 +1885,11 @@ class ProductHarvestTests(unittest.TestCase):
     def test_a_plan_branch_touching_code_needs_a_review_like_code(self):
         calls = self.fake_gh([])
         self.push_plan({'docs/plans/f-0001.md': '# plan\n', 'src/app.py': 'x = 1\n'})
-        results, lines = self.harvest(self.pr_product())
+        # the card's grant: covers the code this plan branch carries, so F-0026's boundary
+        # screen passes it — and what it then needs is a review, like any code
+        results, lines = self.harvest(self.pr_product(), items={
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active',
+                       'grant': ['docs/plans/f-0001.md', 'src/**']}})
         self.assertEqual(results, {'plan/F-0001': 'waiting'})
         self.assertEqual(lines, ['waiting plan/F-0001: PR #41 not approved — no ASF review yet: '
                                  'review round 1 asked for'])
@@ -2692,6 +2708,224 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'landed'})
         self.assertEqual(len(self.merges(calls)), 1)
 
+    # -- F-0026: the boundary holds a branch, and it never silently reverts -----------------
+
+    def push_t0080(self, files, branch='worker/T-0080', item='T-0080'):
+        """A lane branch of ``item`` carrying ``files``, with a finished session."""
+        self.push_lane(branch, [(f'task({item}): the change', files)])
+        self.session(f'coder-{item.lower()}', item, branch)
+        return branch
+
+    def granted(self, grant=None, writes=None, item='T-0080'):
+        """The record's index: one Task card of ``item`` with ``grant:`` and/or ``writes:``."""
+        card = {'id': item, 'type': 'task', 'state': 'Active'}
+        if grant is not None:
+            card['grant'] = list(grant)
+        if writes is not None:
+            card['writes'] = list(writes)
+        return {item: card}
+
+    def branch_sha(self, branch):
+        return sh(['git', 'rev-parse', branch], cwd=self.origin).stdout.strip()
+
+    def own_count(self, branch):
+        return sh(['git', 'rev-list', '--count', f'main..{branch}'],
+                  cwd=self.origin).stdout.strip()
+
+    def test_f0026_a_branch_outside_its_grant_is_held_and_never_gated(self):
+        b = self.push_t0080({'src/a.py': 'a\n', 'src/elsewhere.py': 'e\n'})
+        before, sha, ahead = self.origin_main(), self.branch_sha(b), self.own_count(b)
+        with self.gated() as gate:
+            results, lines = self.harvest(self.product(), items=self.granted(['src/a.py']))
+        self.assertEqual(results, {b: 'held'}, lines)
+        self.assertEqual(gate.call_count, 0, lines)  # never gated: no timing line to show
+        self.assertFalse(any(l.startswith('gate: ') for l in lines), lines)
+        held = [l for l in lines if l.startswith('held ')]
+        self.assertEqual(len(held), 1, lines)
+        self.assertIn('writes outside its grant: src/elsewhere.py', held[0])
+        corr = self.record(b)['correction']
+        self.assertEqual((corr['kind'], corr['outside']),
+                         (boundary.BOUNDARY_KIND, ['src/elsewhere.py']))
+        # nothing on origin is touched: not the trunk, not the branch
+        self.assertEqual(self.origin_main(), before)
+        self.assertEqual(self.branch_sha(b), sha)
+        self.assertEqual(self.own_count(b), ahead)
+        self.assertEqual(self.file_at(b, 'src/elsewhere.py'), 'e\n')
+
+    def test_f0026_a_green_branch_inside_its_grant_lands_unchanged(self):
+        b = self.push_t0080({'src/a.py': 'a\n', 'src/b.py': 'b\n'})
+        results, lines = self.harvest(self.product(), items=self.granted(['src/**']))
+        sha = self.origin_main()
+        self.assertEqual(results, {b: 'landed'}, lines)
+        self.assertEqual(lines, ['harvest: 1 branch(es), one gate',
+                                 f'landed {b} → {sha}',
+                                 f'harvest: {self.repo} fast-forwarded to {sha}'])
+        self.assertFalse(self.origin_has(b))
+
+    def test_f0026_an_out_of_grant_branch_is_held_while_its_lawful_sibling_lands(self):
+        good = self.push_t0080({'src/a.py': 'a\n'}, branch='worker/T-0081', item='T-0081')
+        bad = self.push_t0080({'src/b.py': 'b\n', 'src/stray.py': 's\n'})
+        items = dict(self.granted(['src/a.py'], item='T-0081'),
+                     **self.granted(['src/b.py']))
+        results, lines = self.harvest(self.product(), items=items)
+        sha = self.origin_main()
+        self.assertEqual(results, {good: 'landed', bad: 'held'}, lines)
+        self.assertEqual(self.record(good).get('harvested'), sha)
+        self.assertFalse(self.origin_has(good))
+        self.assertTrue(self.origin_has(bad))  # held, whole, and still its own
+        self.assertEqual(self.record(bad)['correction']['outside'], ['src/stray.py'])
+
+    def test_f0026_a_doc_branch_carrying_code_is_held_and_one_carrying_a_review_lands(self):
+        conv = {'branch_prefixes': {'spec': 'spec/', 'code': 'worker/'}}
+        spec = 'docs/specs/f-0001.md'
+        self.push_lane('spec/F-0001', [('spec(F-0001): the spec and some code',
+                                        {spec: 'v1\n', 'asf/harvest/harvest.py': 'x = 1\n'})])
+        self.session('spec-f-0001', 'F-0001', 'spec/F-0001')
+        results, lines = self.harvest(self.product(**conv))
+        self.assertEqual(results, {'spec/F-0001': 'held'}, lines)
+        self.assertIn('writes outside its grant: asf/harvest/harvest.py',
+                      self.record('spec/F-0001')['correction']['text'])
+        self.assertTrue(self.origin_has('spec/F-0001'))
+        # its document and the review files of its own item are the lane's grant: that lands
+        self.push_lane('spec/F-0002', [('spec(F-0002): the spec and its review',
+                                        {'docs/specs/f-0002.md': 'v1\n',
+                                         'docs/reviews/1-f-0002.md': 'approved\n'})])
+        self.session('spec-f-0002', 'F-0002', 'spec/F-0002')
+        results, lines = self.harvest(self.product(**conv))
+        self.assertEqual(results.get('spec/F-0002'), 'landed', lines)
+        self.assertFalse(self.origin_has('spec/F-0002'))
+
+    def test_f0026_a_card_with_no_grant_and_no_footprint_is_gated_as_today(self):
+        b = self.push_t0080({'src/a.py': 'a\n', 'src/elsewhere.py': 'e\n'})
+        results, lines = self.harvest(self.product(), items=self.granted())
+        self.assertEqual(results, {b: 'landed'}, lines)
+        self.assertEqual(self.record(b).get('harvested'), self.origin_main())
+
+    def test_f0026_an_unknown_boundary_value_is_reported_and_reads_as_hold(self):
+        b = self.push_t0080({'src/a.py': 'a\n', 'src/elsewhere.py': 'e\n'})
+        results, lines = self.harvest(self.product(boundary='maybe'),
+                                      items=self.granted(['src/a.py']))
+        self.assertEqual(results, {b: 'held'}, lines)   # never silently off (PD7)
+        self.assertEqual([l for l in lines if l.startswith('harvest: conventions.boundary')],
+                         ["harvest: conventions.boundary: 'maybe' is not one of hold, warn, "
+                          "off — reading it as 'hold'"])
+
+    def test_f0026_warn_lets_the_branch_land_and_says_so_once(self):
+        b = self.push_t0080({'src/a.py': 'a\n', 'src/elsewhere.py': 'e\n'})
+        results, lines = self.harvest(self.product(boundary='warn'),
+                                      items=self.granted(['src/a.py']))
+        self.assertEqual(results, {b: 'landed'}, lines)
+        warned = [l for l in lines if l.startswith('boundary ')]
+        self.assertEqual(len(warned), 1, lines)
+        self.assertIn('writes outside its grant: src/elsewhere.py', warned[0])
+
+    def test_f0026_a_widened_grant_re_admits_the_held_branch_with_no_new_session(self):
+        """§2.7: the hold costs no second session. The same branch, the card's ``grant:``
+        widened between two harvests, lands in the second — ``re-admitted``, its correction
+        cleared, and the round it already spent not refunded."""
+        b = self.push_t0080({'src/a.py': 'a\n', 'src/elsewhere.py': 'e\n'})
+        results, _lines = self.harvest(self.product(), items=self.granted(['src/a.py']))
+        self.assertEqual(results, {b: 'held'})
+        rounds = self.record(b).get('rounds')
+        self.assertEqual(rounds, 1)
+        sha = self.branch_sha(b)
+        results, lines = self.harvest(self.product(), items=self.granted(['src/**']))
+        self.assertEqual(results, {b: 'landed'}, lines)
+        self.assertIn(f're-admitted {b}: its grant now covers the diff', lines)
+        rec = self.record(b)
+        self.assertFalse(rec.get('correction'))
+        self.assertEqual(rec.get('rounds'), rounds)  # §1.4: the round spent is not refunded
+        self.assertEqual(rec.get('harvested'), self.origin_main())
+        self.assertIn('task(T-0080): the change',
+                      sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout)
+        # the trunk is the branch's own tip: it landed exactly as it stood, nothing rebuilt
+        self.assertEqual(self.origin_main(), sha)
+
+    # -- F-0026 §2.5: nothing is discarded -------------------------------------------------
+
+    def test_discard_a_held_branch_keeps_every_commit_and_every_file(self):
+        b = 'worker/T-0080'
+        self.push_lane(b, [('task(T-0080): the change', {'src/a.py': 'a\n',
+                                                         'src/elsewhere.py': 'e\n'}),
+                           ('task(T-0080): more', {'src/more.py': 'm\n'})])
+        self.session('coder-t-0080', 'T-0080', b)
+        before, ahead = self.branch_sha(b), self.own_count(b)
+        self.assertEqual(ahead, '2')
+        for tick in range(3):  # three consecutive harvests: every commit, every file, still there
+            results, lines = self.harvest(self.product(), items=self.granted(['src/a.py']))
+            # the first holds it; the later ones leave the pending correction to its session
+            self.assertEqual(results, {b: 'held'} if tick == 0 else {}, lines)
+            self.assertEqual(self.branch_sha(b), before)
+            self.assertEqual(self.own_count(b), ahead)
+            self.assertEqual(self.record(b)['correction']['kind'], boundary.BOUNDARY_KIND)
+        for rel, text in (('src/a.py', 'a\n'), ('src/elsewhere.py', 'e\n'),
+                          ('src/more.py', 'm\n')):
+            self.assertEqual(self.file_at(b, rel), text, rel)
+
+    def test_discard_extras_are_archived_before_the_branch_is_deleted(self):
+        spec = 'docs/specs/f-0001.md'
+        extra = 'docs/reviews/1-f-0001-ruling.md'
+        self.push_lane('spec/F-0001', [('spec(F-0001): the spec', {spec: 'final\n'}),
+                                       ('adjudicate(F-0001): a ruling', {extra: 'no finding\n'})])
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, spec, 'final\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'spec(F-0001): landed by hand'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        self.session('spec-f-0001', 'F-0001', 'spec/F-0001')
+        tip = self.branch_sha('spec/F-0001')
+        results, lines = self.harvest(self.product(branch_prefixes={'spec': 'spec/',
+                                                                    'code': 'worker/'}))
+        self.assertEqual(results, {'spec/F-0001': 'landed'}, lines)
+        self.assertTrue(any(f'{extra} kept on archive/spec/F-0001' in l for l in lines), lines)
+        self.assertFalse(self.origin_has('spec/F-0001'))   # deleted only after the archive
+        self.assertTrue(self.origin_has('archive/spec/F-0001'))
+        self.assertEqual(self.file_at('archive/spec/F-0001', extra), 'no finding\n')
+        self.assertEqual(self.file_at('archive/spec/F-0001', spec), 'final\n')
+        self.assertEqual(sh(['git', 'rev-parse', 'archive/spec/F-0001^'],
+                            cwd=self.origin).stdout.strip(), tip)
+
+    def test_discard_a_refused_archive_keeps_the_lane_branch(self):
+        spec = 'docs/specs/f-0001.md'
+        extra = 'docs/reviews/1-f-0001-ruling.md'
+        self.push_lane('spec/F-0001', [('spec(F-0001): the spec', {spec: 'final\n'}),
+                                       ('adjudicate(F-0001): a ruling', {extra: 'no finding\n'})])
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, spec, 'final\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'spec(F-0001): landed by hand'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        self.session('spec-f-0001', 'F-0001', 'spec/F-0001')
+        product = self.product(branch_prefixes={'spec': 'spec/', 'code': 'worker/'})
+        with mock.patch.object(lane.Lane, 'ref_push', return_value=False):
+            results, lines = self.harvest(product)
+        self.assertEqual(results, {'spec/F-0001': 'held'}, lines)
+        self.assertTrue(any('could not be pushed as archive/spec/F-0001' in l for l in lines),
+                        lines)
+        self.assertTrue(self.origin_has('spec/F-0001'))  # never deleted before its archive
+        self.assertFalse(self.record('spec/F-0001').get('harvested'))
+        self.assertEqual(self.file_at('spec/F-0001', extra), 'no finding\n')
+
+    def test_discard_a_dry_run_archives_nothing(self):
+        spec = 'docs/specs/f-0001.md'
+        extra = 'docs/reviews/1-f-0001-ruling.md'
+        self.push_lane('spec/F-0001', [('spec(F-0001): the spec', {spec: 'final\n'}),
+                                       ('adjudicate(F-0001): a ruling', {extra: 'no finding\n'})])
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, spec, 'final\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'spec(F-0001): landed by hand'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        self.session('spec-f-0001', 'F-0001', 'spec/F-0001')
+        lines = []
+        harvest.run_product_harvest(self.product(branch_prefixes={'spec': 'spec/',
+                                                                  'code': 'worker/'}),
+                                    self.state_dir, dry_run=True, out=lines.append)
+        self.assertTrue(any('DRY: would mark spec/F-0001 landed' in l for l in lines), lines)
+        self.assertTrue(any(f'{extra} kept on archive/spec/F-0001' in l for l in lines), lines)
+        self.assertTrue(self.origin_has('spec/F-0001'))
+        self.assertFalse(self.origin_has('archive/spec/F-0001'))
+
 
 class RuledOnThisHeadTests(unittest.TestCase):
     """F-0157 P4(b,c): the lane acting on what it can now read — ``asf/harvest/lane.py:1368-1374``
@@ -2907,6 +3141,210 @@ class ForeignRedTests(unittest.TestCase):
     def test_only_a_gate_red_can_be_foreign(self):
         self.assertEqual(self.hold(['asf/other.py'], ['asf/harvest/harvest.py'], kind='conflict'),
                          'held')
+
+
+class BoundaryHoldTests(unittest.TestCase):
+    """F-0026 §3.3, the unit half: the boundary screen (:meth:`asf.harvest.lane.Lane.
+    boundary_screen`). A branch whose diff leaves its **grant** — what a session on it may
+    write, which is not the footprint its card reserves (:mod:`asf.boundary`) — is refused
+    before any gate, with every out-of-grant path carried whole. Nothing on origin is touched:
+    the hold is the whole of it."""
+
+    #: the grant the card under test declares
+    GRANT = ['asf/boundary.py', 'tests/test_boundary.py']
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix='boundary_hold_')
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.origin = os.path.join(self.base, 'origin.git')
+        self.worker = os.path.join(self.base, 'worker')
+        self.state = os.path.join(self.base, 'state')
+        os.makedirs(self.state)
+        sh(['git', 'init', '-q', '--bare', '-b', 'main', self.origin])
+        sh(['git', 'clone', '-q', self.origin, self.worker])
+        git_identity(self.worker)
+        for rel in ('asf/boundary.py', 'tests/test_boundary.py', 'asf/conventions.py'):
+            self.write(rel, f'# {rel}\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'init'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.worker)
+        self.lines = []
+
+    def write(self, rel, text):
+        path = os.path.join(self.worker, rel)
+        os.makedirs(os.path.dirname(path) or self.worker, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def push(self, branch='worker/T-0080', add=(), remove=(), rename=None):
+        """``branch`` cut off main: ``add`` written, ``remove`` deleted, ``rename`` moved;
+        pushed, and ``origin/<branch>`` fetched. Its name."""
+        sh(['git', 'checkout', '-q', '-B', branch, 'origin/main'], cwd=self.worker)
+        for rel in add:
+            self.write(rel, f'# touched {rel}\n')
+        for rel in remove:
+            os.remove(os.path.join(self.worker, rel))
+        if rename:
+            sh(['git', 'mv', rename[0], rename[1]], cwd=self.worker)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', f'task(T-0080): {branch}'], cwd=self.worker)
+        sh(['git', 'push', '-q', '-f', 'origin', branch], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        return branch
+
+    def screen(self, branch, grant=None, writes=None, mode=None, correction=None, dry_run=False):
+        """``f`` after the screen ran over ``branch``: its ``refusal`` and ``outside``."""
+        from types import SimpleNamespace
+        conv = {'branch_prefixes': {'code': 'worker/', 'spec': 'spec/', 'plan': 'plan/'}}
+        if mode is not None:
+            conv['boundary'] = mode
+        card = {'id': 'T-0080', 'type': 'task'}
+        if writes is not None:
+            card['writes'] = list(writes)
+        else:
+            card['grant'] = list(self.GRANT if grant is None else grant)
+        product = env.Product('p', {'repo_dir': self.worker, 'main': 'main',
+                                    'conventions': conv})
+        ln = SimpleNamespace(conv=product.conventions, repo=self.worker, trunk='main',
+                             items={'T-0080': card}, out=self.lines.append,
+                             state_dir=self.state, dry_run=dry_run, results={})
+        f = {'branch': branch, 'item': 'T-0080', 'refusal': None, 'correction': correction,
+             'run': {'job': 'code-t-0080', 'item': 'T-0080', 'branch': branch}}
+        lane.Lane.boundary_screen(ln, f)
+        return f
+
+    def registry(self):
+        path = harvest.sessions_path(self.state)
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding='utf-8') as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    # -- the matcher's verdict over a real diff ---------------------------------------------
+
+    def test_a_diff_inside_the_grant_is_no_refusal(self):
+        f = self.screen(self.push(add=('asf/boundary.py', 'tests/test_boundary.py')))
+        self.assertIsNone(f['refusal'])
+        self.assertEqual(self.lines, [])
+
+    def test_one_file_outside_names_it_and_the_kind_is_boundary(self):
+        f = self.screen(self.push(add=('asf/boundary.py', 'asf/conventions.py')))
+        kind, text = f['refusal']
+        self.assertEqual(kind, boundary.BOUNDARY_KIND)
+        self.assertIn('writes outside its grant: asf/conventions.py', text)
+        self.assertIn('the grant is asf/boundary.py, tests/test_boundary.py', text)
+        self.assertIn('Nothing is reverted and nothing is lost', text)
+        self.assertEqual(f['outside'], ('asf/conventions.py',))
+        self.assertEqual(self.lines, [])  # a hold is the lane's line, not the screen's
+
+    def test_five_outside_are_all_named_and_six_abbreviate_with_the_list_kept_whole(self):
+        five = tuple(f'asf/x{n}.py' for n in range(5))
+        f = self.screen(self.push(add=('asf/boundary.py',) + five))
+        self.assertIn(f'writes outside its grant: {", ".join(five)} —', f['refusal'][1])
+        self.assertNotIn('more)', f['refusal'][1])
+        self.assertEqual(f['outside'], five)
+        six = five + ('asf/x9.py',)
+        f = self.screen(self.push(branch='worker/T-0080-six',
+                                  add=('asf/boundary.py',) + six))
+        self.assertIn(f'writes outside its grant: {", ".join(five)} (+1 more) —', f['refusal'][1])
+        self.assertEqual(f['outside'], six)  # the text abbreviates; the correction does not
+
+    def test_a_file_deleted_outside_the_grant_is_a_violation_like_any_other(self):
+        f = self.screen(self.push(add=('asf/boundary.py',), remove=('asf/conventions.py',)))
+        self.assertEqual(f['refusal'][0], boundary.BOUNDARY_KIND)
+        self.assertEqual(f['outside'], ('asf/conventions.py',))
+
+    def test_a_rename_out_of_the_grant_is_judged_at_both_of_its_paths(self):
+        """``--no-renames`` (P5): git's rename detection shows a move as its destination alone,
+        so a file carried *into* the grant would hide the deletion it made outside it."""
+        b = self.push(rename=('asf/conventions.py', 'asf/moved.py'))
+        self.assertEqual(lane.touched_files(self.worker, 'main', b), ['asf/moved.py'])
+        self.assertEqual(lane.touched_files(self.worker, 'main', b, renames=False),
+                         ['asf/conventions.py', 'asf/moved.py'])
+        f = self.screen(b, grant=['asf/moved.py'])
+        self.assertEqual(f['refusal'][0], boundary.BOUNDARY_KIND)
+        self.assertEqual(f['outside'], ('asf/conventions.py',))
+
+    # -- what the record declares -----------------------------------------------------------
+
+    def test_with_no_grant_the_footprint_is_the_grant(self):
+        inside = self.screen(self.push(add=('asf/boundary.py',)), writes=['asf/boundary.py'])
+        self.assertIsNone(inside['refusal'])
+        out = self.screen(self.push(branch='worker/T-0080-w', add=('asf/conventions.py',)),
+                          writes=['asf/boundary.py'])
+        self.assertEqual(out['outside'], ('asf/conventions.py',))
+
+    def test_a_card_declaring_neither_is_never_screened(self):
+        b = self.push(add=('asf/conventions.py',))
+        with mock.patch.object(lane, 'touched_files') as touched:
+            f = self.screen(b, grant=[])
+        self.assertFalse(touched.called)  # nothing in the record says what it may write
+        self.assertIsNone(f['refusal'])
+
+    # -- conventions.boundary ---------------------------------------------------------------
+
+    def test_warn_prints_the_line_and_lets_the_branch_through(self):
+        f = self.screen(self.push(add=('asf/conventions.py',)), mode='warn')
+        self.assertIsNone(f['refusal'])
+        self.assertEqual(len(self.lines), 1, self.lines)
+        self.assertTrue(self.lines[0].startswith('boundary worker/T-0080: writes outside its '
+                                                 'grant: asf/conventions.py'), self.lines)
+
+    def test_off_never_reads_the_diff(self):
+        b = self.push(add=('asf/conventions.py',))
+        with mock.patch.object(lane, 'touched_files') as touched:
+            f = self.screen(b, mode='off')
+        self.assertFalse(touched.called)
+        self.assertIsNone(f['refusal'])
+        self.assertEqual(self.lines, [])
+
+    def test_an_unknown_value_holds_and_never_reads_as_off(self):
+        f = self.screen(self.push(add=('asf/conventions.py',)), mode='maybe')
+        self.assertEqual(f['refusal'][0], boundary.BOUNDARY_KIND)
+
+    # -- the hold, and the hold the record has answered -------------------------------------
+
+    def test_the_hold_carries_the_kind_and_every_out_of_grant_path(self):
+        edge = boundary.Edge(boundary.BOUNDARY_KIND, 'writes outside its grant: a.py (+1 more)',
+                             outside=['a.py', 'b.py'])
+        record = {'job': 'code-t-0080', 'item': 'T-0080', 'branch': 'worker/T-0080'}
+        got = lane.hold_with_correction(self.state, 'worker/T-0080', record, edge[0], edge[1],
+                                        self.lines.append,
+                                        outside=boundary.outside_of(edge))
+        self.assertEqual(got, 'held')
+        corr = self.registry()[-1]['correction']
+        self.assertEqual((corr['kind'], corr['outside']),
+                         (boundary.BOUNDARY_KIND, ['a.py', 'b.py']))
+
+    def test_a_boundary_hold_the_grant_now_covers_is_re_admitted(self):
+        """§2.7: the widened grant costs no second session — the harvest clears the hold itself
+        and the branch goes on from where it stands."""
+        b = self.push(add=('asf/boundary.py',))
+        corr = {'kind': boundary.BOUNDARY_KIND, 'text': 'writes outside its grant: asf/boundary.py',
+                'at': '2026-10-01T00:00:00Z'}
+        f = self.screen(b, correction=corr)
+        self.assertIsNone(f['refusal'])
+        self.assertIsNone(f['correction'])  # the transition below reads the cleared state
+        self.assertEqual(self.lines, ['re-admitted worker/T-0080: its grant now covers the diff'])
+        self.assertIsNone(self.registry()[-1]['correction'])
+        self.assertNotIn('rounds', self.registry()[-1])  # the round spent is not refunded
+
+    def test_a_dry_run_re_admits_nothing(self):
+        b = self.push(add=('asf/boundary.py',))
+        corr = {'kind': boundary.BOUNDARY_KIND, 'text': 'outside', 'at': '2026-10-01T00:00:00Z'}
+        f = self.screen(b, correction=corr, dry_run=True)
+        self.assertEqual(f['correction'], corr)
+        self.assertEqual(self.registry(), [])
+        self.assertEqual(self.lines, ['DRY: would re-admit worker/T-0080: its grant now covers '
+                                      'the diff'])
+
+    def test_another_kind_of_correction_is_never_cleared_here(self):
+        b = self.push(add=('asf/boundary.py',))
+        corr = {'kind': 'gate', 'text': 'FAILED', 'at': '2026-10-01T00:00:00Z'}
+        f = self.screen(b, correction=corr)
+        self.assertEqual(f['correction'], corr)
+        self.assertEqual(self.lines, [])
+        self.assertEqual(self.registry(), [])
 
 
 PRODUCT_REPOS = Template(ProductHarvestTests.build, prefix='harvest_product_')

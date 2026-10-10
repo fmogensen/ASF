@@ -30,7 +30,7 @@ import tempfile
 import time
 
 
-from asf import approvals, env, github, gitpush, hermetic, redact, refguard
+from asf import approvals, boundary, env, github, gitpush, hermetic, redact, refguard
 from asf.conventions import Conventions
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -1032,6 +1032,9 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     if is_record_repo(repo) and is_tracked(repo, 'index.json'):  # the record's own gate
         run_harvest(repo, state_dir or env.state_dir(product), dry_run, conv)
         return {}
+    warning = boundary.mode_warning(conv)
+    if warning:  # F-0026 PD7: an unknown boundary: value is reported, once, and reads as hold
+        out(f'harvest: {warning}')
     lane = lane_mod.Lane(product, state_dir, out, dry_run, items)
     sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
     if not dry_run:
