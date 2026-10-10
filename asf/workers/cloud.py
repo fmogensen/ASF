@@ -128,6 +128,25 @@ ROWS_CLOUD_OK = 'cloud-ok'
 #:
 #: ``cloud.local_only`` adds to this list. Nothing takes from it (F-0216 C4).
 LOCAL_KINDS = ('groom', 'groom-clerk', 'close')
+#: The correction kinds whose answer REWRITES the branch's history — the session rebases the
+#: branch's own commits onto the trunk and the factory publishes the result (B-0056). The cloud
+#: lane has no channel back for them, for the same reason it has none for :data:`LOCAL_KINDS`:
+#: it collects a session by one commit pushed to ``origin/<branch>``
+#: (:func:`report_commit`), a rewritten branch's push is a non-fast-forward the standing rules
+#: refuse, and the factory's own publish (:func:`asf.workers.lifecycle.publish`) pushes a LOCAL
+#: worktree's HEAD — which a cloud run's worktree never holds (:func:`catch_up` fast-forwards it
+#: to origin and does nothing else). Run in the cloud, such a correction ends "without the
+#: report commit" and the relaunch cap parks it (F-0289).
+#:
+#: ``conflict`` — the branch does not merge onto the trunk and the lane's own rebase conflicted
+#:   (asf.harvest.lane.Lane.rebase_onto_trunk): the session rebases and resolves.
+#: ``copies``   — the trunk-copies rebuild conflicted: the same rebase, by hand.
+#: ``naming``   — commit subjects the lane refused, reworded: a rewrite of every commit on the
+#:   branch.
+#:
+#: ``merge`` is NOT one of them, and neither is the ``rebase`` brief kind: both end in a merge
+#: commit on top of origin's tip, which is a fast-forward push the cloud channel carries.
+REWRITE_KINDS = ('conflict', 'copies', 'naming')
 DEFAULT_TIMEOUT_MIN = 240
 DEFAULT_LAUNCH_WAIT_S = 30
 DEFAULT_RUNS_ON = ('ubuntu-latest',)
@@ -359,11 +378,15 @@ def lane_accounts(accounts, s):
 
 def local_only(row, s):
     """The row never leaves the host: its kind is a :data:`LOCAL_KINDS` one (the floor, both
-    modes — F-0216 C3), a kind the operator added in ``cloud.local_only``, or its item says
+    modes — F-0216 C3), a kind the operator added in ``cloud.local_only``, the correction it
+    answers is a :data:`REWRITE_KINDS` one (the floor too — F-0289), or its item says
     ``local_only: true``. The kind is the canonical one: ``asf.tick.step_wave.worker_row``
-    carries ``brief.kind``, which is :func:`asf.briefs.build.normalize_kind`'s output."""
+    carries ``brief.kind``, which is :func:`asf.briefs.build.normalize_kind`'s output; the
+    correction kind is the lane's own, as it wrote it on the hold.
+    """
     kind = getattr(row, 'kind', None)
     return kind in LOCAL_KINDS or kind in s.local_only \
+        or getattr(row, 'correction_kind', '') in REWRITE_KINDS \
         or truthy(getattr(row, 'local_only', False))
 
 
@@ -944,8 +967,8 @@ def inflight_all():
 #: ``asf cloud doctor``'s mode row, per mode
 MODE_DETAIL = {
     MODE_PRIMARY: f'cloud.mode: primary — the cloud lane is the default executor '
-                  f'(local: {", ".join(LOCAL_KINDS)}, cloud.local_only, cards marked local_only, '
-                  f'and the fallback)',
+                  f'(local: {", ".join(LOCAL_KINDS)}, corrections that rebase, cloud.local_only, '
+                  f'cards marked local_only, and the fallback)',
     MODE_OVERFLOW: 'cloud.mode: overflow — the cloud lane is overflow only',
     MODE_OFF: 'cloud.mode: off — no new cloud launch; live cloud runs drain',
 }
@@ -1077,7 +1100,8 @@ def lane_split(cfg, product):
     lane = ('cloud lane off' if not s.enabled else 'no new cloud launch' if s.mode == MODE_OFF
             else f'cloud max_inflight {s.max_inflight}' if s.on
             else 'cloud lane not ready to launch (asf cloud doctor)')
-    keep = ', '.join(LOCAL_KINDS + tuple(k for k in s.local_only if k not in LOCAL_KINDS))
+    keep = ', '.join(LOCAL_KINDS + tuple(k for k in s.local_only if k not in LOCAL_KINDS)
+                     + (f'corrections that rebase ({", ".join(REWRITE_KINDS)})',))
     why = {MODE_PRIMARY: 'cloud first; local takes local-only rows and the fallback',
            MODE_OVERFLOW: 'local first; the cloud takes what local cannot',
            MODE_OFF: 'local only'}[s.mode]
