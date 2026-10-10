@@ -872,5 +872,66 @@ class RetirementRuleTests(ViewsTestCase):
         self.assertEqual(set(out.retired_open), {'T-0002', 'T-0004'})
 
 
+class BoardCollapsingTests(ViewsTestCase):
+    """B-0088 review round 1: the board's default must collapse on its own — ``--epic`` narrows
+    it further, it was never the whole fix."""
+
+    def write(self, items):
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    ITEMS = {
+        'E-0001': {'id': 'E-0001', 'type': 'epic', 'title': 'first goal', 'folder': 'epics',
+                   'state': 'New', 'decided': True, 'rank': 1},
+        'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'still moving',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Active', 'decided': True,
+                   'rank': 1, 'stage': 'building 1/3'},
+        'F-0002': {'id': 'F-0002', 'type': 'feature', 'title': 'just landed',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Active', 'decided': True,
+                   'rank': 2, 'stage': 'landed'},
+        'F-0003': {'id': 'F-0003', 'type': 'feature', 'title': 'shipped long ago',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Active', 'decided': True,
+                   'rank': 3, 'stage': 'on-prod'},
+        'F-0004': {'id': 'F-0004', 'type': 'feature', 'title': 'closed as wontdo',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Closed', 'decided': True,
+                   'rank': 4, 'stage': 'card'},
+        'F-0005': {'id': 'F-0005', 'type': 'feature', 'title': 'groom has not decided',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'New', 'decided': False,
+                   'rank': 5},
+    }
+
+    def test_the_default_collapses_done_and_undecided_to_one_line_each(self):
+        self.write(self.ITEMS)
+        text = board.render(self.root)
+        self.assertIn('F-0001', text)
+        self.assertIn('F-0002', text)
+        self.assertNotIn('F-0003', text)
+        self.assertNotIn('F-0004', text)
+        self.assertNotIn('F-0005', text)
+        self.assertIn('**Undecided** — 1 Feature (`--all` to list)', text)
+        self.assertIn('**Closed / on-prod** — 2 Features (`--all` to list)', text)
+
+    def test_all_opts_out_of_the_collapsing(self):
+        self.write(self.ITEMS)
+        text = board.render(self.root, show_all=True)
+        for fid in ('F-0001', 'F-0002', 'F-0003', 'F-0004', 'F-0005'):
+            self.assertIn(fid, text)
+        self.assertNotIn('Undecided —', text)
+        self.assertNotIn('Closed / on-prod —', text)
+
+    def test_epic_narrows_the_collapsed_summaries_too(self):
+        items = dict(self.ITEMS)
+        items['E-0002'] = {'id': 'E-0002', 'type': 'epic', 'title': 'second goal',
+                            'folder': 'epics', 'state': 'New', 'decided': True, 'rank': 2}
+        items['F-0006'] = {'id': 'F-0006', 'type': 'feature', 'title': 'closed elsewhere',
+                            'folder': 'features', 'parent': 'E-0002', 'state': 'Closed',
+                            'decided': True, 'rank': 1, 'stage': 'card'}
+        self.write(items)
+        text = board.render(self.root, epic='E-0001')
+        self.assertIn('**Closed / on-prod** — 2 Features (`--all` to list)', text)
+        self.assertNotIn('F-0006', text)
+        self.assertNotIn('E-0002', text)
+
+
 if __name__ == '__main__':
     unittest.main()

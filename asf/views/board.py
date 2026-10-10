@@ -38,11 +38,30 @@ def epic_title(e):
         else f"{e['id']} — {e['title']}"
 
 
-def render(root, product=None, epic=None):
-    """``epic`` (an Epic id, case-insensitive), when given, keeps only that epic's group out of
-    the groups below — the board grows one row per Feature with no cap on its own (339 lines /
-    67 KB on the real record, B-0088), and a console that caps its own output (the operator's
-    terminal, an agent's tool result) cuts it off before a given epic ever appears."""
+def feature_status(f):
+    """A Feature's bucket for the default collapsing (B-0088): ``'undecided'`` (groom has not
+    set ``decided: true`` on it yet — :func:`asf.groom.policy._undecided`'s rule, read again
+    here since this module stays index-only), ``'done'`` (``state: Closed`` or stage ``on-prod``
+    — shipped or dead, nothing to act on), else ``'moving'`` (decided and still in the pipeline,
+    ``landed`` included — the stage right before ``on-prod``)."""
+    if f.get('decided') is not True:
+        return 'undecided'
+    word = (f.get('stage') or '').split(' ')[0]
+    return 'done' if f.get('state') == 'Closed' or word == 'on-prod' else 'moving'
+
+
+def render(root, product=None, epic=None, show_all=False):
+    """``epic`` (an Epic id, case-insensitive), when given, narrows the output to that one
+    epic's group, on top of whatever ``show_all`` already chose — it never widens it.
+
+    By default (``show_all=False``) the board collapses to what still needs a look: full rows,
+    grouped per Epic as below, for Features :func:`feature_status` calls ``'moving'`` (decided,
+    still in the pipeline — ``landed`` included); the ``'undecided'`` and ``'done'`` (Closed or
+    on-prod) Features — most of a mature backlog — fold into one summary line each instead of a
+    full row apiece. ``show_all=True`` (``--all``) is the opt-out: every Feature gets a full row,
+    the board as it was before this default (339 lines / 67 KB on the real record, B-0088) — a
+    console that caps its own output (the operator's terminal, an agent's tool result) cuts it
+    off before a Feature anyone is actually looking for ever appears."""
     import time
     items, generated = ix.load(root)
     feats = ix.of_type(items, 'feature')
@@ -76,10 +95,21 @@ def render(root, product=None, epic=None):
            f"{n_plan['draft'] + n_plan['linked']} draft · "
            f"Tasks: {task_done} Closed / {task_n} · index.json generated {ix.local_stamp(generated)}"]
     groups = [(epic_title(e), e['id']) for e in epics] + [("No Epic (needs a parent Epic)", None)]
+    scope = rows
     if epic is not None:
         groups = [(title, eid) for title, eid in groups if eid and eid.lower() == epic.lower()]
+        scope = [r for r in rows if r[0] and r[0].lower() == epic.lower()]
+    if not show_all:
+        for bucket, label in (('undecided', 'Undecided'), ('done', 'Closed / on-prod')):
+            n = sum(1 for _e, f, _c in scope if feature_status(f) == bucket)
+            if n:
+                out.append("")
+                out.append(f"**{label}** — {n} Feature{'' if n == 1 else 's'} "
+                            f"(`--all` to list)")
     for title, eid in groups:
-        group = sorted(((f, cells) for e, f, cells in rows if e == eid), key=lambda r: (ix.rank(r[0]), r[0]['id']))
+        group = sorted(((f, cells) for e, f, cells in rows if e == eid
+                         and (show_all or feature_status(f) == 'moving')),
+                        key=lambda r: (ix.rank(r[0]), r[0]['id']))
         if not group:
             continue
         out.append("")
@@ -95,5 +125,6 @@ def render(root, product=None, epic=None):
 def cmd_backlog(args, root):
     from asf import env
     product = env.load_product(getattr(args, 'product', None))
-    print(render(root, product, epic=getattr(args, 'epic', None)), end='')
+    print(render(root, product, epic=getattr(args, 'epic', None),
+                 show_all=getattr(args, 'all', False)), end='')
     return 0
