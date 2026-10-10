@@ -548,6 +548,43 @@ def decisions_cell(plan):
     return f"{len(rows)} undecided — next: {shown}" if shown else f"{len(rows)} undecided"
 
 
+def rule_pass_cell(root, product):
+    """``Rule pass``: what the rule pass ruled over the last 7 days and the adjudicate
+    sessions it did not spawn (:mod:`asf.evidence.rulepass`) — ``None`` with the flag off or
+    nothing ruled, because a product that has not adopted it grows no row."""
+    from asf.evidence import rulepass
+    if not root or not rulepass.enabled(product):
+        return None
+    from asf.metrics import metrics
+    events = []
+    for day in metrics.days_back(datetime.date.today().isoformat(), 7):
+        try:
+            events.extend(metrics.read_stream(root, 'events', [day]))
+        except Exception:  # noqa: BLE001 — an unreadable or malformed day is skipped (PD16)
+            continue
+    events = [e for e in events if e.get('kind') == rulepass.EVENT]
+    if not events:
+        return None
+    cosmetic_names = tuple(name for name, _rx in rulepass.COSMETIC)
+    tally = collections.Counter()
+    for e in events:
+        for name in (e.get('rule') or '').split(','):
+            name = name.strip()
+            if name:
+                tally[name] += 1
+    cosmetic_total = sum(tally[n] for n in cosmetic_names)
+    precedent_total = tally.get('precedent', 0)
+    parts = []
+    if cosmetic_total:
+        sub = ', '.join(f'{n} {tally[n]}' for n in cosmetic_names if tally[n])
+        parts.append(f'cosmetic {cosmetic_total} ({sub})')
+    if precedent_total:
+        parts.append(f'precedent {precedent_total}')
+    ruled = cosmetic_total + precedent_total
+    return (f'{ruled} ruled in 7d — {", ".join(parts)}; '
+            f'{len(events)} adjudicate sessions not spawned')
+
+
 def _stalemate_parks(product, root):
     """``{item: adj}`` for every derived "adjudicated, card unchanged" stalemate park
     (:func:`asf.feeder.rows._capped`) — never one whose adjudicate ruling is still uncarried,
@@ -886,6 +923,7 @@ def render(root, product, cfg=None):
                        ('Ready to launch', lambda: ready_cell(plan())),
                        ('S1 gate', lambda: s1_gate_cell(plan())),
                        ('Decisions', lambda: decisions_cell(plan())),
+                       ('Rule pass', lambda: rule_pass_cell(root, product)),
                        ('Intake', lambda: intake_cell(root, product)),
                        ('Parked', lambda: parked_cell(product, root)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
