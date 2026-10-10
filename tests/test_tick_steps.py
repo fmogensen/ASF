@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import budget, capacity, env
+from asf import budget, capacity, env, upgrade
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
@@ -73,6 +73,12 @@ class StepsTestCase(TickTestCase):
         self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}')
         self.product = env.load_product('sample')
         self.lines = []
+        # this fixture's `repo_dir` has no `pyproject.toml`, so `drift.is_factory_source` is
+        # false and `_run_steps` takes the release channel: unmocked, every test built on this
+        # case reads the live factory repo (and the install under it) over the network
+        patcher = mock.patch.object(upgrade, 'release_report', return_value='none')
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def push_branch(self, branch):
         _git(['checkout', '-q', '-b', branch, 'main'], self.repo)
@@ -1877,11 +1883,13 @@ class BatchStep(StepsTestCase):
 
     def test_no_ci_capacity_configured_makes_no_gh_call(self):
         # the product declares no `ci:` block, so the resolver's own CI law never picks CiRuns —
-        # this proves it end to end, with the real resolver, not the stub above
-        with mock.patch('subprocess.run') as gh:
+        # this proves it end to end, with the real resolver, not the stub above. The tick's own
+        # preflight (upgrade.checkout_off_main, the release channel's installed_release) shells
+        # out to `git` on every tick regardless of `steps=`, so only a `gh` call is the resolver's.
+        with mock.patch('subprocess.run', wraps=subprocess.run) as run:
             rc, out = self.run_tick(steps='batch')
         self.assertEqual(rc, 0)
-        gh.assert_not_called()
+        self.assertFalse(any(c.args[0][:1] == ['gh'] for c in run.call_args_list))
         self.assertIn('[command:batch] batch ran', out)
 
 

@@ -2092,6 +2092,17 @@ class UpgradeRowTests(unittest.TestCase):
             doctor.check_upgrade(self._product(declared='auto'))
         latest.assert_not_called()
 
+    def test_the_row_takes_the_url_off_the_cache_and_never_a_fresh_pipx(self):
+        from asf import upgrade
+        patches = self._patched(old='v0.1.62', tag='v0.1.63', at=time.time() - 60, newer=True)
+        with patches[0], patches[2], patches[3], patches[4], \
+             mock.patch.object(upgrade, 'repo_url',
+                               return_value='https://github.com/x/asf') as url:
+            doctor.check_upgrade(self._product(declared='auto'))
+        self.assertTrue(url.call_args.kwargs.get('cached'),
+                        'an uncached read of the url runs `pipx list --json`, which writes a log '
+                        'file into the operator home on every row this check renders')
+
     def test_without_the_release_channel_landed_the_row_is_ok_not_a_crash(self):
         """The real ``asf.upgrade`` on this checkout — F-0112 Tasks 2/3/5 not landed, no mocks."""
         ok, detail = doctor.check_upgrade(self._product(declared='auto'))

@@ -412,15 +412,51 @@ def _out(run, cmd, timeout=60):
     return p.stdout if p.returncode == 0 and isinstance(p.stdout, str) else None
 
 
-def repo_url(run=subprocess.run):
-    """The git url the current install came from (its pipx spec), else install.sh's default."""
+def source_path():
+    """``<ASF_HOME>/state/install-source.json`` — ``{'url', 'at'}``: the git url ``pipx``
+    records as this install's source, beside the release cache and read on the same hour."""
+    return os.path.join(env.ASF_HOME, 'state', 'install-source.json')
+
+
+def _spec_url(run):
+    """The git url ``pipx`` records as this install's source, ``''`` when it records none (a
+    local-directory install, no pipx on PATH, an unreadable listing)."""
     text = _out(run, ['pipx', 'list', '--json'])
     try:
         spec = json.loads(text)['venvs'][PACKAGE_NAME]['metadata']['main_package']['package_or_url']
     except (TypeError, ValueError, KeyError):
         spec = ''
     m = re.match(r'git\+(.+?)(@[^@/]+)?$', spec or '')
-    return m.group(1) if m else os.environ.get('ASF_REPO_URL', tunable('DEFAULT_REPO_URL'))
+    return m.group(1) if m else ''
+
+
+def _cached_spec_url(run, now):
+    """:func:`_spec_url` off :func:`source_path` while its entry is younger than
+    :data:`RELEASE_POLL_S`, else read again and written back stamped — the empty answer cached
+    too, since it is the one a checkout gives on every single read."""
+    entry = _read_json(source_path())
+    url, at = entry.get('url'), entry.get('at')
+    if isinstance(url, str) and isinstance(at, (int, float)) and now - at < RELEASE_POLL_S:
+        return url
+    url = _spec_url(run)
+    _write_json(source_path(), {'url': url, 'at': now})
+    return url
+
+
+def repo_url(run=subprocess.run, cached=False, now=None):
+    """The git url the current install came from (its pipx spec), else install.sh's default.
+
+    ``cached`` takes that pipx answer off :func:`source_path` on the release cache's own hour
+    (D4), and is what the read-only views ask for. Every ``pipx`` call writes a timestamped log
+    file into the operator's home (``~/.local/state/pipx/log``, or ``$PIPX_HOME/logs``), and the
+    tick's release line and ``asf doctor``'s ``upgrade`` row both read this url on every run: a
+    tick a minute and a doctor beside it pile those logs up for an answer that changes only when
+    the install is replaced, and a second ``asf install`` over one home stops being the no-op
+    ``tests.test_install_e2e`` holds it to. An install reads it uncached — it is the one caller
+    that has just replaced what pipx records."""
+    url = _cached_spec_url(run, now if now is not None else time.time()) if cached \
+        else _spec_url(run)
+    return url or os.environ.get('ASF_REPO_URL', tunable('DEFAULT_REPO_URL'))
 
 
 def remote_head(url, run=subprocess.run, branch='main'):
@@ -673,6 +709,76 @@ def mid_landing(product):
         return sorted((item, info['branch']) for item, info in out['landing'].items())
     except Exception:  # noqa: BLE001 — an unreadable ledger holds the install, never clears it
         return []
+
+
+def _release_state_path(product):
+    """``<state_dir>/upgrade-release.json`` — the release channel's own state for one product
+    (D3): the tag last notified (``notified``), and the last release action taken, if any
+    (``last``: ``from``, ``from_sha``, ``to``, ``at``, ``result`` — Tasks 4 and 5 write it)."""
+    return os.path.join(env.state_dir(product), 'upgrade-release.json')
+
+
+def _read_release_state(product):
+    try:
+        with open(_release_state_path(product), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_release_state(product, data):
+    _write_json(_release_state_path(product), data)
+
+
+def release_report(ctx, out=print, now=None, run=subprocess.run):
+    """The release channel's tick, for every product that is not the factory's own source (D3):
+    one line every tick naming the installed release against the newest tag on the remote, and
+    ``notify``'s ``UPGRADE AVAILABLE`` once per tag — notified once, silent again until a newer
+    tag is cut (:func:`asf.tick.tick._run_steps` chooses this over :func:`asf.drift.report` by
+    structure, never by a product's own declaration).
+
+    Returns one of ``'none' | 'notified' | 'held' | 'installed' | 'rolled-back' | 'failed'``:
+    this function itself returns only the first two — ``'held'``, ``'installed'`` and
+    ``'rolled-back'`` are the install and rollback that Tasks 4 and 5 add to this same body.
+    ``auto`` falls through to the same ``notify`` branch for now (PD15): a product that asked to
+    be upgraded gets the line, not silence, until Task 4 replaces this with the install.
+
+    The whole body is inside one ``try``/``except Exception``, printing ``factory: release check
+    failed (<detail>)`` and returning ``'none'`` — the shape :func:`asf.drift.report` already
+    uses: a version check has never been allowed to stop a tick."""
+    try:
+        product = ctx.product
+        policy = product.upgrade
+        # `cached=True`: the tick's line is a read, and an uncached url costs a `pipx` call
+        # — and a pipx log file in the operator's home — on every tick (see `repo_url`)
+        url = repo_url(run, cached=True, now=now)
+        tag, _sha = latest_release(url, now, run)
+        old, old_sha = installed_release()
+        if old is None:
+            tail = 'release unreadable'
+        elif newer(tag, old):
+            tail = 'BEHIND'
+        else:
+            tail = 'current'
+        out(f"factory: asf {old or 'unknown'} @ {(old_sha or 'unknown')[:7]} · "
+            f"release {tag or 'unreadable'} · {tail}")
+        if policy == 'off':
+            return 'none'
+        if not newer(tag, old):
+            return 'none'
+        state = _read_release_state(product)
+        if state.get('notified') == tag:
+            return 'none'
+        upgrade_line = f'UPGRADE AVAILABLE {old} → {tag}'
+        out(upgrade_line)
+        ctx.upgrade_line = upgrade_line
+        state['notified'] = tag
+        _write_release_state(product, state)
+        return 'notified'
+    except Exception as e:  # noqa: BLE001 — a version check never stops a tick
+        out(f"factory: release check failed ({str(e).strip() or type(e).__name__})")
+        return 'none'
 
 
 def _ref_label(ref):

@@ -221,6 +221,7 @@ class Context:
         self.fresh = fresh
         self._record = None
         self.stale_reason = None  # set when the record step failed: the index is not this tick's
+        self.upgrade_line = None  # the release channel's `UPGRADE AVAILABLE …`, for the digest
         self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
         self.wave = {}             # §2.3 — step_wave.wave_state's own answer, carried on the tick line
         self.seats = None         # the wave's seat reading, carried on the tick line
@@ -523,10 +524,17 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
                                                 wait=upgrade.drain_wait_s())))
         return upgraded[-1]
 
+    # the two channels are exclusive (D3): a product whose repo is the factory's own source
+    # takes the trunk channel; every other product takes the release channel. Structure chooses,
+    # never a product's own declaration, so no product file can get it wrong.
+    released = []
     with locks.record('version check', wait_s=0) as ok:
         if ok:
-            drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
-                         upgrade=run_upgrade)
+            if drift.is_factory_source(product.repo_dir or ''):
+                drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
+                             upgrade=run_upgrade)
+            else:
+                released.append(upgrade.release_report(ctx))
     if upgraded and upgraded[-1] == 0:
         # this process still runs the old package over a replaced install: a later lazy import
         # would load the new one half-way through the tick, so the steps wait for the next tick
@@ -541,6 +549,12 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         marker = upgrade.read_pending(product.name)
         print(f'tick: upgrade to {marker["sha"][:7]} pending — this tick runs'
               ' without a new background harvest; the install goes at the next start')
+    if released and released[-1] in ('installed', 'rolled-back', 'failed'):
+        # the release channel's own install/rollback (Tasks 4 and 5): nothing installs these
+        # three yet, but the fork lands with the two channels so neither Task wires tick.py at
+        # all — the two lists are never both non-empty, the channels being exclusive.
+        print('tick: the install was changed under this tick; its steps run on the next tick')
+        return 0
     if any(s == 'wave' and o == 'asf' for s, o, _ in rows) and not any(s == 'watchdog' for s, _, _ in rows):
         # the dwell watchdog (asf.dwell) runs with every asf wave, whichever clock carries it — a
         # product whose clocks predate the step is watched too; `steps: {watchdog: off}` stops it
