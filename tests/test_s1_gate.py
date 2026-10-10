@@ -94,3 +94,15 @@ class AnUnworkedS1HoldsNothing(unittest.TestCase):
         g = tiers.gate(cut, uncut, held=['B-0057'])
         self.assertEqual(g.held, 0)
         self.assertEqual([e[0] for e in g.unworked], ['B-0057'])
+
+    def test_a_waived_s1_waiting_on_the_gate_holds_nothing(self):
+        # F-0300: a rule pass ruled the finding — the correction's own WAITS ON gate row takes
+        # the S1 lane's first seat, same as a live branch or merge, cutting no tier-2 row behind
+        # it and reading as nothing is working in it (D5, WORKED)
+        bug = {'id': 'B-0057', 'type': 'bug', 'severity': 'S1', 'decided': True, 'state': 'New'}
+        occ = {'corrections': {'B-0057': {'kind': 'review', 'text': 'x', 'rounds': 3, 'same': 3,
+                                          'branch': 'fix/B-0057'}}}
+        cut, uncut = self._plans(bug, occupancy=occ, waived={'B-0057'})
+        launching = {(r.item_id, r.kind) for r in uncut if r.launches}
+        self.assertTrue(launching <= {(r.item_id, r.kind) for r in cut if r.launches})
+        self.assertIsNone(tiers.gate(cut, uncut))
