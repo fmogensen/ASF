@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 from asf import env, rehearsal
-from asf.record import core, frontmatter
+from asf.record import core, frontmatter, staged_guard
 from tests import gitfixture
 
 DESCRIPTION = """## Description
@@ -25,12 +25,20 @@ DESCRIPTION = """## Description
 ## History
 - 2026-01-01: created
 - 2026-01-02: groom: priority → P1, see {ref}
+{timestamped}
 {continuation}
 
 ## Children
 
 ## Backlinks
 """
+
+#: a ``## History`` entry of the *timestamped* shape the record writes beside the template's own
+#: ``- <date>: created`` — :func:`asf.record.reopen` stamps ``- <date> <HH:MM> <verb>: …``, and
+#: ``asf set`` and groom write ``- <date> <verb>: …``. The clearer owes this shape the same
+#: treatment as the colon shape: the date and the verb stay, the prose after them goes.
+HISTORY_TIMESTAMPED_PROSE = 'the rehearsal found it filed by hand and still open'
+HISTORY_TIMESTAMPED = f'- 2026-01-03 09:04 reopen: {HISTORY_TIMESTAMPED_PROSE} — state Done'
 
 #: a ``## History`` line that does not open an entry: the wrapped tail of the one above it, and
 #: free prose like the entry itself. It must not reach the snapshot as written.
@@ -40,6 +48,14 @@ HISTORY_CONTINUATION = '  wrapped on from the line above, free prose and not a n
 #: an operator-ish name and a filesystem path in it. Neither may reach the snapshot; the ``→`` and
 #: the id must. (Stand-in values: no real account name or machine path is spelled in this tree.)
 PROSE_HEADER = '→ closed (groom 2026-02-03, lane-1 via /opt/elsewhere/notes.md)'
+
+#: a ``## `` heading a person wrote, not one of the record template's own
+#: (``asf/record/new.py:207-214``). The heading *line* is free prose like any other: a real
+#: record's hand-written headings name a date, a pull request number and a product, so a heading
+#: kept verbatim merely because it opens with ``## `` carries all three into the snapshot.
+HAND_HEADING_PROSE = 'Source: the thread of 2026-02-05 (PR #1234), read by hand'
+HAND_HEADING = f'## {HAND_HEADING_PROSE}'
+HAND_SECTION_BODY = 'the prose filed under a hand-written heading, cleared like any other body'
 
 #: a ``removed:`` reason of the shape :func:`asf.record.setfield._set_only` accepts. The prose must
 #: not reach the snapshot; the task id :mod:`asf.record.ingest` reads back out of it must.
@@ -59,7 +75,8 @@ LINK_LABEL = 'the thread this was agreed in filed by hand'
 #: every prose value above, the shape a leak check reads: none of these may appear in the
 #: snapshot, whole or in part.
 PROSE_VALUES = (RESHAPE, DECIDED_BY, RULE_REASON, RULE_CHECK, AREA, LINK_LABEL, REMOVED_REASON,
-                HISTORY_CONTINUATION.strip(), PROSE_HEADER)
+                HISTORY_CONTINUATION.strip(), PROSE_HEADER, HISTORY_TIMESTAMPED_PROSE,
+                HAND_HEADING_PROSE, HAND_SECTION_BODY)
 
 #: folder -> (type, prefix, digit width). Three prefixes five digits wide, four kept at four —
 #: the same shape the plan's own sizing table reads off the real record.
@@ -200,8 +217,9 @@ def _history_lines(body):
 def _build_source(root, n_per_type=3, tags=True, counts=None):
     """A from-scratch synthetic record + repo of real *shape*: every item type, a five-digit id
     for three prefixes, each card carrying both structural and prose-bearing typed fields and a
-    ``## History`` with a continuation line, intake in its three states, three tags (two
-    annotated, one a lightweight pre-release). ``counts`` gives a per-folder card count where
+    ``## History`` with both entry shapes and a continuation line, one card with a hand-written
+    section heading, intake in its three states, three tags (two annotated, one a lightweight
+    pre-release). ``counts`` gives a per-folder card count where
     the flat ``n_per_type`` will not do (:data:`FIXTURE_COUNTS`); ``tags=False`` leaves the repo
     tag-less, the shape that drives the builder's synthetic-ref fallback. Returns
     ``(record_dir, repo_dir, {folder: [ids]})``.
@@ -224,7 +242,12 @@ def _build_source(root, n_per_type=3, tags=True, counts=None):
             # body and title lengths vary with the index: the filler is seeded by the length of
             # what it replaces, so a record of one length everywhere proves nothing
             body = DESCRIPTION.format(body='a card body of some real length here ' * (2 + i % 3),
-                                       ref=task_ref, continuation=HISTORY_CONTINUATION)
+                                       ref=task_ref, timestamped=HISTORY_TIMESTAMPED,
+                                       continuation=HISTORY_CONTINUATION)
+            if folder == 'tasks' and i == 2:
+                # one card carrying a section heading a person typed, which is not one of the
+                # template's own and may not be copied through
+                body += f"\n{HAND_HEADING}\n\n{HAND_SECTION_BODY}\n"
             typed, machine = _card_fields(folder, i)
             _write_card(record, folder, iid, type_, 'a representative title here' + ' x' * (i % 4),
                         body, typed=typed, machine=machine,
@@ -334,7 +357,33 @@ class IntakeThreeStates(unittest.TestCase):
         self.assertTrue(intake['open'])
         self.assertGreaterEqual(len(intake['done']), 2)
         self.assertIn('mismatch', intake)
-        self.assertIn(intake['mismatch']['name'], intake['done'])
+        # the third state is a *pair*: an open note and the done/ copy written under its stem
+        self.assertIn(intake['mismatch']['note'], intake['open'])
+        self.assertIn(intake['mismatch']['done'], intake['done'])
+
+    def _note(self, *parts):
+        path = os.path.join(COMMITTED_SNAPSHOT, 'record', self.manifest['intake_dir'], *parts)
+        with open(path, encoding='utf-8') as f:
+            return f.read()
+
+    def test_the_mismatch_done_copy_is_not_a_superstring_and_still_pairs_by_name(self):
+        intake_dir = self.manifest['intake_dir']
+        mismatch = self.manifest['intake']['mismatch']
+        note_text = self._note(mismatch['note'])
+        done_text = self._note('done', mismatch['done'])
+        # the state acceptance line 5 names: a done/ copy that is not a byte-for-byte superstring
+        # of the note, so asf.record.staged_guard.check's containment arm (`text in t`) cannot
+        # cover the move...
+        self.assertTrue(note_text.strip(), mismatch)
+        self.assertNotIn(note_text.strip(), done_text)
+        # ...which leaves _paired_done, the guard's one escape (F-0305), as what does — and that
+        # pairs by name, which is why the copy carries the note's own stem.
+        note_rel = f"{intake_dir}/{mismatch['note']}"
+        done_rel = f"{intake_dir}/done/{mismatch['done']}"
+        self.assertTrue(
+            staged_guard._paired_done(note_rel, note_text, [done_rel], {done_rel: done_text},
+                                       intake_dir),
+            (note_rel, done_rel))
 
     def test_intake_done_header_kept_text_cleared(self):
         name = self.manifest['intake']['done'][0]
@@ -490,12 +539,56 @@ class BuildWritesTheSnapshot(unittest.TestCase):
         open_names = sorted(n for n in os.listdir(intake) if n.endswith('.md'))
         done_names = sorted(os.listdir(os.path.join(intake, 'done')))
         self.assertEqual(open_names, ['open-note-1.md', 'open-note-2.md'])
-        self.assertEqual(done_names, ['done-note-1.md', 'done-note-2.md', 'done-note-3.md'])
+        # 'open-note-1.md' under done/ is the mismatch copy: the note's own stem, which is what
+        # the staged guard pairs by (asf/rehearsal.py:_build_intake)
+        self.assertEqual(done_names, ['done-note-1.md', 'done-note-2.md', 'done-note-3.md',
+                                       'open-note-1.md'])
         self.assertEqual(sorted(self.manifest['intake']['open']), open_names)
         self.assertEqual(sorted(self.manifest['intake']['done']), done_names)
         for source_name in ('open-1.md', 'a-second-filed-note.md', 'done-1.md', 'done-2.md',
                             'done-3.md'):
             self.assertNotIn(source_name, open_names + done_names)
+
+    def test_a_timestamped_history_entry_keeps_its_stamp_and_verb_and_loses_its_prose(self):
+        # the shape asf.record.reopen writes. Before the entry regex read it, the whole line took
+        # the fallback and the stamp went out with the prose.
+        _meta, body = self._card('tasks')
+        history = dict((h.strip(), c) for h, c in core.parse_sections(body)[1])['## History']
+        line = next(l for l in history.split('\n') if l.startswith('- 2026-01-03'))
+        self.assertEqual(len(line), len(HISTORY_TIMESTAMPED))
+        self.assertTrue(line.startswith('- 2026-01-03 09:04 reopen:'), line)
+        self.assertNotIn(HISTORY_TIMESTAMPED_PROSE, line)
+        self.assertEqual(_uncleared(line[len('- 2026-01-03 09:04 reopen:'):]), [], line)
+
+    def test_a_hand_written_section_heading_is_cleared_and_the_templates_are_kept(self):
+        _meta, body = self._card('tasks', 1)   # the card _build_source gives a hand-typed heading
+        headings = [h for h, _c in core.parse_sections(body)[1]]
+        for kept in ('## Description', '## Acceptance', '## History', '## Children',
+                      '## Backlinks'):
+            self.assertIn(kept, headings, headings)
+        self.assertNotIn(HAND_HEADING, headings)
+        hand = [h for h in headings if h not in rehearsal._TEMPLATE_HEADINGS]
+        self.assertEqual(len(hand), 1, headings)
+        # the heading's shape survives (the '## ' and the line's own length) and nothing it said
+        self.assertTrue(hand[0].startswith('## '), hand[0])
+        self.assertEqual(len(hand[0]), len(HAND_HEADING))
+        self.assertEqual(_uncleared(hand[0]), [], hand[0])
+
+    def test_the_mismatch_done_copy_pairs_by_name_and_is_a_truncation(self):
+        intake = self.manifest['intake']
+        mismatch = intake['mismatch']
+        self.assertEqual(mismatch['done'], mismatch['note'])
+        base = os.path.join(self.out, 'record', 'inbox')
+        with open(os.path.join(base, mismatch['note']), encoding='utf-8') as f:
+            note_text = f.read()
+        with open(os.path.join(base, 'done', mismatch['done']), encoding='utf-8') as f:
+            done_text = f.read()
+        self.assertTrue(note_text.strip())
+        self.assertNotIn(note_text.strip(), done_text)
+        self.assertIn(done_text.strip(), note_text)   # a prefix of it, and shorter
+        self.assertTrue(staged_guard._paired_done(
+            f"inbox/{mismatch['note']}", note_text, [f"inbox/done/{mismatch['done']}"],
+            {f"inbox/done/{mismatch['done']}": done_text}, 'inbox'))
 
     def test_a_removed_reasons_prose_is_cleared_and_its_id_kept(self):
         iid = self.ids['tasks'][0]
@@ -625,6 +718,19 @@ class ManifestHoldsDetectsBreakage(unittest.TestCase):
             json.dump(manifest, f)
         problems = rehearsal.manifest_holds(self.out)
         self.assertTrue(any('refs' in p for p in problems), problems)
+
+    def test_a_mismatch_copy_that_swallows_its_note_whole_is_a_red_line(self):
+        # the claim is non-containment, checked against the note's own text on disk — so writing
+        # the note back into its done/ copy breaks it, and no edit of manifest.json can hide that
+        with open(os.path.join(self.out, 'manifest.json'), encoding='utf-8') as f:
+            mismatch = json.load(f)['intake']['mismatch']
+        base = os.path.join(self.out, 'record', 'inbox')
+        with open(os.path.join(base, mismatch['note']), encoding='utf-8') as f:
+            note_text = f.read()
+        with open(os.path.join(base, 'done', mismatch['done']), 'w', encoding='utf-8') as f:
+            f.write(note_text + '\nand a line more\n')
+        problems = rehearsal.manifest_holds(self.out)
+        self.assertTrue(any('intake.mismatch' in p for p in problems), problems)
 
     def test_annotated_flag_flipped_in_both_files_is_still_a_red_line(self):
         # the same flip, made consistently in manifest.json's `refs` list and the independent

@@ -75,7 +75,16 @@ def clear_block(text):
     return '\n'.join(clear_line(line) for line in text.split('\n'))
 
 
-_HISTORY_LINE_RE = re.compile(r'^(-\s\d{4}-\d{2}-\d{2}:\s*)(\S+)(.*)$')
+#: A ``## History`` entry's opening: ``- <date>`` or ``- <date> <HH:MM[:SS][Z]>``, the optional
+#: colon after it, and the entry's own leading verb. The record writes both shapes — the
+#: template's ``- <date>: created`` (``asf/record/new.py:212``, ``asf/record/ids.py:198``) and the
+#: timestamped ``- <date> <HH:MM> <verb>: …`` that :func:`asf.record.reopen` (``- 2026-01-01
+#: 09:04 reopen: …``), ``asf set`` and groom write — so a line of either shape keeps its date and
+#: its verb and loses the prose after them. The ``:?`` is what the review's own pattern left out:
+#: without it every ``created`` line in the record takes the fallback below and the date goes
+#: with the prose.
+_HISTORY_LINE_RE = re.compile(
+    r'^(-\s\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?Z?)?:?\s+)(\S+)(.*)$')
 
 
 def _clear_gap(gap):
@@ -114,13 +123,19 @@ def clear_block_ids_kept(text):
 
 
 def clear_history_line(line):
-    """One ``## History`` line cleared: its date and leading verb token kept verbatim, every id
-    token inside it (:data:`asf.record.core.ID_TOKEN_RE`) kept verbatim, everything else filler
-    of the same length (the design's "a History section ... keeping its real date, its real
-    leading verb ... and its real id references — and filler for everything after them")."""
+    """One ``## History`` line cleared: its date (with the time it may carry) and leading verb
+    token kept verbatim, every id token inside it (:data:`asf.record.core.ID_TOKEN_RE`) kept
+    verbatim, everything else filler of the same length (the design's "a History section ...
+    keeping its real date, its real leading verb ... and its real id references — and filler for
+    everything after them"). A line :data:`_HISTORY_LINE_RE` cannot read is cleared
+    id-preservingly too, never copied."""
     m = _HISTORY_LINE_RE.match(line)
     if not m:
-        return clear_line(line)
+        # not an entry opening this clearer can read — still a History line, so it is cleared
+        # id-preservingly rather than wholly: an `` — see T-00001`` reference inside a shape the
+        # regex above does not cover is structure the snapshot owes its readers (C4), and the
+        # prose around it goes either way.
+        return clear_ids_kept(line)
     prefix, verb, rest = m.groups()
     return prefix + verb + clear_ids_kept(rest)
 
@@ -164,12 +179,34 @@ def _clear_meta_value(value, ids_kept=False):
     return value
 
 
+#: The ``## `` headings the record's own card template writes
+#: (:func:`asf.record.new.cmd_new`, ``asf/record/new.py:207-214``) — the only ones kept verbatim.
+#: Every other heading *line* is free prose, whoever typed it: a real record carries hand-written
+#: section headings that name a date, a pull request number and a product by name, and a heading
+#: copied through because it opens with ``## `` is a leak like any other (C4). The heading's own
+#: shape survives — ``'## '`` and the line's length — and nothing it said does.
+_TEMPLATE_HEADINGS = frozenset((
+    '## Description', '## Acceptance', '## Non-goals', '## History', '## Children',
+    '## Backlinks',
+))
+
+
+def _clear_heading(heading):
+    """``heading`` kept verbatim when it is one of the record template's own
+    (:data:`_TEMPLATE_HEADINGS`), else ``'## '`` and filler of the rest's own length, every id
+    token in it kept."""
+    if heading.strip() in _TEMPLATE_HEADINGS:
+        return heading
+    return '## ' + clear_ids_kept(heading[len('## '):])
+
+
 def _clear_card_body(body):
     preamble, sections = core.parse_sections(body)
     if preamble.strip():
         preamble = clear_block(preamble)
     new_sections = []
     for heading, content in sections:
+        cleared_heading = _clear_heading(heading)
         if heading.strip() == '## History':
             lines = content.split('\n')
             # a line that does not open an entry is a continuation of the one above it — free
@@ -180,7 +217,7 @@ def _clear_card_body(body):
                 for l in lines)
         else:
             content = clear_block(content)
-        new_sections.append([heading, content])
+        new_sections.append([cleared_heading, content])
     return core.render_sections(preamble, new_sections)
 
 
@@ -311,13 +348,26 @@ def _build_repo_seed(repo_dir, out_repo, widest):
     return refs, branches, merges
 
 
+def _intake_mismatch_text(note_text):
+    """The mismatch ``done/`` copy's text: a strict, non-empty prefix of ``note_text`` — a
+    *truncation* of the note's own cleared text, so the note can never be a substring of the copy
+    it was moved to. :func:`asf.record.staged_guard.check`'s plain containment arm (``text in t``)
+    is the one that covers an ordinary move; this shape defeats it on purpose, so the guard's one
+    escape, :func:`asf.record.staged_guard._paired_done`, is what has to cover the move — which
+    is why the copy is written under the note's own stem and not a name of its own (P5)."""
+    body = note_text.strip()
+    return body[:max(1, len(body) * 2 // 3)] + '\n'
+
+
 def _build_intake(record_dir, intake_dir_name, out_record):
     """Carry intake in its three states (S-79606's shape): notes still under ``<intake>/``,
     notes moved to ``<intake>/done/`` with their ``→ <id>`` header cleared id-preservingly and
-    their text cleared, and one done note the manifest names whose cleared text is a byte or two
-    shorter than the ``original`` it also records — so that recorded ``original`` is never a
-    substring of what the snapshot actually carries, the shape the staged guard's one escape
-    turns on (P5). Returns the manifest's ``intake`` claim.
+    their text cleared, and — the third state — one ``done/`` copy of an open note, written under
+    *that note's own stem* (``<intake>/done/<note>``) and carrying a truncation of the note's
+    cleared text (:func:`_intake_mismatch_text`). The copy is therefore not a byte-for-byte
+    superstring of the note it pairs with, which is the shape the staged guard's one escape turns
+    on (P5), and the manifest records the pair itself — ``mismatch = {note, done}`` — not a text
+    of its own. Returns the manifest's ``intake`` claim.
 
     Every note is written under a **generated** name — ``open-note-<n>.md`` /
     ``done-note-<n>.md``, numbered in the source's own sort order — never the source's own file
@@ -372,15 +422,18 @@ def _build_intake(record_dir, intake_dir_name, out_record):
                    f"→ T-00000\n\n{clear_block('a groomed note' * n)}")
         done_names.append(out_name)
 
-    mismatch_name = done_names[-1]
-    path = os.path.join(out_done, mismatch_name)
-    with open(path, encoding='utf-8') as f:
-        current = f.read()
-    _header, _, text = current.partition('\n\n')
-    original = text + '\n' + clear_line('x' * 40)   # longer than what the snapshot carries —
-    #                                                  never a substring of it, by construction
+    # the third state: a ``done/`` copy of the first open note, under that note's own stem, so
+    # :func:`asf.record.staged_guard._paired_done` pairs the two by name — and a truncation of
+    # the note's text, so nothing pairs them by containment.
+    note_name = open_names[0]
+    with open(os.path.join(out_intake, note_name), encoding='utf-8') as f:
+        note_text = f.read()
+    mismatch_done = note_name
+    write_text(os.path.join(out_done, mismatch_done), _intake_mismatch_text(note_text))
+    if mismatch_done not in done_names:
+        done_names.append(mismatch_done)
     return {'open': open_names, 'done': done_names,
-            'mismatch': {'name': mismatch_name, 'original': original}}
+            'mismatch': {'note': note_name, 'done': mismatch_done}}
 
 
 def build(record_dir, repo_dir, out, product=None):
@@ -543,18 +596,30 @@ def manifest_holds(snapshot):
     if actual_done != sorted(claimed_intake.get('done') or []):
         problems.append(f"intake.done: manifest claims {claimed_intake.get('done')}, "
                          f"snapshot has {actual_done}")
+    # the third intake state's claim, checked against the note's *real* text rather than a copy
+    # of it the manifest carries: the ``done/`` copy pairs with the note by name and must not be
+    # a superstring of it, which is what leaves the staged guard's one escape as the only thing
+    # that can cover the move (P5).
     mismatch = claimed_intake.get('mismatch')
     if mismatch:
-        path = os.path.join(done_dir, mismatch.get('name', ''))
+        note_path = os.path.join(intake_dir, mismatch.get('note') or '')
+        done_path = os.path.join(done_dir, mismatch.get('done') or '')
         try:
-            with open(path, encoding='utf-8') as f:
-                text = f.read()
-        except OSError:
-            problems.append(f"intake.mismatch: {mismatch.get('name')} missing")
+            with open(note_path, encoding='utf-8') as f:
+                note_text = f.read()
+            with open(done_path, encoding='utf-8') as f:
+                done_text = f.read()
+        except OSError as e:
+            problems.append(f"intake.mismatch: {mismatch.get('note')} / "
+                             f"{mismatch.get('done')}: {e.strerror}")
         else:
-            if mismatch.get('original') in text:
-                problems.append(f"intake.mismatch: {mismatch.get('name')}'s done copy now "
-                                 "contains the text its claim says it lacks")
+            if not note_text.strip():
+                problems.append(f"intake.mismatch: {mismatch.get('note')} is empty, so its "
+                                 "done copy cannot fail to contain it")
+            elif note_text.strip() in done_text:
+                problems.append(f"intake.mismatch: {mismatch.get('done')}'s done copy now "
+                                 f"contains {mismatch.get('note')} whole, which its claim says "
+                                 "it does not")
 
     return problems
 
