@@ -1,12 +1,14 @@
 """asf.tick.step_daily — the tick's once-a-day step, in the record clone.
 
 ``stale``, ``rollup`` for yesterday with its releases, the value loop (``scorecard``,
-:mod:`asf.scorecard.loop`), and ``deciders`` (:func:`asf.shadow.settle`: each due closing
-decider's shadow cases judged against what happened to their card), written into the record
-clone — the tick's one commit (:func:`asf.tick.tick.finish`) carries them with the rest of the
-tick. One line per part: ``daily: <part> ok|FAILED — <its last line>``. A part that fails does
-not stop the other; the step fails (and the day is not stamped) when any did. The groom is its
-own step (:mod:`asf.tick.step_groom`). Whether it is due today is the tick's stamp
+:mod:`asf.scorecard.loop`), ``deciders`` (:func:`asf.shadow.settle`: each due closing
+decider's shadow cases judged against what happened to their card), and ``channels``
+(:func:`asf.channels.advance`: edge at the newest green tag, stable promoted when its gate is
+met — after ``rollup`` cuts the day's releases), written into the record clone — the tick's one
+commit (:func:`asf.tick.tick.finish`) carries them with the rest of the tick. One line per part:
+``daily: <part> ok|FAILED — <its last line>``. A part that fails does not stop the other; the
+step fails (and the day is not stamped) when any did. The groom is its own step
+(:mod:`asf.tick.step_groom`). Whether it is due today is the tick's stamp
 (:func:`asf.tick.steps.daily_due`).
 """
 import argparse
@@ -30,6 +32,7 @@ def parts(product, root, event=None):
     from asf.tick.stale import cmd_stale
     from asf.scorecard.loop import daily as scorecard_daily
     from asf.shadow import settle as shadow_settle
+    from asf import channels
     return [
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
@@ -38,6 +41,8 @@ def parts(product, root, event=None):
         ('scorecard', lambda: scorecard_daily(product, root)),
         # the shadow deciders: each due close judged against what happened to its card
         ('deciders', lambda: shadow_settle(product, root)),
+        # the release channels: edge at the newest green tag, stable promoted when its gate is met
+        ('channels', lambda: channels.advance(product, root, event=event)),
     ]
 
 

@@ -548,6 +548,11 @@ def build_parser():
     p_release.add_argument('--known-issues', action='store_true',
                            help='print docs/KNOWN-ISSUES.md: the open 1.0 criteria and the open Bugs')
 
+    p_channels = sub.add_parser('channels', help='the RELEASE CHANNELS table: edge and stable, '
+                                                  'the stable candidate, and its four gate rows')
+    p_channels.add_argument('--product')
+    p_channels.add_argument('--json', action='store_true')
+
     from asf.tune import add_parser as add_tune_parser
     add_tune_parser(sub)
     from asf.shadow import add_parser as add_deciders_parser
@@ -906,7 +911,7 @@ def _main(argv=None):
         from asf.tick.watch import cmd_watch
         return cmd_watch(args)
     if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status', 'tokens', 'scorecard',
-                        'release-readiness', 'console-feed'):
+                        'release-readiness', 'console-feed', 'channels'):
         view_root = resolve_record(args, announce=_announce_stderr if getattr(args, 'json', False) else print)
         if args.command == 'roadmap':
             from asf.views.roadmap import cmd_roadmap
@@ -932,6 +937,9 @@ def _main(argv=None):
         if args.command == 'release-readiness':
             from asf.release import cmd_release_readiness
             return cmd_release_readiness(args, view_root)
+        if args.command == 'channels':
+            from asf import channels
+            return channels.cmd_channels(args, view_root)
         if args.command == 'status':
             from asf.views.status import cmd_status
             return cmd_status(args, view_root)

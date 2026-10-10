@@ -24,7 +24,14 @@ one case per checkbox line of S-81206.
 Task 6 adds the two consumers: ``UpgradeTargetTest`` (``upgrade.resolve_target``'s new channel
 step) and ``BootstrapRuleTest`` (the bootstrap's own inline copy of the rule, extracted from
 ``tools/install.sh`` and pinned equal to :func:`channels.channel_tag` on the same fixture remote
-— one case per checkbox line of S-81209)."""
+— one case per checkbox line of S-81209).
+
+Task 5 adds the mover and the report: ``AdvanceTest`` (``channels.advance``, the daily part —
+real git throughout, a :class:`FakeGh` only for the ``gh api`` calls ``ci_verdict`` makes, the
+same discipline :class:`EdgeTest`/:class:`PublishTest` hold their own fixtures to) and
+``ReportTest`` (``channels.report``/``render``/``cmd_channels`` — read-only: no state file, no
+ref, no event, no commit) — one case per checkbox line of S-81208."""
+import argparse
 import contextlib
 import datetime
 import io
@@ -705,6 +712,309 @@ class S1WindowTest(unittest.TestCase):
     def test_an_s2_inside_the_window_does_not_block(self):
         self.assertNotIn('B-0004', self.windowed_ids())
         self.assertNotIn('B-0004', self.open_s1_ids())
+
+
+# --- Task 5: the mover and the report — the daily part, and `asf channels` ------------------
+#
+# ``advance``'s own ``run`` reaches only the ``gh api`` calls ``ci_verdict`` makes
+# (``_release_tags`` reads local tags through :func:`asf.gitops.git`, never through ``run``, and
+# :func:`channels.publish` always pushes for real): a :class:`FakeGh` is passed as ``run``
+# directly, never a hand built ``CompletedProcess``, the same discipline :class:`EdgeTest` holds
+# its own fixture to.
+
+
+class AdvanceTest(ChannelsStateHome):
+    """S-81208 — ``advance`` is the daily part: publish edge at the newest green tag, then
+    promote stable once all four rows of :func:`channels.stable_rows` are met. One case per
+    checkbox line; the rehearsal row is held ``off`` throughout (Task 4's own fixture for it,
+    :class:`FakeRehearsalGh`, is a separate concern from this Task's)."""
+
+    NOW = datetime.datetime(2026, 10, 10, 12, 0, 0, tzinfo=UTC)
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix='channels_advance_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bare, self.local = _repo_fixture(self.tmp)
+        self._make_factory_source(self.local)
+        self.root = os.path.join(self.tmp, 'record')  # no bugs/ folder: no_s1 reads as met
+        self.product = env.Product(self.P, {'repo_dir': self.local, 'repo_slug': 'o/r',
+                                             'main': 'main',
+                                             'release': {'channels': {'rehearsal_check': 'off'}}})
+
+    def _make_factory_source(self, repo):
+        with open(os.path.join(repo, 'pyproject.toml'), 'w', encoding='utf-8') as f:
+            f.write('[project]\nname = "asf-factory"\n')
+        _git(['add', 'pyproject.toml'], repo)
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'pyproject'],
+            repo)
+        _git(['push', '-q', 'origin', 'HEAD:main'], repo)
+
+    def _commit(self, msg):
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', msg], self.local)
+        return _git(['rev-parse', 'HEAD'], self.local)
+
+    def _tag(self, name):
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'tag', '-a', name, '-m', name],
+            self.local)
+
+    def _events(self, sink):
+        return lambda kind, **fields: sink.append(dict(fields, kind=kind))
+
+    def test_the_part_is_in_step_daily_after_rollup(self):
+        from asf.tick import step_daily
+        names = [n for n, _ in step_daily.parts(env.Product('p', {'repo_slug': 'a/b'}), '.')]
+        self.assertGreater(names.index('channels'), names.index('rollup'))
+
+    def test_edge_publishes_the_newest_green_tag_and_logs_it(self):
+        c1 = _git(['rev-parse', 'HEAD'], self.local)
+        self._tag('v0.1.1')  # red, at c1
+        c2 = self._commit('second')
+        self._tag('v0.1.2')  # green, at c2
+        run = FakeGh({c1: 'red', c2: 'green'})
+        events, lines = [], []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(self.product, self.root, event=self._events(events),
+                                  out=lines.append, now=self.NOW, run=run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_ref_sha(self.bare, 'refs/heads/releases/edge'), c2)
+        log = channels.read_log(self.P)
+        self.assertEqual(log['edge'], {'tag': 'v0.1.2', 'commit': c2,
+                                       'at': self.NOW.strftime('%Y-%m-%dT%H:%M:%SZ')})
+        # one line for edge, one for stable (checkbox 3), naming the version
+        edge_lines = [ln for ln in lines if ln.startswith('channels: edge')]
+        stable_lines = [ln for ln in lines if ln.startswith('channels: stable')]
+        self.assertEqual(len(edge_lines), 1)
+        self.assertEqual(len(stable_lines), 1)
+        self.assertIn('v0.1.2', edge_lines[0])
+        edge_events = [e for e in events if e['channel'] == 'edge']
+        self.assertEqual(edge_events, [{'kind': 'channel', 'channel': 'edge', 'tag': 'v0.1.2',
+                                        'commit': c2, 'previous': None}])
+
+    def test_a_tag_whose_ci_is_red_never_reaches_edge_and_the_older_green_one_does(self):
+        c1 = self._commit('one')
+        self._tag('v0.1.1')  # green
+        c2 = self._commit('two')
+        self._tag('v0.1.2')  # red: never published
+        run = FakeGh({c1: 'green', c2: 'red'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(self.product, self.root, out=lambda *_a: None, now=self.NOW,
+                                  run=run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_ref_sha(self.bare, 'refs/heads/releases/edge'), c1)
+
+    def test_a_day_with_nothing_new_prints_unchanged_and_writes_nothing(self):
+        c1 = _git(['rev-parse', 'HEAD'], self.local)
+        self._tag('v0.1.1')
+        run = FakeGh({c1: 'green'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            channels.advance(self.product, self.root, out=lambda *_a: None, now=self.NOW, run=run)
+        before = channels.read_log(self.P)
+        events, lines = [], []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(self.product, self.root, event=self._events(events),
+                                  out=lines.append, now=self.NOW, run=run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(channels.read_log(self.P), before)
+        self.assertEqual(events, [])
+        self.assertTrue(any('edge unchanged' in ln for ln in lines))
+
+    def test_stable_holds_and_names_what_it_is_waiting_for(self):
+        c1 = _git(['rev-parse', 'HEAD'], self.local)
+        self._tag('v0.1.1')
+        run = FakeGh({c1: 'green'})
+        lines = []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(self.product, self.root, out=lines.append, now=self.NOW,
+                                  run=run)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(_ref_sha(self.bare, 'refs/heads/releases/stable'))
+        self.assertIsNone(channels.read_log(self.P)['stable'])
+        holds = [ln for ln in lines if ln.startswith('channels: stable')]
+        self.assertEqual(len(holds), 1)
+        # a tag published moments ago has not dwelled 48 h, so there is no candidate yet at all
+        self.assertIn('no candidate', holds[0])
+
+    def test_stable_promotes_once_the_gate_is_met_and_writes_one_event(self):
+        c1 = _git(['rev-parse', 'HEAD'], self.local)
+        self._tag('v0.1.1')
+        run = FakeGh({c1: 'green'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            channels.advance(self.product, self.root, out=lambda *_a: None, now=self.NOW, run=run)
+
+        later = self.NOW + datetime.timedelta(hours=49)
+        events, lines = [], []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(self.product, self.root, event=self._events(events),
+                                  out=lines.append, now=later, run=run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_ref_sha(self.bare, 'refs/heads/releases/stable'), c1)
+        log = channels.read_log(self.P)
+        self.assertEqual(log['stable']['tag'], 'v0.1.1')
+        self.assertEqual(log['stable']['commit'], c1)
+        self.assertEqual(log['stable']['promoted_for'],
+                         ['cadence', 'dwell', 'rehearsal', 'no_s1'])
+        self.assertTrue(any(ln.startswith('channels: stable') and 'v0.1.1' in ln
+                           for ln in lines))
+        stable_events = [e for e in events if e['channel'] == 'stable']
+        self.assertEqual(len(stable_events), 1)
+        self.assertEqual(stable_events[0], {
+            'kind': 'channel', 'channel': 'stable', 'tag': 'v0.1.1', 'commit': c1,
+            'previous': None, 'rows': ['cadence', 'dwell', 'rehearsal', 'no_s1']})
+
+    def test_a_non_factory_source_product_publishes_nothing(self):
+        other_tmp = tempfile.mkdtemp(prefix='channels_nonfactory_')
+        self.addCleanup(shutil.rmtree, other_tmp, ignore_errors=True)
+        bare, local = _repo_fixture(other_tmp)  # no pyproject.toml: not the factory's source
+        product = env.Product(self.P, {'repo_dir': local, 'repo_slug': 'o/r', 'main': 'main'})
+        events, lines = [], []
+        rc = channels.advance(product, self.root, event=self._events(events),
+                              out=lines.append, now=self.NOW)
+        self.assertEqual(rc, 0)
+        self.assertEqual(events, [])
+        self.assertIsNone(_ref_sha(bare, 'refs/heads/releases/edge'))
+        self.assertEqual(channels.read_log(self.P), channels._empty_log())
+        self.assertEqual(len(lines), 1)
+        self.assertIn('factory', lines[0])
+
+    def test_an_unreadable_remote_is_one_line_per_channel_and_a_zero_exit(self):
+        # a directory with the factory's own pyproject.toml, but no ``.git`` at all: the tag
+        # listing fails exactly the way an unreadable checkout would, and never reaches ``gh``
+        not_a_repo = os.path.join(self.tmp, 'not-a-git-repo')
+        os.makedirs(not_a_repo)
+        with open(os.path.join(not_a_repo, 'pyproject.toml'), 'w', encoding='utf-8') as f:
+            f.write('[project]\nname = "asf-factory"\n')
+        product = env.Product(self.P, {'repo_dir': not_a_repo, 'repo_slug': 'o/r', 'main': 'main'})
+
+        def failing_gh(cmd, **kw):
+            raise AssertionError('no tag was read: gh must never be asked')
+
+        lines = []
+        rc = channels.advance(product, self.root, out=lines.append, now=self.NOW,
+                              run=failing_gh)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len([ln for ln in lines if ln.startswith('channels: edge')]), 1)
+        self.assertEqual(len([ln for ln in lines if ln.startswith('channels: stable')]), 1)
+        self.assertIsNone(channels.read_log(self.P)['edge'])
+        self.assertIsNone(_ref_sha(self.bare, 'refs/heads/releases/edge'))
+
+    def test_an_unreadable_record_is_a_zero_exit_too(self):
+        c1 = _git(['rev-parse', 'HEAD'], self.local)
+        self._tag('v0.1.1')
+        run = FakeGh({c1: 'green'})
+        later = self.NOW + datetime.timedelta(hours=49)
+        no_such_root = os.path.join(self.tmp, 'no-such-record-root')
+        lines = []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(self.product, no_such_root, out=lines.append, now=later,
+                                  run=run)
+        self.assertEqual(rc, 0)
+        self.assertTrue(lines)
+
+
+class ReportTest(unittest.TestCase):
+    """S-81208 — ``report``/``render``/``cmd_channels``: the table and the ``--json`` form carry
+    the same data, and — the one that matters — ``asf channels`` writes nothing at all."""
+
+    NOW = datetime.datetime(2026, 10, 10, 12, 0, 0, tzinfo=UTC)
+    P = 'channels-report-product'
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='channels_report_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.addCleanup(self._restore_home)
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        with open(env.product_path(self.P), 'w', encoding='utf-8') as f:
+            f.write('repo_slug: o/r\nrelease:\n  channels:\n    rehearsal_check: off\n')
+        self.root = os.path.join(self.tmp, 'record')
+        self.product = env.load_product(self.P)
+
+    def _restore_home(self):
+        env.ASF_HOME = self._home
+
+    def _seed_log(self):
+        edge_log = [{'tag': 'v0.1.2', 'commit': 'b' * 40, 'at': '2026-10-08T00:00:00Z'}]  # 60 h
+        channels.write_log(self.P, lambda l: dict(
+            l, edge={'tag': 'v0.1.2', 'commit': 'b' * 40, 'at': '2026-10-08T00:00:00Z'},
+            stable={'tag': 'v0.1.1', 'commit': 'a' * 40, 'at': '2026-10-02T00:00:00Z',
+                   'promoted_for': ['cadence', 'dwell', 'rehearsal', 'no_s1']},
+            edge_log=edge_log))
+
+    def test_report_carries_both_channels_the_candidate_and_the_four_rows(self):
+        self._seed_log()
+        data = channels.report(self.product, self.root, now=self.NOW)
+        self.assertEqual([c['channel'] for c in data['channels']], ['edge', 'stable'])
+        edge = data['channels'][0]
+        self.assertEqual((edge['tag'], edge['commit']), ('v0.1.2', 'b' * 40))
+        stable = data['channels'][1]
+        self.assertEqual((stable['tag'], stable['commit']), ('v0.1.1', 'a' * 40))
+        # the candidate dwelled 60 h, past the 48 h bar — it is the stable candidate
+        self.assertEqual(data['candidate'], {'tag': 'v0.1.2', 'commit': 'b' * 40})
+        self.assertEqual([r['key'] for r in data['rows']],
+                         ['cadence', 'dwell', 'rehearsal', 'no_s1'])
+        for row in data['rows']:
+            self.assertIn('met', row)
+            self.assertIn('evidence', row)
+            self.assertIn('name', row)
+
+    def test_the_table_prints_both_channels_the_candidate_and_the_rows(self):
+        self._seed_log()
+        table = channels.render(channels.report(self.product, self.root, now=self.NOW))
+        self.assertIn('edge', table)
+        self.assertIn('v0.1.2', table)
+        self.assertIn('stable', table)
+        self.assertIn('v0.1.1', table)
+        self.assertIn('Stable candidate: v0.1.2', table)
+        self.assertIn('yes', table)
+
+    def test_the_json_form_carries_the_same_data_key_for_key(self):
+        self._seed_log()
+        data = channels.report(self.product, self.root, now=self.NOW)
+        got = json.loads(json.dumps(data, default=str))
+        self.assertEqual(got, data)
+        self.assertEqual(len(got['rows']), 4)
+        for row in got['rows']:
+            self.assertIn('key', row)
+            self.assertIn('met', row)
+            self.assertIn('evidence', row)
+
+    def test_asf_channels_writes_nothing(self):
+        self._seed_log()
+        before = channels.read_log(self.P)
+        state_before = sorted(os.listdir(env.state_dir(self.P)))
+        with mock.patch('asf.gitpush.push') as push:
+            rc = channels.cmd_channels(argparse.Namespace(product=self.P, json=False), self.root)
+        self.assertEqual(rc, 0)
+        push.assert_not_called()
+        self.assertEqual(channels.read_log(self.P), before)
+        self.assertEqual(sorted(os.listdir(env.state_dir(self.P))), state_before)
+
+    def test_asf_channels_json_writes_nothing_either(self):
+        self._seed_log()
+        before = channels.read_log(self.P)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = channels.cmd_channels(argparse.Namespace(product=self.P, json=True), self.root)
+        self.assertEqual(rc, 0)
+        printed = json.loads(out.getvalue())
+        self.assertEqual(printed['candidate']['tag'], 'v0.1.2')
+        self.assertEqual(channels.read_log(self.P), before)
+
+    def test_channels_is_not_a_plugin_view(self):
+        from asf import plugin_build
+        self.assertNotIn('channels', plugin_build.VIEWS)
+
+    def test_asf_channels_help(self):
+        from asf.cli import build_parser
+        parser = build_parser()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as cm:
+            parser.parse_args(['channels', '--help'])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn('channels', out.getvalue())
 
 
 class UpgradeTargetTest(unittest.TestCase):
