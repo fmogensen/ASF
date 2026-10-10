@@ -1558,6 +1558,7 @@ def limbo(facts, config, judged, states, parked, children, actions, queued=None,
             out[iid] = why
     for iid, why in sorted((facts.unreadable or {}).items()):
         out[iid] = 'card unreadable, invisible to the kernel: %s' % why
+    out.update(_blocked_for_good(items, states, parked, children, out))
     closed = {a.pr for a in actions if isinstance(a, (A.ClosePR, A.ArchiveAndReset))}
     for p in sorted([p for p in facts.prs if not p.merged] + list(facts.orphan_prs),
                     key=lambda p: p.number):
@@ -1575,6 +1576,39 @@ def limbo(facts, config, judged, states, parked, children, actions, queued=None,
             out['PR #%d' % p.number] = '%s has a newer open PR #%d' % (p.item_id, mine)
         elif p.item_id in parked and states.get(p.item_id, (None,))[0] is not State.DONE:
             out['PR #%d' % p.number] = 'its item %s is parked (priority: later)' % p.item_id
+    return out
+
+
+def _blocked_for_good(items, states, parked, children, stalled):
+    """``{item: why}`` for every visible New item whose ``after:`` chain ends at a blocker that
+    nothing will move: the blocker is itself in LIMBO (``stalled``), or the chain is a cycle. A
+    Done blocker (a retired card reads as Done) or a parked one never blocks; a blocker with its
+    own next action (a relaunch, a session, CI) or waiting on a console question moves."""
+    out = {}
+    for iid in sorted(items):
+        if (iid in parked or states.get(iid, (None,))[0] is not State.NEW
+                or _derived(iid, items, children)):
+            continue
+        roots, cycle, seen, todo = set(), False, {iid}, list(items[iid].after)
+        while todo:
+            a = todo.pop()
+            if not _visible(items, a, parked) or states.get(a, (State.DONE,))[0] is State.DONE:
+                continue
+            if a in seen:
+                cycle = cycle or a == iid
+                continue
+            seen.add(a)
+            pending = [b for b in items[a].after if _visible(items, b, parked)
+                       and states.get(b, (State.DONE,))[0] is not State.DONE]
+            if states[a][0] is State.NEW and pending:
+                todo += pending
+            else:
+                roots.add(a)
+        dead = sorted(r for r in roots if r in stalled)
+        if dead:
+            out[iid] = 'after: %s, which has no action (%s)' % (dead[0], stalled[dead[0]])
+        elif cycle:
+            out[iid] = 'after: a cycle back to itself'
     return out
 
 

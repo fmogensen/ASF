@@ -202,6 +202,40 @@ class Breach(unittest.TestCase):
         self.assertEqual(plan.breaches[0]['action'], 'none: waits on the operator')
 
 
+class AfterEdges(unittest.TestCase):
+    """A waiter on ``after:`` is only as alive as what it waits on."""
+
+    def test_a_blocker_whose_pr_was_closed_unmerged_is_relaunched(self):
+        # its card still says Review, the PR is gone (closed unmerged), no branch on origin
+        items = [B.task('T-1', state=State.REVIEW),
+                 B.task('T-2', state=State.NEW, after=['T-1'])]
+        plan = D.decide(facts(items), config())
+        self.assertEqual(B.launched(plan), ['T-1'])
+        self.assertEqual(B.state(plan, 'T-2'), State.NEW)
+        self.assertEqual(plan.limbo, {})
+
+    def test_a_retired_blocker_stops_blocking(self):
+        items = [B.task('T-1', state=State.DONE, priority='later'),
+                 B.task('T-2', state=State.NEW, after=['T-1'])]
+        plan = D.decide(facts(items), config())
+        self.assertEqual(B.launched(plan), ['T-2'])
+        self.assertEqual(plan.limbo, {})
+
+    def test_a_blocker_with_no_action_puts_its_waiters_in_limbo(self):
+        items = [B.task('T-1', state=State.STUCK, stuck=M.Stuck('launch: no account', 'loop')),
+                 B.task('T-2', state=State.NEW, after=['T-1']),
+                 B.task('T-3', state=State.NEW, after=['T-2'])]
+        plan = D.decide(facts(items), config())
+        self.assertEqual(sorted(plan.limbo), ['T-1', 'T-2', 'T-3'])
+        self.assertIn('after: T-1', plan.limbo['T-3'])
+
+    def test_an_after_cycle_is_limbo(self):
+        items = [B.task('T-1', state=State.NEW, after=['T-2']),
+                 B.task('T-2', state=State.NEW, after=['T-1'])]
+        plan = D.decide(facts(items), config())
+        self.assertEqual(sorted(plan.limbo), ['T-1', 'T-2'])
+
+
 class MeasuredBounds(unittest.TestCase):
     """Live processes are bounded by the wait ledger's p90s, the knobs only a fallback."""
 
