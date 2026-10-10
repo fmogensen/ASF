@@ -140,7 +140,7 @@ def sync_cloud(ports, out=print):
     """Before the facts are read: the session port's cloud runs brought up to date (a port with
     ``sync``: :meth:`asf.kernel.ports.RealSessions.sync`), and its launch log pointed at ``out``.
     A failed sync is one line; the tick reads the sessions as the last sync left them."""
-    for port in (ports.sessions, ports.brief):
+    for port in (ports.sessions, ports.brief, ports.github):
         if hasattr(port, 'log'):
             port.log = out
     sync = getattr(ports.sessions, 'sync', None)
@@ -207,6 +207,8 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
     config = config or P.config_for(product, github=ports.github)
     state_dir = state_dir or os.path.join(env.ASF_HOME, 'state', product.name)
     if dry_run:
+        if hasattr(ports.github, 'log'):
+            ports.github.log = out
         with mutation_guard.active():
             facts = read_facts(ports)
             if facts.github_error:

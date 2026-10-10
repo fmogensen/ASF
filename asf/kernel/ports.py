@@ -479,6 +479,21 @@ def _check(c):
                    run_id=int(m.group(1)) if m else None)
 
 
+def job_keys(rollup):
+    """``{(check name, run id): details URL}`` of each check's newest job in the rollup — a job
+    (one attempt of a run) is finished once, so its URL keys its facts across ticks."""
+    best = {}
+    for c in rollup or []:
+        check = _check(c)
+        url = str(c.get('detailsUrl') or '')
+        if not (check.run_id and '/job/' in url):
+            continue
+        key, order = (check.name, check.run_id), _run_order(c, check)
+        if key not in best or best[key][0] <= order:
+            best[key] = (order, url)
+    return {k: v[1] for k, v in best.items()}
+
+
 def _run_order(c, check):
     """The sort key that puts the newest run of a check last: its run id, then its latest time
     (completed, else started, else created — an unfinished rerun is newer than its red)."""
@@ -571,13 +586,89 @@ def _secondary(limit):
     return bool(re.search(r'secondary rate limit|abuse detection', str(limit), re.IGNORECASE))
 
 
+#: the ``X-RateLimit-*`` headers of a ``gh api -i`` reply
+_RATE_HDR = re.compile(r'^x-ratelimit-(limit|remaining|reset):\s*(\d+)\s*$', re.I | re.M)
+
+#: the file of immutable GitHub facts kept across ticks (``state/<product>/``)
+GH_CACHE_FILE = 'kernel-gh-cache.json'
+
+
+def rate_headers(text):
+    """``(remaining, limit, reset)`` off a ``gh api -i`` reply's ``X-RateLimit-*`` headers, or
+    None when they are not there."""
+    got = {k.lower(): int(v) for k, v in _RATE_HDR.findall(str(text or ''))}
+    if 'remaining' not in got or 'limit' not in got:
+        return None
+    return got['remaining'], got['limit'], got.get('reset', 0)
+
+
+class GhCache:
+    """Facts GitHub never changes, kept across ticks in ``path`` (JSON; None: this process only):
+    ``trees`` (commit sha -> tree sha), ``changes`` (``base...head`` -> change id) and ``jobs``
+    (a finished red job's details URL -> its run attempt and failed-log reading). Each section
+    keeps its newest :data:`MAX` entries. An unreadable file is an empty cache; a dry run
+    (:func:`asf.mutation_guard.is_active`) reads it and writes nothing."""
+
+    SECTIONS = ('trees', 'changes', 'jobs')
+    MAX = 2000
+
+    def __init__(self, path=None):
+        self.path, self.dirty = path, False
+        data = {}
+        if path:
+            try:
+                with open(path, encoding='utf-8') as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        self.data = {k: dict(data.get(k) or {}) if isinstance(data.get(k), dict) else {}
+                     for k in self.SECTIONS}
+
+    def get(self, section, key):
+        return self.data[section].get(key)
+
+    def put(self, section, key, value):
+        sec = self.data[section]
+        if sec.get(key) == value:
+            return
+        sec.pop(key, None)
+        sec[key] = value
+        while len(sec) > self.MAX:
+            sec.pop(next(iter(sec)))
+        self.dirty = True
+
+    def save(self):
+        from asf import mutation_guard
+        if not (self.path and self.dirty) or mutation_guard.is_active():
+            return
+        try:
+            os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
+            with open(self.path + '.tmp', 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, sort_keys=True)
+            os.replace(self.path + '.tmp', self.path)
+            self.dirty = False
+        except OSError:
+            pass  # a cache never fails the tick: the next one reads again
+
+
 class RealGitHub:
     """The product's repo (``repo_slug``) through :func:`asf.github.gh` with its ``auth_env``.
 
     A read that fails transiently (:func:`transient`; a secondary rate limit too) is tried again
     after each of ``kernel.github.retry_delays_s`` (default 2, 5, 10 s). Once a read has spent
     them, GitHub counts as down for this port's tick: later reads are tried once. A write is
-    never retried here — the next tick decides it again on fresh facts."""
+    never retried here — the next tick decides it again on fresh facts.
+
+    The budget (2026-10-10: the core limit ran out at 60 open PRs): a fact that never changes —
+    a commit's tree, a head's change, a finished red job's attempt and failed log — is read once
+    and kept in :class:`GhCache` across ticks (``cache_path``); the pushed branches come from
+    ``git ls-remote`` (no API cost). Once per tick (:meth:`read_budget`) the core calls left are
+    read off a real call's ``X-RateLimit-*`` headers (``gh api rate_limit`` was seen answering
+    5000 left while every call was refused); under ``kernel.github.slow_below`` of the limit the
+    tick is ``slow``: it reads no new change (a verdict keys by tree alone) and no failed log, and
+    logs one line."""
 
     #: merged PRs read per tick: enough to see every recent landing
     MERGED_LIMIT = 100
@@ -586,9 +677,17 @@ class RealGitHub:
     #: the compare API's file cap: a change listing this many files may be cut short
     COMPARE_FILES_CAP = 300
 
-    def __init__(self, product, run=None, sleep=None):
+    def __init__(self, product, run=None, sleep=None, cache_path=None, git=None, log=None):
         from asf import ci_pool
         self.product = product
+        self.cache = GhCache(cache_path)
+        self._git = git
+        self.log = log or _quiet
+        self.budget, self.slow, self._budget_read = None, False, False
+        try:
+            self._slow_below = float(product.kernel['github']['slow_below'])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            self._slow_below = 0.15
         self.slug = product.repo_slug
         self._env = ci_pool._gh_env(product)
         self._run = run
@@ -622,6 +721,35 @@ class RealGitHub:
     def prs(self):
         """The open PRs and the recently merged ones; :class:`PortError` when either listing is
         unreadable (a missing merged PR would read as an item with none: no partial facts)."""
+        self.read_budget()
+        try:
+            return self._prs()
+        finally:
+            self.cache.save()
+
+    def read_budget(self):
+        """Once per port (one tick): the core calls left (:attr:`budget`: ``(remaining, limit,
+        reset)``, None when unreadable) off ``gh api -i repos/<slug>``'s headers, and
+        :attr:`slow` when they are under ``kernel.github.slow_below`` of the limit (one log line
+        says so). A rate-limited probe raises :class:`asf.gh_limit.RateLimited`: the tick is
+        blind before it spends anything else."""
+        if self._budget_read:
+            return self.budget
+        self._budget_read = True
+        r = self._gh(['api', '-i', 'repos/%s' % self.slug], json=False, retry=False)
+        self.budget = rate_headers('%s\n%s' % (r.stdout or '', r.stderr or ''))
+        if self.budget is None:
+            return None
+        left, limit, reset = self.budget
+        self.slow = limit > 0 and left < limit * self._slow_below
+        if self.slow:
+            at = time.strftime('%H:%MZ', time.gmtime(reset)) if reset else '?'
+            self.log('kernel tick: GitHub core calls low — %d/%d left (under %.0f%%): reads '
+                     'slowed (no new change or failed-log reads) until the reset at %s'
+                     % (left, limit, 100 * self._slow_below, at))
+        return self.budget
+
+    def _prs(self):
         r = self._gh(['pr', 'list', '-R', self.slug, '--state', 'open', '--limit', '200',
                       '--json', ','.join(PR_FIELDS)])
         if not r.ok:
@@ -658,16 +786,24 @@ class RealGitHub:
         pr.tree_sha = self._tree(pr.head_sha)
         pr.change_id = self._change(d.get('baseRefName') or self.product.main, pr.head_sha)
         pr.latest_reviews = d.get('latestReviews') or []
+        jobs = job_keys(d.get('statusCheckRollup') or [])
         for c in pr.checks:
             if c.status == 'completed' and c.conclusion in M.RED_CONCLUSIONS and c.run_id:
-                self._red_detail(c, files)
+                self._red_detail(c, files, jobs.get((c.name, c.run_id)) or '')
         return pr
 
     def _tree(self, sha):
+        """The commit's tree (a commit never changes its tree: read once, kept in the cache)."""
         if not sha:
             return ''
+        got = self.cache.get('trees', sha)
+        if got:
+            return got
         r = self._gh(['api', 'repos/%s/git/commits/%s' % (self.slug, sha)])
-        return ((r.data or {}).get('tree') or {}).get('sha', '') if r.ok else ''
+        tree = ((r.data or {}).get('tree') or {}).get('sha', '') if r.ok else ''
+        if tree:
+            self.cache.put('trees', sha, tree)
+        return tree
 
     #: (repo, base, head sha) -> change id: a head's merge base with trunk never moves, so
     #: neither does its change (one compare call per new head, not per tick)
@@ -681,6 +817,11 @@ class RealGitHub:
         key = (self.slug, base, head)
         if key in self._changes:
             return self._changes[key]
+        got = self.cache.get('changes', '%s...%s' % (base, head))
+        if got is not None:
+            return got
+        if self.slow:
+            return ''  # a slowed tick reads no new change: the verdict keys by tree alone
         r = self._gh(['api', 'repos/%s/compare/%s...%s' % (self.slug, base, head)])
         if not r.ok or not isinstance(r.data, dict):
             return ''
@@ -691,20 +832,35 @@ class RealGitHub:
         if len(self._changes) >= 4096:
             self._changes.clear()
         self._changes[key] = cid
+        if cid:
+            self.cache.put('changes', '%s...%s' % (base, head), cid)
         return cid
 
-    def _red_detail(self, check, files):
-        r = self._gh(['api', 'repos/%s/actions/runs/%d' % (self.slug, check.run_id)])
-        if r.ok and isinstance(r.data, dict):
-            check.attempt = int(r.data.get('run_attempt') or 1)
-        if self._logs >= self.LOG_LIMIT:
-            return
-        self._logs += 1
-        log = self._gh(['run', 'view', str(check.run_id), '-R', self.slug, '--log-failed'],
-                       json=False)
-        if log.ok:
-            check.failing_files = failing_files(log.data or '', files)
-            check.failed_step, check.log_tail = failed_step(log.data or '')
+    def _red_detail(self, check, files, job=''):
+        """A finished red check's run attempt and failed-log reading; a finished job never
+        changes, so with its details URL (``job``) both are read once and kept in the cache."""
+        seen = dict(self.cache.get('jobs', job) or {}) if job else {}
+        if 'attempt' in seen:
+            check.attempt = int(seen['attempt'] or 1)
+        else:
+            r = self._gh(['api', 'repos/%s/actions/runs/%d' % (self.slug, check.run_id)])
+            if r.ok and isinstance(r.data, dict):
+                check.attempt = int(r.data.get('run_attempt') or 1)
+                seen['attempt'] = check.attempt
+        if 'step' in seen:
+            check.failing_files = list(seen.get('files') or [])
+            check.failed_step, check.log_tail = seen['step'], seen.get('tail') or ''
+        elif self._logs < self.LOG_LIMIT and not self.slow:
+            self._logs += 1
+            log = self._gh(['run', 'view', str(check.run_id), '-R', self.slug, '--log-failed'],
+                           json=False)
+            if log.ok:
+                check.failing_files = failing_files(log.data or '', files)
+                check.failed_step, check.log_tail = failed_step(log.data or '')
+                seen.update(files=check.failing_files, step=check.failed_step,
+                            tail=check.log_tail)
+        if job and seen:
+            self.cache.put('jobs', job, seen)
 
     def required_checks(self, branch=None):
         """The check names GitHub's rules require on ``branch`` (the trunk by default): every
@@ -783,9 +939,17 @@ class RealGitHub:
 
     def branches(self):
         """Every branch on origin under the kernel's work prefixes (``code``, ``fix``) that names
-        an item: ``git/matching-refs/heads/<prefix>`` — what ``ls-remote`` would list."""
+        an item: ``git ls-remote origin refs/heads/<prefix>*`` in the product's checkout (no API
+        cost), else ``git/matching-refs/heads/<prefix>``."""
         out = []
         for prefix in self._prefixes():
+            listed = self._ls_remote(prefix)
+            if listed is not None:
+                for sha, name in listed:
+                    iid = item_of_branch(name)
+                    if iid:
+                        out.append(M.Branch(name, iid, sha))
+                continue
             r = self._gh(['api', 'repos/%s/git/matching-refs/heads/%s' % (self.slug, prefix)])
             if not r.ok or not isinstance(r.data, list):
                 continue  # unknown is no pushed branch: nothing is opened on a guess
@@ -794,6 +958,24 @@ class RealGitHub:
                 iid = item_of_branch(name)
                 if name and iid:
                     out.append(M.Branch(name, iid, str((d.get('object') or {}).get('sha') or '')))
+        return out
+
+    def _ls_remote(self, prefix):
+        """``[(sha, branch)]`` under ``refs/heads/<prefix>`` on the checkout's origin, or None
+        when there is no checkout or git could not answer (the API is read instead)."""
+        repo = getattr(self.product, 'repo_dir', None)
+        if not (repo and os.path.isdir(repo)):
+            return None
+        from asf import gitops
+        r = (self._git or gitops.git)(['ls-remote', 'origin', 'refs/heads/%s*' % prefix], repo,
+                                      timeout=60)
+        if not r.ok:
+            return None
+        out = []
+        for line in str(r.data or '').splitlines():
+            sha, _, ref = line.partition('\t')
+            if ref.startswith('refs/heads/') and sha:
+                out.append((sha.strip(), ref.strip()[len('refs/heads/'):]))
         return out
 
     def _pr_of(self, branch):
@@ -1327,8 +1509,10 @@ class Ports:
 
 def real_ports(product):
     from asf.kernel.briefs import Briefer
-    return Ports(RealRecord(product), RealGitHub(product), RealSessions(product),
-                 Briefer(product))
+    from asf import env
+    cache = os.path.join(env.ASF_HOME, 'state', product.name, GH_CACHE_FILE)
+    return Ports(RealRecord(product), RealGitHub(product, cache_path=cache),
+                 RealSessions(product), Briefer(product))
 
 
 def required_checks_for(product, github=None):

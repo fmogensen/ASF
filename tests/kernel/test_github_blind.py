@@ -62,7 +62,8 @@ class Retry(unittest.TestCase):
         with self.assertRaises(P.PortError) as e:
             gh.prs()
         self.assertIn('504', str(e.exception))
-        self.assertEqual((self.slept, len(calls)), ([1, 3], 3))
+        # the tick's one budget probe (never retried), then the PR list's three tries
+        self.assertEqual((self.slept, len(calls)), ([1, 3], 4))
         self.assertEqual(gh._tree('h1'), '')
         self.assertEqual(self.slept, [1, 3], 'GitHub is down this tick: no second backoff')
 

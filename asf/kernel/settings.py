@@ -16,10 +16,13 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # the PR branch, so it restarts no CI
                    rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
-      github:     {retry_delays_s: [2, 5, 10]}   # a transient GitHub read (5xx, timeout,
+      github:     {retry_delays_s: [2, 5, 10],   # a transient GitHub read (5xx, timeout,
                                               # secondary rate limit) is retried after each
                                               # delay; still failing, the tick is blind: no PR
                                               # action, crashed sessions still ended, exit 0
+                   slow_below: 0.15}          # core calls left under this share of the hourly
+                                              # limit (read once per tick off a call's headers):
+                                              # the tick reads no new change or failed log
       models:     {coder: claude-sonnet-5, fix-bug: claude-sonnet-5, correct: claude-sonnet-5,
                    review: claude-sonnet-5, light-review: claude-sonnet-5,
                    spec: claude-opus-5, plan: claude-opus-5}   # per brief kind: a model id, or
@@ -117,7 +120,7 @@ SPEC = {
                'local_max': (None, int), 'cloud_max': (0, int),
                'cloud_kinds': (('coder', 'fix-bug', 'spec', 'plan', 'review', 'light-review'),
                                'words')},
-    'github': {'retry_delays_s': ((2, 5, 10), 'seconds')},
+    'github': {'retry_delays_s': ((2, 5, 10), 'seconds'), 'slow_below': (0.15, float)},
     'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
     'review': {'light_paths': (('docs/**', '*.md'), 'globs')},
     'briefs': {'max_appended_chars': (4000, int)},

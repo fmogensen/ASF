@@ -5,7 +5,8 @@ how long it has been stuck), then the count of items per state, then the active 
 when any item has one, a fourth: the notes (a question a session asked while its work moved on). The
 states are the last tick's plan (``state/<product>/kernel-plan.json``, written by every applied
 tick), so the table costs no network call; ``live=True`` (``--live``), or no plan on disk yet,
-decides afresh on the facts now (no action is applied). A Stuck item's age is from its card's
+decides afresh on the facts now (no action is applied) — unless the plan is under one tick
+(``kernel.tick.interval_s``) old: then those facts are now's, and no GitHub call is spent. A Stuck item's age is from its card's
 ``kernel_stuck_since``, ``-`` until a tick has recorded it. The biggest wait
 (:func:`asf.kernel.waits.biggest_line`, from the wait ledger) heads the table, after the
 "Needs you" block when there is one.
@@ -148,20 +149,20 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
         top = waits.biggest_line(waits.summary(product, state_dir=state_dir)) + '\n\n'
     except Exception as e:  # noqa: BLE001 — a bad ledger never hides the status
         top = 'biggest wait: unreadable — %s\n\n' % (str(e) or type(e).__name__)
-    data = None
-    if not live:
-        try:
-            with open(path, encoding='utf-8') as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            data = None
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = None
+    if live and not (isinstance(data, dict) and _under_one_tick(data.get('at'), product)):
+        data = None
     if data is not None:
         record = ports.record if ports else P.RealRecord(product)
         text = render(*rows_from_plan(data, record), idle=data.get('idle'),
                       notes=data.get('notes'), needs_after_h=_needs_after(product),
                       head=top) \
-            + '\n\n(the tick of %s; --live for now)' \
-            % data.get('at', '?')
+            + ('\n\n(the tick of %s, under one tick old: no GitHub read)' if live
+               else '\n\n(the tick of %s; --live for now)') % data.get('at', '?')
         out(text)
         return text
     ports = ports or P.real_ports(product)
@@ -171,6 +172,20 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
                   needs_after_h=_needs_after(product), head=top)
     out(text)
     return text
+
+
+def _under_one_tick(at, product, now=None):
+    """Whether a plan written at ``at`` is under one tick (``kernel.tick.interval_s``) old:
+    ``--live`` then shows it — the facts now are the ones that tick read — and spends no GitHub
+    call (the console's every-10-minutes ``--live`` cost a full tick's reads each time)."""
+    try:
+        then = datetime.datetime.strptime(str(at), '%Y-%m-%dT%H:%M:%SZ').replace(
+            tzinfo=datetime.timezone.utc)
+        interval = float(product.kernel['tick']['interval_s'])
+    except Exception:  # noqa: BLE001 — an unknown age is not fresh
+        return False
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return 0 <= (now - then).total_seconds() <= interval
 
 
 def _needs_after(product):

@@ -291,6 +291,15 @@ class StatusFromThePlan(unittest.TestCase):
                              state_dir=state)
         self.assertIn('| T-0001 | ci | 0 |', text)
         self.assertIn('| parked | 0 |', text)
+        live = status.status(product, ports=ports, config=B.config(), out=lambda *_: None,
+                             state_dir=state, live=True)
+        self.assertIn('under one tick old', live)  # a plan this fresh is now's facts
+        path = os.path.join(state, loop.PLAN_FILE)
+        with open(path, encoding='utf-8') as f:
+            plan = json.load(f)
+        plan['at'] = '2026-01-01T00:00:00Z'  # older than one tick: --live reads afresh
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(plan, f)
         with self.assertRaises(AssertionError):
             status.status(product, ports=ports, config=B.config(), out=lambda *_: None,
                           state_dir=state, live=True)
