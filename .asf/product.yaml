@@ -13,6 +13,7 @@ conventions:
     spec: spec/
     plan: plan/
     direct: cloud/direct-
+    revert: revert/
     legacy: []
   merge:
     mode: auto
