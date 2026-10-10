@@ -70,6 +70,9 @@ class FakeFacts(dwell.Facts):
     def live_refs(self):
         return self.kw.get('live')
 
+    def rerun_ids(self):
+        return self.kw.get('rerun_ids', frozenset())
+
 
 class DwellTestCase(unittest.TestCase):
     def setUp(self):
@@ -447,6 +450,19 @@ class CancelledCheckTests(DwellTestCase):
                                 check('tests', 'SUCCESS', at=NOW - 5 * 60)])]
         self.assertEqual(self.by_state(self.found(FakeFacts(self.product, prs=prs)),
                                        'check_cancelled'), [])
+
+    def test_a_run_the_ci_queue_holds_to_rerun_is_not_watched(self):
+        # B-82809: the trunk/S1 relief cancels a run and holds it to re-run on its own
+        # (ci_queue.rerun_ids) — that cancel is no verdict on the code, pr_checks already reads
+        # it as pending. The watchdog must defer to it too, or it re-runs (racing the relief's
+        # own plan) and, past the once-per-head mark, breaches every pass for a cancel the
+        # relief was already handling.
+        prs = [pr(1, 'a' * 40, [check('tests', 'CANCELLED', run='991')])]
+        with mock.patch.object(github, 'gh') as gh:
+            found = self.found(FakeFacts(self.product, prs=prs, rerun_ids=frozenset({'991'})),
+                               act=True)
+        gh.assert_not_called()
+        self.assertEqual(self.by_state(found, 'check_cancelled'), [])
 
 
 class UngrantableHoldTests(DwellTestCase):
