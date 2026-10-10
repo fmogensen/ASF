@@ -188,10 +188,10 @@ if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
         [ -n "$out" ] && printf '%s\n' "$out" >&2
         [ "$rc" = 0 ] || asf_refused "hook refused" "$out"
     fi
+    cli="$HOME/.local/bin/asf"
     # CI judges the branch merged into the trunk, by the trunk's own check list and scripts: the
     # product's pre-push check runs once more on that merge (asf.workers.trunkmerge)
     if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PRODUCT" ]; then
-        cli="$HOME/.local/bin/asf"
         if [ -x "$cli" ] && ! head -n 3 "$cli" 2>/dev/null | grep -qF '# asf dispatcher'; then
             msg="asf: push refused — $cli is not asf's dispatcher; asf hooks install --product $ASF_PRODUCT"
             echo "$msg" >&2
@@ -204,6 +204,17 @@ if [ "$name" = "pre-push" ] && [ "$scratch" = 0 ] \
             [ -n "$out" ] && printf '%s\n' "$out" >&2
             [ "$rc" = 0 ] || asf_refused "hook refused" "$out"
         fi
+    fi
+    # the brief's own rules — package tests not run, a diff outside the footprint — are checked
+    # the same push stops in, matched to the paths this push adds (asf.prepush, F-0301). No
+    # dispatcher at $cli: trunk-check already skipped above (an old install, no asf built yet),
+    # and the door skips the same way — only a stale or malformed $cli is refused, never a push
+    # with none at all
+    if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PRODUCT" ] && [ -x "$cli" ]; then
+        out=$(printf '%s\n' "$input" | "$cli" pre-push --product "$ASF_PRODUCT" 2>&1)
+        rc=$?
+        [ -n "$out" ] && printf '%s\n' "$out" >&2
+        [ "$rc" = 0 ] || asf_refused "hook refused" "$out"
     fi
     if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PUSH_LOG" ]; then
         printf '%s\n' "$input" | awk 'NF >= 4 && $2 !~ /^0+$/ { print $2 }' \

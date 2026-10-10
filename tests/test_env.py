@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from asf import env
+from asf import conventions as conventions_mod
 from asf.conventions import Conventions
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -286,6 +287,30 @@ class TestProductSchema(unittest.TestCase):
     def test_the_documented_example_validates(self):
         self.assertEqual(env.validate_product_text(open(os.path.join(
             os.path.dirname(__file__), '..', 'docs', 'products.example.yaml')).read()), [])
+
+
+class PrePushChecksDocumentedTests(unittest.TestCase):
+    """F-0301 Task 1, PD14: `pre_push_checks` is documented between `check_commands` and
+    `read_only_allow`, and its own example block — uncommented — validates clean."""
+
+    def _text(self):
+        with open(os.path.join(REPO_ROOT, 'docs', 'products.example.yaml'), encoding='utf-8') as f:
+            return f.read()
+
+    def test_the_key_is_named_and_the_file_still_validates(self):
+        text = self._text()
+        self.assertIn('pre_push_checks:', text)
+        self.assertEqual(env.validate_product_text(text), [])
+
+    def test_its_own_example_block_uncommented_validates_clean(self):
+        text = self._text()
+        start = text.index('  # pre_push_checks:')
+        end = text.index('  # whether the approvals hook grants', start)
+        block = '\n'.join(l[4:] if l.startswith('  # ') else (l[3:] if l.startswith('  #') else l)
+                          for l in text[start:end].splitlines())
+        data = env.loads(block)
+        self.assertEqual(conventions_mod.validate_mapping(data), [])
+        self.assertEqual(len(data.get('pre_push_checks') or []), 2)
 
 
 class CiTargetsFieldTests(unittest.TestCase):

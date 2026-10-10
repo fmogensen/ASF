@@ -321,6 +321,19 @@ conventions:
   # check_commands:
   #   - bash tools/check_conventions.sh
   #   - make lint
+  # path-matched pre-push checks (F-0301): an ordered list of {paths, run, why}. The session's
+  # `pre-push` hook asks git which paths the push adds over the trunk, runs the `run` of every
+  # rule whose `paths` any added path hits, in this order, and refuses the push on the first one
+  # that exits non-zero — with `why` and the command's last lines. A rule whose `paths` match
+  # nothing in a given push does not run. Unset, or a list of malformed rules, is read as `[]`:
+  # no path is ever checked (default: none).
+  # pre_push_checks:
+  #   - paths: ['asf/**', 'tests/**']
+  #     run: 'python3 tools/run_tests.py --touched origin/main --shards 2'
+  #     why: 'every test module that covers a file you touched, each module whole'
+  #   - paths: ['asf/schema.py', 'asf/record/**', 'asf/tick/migrate*.py']
+  #     run: 'python3 -m asf.schema --check'
+  #     why: 'the schema and migration lists the record reads'
   # whether the approvals hook grants a factory session's Bash call outright when the command is
   # provably read-only (git reads, ls/cat/head/tail/grep/rg/find/wc, cd, and this product's own
   # check_commands/pre_push_check/test_command) — compound, `cd X && …` and `$?` forms included.
