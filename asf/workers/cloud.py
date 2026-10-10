@@ -157,6 +157,20 @@ DEFAULT_WORKFLOW = 'asf-worker.yml'
 LOST_AFTER_MIN = 15
 REPORT_TRAILER = 'ASF-Report'
 SESSION_TRAILER = 'ASF-Session'
+#: the run kinds whose session is a review: it reports on its own branch (:func:`review_ref`),
+#: never on the branch under review — a push there moves the PR head and restarts the PR's CI
+REVIEW_KINDS = ('review', 'light-review')
+#: where a cloud review pushes its report commit: its own branch ``asf-reviews/<job>``, read by
+#: :func:`review_report` when the run ends and deleted after reading (:func:`delete_review`). A
+#: branch, never a ``refs/asf/*`` ref: the cloud session's git proxy answers 403 to any push
+#: outside ``refs/heads/`` (2026-10-10: review-f-0329 approved, then failed four pushes to
+#: ``refs/asf/reviews/…`` and its run ended "without the report commit"). No workflow runs on a
+#: push to it — the product's CI runs on its trunk and on pull requests — and no PR is opened
+#: for it.
+REVIEW_BRANCH_PREFIX = 'asf-reviews/'
+REVIEW_REF_PREFIX = 'refs/heads/' + REVIEW_BRANCH_PREFIX
+#: a review report's verdict line (the kernel's :data:`asf.kernel.briefs.VERDICT_RE`)
+VERDICT_LINE_RE = re.compile(r'^\s*VERDICT:\s*(approve|changes)\s*$', re.M | re.I)
 SECRET_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 WORKING, FINISHED, DEAD = cloudpid.WORKING, cloudpid.FINISHED, cloudpid.DEAD
@@ -433,6 +447,7 @@ def cloud_brief(text, job, setting=None, product=None, runtime_liveness=False):
     ``runtime_liveness``: the runtime reports the session alive itself — the HEARTBEAT block
     then starts no background loop (:func:`asf.workers.heartbeat.brief_lines`)."""
     sid = job.session or ''
+    review = is_review(getattr(job, 'kind', None))
     setting = list(setting) if setting else [
         'You run in a CI job, not on the factory host: build and test happen here, in this '
         'job. The worker environment (ASF_SESSION, BACKLOG_ID_RANGE, the caps) is already '
@@ -449,24 +464,69 @@ def cloud_brief(text, job, setting=None, product=None, runtime_liveness=False):
     # the subject names the item: a cloud session runs no commit-msg hook (F-0278)
     report_subject = githooks.report_subject(
         job.name, ((getattr(job, 'env', None) or {}).get('ASF_ITEM') or '').strip())
-    lines = ['', '', 'CLOUD SESSION', *setting,
-             f'- Every commit message carries the trailer `{SESSION_TRAILER}: {sid}` '
-             f'(`git commit --trailer "{SESSION_TRAILER}: {sid}"`).',
-             '- Run the tests the brief names here, before you push.',
-             '- A review file the brief says to leave uncommitted is committed here, with the '
-             'report commit: off the factory host the branch is the only way back.',
-             *_pre_push_lines(product),
-             f'- Your last act: one commit — `--allow-empty` only when there is nothing else to '
-             f'commit — whose message is the subject `{report_subject}`, then your REPORT '
-             f'block as the body, then the trailers `{SESSION_TRAILER}: {sid}` and '
-             f'`{REPORT_TRAILER}: {job.name}`; push `{job.branch}`. The factory reads that commit '
-             'as the end of this session; without it the session counts as failed.', '']
+    if review:
+        setting = [_BRANCH_PUSH_RE.sub(
+            f'Never commit to or push `{job.branch}` (nor `{job.base}`): a review reports on its '
+            'own ref, below.', ln) for ln in setting]
+        lines = ['', '', 'CLOUD SESSION', *setting, *_review_lines(job, sid, report_subject), '']
+    else:
+        lines = ['', '', 'CLOUD SESSION', *setting,
+                 f'- Every commit message carries the trailer `{SESSION_TRAILER}: {sid}` '
+                 f'(`git commit --trailer "{SESSION_TRAILER}: {sid}"`).',
+                 '- Run the tests the brief names here, before you push.',
+                 '- A review file the brief says to leave uncommitted is committed here, with the '
+                 'report commit: off the factory host the branch is the only way back.',
+                 *_pre_push_lines(product),
+                 f'- Your last act: one commit — `--allow-empty` only when there is nothing else '
+                 f'to commit — whose message is the subject `{report_subject}`, then your REPORT '
+                 f'block as the body, then the trailers `{SESSION_TRAILER}: {sid}` and '
+                 f'`{REPORT_TRAILER}: {job.name}`; push `{job.branch}`. The factory reads that '
+                 'commit as the end of this session; without it the session counts as failed.', '']
     beat = getattr(job, 'heartbeat', None)
     if beat is not None:  # asf.workers.heartbeat: the run's proof of movement, every runtime
         from asf.workers import heartbeat
         lines[-1:] = heartbeat.brief_lines(job.name, sid, beat,
                                            runtime_liveness=runtime_liveness) + ['']
     return str(text or '').rstrip('\n') + '\n'.join(lines)
+
+
+#: a setting's "commit and push on <branch> only" sentence: a review's CLOUD block says the opposite
+_BRANCH_PUSH_RE = re.compile(r'Commit and push on `[^`]+` only; never push `[^`]+`, '
+                             r'never force-push\.')
+
+
+def is_review(kind):
+    """Whether a run of ``kind`` is a review (:data:`REVIEW_KINDS`)."""
+    return str(kind or '').replace('_', '-') in REVIEW_KINDS
+
+
+def review_ref(job_name):
+    """``refs/heads/asf-reviews/<job>``: the branch a cloud review reports on."""
+    return f'{REVIEW_REF_PREFIX}{job_name}'
+
+
+def _review_lines(job, sid, subject):
+    """A cloud review's end: its verdict on its own branch (:func:`review_ref`), never the branch
+    under review — a push there moves the PR head and restarts the PR's whole CI."""
+    ref = review_ref(job.name)
+    return [
+        f'- THIS IS A REVIEW: never commit to, push or force-push `{job.branch}` or any other '
+        f'branch but `{ref[len("refs/heads/"):]}` below — not the review, not anything else. '
+        'This overrides every push rule above, the '
+        "REPORT's `pushed:` line included (`pushed: n/a — review reported on its ref`).",
+        '- Run every command in the foreground and wait for it — never in the background: the '
+        'session ends when your turn ends, and a review whose turn ended before its push is '
+        'lost. A gate that does not finish in time is a row of the review, not a reason to wait.',
+        f'- Your last act publishes the verdict on its own report branch, `{ref}`: write the '
+        'review file the brief names, then `git checkout --detach`, `git add -f <that file>`, '
+        'and make one commit (`git commit --cleanup=whitespace -F <message file>`) whose '
+        f'message is the subject `{subject}`, then your REPORT block, then the `VERDICT:` line '
+        'and the `FINDINGS:` lines exactly as the brief says, then the trailers '
+        f'`{SESSION_TRAILER}: {sid}` and `{REPORT_TRAILER}: {job.name}`. Push only that commit, '
+        f'only there: `git push origin HEAD:{ref}`, and see it succeed. The factory reads the '
+        'verdict off that branch when the session ends and deletes it; without it the review '
+        'counts as failed.',
+    ]
 
 
 def _pre_push_lines(product):
@@ -555,6 +615,59 @@ def report_commit(worktree, branch, session, fetch=True):
         if trailers.get(SESSION_TRAILER.lower()) == session and REPORT_TRAILER.lower() in trailers:
             return {'sha': sha.strip(), 'body': body.strip()}
     return None
+
+
+def review_report(worktree, job_name):
+    """``{sha, body, ref}`` of a cloud review's report commit on origin's
+    ``asf-reviews/<job>`` branch (:func:`review_ref`), else None while it is absent. ``body``
+    is the commit message; when it holds no ``VERDICT:`` line, the text of the files the commit
+    adds (the review file) follows it. Raises :class:`ReportUnreadable` when origin cannot be
+    read: an unread answer is never "no report yet"."""
+    if not worktree or not os.path.isdir(worktree) or not job_name:
+        return None
+    ref = review_ref(job_name)
+    ls = _git(['ls-remote', 'origin', ref], worktree)
+    if ls.returncode != 0:
+        raise ReportUnreadable((ls.stderr or ls.stdout or 'git ls-remote failed').strip())
+    sha = next((ln.split()[0] for ln in ls.stdout.splitlines() if ln.split()[1:] == [ref]), '')
+    if not sha:
+        return None
+    fetched = _git(['fetch', '-q', 'origin', ref], worktree)
+    if fetched.returncode != 0:
+        raise ReportUnreadable((fetched.stderr or fetched.stdout or 'git fetch failed').strip())
+    msg = _git(['log', '-1', '--format=%B', sha], worktree)
+    if msg.returncode != 0:
+        raise ReportUnreadable((msg.stderr or 'git log failed').strip())
+    body = msg.stdout.strip()
+    if not VERDICT_LINE_RE.search(body):  # the verdict lines in the review file instead
+        names = _git(['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', sha],
+                     worktree)
+        for path in (names.stdout.splitlines() if names.returncode == 0 else []):
+            shown = _git(['show', f'{sha}:{path}'], worktree)
+            if shown.returncode == 0 and shown.stdout.strip():
+                body += '\n\n' + shown.stdout.strip()
+    return {'sha': sha, 'body': body, 'ref': ref}
+
+
+def delete_review(worktree, job_name):
+    """Delete a read review's branch, on origin and here (the remote-tracking ref a fetch of it
+    left): nothing of a review outlives its reading."""
+    if not worktree or not os.path.isdir(worktree) or not job_name:
+        return False
+    from asf import gitpush, refguard
+    ref = review_ref(job_name)
+    p = gitpush.push(['-q', 'origin', f':{ref}'], worktree, refs_only=True,
+                     guard=refguard.Guard())
+    _git(['update-ref', '-d', f'refs/remotes/origin/{ref[len("refs/heads/"):]}'], worktree)
+    return p.returncode == 0
+
+
+def run_report(run, job=None):
+    """The report commit that ends ``run`` (a ledger row; ``job`` its name): a review's on its
+    own report branch (:func:`review_report`), any other run's on its branch (:func:`report_commit`)."""
+    if is_review(run.get('kind')):
+        return review_report(run.get('worktree'), job or run.get('job'))
+    return report_commit(run.get('worktree'), run.get('branch'), run.get('session'))
 
 
 def _parse_ts(text):
@@ -677,7 +790,7 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
         else:
             view = gh.view(run_id) if run_id else None  # before the report: no race with its end
             try:
-                report = report_commit(run.get('worktree'), run.get('branch'), run.get('session'))
+                report = run_report(run, job)
             except ReportUnreadable as e:
                 why = f'report unreadable ({e}): left as it is'
                 out(f'cloud    {job:<24} {why}')
@@ -734,6 +847,9 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
             head, _what = heartbeat.land_snapshot(wt, run.get('branch'), last)
             heartbeat.delete_ref(wt, job)
             hb_state.pop(job, None)
+        if status != WORKING and is_review(run.get('kind')) and (
+                status != FINISHED or (report and run.get('log'))):
+            delete_review(run.get('worktree'), job)  # read, its verdict on the log: gone
         if status != WORKING:
             catch_up(run.get('worktree'), run.get('branch'))
             if run.get('brief_ref'):

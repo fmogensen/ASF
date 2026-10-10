@@ -459,6 +459,8 @@ def build_parser():
     register_answer(sub)
     from asf.tick.migrate_landing import register as register_migrate_landing
     register_migrate_landing(sub)
+    from asf.record.repair import register as register_record_repair
+    register_record_repair(sub)
     from asf.trunk_ruleset import register as register_ruleset
     register_ruleset(sub)
     from asf.facts.landing import register as register_facts
@@ -550,6 +552,48 @@ def build_parser():
     add_tune_parser(sub)
     from asf.shadow import add_parser as add_deciders_parser
     add_deciders_parser(sub)
+
+    p_kernel = sub.add_parser('kernel', help="ASF 0.2's kernel: one loop of facts -> decide -> apply")
+    kernel_sub = p_kernel.add_subparsers(dest='kernel_command', required=True)
+    p_ktick = kernel_sub.add_parser('tick', help='one tick: read facts, decide, apply (or print)')
+    p_ktick.add_argument('--product', required=True)
+    p_ktick.add_argument('--dry-run', action='store_true', help='print the plan; write nothing')
+    p_ktick.add_argument('--plan-out', metavar='FILE',
+                         help='with --dry-run: also write the plan (item states, action counts) '
+                              'as JSON to FILE')
+    p_kstatus = kernel_sub.add_parser('status', help='Stuck items, states and sessions')
+    p_kstatus.add_argument('--product', required=True)
+    p_kstatus.add_argument('--live', action='store_true',
+                           help="decide afresh on the facts now (reads GitHub), not the last tick's plan")
+    p_kwaits = kernel_sub.add_parser(
+        'waits', help='every wait measured: per class now/p50/p90/max/item-hours, the oldest '
+                      'waits, the biggest one (the wait ledger and the last plan; no GitHub)')
+    p_kwaits.add_argument('--product', required=True)
+    p_kwaits.add_argument('--since', help='the window start (ISO-8601; default: 24 h ago)')
+    p_kwaits.add_argument('--live', action='store_true',
+                          help='the current waits from the facts now (reads GitHub)')
+    p_kmoves = kernel_sub.add_parser(
+        'main-moves', help='what each main move cost: moves per hour, p50/p90 minutes '
+                           '(state/<p>/kernel-main-moves.jsonl; no GitHub)')
+    p_kmoves.add_argument('--product', required=True)
+    p_kmoves.add_argument('--since', help='the window start (ISO-8601; default: 24 h ago)')
+    p_kpause = kernel_sub.add_parser('pause', help="hold the product's launches")
+    p_kpause.add_argument('--product', required=True)
+    p_kpause.add_argument('--reason', default='kernel pause', help='recorded with the pause')
+    p_kresume = kernel_sub.add_parser('resume', help="lift the product's launch pause")
+    p_kresume.add_argument('--product', required=True)
+    p_kinstall = kernel_sub.add_parser(
+        'install', help="write and load the tick and keep-alive launchd jobs from the product's "
+                        'kernel: block, running this venv')
+    p_kinstall.add_argument('--product', required=True)
+    p_kinstall.add_argument('--dry-run', action='store_true', help='print the plists; write nothing')
+    p_kinstall.add_argument('--accept-diff', action='store_true',
+                            help="switch even when the new venv's shadow plan differs widely from "
+                                 'the live one (kernel.install.max_state_changes, a Launch drop)')
+    p_kwatch = kernel_sub.add_parser('watch', help='keep-alive: load the tick job, kick a stale one')
+    p_kwatch.add_argument('--product', required=True)
+    p_kgate = kernel_sub.add_parser('gate', help='the proof gate: PASS/FAIL per kernel.gate criterion')
+    p_kgate.add_argument('--product', required=True)
 
     p_capacity = sub.add_parser('capacity', help='the CAPACITY table: sessions and CI runs per product')
     g_capacity = p_capacity.add_mutually_exclusive_group()
@@ -661,6 +705,60 @@ def _published(cmd, args, record, message):
 EX_TEMPFAIL = 75
 
 
+def _kernel(args):
+    """``asf kernel tick|status|waits|pause|resume|install|watch|gate --product P``."""
+    if args.kernel_command in ('install', 'watch', 'gate'):
+        from asf import env
+        product = env.load_product(args.product)
+        if args.kernel_command == 'install':
+            from asf.kernel import host
+            return host.install(product, dry_run=args.dry_run, accept_diff=args.accept_diff)
+        if args.kernel_command == 'watch':
+            from asf.kernel import host
+            rc, line = host.watch(product)
+            if sys.stdout.isatty():
+                print(line)
+            return rc
+        from asf.kernel import gate
+        return gate.gate(product)
+    if args.kernel_command == 'tick':
+        from asf.kernel.loop import tick
+        if args.plan_out and not args.dry_run:
+            print('kernel tick: --plan-out needs --dry-run')
+            return 2
+        summary = tick(args.product, dry_run=args.dry_run, plan_out=args.plan_out)
+        return 1 if summary.get('locked') or summary.get('failed') else 0
+    if args.kernel_command == 'status':
+        from asf.kernel.status import status
+        status(args.product, live=args.live)
+        return 0
+    if args.kernel_command == 'waits':
+        from asf.kernel.waits import waits
+        try:
+            waits(args.product, since=args.since, live=args.live)
+        except ValueError as e:
+            print(e)
+            return 2
+        return 0
+    if args.kernel_command == 'main-moves':
+        from asf.kernel.mainmoves import main_moves
+        try:
+            main_moves(args.product, since=args.since)
+        except ValueError as e:
+            print(e)
+            return 2
+        return 0
+    from asf import env, pause
+    name = env.load_product(args.product).name
+    if args.kernel_command == 'pause':
+        lines = pause.pause(name, args.reason, os.environ.get('USER') or '?')
+    else:
+        lines = pause.resume(name)
+    for line in lines:
+        print(line)
+    return 0
+
+
 def main(argv=None):
     from asf import env, tables
     line_buffered(sys.stdout, sys.stderr)  # before BoxStream wraps stdout, which passes lines on
@@ -738,6 +836,12 @@ def _main(argv=None):
             return cmd_migrate_landing(args, resolve_record(args))
         return _published(cmd_migrate_landing, args, resolve_record(args),
                           'record: migrate-landing ' + ('--revert' if args.revert else '--apply'))
+    if args.command == 'record-repair':
+        from asf.record.repair import cmd_record_repair
+        if not args.apply:   # the dry run writes nothing: nothing to publish
+            return cmd_record_repair(args, resolve_record(args))
+        return _published(cmd_record_repair, args, resolve_record(args),
+                          'record: record-repair --apply (multi-line values back on one line)')
     if args.command == 'groom':
         from asf.groom.groom import cmd_groom
         return cmd_groom(args, resolve_record(args))
@@ -834,6 +938,8 @@ def _main(argv=None):
         if args.command == 'console-feed':
             from asf.console_feed import cmd_console_feed
             return cmd_console_feed(args, view_root)
+    if args.command == 'kernel':
+        return _kernel(args)
     if args.command == 'capacity':
         from asf.views.capacity import cmd_capacity
         return cmd_capacity(args)

@@ -1,0 +1,517 @@
+"""asf.kernel.apply — a :class:`~asf.kernel.actions.Plan` done through the ports (ASF 0.2).
+
+:func:`apply` walks the plan's actions in order, then writes each item's judged state to its card.
+It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
+
+- a build launched on an open PR's branch is a fix round: ``kernel_fix_rounds`` + 1, and the
+  'changes' findings on that PR's tree, plus the launch's own (a rebase round's), go to the card
+  and the brief;
+- a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR, or whose error says
+  "merge conflict", is an attempt :func:`asf.kernel.decide.conflict_attempt` (PR and head), so
+  the next tick routes the PR to its rebase session; a failed launch is an attempt ``launch: …``
+  — but one with no seat on its lane (:class:`asf.kernel.ports.NoSeat`) only waits a tick;
+- a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; a live
+  one ended past its max age is stopped by the host and is an attempt
+  :data:`asf.kernel.decide.OVER_AGE` (its worktree kept);
+- a :class:`~asf.kernel.actions.ClosePR` closes the PR with a comment naming why (the branch is
+  kept); one whose
+  API failed before it reported is an attempt :data:`asf.kernel.decide.API_FAILED`;
+- an ended session that reported ``pushed: rebased <sha>`` (the floor's wording: "the factory
+  publishes") and pushed nothing, or a ``done`` one whose worktree holds commits origin lacks
+  (:func:`asf.kernel.decide.host_pushes`: a rebase the session's sandbox would not force-push,
+  a push its hook timed out on), is pushed once by the host (``sessions.push_rebase``: the
+  worktree's HEAD must be that sha; ``--force-with-lease`` over origin's tip, only when that
+  tip is in the branch's own history or patch-equivalent to it; the push recorded on its push
+  log) before the session is ended — a kernel session pushes its own branch, and this is the
+  safety net; a refused push keeps the worktree, skips the item's OpenPR and leaves it
+  Stuck(owner=operator) on the refusal;
+- a Stuck item a refused force-push left (:func:`asf.kernel.decide.stranded`) whose kept rebase
+  worktree holds a safe HEAD is published the same way (:class:`~asf.kernel.actions.PushStranded`)
+  and goes to Review, its PR judged next tick; a refused push leaves it Stuck(owner=operator) on
+  the refusal;
+- an answer to a Stuck item resets its attempts to one relaunch marker carrying the answer
+  (:func:`asf.kernel.decide.answer_attempt`); one that grants an extra fix round adds one to
+  ``kernel_extra_rounds`` and drops the spent rebase finding; a :class:`~asf.kernel.actions.ClearStuck` appends
+  its attempt; a build launched off a PR carries the launch's findings (a granted relaunch's)
+  into the brief, and writes no fix round;
+- an :class:`~asf.kernel.actions.ArchiveAndReset` has the host keep the PR's head as
+  ``archive/<branch>``, close the PR with a comment and delete the branch; then the card's fix
+  rounds, extra rounds, attempts and findings are cleared and ``kernel_rebuilds`` goes up by one
+  (a failed host step leaves the card as it was: the next tick judges the PR again);
+- a :class:`~asf.kernel.actions.RevertPR` has the host open the revert PR and enable its
+  auto-merge, then adds the PR to ``kernel_reverted`` (it no longer makes the item Done), a
+  :data:`asf.kernel.decide.RELAUNCH` attempt carrying the red (the relaunch's finding) and the
+  note; a :class:`~asf.kernel.actions.FileBug` writes its Bug card (once per key);
+- a session that ended without a REPORT is an attempt :data:`asf.kernel.decide.NO_REPORT` and
+  its worktree is kept: the relaunch continues on it;
+- a :class:`~asf.kernel.actions.Satisfied` writes Done and the note ``satisfied on main at
+  <sha>: <tests>`` (:mod:`asf.kernel.needed`); its ended session's unpushed HEAD is not
+  published (no empty commit); a :class:`~asf.kernel.actions.CancelRun` cancels the run;
+- a review session that ended has its report's verdict lines
+  (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree and
+  the PR change it was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
+
+Every brief comes from the ports' brief maker (:class:`asf.kernel.briefs.Briefer` on the real
+ports): the floor's brief builder, never text of the kernel's own.
+
+Idempotent: a state already on the card is not rewritten, a Stuck already recorded keeps its
+``since``, a Story already on the record is not minted, and a launch for an item a live session
+already holds is skipped. One action's failure is logged in the result and never stops the rest;
+one card's failed write is logged the same way.
+"""
+import dataclasses
+import re
+
+from asf.kernel import actions as A
+from asf.kernel import dor as D
+from asf.kernel.actions import describe  # noqa: F401 — the applier's log line, re-exported
+from asf.kernel import ports as P
+from asf.kernel import reports as R
+from asf.kernel.briefs import parse_verdict
+from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
+                               NO_VERDICT, OVER_AGE, READ_ONLY, RELAUNCH, answer_attempt, conflict_attempt, host_pushes, host_refuses,
+                               no_report, rebase_finding)
+from asf.kernel.model import State, Stuck, verdict_holds
+
+#: the Stuck reason prefix of a needs-writes grant the record refused to write
+UNWIDENED = 'the record refused to widen writes: '
+
+#: a REPORT's ``pushed: rebased <sha> …`` — the floor's "the factory publishes" line
+REBASED_RE = re.compile(r'^\s*rebased\s+([0-9a-fA-F]{7,40})\b')
+
+
+def rebased_sha(s):
+    """The sha an ended, non-review session reported as ``pushed: rebased <sha>`` and left
+    to the factory, else '' (the port skips a sha its push log already holds)."""
+    if not s.ended or s.kind == 'review':
+        return ''
+    m = REBASED_RE.match(str((s.fields or {}).get('pushed') or ''))
+    return m.group(1).lower() if m else ''
+
+
+def host_push_sha(s):
+    """The sha the host pushes for ended session ``s`` before ending it, else '': a reported
+    ``rebased <sha>``, else the worktree HEAD a ``done`` session left unpushed
+    (:func:`asf.kernel.decide.host_pushes`: also a ``partial``, ``blocked`` or no-REPORT one on
+    an open PR's branch)."""
+    return rebased_sha(s) or (s.unpushed.lower() if host_pushes(s) else '')
+
+
+@dataclasses.dataclass
+class Result:
+    """What one apply did: ``done`` and ``failed`` hold ``(action, note)`` pairs; ``written`` the
+    item ids whose card changed."""
+    done: list = dataclasses.field(default_factory=list)
+    failed: list = dataclasses.field(default_factory=list)
+    written: list = dataclasses.field(default_factory=list)
+
+
+class _Applier:
+
+    def __init__(self, plan, facts, ports, now, log, judged=True):
+        self.plan, self.facts, self.ports, self.now, self.log = plan, facts, ports, now, log
+        self.judged = judged
+        self.updates = {}   # item id -> {machine key: value}
+        self.refused = {}   # item id -> why the host did not push its session's work
+        self.unwidened = {}  # item id -> why the record refused a needs-writes grant
+        self.moved = {}     # PR number -> what this apply did to it (merged, closed, updated, ...)
+        self.result = Result()
+
+    def field(self, iid, key, default):
+        """The value ``key`` will have on ``iid``'s card: this tick's update, else the card's."""
+        if key in self.updates.get(iid, {}):
+            return self.updates[iid][key]
+        it = self.facts.items.get(iid)
+        if it is None:
+            return default
+        return {P.ATTEMPTS: list(it.attempts), P.FIX_ROUNDS: it.fix_rounds,
+                P.ANSWERS: list(it.answers), P.NOTES: list(it.notes),
+                P.EXTRA_ROUNDS: it.extra_rounds, P.FINDINGS: list(it.findings),
+                P.REBUILDS: it.rebuilds, P.REVERTED: list(it.reverted),
+                P.DOR_FILLS: it.dor_fills}.get(key, default)
+
+    def set(self, iid, **fields):
+        self.updates.setdefault(iid, {}).update(fields)
+
+    def attempt(self, iid, reason):
+        self.set(iid, **{P.ATTEMPTS: self.field(iid, P.ATTEMPTS, []) + [reason]})
+
+    # ---- one method per action type -------------------------------------------------------
+
+    def ApplyAnswer(self, a):
+        note = ''
+        if a.writes:  # a needs-writes grant: the card's writes: first; refused, nothing is answered
+            try:
+                self.ports.record.widen_writes(a.item_id, list(a.writes))
+            except Exception as e:  # the question stays with the operator, with why
+                self.unwidened[a.item_id] = str(e) or type(e).__name__
+                raise
+            note = 'writes: +%s' % ' '.join(a.writes)
+        answers = self.field(a.item_id, P.ANSWERS, [])
+        if a.text not in answers:
+            self.set(a.item_id, **{P.ANSWERS: answers + [a.text], P.QUESTION: None})
+        it = self.facts.items.get(a.item_id)
+        if it is not None and it.state is State.STUCK:
+            self.set(a.item_id, **{P.QUESTION: None, P.ATTEMPTS: [answer_attempt(a.text)]})
+            if it.dor_fills:  # an answer to a Definition-of-Ready Stuck: groom-fill again
+                self.set(a.item_id, **{P.DOR_FILLS: None, P.DOR_FILLS_VER: None})
+        if it is not None and a.extra_round:  # one more fix round; a spent rebase is retried
+            self.set(a.item_id, **{
+                P.EXTRA_ROUNDS: self.field(a.item_id, P.EXTRA_ROUNDS, 0) + 1,
+                P.FINDINGS: [f for f in self.field(a.item_id, P.FINDINGS, [])
+                             if not rebase_finding(f)]})
+        return note
+
+    def FileInbox(self, a):
+        return 'filed %s' % self.ports.record.file_inbox(a.title, a.body)
+
+    def ClearStuck(self, a):
+        if a.item_id in self.unwidened:
+            return 'kept: its needs-writes grant was refused'
+        self.attempt(a.item_id, a.attempt)
+
+    def WaitOn(self, a):
+        it = self.facts.items.get(a.item_id)
+        after = list(self.updates.get(a.item_id, {}).get(P.AFTER) or (it.after if it else []))
+        added = [i for i in a.ids if i not in after]
+        if added:
+            self.set(a.item_id, **{P.AFTER: after + added})
+        self.set(a.item_id, **{P.QUESTION: None})  # its Stuck goes with the judged state (New)
+        return 'after: %s' % ', '.join(after + added)
+
+    def ArchiveAndReset(self, a):
+        comment = ('Closed by the kernel: %s. The head %s is kept as `%s%s`; %s is rebuilt '
+                   'fresh from the trunk.' % (a.reason, a.head_sha or '?', P.ARCHIVE_PREFIX,
+                                              a.branch, a.item_id))
+        archive = self.ports.github.archive_and_reset(a.pr, a.branch, a.head_sha, comment)
+        self.set(a.item_id, **{P.FIX_ROUNDS: 0, P.EXTRA_ROUNDS: 0, P.ATTEMPTS: [],
+                               P.FINDINGS: [],
+                               P.REBUILDS: self.field(a.item_id, P.REBUILDS, 0) + 1})
+        return 'archived as %s' % archive
+
+    def NoteItem(self, a):
+        notes = self.field(a.item_id, P.NOTES, [])
+        if a.text not in notes:
+            self.set(a.item_id, **{P.NOTES: notes + [a.text]})
+
+    def EndSession(self, a):
+        s = next((s for s in self.facts.sessions if s.job == a.job), None)
+        if s is None:
+            return 'not in the facts'
+        published = host_pushes(s) or host_refuses(s)  # the host's push judges this end
+        if s.alive:  # past its max age: the host stops it, the item is relaunched
+            self.attempt(s.item_id, OVER_AGE)
+        elif not s.ended:
+            self.attempt(s.item_id, CRASH)
+        elif s.kind == 'review':
+            self.verdict(s)
+        elif s.kind == D.GROOM_FILL:
+            self.groom_fill(s)
+        elif s.api_error and not s.fields and not published:
+            self.attempt(s.item_id, API_FAILED)
+        free, note = a.free_worktree, None
+        if host_refuses(s):
+            free = False  # origin holds commits this history never had: the operator carries them
+        elif s.ended and s.kind not in READ_ONLY and no_report(s) and not published:
+            self.attempt(s.item_id, NO_REPORT)
+            free = False  # the relaunch continues on its worktree and branch
+        sha = host_push_sha(s)
+        if any(isinstance(x, A.Satisfied) and x.item_id == s.item_id for x in self.plan.actions):
+            sha = ''  # already done on main: no empty commit is published
+        if sha:
+            try:
+                note = self.ports.sessions.push_rebase(s, sha)
+            except Exception as e:  # the worktree is kept: its commits are the work
+                why = str(e) or type(e).__name__
+                free, note = False, 'rebase not pushed: %s' % why
+                if host_pushes(s):
+                    self.refused[s.item_id] = why
+            self.log('%s %s — %s' % (s.job, s.item_id, note))
+        self.ports.sessions.end(s, free)
+        return note
+
+    def PushStranded(self, a):
+        s = next((s for s in self.facts.stranded if s.job == a.job), None)
+        if s is None:
+            return 'not in the facts'
+        try:
+            note = self.ports.sessions.push_rebase(s, s.unpushed.lower())
+        except Exception as e:  # stays Stuck on the operator, on the refusal
+            self.refused[a.item_id] = str(e) or type(e).__name__
+            raise
+        return note
+
+    def verdict(self, s):
+        """Record an ended review session's verdict on the ledger, keyed by the tree and the PR
+        change it read."""
+        got = parse_verdict(s.report)
+        pr = next((p for p in self.facts.prs if p.item_id == s.item_id and not p.merged
+                   and (s.pr is None or p.number == s.pr)), None)
+        tree = s.tree_sha or (pr.tree_sha if pr else '')
+        # the change read with the tree the session was launched on; a session launched before
+        # the change was kept takes the PR's only while its tree is still the one reviewed
+        same = pr is not None and (not s.tree_sha or s.tree_sha == pr.tree_sha)
+        change = s.change_id or (pr.change_id if same else '')
+        if got is None or not tree:
+            self.attempt(s.item_id, NO_VERDICT)
+            return
+        self.ports.record.record_review(s.item_id, s.pr or (pr.number if pr else None), tree,
+                                        got[0], got[1], change)
+
+    def groom_fill(self, s):
+        """Apply an ended groom-fill session's verdict (:func:`asf.kernel.dor.parse_verdict`):
+        ``superseded`` retires the card, ``fill``/``reshape`` write its acceptance and writes,
+        ``proceed`` changes nothing; a rejected block (or a write the record refuses) is a note on
+        the card. ``risk_raise: high`` is a note too (the risk flag is the product's config). The
+        next tick judges the card afresh."""
+        v, why = D.parse_verdict(s.report)
+        note = None
+        if v is None:
+            note = '%s: groom-fill verdict rejected: %s' % (s.job, why)
+            if D.format_only(why):  # a format slip is not an attempt: the fill is given back
+                n = self.field(s.item_id, P.DOR_FILLS, 0)
+                self.set(s.item_id, **{P.DOR_FILLS: max(0, n - 1)})
+        else:
+            try:
+                if v.verdict == 'superseded':
+                    self.ports.record.supersede(s.item_id, v.superseded_by, v.reason)
+                elif v.verdict in ('fill', 'reshape'):
+                    self.ports.record.fill_card(s.item_id, v.acceptance, v.writes, v.creates,
+                                                '%s: %s' % (v.verdict, v.reason))
+            except Exception as e:  # the card stays as it was; the next fill is its next chance
+                note = '%s: groom-fill %s not written: %s' % (s.job, v.verdict, e)
+            if v.risk_raise == 'high':
+                self._note(s.item_id, '%s: groom-fill raised risk high: %s' % (s.job, v.reason))
+        if note:
+            self._note(s.item_id, R.cap(note))
+        self.log('%s %s — groom-fill %s' % (s.job, s.item_id, note or '%s: %s' % (
+            v.verdict, v.reason)))
+
+    def _note(self, iid, text):
+        notes = self.field(iid, P.NOTES, [])
+        if text not in notes:
+            self.set(iid, **{P.NOTES: notes + [text]})
+
+    def MarkStuck(self, a):
+        pass  # written with the item's state below (one card write per item)
+
+    def MintStory(self, a):
+        self.ports.record.mint_story(a.feature_id, a.story_id, a.title, a.acceptance)
+
+    def OpenPR(self, a):
+        if a.item_id in self.refused:
+            return 'skipped: the host push failed'
+        return 'PR #%s' % self.ports.github.open_pr(a.branch, a.base, a.title, a.body)
+
+    def ClosePR(self, a):
+        comment = ('Closed by the kernel: %s, so nothing would ever move this PR. The branch '
+                   '`%s` is kept.' % (a.reason, a.branch))
+        self.ports.github.close_pr(a.pr, comment)
+
+    def Rerun(self, a):
+        if a.cancel:
+            self.ports.github.rerun(a.run_id, cancel=True)
+        else:
+            self.ports.github.rerun(a.run_id)
+
+    def UpdateBranch(self, a):
+        pr = next((p for p in self.facts.prs if p.number == a.pr and not p.merged), None)
+        try:
+            self.ports.github.update_branch(a.pr)
+        except Exception as e:
+            if pr is not None and (pr.conflicting or 'merge conflict' in str(e).lower()):
+                self.attempt(pr.item_id, conflict_attempt(a.pr, pr.head_sha) + str(e))
+            raise
+
+    def RevertPR(self, a):
+        number = self.ports.github.revert_pr(a.sha, a.branch, a.title, a.body)
+        self.ports.github.enable_auto_merge(number)
+        reverted = self.field(a.item_id, P.REVERTED, [])
+        if a.pr not in reverted:
+            self.set(a.item_id, **{P.REVERTED: reverted + [a.pr]})
+            if a.finding:  # its relaunch carries the red (decide.relaunch_findings)
+                self.attempt(a.item_id, RELAUNCH + a.finding)
+        notes = self.field(a.item_id, P.NOTES, [])
+        if a.note and a.note not in notes:
+            self.set(a.item_id, **{P.NOTES: notes + [a.note]})
+        return 'revert PR #%s, auto-merge on' % number
+
+    def Satisfied(self, a):
+        from asf.kernel.needed import note
+        text = note(a.sha, a.tests)
+        notes = self.field(a.item_id, P.NOTES, [])
+        if text not in notes:
+            self.set(a.item_id, **{P.NOTES: notes + [text]})
+        self.set(a.item_id, **{P.STATE: State.DONE.value})
+        return text
+
+    def CancelRun(self, a):
+        self.ports.github.cancel_run(a.run_id)
+
+    def FileBug(self, a):
+        return 'filed %s' % self.ports.record.file_bug(a.key, a.title, a.body, a.rank)
+
+    def MergePR(self, a):
+        self.ports.github.merge(a.pr, a.head_sha)
+
+    def EnableAutoMerge(self, a):
+        self.ports.github.enable_auto_merge(a.pr)
+
+    def Launch(self, a):
+        if any(s.item_id == a.item_id and s.alive and (s.kind == 'review') == (a.kind == 'review')
+               for s in self.facts.sessions):
+            return 'skipped: a live session holds it'
+        it = self.facts.items[a.item_id]
+        pr = next((p for p in self.facts.prs
+                   if p.item_id == a.item_id and not p.merged and p.branch == a.branch), None)
+        fix = a.kind == 'build' and pr is not None
+        findings = []
+        groom = a.kind == D.GROOM_FILL
+        if fix:
+            findings = [f for r in self.facts.reviews
+                        if r.item_id == a.item_id and verdict_holds(r, pr)
+                        and r.verdict != 'approve' for f in r.findings]
+            findings += [f for f in a.findings if f not in findings]
+        elif a.kind != 'review':
+            findings = list(a.findings)
+        meta = ({'pr': pr.number, 'tree': pr.tree_sha, 'change': pr.change_id}
+                if pr is not None else {})
+        if any(rebase_finding(f) for f in findings):
+            meta['host'] = True  # a rebase round: the host publishes it from the worktree
+        if a.local:
+            meta['local_first'] = True  # a breach: a seat on this host first
+        try:
+            if self.ports.brief is None:
+                raise P.PortError('no brief maker on the ports')
+            job = self.ports.sessions.launch(a.kind, a.item_id, a.branch,
+                                             self.ports.brief(it, a, findings, pr), meta)
+        except P.NoSeat as e:  # a capacity wait, not a failed attempt on the item
+            return 'waits for a seat: %s' % e
+        except Exception as e:
+            self.attempt(a.item_id, 'launch: %s' % e)
+            raise
+        if fix:
+            self.set(a.item_id, **{P.FIX_ROUNDS: self.field(a.item_id, P.FIX_ROUNDS, 0) + 1,
+                                   P.FINDINGS: findings})
+        if groom:  # it stays New while its card is filled; the fill counts against its budget
+            self.set(a.item_id, **{P.DOR_FILLS: self.field(a.item_id, P.DOR_FILLS, 0) + 1,
+                                   P.DOR_FILLS_VER: P._kernel_version()})
+            return 'job %s' % job
+        self.set(a.item_id, **{P.STATE: (State.REVIEW if a.kind == 'review'
+                                         else State.BUILDING).value})
+        return 'job %s' % job
+
+    # ---- a write invalidates the view it was decided on --------------------------------------
+
+    def stale(self, action):
+        """Why ``action`` must not run: it targets a PR an earlier action of this apply changed
+        (merged, closed, archived, reverted, updated), so the plan's view of that PR (its head,
+        checks, reviews, mergeability) is the pre-write one. The next tick decides it afresh."""
+        for number in self.targets(action):
+            if number in self.moved:
+                return 'skipped: #%s was %s earlier this tick' % (number, self.moved[number])
+        return ''
+
+    def targets(self, action):
+        """The PR numbers ``action`` acts on."""
+        if isinstance(action, (A.MergePR, A.EnableAutoMerge, A.UpdateBranch, A.ClosePR,
+                               A.ArchiveAndReset, A.RevertPR)):
+            return [action.pr]
+        if isinstance(action, (A.Rerun, A.CancelRun)):
+            return [p.number for p in self.facts.prs
+                    if any(c.run_id == action.run_id for c in p.checks)]
+        if isinstance(action, A.Launch):
+            return [p.number for p in self.facts.prs
+                    if p.item_id == action.item_id and not p.merged
+                    and p.branch == action.branch]
+        return []
+
+    def mark(self, action):
+        """Record what a successful ``action`` did to its PR."""
+        what = {A.MergePR: 'merged', A.ClosePR: 'closed', A.ArchiveAndReset: 'closed',
+                A.RevertPR: 'reverted', A.UpdateBranch: 'updated'}.get(type(action))
+        if what:
+            for number in self.targets(action):
+                self.moved[number] = what
+
+    # ---- the walk -------------------------------------------------------------------------
+
+    def run(self):
+        for action in self.plan.actions:
+            name = type(action).__name__
+            why = self.stale(action)
+            if why:
+                self.result.done.append((action, why))
+                self.log('%s — %s' % (describe(action), why))
+                continue
+            try:
+                note = getattr(self, name)(action)
+                self.mark(action)
+            except Exception as e:  # one action's failure never stops the rest
+                self.result.failed.append((action, str(e) or type(e).__name__))
+                self.log('FAILED %s — %s' % (describe(action), e))
+                continue
+            self.result.done.append((action, note or ''))
+            self.log('%s%s' % (describe(action), ' — %s' % note if note else ''))
+        if self.judged:
+            self.states()
+        self.write()
+        return self.result
+
+    def states(self):
+        """Each judged item's state and Stuck, onto this tick's updates where the card differs.
+        A container with children is derived every tick and never stored."""
+        parents = {it.parent for it in self.facts.items.values()}
+        parents |= {sid for it in self.facts.items.values() for sid in it.stories}
+        states = dict(self.plan.states)
+        for iid, why in self.refused.items():  # decide counted on a push that did not happen
+            if iid in states:
+                states[iid] = (State.STUCK, Stuck(reason=R.cap(NOT_PUSHED + why), owner='operator',
+                                                  next_action=NEXT_ACTION['operator']))
+        for iid, why in self.unwidened.items():  # decide counted on a grant the record refused
+            if iid in states:
+                states[iid] = (State.STUCK, Stuck(reason=R.cap(UNWIDENED + why), owner='operator',
+                                                  next_action=NEXT_ACTION['operator']))
+        for iid, (state, stuck) in states.items():
+            it = self.facts.items.get(iid)
+            if it is None or (it.type in CONTAINERS and iid in parents):
+                continue  # derived every tick, never stored
+            upd = self.updates.get(iid, {})
+            if P.STATE in upd:   # a launch this tick moved it already
+                continue
+            if state is State.PARKED:  # derived every tick, never stored — but a stored Stuck
+                if it.state is State.STUCK or it.stale_stuck:  # goes: unparked, judged afresh
+                    self.set(iid, **{P.STATE: None, **dict.fromkeys(P.STUCK_KEYS)})
+                continue
+            fields = {}
+            if state is not it.state:
+                fields[P.STATE] = state.value
+            if state is State.STUCK:
+                old = it.stuck if it.state is State.STUCK else None
+                if old is None or (old.reason, old.owner) != (stuck.reason, stuck.owner):
+                    fields.update({P.STATE: state.value, P.STUCK_REASON: stuck.reason,
+                                   P.STUCK_OWNER: stuck.owner, P.STUCK_NEXT: stuck.next_action,
+                                   P.STUCK_SINCE: self.now})
+            elif it.state is State.STUCK or it.stale_stuck:
+                fields.update(dict.fromkeys(P.STUCK_KEYS))
+                if it.stale_stuck:  # a retired card still saying stuck: it says Done now
+                    fields[P.STATE] = state.value
+            if fields:
+                self.set(iid, **fields)
+
+    def write(self):
+        for iid in sorted(self.updates):
+            try:
+                self.ports.record.write_fields(iid, self.updates[iid])
+            except Exception as e:  # one card's failure never stops the rest
+                self.result.failed.append((('write', iid), str(e) or type(e).__name__))
+                self.log('FAILED write %s — %s' % (iid, e))
+                continue
+            self.result.written.append(iid)
+
+
+def apply(plan, facts, ports, now=None, log=print, judged=True):
+    """Do ``plan`` (decided on ``facts``) through ``ports``; return a :class:`Result`.
+    ``judged=False`` (a blind plan, :func:`asf.kernel.decide.blind_plan`) writes no item state."""
+    return _Applier(plan, facts, ports, now or P.now_iso(), log, judged).run()
+

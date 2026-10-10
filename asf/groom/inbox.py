@@ -242,6 +242,74 @@ def signed(card):
     return card._replace(headers=dict(headers, signature=sig))
 
 
+#: the instance tokens a machine-filed signature may carry — item ids (``T-0073``, ``PR-0772``),
+#: PR numbers (``#593``), commit shas (``@62be9d372``, ``abc1234``) — none of which is the symptom
+_INSTANCE_RE = re.compile(r'#\d+(?:@[0-9a-f]{7,40})?|\b[A-Z]{1,3}-\d+\b|@?\b[0-9a-f]{7,40}\b')
+#: a watchdog signature: ``watchdog <state>: <key>`` — the state is the symptom, the key one place
+_WATCHDOG_SIG_RE = re.compile(r'^(watchdog [a-z_]+)\s*:.*$')
+
+
+def symptom_class(signature):
+    """The symptom class of a machine-filed ``signature``, never its instance: ``watchdog
+    <state>: <key>`` is ``watchdog <state>``; elsewhere each item id, PR number and sha is
+    ``…`` (a list of them one ``…``). Two cards of one class are one defect: intake appends the
+    repeat's evidence to the open card and counts it (:func:`process_inbox`)."""
+    sig = ' '.join(str(signature or '').split())
+    m = _WATCHDOG_SIG_RE.match(sig)
+    if m:
+        return m.group(1)
+    def one(m):
+        tok = m.group(0).lstrip('@')
+        if re.fullmatch(r'[0-9a-f]+', tok) and not (re.search(r'\d', tok)
+                                                    and re.search(r'[a-f]', tok)):
+            return m.group(0)  # a plain number or word, not a sha
+        return '…'
+    return re.sub(r'…(?:\s*,\s*…)+', '…', _INSTANCE_RE.sub(one, sig))
+
+
+def open_bug_of_class(canonical, signature):
+    """The open Bug (not removed, not closed, not Done on the kernel) whose ``signature:`` is of
+    ``signature``'s :func:`symptom_class`, the lowest id first; None when none is."""
+    from asf.record import frontmatter
+    want = symptom_class(signature)
+    if not want:
+        return None
+    for iid in sorted(canonical):
+        rec = canonical[iid]
+        typed, machine = frontmatter.split_machine(rec['meta'])
+        if (typed.get('type') != 'bug' or typed.get('removed') or typed.get('moved_to')
+                or machine.get('state') in ('Closed', 'Resolved')
+                or machine.get('kernel_state') == 'done'):
+            continue
+        if typed.get('signature') and symptom_class(typed['signature']) == want:
+            return rec
+    return None
+
+
+def add_evidence(rec, lines, date, who='inbox'):
+    """A repeat of an open Bug's class: each of ``lines`` the card does not carry yet becomes a
+    ``## History`` line and adds one to its ``count:`` (one write of the card). Returns how many
+    were added."""
+    from asf.record import frontmatter, writer
+    from asf.record.ingest import append_history_lines
+    with open(rec['path'], encoding='utf-8') as f:
+        text = f.read()
+    meta, body = frontmatter.parse(text, path=rec['relpath'])
+    new = [' '.join(str(e).split()) for e in lines]
+    new = [e for e in dict.fromkeys(new) if e and e not in body]
+    if not new:
+        return 0
+    count = int(meta.get('count') or 1) + len(new)
+    meta['count'] = count
+    meta['last_filed'] = date
+    body = append_history_lines(body, ['- %s %s: count %d — also %s' % (date, who, count, e)
+                                       for e in new])
+    text = frontmatter.render(meta, body)
+    writer.write_card(rec['path'], text)
+    rec['meta'], rec['text'], rec['body'] = meta, text, body
+    return len(new)
+
+
 def title_signature(title):
     """The signature an operator's ``type: bug`` card gets when it names none: its title,
     whitespace folded — a Bug is keyed on its signature, and a title is the one line it has."""
@@ -335,7 +403,19 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             text = f.read()
         body, prior = _split_question(text) if _has_question(text) else (text, '')
 
-        card = declared(signed(graded(scrub_title(parse_inbox_file(body), root))))
+        raw = parse_inbox_file(body)
+        card = declared(signed(graded(scrub_title(raw, root))))
+        machine_sig = raw.headers.get('signature')
+        if machine_sig:  # a machine-filed card: one open Bug per symptom class
+            card = card._replace(headers=dict(card.headers,
+                                              signature=symptom_class(machine_sig)))
+            same = open_bug_of_class(canonical, machine_sig)
+            if same is not None:
+                evidence = ' '.join((card.description or card.title).split())[:300]
+                add_evidence(same, ['%s: %s' % (name, evidence or card.title)], date)
+                move_to_done(inbox_dir, name, f"→ {same['meta'].get('id')} (repeat of "
+                             f"`{symptom_class(machine_sig)}`, groom {date})", text)
+                continue
         if retired is None:
             retired = retired_keys(canonical, inbox_dir)
         gone = retired_as(card, retired)

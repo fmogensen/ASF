@@ -39,7 +39,7 @@ from asf import env, refguard
 from asf import hooks
 from asf import progress
 from asf.workers import githooks
-from asf.workers import heartbeat
+from asf.workers import heartbeat as heartbeat_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import pushlog
@@ -1016,17 +1016,23 @@ def write_brief(product, job, text):
 #: configured before it has no entry; falling back to ``light`` keeps that pool running at the
 #: price it already paid, where refusing would stop the factory over a saving.
 MODEL_FALLBACK = {'cheap': 'light'}
+#: a model id rather than a label: a label is one plain word, an id carries a digit, a dash or a dot
+MODEL_ID_RE = re.compile(r'[0-9.-]')
 
 
 def model_arg(model, cfg=None):
     """``worker_pool.models: {heavy: <id>, light: <id>, cheap: <id>}`` maps a row's model label.
     A label with no entry falls back per :data:`MODEL_FALLBACK`; a label with neither is refused —
-    the literal label is not a model id the runtime knows, and the session dies at once."""
+    the literal label is not a model id the runtime knows, and the session dies at once. A model
+    id itself (one of the table's values, or a name no label is spelled like: :data:`MODEL_ID_RE`
+    — the 0.2 kernel's ``kernel.models``) passes through as it is."""
     if not model:
         return None
     table = (((cfg or {}).get('worker_pool') or {}).get('models')) or {}
     if not isinstance(table, dict):  # a misshapen value is no entry, never a TypeError
         table = {}
+    if model not in table and (model in table.values() or MODEL_ID_RE.search(str(model))):
+        return model
     if model not in table:
         alt = tunable('MODEL_FALLBACK').get(model)
         if alt and alt in table:
@@ -1202,8 +1208,10 @@ def _preflight_push_auth(product, account, product_auth_env):
                      clear=account_auth.enable_hint(account.name))
 
 
-def spawn(product, row, account, brief_text, runtime=None, cfg=None):
-    """Launch one row on ``account``. Returns the session record written to the ledger."""
+def spawn(product, row, account, brief_text, runtime=None, cfg=None, heartbeat=True):
+    """Launch one row on ``account``. Returns the session record written to the ledger.
+    ``heartbeat=False`` launches without the beat (no HEARTBEAT block, no ``heartbeat_min``):
+    the 0.2 kernel judges a session by its pid and REPORT."""
     from asf import prepush  # local: prepush pulls in asf.feeder, which reaches back to
                               # asf.workers.health/stall (circular at module scope)
     cfg = load_cfg() if cfg is None else cfg
@@ -1248,7 +1256,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     sid = lifecycle.session_id(product.name, row.job, started)
     # every runtime beats (asf.workers.heartbeat): the runtime hands the session the rule from
     # job.heartbeat — a local one after the brief, a cloud one in its CLOUD block
-    beat = heartbeat.settings(cfg, product, 'cloud' if cloud else 'local')
+    beat = heartbeat_mod.settings(cfg, product, 'cloud' if cloud else 'local') if heartbeat \
+        else None
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)
@@ -1282,6 +1291,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           branch=branch, base=product.main,
                           setup=getattr(product.conventions, 'worktree_setup', None))
     job.heartbeat = beat
+    job.kind = row.kind
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,
@@ -1290,7 +1300,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
               'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or '',
               'cause': getattr(row, 'cause', '') or '',
-              'heartbeat_min': beat.interval_min}
+              'heartbeat_min': beat.interval_min if beat is not None else None}
     launch_head = _launch_head(product.repo_dir, branch)
     if launch_head:
         # the head a held branch was handed back on: the loop guard counts launches on one sha

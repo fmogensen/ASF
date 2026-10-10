@@ -109,13 +109,15 @@ DEFAULT_BRANCH_PREFIXES = {
     'plan': 'plan/',
     #: a ``lane: direct`` Feature's one branch — the whole Feature, code and tests, one PR
     'direct': 'cloud/direct-',
+    #: the kernel's revert of a merged PR that turned the trunk red (``revert/<item>``)
+    'revert': 'revert/',
     'legacy': [],
 }
 
 #: Kinds a product's branches fall in whether or not its ``branch_prefixes`` names them — ones
 #: added after products wrote their prefix maps (a product naming ``code:`` alone still has a
-#: direct lane, under the default prefix).
-RECOGNISED_KINDS = ('direct',)
+#: direct lane, and the kernel's reverts, under the default prefixes).
+RECOGNISED_KINDS = ('direct', 'revert')
 
 #: The operator's two model labels. worker_pool.models maps them onto real model ids
 #: (asf.workers.spawn.model_arg), so no vendor's model id is written down in this repo.

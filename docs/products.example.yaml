@@ -116,7 +116,9 @@ conventions:
   # the dwell-time watchdog (asf.dwell; `asf watchdog`, and the tick's `watchdog` step, which runs
   # with every wave): the longest each state may last, in minutes, or `off` (defaults shown).
   # Only check_cancelled (re-run the failed jobs once per head) and ungrantable_hold (drop it)
-  # act; every other breach is a `watchdog: BREACH` line, a `watchdog` event and a Bug.
+  # act; every other breach is a `watchdog: BREACH` line, a `watchdog` event and a Bug — one per
+  # state (signature `watchdog <state>`, the symptom class, never the instance): a breach of a
+  # state whose Bug is open appends its key's evidence there and adds one to its `count:`.
   # watchdog:
   #   tick_running: 15
   #   pr_green_not_landing: 30
@@ -217,7 +219,10 @@ conventions:
   # the notes' Upgrade line; {repo_slug} and {tag} substituted; "" leaves it out.
   release_install: 'pipx install --force "git+https://github.com/{repo_slug}.git@{tag}"'
   # asf.groom.inbox: where a dropped .md becomes a card. Leave out and the product has no such
-  # thing — nothing looks for it.
+  # thing — nothing looks for it. A machine-filed card (one carrying `signature:`) is keyed on its
+  # symptom class — item ids, PR numbers and shas taken out (`watchdog <state>: <key>` is
+  # `watchdog <state>`): a repeat of an open Bug's class appends its evidence to that Bug and
+  # adds one to its `count:` instead of minting another.
   intake_dir: inbox
   # globs that are documentation beside specs_dir/plans_dir/reviews_dir: a branch touching only
   # these lands as docs, and a trunk that moved only here does not re-gate (default []).
@@ -467,6 +472,218 @@ capacity:
     per_run: 8        # batches per run (harvest: PR merges per run)
     parallel: 2       # batches in flight at once (harvest: PRs in a GitHub merge queue)
     runners: 4        # runner slots one run may claim
+
+# kernel: ASF 0.2's kernel (asf.kernel.settings). Every key shown is its default; leave the block
+# out to take them all. `asf kernel install` writes the two launchd jobs from tick/watch,
+# `asf kernel watch` is the keep-alive, `asf kernel gate` checks the proof criteria.
+kernel:
+  tick:
+    interval_s: 120         # the tick job runs every this many seconds
+  launch:
+    max_sessions: 6         # live sessions the tick launches up to (the local default below)
+    # local_max: 6          # seats on this host (unset: max_sessions)
+    # cloud_kinds: [coder, fix-bug, spec, plan, review, light-review]   # brief kinds that may
+    #                       # go to cloud; the rest (correct, rebases) take a local seat. A cloud
+    #                       # review reports on asf-reviews/<job>, never the PR branch, so
+    #                       # it restarts no CI
+    cloud_max: 0            # seats on the product's cloud lane (`cloud:` above: enabled, not
+                            # mode off, runtime claude-remote or actions); the tick launches up to
+                            # local_max + cloud_max. Cloud first — a launch that needs the host
+                            # (a rebase round, a cloud.local_only kind) takes a local seat — then
+                            # local. A cloud session's liveness is its remote run's status, its
+                            # REPORT the report commit it pushes; a failed create falls back local
+                            # and counts on the lane's breaker (cloud.fallback_*).
+    rank: inherit           # inherit: a Task takes its nearest ancestor's rank; own: only its own
+                            # Seats always fill finish-first: fix rounds and rebases on open PRs,
+                            # then reviews, then builds of Tasks/Bugs, then plans, then specs;
+                            # rank orders each class
+    max_open_prs: 30        # the WIP cap: while the items holding an open PR (Review, Landing, a
+                            # fix round) exceed it, no new build, plan or spec launches — their
+                            # seats go to finishing work; the tick logs `WIP CAP: ...` (0: off)
+  github:
+    retry_delays_s: [2, 5, 10]   # a GitHub read that fails transiently (a 5xx, a timeout, a
+                            # dropped connection, a secondary rate limit) is tried again after
+                            # each delay; writes are never retried. Still failing, the tick is
+                            # blind: no action that needs PR facts and no launch, a crashed
+                            # session is still ended, one "GitHub unreadable" line, exit 0
+  models:                   # the model each brief kind launches on: a model id, or a
+                            # worker_pool.models label (heavy, light, cheap)
+    coder: claude-sonnet-5
+    fix-bug: claude-sonnet-5
+    correct: claude-sonnet-5        # a fix round on an open PR
+    review: claude-sonnet-5
+    light-review: claude-sonnet-5   # a docs-only PR's review (review.light_paths)
+    groom-fill: claude-sonnet-5     # fills a card the Definition of Ready holds (dor:)
+    spec: claude-opus-5
+    plan: claude-opus-5
+  review:
+    light_paths: ['docs/**', '*.md']   # a PR whose every file matches these (or the product's
+                            # specs/plans/reviews dirs) gets a light review: a short checklist
+  briefs:
+    max_appended_chars: 4000  # the kernel's findings + operator answers appended to a brief,
+                            # newest kept; the tick logs each cut (0: no cap)
+  landing:
+    update_parallel: 2      # the merge train: at most this many behind Landing PRs are updated
+                            # (and re-run CI) at once, the one unblocking the most items
+                            # (after:) first, then rank, then oldest PR; the rest wait. A PR
+                            # whose CI still runs holds its place and is never updated again
+                            # until that CI ends
+    max_wait_h: 2           # an auto-merge PR waiting this many hours since auto-merge was
+                            # enabled goes first in line (longest wait first): none starves
+  watch:
+    interval_s: 600         # the keep-alive job runs every this many seconds
+    stale_after_s: 900      # a plan older than this, and no tick running: kickstart the tick
+                            # each pass also reaps state/<p>/worktrees: a worktree no live
+                            # session holds whose work is on origin or the trunk is removed.
+                            # `asf kernel install` keeps the running venv plus the 2 previous
+                            # of its family (and any pinned one), removing the rest and their
+                            # dangling ~/.local/bin links
+  idle_alarm:
+    enabled: true           # the plan carries an `idle` record when seats are free, work waits,
+    min_free_seats: 1       # and nothing launches; tick prints IDLE, status shows it on top
+  stuck:                    # Stuck never sits: what the kernel can resolve, it resolves
+    escalate_after_h: 0     # a Stuck owned by a session or CI this old (0: the tick it appears):
+                            # a red off the PR gets one more rerun, then a fix round; a stopped
+                            # session one relaunch with its report as findings; the fix-round
+                            # cap one extra round on strong_model with every finding
+    rebuild_after_h: 0      # a conflict the rebase could not resolve, or the cap after that extra
+                            # round, this old: archive the branch to archive/<branch>, close the
+                            # PR, rebuild fresh from the trunk — at most once per item
+    strong_model: claude-opus-5   # the extra round's model. Operator questions are never
+                            # resolved: `asf kernel status` puts them in a "needs you" block —
+    id_claim_answer: true   # except a session question that only asks whether an id claim
+                            # covers ids it cites (it names a claim and offers a re-mint): the
+                            # kernel reads refs/asf/ids/* on the record's origin and answers —
+                            # "the claim stands, keep" (every id covered, none on the record under
+                            # another item) or "re-mint from your current block"; a claim it
+                            # cannot read leaves the question with the operator
+    id_claim_prefixes: [S, T]   # the id prefixes such a question is checked for
+  resolve:                  # more session questions code answers from a fact, not the console
+    trunk_tests: true       # "are these named tests red on the factory host too, or only in a
+                            # cloud sandbox?": the kernel runs the ids (python -m unittest) on a
+                            # fresh detached worktree of origin's trunk under state/<product>/
+                            # resolve-tmp/ (removed after) and answers "green on trunk at <sha>
+                            # (N tests OK): cloud-sandbox only, not a trunk red; proceed" or "red
+                            # on trunk at <sha>: <ids>; treat as a trunk red"
+    symbols: true           # "was `pkg.mod.Name` meant to exist? it does not": the kernel reads
+                            # the module at trunk (ast) — absent: the session's own proposal
+                            # stands; present: where it is. A question no resolver matches, or one
+                            # whose probe is unsure (timeout, an id that does not load), stays with
+                            # the operator. Each answer logs RESOLVED <item> <class> -> <answer>;
+                            # the tick logs "questions: resolved by code N, to the console M"
+    test_timeout_s: 600     # the test run is killed past this, and the question stays open
+    python: python3         # the interpreter the named tests run under
+    test_runs_per_tick: 1   # test and gate runs per tick (each result is cached by question
+                            # in state/<product>/kernel-resolve.json); the rest wait a tick
+    gates: true             # "`bash tools/check_x.sh` was not run here (the cloud runtime
+                            # refused); confirm on the host": the kernel runs it — only a step of
+                            # conventions.pre_push_check — on a fresh detached worktree of the
+                            # session's branch head and answers "Confirmed on the factory host:
+                            # `<cmd>` on <branch> at <sha> -> <its last line>" (red: "fix it")
+    inbox_bugs: true        # "mint the Bug card … this session cannot: no record is mounted … `asf
+                            # new bug --title …`": the kernel files it through the record's inbox
+                            # (the question and the test ids it names as the body), then answers
+                            # "filed as inbox/<file>; do not mint reserved ids"
+    needs_writes: true      # a build REPORT's `needs writes: <paths>` (with or without a NEEDS
+                            # OPERATOR asking to widen writes:): a path an unfinished after: item
+                            # writes -> "hold: <path> belongs to <id>, wait for it"; else granted —
+                            # the card's writes: widened through the record's writer, answered
+                            # "granted <paths>; nothing else outside writes" (a Building/Review
+                            # writer of a path is named: the overlap rule serialises them; a path
+                            # on kernel.risk.high makes the item high-risk)
+  gate:
+    window_h: 24            # first-push-green is measured over PRs opened in the last window_h
+    first_push_green_min: 0.7
+    landed_min: 5           # Tasks/Bugs landed via kernel PRs since `since`
+    silent_stuck_max: 0     # Stuck items with no reason or no owner
+    # since: 2026-10-09T14:00:00Z   # the proof's start
+    satisfied: true         # still needed? Before every launch of a Ready Task or Bug, the tests
+                            # its card names as proof (`proves:` lines, test ids in its
+                            # Acceptance, a Bug's `Fixes:` lines and `signature`; never its plan's
+                            # lines) that did not exist when it was planned are run on a fresh
+                            # worktree of origin's trunk (resolve.test_runs_per_tick, shared). All
+                            # green: Done, note "satisfied on main at <sha>: <tests>", nothing
+                            # launched (SATISFIED on the tick line); not run yet: the launch waits
+                            # a tick. A done REPORT that pushed nothing and names a landed sha and
+                            # passing tests is Done the same way; a kernel PR that changes nothing
+                            # is closed (Done if green on main, else relaunched with a finding)
+  waits:
+    targets:                # per wait class (`asf kernel waits`): a wait older than its target is
+      seat: 10m             # flagged ⚠ there and counted on the tick line ("over-target waits");
+      ci: 10m               # classes: seat (Ready, no seat), ci (checks running), review (awaiting
+      review: 30m           # a verdict), train (queued for update), merge (green, waiting on
+      train: 30m            # GitHub), conflict, stuck (every stuck:<owner>), after (a dependency),
+      merge: 10m            # parked. after and parked have no target unless set. A duration is
+      conflict: 0m          # 30s, 10m, 2h, 1d or whole seconds
+      stuck: 0m
+    breach: true            # waiting without acting is a bug: a wait over its target takes a
+                            # breach action this tick — Ready launches first (a seat free), a
+                            # Review gets its reviewer first on a local seat first, a behind
+                            # Landing PR goes to the front of the merge train (a conflicting or
+                            # red one is already a fix round), a Stuck its escalation. The tick
+                            # logs `BREACH <item> <class> <age> -> <action>` and says `LIMBO n`:
+                            # the items and kernel PRs with no action and nothing in flight
+                            # (listed with why; the target is 0). false: no breach actions
+    max_session_age: 3h     # a live session older than this is stopped (worktree kept) and its
+                            # item relaunched; the attempt counts like a crash
+    max_review_session_age: 90m   # the same for a review session (a review running this long
+                            # has hung — p99 is ~77m): its review is relaunched, local seat first
+    max_ci_age: 1h          # a PR's required CI running this long is cancelled; the cancelled
+                            # check is rerun next tick (a cancelled required check always is)
+    bound_min_samples: 20   # the three ages above are fallbacks only: once the wait ledger holds
+                            # this many finished spells of a class (last 24 h), its p90 is the
+                            # bound — a session past the building (or review) p90 with no push,
+                            # twice it with one; CI past twice the ci p90. Passing it is a stall,
+                            # handled that tick (end + relaunch, or cancel + rerun)
+  main_move:                # "a main move must cost minutes, not hours" (asf.kernel.mainmoves):
+    alarm_minutes: 5        # every move of main's head is measured over the next window_ticks
+    window_ticks: 15        # ticks (or until the next move): branches updated, rebases for PRs
+                            # that turned DIRTY after it, CI reruns on unchanged heads, and the
+                            # session + CI minutes they took. One line per move goes to
+                            # state/<p>/kernel-main-moves.jsonl (sha, at, prs_updated, rebases,
+                            # reruns, rebase_minutes, total_minutes) and the tick logs `MAIN MOVE
+                            # <sha> cost: ...`. A move costing more than alarm_minutes logs `MAIN
+                            # MOVE ALARM` once, shown by `asf kernel status` and `asf kernel
+                            # watch`. `asf kernel main-moves [--since T]`: moves per hour, p50/p90
+  dor:                      # the Definition of Ready (asf.kernel.dor): a Task or Bug starts only
+    enabled: false          # when its card (i) names a test — an `## Acceptance` line
+                            # (tests/<file>.py::<Test>, or a dotted tests.test_x module) or a
+                            # `**Gate**` block line naming a test module on the trunk or in its
+                            # writes; (ii) has writes:, each on origin's trunk or listed in
+                            # creates: (declared new); (iii) names after: ids that are on the
+                            # record and not parked; (iv) names a parent that exists and is not
+                            # Done (a Task must name one). Else it stays New, `dor: <missing>`
+                            # (an idle reason, never LIMBO), and a groom-fill session judges it
+                            # and returns a GROOM-FILL verdict (proceed | superseded | reshape |
+                            # fill) that code validates and applies: superseded retires the card
+                            # (superseded_by:), fill/reshape write its acceptance and writes:
+    fill_per_tick: 3        # groom-fill launches a tick: after fix rounds and reviews, before builds
+    max_fills: 2            # groom-fill sessions per card; then Stuck on the operator (judged
+                            # afresh every tick: a card mended by hand starts)
+  risk:                     # the coarse risk flag, from this file only
+    high: []                # path globs: an item whose writes: (or its PR's files) hit one is
+                            # high-risk — its review runs on stuck.strong_model; no second high
+                            # PR with overlapping writes lands beside it (the one with auto-merge
+                            # on, else the lowest number, goes first); and after a high merge the
+                            # next high one waits until the trunk's required checks on that
+                            # merge are green. ASF's own: [asf/record/**, .github/**,
+                            # asf/kernel/**, tools/**]
+    large_lines: 800        # ... and so is a PR whose diff (additions + deletions) is over this
+  floor:
+    close_orphan_prs: true  # an open PR on a kernel branch (code/fix/spec/plan prefix) whose item
+                            # is not on the record, Done or retired is closed with a comment
+                            # naming why (the branch is kept); a reopened item keeps its PR
+    cancel_stale_ci: true   # a queued/running CI run whose PRs are all closed, or whose head is no
+                            # longer its PR's head, is cancelled (two runs-API reads a tick, none
+                            # while GitHub calls are low: kernel.github.slow_below)
+  install:                  # `asf kernel install`'s shadow preflight
+    shadow: true            # before the plists move to another venv, that venv's
+                            # `asf kernel tick --dry-run` runs on the live facts (read-only); a
+                            # crash or non-zero exit refuses the switch and keeps the old plists.
+                            # Its plan is diffed against the live one (the old venv's dry run,
+                            # else state/<p>/kernel-plan.json): actions by type and item states
+    max_state_changes: 25   # more items changing state than this — or Launch dropping to 0 while
+                            # items are Ready — refuses the switch unless --accept-diff
 
 # token_caps: runaway ceilings on one run's tokens, per dimension, never summed. `default` applies
 # to every job kind; a kind (spec, review, fix, code, plan, ...) narrows or widens single dimensions.

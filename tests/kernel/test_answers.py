@@ -1,0 +1,311 @@
+"""An operator answer clears any Stuck it is newer than, whatever the owner, and the item is
+relaunched first carrying it; an older answer clears nothing; legacy session Stuck reasons the
+newer rules handle are re-judged once. The old floor's ``asf answer`` writes the ledger the
+kernel reads."""
+import os
+import tempfile
+import unittest
+
+from asf import env
+from asf.kernel import actions as A
+from asf.kernel import decide as D
+from asf.kernel import facts as K
+from asf.kernel import loop
+from asf.kernel import ports as P
+
+try:
+    from kernel import builders as B
+    from kernel import fakes as F
+except ImportError:  # pragma: no cover - import shape only
+    from tests.kernel import builders as B
+    from tests.kernel import fakes as F
+
+State = B.State
+SINCE = '2026-10-09T20:42:10Z'
+NO_REPORT_REASON = 'ended without a REPORT: work is committed on worker/T-0432 but not yet pushed'
+HOOK_REASON = ('done without a push: pushed: no — hook refused twice: `bash tools/check_generic.sh'
+               ' && python3 -m unittest -q te…')
+
+
+def stuck(iid, reason='partial: the session stopped', owner='session', **kw):
+    return B.task(iid, state=State.STUCK, stuck=B.M.Stuck(reason, owner), stuck_since=SINCE, **kw)
+
+
+def answer(iid, text='Retry: continue on the same branch', at='2026-10-09T21:18:33Z'):
+    return B.M.Answer(iid, text, at)
+
+
+class Facts(unittest.TestCase):
+
+    def test_a_newer_answer_counts_for_any_owner_and_an_older_never(self):
+        for owner in ('session', 'loop', 'ci', 'operator'):
+            it = stuck('T-0001', owner=owner)
+            self.assertTrue(K.answer_counts(answer('T-0001'), it), owner)
+            self.assertFalse(K.answer_counts(answer('T-0001', at='2026-10-09T19:00:00Z'), it),
+                             owner)
+
+    def test_with_a_time_unknown_only_an_operator_stuck_or_a_question_counts(self):
+        self.assertFalse(K.answer_counts(answer('T-0001', at=''), stuck('T-0001')))
+        self.assertTrue(K.answer_counts(answer('T-0001', at=''), stuck('T-0001', owner='operator')))
+        self.assertTrue(K.answer_counts(answer('T-0001', at=''),
+                                        B.task('T-0001', question='which?')))
+        self.assertFalse(K.answer_counts(answer('T-0001'), B.task('T-0001')), 'not waiting')
+
+    def test_the_old_cli_writes_the_ledger_the_kernel_reads(self):
+        from asf.workers import answer as old
+        product = env.Product('sample', {})
+        self.assertEqual(old.ANSWERS_FILE, P.ANSWERS_FILE)
+        self.assertEqual(os.path.realpath(old.answers_path(product)),
+                         os.path.realpath(os.path.join(P.RealRecord(product).state_dir,
+                                                       P.ANSWERS_FILE)))
+
+    def test_the_ledger_keeps_the_answer_time(self):
+        state = tempfile.mkdtemp()
+        with open(os.path.join(state, P.ANSWERS_FILE), 'w') as f:
+            f.write('{"item": "T-0001", "text": "yes", "at": "2026-10-09T21:18:33Z"}\n')
+        rec = P.RealRecord(env.Product('sample', {'backlog_dir': state}), state_dir=state)
+        self.assertEqual(rec.answers(), [B.M.Answer('T-0001', 'yes', '2026-10-09T21:18:33Z')])
+
+
+class Decide(unittest.TestCase):
+
+    def test_a_session_owned_stuck_clears_on_an_answer(self):
+        plan = D.decide(B.facts([stuck('T-0001')], answers=[answer('T-0001')]), B.config())
+        self.assertEqual([(a.item_id, a.text) for a in B.of(plan, A.ApplyAnswer)],
+                         [('T-0001', 'Retry: continue on the same branch')])
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        self.assertEqual(B.launched(plan), [], 'launched once the record is read again')
+
+    def test_an_answer_goes_to_review_on_an_open_pr_and_building_under_a_live_session(self):
+        f = B.facts([stuck('T-0001')], answers=[answer('T-0001')], prs=[B.pr(7, 'T-0001')])
+        self.assertEqual(B.state(D.decide(f, B.config()), 'T-0001'), State.REVIEW)
+        f = B.facts([stuck('T-0001')], answers=[answer('T-0001')],
+                    sessions=[B.session('j1', 'T-0001')])
+        self.assertEqual(B.state(D.decide(f, B.config()), 'T-0001'), State.BUILDING)
+
+    def test_no_answer_keeps_it_stuck(self):
+        plan = D.decide(B.facts([stuck('T-0001')]), B.config())
+        self.assertEqual(B.state(plan, 'T-0001'), State.STUCK)
+        self.assertEqual(B.of(plan, A.ClearStuck), [])
+
+    def test_ended_without_a_report_is_relaunched_once(self):
+        plan = D.decide(B.facts([stuck('T-0001', NO_REPORT_REASON)]), B.config())
+        self.assertEqual([(a.item_id, a.attempt) for a in B.of(plan, A.ClearStuck)],
+                         [('T-0001', D.NO_REPORT)])
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+        spent = stuck('T-0001', NO_REPORT_REASON, attempts=[D.NO_REPORT, D.NO_REPORT])
+        plan = D.decide(B.facts([spent]), B.config())
+        self.assertEqual(B.state(plan, 'T-0001'), State.STUCK, 'its relaunch was spent')
+        self.assertEqual(B.of(plan, A.ClearStuck), [])
+
+    def test_a_refused_hook_is_relaunched_once_with_the_finding(self):
+        plan = D.decide(B.facts([stuck('B-0001', HOOK_REASON)]), B.config())
+        self.assertEqual([a.attempt for a in B.of(plan, A.ClearStuck)],
+                         [D.RELAUNCH + D.HOOK_FINDING])
+        self.assertEqual(B.state(plan, 'B-0001'), State.READY)
+        spent = stuck('B-0001', HOOK_REASON, attempts=[D.RELAUNCH + D.HOOK_FINDING])
+        self.assertEqual(B.state(D.decide(B.facts([spent]), B.config()), 'B-0001'), State.STUCK)
+        other = stuck('B-0001', 'done without a push: pushed: no — nothing to push')
+        self.assertEqual(B.state(D.decide(B.facts([other]), B.config()), 'B-0001'), State.STUCK)
+
+
+class Loop(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.product = env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
+
+    def tick(self, ports, **kw):
+        return loop.tick(self.product, ports=ports, config=B.config(**kw), state_dir=self.tmp,
+                         out=lambda *_: None)
+
+    def test_answer_clears_then_launches_first_with_the_answer_as_finding(self):
+        blocker = stuck('T-0009', rank=9, attempts=['launch: x', 'launch: x'])
+        rec = F.FakeRecord([blocker, B.task('T-0001', rank=1), B.task('T-0002', after=['T-0009'])],
+                           answers=[answer('T-0009')])
+        sess = F.FakeSessions()
+        ports = F.ports(record=rec, sessions=sess)
+        self.tick(ports, max_sessions=1)
+        self.assertEqual(rec.fields['T-0009'][P.STATE], 'ready')
+        self.assertEqual(rec.fields['T-0009'][P.ATTEMPTS],
+                         [D.answer_attempt('Retry: continue on the same branch')])
+        self.assertNotIn(P.STUCK_REASON, rec.fields['T-0009'])
+        sess.launched.clear()
+        sess._sessions.clear()
+        self.tick(ports, max_sessions=1)
+        self.assertEqual([i for _k, i, _b, _t in sess.launched], ['T-0009'],
+                         'the answered blocker relaunches before a better-ranked item')
+        self.assertIn('operator answer: Retry: continue on the same branch', sess.launched[0][3])
+        self.assertEqual(rec.fields['T-0009'][P.STATE], 'building')
+
+    def test_an_answer_older_than_the_stuck_clears_nothing(self):
+        rec = F.FakeRecord([stuck('T-0001')], answers=[answer('T-0001', at='2026-10-09T19:00:00Z')])
+        ports = F.ports(record=rec)
+        facts = K.read_facts(ports)
+        self.assertEqual(facts.answers, [])
+        self.tick(ports)
+        self.assertNotIn(P.STATE, rec.fields['T-0001'])
+        self.assertEqual(ports.sessions.launched, [])
+
+    def test_a_refused_hook_relaunches_with_its_finding(self):
+        rec = F.FakeRecord([stuck('B-0001', HOOK_REASON)])
+        sess = F.FakeSessions()
+        ports = F.ports(record=rec, sessions=sess)
+        self.tick(ports)
+        self.assertEqual(sess.launched, [])
+        self.tick(ports)
+        self.assertEqual([i for _k, i, _b, _t in sess.launched], ['B-0001'])
+        self.assertIn(D.HOOK_FINDING, sess.launched[0][3])
+
+
+
+CAPPED = 'review: changes requested after 2 fix rounds'
+ADD_TEST = 'add a test'
+
+
+class CappedAnswer(unittest.TestCase):
+    """An operator answer on an item Stuck at the fix-round cap grants exactly one more round."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.product = env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
+
+    def tick(self, ports):
+        return loop.tick(self.product, ports=ports, config=B.config(max_fix_rounds=2),
+                         state_dir=self.tmp, out=lambda *_: None)
+
+    def capped(self, answers=(), reason=CAPPED, findings=()):
+        it = stuck('T-0432', reason, owner='operator', fix_rounds=2, findings=list(findings))
+        review = B.review('T-0432', verdict='changes', findings=[ADD_TEST])
+        rec = F.FakeRecord([it], answers=list(answers), reviews=[review])
+        return F.ports(record=rec, github=F.FakeGitHub(prs=[B.pr(7, 'T-0432')]),
+                       sessions=F.FakeSessions())
+
+    def test_decide_grants_one_extra_round(self):
+        it = stuck('T-0432', CAPPED, owner='operator', fix_rounds=2)
+        f = B.facts([it], answers=[answer('T-0432', 'just add the test')], prs=[B.pr(7, 'T-0432')],
+                    reviews=[B.review('T-0432', verdict='changes', findings=[ADD_TEST])])
+        plan = D.decide(f, B.config(max_fix_rounds=2))
+        self.assertEqual([a.extra_round for a in B.of(plan, A.ApplyAnswer)], [True])
+        self.assertEqual(B.state(plan, 'T-0432'), State.READY)
+        other = D.decide(B.facts([stuck('T-0001')], answers=[answer('T-0001')]), B.config())
+        self.assertEqual([a.extra_round for a in B.of(other, A.ApplyAnswer)], [False])
+        self.assertTrue(D.capped(B.M.Stuck(
+            'conflict: PR #7 the rebase session could not resolve: PR #7 still conflicts on head h',
+            'operator')))
+
+    def test_answered_capped_item_launches_then_sticks_after_3_rounds(self):
+        ports = self.capped([answer('T-0432', 'just add the test')])
+        rec, sess = ports.record, ports.sessions
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'ready')
+        self.assertEqual(rec.fields['T-0432'][P.EXTRA_ROUNDS], 1)
+        self.assertEqual(sess.launched, [])
+        self.tick(ports)
+        self.assertEqual([(k, i, b) for k, i, b, _t in sess.launched],
+                         [('build', 'T-0432', 'worker/T-0432')], 'a fix round, not Stuck')
+        brief = sess.launched[0][3]
+        self.assertIn(ADD_TEST, brief)
+        self.assertIn('operator answer: just add the test', brief)
+        self.assertEqual(rec.fields['T-0432'][P.FIX_ROUNDS], 3)
+        sess._sessions.clear()  # the round ended; the review still asks for changes
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'stuck')
+        self.assertEqual(rec.fields['T-0432'][P.STUCK_REASON],
+                         'review: changes requested after 3 fix rounds')
+
+    def test_no_answer_leaves_it_unchanged(self):
+        ports = self.capped()
+        self.tick(ports)
+        self.assertNotIn(P.STATE, ports.record.fields['T-0432'])
+        self.assertNotIn(P.EXTRA_ROUNDS, ports.record.fields['T-0432'])
+        self.assertEqual(ports.sessions.launched, [])
+
+    def test_answered_unresolved_conflict_gets_one_more_rebase_round(self):
+        reason = ('conflict: PR #7 the rebase session could not resolve: PR #7 still conflicts '
+                  'on head head-1')
+        it = stuck('T-0432', reason, owner='operator', fix_rounds=1)
+        rec = F.FakeRecord([it], answers=[answer('T-0432', 'try again')])
+        rec.fields['T-0432'][P.FINDINGS] = [D.rebase_finding_for(7)]  # the spent rebase round
+        sess = F.FakeSessions()
+        ports = F.ports(record=rec, github=F.FakeGitHub(prs=[B.pr(7, 'T-0432', conflicting=True)]),
+                        sessions=sess)
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'ready')
+        self.tick(ports)
+        self.assertEqual([i for _k, i, _b, _t in sess.launched], ['T-0432'])
+        self.assertIn(D.REBASE_ASK, sess.launched[0][3])
+        sess._sessions.clear()
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'stuck', 'it still conflicts')
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+T0197_SINCE = '2026-10-10T07:03:27Z'
+T0197_JOB = 'review-t-0197-1791613620'
+
+
+def t0197(**kw):
+    """T-0197 as the live record held it: its two reviews ended with no VERDICT line, the Stuck
+    recorded at 07:03 though the operator answered it — naming the dead review's job — at 06:56."""
+    kw.setdefault('attempts', ['review: no VERDICT line', 'review: no VERDICT line'])
+    return B.task('T-0197', state=State.STUCK, stuck_since=T0197_SINCE,
+                  stuck=B.M.Stuck('review: no VERDICT line', 'loop'), **kw)
+
+
+def rerun(at='2026-10-10T06:56:25Z', job=T0197_JOB):
+    return B.M.Answer('T-0197', 'Rerun the review; the code is unchanged.', at, job)
+
+
+class AnsweredBeforeRecorded(unittest.TestCase):
+    """An answer naming the job the item's Stuck came from clears it though the kernel recorded the
+    Stuck after the answer was given; an answer already on the card, or naming an older job, never
+    does."""
+
+    def test_an_answer_naming_the_items_last_job_counts_though_older_than_the_record(self):
+        self.assertTrue(K.answer_counts(rerun(), t0197(), last_job=T0197_JOB))
+        self.assertFalse(K.answer_counts(rerun(), t0197(), last_job='review-t-0197-1791699999'),
+                         'a later job ran since: the answer is history')
+        self.assertFalse(K.answer_counts(rerun(), t0197()), 'no job known')
+        self.assertFalse(K.answer_counts(rerun(), t0197(answers=[rerun().text]),
+                                         last_job=T0197_JOB), 'already applied')
+
+    def test_the_ledger_keeps_the_job(self):
+        state = tempfile.mkdtemp()
+        with open(os.path.join(state, P.ANSWERS_FILE), 'w') as f:
+            f.write('{"item": "T-0197", "job": "%s", "text": "go", "at": "x"}\n' % T0197_JOB)
+        rec = P.RealRecord(env.Product('sample', {'backlog_dir': state}), state_dir=state)
+        self.assertEqual(rec.answers()[0].job, T0197_JOB)
+
+    def test_the_tick_clears_and_the_next_relaunches_the_review(self):
+        rec = F.FakeRecord([t0197()], answers=[rerun()])
+        gh = F.FakeGitHub(prs=[B.pr(1329, 'T-0197')])
+        sess = F.FakeSessions(last_jobs={'T-0197': T0197_JOB})
+        ports = F.ports(record=rec, github=gh, sessions=sess)
+        tick = lambda: loop.tick(env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'}),
+                                 ports=ports, config=B.config(), state_dir=tempfile.mkdtemp(),
+                                 out=lambda *_: None)
+        tick()
+        self.assertNotEqual(rec.fields['T-0197'][P.STATE], 'stuck')
+        self.assertNotIn(P.STUCK_REASON, rec.fields['T-0197'])
+        tick()
+        self.assertEqual([(k, i) for k, i, _b, _t in sess.launched], [('review', 'T-0197')])
+
+
+class NoVerdictRelaunch(unittest.TestCase):
+    """A review that printed no VERDICT line is an infrastructure failure: it is relaunched once
+    before the item is ever Stuck, whatever ``max_attempts`` says."""
+
+    def test_one_no_verdict_relaunches_even_at_one_attempt(self):
+        it = B.task('T-0001', state=State.REVIEW, attempts=['review: no VERDICT line'])
+        plan = D.decide(B.facts([it], prs=[B.pr(7, 'T-0001')]), B.config(max_attempts=1))
+        self.assertNotEqual(B.state(plan, 'T-0001'), State.STUCK)
+        self.assertEqual(B.launched(plan, 'review'), ['T-0001'])
+
+    def test_the_second_no_verdict_is_stuck(self):
+        it = B.task('T-0001', state=State.REVIEW, attempts=['review: no VERDICT line'] * 2)
+        plan = D.decide(B.facts([it], prs=[B.pr(7, 'T-0001')]), B.config(max_attempts=1))
+        self.assertEqual(B.state(plan, 'T-0001'), State.STUCK)

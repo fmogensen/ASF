@@ -104,6 +104,15 @@ class TickTestCase(unittest.TestCase):
         self.write_product(self.product_yaml)
         self.write_config('')
 
+        # every pass re-asserts the dispatcher (dispatch.reassert): it resolves inside this test's
+        # temp dir, never the operator's ~/.local/bin/asf (a tick test once rewrote that one to
+        # bake this temp dir's ASF home)
+        self.dispatcher_home = os.path.join(self.tmp, 'dispatcher-home')
+        patcher = mock.patch.object(
+            dispatch, 'default_path',
+            lambda home=None: os.path.join(home or self.dispatcher_home, dispatch.REL_PATH))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = mock.patch.object(tick, 'run_step0', _fake_step0)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -1624,6 +1633,39 @@ class DispatcherReassertTests(TickTestCase):
         self.assertIn("tick: dispatcher — NEEDS OPERATOR: /x/.local/bin/asf is not asf's dispatcher\n",
                       err.getvalue())
         self.assertIn('committed and pushed', out)  # the refusal never stops the tick
+
+    def test_a_pass_under_a_temp_home_never_writes_the_operators_dispatcher(self):
+        """The leak guard: the real ``reassert`` (no patch), the real ``default_path`` resolving
+        ``$HOME`` — a fake operator HOME holding a dispatcher that bakes the operator's own ASF
+        home — while this test's ASF home is a temp dir. The pass leaves that file byte- and
+        mtime-identical."""
+        operator = os.path.join(self.tmp, 'operator-home')
+        os.makedirs(os.path.join(operator, '.ASF'))
+        cli = os.path.join(self.tmp, 'cli', 'bin', 'asf')
+        os.makedirs(os.path.dirname(cli))
+        with open(cli, 'w') as f:
+            f.write('#!/bin/sh\n')
+        os.chmod(cli, 0o755)
+        real = os.path.join(operator, dispatch.REL_PATH)
+        rc, detail = dispatch.install(real, asf_home=os.path.join(operator, '.ASF'),
+                                      default_product='sample', cli=cli)
+        self.assertEqual(rc, 0, detail)
+        old = os.stat(real).st_mtime_ns - 10_000_000_000
+        os.utime(real, ns=(old, old))
+        with open(real, 'rb') as f:
+            before = f.read()
+        ident = {'GIT_AUTHOR_NAME': 'ci', 'GIT_AUTHOR_EMAIL': 'ci@localhost',
+                 'GIT_COMMITTER_NAME': 'ci', 'GIT_COMMITTER_EMAIL': 'ci@localhost'}
+        with mock.patch.dict(os.environ, {'HOME': operator, **ident}), \
+                mock.patch.object(dispatch, 'default_path', lambda home=None: os.path.join(
+                    os.path.expanduser(home or '~'), dispatch.REL_PATH)):
+            self.assertEqual(dispatch.default_path(), real)
+            rc, out = self.run_tick(steps='record')
+        self.assertNotIn('tick: dispatcher', out)
+        with open(real, 'rb') as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(os.stat(real).st_mtime_ns, old)
+        self.assertFalse(os.path.lexists(os.path.join(self.dispatcher_home, dispatch.REL_PATH)))
 
     def test_dry_run_does_not_call_reassert(self):
         with mock.patch.object(dispatch, 'reassert') as m:
