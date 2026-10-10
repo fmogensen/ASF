@@ -323,7 +323,6 @@ def unordered_overlaps(tasks, shared=()):
     Reachability runs only for a pair whose globs already intersect, so the cost is the number
     of intersecting pairs, not the square of the record."""
     from asf.feeder import footprint
-    from asf.record.core import writes_intersect
     edges = _after_edges(tasks)
     active = sorted((iid, _writes_of(t)) for iid, t in tasks.items()
                     if t.get('type') == 'task' and not t.get('removed')
@@ -331,18 +330,7 @@ def unordered_overlaps(tasks, shared=()):
     out = []
     for i, (a, wa) in enumerate(active):
         for b, wb in active[i + 1:]:
-            glob = None
-            for x in wa:
-                if footprint.is_shared(x, shared):
-                    continue
-                for y in wb:
-                    if footprint.is_shared(y, shared):
-                        continue
-                    if writes_intersect(x, y):
-                        glob = (x, y)
-                        break
-                if glob:
-                    break
+            glob = footprint.first_intersection(wa, wb, shared)
             if glob and not ordered(edges, a, b):
                 a_progress, b_progress = has_pushed_work(tasks[a]), has_pushed_work(tasks[b])
                 if b_progress and not a_progress:
