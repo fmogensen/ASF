@@ -84,6 +84,18 @@ class CheckAcceptsTheProductsRegister(unittest.TestCase):
             f.write('# parser\n')
         self.assertEqual(decisions.docs_ids(repo), {'D-0007'})
 
+    def test_a_specs_own_choices_table_is_also_the_products_register(self):
+        # a spec numbers its own decisions D1, D2, … from 1 — independent of whichever record
+        # D-card happens to share the number (B-0137)
+        repo = tempfile.mkdtemp(prefix='decisions_repo_')
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        os.makedirs(os.path.join(repo, 'docs', 'specs'))
+        with open(os.path.join(repo, 'docs', 'specs', 'f-0079.md'), 'w') as f:
+            f.write('### The choices\n\n| # | the choice | chosen | against | why |\n'
+                     '| --- | --- | --- | --- | --- |\n'
+                     '| D4 | Resolution order | … | … | … |\n')
+        self.assertEqual(decisions.docs_ids(repo), {'D-0004'})
+
 
 if __name__ == '__main__':
     unittest.main()
