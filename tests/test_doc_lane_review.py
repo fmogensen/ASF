@@ -59,7 +59,7 @@ def doc_occ(fid, branch, kind, state=lane.REVIEW, round_=1, pr=941, reason=''):
 
 class TheFeatureLaneRows(unittest.TestCase):
 
-    def test_1_review_round_1_draws_one_launching_pushed_review_row(self):
+    def test_a_feature_in_review_draws_one_pushed_review_row_and_no_land_row(self):
         occ = doc_occ('F-0280', 'spec/F-0280', 'spec', state=lane.REVIEW, pr=941)
         out = rows.candidates(index(feature(stage='spec-draft')), product(), [], occupancy=occ)
         self.assertEqual(kinds(out), [(rows.PUSHED_REVIEW, 'F-0280')])
@@ -69,7 +69,7 @@ class TheFeatureLaneRows(unittest.TestCase):
         self.assertEqual(r.branch, 'spec/F-0280')
         self.assertEqual(r.review_round, 1)
 
-    def test_2_the_same_on_plan_and_unchanged_on_direct(self):
+    def test_the_same_holds_on_the_plan_branch_and_the_direct_branch_is_unchanged(self):
         with self.subTest('plan'):
             occ = doc_occ('F-0280', 'plan/F-0280', 'plan', state=lane.REVIEW, pr=897)
             out = rows.candidates(index(feature(stage='plan-draft')), product(), [],
@@ -83,7 +83,7 @@ class TheFeatureLaneRows(unittest.TestCase):
             self.assertEqual(kinds(out), [(rows.PUSHED_REVIEW, 'F-0280')])
             self.assertEqual(out[0].branch, 'cloud/direct-F-0280')
 
-    def test_3_any_other_open_state_draws_one_non_launching_pushed_land_row(self):
+    def test_a_feature_in_any_other_open_lane_state_draws_one_pushed_land_row(self):
         for state in (lane.GATE, lane.WAITING, lane.WAITING_CI, lane.MERGING):
             with self.subTest(state=state):
                 occ = doc_occ('F-0280', 'spec/F-0280', 'spec', state=state)
@@ -93,7 +93,7 @@ class TheFeatureLaneRows(unittest.TestCase):
                 self.assertFalse(out[0].launches)
                 self.assertIn(state, out[0].action)
 
-    def test_4_a_building_feature_with_its_plan_branch_held_keeps_its_task_row(self):
+    def test_a_building_feature_keeps_its_task_rows_and_loses_only_its_landing_row(self):
         occ = doc_occ('F-0280', 'plan/F-0280-replan', 'plan', state=lane.GATE)
         idx = index(feature(stage='building 1/2', reshape='cut the scope',
                             children=['T-9001']),
@@ -103,12 +103,12 @@ class TheFeatureLaneRows(unittest.TestCase):
                          [(rows.PUSHED_LAND, 'F-0280')])
         self.assertIn('T-9001', by_item(out))
 
-    def test_5_an_unknown_branch_prefix_draws_no_lane_rows_row(self):
+    def test_a_feature_on_an_unknown_branch_prefix_draws_no_row(self):
         occ = doc_occ('F-0280', 'mystery/F-0280', 'spec', state=lane.REVIEW)
         out = rows.lane_rows(index(feature(stage='spec-draft'))['items'], product(), [], occ)
         self.assertEqual(out, [])
 
-    def test_6_pushed_ids_and_orphaned_pushed_name_the_feature(self):
+    def test_pushed_ids_and_orphaned_pushed_see_the_feature(self):
         occ = doc_occ('F-0280', 'spec/F-0280', 'spec', state=lane.REVIEW)
         idx = index(feature(stage='spec-draft'))
         self.assertIn('F-0280', rows.pushed_ids(idx['items'], occ))
@@ -116,7 +116,7 @@ class TheFeatureLaneRows(unittest.TestCase):
         out = rows.candidates(idx, product(), [], occupancy=occ)
         self.assertEqual(rows.orphaned_pushed(idx, out, occ, []), [])
 
-    def test_7_zero_free_seats_still_emits_the_row_waiting_on_a_slot(self):
+    def test_plan_rows_at_zero_free_seats_still_emits_the_row(self):
         occ = doc_occ('F-0280', 'spec/F-0280', 'spec', state=lane.REVIEW)
         idx = index(feature(stage='spec-draft'))
         busy = [{'item': 'X-1', 'kind': 'task'}]
@@ -125,7 +125,7 @@ class TheFeatureLaneRows(unittest.TestCase):
         self.assertFalse(out['F-0280'].launches)
         self.assertEqual(out['F-0280'].action, tiers.NO_SLOT)
 
-    def test_8_pushed_rows_names_the_lanes_branch_never_fix(self):
+    def test_pushed_rows_names_the_occupancy_branch_not_the_fix_lane(self):
         occ = doc_occ('F-0280', 'spec/F-0280', 'spec', state=lane.REVIEW)
         items = index(feature(stage='spec-draft'))['items']
         pushed = rows.pushed_ids(items, occ)
@@ -134,13 +134,30 @@ class TheFeatureLaneRows(unittest.TestCase):
         self.assertEqual(out[0].branch, 'spec/F-0280')
         self.assertNotEqual(out[0].branch, 'fix/F-0280')
 
-    def test_9_a_feature_no_occupancy_entry_names_a_branch_for_gets_no_row(self):
+    def test_a_feature_no_occupancy_entry_names_gets_no_pushed_rows_row(self):
         occ = {'corrections': {'F-0280': {'kind': 'gate'}}}
         items = index(feature(stage='spec-draft'))['items']
         pushed = rows.pushed_ids(items, occ)
         self.assertIn('F-0280', pushed)
         out = rows.pushed_rows(items, product(), pushed, occ, set())
         self.assertEqual(out, [])
+
+    def test_direct_lane_rows_are_unmoved(self):
+        # the direct branch was already in the gate before this card (FEATURE_LANES keeps
+        # `DIRECT` beside `spec`/`plan`): its REVIEW row is covered above, and here its row at
+        # any other open lane state is the same PUSHED → LAND `lane_rows` draws for a document
+        # branch — unmoved by generalising the gate from "is it direct" to "is it a feature lane".
+        for state in (lane.GATE, lane.WAITING, lane.WAITING_CI, lane.MERGING):
+            with self.subTest(state=state):
+                occ = doc_occ('F-0280', 'cloud/direct-F-0280', 'direct', state=state)
+                out = rows.candidates(index(feature(stage='card', lane='direct')), product(), [],
+                                      occupancy=occ)
+                self.assertEqual(kinds(out), [(rows.PUSHED_LAND, 'F-0280')])
+                self.assertFalse(out[0].launches)
+                self.assertIn(state, out[0].action)
+        # and `tests.test_direct_lane` — the module that pins the direct lane's rows end to
+        # end — stays green; it is not re-run here, only named as what "unmoved" means (its own
+        # suite is part of this Task's Gate).
 
 
 if __name__ == '__main__':
