@@ -727,7 +727,9 @@ def batch_checks(runs):
 
 
 def status_cell(product, state_dir=None, now=None):
-    """The ``Quarantine`` row of ``asf status``: each live entry, or None when there is none."""
+    """The ``Quarantine`` row of ``asf status``: each live entry, the held re-runs still in
+    triage, and each live infra re-run (:func:`infra_rerun`'s ``infra`` block: its class, head
+    and any breach) — or None when none of the three is live."""
     from asf import env
     state_dir = state_dir or env.state_dir(product.name)
     data = load(state_dir, now)
@@ -740,4 +742,14 @@ def status_cell(product, state_dir=None, now=None):
     held = len(data['reruns'])
     if held:
         parts.append(f'{held} re-run(s) in triage')
+    infra = []
+    for key, rec in sorted(data['infra'].items()):
+        if key.startswith('probe|') or not isinstance(rec, dict) or not rec.get('count'):
+            continue
+        line = f"{rec.get('class')} @ {key[:9]} re-run once"
+        if rec.get('breach'):
+            line += ' — BREACH, not re-run again'
+        infra.append(line)
+    if infra:
+        parts.append(f"{len(infra)} infra re-run(s): " + '; '.join(infra))
     return ', '.join(parts) if parts else None
