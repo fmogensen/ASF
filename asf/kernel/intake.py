@@ -345,11 +345,33 @@ def goals(items):
     return out
 
 
+def operator_clauses(text):
+    """``(clauses, '')``: the operator's answer to a Stuck note as the inbox's own clauses
+    (:func:`note_clauses`' grammar) — ``kind: story; parent: F-0001``, ``story, parent F-0001``,
+    ``close`` — or ``('', why)`` when a part is outside it."""
+    from asf.groom import inbox
+    words = []
+    for part in re.split(r'[;,\n]', str(text or '')):
+        part = ' '.join(part.split()).strip('`"\'. ')
+        if not part:
+            continue
+        m = re.match(r'^(kind|type|parent|severity)\s*:?\s*(.+)$', part, re.IGNORECASE)
+        if m:
+            key, value = m.group(1).lower(), m.group(2).strip()
+            part = value if key in ('kind', 'type', 'severity') else 'parent %s' % value.upper()
+        words.append(part)
+    clauses = '; '.join(words)
+    if not clauses:
+        return '', 'no answer'
+    parsed, why = inbox.parse_answer(clauses)
+    return (clauses, '') if parsed is not None else ('', why or 'not an inbox answer')
+
+
 # ---- never silent -------------------------------------------------------------------------------
 
 #: the line a note whose sessions are spent is Stuck with (on the operator)
-SPENT_NOTE = ('%d intake-decide session(s) gave no valid verdict — %s; answer its ## Question '
-              '(add the line it asks for to the note)')
+SPENT_NOTE = ('%d intake-decide session(s) gave no valid verdict — %s; answer it: asf answer '
+              '%s --text "kind: feature|bug|epic|story; parent: <id>" (or close)')
 
 
 def unheard(facts, config, actions):
@@ -373,7 +395,7 @@ def unheard(facts, config, actions):
         n = tries.get(key, 0)
         q = ' '.join(str(notes[key].question or 'no question').split())
         if n >= config.intake_max_tries:
-            out.append((key, 'operator', SPENT_NOTE % (n, q)))
+            out.append((key, 'operator', SPENT_NOTE % (n, q, key)))
         elif facts.paused:
             out.append((key, '', 'waits: launches are paused'))
         elif asked >= config.intake_decide_per_tick:

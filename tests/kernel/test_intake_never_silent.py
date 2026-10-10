@@ -209,5 +209,66 @@ class NeverSilent(unittest.TestCase):
         self.assertEqual((row['state'], row['owner']), ('stuck', 'operator'))
 
 
+class OperatorAnswersANote(unittest.TestCase):
+    """A Stuck inbox note has an answer path: ``asf answer <note key> --text …`` (2026-10-10:
+    the Stuck row named ``inbox.<slug>`` and ``asf answer`` said "names no job or item")."""
+
+    def setUp(self):
+        self.root, self.state = tempfile.mkdtemp(), tempfile.mkdtemp()
+        for rel, text in (
+                ('epics/E-0001.md', '---\nid: E-0001\ntype: epic\ntitle: the factory\n'
+                                    'decided: true\n---\n## Description\n\n## History\n'),
+                ('features/F-0001.md', '---\nid: F-0001\ntype: feature\ntitle: limbo\n'
+                                       'parent: E-0001\ndecided: true\n---\n## Description\n'
+                                       '\n## History\n'),
+                ('inbox/story-limbo.md', '# Story limbo is counted\ntype: feature\n\nwhy\n\n'
+                                         '## Acceptance\n- a test for it\n\n## Question\n'
+                                         'Which Epic is this under?\n')):
+            os.makedirs(os.path.dirname(os.path.join(self.root, rel)), exist_ok=True)
+            with open(os.path.join(self.root, rel), 'w', encoding='utf-8') as f:
+                f.write(text)
+        self.product = env.Product('sample', {'backlog_dir': self.root})
+
+    def rec(self):
+        return P.RealRecord(self.product, state_dir=self.state)
+
+    def test_the_operator_words_become_the_inbox_clauses(self):
+        self.assertEqual(intake.operator_clauses('kind: story; parent: F-0346'),
+                         ('story; parent F-0346', ''))
+        self.assertEqual(intake.operator_clauses('feature, parent E-0003, S2')[0],
+                         'feature; parent E-0003; S2')
+        self.assertEqual(intake.operator_clauses('close')[0], 'close')
+        self.assertTrue(intake.operator_clauses('make it nice')[1])
+
+    def test_note_keys_in_every_spelling_name_the_note(self):
+        for t in ('inbox.story-limbo', 'story-limbo.md', 'inbox/story-limbo.md', 'story-limbo'):
+            self.assertEqual(self.rec().note_of(t), 'inbox.story-limbo', t)
+        self.assertEqual(self.rec().note_of('F-0001'), '')
+
+    def test_an_answer_is_applied_by_code_and_the_next_mint_makes_the_story(self):
+        rec = self.rec()
+        rec.count_intake('inbox.story-limbo')
+        rec.count_intake('inbox.story-limbo')
+        self.assertEqual(rec.answer_note('inbox.story-limbo', 'kind: story; parent: F-0001'), '')
+        self.assertEqual(self.rec().intake_tries(), {}, 'an answer is a fresh start')
+        [sid] = self.rec().mint_inbox()
+        it = self.rec().items()[sid]
+        self.assertEqual((it.type, it.parent), ('story', 'F-0001'))
+
+    def test_asf_answer_takes_the_note_key(self):
+        from unittest import mock
+        from asf.workers import answer
+        args = mock.Mock(target='inbox.story-limbo', text='kind: story; parent: F-0001',
+                         file=None, product='sample')
+        with mock.patch.object(env, 'load_product', return_value=self.product), \
+                mock.patch.object(env, 'state_dir', return_value=self.state):
+            self.assertEqual(answer.cmd_answer(args), 0)
+        with open(os.path.join(self.root, 'inbox', 'story-limbo.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertNotIn('## Question', text)
+        self.assertIn('type: story', text)
+        self.assertIn('parent: F-0001', text)
+
+
 if __name__ == '__main__':
     unittest.main()
