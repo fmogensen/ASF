@@ -164,6 +164,10 @@ RESHAPE = 'RESHAPE → PLAN'
 #: a Feature's pending ``reshape:`` (:mod:`asf.record.replan`): one session re-plans its open Tasks
 REPLAN = 'RESHAPE → REPLAN'
 REPLAN_KIND = 'replan'
+#: the suffix :func:`replan_branch` adds to a Feature id, and the one string
+#: :func:`is_replan_branch` reads back: a replan is on the plan lane, under a name that is not
+#: the Feature's own plan branch
+REPLAN_SUFFIX = '-replan'
 #: the ``waits_on`` of a code row whose Feature waits on its replan
 WAITS_REPLAN = 'replan'
 #: a Feature its own session holds (a replan, a spec-amend, a correction): one reason row,
@@ -1711,8 +1715,19 @@ def held_feature_row(items, feature, occupancy):
 def replan_branch(product, fid):
     """The replan's branch: the plan lane, under a name that is not the Feature's own plan
     branch — the ingest reads ``<plan prefix><id>`` as the Feature's plan, and a replan is not
-    that document (:data:`asf.record.replan.SUBDIR`)."""
-    return branch_for(product, 'plan', f'{fid}-replan')
+    that document (:data:`asf.record.replan.SUBDIR`). Inverse: :func:`is_replan_branch`."""
+    return branch_for(product, 'plan', f'{fid}{REPLAN_SUFFIX}')
+
+
+def is_replan_branch(product, branch):
+    """True for a branch :func:`replan_branch` minted: the plan lane, under a name ending
+    :data:`REPLAN_SUFFIX`. The replan is its own document
+    (``<plans_dir>/replans/<fid>-<digest>.md``, :data:`asf.record.replan.SUBDIR`) and never the
+    Feature's plan, so a reader that asks ``branch_kind(branch) == 'plan'`` in order to say
+    something about *the Feature's plan* asks this first (F-0317)."""
+    conv = _conventions(product)
+    b = branch or ''
+    return conv.branch_kind(b) == 'plan' and conv.strip_prefix(b).endswith(REPLAN_SUFFIX)
 
 
 def _tasks_in_flight(items, feature, occupancy):
