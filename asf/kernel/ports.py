@@ -55,6 +55,8 @@ FINDINGS, ANSWERS, QUESTION = 'kernel_findings', 'kernel_answers', 'kernel_quest
 STUCK_REASON, STUCK_OWNER = 'kernel_stuck_reason', 'kernel_stuck_owner'
 STUCK_NEXT, STUCK_SINCE, REOPENED = 'kernel_stuck_next', 'kernel_stuck_since', 'kernel_reopened'
 NOTES, EXTRA_ROUNDS, REBUILDS = 'kernel_notes', 'kernel_extra_rounds', 'kernel_rebuilds'
+#: the machine-block keys that hold a Stuck (cleared together)
+STUCK_KEYS = (STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE)
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
                FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS, REBUILDS)
 
@@ -246,6 +248,8 @@ class RealRecord:
                 continue
             it = item_from_card(rec)
             if is_retired(rec['meta']):  # on the record (never re-minted), invisible, finished
+                it.stale_stuck = it.state is M.State.STUCK or any(
+                    rec['meta'].get(k) is not None for k in STUCK_KEYS)
                 it.state, it.stuck, it.priority = M.State.DONE, None, 'later'
             out[iid] = it
         return out
@@ -429,6 +433,30 @@ def _check(c):
                    run_id=int(m.group(1)) if m else None)
 
 
+def _run_order(c, check):
+    """The sort key that puts the newest run of a check last: its run id, then its latest time
+    (completed, else started, else created — an unfinished rerun is newer than its red)."""
+    times = [str(c.get(k) or '') for k in ('completedAt', 'startedAt', 'createdAt')]
+    times = [t for t in times if t and not t.startswith('0001-')]
+    return (check.run_id or 0, max(times) if times else '')
+
+
+def newest_checks(rollup):
+    """The rollup's checks, one per name: when several runs carry one check name, only the
+    newest (:func:`_run_order`) decides red or green — an older skipped or red run never hides
+    a newer one. Order is the rollup's first appearance of each name."""
+    best, order = {}, []
+    for c in rollup or []:
+        check = _check(c)
+        key = _run_order(c, check)
+        if check.name not in best:
+            order.append(check.name)
+        elif best[check.name][0] > key:
+            continue
+        best[check.name] = (key, check)
+    return [best[n][1] for n in order]
+
+
 def failing_files(log, files):
     """The PR ``files`` a failed run's ``log`` names, plus each failing unittest's module file
     (``FAIL: test_x (pkg.test_mod.Case)`` -> ``pkg/test_mod.py``) — empty when nothing reads."""
@@ -528,7 +556,7 @@ class RealGitHub:
                   behind=d.get('mergeStateStatus') == 'BEHIND',
                   conflicting=(d.get('mergeable') == 'CONFLICTING'
                                or d.get('mergeStateStatus') == 'DIRTY'), files=files,
-                  checks=[_check(c) for c in d.get('statusCheckRollup') or []],
+                  checks=newest_checks(d.get('statusCheckRollup') or []),
                   auto_merge=bool(d.get('autoMergeRequest')))
         pr.tree_sha = self._tree(pr.head_sha)
         pr.change_id = self._change(d.get('baseRefName') or self.product.main, pr.head_sha)

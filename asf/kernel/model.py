@@ -83,6 +83,8 @@ class Item:
     ``extra_rounds`` are the fix rounds operator answers granted beyond ``max_fix_rounds``.
     ``rebuilds`` counts the times the kernel archived the item's branch, closed its PR and built
     it afresh (:class:`asf.kernel.actions.ArchiveAndReset`): at most once per item.
+    ``stale_stuck`` is set when the card still stores a Stuck the kernel no longer reads (a
+    retired card reads as Done): the next tick clears those fields off the card.
     """
     id: str
     type: str = 'task'
@@ -105,6 +107,7 @@ class Item:
     stuck_since: str = None
     extra_rounds: int = 0
     rebuilds: int = 0
+    stale_stuck: bool = False
 
 
 @dataclasses.dataclass

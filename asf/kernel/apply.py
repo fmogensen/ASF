@@ -333,10 +333,14 @@ class _Applier:
                                                   next_action=NEXT_ACTION['operator']))
         for iid, (state, stuck) in states.items():
             it = self.facts.items.get(iid)
-            if it is None or state is State.PARKED or (it.type in CONTAINERS and iid in parents):
+            if it is None or (it.type in CONTAINERS and iid in parents):
                 continue  # derived every tick, never stored
             upd = self.updates.get(iid, {})
             if P.STATE in upd:   # a launch this tick moved it already
+                continue
+            if state is State.PARKED:  # derived every tick, never stored — but a stored Stuck
+                if it.state is State.STUCK or it.stale_stuck:  # goes: unparked, judged afresh
+                    self.set(iid, **{P.STATE: None, **dict.fromkeys(P.STUCK_KEYS)})
                 continue
             fields = {}
             if state is not it.state:
@@ -347,9 +351,10 @@ class _Applier:
                     fields.update({P.STATE: state.value, P.STUCK_REASON: stuck.reason,
                                    P.STUCK_OWNER: stuck.owner, P.STUCK_NEXT: stuck.next_action,
                                    P.STUCK_SINCE: self.now})
-            elif it.state is State.STUCK:
-                fields.update({P.STUCK_REASON: None, P.STUCK_OWNER: None, P.STUCK_NEXT: None,
-                               P.STUCK_SINCE: None})
+            elif it.state is State.STUCK or it.stale_stuck:
+                fields.update(dict.fromkeys(P.STUCK_KEYS))
+                if it.stale_stuck:  # a retired card still saying stuck: it says Done now
+                    fields[P.STATE] = state.value
             if fields:
                 self.set(iid, **fields)
 

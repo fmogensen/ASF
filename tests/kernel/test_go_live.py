@@ -65,11 +65,20 @@ class Parked(unittest.TestCase):
         self.assertNotIn('T-0001', [m.item_id for m in B.of(plan, A.MarkStuck)])
 
     def test_parked_is_never_written_to_the_card(self):
+        rec = F.FakeRecord([B.task('T-0001', state=State.READY, priority='later')])
+        loop.tick(env.Product('sample', {}), ports=F.ports(record=rec), config=B.config(),
+                  state_dir=tempfile.mkdtemp(), out=lambda *_: None)
+        self.assertEqual(rec.writes, [])
+
+    def test_a_parked_stuck_drops_its_stuck_and_never_stores_parked(self):
         rec = F.FakeRecord([B.task('T-0001', state=State.STUCK, stuck=B.M.Stuck('red', 'ci'),
                                    priority='later')])
         loop.tick(env.Product('sample', {}), ports=F.ports(record=rec), config=B.config(),
                   state_dir=tempfile.mkdtemp(), out=lambda *_: None)
-        self.assertEqual(rec.writes, [])
+        (iid, fields), = rec.writes
+        self.assertEqual(iid, 'T-0001')
+        self.assertEqual(set(fields.values()), {None})
+        self.assertNotIn('parked', [str(v) for v in rec.fields['T-0001'].values()])
 
     def test_a_container_of_parked_children_is_parked_not_launched(self):
         items = [B.item('F-0001'), B.task('T-0001', parent='F-0001', priority='later')]
