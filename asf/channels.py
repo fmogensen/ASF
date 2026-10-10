@@ -21,10 +21,12 @@ This module holds the resolver, the channel log, the edge half and the stable ga
 constants, the ordering key, the pure line parser every consumer shares, the one ``git
 ls-remote`` that feeds it, ``settings`` (the overlay for the settings keys the criteria read
 their thresholds from), the log's read/write/note helpers, :func:`edge_candidate` and
-:func:`publish`, and :func:`stable_rows`/:func:`s1_in_window`. The daily part is a later Task of
-the same plan (``docs/plans/f-0308.md``).
+:func:`publish`, and :func:`stable_rows`/:func:`s1_in_window`. The daily part (:func:`advance`)
+and the read-only report (:func:`report`, :func:`cmd_channels`) are this same module's last
+Task of the plan (``docs/plans/f-0308.md``).
 """
 import datetime
+import json
 import re
 import subprocess
 
@@ -336,3 +338,193 @@ def stable_rows(product, root, log, candidate, now, opts=None, run=subprocess.ru
     return [_cadence_row(log, now, opts), _dwell_row(log, candidate, now, opts),
             _rehearsal_row(product, candidate, opts, run),
             _no_s1_row(root, log, candidate, now, opts)]
+
+
+# ------------------------------------------------------------- the daily part and the report --
+
+def _release_tags(repo_dir):
+    """``[(tag, commit)]`` — every release tag in ``repo_dir`` (:func:`asf.gitops.git`), newest
+    first by :func:`version_key`. The commit is an annotated tag's peel, or the tag's own object
+    for a lightweight one. ``[]`` when the checkout or its tags cannot be read (an unreadable
+    repo is never a candidate, never an exception)."""
+    from asf import gitops
+    result = gitops.git(
+        ['for-each-ref', '--format=%(refname:short)%09%(*objectname)%09%(objectname)',
+         'refs/tags/v*'], repo_dir)
+    tags = []
+    for line in (result.data or '').splitlines() if result.ok else []:
+        fields = line.split('\t')
+        if len(fields) != 3:
+            continue
+        name, peeled, obj = (f.strip() for f in fields)
+        if not cli.RELEASE_TAG.fullmatch(name):
+            continue
+        commit = peeled or obj
+        if commit:
+            tags.append((name, commit))
+    return sorted(tags, key=lambda t: version_key(t[0]), reverse=True)
+
+
+def _stable_candidate(log, now, opts):
+    """``(tag, commit)`` — the newest entry in ``log['edge_log']`` (itself newest first) whose
+    publication is at least ``edge_dwell_h`` hours old: the dwell row's own rule (:func:`_dwell_row`
+    re-checks exactly this candidate against the same log entry). ``(None, None)`` when nothing
+    has dwelled long enough yet, or the log has no edge history at all."""
+    hours = opts['edge_dwell_h']
+    for entry in log.get('edge_log') or []:
+        age_h = _hours_since(entry.get('at'), now)
+        if age_h is not None and age_h >= hours:
+            return entry.get('tag'), entry.get('commit')
+    return None, None
+
+
+def _advance_stable(product, log, root, opts, now, now_iso, out, run, event):
+    candidate = _stable_candidate(log, now, opts)
+    rows = stable_rows(product, root, log, candidate, now, opts=opts, run=run)
+    if not all(r.met for r in rows):
+        unmet = next(r for r in rows if not r.met)
+        held_at = (log.get('stable') or {}).get('tag') or 'no stable release yet'
+        out(f'channels: stable holds at {held_at} — {unmet.key} no: {unmet.evidence}')
+        return
+    tag, commit = candidate
+    before = log.get('stable') or {}
+    if commit == before.get('commit'):
+        out(f'channels: stable unchanged at {tag}')
+        return
+    ok, why = publish(product, 'stable', commit, run=run, out=out)
+    if not ok:
+        out(f'channels: stable publish failed — {why}')
+        return
+    was = before.get('tag') or before.get('commit')
+    keys = [r.key for r in rows]
+    note_stable(log, tag, commit, now_iso, keys)
+    ok_log, log_detail = write_log(product, lambda l: note_stable(l, tag, commit, now_iso, keys))
+    if not ok_log:
+        out(f'channels: stable log not written — {log_detail}')
+    out(f'channels: stable {tag}' + (f' (was {was})' if was else '') + ' — ' +
+       ', '.join(f'{k} yes' for k in keys))
+    if event is not None:
+        event('channel', channel='stable', tag=tag, commit=commit, previous=was, rows=keys)
+
+
+def advance(product, root, event=None, out=print, now=None, run=subprocess.run):
+    """The daily part (D10): publish ``edge`` at the newest green tag, then promote ``stable``
+    when all four rows of :func:`stable_rows` are met. Always returns **0** — a remote, record
+    or log this cannot read is one line and this still moves on, because a channel that does not
+    move today is not a failed tick. Publishes nothing at all for a product whose repo is not
+    the factory's own source (:func:`asf.drift.is_factory_source`, P11): no product is named
+    anywhere. Each publication is one ``event('channel', ...)`` line, never raised when ``event``
+    is left ``None``."""
+    from asf import drift
+    repo_dir = getattr(product, 'repo_dir', None)
+    if not repo_dir or not drift.is_factory_source(repo_dir):
+        out("channels: not run — this product's repo is not the factory's own source")
+        return 0
+    now_dt = _parse(now) or datetime.datetime.now(UTC)
+    now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    log = read_log(product)
+    opts = settings(product)
+    slug = getattr(product, 'repo_slug', None)
+    url = f'https://github.com/{slug}' if slug else ''
+
+    _advance_edge(product, log, url, opts, now_iso, out, run, event)
+    _advance_stable(product, log, root, opts, now_dt, now_iso, out, run, event)
+    return 0
+
+
+def _advance_edge(product, log, url, opts, now_iso, out, run, event):
+    tags = _release_tags(product.repo_dir)
+    tag, commit, detail = edge_candidate(product, url, tags, run=run, limit=opts['lookback_tags'])
+    if commit is None:
+        out(f'channels: edge holds — {detail}')
+        return
+    previous = log.get('edge') or {}
+    if commit == previous.get('commit'):
+        out(f'channels: edge unchanged — {detail}')
+        return
+    ok, why = publish(product, 'edge', commit, run=run, out=out)
+    if not ok:
+        out(f'channels: edge publish failed — {why}')
+        return
+    was = previous.get('tag') or previous.get('commit')
+    note_edge(log, tag, commit, now_iso, log_keep=opts['log_keep'])
+    ok_log, log_detail = write_log(
+        product, lambda l: note_edge(l, tag, commit, now_iso, log_keep=opts['log_keep']))
+    if not ok_log:
+        out(f'channels: edge log not written — {log_detail}')
+    out(f'channels: edge {detail}' + (f' (was {was})' if was else ''))
+    if event is not None:
+        event('channel', channel='edge', tag=tag, commit=commit, previous=was)
+
+
+def _age_str(hours):
+    """``'2 h'`` under two days, else ``'6 d'`` — the table's ``age`` column. ``'?'`` when the
+    log names no time at all (a channel never published)."""
+    if hours is None:
+        return '?'
+    if hours < 48:
+        return f'{hours:.0f} h'
+    return f'{hours / 24:.0f} d'
+
+
+def report(product, root, now=None, run=subprocess.run):
+    """The data behind ``asf channels`` — both channels, the stable candidate and the four gate
+    rows with their evidence, shared by the table and ``--json`` so the two cannot drift.
+    Read-only (D12): it reads the log and the record and asks ``gh`` for the rehearsal check; it
+    never writes the log, pushes a ref, or writes an event."""
+    now_dt = _parse(now) or datetime.datetime.now(UTC)
+    log = read_log(product)
+    opts = settings(product)
+    candidate = _stable_candidate(log, now_dt, opts)
+    rows = stable_rows(product, root, log, candidate, now_dt, opts=opts, run=run)
+    channels_out = []
+    for name in NAMES:
+        entry = log.get(name) or {}
+        channels_out.append({
+            'channel': name,
+            'tag': entry.get('tag'),
+            'commit': entry.get('commit'),
+            'age_h': _hours_since(entry.get('at'), now_dt) if entry.get('at') else None,
+        })
+    return {
+        'now': now_dt.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'channels': channels_out,
+        'candidate': {'tag': candidate[0], 'commit': candidate[1]},
+        'rows': [{'key': r.key, 'name': r.name, 'met': r.met, 'evidence': r.evidence}
+                for r in rows],
+    }
+
+
+def render(data):
+    """The ``asf channels`` table — two channels, the stable candidate and its four rows — over
+    exactly what :func:`report` returns, so the table and ``--json`` can never drift apart."""
+    lines = [f"**RELEASE CHANNELS** — {data['now']}", '',
+            '| channel | version | commit | age |', '|---|---|---|---|']
+    for c in data['channels']:
+        lines.append(f"| {c['channel']} | {c['tag'] or '—'} | "
+                     f"{(c['commit'] or '—')[:7]} | {_age_str(c['age_h'])} |")
+    lines.append('')
+    cand = data['candidate']
+    lines.append(f"Stable candidate: {cand['tag']}" if cand['tag'] else 'Stable candidate: none')
+    lines.append('')
+    lines.append('| # | Criterion | Met | Evidence |')
+    lines.append('|---|---|---|---|')
+    for i, row in enumerate(data['rows'], 1):
+        lines.append(f"| {i} | {row['name']} | {'yes' if row['met'] else 'NO'} | "
+                     f"{row['evidence'].replace('|', '/')} |")
+    return '\n'.join(lines) + '\n'
+
+
+def cmd_channels(args, root):
+    """``asf channels [--product P] [--json]`` — the table of :func:`render`, ending with
+    ``cli.stamp`` the way every other stamped table does, or the same data as one JSON document
+    (D12). Writes nothing: no state file, no ref, no event, no commit."""
+    from asf import env
+    product = env.load_product(getattr(args, 'product', None))
+    data = report(product, root)
+    if getattr(args, 'json', False):
+        print(json.dumps(data, indent=1, default=str))
+        return 0
+    print(render(data))
+    print(cli.stamp('channels', version=cli.version_string()))
+    return 0
