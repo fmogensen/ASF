@@ -685,10 +685,17 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
                 continue
             status, why = classify(view, report, elapsed, s.timeout_min, run_id,
                                    refusal=refusal)
-        if status == DEAD and REPORT_MISSING in why and refusals.CLAUSE_HEAD not in why:
-            if refusal is None:  # nothing on this host: the run's own log, read once (C11)
-                refusal = refusals.recognise(_run_log_tail(run, s, remote_client, gh))
-            why += refusals.clause(refusal)
+        if status == DEAD and REPORT_MISSING in why:
+            if refusal is None or refusals.describes_the_ask(refusal):
+                # the record's answer names the lane's ASK, never what stopped the run: for a
+                # rewrite correction the outcome — git's refusal of the rewritten push — is in
+                # the run's own log and nowhere else (F-0289 C7)
+                got = refusals.recognise(_run_log_tail(run, s, remote_client, gh))
+                if got is not None:        # git's refusal, not the lane's ask (C7)
+                    refusal = got
+                    why = why.partition(f' — {refusals.CLAUSE_HEAD}')[0]
+            if refusals.CLAUSE_HEAD not in why:
+                why += refusals.clause(refusal)
         beat = heartbeat.for_run(run, cfg, product) if status == WORKING else None
         stalled = False
         if beat is not None:
