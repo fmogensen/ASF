@@ -565,19 +565,13 @@ def verdict(runs, required, nonverdict=('cancelled',)):
     leg answers for its job) concluded ``success``; one still running or not created is
     pending; one ``cancelled`` (any conclusion in ``nonverdict``; the batch judge passes
     :data:`NONVERDICT`) is pending (it judged no code); one that concluded anything else —
-    ``skipped`` included — is red, unless its workflow run still has a job in flight (then a
-    ``skipped``/``cancelled`` is pending: it waits on an unfinished upstream). A red check the
+    ``skipped`` included — is red. A red check the
     product does not require is never a verdict. No required names: pending, and the line says
     so — a queue with nothing to gate on lands nothing."""
     from asf.harvest import deploy
     if not required:
         return 'pending', 'no required checks named (landing_checks / required_jobs_from)'
     red, pending = [], []
-    # F-0328: a workflow run still in flight (a job of it queued or running) has not settled its
-    # skipped/cancelled jobs — a job that ``needs:`` an unfinished upstream can read ``skipped``
-    # while it waits (a product batch 053bccd, dropped mid-``rules``): such a required job is
-    # pending, never red. Only a real conclusion of a settled run is a verdict.
-    live_ids = {_run_id(r) for r in runs or () if r.get('status') != 'completed'}
     for name in required:
         mine = [r for r in runs or () if deploy.job_key(r.get('name')) == name]
         if not mine:
@@ -588,9 +582,6 @@ def verdict(runs, required, nonverdict=('cancelled',)):
                 pending.append(f"{name} ({r.get('status') or 'pending'})")
             elif r.get('conclusion') in nonverdict:   # a cut-short run judged no code
                 pending.append(f"{name} ({r.get('conclusion')})")
-            elif r.get('conclusion') in ('skipped', 'cancelled') and live_ids and (
-                    _run_id(r) in live_ids or _run_id(r) is None or None in live_ids):
-                pending.append(f"{name} ({r.get('conclusion')}, its run still in progress)")
             elif r.get('conclusion') != 'success':
                 red.append(f"{name} ({r.get('conclusion') or 'no conclusion'})")
     if red:
