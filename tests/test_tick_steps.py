@@ -1939,17 +1939,18 @@ class DailyStepTests(StepsTestCase):
 
 
 class DailyPartsTests(StepsTestCase):
-    def test_the_daily_is_four_parts_and_only_four(self):
+    def test_the_daily_is_five_parts_and_only_five(self):
         names = [n for n, _ in step_daily.parts(self.product, self.tmp)]
-        self.assertEqual(names, ['stale', 'rollup', 'scorecard', 'deciders'])
+        self.assertEqual(names, ['stale', 'rollup', 'scorecard', 'deciders', 'channels'])
         self.assertEqual(step_daily.yesterday(__import__('datetime').date(2026, 3, 1)), '2026-02-28')
 
-    def test_asf_tick_daily_prints_those_four_and_stamps_the_day(self):
+    def test_asf_tick_daily_prints_those_five_and_stamps_the_day(self):
         with mock.patch('asf.scorecard.facts.forge_clutter', return_value={}):   # no forge in a test
             rc, out = self.run_tick(steps='daily')
         lines = [ln for ln in steps_only(out).splitlines() if ln.startswith('daily:')]
         self.assertEqual([ln.split()[1:3] for ln in lines],
-                         [['stale', 'ok'], ['rollup', 'ok'], ['scorecard', 'ok'], ['deciders', 'ok']])
+                         [['stale', 'ok'], ['rollup', 'ok'], ['scorecard', 'ok'], ['deciders', 'ok'],
+                          ['channels', 'ok']])
         self.assertNotIn('daily: groom', out)
         self.assertNotIn('daily: file-bugs', out)
         self.assertTrue(os.path.exists(steps.stamp_path(self.product)))
