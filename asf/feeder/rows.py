@@ -266,6 +266,9 @@ class Row:
     correction_kind: str = ''
     #: a PUSHED → REVIEW row only: the round the reviewer writes
     review_round: int = 0
+    #: a PUSHED → REVIEW row only: the checklists its reviewer must answer
+    #: (:func:`asf.harvest.lane.review_kinds`), read only by the brief builder
+    review_kinds: tuple = ()
     #: the GROOM → ADJUDICATE row only (§2.5, PD8): the groom day, the record clone's groom
     #: file and the state dir's answers file, and the open questions' own lines (for the brief).
     groom_date: str = ''
@@ -1157,7 +1160,7 @@ def lane_rows(items, product, busy, occupancy):
     occ = occupancy or {}
     held = [(iid, h, True) for iid, h in (occ.get('review') or {}).items()]
     held += [(iid, h, False) for iid, h in (occ.get('landing') or {}).items()]
-    from asf.harvest.lane import docs_only_task, is_pr_item  # local: the lane imports the feeder
+    from asf.harvest.lane import CODE, docs_only_task, is_pr_item, review_kinds as lane_review_kinds  # local: the lane imports the feeder
     for iid, h, review in sorted(held, key=lambda t: t[0]):
         item = items.get(iid)
         foreign = not item and is_pr_item(iid)  # merge: auto — a PR no factory item made
@@ -1198,9 +1201,11 @@ def lane_rows(items, product, busy, occupancy):
                                reason=f'{tries} review sessions on this head ended with no '
                                       f'review filed: no further reviewer until the head moves'))
                 continue
+            kinds = lane_review_kinds(_conventions(product).branch_kind(branch),
+                                      h.get('class') or CODE)
             out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid,
                            feature_id=fid, action=LAUNCH, brief_kind='review', branch=branch,
-                           review_round=rnd,
+                           review_round=rnd, review_kinds=kinds,
                            reason=f"{what} has no review of its head: round {rnd} "
                                   f"({h.get('why') or 'no verdict'})"))
         else:

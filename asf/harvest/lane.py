@@ -434,6 +434,19 @@ def review_kind(kind):
     return kind if kind in ('spec', 'plan') else CODE
 
 
+def review_kinds(kind, landing_class):
+    """The `asf.reviews` checklists a branch of `kind` must answer, given its `landing_class`
+    (:data:`DOCS`/:data:`CODE`): `(CODE,)` when :func:`review_kind` already reads `kind` as
+    ``code`` — a ``code``, ``fix``, ``direct``, legacy or unknown branch kind answers the same
+    table at either class; else `(doc,)` at :data:`DOCS` and `(doc, CODE)` at :data:`CODE` — a
+    ``spec``/``plan`` branch whose diff carries code answers its own checklist and the code one,
+    once each, in that order."""
+    doc = review_kind(kind)
+    if doc == CODE:
+        return (CODE,)
+    return (doc,) if landing_class == DOCS else (doc, CODE)
+
+
 def shared_hits(conv, files):
     """The files among ``files`` under a ``conventions.shared_paths`` or ``shared_writes`` glob."""
     globs = list(footprint.shared_globs(conv))
@@ -1946,7 +1959,7 @@ class Lane:
         if (f['review_required'] or f['class'] == CODE) \
                 and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
             rv = review_mod.review_at(repo, conv, f'origin/{b}', item,
-                                       reviews.required(review_kind(f['kind'])),
+                                       reviews.required(*review_kinds(f['kind'], f['class'])),
                                        store=os.path.join(self.state_dir, review_store.DIRNAME))
             body = ''
             if rv:
@@ -2356,6 +2369,8 @@ class Lane:
             # flags.mechanical: the head the table's own move left, while the head it made stands
             rec['mechanical_from'] = prev['mechanical_from']
         rec.update({k: v for k, v in extra.items() if v is not None})
+        if f.get('class'):
+            rec['class'] = f['class']
         return rec
 
     def write(self, f, rec, job=None, **fields):
@@ -3155,7 +3170,7 @@ class Lane:
             return None  # an operator ruling on the card: its adjudication carries it out
         appr = transplant_mod.approval(
             self.repo, self.conv, f'origin/{b}', item,
-            reviews.required(review_kind(kind)),
+            reviews.required(*review_kinds(kind, f.get('class') or CODE)),
             store=os.path.join(self.state_dir, review_store.DIRNAME))
         if not appr:
             return None

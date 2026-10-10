@@ -1521,7 +1521,8 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
             why = f"lane {state}{pr}: {rec.get('reason') or ''}".rstrip(': ')
             if state == lane_mod.REVIEW:
                 out['review'][item] = {'branch': branch, 'round': int(rec.get('round') or 1),
-                                       'pr': rec.get('pr'), 'why': rec.get('reason') or ''}
+                                       'pr': rec.get('pr'), 'why': rec.get('reason') or '',
+                                       'class': rec.get('class')}
             else:
                 # B-0043: `heavy`/`head` (the lane's own ci.heavy_after_review bookkeeping,
                 # :meth:`asf.harvest.lane.GitHubHost.heavy_gate`) let the feeder's PUSHED → LAND
@@ -1529,7 +1530,7 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
                 # never requested apart from one landing normally — never a silent gap.
                 out['landing'][item] = {'branch': branch, 'state': state, 'pr': rec.get('pr'),
                                         'why': why, 'heavy': rec.get('heavy'),
-                                        'head': rec.get('head')}
+                                        'head': rec.get('head'), 'class': rec.get('class')}
         elif landed(run) or pending_correction(run, path) or lands_nothing(run):
             continue
         elif run.get('harvest') == 'pr':

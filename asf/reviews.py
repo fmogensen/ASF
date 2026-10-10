@@ -152,9 +152,17 @@ def normalize(name):
     return s.rstrip('.,;:').strip()
 
 
-def required(kind):
-    """The normalized mechanical names of `CHECKLIST[kind]`, in checklist order."""
-    return tuple(normalize(name) for name in CHECKLIST[kind][0])
+def required(*kinds):
+    """The normalized mechanical names of every `CHECKLIST[kind]` in `kinds`, in checklist order,
+    each name once: `required('spec', 'code')` is the five spec names then the six code names.
+    De-duplicates while preserving first-seen order; `required()` is `()`."""
+    out = []
+    for kind in kinds:
+        for name in CHECKLIST[kind][0]:
+            n = normalize(name)
+            if n not in out:
+                out.append(n)
+    return tuple(out)
 
 
 #: Words a check's name may add or drop without naming another check.

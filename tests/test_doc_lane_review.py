@@ -1,11 +1,23 @@
 """F-0280 S-73204 — the feeder speaks for a Feature the lane holds: `FEATURE_LANES`, the
 branch-keyed gate in `lane_rows`, `lane_speaks`, and a Feature admitted to `pushed_ids`/
-`pushed_rows` on the branch the lane recorded, never a type-derived guess."""
+`pushed_rows` on the branch the lane recorded, never a type-derived guess.
+
+F-0280 S-73205 — the checklist a document branch that carries code must answer, and the class
+that chooses it: `reviews.required(*kinds)`, `lane.review_kinds(kind, landing_class)`, `class` on
+the lane record and on the occupancy's `review`/`landing` entries, and `Row.review_kinds` set
+from it."""
+import json
+import os
+import shutil
+import tempfile
+import types
 import unittest
 
 from asf.env import Product
 from asf.feeder import rows, tiers
 from asf.harvest import lane
+from asf import reviews
+from asf.workers import lifecycle as lc
 
 
 def product(**conv):
@@ -36,12 +48,15 @@ def by_item(rs):
     return {r.item_id: r for r in rs}
 
 
-def doc_occ(fid, branch, kind, state=lane.REVIEW, round_=1, pr=941, reason=''):
+def doc_occ(fid, branch, kind, state=lane.REVIEW, round_=1, pr=941, reason='', cls=None):
     """An occupancy for one Feature's document branch, in the shape
     ``asf.workers.lifecycle.occupancy`` builds for it (docs/plans/f-0280.md PD4): a REVIEW or
     other open-state record populates ``review``/``landing``, ``lanes``, ``waiting_landing``,
     ``branches`` and ``docs`` together in one pass — a fixture that sets only ``review``/
-    ``landing`` cannot show the duplicate row :func:`rows.lane_speaks` removes."""
+    ``landing`` cannot show the duplicate row :func:`rows.lane_speaks` removes. ``cls``: the
+    landing class the lane record carried (:data:`lane.DOCS`/:data:`lane.CODE`), or None for a
+    record written before this card — carried onto the ``review``/``landing`` entry the same way
+    ``asf.workers.lifecycle.occupancy`` carries it from the lane record (S-73205)."""
     pr_part = f" PR #{pr}" if pr else ''
     why = f"lane {state}{pr_part}: {reason}".rstrip(': ')
     out = {'busy': {}, 'waiting_landing': {fid: why}, 'corrections': {},
@@ -50,10 +65,11 @@ def doc_occ(fid, branch, kind, state=lane.REVIEW, round_=1, pr=941, reason=''):
            'review': {}, 'landing': {}, 'branches': {branch: why}, 'docs': {fid: {kind: why}},
            'landed': {}, 'landed_on': {}, 'parks': {}, 'back': {}}
     if state == lane.REVIEW:
-        out['review'][fid] = {'branch': branch, 'round': round_, 'pr': pr, 'why': reason}
+        out['review'][fid] = {'branch': branch, 'round': round_, 'pr': pr, 'why': reason,
+                               'class': cls}
     else:
         out['landing'][fid] = {'branch': branch, 'state': state, 'pr': pr, 'why': why,
-                                'heavy': None, 'head': None}
+                                'heavy': None, 'head': None, 'class': cls}
     return out
 
 
@@ -161,6 +177,116 @@ class TheFeatureLaneRows(unittest.TestCase):
         # and `tests.test_direct_lane` — the module that pins the direct lane's rows end to
         # end — stays green; it is not re-run here, only named as what "unmoved" means (its own
         # suite is part of this Task's Gate).
+
+
+def _write_sessions(lines):
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, 'sessions.jsonl')
+    with open(path, 'w', encoding='utf-8') as f:
+        for ln in lines:
+            f.write(json.dumps(ln) + '\n')
+    return d, path
+
+
+class TheChecklistOfADocumentBranch(unittest.TestCase):
+    """S-73205 — a document branch that carries code must answer the code checklist too, and one
+    review satisfies both readers."""
+
+    def setUp(self):
+        self._dirs = []
+
+    def tearDown(self):
+        for d in self._dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _sessions(self, lines):
+        d, path = _write_sessions(lines)
+        self._dirs.append(d)
+        return path
+
+    def test_required_varargs_is_spec_then_code_each_once_and_code_alone_is_unmoved(self):
+        code_names = tuple(reviews.normalize(n) for n in reviews.CHECKLIST['code'][0])
+        spec_names = tuple(reviews.normalize(n) for n in reviews.CHECKLIST['spec'][0])
+        self.assertEqual(reviews.required('code'), code_names)
+        self.assertEqual(reviews.required('spec', 'code'), spec_names + code_names)
+        # each name once, in checklist order, however many times a kind is named
+        self.assertEqual(reviews.required('code', 'code'), code_names)
+        self.assertEqual(reviews.required(), ())
+
+    def test_review_kinds_across_both_classes_and_every_branch_kind(self):
+        self.assertEqual(lane.review_kinds('spec', lane.CODE), ('spec', 'code'))
+        self.assertEqual(lane.review_kinds('spec', lane.DOCS), ('spec',))
+        self.assertEqual(lane.review_kinds('plan', lane.CODE), ('plan', 'code'))
+        self.assertEqual(lane.review_kinds('plan', lane.DOCS), ('plan',))
+        for kind in ('code', 'fix', lane.DIRECT, 'legacy', 'mystery', None):
+            for cls in (lane.DOCS, lane.CODE):
+                with self.subTest(kind=kind, cls=cls):
+                    self.assertEqual(lane.review_kinds(kind, cls), ('code',))
+
+    def test_a_filled_spec_and_code_table_is_approved_against_both_checklists(self):
+        names = reviews.required('spec', 'code')
+        lines = ['| check | result | evidence |', '| --- | --- | --- |']
+        lines += [f'| {n} | pass | checked |' for n in names]
+        text = '\n'.join(lines)
+        self.assertEqual(reviews.verdict(text, reviews.required('spec', 'code')), reviews.APPROVED)
+        self.assertEqual(reviews.verdict(text, reviews.required('spec')), reviews.APPROVED)
+
+    def test_a_filled_code_only_table_still_bounces_against_spec_and_code(self):
+        names = reviews.required('code')
+        lines = ['| check | result | evidence |', '| --- | --- | --- |']
+        lines += [f'| {n} | pass | checked |' for n in names]
+        text = '\n'.join(lines)
+        self.assertEqual(reviews.verdict(text, reviews.required('spec', 'code')), reviews.BOUNCE)
+
+    def test_lane_record_writes_class_when_facts_read_one_and_omits_it_otherwise(self):
+        f = {'item': 'F-0280', 'head': 'deadbeef' * 5, 'class': lane.CODE}
+        rec = lane.Lane.record(None, f, lane.REVIEW, 'no verdict')
+        self.assertEqual(rec['class'], lane.CODE)
+
+        f_no_class = {'item': 'F-0280', 'head': 'deadbeef' * 5}
+        rec2 = lane.Lane.record(None, f_no_class, lane.REVIEW, 'no verdict')
+        self.assertNotIn('class', rec2)
+
+    def test_occupancy_carries_class_onto_the_review_and_landing_entries(self):
+        path = self._sessions([
+            {'job': 'coder-f-0280', 'pid': 1, 'started': '2026-01-02T00:00:00Z',
+             'branch': 'spec/F-0280', 'item': 'F-0280', 'kind': 'spec'},
+            {'job': 'coder-f-0280', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'},
+        ])
+        review_lanes = {'spec/F-0280': {'state': lane.REVIEW, 'round': 1, 'class': lane.CODE}}
+        out = lc.occupancy(path, lanes=review_lanes)
+        self.assertEqual(out['review']['F-0280']['class'], lane.CODE)
+
+        landing_lanes = {'spec/F-0280': {'state': lane.GATE, 'class': lane.DOCS}}
+        out2 = lc.occupancy(path, lanes=landing_lanes)
+        self.assertEqual(out2['landing']['F-0280']['class'], lane.DOCS)
+
+    def test_lane_rows_sets_review_kinds_from_class_and_defaults_with_none(self):
+        occ = doc_occ('F-0280', 'spec/F-0280', 'spec', state=lane.REVIEW, cls=lane.CODE)
+        out = rows.lane_rows(index(feature(stage='spec-draft'))['items'], product(), [], occ)
+        self.assertEqual(by_item(out)['F-0280'].review_kinds, ('spec', 'code'))
+
+        # a REVIEW record written before this card carries no class (C10): the union never
+        # under-asks, so it reads the same as an explicit `code` class
+        occ_no_class = doc_occ('F-0280', 'spec/F-0280', 'spec', state=lane.REVIEW)
+        out2 = rows.lane_rows(index(feature(stage='spec-draft'))['items'], product(), [],
+                              occ_no_class)
+        self.assertEqual(by_item(out2)['F-0280'].review_kinds, ('spec', 'code'))
+
+    def test_the_lane_s_own_transition_is_unmoved(self):
+        # a docs-only document branch still reads `review: none` on its lane transition — this
+        # card changes which checklist a review is read against, never whether one is required
+        state, reason = lane.next_state({'state': lane.REVIEW},
+                                        {'head': 'deadbeef' * 5, 'review_required': False})
+        self.assertEqual((state, reason), (lane.GATE, 'review: none'))
+
+        # and `transplant_case` still refuses a `spec`/`plan`/`direct` branch outright
+        for kind in ('spec', 'plan', lane.DIRECT):
+            with self.subTest(kind=kind):
+                fake_self = types.SimpleNamespace(repo='/fake/repo')
+                f = {'branch': f'{kind}/F-0280', 'item': 'F-0280', 'head': 'deadbeef' * 5,
+                     'kind': kind}
+                self.assertIsNone(lane.Lane.transplant_case(fake_self, f))
 
 
 if __name__ == '__main__':
