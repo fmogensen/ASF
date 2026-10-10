@@ -2536,6 +2536,12 @@ def gather(product, run, alive=None, worktree=None, heads=None, liveness=None, s
         log = _git(['reflog', 'show', '--format=%gs', f'refs/heads/{branch}'], wt)
         ev.has_commits = log.returncode == 0 and any(
             not ln.startswith('branch: Created from') for ln in log.stdout.splitlines() if ln.strip())
+        if not ev.has_commits and ev.remote_sha:
+            # this worktree's own reflog is blind to work pushed before it ever checked the
+            # branch out — a cloud session's direct push, or an earlier worktree already gone
+            # (B-0584): read origin's own commits past the trunk instead of calling it empty
+            ahead = _git(['rev-list', '--no-merges', f'origin/{main}..{ev.remote_sha}'], wt)
+            ev.has_commits = ahead.returncode == 0 and bool(ahead.stdout.split())
     if ev.remote_sha:
         ev.head_on_remote = _git(['merge-base', '--is-ancestor', 'HEAD', ev.remote_sha], wt).returncode == 0
         ev.unpushed = unpushed_commits(wt, ev.remote_sha, main)
