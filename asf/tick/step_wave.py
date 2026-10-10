@@ -110,8 +110,7 @@ def attempts(product):
 def trunk_landed(product):
     """``{pr number: sha}`` the trunk carries as landed within :data:`TRUNK_LANDED_DAYS`
     (:func:`asf.trunk_watch.landed_prs` over :func:`asf.trunk_watch.first_parent`); ``{}`` when
-    git cannot read it (no ``repo_dir``, or the log read fails) — unknown is never "not
-    landed"."""
+    git cannot read it — unknown is never "not landed"."""
     repo = getattr(product, 'repo_dir', None)
     if not repo:
         return {}

@@ -1373,13 +1373,10 @@ PR_CACHE = 'cache-prs.json'
 
 def ended_prs(state_dir, landed=()):
     """``{number: {'state', 'head'}}`` of every PR that is over: the rows the evidence pass last
-    saw MERGED or CLOSED on its cache (no ``gh``), plus every number in ``landed``
+    saw MERGED or CLOSED on its cache, plus every number in ``landed``
     (:func:`asf.trunk_watch.landed_prs`) as MERGED, whatever its cached row says — the trunk
-    carries the merge, and the cache is a copy of an older answer (F-0277). The trunk's entry is
-    written last and wins, and keeps the cached row's ``headRefOid`` when the cache has one, else
-    None — a merge is final whatever the head did (:func:`pr_ended`), so this keeps the map
-    honest for a later reader rather than guessing a head. ``{}`` when there is no cache, it
-    cannot be read, and ``landed`` is empty."""
+    carries the merge, and the cache is a copy of an older answer (F-0277). ``{}`` when there is
+    no cache and ``landed`` is empty."""
     try:
         with open(os.path.join(state_dir, PR_CACHE)) as fh:
             data = json.load(fh)

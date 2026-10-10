@@ -144,6 +144,11 @@ class TrunkLandedTests(unittest.TestCase):
         with mock.patch.object(trunk_watch, 'first_parent', return_value=None):
             self.assertEqual(step_wave.trunk_landed(self.product), {})
 
+    def test_passes_trunk_landed_days_as_days_to_first_parent(self):
+        with mock.patch.object(trunk_watch, 'first_parent', return_value=None) as first_parent:
+            step_wave.trunk_landed(self.product)
+        self.assertEqual(first_parent.call_args.kwargs['days'], step_wave.TRUNK_LANDED_DAYS)
+
     def test_occupancy_passes_trunk_landed_through_to_ended_prs(self):
         """No new state file, no new ``gh`` call: the trunk read is the one ``git log`` in
         :func:`step_wave.trunk_landed`, and ``lifecycle.ended_prs``/``occupancy`` are both
