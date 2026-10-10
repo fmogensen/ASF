@@ -65,11 +65,19 @@ LEGACY_QUIET_S = 5 * 60
 GIVE_UP_S = 30 * 60
 #: one ssh read of one box
 SSH_TIMEOUT_S = 30
+#: no stall-watch pass inside this long, with a non-empty pool, is nobody watching
+PASS_STALE_S = 15 * 60
+#: a claim whose cancel or re-run was refused is retried at most this many times
+RERUN_TRIES = 3
+#: a claim still in a bad state is held this long, long past the resolved claims' prune
+BAD_KEEP_S = 14 * 24 * 60 * 60
+#: the claim states that mean a cancel was made and its re-run did not happen
+BAD_STATES = ('cancel-failed', 'rerun-failed', 'gave-up')
 
 TUNABLES = {'SILENCE_S': 'ci.stall_watch.silence_s',
             'HEARTBEAT_STALE_S': 'ci.stall_watch.heartbeat_stale_s',
             'FACTOR': 'ci.stall_watch.factor', 'DEFAULT_MAX_S': 'ci.stall_watch.default_max_s',
-            'CPU_FLOOR': 'ci.stall_watch.cpu_floor'}
+            'CPU_FLOOR': 'ci.stall_watch.cpu_floor', 'PASS_STALE_S': 'ci.stall_watch.pass_stale_s'}
 
 #: this watch's own record, under the product's state dir
 STATE_FILE = 'ci-stall.json'
@@ -362,6 +370,54 @@ def watch(product, apply=False, fetch_fn=None, src=None, now=None, out=print, ev
                       if now - float(c.get('claimed_at') or now) < 2 * REFRESH_S}
     save(product, data)
     return stalls, cancels
+
+
+# ---- the doctor row: which watcher acts, when the last pass ran, and every cancel still owed
+#      a re-run (asf.doctor.check_ci_stall) -----------------------------------------------------
+
+def doctor_rows(product, now=None):
+    """``[(required, ok, detail)]``: the held timer while the operator watchdog still runs, no
+    stall-watch pass for too long over a non-empty pool, one row per claim stuck in a bad state
+    (:data:`BAD_STATES`) with its re-run still owed, else one ok row off the last ``pass``.
+    ``[]`` for a product with no ``ci.pool`` and no ``pass`` block — not asked about. Reads only
+    :func:`load`, :func:`asf.ci_heartbeat.boxes`, :func:`mode` and :func:`legacy_active`: no ssh,
+    no ``gh`` call."""
+    now = now if now is not None else _now()
+    boxes = ci_heartbeat.boxes(product)
+    data = load(product)
+    blk = data['pass']
+    if not boxes and not blk:
+        return []
+    rows = []
+    legacy = legacy_active(now)
+    held = legacy if legacy is not None else blk.get('legacy')
+    if mode() == 'act' and held is not None:
+        rows.append((True, False,
+                     f'the operator watchdog still holds the timer (claims.json {int(held)}s '
+                     f'ago) — not claimed in ci-cancels.json, not re-run; asf ci stall-watch '
+                     f'--apply once it quiets'))
+    if boxes and (not blk or now - blk['at'] > tunable('PASS_STALE_S')):
+        limit_min = tunable('PASS_STALE_S') / 60
+        when = ('never' if not blk else
+                f"for {int((now - blk['at']) / 60)} min (limit {limit_min:g})")
+        rows.append((True, False, f'no stall-watch pass {when} — {len(boxes)} box(es) of '
+                                  f'ci.pool are unwatched'))
+    for _, c in sorted(data['claims'].items()):
+        if c.get('state') not in BAD_STATES:
+            continue
+        age_min = int((now - float(c.get('claimed_at') or now)) / 60)
+        rows.append((True, False,
+                     f"run {c.get('run')} ({c.get('job')} on {c.get('runner')}) is "
+                     f"{c['state']} after {c.get('tries', 1)} tries ({age_min} min ago) — it "
+                     f"has not been re-run"))
+    if rows:
+        return rows
+    mode_word = blk.get('mode', 'report')
+    note = ' (reporting only, nothing is cancelled)' if mode_word == 'report' else ''
+    age_min = int((now - float(blk.get('at') or now)) / 60)
+    return [(True, True,
+             f"mode {mode_word}, last pass {age_min} min ago{note}: {blk.get('stalls', 0)} "
+             f"stalled, {blk.get('cancels', 0)} cancelled over {blk.get('boxes', 0)} box(es)")]
 
 
 def cmd_stall_watch(args, out=print):
