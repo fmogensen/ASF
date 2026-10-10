@@ -312,6 +312,13 @@ def build_parser():
     p_rules.add_argument('--json', action='store_true')
     p_rules.add_argument('--verbose', action='store_true')
 
+    p_proves = sub.add_parser('proves', help="the Proves: trailer gate (F-0040)")
+    p_proves.add_argument('proves_command', choices=['check', 'show'])
+    p_proves.add_argument('item', nargs='?', help='a Task id, with `show`')
+    p_proves.add_argument('--product')
+    p_proves.add_argument('--branch', help='`show`: override the branch read for claims')
+    p_proves.add_argument('--json', action='store_true')
+
     p_credentials = sub.add_parser(
         'credentials', help='is every signed-in tool this product names still valid')
     p_credentials.add_argument('credentials_command', choices=['check'])
@@ -661,6 +668,9 @@ def _main(argv=None):
     if args.command == 'rules':
         from asf.rules.rules import cmd_check as rules_cmd_check
         return rules_cmd_check(args, resolve_record(args))
+    if args.command == 'proves':
+        from asf.rules.story_proof import cmd_proves
+        return cmd_proves(args, resolve_record(args, announce=_announce_stderr))  # stdout: the gate's own contract
     if args.command == 'credentials':
         from asf import credentials as credentials_mod
         from asf import env

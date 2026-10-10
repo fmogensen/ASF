@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -6,8 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from asf.rules import rules
+from asf.rules import story_proof
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
@@ -503,3 +508,137 @@ class CoreRulesTests(unittest.TestCase):
         proc = self._run(['check', '--product', 'p'], root='/nonexistent')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(proc.stdout.strip(), '== RULES 1 checked, 0 violations, 0 unenforced')
+
+
+class StoryProofTests(unittest.TestCase):
+    """F-0040 §2.8: the backstop for a landed Task whose claims the landing never checked — a
+    missing index (D4), a Task listing no Story (D5), or a landing from before this gate
+    existed."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='story_proof_test_')
+        os.makedirs(os.path.join(self.root, 'stories'))
+        with open(os.path.join(self.root, 'stories', 'S-18750.md'), 'w', encoding='utf-8') as f:
+            f.write("## Acceptance\n- [ ] one\n- [ ] two\n- [ ] three\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    @staticmethod
+    def _story(sid='S-18750'):
+        return {'type': 'story', 'folder': 'stories', 'id': sid}
+
+    @staticmethod
+    def _task(tid, stories, updated):
+        return {'type': 'task', 'id': tid, 'stories': stories, 'updated': updated}
+
+    def test_task_landed_proving_nothing(self):
+        items = {
+            'S-18750': self._story(),
+            'T-0123': self._task('T-0123', ['S-18750'], '2026-09-20T00:00:00Z'),
+        }
+        ev = {'ids': {'T-0123': {'commit': 'abc1234'}}, 'proves': {}}
+        self.assertEqual(
+            story_proof.violations(items, ev, self.root),
+            ['task landed proving nothing T-0123 (S-18750) since 2026-09-20'])
+
+    def test_claim_names_a_line_the_story_no_longer_has(self):
+        items = {
+            'S-18750': self._story(),
+            'T-0124': self._task('T-0124', ['S-18750'], '2026-09-22T00:00:00Z'),
+        }
+        ev = {
+            'ids': {'T-0124': {'commit': 'def5678'}},
+            'proves': {'S-18750': [{'line': 7, 'test': 'tests/x.py', 'task': 'T-0124',
+                                     'pr': None, 'sha': 'def5678', 'source': 'commit'}]},
+        }
+        self.assertEqual(
+            story_proof.violations(items, ev, self.root),
+            ['claim names a line S-18750 has no more S-18750 line 7 (T-0124) since 2026-09-22'])
+
+    def test_task_lists_no_story(self):
+        items = {'T-0125': self._task('T-0125', [], '2026-09-21T00:00:00Z')}
+        ev = {'ids': {'T-0125': {'commit': 'aaa0001'}}, 'proves': {}}
+        self.assertEqual(
+            story_proof.violations(items, ev, self.root),
+            ['task lists no story T-0125 since 2026-09-21'])
+
+    def test_a_landed_task_whose_every_story_is_proven_is_silent(self):
+        items = {
+            'S-18750': self._story(),
+            'T-0126': self._task('T-0126', ['S-18750'], '2026-09-23T00:00:00Z'),
+        }
+        ev = {
+            'ids': {'T-0126': {'commit': 'bbb0002'}},
+            'proves': {'S-18750': [{'line': 1, 'test': 'tests/x.py', 'task': 'T-0126',
+                                     'pr': None, 'sha': 'bbb0002', 'source': 'commit'}]},
+        }
+        self.assertEqual(story_proof.violations(items, ev, self.root), [])
+
+    def test_a_task_with_no_landing_evidence_is_not_reported_at_all(self):
+        items = {
+            'S-18750': self._story(),
+            'T-0127': self._task('T-0127', [], '2026-09-20T00:00:00Z'),
+        }
+        ev = {'ids': {}, 'proves': {}}
+        self.assertEqual(story_proof.violations(items, ev, self.root), [])
+
+    def test_violations_are_sorted_and_two_runs_agree(self):
+        items = {
+            'S-18750': self._story(),
+            'T-0123': self._task('T-0123', ['S-18750'], '2026-09-20T00:00:00Z'),
+            'T-0125': self._task('T-0125', [], '2026-09-21T00:00:00Z'),
+        }
+        ev = {'ids': {'T-0123': {'commit': 'a'}, 'T-0125': {'commit': 'b'}}, 'proves': {}}
+        once = story_proof.violations(items, ev, self.root)
+        twice = story_proof.violations(items, ev, self.root)
+        self.assertEqual(once, twice)
+        self.assertEqual(once, sorted(once))
+
+    def _args(self, **over):
+        base = dict(proves_command='check', item=None, product=None, branch=None, json=False)
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def test_cmd_proves_check_prints_one_line_per_violation_and_exits_1(self):
+        with mock.patch.object(story_proof, 'violations',
+                               return_value=['x lists no story T-9999 since 2026-01-01']):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = story_proof.cmd_proves(self._args(), self.root)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue().strip(),
+                         'x lists no story T-9999 since 2026-01-01')
+
+    def test_cmd_proves_check_exits_0_and_prints_nothing_with_no_violations(self):
+        with mock.patch.object(story_proof, 'violations', return_value=[]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = story_proof.cmd_proves(self._args(), self.root)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), '')
+
+    def test_cmd_proves_check_json_carries_the_same_rows(self):
+        with mock.patch.object(story_proof, 'violations',
+                               return_value=['a lists no story T-0001 since 2026-01-01']):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = story_proof.cmd_proves(self._args(json=True), self.root)
+        self.assertEqual(code, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload,
+                         {'violations': [{'line': 'a lists no story T-0001 since 2026-01-01'}]})
+
+    def test_shipped_script_runs_proves_check_from_the_environment(self):
+        path = os.path.join(PROJECT_ROOT, 'rules', 'story-proof.sh')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('asf proves check --product', text)
+        self.assertIn('${ASF_PRODUCT', text)
+
+    def test_resolve_script_finds_the_shipped_script_with_no_rules_dir_of_its_own(self):
+        self.assertNotEqual(self.root, PROJECT_ROOT)
+        self.assertFalse(os.path.isdir(os.path.join(self.root, 'rules')))
+        path = rules.resolve_script(self.root, 'rules/story-proof.sh')
+        self.assertEqual(path, os.path.join(PROJECT_ROOT, 'rules', 'story-proof.sh'))
+        self.assertTrue(os.access(path, os.X_OK))
