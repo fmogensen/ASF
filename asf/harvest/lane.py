@@ -154,6 +154,7 @@ from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
 from asf.harvest import mechanical
 from asf.harvest import pr_graph
+from asf.harvest import regression
 from asf.harvest import transplant as transplant_mod
 from asf.workers import githooks
 from asf.workers import host as host_mod
@@ -1937,6 +1938,12 @@ class Lane:
                 f['refusal'] = incomplete_refusal(repo, trunk, b, built, run)
                 if f['refusal']:  # the hold's finding: the members still missing (progress is a new finding)
                     f['incomplete'] = members_named(repo, trunk, b, built)[1]
+            if not f['refusal'] and conv.branch_kind(b) == 'fix':
+                # F-0312: a fix branch's own tests, run on the tree its defect was reported
+                # against — an existing refusal wins, the cheap pure-git one is not displaced
+                f['regression'] = regression.ask(self, f)
+                if f['regression'] and f['regression'][0] not in ('proved', 'skipped', 'waived'):
+                    f['refusal'] = (lifecycle.REGRESSION, regression.hold_text(f))
         f['customer'] = customer_content.touched(conv, f['files'])
         # a customer page is never landed unread: its diff needs a review whatever its class
         f['review_required'] = f['review_required'] or bool(f['customer'])

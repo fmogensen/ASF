@@ -534,5 +534,50 @@ class PrePushChecksTests(unittest.TestCase):
         self.assertIn('pre_push_checks', conv_mod.validate_mapping.__doc__)
 
 
+class RegressionFlagsTests(unittest.TestCase):
+    """F-0312 S-80458: the four `regression.*` names, registered and defaulted, with a malformed
+    `command` or `exempt_found_in` named by `validate_mapping` rather than reaching the runner."""
+
+    def test_all_four_names_are_known_flags(self):
+        for name in ('regression.check', 'regression.exempt_found_in', 'regression.command',
+                    'regression.fail_re'):
+            self.assertIn(name, conv_mod.KNOWN_FLAGS)
+
+    def test_check_defaults_to_off(self):
+        self.assertEqual(Conventions().flag('regression.check', False), False)
+        self.assertEqual(Conventions.from_mapping({}).flag('regression.check', False), False)
+
+    def test_exempt_found_in_defaults_to_ci(self):
+        self.assertEqual(Conventions().flag('regression.exempt_found_in', ['ci']), ['ci'])
+
+    def test_command_falls_back_to_test_command_and_substitutes_base(self):
+        from asf.harvest import regression
+        c = Conventions.from_mapping({'test_command': 'make test'})
+        self.assertEqual(regression.resolved_command(c, 'deadbee'), 'make test')
+        c = Conventions.from_mapping({'test_command': 'make test',
+                                     'flags': {'regression': {'command': 'run {base} now'}}})
+        self.assertEqual(regression.resolved_command(c, 'deadbee'), 'run deadbee now')
+
+    def test_validate_mapping_passes_a_well_formed_regression_block(self):
+        probs = conv_mod.validate_mapping(
+            {'flags': {'regression': {'command': 'make test', 'exempt_found_in': ['ci', 'dev']}}})
+        self.assertEqual(probs, [])
+
+    def test_validate_mapping_names_a_command_that_is_not_a_string(self):
+        probs = dict(conv_mod.validate_mapping(
+            {'flags': {'regression': {'command': 7}}}))
+        self.assertIn('flags.regression.command', probs)
+        probs = dict(conv_mod.validate_mapping({'flags': {'regression.command': 7}}))
+        self.assertIn('flags.regression.command', probs)
+
+    def test_validate_mapping_names_an_exempt_found_in_that_is_not_a_list_of_strings(self):
+        probs = dict(conv_mod.validate_mapping(
+            {'flags': {'regression': {'exempt_found_in': 'ci'}}}))
+        self.assertIn('flags.regression.exempt_found_in', probs)
+        probs = dict(conv_mod.validate_mapping(
+            {'flags': {'regression': {'exempt_found_in': ['ci', 7]}}}))
+        self.assertIn('flags.regression.exempt_found_in', probs)
+
+
 if __name__ == '__main__':
     unittest.main()

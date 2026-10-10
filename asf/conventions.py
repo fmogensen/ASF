@@ -432,7 +432,12 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                # B-0121: how often the console's FACTORY STATUS feed ticks — off | 0 | a number
                # of minutes | a unit-suffixed duration (5m, 30s, 1h); overrides config.yaml's own
                # console.status_every (asf.console_feed.resolve_every). Same reasoning as 'upgrade'.
-               'console_status_every')
+               'console_status_every',
+               # F-0312: the regression gate on `fix` lane branches — off by default, so a
+               # product taking the release does not have its incident lane start holding
+               # branches nobody asked it to hold (asf.harvest.regression)
+               'regression.check', 'regression.exempt_found_in', 'regression.command',
+               'regression.fail_re')
 
 
 
@@ -582,8 +587,10 @@ def validate_mapping(data):
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
     ``worktree_setup``, ``pre_push_check``, ``pre_push_checks``, ``auth_env``,
     ``full_suite_commands``, ``check_commands``, ``read_only_allow``, ``customer_content``,
-    ``security``, ``feeder`` and ``legacy_branch`` are checked — every other key is kept verbatim
-    (see the module doc), so a product file written for a newer ``asf`` still loads."""
+    ``security``, ``feeder``, ``legacy_branch`` and two names under ``flags`` —
+    ``regression.command`` and ``regression.exempt_found_in`` — are checked; every other key
+    (every other flag included) is kept verbatim (see the module doc), so a product file written
+    for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -614,6 +621,24 @@ def validate_mapping(data):
             continue
         if setup is not None and (isinstance(setup, (dict, list, bool)) or not str(setup).strip()):
             problems.append((key, f'must be a command string, not {setup!r}'))
+    flags = data.get('flags')
+    if isinstance(flags, dict):
+        def _flag(name):
+            if name in flags:
+                return flags[name]
+            node = flags
+            for part in name.split('.'):
+                node = node.get(part) if isinstance(node, dict) else None
+            return node
+        command = _flag('regression.command')
+        if command is not None and (not isinstance(command, str) or not command.strip()):
+            problems.append(('flags.regression.command',
+                             f'must be a command string, not {command!r}'))
+        exempt = _flag('regression.exempt_found_in')
+        if exempt is not None and (not isinstance(exempt, list)
+                                   or any(not isinstance(v, str) for v in exempt)):
+            problems.append(('flags.regression.exempt_found_in',
+                             f'must be a list of strings, not {exempt!r}'))
     suite = data.get('full_suite_commands')
     if suite is not None:
         if not isinstance(suite, list):

@@ -3011,6 +3011,10 @@ NAMING = 'naming'
 COPIES = 'copies'
 #: the correction kinds that spend no round and never reach adjudicate
 MECHANICAL = (NAMING, COPIES)
+#: F-0312: a fix branch whose tests pass on the pre-fix tree — the regression test is missing,
+#: inconclusive, or red on both sides. The session's work, so a round is spent and the factory
+#: does not try to resolve it itself (never in MECHANICAL).
+REGRESSION = 'regression'
 #: the lane's hold of a delivery branch (``delivers:``) a member of which no commit names while
 #: its report does not say ``done`` — a crash, a run cap, ``status: partial``: no PR opens; the
 #: same lead comes back to a session that continues from the branch's head
