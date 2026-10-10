@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -299,6 +300,19 @@ class Refreshing(GhappCase):
             meta = json.load(f)
         self.assertEqual(meta['error'], why)
         self.assertEqual(meta['expires_at'], '2026-01-01T00:05:00Z')  # the stale expiry survives
+
+    def test_a_network_error_mints_nothing_and_leaves_the_previous_token_file_exactly_as_it_was(self):
+        product = self.product(installation_id=987654)
+        self.seed(product, 'OLD-TOKEN', '2026-01-01T00:05:00Z')
+        now = ghapp._seconds_left('2026-01-01T00:05:00Z', 0) - 100  # already inside the margin
+
+        def http(req, timeout=None):
+            raise urllib.error.URLError('no route to host')
+
+        expires, why = ghapp.refresh(product, now=now, http=http, run=fake_run())
+        self.assertEqual(expires, '')
+        self.assertNotEqual(why, '')
+        self.assertEqual(ghapp.token(product), 'OLD-TOKEN')  # exactly as it was
 
 
 # ------------------------------------------------------------ rate limit / parsing (19-20) --

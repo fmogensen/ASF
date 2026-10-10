@@ -280,29 +280,33 @@ def mint(product, now=None, http=None, run=None):
         return '', 'no app configured'
     env.state_dir(product)  # the only call in this module that makes the directory (PD11)
     now = time.time() if now is None else now
-    bearer, why = jwt(app, now, run=run)
-    if bearer is None:
-        return _fail(product, app, slug, why)
     installation_id = app.installation_id
-    if installation_id is None:
-        installation_id, why = installation(app, slug, bearer, http=http)
-        if installation_id is None:
-            return _fail(product, app, slug, why)
-    status, body = _request(
-        http, f'https://api.github.com/app/installations/{installation_id}/access_tokens',
-        method='POST', headers=_headers(bearer))
-    _check_rate_limit(['ghapp', 'mint', slug], status, body)
-    if not 200 <= status < 300:
-        return _fail(product, app, slug, f'mint for {slug} failed: HTTP {status}',
-                     installation_id=installation_id)
     try:
-        data = json.loads(body)
-        access_token = str(data['token'])
-        expires = str(data['expires_at'])
-    except (ValueError, KeyError, TypeError):
-        return _fail(product, app, slug, 'mint response unparseable',
+        bearer, why = jwt(app, now, run=run)
+        if bearer is None:
+            return _fail(product, app, slug, why)
+        if installation_id is None:
+            installation_id, why = installation(app, slug, bearer, http=http)
+            if installation_id is None:
+                return _fail(product, app, slug, why)
+        status, body = _request(
+            http, f'https://api.github.com/app/installations/{installation_id}/access_tokens',
+            method='POST', headers=_headers(bearer))
+        _check_rate_limit(['ghapp', 'mint', slug], status, body)
+        if not 200 <= status < 300:
+            return _fail(product, app, slug, f'mint for {slug} failed: HTTP {status}',
+                         installation_id=installation_id)
+        try:
+            data = json.loads(body)
+            access_token = str(data['token'])
+            expires = str(data['expires_at'])
+        except (ValueError, KeyError, TypeError):
+            return _fail(product, app, slug, 'mint response unparseable',
+                         installation_id=installation_id)
+        return _succeed(product, app, slug, installation_id, access_token, expires, now)
+    except Exception as exc:
+        return _fail(product, app, slug, f'mint for {slug} failed: {type(exc).__name__}',
                      installation_id=installation_id)
-    return _succeed(product, app, slug, installation_id, access_token, expires, now)
 
 
 def refresh(product, now=None, http=None, run=None):
@@ -325,4 +329,7 @@ def refresh(product, now=None, http=None, run=None):
         slug = getattr(product, 'repo_slug', None) or ''
         print(f'would mint an installation token for {slug}')
         return '', 'dry run'
-    return mint(product, now=now, http=http, run=run)
+    try:
+        return mint(product, now=now, http=http, run=run)
+    except Exception as exc:
+        return '', f'mint failed: {type(exc).__name__}'
