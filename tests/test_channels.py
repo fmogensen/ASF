@@ -19,7 +19,15 @@ Task 4 adds the stable gate: ``StableGateTest`` (over ``channels.stable_rows``, 
 ``FakeRehearsalGh`` for its rehearsal row) and ``S1WindowTest`` (over ``channels.s1_in_window`` and
 ``release_preview.open_defects``, against the fixture record at
 ``tests/fixtures/channels/record`` — four Bug cards, the four answers D9 has to tell apart) —
-one case per checkbox line of S-81206."""
+one case per checkbox line of S-81206.
+
+Task 5 adds the daily part and the report: ``AdvanceTest`` (``channels.advance``, over a real
+bare+local repo built the way ``PublishTest``'s own ``_repo_fixture`` is, with a ``pyproject.toml``
+naming the factory package so ``drift.is_factory_source`` holds — never a hand-built
+``CompletedProcess`` for the push, real ``gh`` answers through ``FakeGh`` for the verdicts) and
+``ReportTest`` (``channels.report``/``render``/``cmd_channels`` — read-only, asserted by what it
+never writes) — one case per checkbox line of S-81208."""
+import argparse
 import contextlib
 import datetime
 import io
@@ -699,3 +707,249 @@ class S1WindowTest(unittest.TestCase):
     def test_an_s2_inside_the_window_does_not_block(self):
         self.assertNotIn('B-0004', self.windowed_ids())
         self.assertNotIn('B-0004', self.open_s1_ids())
+
+
+# --- Task 5: the mover and the report — the daily part, and `asf channels` --------------------
+
+def _factory_repo(tmp):
+    """:func:`_repo_fixture`'s bare+local pair, with a ``pyproject.toml`` naming the factory
+    package committed and pushed to ``main`` — the one thing :func:`asf.drift.is_factory_source`
+    reads (P11), so ``advance`` is proved against a real checkout rather than a stub."""
+    bare, local = _repo_fixture(tmp)
+    with open(os.path.join(local, 'pyproject.toml'), 'w', encoding='utf-8') as f:
+        f.write('[project]\nname = "asf-factory"\n')
+    _git(['add', 'pyproject.toml'], local)
+    _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'factory source'],
+        local)
+    _git(['push', '-q', 'origin', 'HEAD:main'], local)
+    return bare, local
+
+
+def _tag_and_push(local, name):
+    """One annotated version tag on ``local``'s current ``HEAD``, pushed to ``origin``."""
+    _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'tag', '-a', name, '-m', name], local)
+    _git(['push', '-q', 'origin', name], local)
+
+
+def _commit_tag_and_push(local, name):
+    """A new commit on ``local``, tagged ``name`` and pushed with it — never the bare
+    :func:`_tag_and_push` for a second tag, which would otherwise land on the same commit as
+    the first and make the two indistinguishable."""
+    _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', name],
+        local)
+    _tag_and_push(local, name)
+    _git(['push', '-q', 'origin', 'HEAD:main'], local)
+
+
+class AdvanceGh:
+    """``run`` for :func:`channels.advance`: ``git ls-remote`` is answered by a real listing of
+    ``bare`` (the product's fictional ``https://github.com/o/r`` url swapped for the real local
+    remote — the same substitution a product's url always needs in a hermetic test), ``gh api``
+    by :class:`FakeGh`'s own per-commit states, and every other command (the publish's real
+    push) is untouched: :func:`asf.channels.publish` never threads ``run`` into
+    :func:`asf.gitpush.push`, so this class only has to answer the two calls ``advance`` itself
+    makes through ``run``."""
+
+    def __init__(self, bare, states=None):
+        self.bare = bare
+        self.gh = FakeGh(states)
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        if cmd[:2] == ['git', 'ls-remote']:
+            cmd = list(cmd)
+            cmd[2] = self.bare
+            return subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=kw.get('timeout', 60))
+        return self.gh(cmd, **kw)
+
+
+class AdvanceTest(ChannelsStateHome):
+    """S-81208 — one case per checkbox line: the daily part moves both channels and prints what
+    it did, never raising and never failing the tick (the step's own ``run_part`` turns an
+    exception into a FAILED line and a non-zero step; ``advance`` itself must never reach it)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix='channels_advance_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bare, self.local = _factory_repo(self.tmp)
+        self.root = os.path.join(self.tmp, 'record')
+
+    def _product(self, **channels_block):
+        data = {'repo_dir': self.local, 'repo_slug': 'o/r', 'main': 'main'}
+        if channels_block:
+            data['release'] = {'channels': channels_block}
+        return env.Product(self.P, data)
+
+    def test_the_daily_step_carries_a_channels_part_after_the_rollup(self):
+        from asf.tick import step_daily
+        names = [n for n, _ in step_daily.parts(
+            env.Product('p', {'repo_slug': 'a/b'}), '.')]
+        self.assertGreater(names.index('channels'), names.index('rollup'), names)
+
+    def test_the_part_publishes_nothing_for_a_non_factory_source_product(self):
+        other = tempfile.mkdtemp(prefix='channels_advance_other_')
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        bare, local = _repo_fixture(other)  # no pyproject.toml naming the factory package
+        _tag_and_push(local, 'v0.1.0')
+        product = env.Product(self.P, {'repo_dir': local, 'repo_slug': 'o/r', 'main': 'main'})
+        lines = []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(product, self.root, out=lines.append,
+                                  run=AdvanceGh(bare))
+        self.assertEqual(rc, 0)
+        self.assertEqual(lines, [])  # nothing printed: the part never ran
+        self.assertEqual(channels.read_log(self.P), channels._empty_log())
+        self.assertIsNone(channels.resolve(bare, 'edge')[1])  # nothing was pushed either
+
+    def test_the_part_prints_one_line_for_edge_and_one_for_stable(self):
+        _tag_and_push(self.local, 'v0.1.0')
+        product = self._product(rehearsal_check='off')
+        lines = []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(product, self.root, out=lines.append,
+                                  run=AdvanceGh(self.bare))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith('channels: edge '))
+        self.assertIn('v0.1.0', lines[0])
+        self.assertTrue(lines[1].startswith('channels: stable '))
+
+    def test_the_second_run_leaves_an_unchanged_edge_and_no_second_push(self):
+        _tag_and_push(self.local, 'v0.1.0')
+        product = self._product(rehearsal_check='off')
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            channels.advance(product, self.root, out=lambda l: None, run=AdvanceGh(self.bare))
+            lines = []
+            rc = channels.advance(product, self.root, out=lines.append,
+                                  run=AdvanceGh(self.bare))
+        self.assertEqual(rc, 0)
+        self.assertIn('edge v0.1.0 unchanged', lines[0])
+
+    def test_a_remote_that_cannot_be_read_is_one_line_per_channel_and_rc_zero(self):
+        def failing_run(cmd, **kw):
+            raise OSError('git not found')
+
+        lines = []
+        rc = channels.advance(self._product(), self.root, out=lines.append, run=failing_run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 2)
+        self.assertIn('edge unreadable', lines[0])
+        self.assertIn('stable unreadable', lines[1])
+        self.assertEqual(channels.read_log(self.P), channels._empty_log())
+
+    def test_a_corrupt_log_is_one_line_and_rc_zero_and_the_file_is_untouched(self):
+        path = store.path(self.P, channels.LOG_NAME)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('not json')
+        _tag_and_push(self.local, 'v0.1.0')
+        lines = []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            rc = channels.advance(self._product(rehearsal_check='off'), self.root,
+                                  out=lines.append, run=AdvanceGh(self.bare))
+        self.assertEqual(rc, 0)
+        self.assertIn('log unreadable', lines[0])
+        with open(path, encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'not json')  # never overwritten
+        # the push still reached the real remote: the log is what could not be read, not the ref
+        self.assertEqual(channels.resolve(self.bare, 'edge')[0], 'v0.1.0')
+
+    def test_each_publication_writes_one_event_naming_the_channel_tag_commit_and_previous(self):
+        _tag_and_push(self.local, 'v0.1.0')
+        product = self._product(rehearsal_check='off')
+        events = []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            channels.advance(product, self.root, out=lambda l: None,
+                             event=_record_event(events), run=AdvanceGh(self.bare))
+        self.assertEqual(len(events), 1)
+        kind, kw = events[0]
+        self.assertEqual(kind, 'channel')
+        self.assertEqual(kw['channel'], 'edge')
+        self.assertEqual(kw['tag'], 'v0.1.0')
+        self.assertIsNone(kw['previous'])
+
+        _commit_tag_and_push(self.local, 'v0.1.1')
+        later = datetime.datetime.now(UTC) + datetime.timedelta(hours=50)
+        events2 = []
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            channels.advance(product, self.root, out=lambda l: None,
+                             event=_record_event(events2), now=later, run=AdvanceGh(self.bare))
+        kinds = [k for k, _kw in events2]
+        self.assertEqual(kinds, ['channel', 'channel'])
+        edge_kw = next(kw for k, kw in events2 if kw['channel'] == 'edge')
+        self.assertEqual(edge_kw['previous'], _git(['rev-parse', 'v0.1.0^{commit}'], self.local).strip())
+        stable_kw = next(kw for k, kw in events2 if kw['channel'] == 'stable')
+        self.assertEqual(stable_kw['tag'], 'v0.1.0')  # the tag that dwelled, not the brand new one
+        self.assertIn('rows', stable_kw)
+        self.assertEqual(set(stable_kw['rows']), {'cadence', 'dwell', 'rehearsal', 'no_s1'})
+
+
+#: the module-level helper :func:`ChannelsStateHome._restore_home`'s own event-recording shape:
+#: ``events.append`` is given a function of ``event.append((kind, fields))``'s own two-arg form.
+def _record_event(events):
+    return lambda kind, **fields: events.append((kind, fields))
+
+
+class ReportTest(ChannelsStateHome):
+    """S-81208 — ``channels.report``/``render``/``cmd_channels``: read-only, proved by what it
+    never writes (D12)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix='channels_report_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bare, self.local = _factory_repo(self.tmp)
+        self.root = os.path.join(self.tmp, 'record')
+        self.product = env.Product(
+            self.P, {'repo_dir': self.local, 'repo_slug': 'o/r', 'main': 'main',
+                    'release': {'channels': {'rehearsal_check': 'off'}}})
+
+    def test_asf_channels_prints_both_channels_the_candidate_and_the_four_rows(self):
+        _tag_and_push(self.local, 'v0.1.0')
+        # edge_dwell_h: 0 so the just-published tag is itself the stable candidate (AdvanceTest's
+        # own event test covers the dwell scan that skips a too-young one)
+        product = env.Product(self.P, {'repo_dir': self.local, 'repo_slug': 'o/r', 'main': 'main',
+                                       'release': {'channels': {'rehearsal_check': 'off',
+                                                                'edge_dwell_h': 0}}})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            channels.advance(product, self.root, out=lambda l: None, run=AdvanceGh(self.bare))
+            d = channels.report(product, self.root, run=AdvanceGh(self.bare))
+        self.assertEqual({c['name'] for c in d['channels']}, {'edge', 'stable'})
+        edge = next(c for c in d['channels'] if c['name'] == 'edge')
+        self.assertEqual(edge['tag'], 'v0.1.0')
+        self.assertEqual(d['candidate']['tag'], 'v0.1.0')
+        self.assertEqual([c['key'] for c in d['criteria']],
+                         ['cadence', 'dwell', 'rehearsal', 'no_s1'])
+        table = channels.render(d, self.product)
+        self.assertIn('RELEASE CHANNELS', table)
+        self.assertIn('v0.1.0', table)
+        self.assertIn('Stable candidate: v0.1.0', table)
+
+    def test_the_json_form_carries_every_row_key_met_and_evidence(self):
+        d = channels.report(self.product, self.root, run=AdvanceGh(self.bare))
+        encoded = json.loads(json.dumps(d, default=str))
+        self.assertEqual(encoded, d)
+        for c in d['criteria']:
+            self.assertEqual(set(c), {'key', 'name', 'met', 'evidence'})
+
+    def test_asf_channels_writes_nothing(self):
+        # cmd_channels is read-only CLI wiring over channels.report (unit-tested above with a
+        # real remote); here it is proved by what it never calls or writes — the same discipline
+        # tests.test_release.SurfaceTest.test_exit_code_follows_the_verdict holds its own
+        # cmd_release_readiness to, canned data standing in for a live remote/record read.
+        d = {'as_of': 'now', 'channels': [{'name': 'edge', 'tag': None, 'commit': None, 'age': None},
+                                          {'name': 'stable', 'tag': None, 'commit': None, 'age': None}],
+            'candidate': {'tag': None, 'commit': None}, 'criteria': [], 'ready': False}
+        args = argparse.Namespace(product=self.P, json=False)
+        with mock.patch.object(env, 'load_product', return_value=self.product), \
+                mock.patch.object(channels, 'report', return_value=d) as report_mock, \
+                mock.patch('asf.gitpush.push', side_effect=AssertionError('must not push')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(channels.cmd_channels(args, self.root), 0)
+            args.json = True
+            self.assertEqual(channels.cmd_channels(args, self.root), 0)
+        self.assertEqual(report_mock.call_count, 2)
+        self.assertFalse(os.path.exists(store.path(self.P, channels.LOG_NAME)))

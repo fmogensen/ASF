@@ -30,6 +30,7 @@ def parts(product, root, event=None):
     from asf.tick.stale import cmd_stale
     from asf.scorecard.loop import daily as scorecard_daily
     from asf.shadow import settle as shadow_settle
+    from asf import channels
     return [
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
@@ -38,6 +39,9 @@ def parts(product, root, event=None):
         ('scorecard', lambda: scorecard_daily(product, root)),
         # the shadow deciders: each due close judged against what happened to its card
         ('deciders', lambda: shadow_settle(product, root)),
+        # the two release channels: edge at the newest green tag, stable behind its four-row gate
+        # (F-0308) — appended at the end (PD1), after the rollup that cuts the day's releases
+        ('channels', lambda: channels.advance(product, root, event=event)),
     ]
 
 
