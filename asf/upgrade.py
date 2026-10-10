@@ -1217,11 +1217,21 @@ def ci_verdict(url, sha, run=subprocess.run, checks=None):
 
 
 def resolve_target(to, rec, url, run=subprocess.run):
-    """``to`` as a 40-hex commit, or ``None``. A sha this product's record already names
-    (current or previous; a prefix of seven or more) resolves offline; then the factory's own
-    checkout (``git rev-parse``), then the remote (``git ls-remote``)."""
+    """``to`` as a 40-hex commit, or ``None``. A channel name (``asf.channels.NAMES``) resolves
+    first, to the version tag it offers, or the commit when it offers no tag (a pin must be
+    immutable — D2); an unpublished channel is the caller's own unreadable-target path. A sha
+    this product's record already names (current or previous; a prefix of seven or more)
+    resolves offline; then the factory's own checkout (``git rev-parse``), then the remote
+    (``git ls-remote``)."""
     if not to:
         return None
+    name = str(to).strip().lower()
+    from asf import channels
+    if name in channels.NAMES:
+        tag, commit = channels.resolve(url, name, run=run)
+        if not commit:
+            return None     # the caller's own "unreadable target" path, unchanged
+        to = tag or commit  # the tag when the channel names one: the pin is the version (D2)
     if HEX40.match(to):
         return to.lower()
     known = [s for s in ((rec.sha, rec.previous_sha) if rec else ()) if s]

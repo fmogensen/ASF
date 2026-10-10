@@ -2238,15 +2238,16 @@ def _operator_tty():
     return {'preexec_fn': become_session_leader_with_a_tty}
 
 
-def _bootstrap_resolve_tag_snippet():
-    """The exact ``python3`` heredoc the bootstrap runs to resolve the default ref — read from
+def _bootstrap_resolve_channel_snippet():
+    """The exact ``python3`` heredoc the bootstrap runs to resolve its default ref — read from
     the script itself, not retyped, so :class:`ReleaseRefTests` pins the two copies of PD6's
-    rule equal instead of merely asserting they agree by construction."""
+    rule equal instead of merely asserting they agree by construction (F-0308 Task 6: the rule
+    is now channel-first, falling back to the newest tag the same way its predecessor did)."""
     with open(INSTALL_SH, encoding='utf-8') as f:
         text = f.read()
-    marker = "<<'RESOLVE_TAG'\n"
+    marker = "<<'RESOLVE_CHANNEL'\n"
     start = text.index(marker) + len(marker)
-    end = text.index("\nRESOLVE_TAG\n", start)
+    end = text.index("\nRESOLVE_CHANNEL\n", start)
     return text[start:end]
 
 
@@ -2274,12 +2275,18 @@ class ReleaseRefTests(unittest.TestCase):
         self.assertFalse(cli.RELEASE_TAG.fullmatch('v0.2.0-rc1'))
 
     def test_the_bootstraps_inline_python_answers_the_same_string(self):
-        snippet = _bootstrap_resolve_tag_snippet()
-        r = subprocess.run(['python3', '-', self.ls_remote], input=snippet, capture_output=True,
-                           text=True, timeout=10)
+        # no `releases/*` head on this fixture: the channel-first rule finds nothing to answer
+        # for and falls back to the newest tag, the one thing its predecessor ever did.
+        refs_text = _git(['ls-remote', self.remote, 'refs/heads/releases/*', 'refs/tags/v*'],
+                         self.tmp)
+        snippet = _bootstrap_resolve_channel_snippet()
+        r = subprocess.run(['python3', '-', 'stable', refs_text], input=snippet,
+                           capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), install.newest_tag(self.ls_remote.splitlines()))
-        self.assertEqual(r.stdout.strip(), 'v0.10.0')
+        tag, source = r.stdout.strip().rsplit(None, 1)
+        self.assertEqual(source, 'fallback')
+        self.assertEqual(tag, install.newest_tag(self.ls_remote.splitlines()))
+        self.assertEqual(tag, 'v0.10.0')
 
     def test_no_matching_tag_is_none_and_the_bootstrap_needs_operator_not_a_fallback(self):
         self.assertIsNone(install.newest_tag([]))
@@ -2551,7 +2558,10 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self._pipx_call(), f'install --force git+{self.remote}@v0.3.0')
         self.assertEqual(self._asf_call(), 'install --product demo')
-        self.assertIn(f'install: product demo, release v0.3.0 from {self.remote}', r.stdout)
+        # no `releases/stable` head on this fixture: the channel-first rule falls back to the
+        # newest tag, and says so (F-0308 Task 6)
+        self.assertIn(f'install: product demo, release v0.3.0 (no stable channel on '
+                      f'{self.remote} yet — the newest tag) from {self.remote}', r.stdout)
 
     def test_an_unreachable_repo_fails_tag_resolution_with_needs_operator(self):
         """B-0113: with no ref, resolving the newest tag runs ``git ls-remote`` before pipx is
