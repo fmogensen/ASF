@@ -3275,7 +3275,8 @@ class TableTests(unittest.TestCase):
         self.assertEqual(data[0]['item_id'], 'B-0001')
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
                                         'brief_kind', 'branch', 'reason', 'waits_on',
-                                        'correction', 'review_round', 'groom_date', 'groom_file',
+                                        'correction', 'correction_kind', 'review_round',
+                                        'groom_date', 'groom_file',
                                         'answers_file', 'open_questions', 'amend',
                                         'amend_outside', 'ruling'})
 
