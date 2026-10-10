@@ -436,6 +436,23 @@ class ScreenRuledTests(_TempProduct):
         self.assertEqual(len(error_lines), 1)
         self.assertIn('T-0001', error_lines[0])
 
+    def test_wave_clock_never_files_a_ruling_so_the_row_starts(self):  # PD5
+        product = self.product(flag='on')
+        self._seed(product)
+        before = self._rulings(product)
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        row = _adjudicate_row()
+        lines = []
+        with mock.patch.object(rp, 'dispute', return_value=d), \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=True,
+                                        out=lines.append, build=_build, ctx=_quiet_ctx())
+        self.assertEqual(screened[0].kind, step_wave.STARTS)
+        self.assertTrue(screened[0].starts)
+        self.assertEqual(self._rulings(product), before)
+        self.assertEqual(len([l for l in lines if l.startswith('ruled')]), 1)
+
 
 class WaiversTests(_TempProduct):
     """S-78056: :func:`asf.tick.step_wave.waivers` — the membership both feeder branches read,

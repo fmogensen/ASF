@@ -870,7 +870,10 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
     and changes nothing — so "Ready to launch N" is the N rows this wave would start.
     ``record_root`` is the bound method that materializes the record clone (``ctx.record_root``),
     not its value, so no clone is made on a tick that rules nothing; with no ``record_root`` the
-    rule pass runs dry and writes nothing, whatever ``act`` is (PD5)."""
+    rule pass runs dry and writes nothing, whatever ``act`` is. On the preview (``act`` false) a
+    ruling always stands the row down, quietly; on the live wave, a ruling with no ``record_root``
+    (the wave-clock path, :func:`launch_now`) is never filed, so it never binds the gate — the row
+    starts, as today, with one line saying why (PD5)."""
     from asf.evidence import rulepass
     host_held, host_why = tuple(host or (False, ''))[:2]
     say = out if act else _quiet
@@ -907,7 +910,7 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
             ruled = rulepass.apply(product, row, items, say,
                                    root=record_root() if (act and record_root) else None,
                                    dry_run=not (act and record_root))
-            if ruled:
+            if ruled and (not act or record_root):
                 if act and ctx is not None:
                     ctx.event('rule_pass', item=row.item_id, rule=','.join(ruled.rules),
                               finding=' '.join(ruled.finding), where=ruled.where,
@@ -915,6 +918,11 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
                 say(f'ruled    {job:<24} {row.item_id:<10} — {ruled.why}')
                 result.append(Screened(row, ruled.why, RULED))
                 continue
+            if ruled:
+                # PD5: the wave-clock path (launch_now, no record_root) never files a ruling —
+                # a filed-but-unwritten RULED would hold the row down forever, so it starts today
+                out(f'ruled    {job:<24} {row.item_id:<10} — {ruled.why} (no record root — '
+                    f'starts unruled)')
         bypass = bypass_open and (items.get(row.item_id) or {}).get('severity') == 'S1'
         if host_held and not bypass:             # a loaded host takes no new session this tick
             why = f'held: {host_why}'
