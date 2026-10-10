@@ -392,6 +392,24 @@ def pr_green_not_landing(facts):
     return out
 
 
+def _latest_by_name(checks):
+    """``checks``, one entry per ``name`` — the newest: a check the rollup still carries from
+    before a rerun (same name, an older ``completedAt``) is never judged beside the rerun's own,
+    later result (B-82658: the stale ``CANCELLED`` twin breached for ever after the rerun it
+    named had already gone green). A check still running has no ``completedAt`` and is the
+    newest. The list's order is kept."""
+    def when(c):
+        t = parse_ts(c.get('completedAt'))
+        return float('inf') if t is None else t
+    best = {}
+    for i, c in enumerate(checks):
+        name = c.get('name') or ''
+        if name not in best or when(c) >= when(checks[best[name]]):
+            best[name] = i
+    keep = set(best.values())
+    return [c for i, c in enumerate(checks) if i in keep]
+
+
 def check_cancelled(facts):
     prs = facts.open_prs()
     if prs is None:
@@ -403,6 +421,7 @@ def check_cancelled(facts):
         checks = [c for c in pr.get('statusCheckRollup') or () if isinstance(c, dict)]
         if pr.get('isDraft') or not checks:
             continue
+        checks = _latest_by_name(checks)
         if any(str(c.get('status') or '').upper() in _RUNNING for c in checks):
             continue                           # something still runs on this head
         # a matrix leg's own run failing for real (not cancelled) fails the whole run under the
@@ -507,7 +526,9 @@ def launchable_idle(facts):
         return []
     out = []
     for s in screened:
-        if not s.row.launches or s.kind == step_wave.NO_SEAT:
+        # the operator's own pause is not an idle seat: it holds every row on purpose, so a
+        # paused product must never breach 10 minutes into the hold it asked for — B-84833
+        if not s.row.launches or s.kind in (step_wave.NO_SEAT, step_wave.PAUSED):
             continue
         # the groom row speaks for the day's open questions, not for the item it happens to be
         # named after (the same exception asf.feeder.rows.hold_unlanded makes) — B-84837

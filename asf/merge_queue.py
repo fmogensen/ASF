@@ -2724,9 +2724,8 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             continue
         if state != 'green':
             waiting = [c for c in runs if c.get('status') != 'completed']
-            if waiting and not any(c.get('status') == 'in_progress' for c in waiting) \
-                    and _land_infra(lane, n, head, waiting, required, probe=True):
-                continue    # a phantom run: its jobs queued under a run that already failed
+            if waiting and _land_infra(lane, n, head, waiting, required, probe=True):
+                continue    # a phantom run: its jobs queued or running under a run that failed
             lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — {why}')
             continue
         if earned:  # this head's green is the next identical tree's too (B-0275)

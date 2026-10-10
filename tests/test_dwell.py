@@ -10,7 +10,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import approvals, dwell, env, github
+from asf import approvals, dwell, env, github, pause
 from asf.feeder import rows as feeder_rows
 from asf.tick import step_wave
 
@@ -291,6 +291,33 @@ class ProbeTests(DwellTestCase):
                                   'launchable_idle')
         self.assertEqual(none_free, [])
 
+    def test_a_paused_products_rows_are_not_idle_seats(self):
+        # B-84833: the operator's pause holds every row on purpose, so the rows the preview
+        # reports as PAUSED are not a wave failing to start — without this the watchdog
+        # breaches 10 minutes into any pause, on every launchable row, while seats sit free.
+        mk = lambda iid: feeder_rows.Row(
+            tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid, feature_id='F-1',
+            action='would launch', brief_kind='task', branch='', reason='')
+        planned = [mk('T-1'), mk('T-2')]
+        with mock.patch.object(step_wave.trunkclose, 'closes_before_launch',
+                               lambda *a, **kw: False):
+            pause.pause(self.product.name, 'release freeze', 'op1')
+            screened = step_wave.screen(self.product, planned, {}, [], {}, 4, act=False,
+                                        paused=pause.held(self.product))
+            self.assertEqual([s.kind for s in screened],
+                             [step_wave.PAUSED, step_wave.PAUSED])
+            got = self.by_state(self.found(FakeFacts(self.product, wave=(screened, 4, []))),
+                                'launchable_idle')
+            self.assertEqual(got, [])
+            # the same plan, the pause lifted: the rows are launchable again and the watchdog
+            # sees them — the half that makes the first half mean something
+            pause.resume(self.product.name)
+            live = step_wave.screen(self.product, planned, {}, [], {}, 4, act=False,
+                                    paused=pause.held(self.product))
+        got = self.by_state(self.found(FakeFacts(self.product, wave=(live, 4, []))),
+                            'launchable_idle')
+        self.assertEqual([f.key for f in got], ['T-1', 'T-2'])
+
     def test_a_groom_adjudicate_row_speaks_for_the_day_not_the_item_it_names(self):
         # B-84837: the row's item_id is the oldest open question's item — not an item the wave
         # is failing to start — so it is left alone, the same exception hold_unlanded makes.
@@ -411,6 +438,15 @@ class CancelledCheckTests(DwellTestCase):
             found = self.found(FakeFacts(self.product, required=('tests',), prs=prs), act=True)
         gh.assert_not_called()
         self.assertEqual(self.by_state(found, 'check_cancelled'), [])
+
+    def test_a_stale_cancelled_check_shadowed_by_its_own_rerun_is_not_a_breach(self):
+        # B-82658: the rollup keeps the pre-rerun CANCELLED run of "tests" beside the rerun's
+        # own later, SUCCESS one — judging the stale twin breached for ever after the rerun it
+        # named had already gone green.
+        prs = [pr(1, 'a' * 40, [check('tests', 'CANCELLED', at=NOW - 30 * 60),
+                                check('tests', 'SUCCESS', at=NOW - 5 * 60)])]
+        self.assertEqual(self.by_state(self.found(FakeFacts(self.product, prs=prs)),
+                                       'check_cancelled'), [])
 
 
 class UngrantableHoldTests(DwellTestCase):

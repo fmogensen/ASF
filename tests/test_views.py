@@ -242,6 +242,16 @@ class StatusViewTests(ViewsTestCase):
         self.assertEqual(rows['Agents'], '1 working')
         self.assertEqual(rows['Ready to launch'], '0')  # the Feature is in flight
 
+    def test_ready_to_launch_holds_every_row_while_the_product_is_paused(self):
+        """B-84833: the wave's own pause hold (F-0137) must show up in the one cell the
+        watchdog reads as a free seat sitting idle, not just in :func:`asf.tick.step_wave.
+        would_start`'s preview — else a paused product's held row reads as launchable here
+        while the live wave correctly holds it."""
+        from asf import pause
+        pause.pause('p', 'release freeze', 'op1')
+        rows = self.rows({'scheduler': {'kind': 'none'}})
+        self.assertEqual(rows['Ready to launch'], '0 (1 held back (paused 1))')
+
     def test_features_in_build_against_the_cap(self):
         # F-0195: X / N and the inputs auto sized N from
         rows = self.rows({'scheduler': {'kind': 'none'}})

@@ -346,6 +346,59 @@ class TheWaveHolds(unittest.TestCase):
         self.assertEqual([e['kind'] for e in ctx.events if e['kind'] == 'paused'], [])
 
 
+class TheReadyPreviewHolds(unittest.TestCase):
+    """``step_wave.would_start`` over a paused product (B-84833): the preview ``asf status``'s
+    Ready-to-launch count and ``asf.dwell``'s ``launchable_idle`` watchdog both read must hold
+    every row exactly as the live wave does — else a pause reads, to both, as a seat sitting
+    idle on a row that "passes the wave's filter, not started yet", and the watchdog alarms on
+    an operator's own intentional hold."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='pause_test_')
+        self._home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.product = env.Product('sample', {})
+
+    def tearDown(self):
+        env.ASF_HOME = self._home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _preview(self, rows):
+        resolved = capacity.Resolved(sessions=5, sessions_bound='product', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={})
+        cloud = types.SimpleNamespace(on=False, max_inflight=0)
+        with mock.patch.object(index_reader, 'load', return_value=({}, False)), \
+                mock.patch.object(feeder_rows_mod, 'plan_rows', lambda *a, **k: list(rows)), \
+                mock.patch.object(invariants, 'feeder_gate',
+                                  lambda product, planned, items, out=print: list(planned)), \
+                mock.patch.object(step_wave.capacity_mod, 'resolve',
+                                  lambda product, *a, **k: resolved), \
+                mock.patch.object(step_wave, 'cloud_settings', lambda product: cloud), \
+                mock.patch.object(step_wave, 'cloud_readiness',
+                                  lambda product, cl: (False, 'cloud lane off')), \
+                mock.patch.object(step_wave, 'plan_inputs', lambda product, root, items: {}), \
+                mock.patch.object(step_wave, 'host_hold', lambda planned: (False, '', {})), \
+                mock.patch.object(step_wave, 'inflight', lambda product: []):
+            return step_wave.would_start(self.product, self.tmp)
+
+    def test_a_paused_products_preview_holds_every_row_none_of_them_start(self):
+        pause.pause('sample', 'release freeze', 'op1')
+        rows = _sample_rows()
+        screened, seats, running = self._preview(rows)
+        self.assertEqual(seats, 5)
+        self.assertEqual(running, [])
+        self.assertFalse(any(s.starts for s in screened), screened)
+        for s in screened:
+            self.assertEqual(s.kind, step_wave.PAUSED)
+            self.assertIn('launches paused: release freeze', s.why)
+
+    def test_the_same_plan_unpaused_starts(self):
+        # no pause written: this half is what makes the first half mean something
+        rows = _sample_rows()
+        screened, _seats, _running = self._preview(rows)
+        self.assertTrue(all(s.starts for s in screened), screened)
+
+
 class TheSlotsAreLent(unittest.TestCase):
     """A paused product's demand reads ``wanted 0`` (F-0137 §2, C4/P8) — so a partner's
     :func:`asf.capacity.claim` borrows the difference — while its own live sessions still
@@ -514,3 +567,23 @@ class ThePreviewAgrees(unittest.TestCase):
             self.assertEqual(s.kind, step_wave.PAUSED, (s.row.item_id, s.kind, s.why))
             self.assertFalse(s.starts)
             self.assertIn('held: launches paused: release freeze', s.why)
+
+    def test_the_same_preview_unpaused_starts_every_row(self):
+        rows = _sample_rows()
+        resolved = capacity.Resolved(sessions=5, sessions_bound='product', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={})
+        cloud = types.SimpleNamespace(on=False, max_inflight=0)
+        with mock.patch.object(step_wave, 'inflight', lambda product: []), \
+                mock.patch.object(step_wave.capacity_mod, 'resolve',
+                                  lambda product, *a, **k: resolved), \
+                mock.patch.object(step_wave, 'cloud_settings', lambda product: cloud), \
+                mock.patch.object(step_wave, 'cloud_readiness',
+                                  lambda product, cl: (False, 'cloud lane off')), \
+                mock.patch.object(step_wave, 'plan_inputs', lambda product, root, items: {}), \
+                mock.patch.object(step_wave, 'gated_plan',
+                                  lambda items, product, running, seats, inputs, out=print:
+                                  (list(rows), set())), \
+                mock.patch.object(step_wave, 'host_hold', lambda planned: (False, '', {})):
+            screened, seats, running = step_wave.would_start(self.product, self.tmp, items={})
+        self.assertEqual([s.row.item_id for s in screened if s.starts],
+                         [r.item_id for r in rows])

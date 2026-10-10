@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest import mock
 
+from asf import pause
 from asf.feeder import rows as feeder_rows
 from asf.tick import step_wave, tick, wave_clock
 from asf.workers import pool as pool_mod
@@ -97,13 +98,26 @@ class RunNoOpTests(StepsTestCase):
         self.assertEqual(rc, 0)
         launch.assert_not_called()
 
-    def test_a_failure_is_caught_the_marker_still_notes_the_run(self):
+    def test_a_failure_is_caught_but_leaves_no_marker(self):
+        """B-84831: a run that raises never notes itself as having run — a persistently
+        failing dedicated clock would otherwise mark itself "recent" forever (the exception is
+        caught before :func:`note_ran`), and the product's own tick (:func:`asf.tick.tick.
+        wave_job_recent`) would skip its own wave step forever too, leaving a launchable row
+        idle with a free seat past every watchdog limit. A transient failure instead falls back
+        to the tick's own wave step as soon as this marker goes stale."""
         with mock.patch.object(step_wave, 'launch_now', side_effect=RuntimeError('boom')):
             lines = []
             rc = wave_clock.run(self.product, out=lines.append)
         self.assertEqual(rc, 1)
         self.assertTrue(any('FAILED' in l for l in lines))
-        self.assertIsNotNone(wave_clock.last_ran_at(self.product))
+        self.assertIsNone(wave_clock.last_ran_at(self.product))
+
+    def test_a_failure_lets_the_ticks_own_wave_step_take_over(self):
+        """B-84831: :func:`asf.tick.tick.wave_job_recent` stops treating the dedicated clock as
+        alive once it has stopped succeeding — so the product's own tick resumes launching."""
+        with mock.patch.object(step_wave, 'launch_now', side_effect=RuntimeError('boom')):
+            wave_clock.run(self.product, out=lambda _l: None)
+        self.assertFalse(tick.wave_job_recent(self.product))
 
 
 class OwnCloneTests(StepsTestCase):
@@ -197,6 +211,17 @@ class WaveJobLaunchTests(StepsTestCase):
         self.assertEqual(rc2, 0)
         self.assertEqual(self.launches, ['fix-bug-b-0001'])  # not launched again
         self.assertIn('wave: nothing to launch', lines2)
+
+    def test_a_paused_product_launches_nothing_on_the_wave_clock_s_own_path(self):
+        """B-84833: the wave clock's :func:`step_wave.launch_now` reads the operator's own
+        pause (F-0137) the same as :func:`step_wave.launch` — a seat free past the clock's
+        tick is never a reason to launch a paused product's row."""
+        pause.pause(self.product.name, 'release freeze', 'op1')
+        rc, lines = self._run_once()
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any(ln.startswith('wave:') and 'release freeze' in ln
+                            for ln in lines), lines)
 
     def test_via_wave_clock_run_end_to_end(self):
         """The CLI's own path (``asf wave``): lock, launch, note the run."""

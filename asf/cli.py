@@ -162,15 +162,9 @@ def latest_release():
             return found[0], when
     url = _direct_url().get('url')
     if isinstance(url, str) and url and not url.startswith('file:'):
-        try:
-            out = subprocess.run(['git', 'ls-remote', '--tags', '--refs', url, 'v*'],
-                                 capture_output=True, text=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        refs = [line.split('refs/tags/', 1)[-1] for line in out.stdout.splitlines()] \
-            if out.returncode == 0 else []
-        found = newest([(r, None) for r in refs])
-        return found
+        from asf import upgrade
+        tag, _sha = upgrade.latest_release(url, run=subprocess.run)
+        return (tag, None) if tag else None
     return None
 
 
