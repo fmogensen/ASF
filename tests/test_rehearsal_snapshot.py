@@ -2,6 +2,7 @@
 manifest_holds, against a synthetic source this module writes itself. No test here reaches a
 real record or the network (S-79604's own acceptance says so)."""
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -28,6 +29,15 @@ DESCRIPTION = """## Description
 ## Backlinks
 """
 
+#: a ``done/`` header of the shape :func:`asf.groom.inbox.move_to_done` writes — free prose, with
+#: an operator-ish name and a filesystem path in it. Neither may reach the snapshot; the ``→`` and
+#: the id must. (Stand-in values: no real account name or machine path is spelled in this tree.)
+PROSE_HEADER = '→ closed (groom 2026-02-03, lane-1 via /opt/elsewhere/notes.md)'
+
+#: a ``removed:`` reason of the shape :func:`asf.record.setfield._set_only` accepts. The prose must
+#: not reach the snapshot; the task id :mod:`asf.record.ingest` reads back out of it must.
+REMOVED_REASON = 'merged into T-00002 after lane-1 found the duplicate'
+
 #: folder -> (type, prefix, digit width). Three prefixes five digits wide, four kept at four —
 #: the same shape the plan's own sizing table reads off the real record.
 _SHAPES = {
@@ -41,7 +51,7 @@ _SHAPES = {
 }
 
 
-def _write_card(record, folder, iid, type_, title, body):
+def _write_card(record, folder, iid, type_, title, body, extra=''):
     os.makedirs(os.path.join(record, folder), exist_ok=True)
     text = (
         '---\n'
@@ -51,6 +61,7 @@ def _write_card(record, folder, iid, type_, title, body):
         '# ---- machine ----\n'
         'schema_version: 1\n'
         'state: New\n'
+        f'{extra}'
         'stage_since: 2026-01-01T09:00:00Z\n'
         'updated: 2026-01-01T09:00:00Z\n'
         '---\n'
@@ -60,10 +71,25 @@ def _write_card(record, folder, iid, type_, title, body):
         f.write(text)
 
 
-def _build_source(root, n_per_type=3):
+def _tree_digest(root, skip_git=False):
+    """``{relpath: sha256-of-content}`` for every file under ``root`` — the shape a mutation
+    check needs, since a path listing alone cannot see a file rewritten in place."""
+    out = {}
+    for dirpath, _dirs, files in os.walk(root):
+        if skip_git and '.git' in os.path.relpath(dirpath, root).split(os.sep):
+            continue
+        for name in files:
+            path = os.path.join(dirpath, name)
+            with open(path, 'rb') as f:
+                out[os.path.relpath(path, root)] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
+
+def _build_source(root, n_per_type=3, tags=True):
     """A from-scratch synthetic record + repo of real *shape*: every item type, a five-digit id
     for three prefixes, intake in its three states, two tags (one annotated, one a pre-release).
-    Returns ``(record_dir, repo_dir, {folder: [ids]})``."""
+    ``tags=False`` leaves the repo tag-less, the shape that drives the builder's synthetic-ref
+    fallback. Returns ``(record_dir, repo_dir, {folder: [ids]})``."""
     record = os.path.join(root, 'record')
     repo = os.path.join(root, 'repo')
     os.makedirs(record, exist_ok=True)
@@ -78,13 +104,21 @@ def _build_source(root, n_per_type=3):
             ids[folder].append(iid)
             body = DESCRIPTION.format(body='a card body of some real length here ' * 3,
                                        ref=task_ref)
-            _write_card(record, folder, iid, type_, 'a representative title here', body)
+            # one card carries a free-text `removed:` reason — the shape setfield accepts and
+            # ingest reads a task id back out of
+            extra = f'removed: {REMOVED_REASON}\n' if (folder, i) == ('tasks', 1) else ''
+            _write_card(record, folder, iid, type_, 'a representative title here', body,
+                        extra=extra)
 
     os.makedirs(os.path.join(record, 'inbox', 'done'), exist_ok=True)
     with open(os.path.join(record, 'inbox', 'open-1.md'), 'w', encoding='utf-8') as f:
         f.write('an open note\nwith two lines of text')
     with open(os.path.join(record, 'inbox', 'done', 'done-1.md'), 'w', encoding='utf-8') as f:
         f.write(f"→ {task_ref}\n\na groomed note, already typed into a card")
+    # the second done note's header is what `move_to_done` actually writes: free prose, with an
+    # account name and a machine path in it (asf/groom/inbox.py)
+    with open(os.path.join(record, 'inbox', 'done', 'done-2.md'), 'w', encoding='utf-8') as f:
+        f.write(f"{PROSE_HEADER}\n\na second groomed note, closed by hand")
 
     subprocess.run(['git', 'init', '-q', repo], check=True)
     gitfixture.identity(repo, 'ci', 'ci@localhost')
@@ -92,9 +126,10 @@ def _build_source(root, n_per_type=3):
         f.write('placeholder\n')
     subprocess.run(['git', '-C', repo, 'add', '.'], check=True)
     subprocess.run(['git', '-C', repo, 'commit', '-q', '-m', 'first'], check=True)
-    subprocess.run(['git', '-C', repo, 'tag', '-a', 'v0.1.0', '-m', 'release notes of some length'],
-                   check=True)
-    subprocess.run(['git', '-C', repo, 'tag', 'v0.1.1-rc1'], check=True)
+    if tags:
+        subprocess.run(['git', '-C', repo, 'tag', '-a', 'v0.1.0', '-m',
+                        'release notes of some length'], check=True)
+        subprocess.run(['git', '-C', repo, 'tag', 'v0.1.1-rc1'], check=True)
     return record, repo, ids
 
 
@@ -174,22 +209,16 @@ class BuilderDoesNotMutateSource(unittest.TestCase):
     either."""
 
     def test_build_never_writes_to_the_source_record_or_repo(self):
+        # content digests, not a path listing: a source file rewritten in place leaves the set
+        # of paths untouched, so only {relpath: sha256} can see it.
         root = tempfile.mkdtemp(prefix='rehearsal_test_')
         self.addCleanup(shutil.rmtree, root, True)
         record, repo, _ids = _build_source(root)
-        record_before = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(record) for n in fs)
-        repo_before = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(repo) for n in fs
-            if '.git' not in dp.split(os.sep))
+        record_before = _tree_digest(record)
+        repo_before = _tree_digest(repo, skip_git=True)
         rehearsal.build(record, repo, os.path.join(root, 'snapshot'))
-        record_after = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(record) for n in fs)
-        repo_after = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(repo) for n in fs
-            if '.git' not in dp.split(os.sep))
-        self.assertEqual(record_before, record_after)
-        self.assertEqual(repo_before, repo_after)
+        self.assertEqual(record_before, _tree_digest(record))
+        self.assertEqual(repo_before, _tree_digest(repo, skip_git=True))
 
 
 class BuildWritesTheSnapshot(unittest.TestCase):
@@ -244,6 +273,28 @@ class BuildWritesTheSnapshot(unittest.TestCase):
 
     def test_manifest_holds_on_the_just_built_snapshot(self):
         self.assertEqual(rehearsal.manifest_holds(self.out), [])
+
+    def test_a_done_headers_free_prose_is_cleared_and_its_arrow_and_id_kept(self):
+        path = os.path.join(self.out, 'record', 'inbox', 'done', 'done-2.md')
+        with open(path, encoding='utf-8') as f:
+            header = f.read().split('\n\n', 1)[0]
+        self.assertNotEqual(header, PROSE_HEADER)
+        self.assertEqual(len(header), len(PROSE_HEADER))
+        self.assertTrue(header.startswith('→ '), header)
+        for leaked in ('closed', 'groom', '2026-02-03', 'lane-1', '/opt/elsewhere/notes.md'):
+            self.assertNotIn(leaked, header, header)
+
+    def test_a_removed_reasons_prose_is_cleared_and_its_id_kept(self):
+        iid = self.ids['tasks'][0]
+        path = os.path.join(self.out, 'record', 'tasks', f'{iid}.md')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        line = next(l for l in text.split('\n') if l.startswith('removed:'))
+        value = line[len('removed:'):].strip()
+        self.assertEqual(len(value), len(REMOVED_REASON))
+        self.assertIn('T-00002', value)           # ingest still reads its id back out
+        for leaked in ('merged into', 'duplicate', 'lane-1'):
+            self.assertNotIn(leaked, value, value)
 
 
 class CommittedSnapshotIsScannedClean(unittest.TestCase):
@@ -361,26 +412,39 @@ class CmdRehearseBuildFromProduct(unittest.TestCase):
 
 
 class BuilderIsDeterministic(unittest.TestCase):
+    def _assert_identical(self, m1, m2, out1, out2):
+        # built_at is the one key that moves between two builds of the same source
+        self.assertEqual(dict(m1, built_at=None), dict(m2, built_at=None))
+        d1 = _tree_digest(out1)
+        d2 = _tree_digest(out2)
+        d1.pop('manifest.json', None)   # built_at differs; covered by the dict compare above
+        d2.pop('manifest.json', None)
+        self.assertEqual(d1, d2)
+
     def test_two_builds_from_one_source_are_byte_identical(self):
         root = tempfile.mkdtemp(prefix='rehearsal_test_')
         self.addCleanup(shutil.rmtree, root, True)
         record, repo, _ids = _build_source(root)
         out1 = os.path.join(root, 'out1')
         out2 = os.path.join(root, 'out2')
-        m1 = rehearsal.build(record, repo, out1)
-        m2 = rehearsal.build(record, repo, out2)
-        m1 = dict(m1, built_at=None)
-        m2 = dict(m2, built_at=None)
-        self.assertEqual(m1, m2)
-        for dirpath, _dirs, files in os.walk(out1):
-            rel = os.path.relpath(dirpath, out1)
-            for name in files:
-                if rel == '.' and name == 'manifest.json':
-                    continue  # built_at differs; covered by the manifest-dict compare above
-                p1 = os.path.join(dirpath, name)
-                p2 = os.path.join(out2, rel, name)
-                with open(p1, 'rb') as f1, open(p2, 'rb') as f2:
-                    self.assertEqual(f1.read(), f2.read(), p1)
+        self._assert_identical(rehearsal.build(record, repo, out1),
+                                rehearsal.build(record, repo, out2), out1, out2)
+
+    def test_two_builds_from_a_tag_less_source_are_byte_identical(self):
+        # a tag-less source takes the synthetic-ref fallback. That entry's date must not be
+        # today(), or a rebuild of the same source on a later day writes different bytes — so
+        # the two builds here run under two different today() values and must still agree.
+        root = tempfile.mkdtemp(prefix='rehearsal_test_')
+        self.addCleanup(shutil.rmtree, root, True)
+        record, repo, _ids = _build_source(root, tags=False)
+        out1 = os.path.join(root, 'out1')
+        out2 = os.path.join(root, 'out2')
+        with mock.patch('asf.record.core.today', return_value='2026-01-01'):
+            m1 = rehearsal.build(record, repo, out1)
+        with mock.patch('asf.record.core.today', return_value='2031-12-31'):
+            m2 = rehearsal.build(record, repo, out2)
+        self.assertEqual([r['date'] for r in m1['refs']], [''], m1['refs'])
+        self._assert_identical(m1, m2, out1, out2)
 
 
 if __name__ == '__main__':

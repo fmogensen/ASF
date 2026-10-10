@@ -88,6 +88,31 @@ def _clear_gap(gap):
     return lead + (clear_line(mid) if mid else '') + trail
 
 
+def clear_ids_kept(line):
+    """One line cleared to filler of its own length, every id token inside it
+    (:data:`asf.record.core.ID_TOKEN_RE`) kept verbatim, and — via :func:`_clear_gap` — the run
+    of non-word characters at each gap's edges kept too, so the ``→`` an intake note's ``done/``
+    header opens with survives while the free prose around it does not."""
+    out = []
+    last = 0
+    for idm in core.ID_TOKEN_RE.finditer(line):
+        gap = line[last:idm.start()]
+        if gap:
+            out.append(_clear_gap(gap))
+        out.append(idm.group(0))
+        last = idm.end()
+    tail = line[last:]
+    if tail:
+        out.append(_clear_gap(tail))
+    return ''.join(out)
+
+
+def clear_block_ids_kept(text):
+    """``text`` cleared line by line with :func:`clear_ids_kept`: the same line count, each line
+    the same length, every id token kept."""
+    return '\n'.join(clear_ids_kept(line) for line in text.split('\n'))
+
+
 def clear_history_line(line):
     """One ``## History`` line cleared: its date and leading verb token kept verbatim, every id
     token inside it (:data:`asf.record.core.ID_TOKEN_RE`) kept verbatim, everything else filler
@@ -97,24 +122,20 @@ def clear_history_line(line):
     if not m:
         return clear_line(line)
     prefix, verb, rest = m.groups()
-    out = []
-    last = 0
-    for idm in core.ID_TOKEN_RE.finditer(rest):
-        gap = rest[last:idm.start()]
-        if gap:
-            out.append(_clear_gap(gap))
-        out.append(idm.group(0))
-        last = idm.end()
-    tail = rest[last:]
-    if tail:
-        out.append(_clear_gap(tail))
-    return prefix + verb + ''.join(out)
+    return prefix + verb + clear_ids_kept(rest)
 
 
 #: frontmatter scalar keys cleared to filler — the only prose a card's frontmatter ever carries.
 #: Everything else (id, type, state, stage, parent, dates, ``writes``, ``delivers`` ...) is
 #: structural and kept verbatim.
 _PROSE_KEYS = ('title',)
+
+#: frontmatter scalar keys cleared with :func:`clear_ids_kept` rather than :func:`clear_line`.
+#: ``removed``'s value is ``true``/``false`` *or* a hand-written reason
+#: (:func:`asf.record.setfield._set_only`), and :mod:`asf.record.ingest` reads a task id back out
+#: of that reason, so the prose goes and every id token in it stays. A boolean is structural and
+#: is left alone.
+_PROSE_KEYS_IDS_KEPT = ('removed',)
 
 
 def _clear_card_body(body):
@@ -138,6 +159,9 @@ def _clear_card(meta, body):
     for key in _PROSE_KEYS:
         if isinstance(cleared.get(key), str):
             cleared[key] = clear_line(cleared[key])
+    for key in _PROSE_KEYS_IDS_KEPT:
+        if isinstance(cleared.get(key), str):
+            cleared[key] = clear_ids_kept(cleared[key])
     return cleared, _clear_card_body(body)
 
 
@@ -225,9 +249,12 @@ def _build_repo_seed(repo_dir, out_repo, widest):
         })
     if not any(r['annotated'] for r in refs):
         # no real annotated tag reachable (a shallow or tag-less checkout): one synthetic entry
-        # so the snapshot still meets its own In — the manifest records what it actually built
+        # so the snapshot still meets its own In — the manifest records what it actually built.
+        # Its date is ``''``, what :func:`_repo_tags` itself returns for an unreadable
+        # creatordate, and never :func:`asf.record.core.today`: a tag-less source has to build
+        # the same bytes on any later day.
         refs.append({'name': 'v0.0.1', 'annotated': True, 'prerelease': False,
-                     'message': clear_line('x' * 24), 'date': core.today()})
+                     'message': clear_line('x' * 24), 'date': ''})
 
     changelog = []
     for ref in refs:
@@ -284,7 +311,12 @@ def _build_intake(record_dir, intake_dir_name, out_record):
             with open(os.path.join(src_done, name), encoding='utf-8') as f:
                 full = f.read()
             header, _, text = full.partition('\n\n')
-            write_text(os.path.join(out_done, name), f"{header}\n\n{clear_block(text)}")
+            # the header is not a bare ``→ <id>``: :func:`asf.groom.inbox.move_to_done` writes
+            # free prose into it (``→ closed (groom <date>, <who>)``, ``→ <removal> (<date>)``),
+            # so it is cleared id-preservingly too — the ``→`` and every id token survive, the
+            # account name, the date's prose and any path in it do not.
+            write_text(os.path.join(out_done, name),
+                       f"{clear_block_ids_kept(header)}\n\n{clear_block(text)}")
             done_names.append(name)
 
     if not open_names:
