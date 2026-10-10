@@ -12,6 +12,8 @@ and nothing in flight, listed one per line: ``limbo <id>: <why>``) and logs one
 ``BREACH <item> <class> <age> -> <action>`` line per breach (:func:`asf.kernel.decide.breaches`).
 A question the facts answered logs ``RESOLVED <item> <class> -> <answer>``, and the tick counts
 them against the questions still on the console (:func:`questions_line`).
+Each tick measures what the trunk's head moving cost (:mod:`asf.kernel.mainmoves`) and logs
+``MAIN MOVE <sha> cost: ...`` (``MAIN MOVE ALARM`` past ``kernel.main_move.alarm_minutes``).
 While the trunk is red it logs ``MAIN RED <sha> -> <action>`` (:mod:`asf.kernel.mainline`).
 The still-needed gate (:mod:`asf.kernel.needed`) logs ``SATISFIED <item>: …`` (``EMPTY <item>``
 for an empty PR closed and relaunched) and the items whose proving-tests check is pending.
@@ -152,6 +154,8 @@ def print_summary(summary, out=print):
         out(questions_line(summary))
     if summary.get('main'):
         out(main_line(summary['main']))
+    for line in summary.get('main_moves') or []:
+        out(line)
     if summary.get('wip'):
         out(wip_line(summary['wip']))
     for rec in summary.get('gate') or []:
@@ -235,6 +239,26 @@ def measure_waits(product, state_dir, plan, facts, config, write=True, out=print
         return ''
 
 
+def measure_main_moves(product, state_dir, facts, plan, config, write=True, out=print, now=None):
+    """Observe the trunk's head (:func:`asf.kernel.mainmoves.observe`): a move's cost so far and
+    each finished move's ledger line; returns the ``MAIN MOVE ...`` lines. A failure is one line,
+    never the tick's end."""
+    import datetime
+    from asf.kernel import mainmoves
+    try:
+        alarm, window = mainmoves.settings_of(product)
+        state, lines, finished = mainmoves.observe(
+            mainmoves.read_state(state_dir), facts, plan, config,
+            now or datetime.datetime.now(datetime.timezone.utc), alarm, window)
+        if write:
+            mainmoves.append(state_dir, finished)
+            mainmoves.write_state(state_dir, state)
+        return lines
+    except Exception as e:  # noqa: BLE001 — the measure never stops the tick
+        out('kernel tick: main move measure failed — %s' % (str(e) or type(e).__name__))
+        return []
+
+
 def write_plan_out(path, plan, summary):
     """A dry run's plan as JSON at ``path`` (``asf kernel tick --dry-run --plan-out``, read by
     the install's shadow preflight, :func:`asf.kernel.host.preflight`): each judged item's state,
@@ -316,6 +340,8 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
         summary = summarize(plan, facts, dry_run=True)
         summary['waits'] = measure_waits(product, state_dir, plan, facts, config, write=False,
                                          out=out)
+        summary['main_moves'] = measure_main_moves(product, state_dir, facts, plan, config,
+                                                   write=False, out=out)
         print_summary(summary, out)
         if plan_out:
             write_plan_out(plan_out, plan, summary)
@@ -339,10 +365,12 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
                     out('publish FAILED: %s' % (str(e).splitlines() or [type(e).__name__])[0])
             save_plan(state_dir, plan, facts)
             waits_line = measure_waits(product, state_dir, plan, facts, config, out=out)
+            moves_lines = measure_main_moves(product, state_dir, facts, plan, config, out=out)
     except Locked as e:
         out('kernel tick: another tick holds %s' % e)
         return {'locked': str(e)}
     summary = summarize(plan, facts, result)
     summary['waits'] = waits_line
+    summary['main_moves'] = moves_lines
     print_summary(summary, out)
     return summary

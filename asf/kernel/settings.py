@@ -109,6 +109,10 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # session past its class's p90 with no push (2x
                                               # with one), CI past 2x the ci p90
                    bound_min_samples: 20}
+      main_move:  {alarm_minutes: 5,          # a main move costing more than this logs MAIN MOVE
+                                              # ALARM (asf.kernel.mainmoves); the cost is
+                                              # measured over window_ticks ticks
+                   window_ticks: 15}
       floor:      {close_orphan_prs: true,    # an open PR on a kernel branch whose item is not on
                                               # the record, Done or retired is closed (comment)
                    cancel_stale_ci: true}     # a queued/running CI run whose PRs are all closed,
@@ -198,6 +202,7 @@ SPEC = {
               'max_session_age': ('3h', 'duration'),
               'max_review_session_age': ('90m', 'duration'),
               'max_ci_age': ('1h', 'duration'), 'bound_min_samples': (20, int)},
+    'main_move': {'alarm_minutes': (5, float), 'window_ticks': (15, int)},
     'floor': {'close_orphan_prs': (True, bool), 'cancel_stale_ci': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int),
                 'lock_timeout_s': (600, int)},

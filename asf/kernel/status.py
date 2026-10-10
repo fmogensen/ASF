@@ -150,6 +150,12 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
     except Exception as e:  # noqa: BLE001 — a bad ledger never hides the status
         top = 'biggest wait: unreadable — %s\n\n' % (str(e) or type(e).__name__)
     try:
+        from asf.kernel import mainmoves
+        alarm = mainmoves.alarm_line(os.path.dirname(path))
+        top = (alarm + '\n\n' if alarm else '') + top
+    except Exception:  # noqa: BLE001 — the alarm never hides the status
+        pass
+    try:
         with open(path, encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, ValueError):

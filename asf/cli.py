@@ -480,6 +480,11 @@ def build_parser():
     p_kwaits.add_argument('--since', help='the window start (ISO-8601; default: 24 h ago)')
     p_kwaits.add_argument('--live', action='store_true',
                           help='the current waits from the facts now (reads GitHub)')
+    p_kmoves = kernel_sub.add_parser(
+        'main-moves', help='what each main move cost: moves per hour, p50/p90 minutes '
+                           '(state/<p>/kernel-main-moves.jsonl; no GitHub)')
+    p_kmoves.add_argument('--product', required=True)
+    p_kmoves.add_argument('--since', help='the window start (ISO-8601; default: 24 h ago)')
     p_kpause = kernel_sub.add_parser('pause', help="hold the product's launches")
     p_kpause.add_argument('--product', required=True)
     p_kpause.add_argument('--reason', default='kernel pause', help='recorded with the pause')
@@ -639,6 +644,14 @@ def _kernel(args):
         from asf.kernel.waits import waits
         try:
             waits(args.product, since=args.since, live=args.live)
+        except ValueError as e:
+            print(e)
+            return 2
+        return 0
+    if args.kernel_command == 'main-moves':
+        from asf.kernel.mainmoves import main_moves
+        try:
+            main_moves(args.product, since=args.since)
         except ValueError as e:
             print(e)
             return 2

@@ -504,6 +504,13 @@ def watch(product, now=None, cfg=None, python=None, state_dir=None):
                else 'KICK FAILED (%s)' % (err.strip() or code))
         rc = 0 if code == 0 else 1
     reaped = reap_worktrees(product)
+    try:
+        from asf.kernel import mainmoves
+        alarm = mainmoves.alarm_line(state_dir, now=now)
+    except Exception:  # noqa: BLE001 — the alarm never stops the keep-alive
+        alarm = ''
+    if alarm:
+        msg += ' | ' + alarm
     tail = _tail(tick_log(product.name))
     last = next((x for x in reversed(tail) if x.startswith(TICK_LINE)), '')
     line = '%s %s plan_age=%s%s tracebacks_last%d=%d | %s' % (

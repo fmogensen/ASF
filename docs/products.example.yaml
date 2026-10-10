@@ -608,6 +608,16 @@ kernel:
                             # bound — a session past the building (or review) p90 with no push,
                             # twice it with one; CI past twice the ci p90. Passing it is a stall,
                             # handled that tick (end + relaunch, or cancel + rerun)
+  main_move:                # "a main move must cost minutes, not hours" (asf.kernel.mainmoves):
+    alarm_minutes: 5        # every move of main's head is measured over the next window_ticks
+    window_ticks: 15        # ticks (or until the next move): branches updated, rebases for PRs
+                            # that turned DIRTY after it, CI reruns on unchanged heads, and the
+                            # session + CI minutes they took. One line per move goes to
+                            # state/<p>/kernel-main-moves.jsonl (sha, at, prs_updated, rebases,
+                            # reruns, rebase_minutes, total_minutes) and the tick logs `MAIN MOVE
+                            # <sha> cost: ...`. A move costing more than alarm_minutes logs `MAIN
+                            # MOVE ALARM` once, shown by `asf kernel status` and `asf kernel
+                            # watch`. `asf kernel main-moves [--since T]`: moves per hour, p50/p90
   floor:
     close_orphan_prs: true  # an open PR on a kernel branch (code/fix/spec/plan prefix) whose item
                             # is not on the record, Done or retired is closed with a comment
