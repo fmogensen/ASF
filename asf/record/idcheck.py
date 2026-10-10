@@ -38,15 +38,22 @@ def session_claims(cl, item):
     return [c for c in cl if key and key in (c.claimant or '').lower()]
 
 
-def check_doc(text, canonical, cl, item=None):
-    """Findings (one line each) for the ids ``text`` mints; empty when the doc may land."""
+#: the kind of a :func:`findings` entry: an id the record holds for another card, an id no claim
+#: covers
+TAKEN, UNCOVERED = 'taken', 'uncovered'
+
+
+def findings(text, canonical, cl, item=None):
+    """``[(id, kind, line)]`` for the ids ``text`` mints (:data:`TAKEN` or :data:`UNCOVERED`);
+    empty when the doc may land."""
     prose = _prose(text)
     out = []
     for m in DECL.finditer(prose):
         iid, title = m.group(1), m.group('title').strip(' *')
         rec = canonical.get(iid)
         if rec is not None and title and _norm(title) != _norm(rec['meta'].get('title')):
-            out.append(f"{iid} already exists in the record ({rec['meta'].get('title')!r})")
+            out.append((iid, TAKEN,
+                        f"{iid} already exists in the record ({rec['meta'].get('title')!r})"))
     mine = session_claims(cl, item)
     active = {c.prefix for c in cl}
     for iid in dict.fromkeys(m.group(0) for m in ID_TOKEN.finditer(prose)):
@@ -57,8 +64,13 @@ def check_doc(text, canonical, cl, item=None):
         if idclaim.covers(pool, iid) is None:
             blocks = ', '.join(f'{c.prefix}:{c.lo:04d}-{c.hi:04d}' for c in own)
             where = f"{item}'s claimed block ({blocks})" if own else 'every claimed block'
-            out.append(f"{iid} is outside {where} — an id no claim covers")
+            out.append((iid, UNCOVERED, f"{iid} is outside {where} — an id no claim covers"))
     return out
+
+
+def check_doc(text, canonical, cl, item=None):
+    """Findings (one line each) for the ids ``text`` mints; empty when the doc may land."""
+    return [line for _iid, _kind, line in findings(text, canonical, cl, item)]
 
 
 def task_key(parent, stories, writes):

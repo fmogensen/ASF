@@ -257,6 +257,7 @@ def read_facts(ports):
     trunk_files = files() if files else None
     look_notes = getattr(record, 'notes', None)
     look_tries = getattr(record, 'intake_tries', None)
+    look_refused = getattr(record, 'plan_refusals', None)
     return Facts(unreadable=dict(look_bad() or {}) if look_bad else {},
                  items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
@@ -269,4 +270,6 @@ def read_facts(ports):
                  notes=dict(look_notes() or {}) if look_notes else {},
                  intake_tries=dict(look_tries() or {}) if look_tries else {},
                  last_jobs=last,
+                 plan_refusals={fid: why for fid, why in dict(
+                     (look_refused() if look_refused else None) or {}).items() if fid in items},
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

@@ -241,14 +241,17 @@ def _claim_view(root):
     return idclaim.claims(root)
 
 
-def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
+def mint_plan_tasks(root, product, ev, out=print, read_ref=None, refusals=None):
     """Mint the Task cards of every landed plan that has none yet. Returns the new ids. One
     writer through the record stage (R14): a card an invariant refuses is not written, the rest
-    are."""
+    are. ``refusals`` (a dict, when given) receives each Feature whose landed plan was refused
+    whole: ``{fid: {'reason': the line, 'ids': {id: kind}}}`` — ``ids`` the S-/T-/B- ids the
+    claim check named (:func:`asf.record.idcheck.findings`), empty for any other refusal."""
     from asf.record import stage
     stage.guarded(root, 'plan-tasks', backfill_acceptance, (ev, out, read_ref, product),
                   product=product, out=out)
-    made, staged, _findings = stage.guarded(root, 'plan-tasks', _mint, (product, ev, out, read_ref),
+    made, staged, _findings = stage.guarded(root, 'plan-tasks', _mint,
+                                            (product, ev, out, read_ref, refusals),
                                             product=product, out=out)
     refused = set(staged.refused)
     return [i for i in made if not any(p.endswith(f"/{i}.md") for p in refused)]
@@ -347,8 +350,13 @@ def backfill_acceptance(root, ev, out=print, read_ref=None, product=None):
     return written
 
 
-def _mint(root, product, ev, out=print, read_ref=None):
+def _mint(root, product, ev, out=print, read_ref=None, refusals=None):
     from asf.tick.migrate import plan_task_records, task_like_headings, writes_lines
+
+    def refuse(fid, line, ids=()):
+        out(line)
+        if refusals is not None:
+            refusals[fid] = {'reason': line.split(': ', 2)[-1], 'ids': dict(ids)}
     by_id, _errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
     features = (ev or {}).get('features') or {}
@@ -404,12 +412,13 @@ def _mint(root, product, ev, out=print, read_ref=None):
             continue
         records = plan_task_records(text)
         if not records and task_like_headings(text):
-            out(f'plan-tasks: {fid}: {plan_path} has {len(task_like_headings(text))} Task-like '
-                f'heading(s) but parses to 0 Tasks — nothing minted (heading format drift: '
-                f'{task_like_headings(text)[0]!r})')
+            refuse(fid, f'plan-tasks: {fid}: {plan_path} has {len(task_like_headings(text))} '
+                   f'Task-like heading(s) but parses to 0 Tasks — nothing minted (heading format '
+                   f'drift: {task_like_headings(text)[0]!r})')
             continue
         if not records:
-            out(f'plan-tasks: {fid}: {plan_path} has no `### Task N:` heading — nothing to mint')
+            refuse(fid, f'plan-tasks: {fid}: {plan_path} has no `### Task N:` heading — '
+                   f'nothing to mint')
             continue
         # a Task that cites a decision the register lacks (S6) is a decision that was never made:
         # the plan is refused whole, before any card exists, and the line names each one
@@ -418,17 +427,19 @@ def _mint(root, product, ev, out=print, read_ref=None):
         missing = list(dict.fromkeys(
             d for t in records for d in decisions.unknown(f"{t['title'] or ''}\n{t['body']}", known)))
         if missing:
-            out(f"plan-tasks: {fid}: {plan_path} cites decision(s) not in the register: "
-                f"{', '.join(missing)} — nothing minted (record the decision, or drop the id)")
+            refuse(fid, f"plan-tasks: {fid}: {plan_path} cites decision(s) not in the register: "
+                   f"{', '.join(missing)} — nothing minted (record the decision, or drop the id)")
             continue
         # the ids the plan mints must be its session's claimed ones (asf.record.idcheck): an
         # invented id, or one the record holds for another card, refuses the plan whole
         if claimed is None:
             claimed = _claim_view(root)
-        bad = idcheck.check_doc(text, canonical, claimed, fid)
+        bad = idcheck.findings(text, canonical, claimed, fid)
         if bad:
-            out(f"plan-tasks: {fid}: {plan_path} mints id(s) no claim covers: {'; '.join(bad)} "
-                f"— nothing minted (take ids from the session's BACKLOG_ID_RANGE)")
+            refuse(fid, f"plan-tasks: {fid}: {plan_path} mints id(s) no claim covers: "
+                   f"{'; '.join(line for _i, _k, line in bad)} "
+                   f"— nothing minted (take ids from the session's BACKLOG_ID_RANGE)",
+                   [(i, k) for i, k, _line in bad])
             continue
         # F-0285: a Story the plan cites must be a card, or a `### S-…: <title>` heading in the
         # plan or its spec — a session that cannot reach the record (a cloud one) declares its
@@ -438,17 +449,17 @@ def _mint(root, product, ev, out=print, read_ref=None):
                     **idcheck.declared_stories(text)}
         phantom = idcheck.phantom_stories(text, canonical, declared)
         if phantom:
-            out(f"plan-tasks: {fid}: {plan_path} cites Story id(s) never minted: "
-                f"{', '.join(phantom)} — nothing minted (each needs a card, or a "
-                f"`### <id>: <title>` heading with its acceptance lines in the spec or plan)")
+            refuse(fid, f"plan-tasks: {fid}: {plan_path} cites Story id(s) never minted: "
+                   f"{', '.join(phantom)} — nothing minted (each needs a card, or a "
+                   f"`### <id>: <title>` heading with its acceptance lines in the spec or plan)")
             continue
         fresh = {s: d for s, d in declared.items() if s not in canonical}
-        bad = idcheck.check_doc('\n'.join(f'### {s}: {d["title"]}' for s, d in fresh.items()),
-                                canonical, claimed, fid)
+        bad = idcheck.findings('\n'.join(f'### {s}: {d["title"]}' for s, d in fresh.items()),
+                               canonical, claimed, fid)
         if bad:
-            out(f"plan-tasks: {fid}: {plan_path} declares Story id(s) no claim covers: "
-                f"{'; '.join(bad)} — nothing minted (take ids from the session's "
-                f"BACKLOG_ID_RANGE)")
+            refuse(fid, f"plan-tasks: {fid}: {plan_path} declares Story id(s) no claim covers: "
+                   f"{'; '.join(line for _i, _k, line in bad)} — nothing minted (take ids from "
+                   f"the session's BACKLOG_ID_RANGE)", [(i, k) for i, k, _line in bad])
             continue
         for sid, d in fresh.items():
             write_new_item(root, canonical, 'story', sid,

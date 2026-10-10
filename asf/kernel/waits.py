@@ -10,6 +10,8 @@ An item whose state and class are unchanged writes nothing, so the ledger holds 
 every spell and nothing else. ``reason`` is the item's wait class (:data:`CLASSES`):
 
 - ``seat``: Ready, no seat has taken it yet
+- ``replan``: a Feature whose merged plan the record refused to mint (``Facts.plan_refusals``),
+  New or Ready for its re-plan session (the ledger follows such a Feature until its Tasks exist)
 - ``ci``: its PR's required checks are still running
 - ``review``: its PR awaits a verdict
 - ``train``: approved and behind, queued for an update (the merge train; a strict ruleset only)
@@ -111,6 +113,9 @@ def classify(iid, state, stuck, facts, config, notes=None):
             (stuck.reason if stuck else '')
     if state is State.PARKED:
         return 'parked', ''
+    refused = (getattr(facts, 'plan_refusals', None) or {}).get(iid)
+    if refused and state in (State.NEW, State.READY):
+        return 'replan', refused
     if state is State.NEW:
         it = facts.items.get(iid)
         return 'after', ', '.join(it.after) if it and it.after else ''
@@ -133,12 +138,14 @@ def classify(iid, state, stuck, facts, config, notes=None):
 
 
 def current(plan, facts, config):
-    """``{item: (state value, wait class, why)}`` for every followed item the plan judged."""
+    """``{item: (state value, wait class, why)}`` for every followed item the plan judged — a
+    Task or Bug, or a Feature whose merged plan the record refused (``Facts.plan_refusals``)."""
     out = {}
     notes = getattr(plan, 'notes', None) or {}
+    refused = getattr(facts, 'plan_refusals', None) or {}
     for iid, (state, stuck) in plan.states.items():
         it = facts.items.get(iid)
-        if it is None or it.type not in FOLLOWED:
+        if it is None or (it.type not in FOLLOWED and iid not in refused):
             continue
         cls, why = classify(iid, state, stuck, facts, config, notes)
         out[iid] = (state.value, cls, why)

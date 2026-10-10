@@ -391,12 +391,75 @@ class RealRecord:
         return {iid: (p, texts.get('%s:%s' % (rev, p))) for iid, p in paths.items()
                 if texts.get('%s:%s' % (rev, p)) is not None}
 
-    def mint_plan_tasks(self, out=print):
+    def mint_plan_tasks(self, out=print, claim_cited=False):
         """The Task cards of every plan landed on ``origin/<main>`` (``<plans_dir>/f-<n>.md``)
         whose Feature has none yet, through the record's own minter
         (:func:`asf.record.plan_tasks.mint_plan_tasks`: parent, writes, stories and the plan's
         order; its guards — decisions, id claims, duplicates, already on the trunk — included).
-        Idempotent: a Feature with a Task child is left alone. Returns the new ids."""
+        Idempotent: a Feature with a Task child is left alone. Returns the new ids.
+
+        A plan the minter refuses whole is kept for :meth:`plan_refusals` (the kernel re-plans
+        it). With ``claim_cited`` a refusal whose only cause is ids no claim covers, none of them
+        on the record nor inside any claim, is resolved in code first: each id is claimed on the
+        record's origin as a block of one, its claimant naming every Feature that cites it
+        (:func:`asf.record.idclaim.claim_exact`), and the plans are minted again."""
+        self._plan_refusals = {}
+        refusals = {}
+        made = self._mint_plans(out, refusals)
+        if claim_cited and refusals:
+            claimed = self._claim_cited(refusals, out)
+            if claimed:
+                refusals = {}
+                made += self._mint_plans(out, refusals)
+        self._plan_refusals = refusals
+        return made
+
+    def plan_refusals(self):
+        """``{Feature id: why}`` of every landed plan the last :meth:`mint_plan_tasks` refused."""
+        return {fid: r['reason'] for fid, r in (getattr(self, '_plan_refusals', None)
+                                                 or {}).items()}
+
+    def _claim_cited(self, refusals, out=print):
+        """Claim the ids the refused plans cite that no claim covers, when that is the plans'
+        only fault and no record item nor claim holds any of them (:mod:`asf.record.idcheck`).
+        Returns the ids claimed; a failure is one line."""
+        from asf.record import idclaim, idcheck
+        cite = {}
+        for fid, r in sorted(refusals.items()):
+            ids = r.get('ids') or {}
+            if ids and all(k == idcheck.UNCOVERED for k in ids.values()):
+                for iid in ids:
+                    cite.setdefault(iid, []).append(fid)
+        if not cite or not idclaim.has_origin(self.root):
+            return []
+        try:
+            idclaim.fetch(self.root)
+            held = idclaim.claims(self.root)
+        except idclaim.ClaimError as e:
+            out('plan-tasks: cited ids not claimed — %s' % e)
+            return []
+        items = self._load()
+        free = [i for i in cite if i not in items and idclaim.covers(held, i) is None]
+        whole = {fid for fid, r in refusals.items()
+                 if r.get('ids') and all(i in free for i in r['ids'])}
+        done = []
+        for iid in sorted(free):
+            if not any(fid in whole for fid in cite[iid]):
+                continue
+            who = 'asf-kernel: cited by %s' % ' '.join(cite[iid])
+            try:
+                ok = idclaim.claim_exact(self.root, iid, who)
+            except idclaim.ClaimError as e:
+                ok = False
+                out('plan-tasks: claim %s failed — %s' % (iid, e))
+            if ok:
+                done.append(iid)
+        if done:
+            out('plan-tasks: claimed cited id(s) %s (on no record item, in no claim) for %s' % (
+                ', '.join(done), ', '.join(sorted(whole))))
+        return done
+
+    def _mint_plans(self, out, refusals):
         from asf.record import plan_tasks
         conv = self.product.conventions
         plans = self._trunk_docs(conv.plans_dir) or {}
@@ -417,7 +480,7 @@ class RealRecord:
             lane[fid.upper()] = {'plan': [path]}
         made = plan_tasks.mint_plan_tasks(self.root, self.product,
                                           {'features': features, 'lane_docs': lane},
-                                          out=out, read_ref=texts.get)
+                                          out=out, read_ref=texts.get, refusals=refusals)
         self._cards = None
         return list(made or [])
 
@@ -2366,6 +2429,8 @@ def config_for(product, cfg=None, github=None):
         resolve_gates=bool(k['resolve']['gates']),
         resolve_inbox_bugs=bool(k['resolve']['inbox_bugs']),
         resolve_needs_writes=bool(k['resolve']['needs_writes']),
+        resolve_plan_ids=bool(k['resolve']['plan_ids']),
+        replan_refused=bool(k['resolve']['replan']),
         wait_targets=dict(k['waits']['targets']) if k['waits']['breach'] else {},
         max_session_age_h=(k['waits']['max_session_age'] / 3600 if k['waits']['breach']
                            and k['waits']['max_session_age'] else None),
