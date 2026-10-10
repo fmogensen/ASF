@@ -73,6 +73,9 @@ from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_RE
                                no_report, rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
 
+#: the Stuck reason prefix of a needs-writes grant the record refused to write
+UNWIDENED = 'the record refused to widen writes: '
+
 #: a REPORT's ``pushed: rebased <sha> …`` — the floor's "the factory publishes" line
 REBASED_RE = re.compile(r'^\s*rebased\s+([0-9a-fA-F]{7,40})\b')
 
@@ -110,6 +113,7 @@ class _Applier:
         self.judged = judged
         self.updates = {}   # item id -> {machine key: value}
         self.refused = {}   # item id -> why the host did not push its session's work
+        self.unwidened = {}  # item id -> why the record refused a needs-writes grant
         self.result = Result()
 
     def field(self, iid, key, default):
@@ -134,6 +138,14 @@ class _Applier:
     # ---- one method per action type -------------------------------------------------------
 
     def ApplyAnswer(self, a):
+        note = ''
+        if a.writes:  # a needs-writes grant: the card's writes: first; refused, nothing is answered
+            try:
+                self.ports.record.widen_writes(a.item_id, list(a.writes))
+            except Exception as e:  # the question stays with the operator, with why
+                self.unwidened[a.item_id] = str(e) or type(e).__name__
+                raise
+            note = 'writes: +%s' % ' '.join(a.writes)
         answers = self.field(a.item_id, P.ANSWERS, [])
         if a.text not in answers:
             self.set(a.item_id, **{P.ANSWERS: answers + [a.text], P.QUESTION: None})
@@ -147,11 +159,14 @@ class _Applier:
                 P.EXTRA_ROUNDS: self.field(a.item_id, P.EXTRA_ROUNDS, 0) + 1,
                 P.FINDINGS: [f for f in self.field(a.item_id, P.FINDINGS, [])
                              if not rebase_finding(f)]})
+        return note
 
     def FileInbox(self, a):
         return 'filed %s' % self.ports.record.file_inbox(a.title, a.body)
 
     def ClearStuck(self, a):
+        if a.item_id in self.unwidened:
+            return 'kept: its needs-writes grant was refused'
         self.attempt(a.item_id, a.attempt)
 
     def WaitOn(self, a):
@@ -408,6 +423,10 @@ class _Applier:
         for iid, why in self.refused.items():  # decide counted on a push that did not happen
             if iid in states:
                 states[iid] = (State.STUCK, Stuck(reason=R.cap(NOT_PUSHED + why), owner='operator',
+                                                  next_action=NEXT_ACTION['operator']))
+        for iid, why in self.unwidened.items():  # decide counted on a grant the record refused
+            if iid in states:
+                states[iid] = (State.STUCK, Stuck(reason=R.cap(UNWIDENED + why), owner='operator',
                                                   next_action=NEXT_ACTION['operator']))
         for iid, (state, stuck) in states.items():
             it = self.facts.items.get(iid)

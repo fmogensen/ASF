@@ -337,7 +337,7 @@ class Settings(unittest.TestCase):
         s = settings.read(None)['resolve']
         self.assertEqual(s, {'trunk_tests': True, 'symbols': True, 'test_timeout_s': 600,
                              'python': 'python3', 'test_runs_per_tick': 1, 'gates': True,
-                             'inbox_bugs': True})
+                             'inbox_bugs': True, 'needs_writes': True})
 
 
 if __name__ == '__main__':

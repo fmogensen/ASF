@@ -137,6 +137,9 @@ item and the actions of one tick. The rules it holds, in the design's words:
   script a session could not run (``config.resolve_gates``) is answered from its run on the
   branch head; a Bug card it could not mint (``config.resolve_inbox_bugs``) is filed first
   (:class:`FileInbox`, the item stays on the operator) and answered once the record holds it.
+  A REPORT's ``needs writes:`` paths (``config.resolve_needs_writes``) are decided by policy,
+  question or not: held behind an unfinished ``after:`` item that writes one, else granted
+  (:class:`ApplyAnswer` with ``writes``: the card's ``writes:`` widened first).
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -511,7 +514,11 @@ def _judge(it, facts, config, actions, parked=()):
     answered = granted = False
     extra = it.extra_rounds
     answers = list(facts.answers)
-    auto, auto_by = _auto_answer(it, facts, config) or (None, '')
+    nw = (_needs_writes(it, resolvers.needs_writes_of(it.stuck.reason), facts, config, parked)
+          if it.state is State.STUCK and it.stuck is not None and it.stuck.owner == 'operator'
+          else None)
+    auto, auto_by = (nw[0], resolvers.NEEDS_WRITES) if nw else (
+        _auto_answer(it, facts, config) or (None, ''))
     if not auto and it.state is State.STUCK and it.stuck is not None \
             and it.stuck.owner == 'operator':
         _file_inbox(it, facts, config, it.question or it.stuck.reason, actions)
@@ -523,7 +530,8 @@ def _judge(it, facts, config, actions, parked=()):
             granted = it.state is State.STUCK and capped(it.stuck)
             extra += 1 if granted else 0
             actions.append(A.ApplyAnswer(it.id, a.text, granted,
-                                         by=auto_by if a.text == auto else ''))
+                                         by=auto_by if a.text == auto else '',
+                                         writes=list(nw[1]) if nw and a.text == auto else []))
             stuck, question, hold, answered = None, None, True, True
             if it.state is State.STUCK:  # a fresh start: the applier resets the attempts too
                 attempts = [answer_attempt(a.text)]
@@ -575,6 +583,14 @@ def _judge(it, facts, config, actions, parked=()):
     spec_only = _spec_only(it, prs, config)
     if open_pr is None and landed(it, prs) and not it.reopened and not spec_only:
         return _Judged(State.DONE)
+    if ended_stuck is not None and asked is not None and not answered and not live:
+        nw = _needs_writes(it, (asked.fields or {}).get('needs writes'), facts, config, parked)
+        if nw:  # a widening the policy decides: held behind its after: owner, or granted
+            actions.append(A.ApplyAnswer(it.id, nw[0], by=resolvers.NEEDS_WRITES,
+                                         writes=list(nw[1])))
+            if it.state is not State.STUCK:  # the applier resets only a Stuck card's attempts
+                actions.append(A.ClearStuck(it.id, answer_attempt(nw[0])))
+            return _Judged(State.READY, hold=True)
     if open_pr is None and not live and not question:
         branch = _pr_branch(it, sessions, pushed, stuck, ended_stuck, facts, config)
         if branch:
@@ -849,6 +865,20 @@ def _resolving(config):
                                  (resolvers.SYMBOL, config.resolve_symbols),
                                  (resolvers.GATE, config.resolve_gates),
                                  (resolvers.INBOX_BUG, config.resolve_inbox_bugs)) if on)
+
+
+def _needs_writes(it, value, facts, config, parked=()):
+    """``(answer, granted paths)`` for the ``needs writes:`` ``value`` a session's REPORT gave
+    (:func:`asf.kernel.resolvers.needs_writes`: held behind an unfinished ``after:`` item that
+    writes a path, else granted), or None — the knob off, no path outside ``writes:``, or the
+    answer already on the card."""
+    if not config.resolve_needs_writes:
+        return None
+    paths = resolvers.requested_writes(value, it.writes, lambda p, g: _overlap([p], g))
+    got = resolvers.needs_writes(it, paths, facts.items,
+                                 lambda x: _unmerged(x, facts, parked), _overlap,
+                                 tuple(config.risk_high or ()))
+    return got if got and got[0] not in it.answers else None
 
 
 def _file_inbox(it, facts, config, text, actions):

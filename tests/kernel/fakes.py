@@ -17,6 +17,7 @@ class FakeRecord:
         self.fail = set(fail)
         self.writes, self.minted, self.recorded, self.changes = [], [], [], []
         self.filled, self.superseded = [], []
+        self.widened = []
 
     def items(self):
         out = {}
@@ -90,6 +91,13 @@ class FakeRecord:
         it = self._items[item_id]
         it.writes, it.creates = list(writes), list(creates)
         it.body = '## Acceptance\n' + ''.join('- [ ] %s\n' % a for a in acceptance)
+
+    def widen_writes(self, item_id, paths):
+        if ('widen', item_id) in self.fail:
+            raise P.PortError('%s: writes: widening refused' % item_id)
+        self.widened.append((item_id, list(paths)))
+        it = self._items[item_id]
+        it.writes = list(it.writes) + [p for p in paths if p not in it.writes]
 
     def supersede(self, item_id, by, why):
         self.superseded.append((item_id, by))

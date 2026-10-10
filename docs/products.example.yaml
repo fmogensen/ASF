@@ -570,6 +570,13 @@ kernel:
                             # new bug --title …`": the kernel files it through the record's inbox
                             # (the question and the test ids it names as the body), then answers
                             # "filed as inbox/<file>; do not mint reserved ids"
+    needs_writes: true      # a build REPORT's `needs writes: <paths>` (with or without a NEEDS
+                            # OPERATOR asking to widen writes:): a path an unfinished after: item
+                            # writes -> "hold: <path> belongs to <id>, wait for it"; else granted —
+                            # the card's writes: widened through the record's writer, answered
+                            # "granted <paths>; nothing else outside writes" (a Building/Review
+                            # writer of a path is named: the overlap rule serialises them; a path
+                            # on kernel.risk.high makes the item high-risk)
   gate:
     window_h: 24            # first-push-green is measured over PRs opened in the last window_h
     first_push_green_min: 0.7

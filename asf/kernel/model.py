@@ -397,7 +397,8 @@ class Config:
     sandbox, or whether a symbol it says does not exist exists, is answered by the kernel from
     ``Facts.resolved`` (:mod:`asf.kernel.resolvers`). ``resolve_gates``: a repo gate script a
     session could not run is answered from its run on the branch head; ``resolve_inbox_bugs``: a
-    Bug card a session could not mint is filed through the inbox, then answered. The product file's ``kernel:`` block sets
+    Bug card a session could not mint is filed through the inbox, then answered. ``resolve_needs_writes``: a session's ``needs writes:`` request is held behind
+    an unfinished ``after:`` item that owns a path, else granted (the card's ``writes:`` widened). The product file's ``kernel:`` block sets
     them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0).
     ``wait_targets`` maps a wait class (``kernel.waits.targets``: ``seat``, ``review``, ``train``,
     ``stuck``, …) to seconds: an item whose current wait (``Facts.waits``) is older is a breach
@@ -452,6 +453,7 @@ class Config:
     resolve_symbols: bool = True
     resolve_gates: bool = True
     resolve_inbox_bugs: bool = True
+    resolve_needs_writes: bool = True
     wait_targets: dict = dataclasses.field(default_factory=dict)
     max_session_age_h: float = None
     max_review_age_h: float = None

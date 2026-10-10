@@ -79,8 +79,11 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    gates: true,               # a repo gate script the session could not run
                                               # (only a pre_push_check step) is run on its branch
                                               # head; answered with its last line and the sha
-                   inbox_bugs: true}          # a Bug card the session could not mint is filed
+                   inbox_bugs: true,          # a Bug card the session could not mint is filed
                                               # through the inbox; answered with its path
+                   needs_writes: true}        # a REPORT's `needs writes:` paths: held behind
+                                              # an unfinished after: item that writes one, else
+                                              # granted (the card's writes: widened)
       gate:       {window_h: 24, first_push_green_min: 0.7, landed_min: 5,
                    silent_stuck_max: 0, since: 2026-10-09T14:00:00Z,   # asf kernel gate
                    satisfied: true}           # before a fresh Task/Bug launches: the tests it
@@ -212,7 +215,7 @@ SPEC = {
     'resolve': {'trunk_tests': (True, bool), 'symbols': (True, bool),
                 'test_timeout_s': (600, int), 'python': ('python3', 'text'),
                 'test_runs_per_tick': (1, int), 'gates': (True, bool),
-                'inbox_bugs': (True, bool)},
+                'inbox_bugs': (True, bool), 'needs_writes': (True, bool)},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time'), 'satisfied': (True, bool)},
     'waits': {'targets': (WAIT_TARGETS, 'targets'), 'breach': (True, bool),

@@ -21,6 +21,11 @@ matched narrowly by :func:`match`:
 - ``symbol``: *whether* a backticked dotted name the question says *does not exist* (a class a
   spec's fence names) was meant to exist. The probe reads the module at origin's trunk (ast);
   absent, the session's own proposal stands; present, the answer names where it is.
+- ``needs-writes``: a REPORT's ``needs writes: <paths>`` outside the card's ``writes:``
+  (:func:`needs_writes`, ``kernel.resolve.needs_writes``): a path an unfinished ``after:`` item
+  writes is held ("hold: <path> belongs to <id>, wait for it"); else the paths are granted — the
+  card's ``writes:`` widened through the record's writer — and a Building/Review writer of one is
+  named (the overlap rule serialises them). Read off the session's fields, not probed.
 
 :func:`match` returns one :class:`Probe` or None; the facts reader has the host probe it
 (``Facts.resolved``: probe key -> result) and ``decide`` turns a result into the answer with
@@ -32,6 +37,7 @@ import collections
 import re
 
 from asf.kernel import idclaims
+from asf.kernel.model import State
 
 TRUNK_TESTS, SYMBOL, GATE, INBOX_BUG = 'trunk-tests', 'symbol', 'gate', 'inbox-bug'
 #: the classes the host's trunk probe answers (:mod:`asf.kernel.trunk`); ``inbox-bug`` is read off
@@ -236,3 +242,79 @@ def to_file(text, facts, item_id, enabled=(INBOX_BUG,)):
     if result is None or result.get('filed') or result.get('error'):
         return None
     return inbox_card(probe, text, item_id)
+
+
+# ---- needs-writes: a widening of the card's ``writes:`` a session asked for ---------------------
+
+#: the class a ``needs writes:`` answer is logged under
+NEEDS_WRITES = 'needs-writes'
+
+#: where a ``needs writes:`` value's paths end and its prose begins (a spaced dash)
+PROSE_RE = re.compile(r'\s(?:—|–|--?)\s')
+#: a recorded Stuck reason that carries the REPORT's ``needs writes:`` value
+NEEDS_RE = re.compile(r'\bneeds writes:\s*(.+)$', re.I | re.S)
+#: a repo path token: a directory part or an extension, no scheme
+PATH_TOKEN_RE = re.compile(r'^(?![a-z]+://)[\w.@+*-]+(?:/[\w.@+*-]+)*$')
+NONE_TOKEN_RE = re.compile(r'^(?:none|n/a|-|—)$', re.I)
+
+HOLD = ('hold: %s belongs to %s, wait for it — no writes granted; this card waits on it through '
+        'after:. Decided by the kernel.')
+GRANTED = 'granted %s; nothing else outside writes (card updated by the kernel).'
+SERIALISED = ' %s also writes %s (%s): the overlap rule serialises them.'
+HIGH_RISK = ' %s matches kernel.risk.high: this item is high-risk now.'
+
+
+def requested_writes(value, writes, covers=None):
+    """The paths a ``needs writes:`` ``value`` names (before any prose after a spaced dash) that
+    the card's ``writes`` globs do not cover yet, in order; [] for none."""
+    import fnmatch
+    covers = covers or (lambda p, globs: any(fnmatch.fnmatchcase(p, g) for g in globs))
+    head = PROSE_RE.split(str(value or ''), maxsplit=1)[0]
+    out = []
+    for tok in re.split(r'[\s,;]+', head):
+        tok = tok.strip('`\'"()[]')
+        if (not tok or NONE_TOKEN_RE.match(tok) or not PATH_TOKEN_RE.match(tok)
+                or ('/' not in tok and '.' not in tok)):
+            continue
+        if tok not in out and not covers(tok, list(writes)):
+            out.append(tok)
+    return out
+
+
+def needs_writes_of(text):
+    """The ``needs writes:`` value a recorded Stuck reason (or question) carries, or ''."""
+    m = NEEDS_RE.search(str(text or ''))
+    return m.group(1).strip() if m else ''
+
+
+def needs_writes(it, paths, items, unfinished, overlap, risk_high=()):
+    """``(answer, granted paths)`` for ``it``'s request to widen its ``writes:`` by ``paths``:
+
+    1. a path in the ``writes`` of an item ``it`` has ``after:`` on and that is ``unfinished``
+       (a callable on the id): hold, nothing granted — ``it`` waits through that edge;
+    2. else a path in the ``writes`` of a Building or Review item: granted, named in the answer
+       (the kernel's overlap rule serialises them);
+    3. else: granted.
+
+    ``overlap(a, b)`` says whether two glob lists can name a common path; ``risk_high`` are the
+    ``kernel.risk.high`` globs a granted path is checked against. None when ``paths`` is empty."""
+    paths = list(paths)
+    if not paths:
+        return None
+    for p in paths:
+        for dep in it.after:
+            d = items.get(dep)
+            if dep != it.id and d is not None and unfinished(dep) and overlap([p], list(d.writes)):
+                return HOLD % (p, dep), []
+    text = GRANTED % ' '.join(paths)
+    for x in sorted(items):
+        o = items[x]
+        if x == it.id or o.state not in (State.BUILDING, State.REVIEW):
+            continue
+        hit = [p for p in paths if overlap([p], list(o.writes))]
+        if hit:
+            text += SERIALISED % (x, ' '.join(hit), o.state.value.title())
+    risky = [p for p in paths if risk_high and overlap([p], list(risk_high))]
+    if risky:
+        text += HIGH_RISK % ' '.join(risky)
+    return text, paths

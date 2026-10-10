@@ -122,6 +122,7 @@ class RecordPort(typing.Protocol):
                       change_id='') -> None: ...  # append
     def paused(self) -> bool: ...
     def write_fields(self, item_id, fields) -> None: ...  # merge into the machine block
+    def widen_writes(self, item_id, paths) -> None: ...  # add to writes: (the record's writer)
     def mint_story(self, feature_id, story_id, title, acceptance) -> None: ...
 
 
@@ -536,6 +537,26 @@ class RealRecord:
         text = frontmatter.render(meta, body)
         writer.write_card(rec['path'], text)
         rec['meta'], rec['text'], rec['body'] = meta, text, body
+
+    def widen_writes(self, item_id, paths):
+        """A ``needs-writes`` grant (:mod:`asf.kernel.resolvers`): ``paths`` not on the card's
+        ``writes:`` yet are appended to it through :func:`asf.record.setfield.set_typed` (the
+        parser round-trip and the record stage) with a History line; a refusal raises
+        :class:`PortError` and the card is unchanged."""
+        from asf.record.core import today
+        from asf.record.setfield import set_typed
+        rec = self._rec(item_id)
+        have = [str(w) for w in as_list(rec['meta'].get('writes'))]
+        added = [p for p in self._scrub(list(paths)) if p not in have]
+        if not added:
+            return
+        err = set_typed(rec, {'writes': have + added}, writer='kernel', product=self.product,
+                        history=['- %s kernel: writes widened +%s (needs-writes)'
+                                 % (today(), ' '.join(added))])
+        if err:
+            raise PortError(err)
+        from asf.record import frontmatter
+        rec['meta'] = frontmatter.parse(rec['text'], path=rec['relpath'])[0]
 
     def supersede(self, item_id, by, why):
         """A groom-fill's ``superseded``: retire ``item_id`` (``removed:``) with
@@ -2015,6 +2036,7 @@ def config_for(product, cfg=None, github=None):
         resolve_symbols=bool(k['resolve']['symbols']),
         resolve_gates=bool(k['resolve']['gates']),
         resolve_inbox_bugs=bool(k['resolve']['inbox_bugs']),
+        resolve_needs_writes=bool(k['resolve']['needs_writes']),
         wait_targets=dict(k['waits']['targets']) if k['waits']['breach'] else {},
         max_session_age_h=(k['waits']['max_session_age'] / 3600 if k['waits']['breach']
                            and k['waits']['max_session_age'] else None),

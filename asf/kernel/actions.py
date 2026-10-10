@@ -123,12 +123,15 @@ class ApplyAnswer:
     ``extra_round``: the item was Stuck at its fix-round cap (or on a conflict its rebase session
     could not resolve), so the answer grants one more fix round (``kernel_extra_rounds`` + 1) and
     drops the spent rebase finding from the card. ``by``: the resolver class whose fact
-    answered (:mod:`asf.kernel.resolvers`: ``id-claim``, ``trunk-tests``, ``symbol``); '' for
-    the operator's own answer."""
+    answered (:mod:`asf.kernel.resolvers`: ``id-claim``, ``trunk-tests``, ``symbol``,
+    ``needs-writes``); '' for the operator's own answer. ``writes``: the paths a ``needs-writes``
+    grant adds to the card's ``writes:`` — written through the record's writer first; a refused
+    widening leaves the answer unwritten (the question stays with the operator)."""
     item_id: str
     text: str
     extra_round: bool = False
     by: str = ''
+    writes: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

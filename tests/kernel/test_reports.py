@@ -175,12 +175,14 @@ def ended(text, kind='build', pushed=False, is_error=False):
 
 class Decide(unittest.TestCase):
 
-    def plan(self, session, item=None, **kw):
+    def plan(self, session, item=None, config=None, **kw):
         return decide(B.facts([item or B.task('T-0001', state=State.BUILDING)],
-                              sessions=[session], **kw), B.config())
+                              sessions=[session], **kw), config or B.config())
 
     def test_partial_is_stuck_on_the_session_with_the_reports_words(self):
-        plan = self.plan(ended(PARTIAL))
+        # its `needs writes:` is the kernel's to grant (test_question_needs_writes); off, the
+        # report's words are the Stuck
+        plan = self.plan(ended(PARTIAL), config=B.config(resolve_needs_writes=False))
         info = B.stuck(plan, 'T-0001')
         self.assertEqual(info.owner, 'session')
         self.assertTrue(info.reason.startswith('partial: tests: '), info.reason)
@@ -188,7 +190,8 @@ class Decide(unittest.TestCase):
         self.assertEqual([m.reason for m in B.of(plan, A.MarkStuck)], [info.reason])
 
     def test_partial_even_with_a_push_is_stuck(self):
-        info = B.stuck(self.plan(ended(PARTIAL, pushed=True)), 'T-0001')
+        info = B.stuck(self.plan(ended(PARTIAL, pushed=True),
+                                 config=B.config(resolve_needs_writes=False)), 'T-0001')
         self.assertEqual(info.owner, 'session')
 
     def test_blocked_with_a_question_is_the_operators(self):
