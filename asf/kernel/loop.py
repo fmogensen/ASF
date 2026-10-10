@@ -13,6 +13,8 @@ and nothing in flight, listed one per line: ``limbo <id>: <why>``) and logs one
 A question the facts answered logs ``RESOLVED <item> <class> -> <answer>``, and the tick counts
 them against the questions still on the console (:func:`questions_line`).
 While the trunk is red it logs ``MAIN RED <sha> -> <action>`` (:mod:`asf.kernel.mainline`).
+The still-needed gate (:mod:`asf.kernel.needed`) logs ``SATISFIED <item>: …`` (``EMPTY <item>``
+for an empty PR closed and relaunched) and the items whose proving-tests check is pending.
 
 A tick whose GitHub read failed (``Facts.github_error``, after the port's retries) is blind
 (:func:`blind_tick`): it applies :func:`asf.kernel.decide.blind_plan` only, writes no state, keeps
@@ -30,6 +32,7 @@ from asf.kernel.apply import apply, describe
 from asf.kernel.decide import blind_plan, decide
 from asf.kernel.facts import read_facts
 from asf.kernel.model import State
+from asf.kernel.needed import PENDING, gate_line
 
 LOCK_FILE = 'kernel.lock'
 
@@ -90,6 +93,9 @@ def summarize(plan, facts, result=None, dry_run=False):
                          if s is State.STUCK and st is not None and st.owner == 'operator'),
         'main': getattr(plan, 'main', None),
         'wip': getattr(plan, 'wip', None),
+        'gate': list(getattr(plan, 'gate', None) or []),
+        'pending': sorted(iid for iid, texts in (getattr(plan, 'notes', None) or {}).items()
+                          if PENDING in texts),
     }
 
 
@@ -148,6 +154,10 @@ def print_summary(summary, out=print):
         out(main_line(summary['main']))
     if summary.get('wip'):
         out(wip_line(summary['wip']))
+    for rec in summary.get('gate') or []:
+        out(gate_line(rec))
+    if summary.get('pending'):
+        out('proving-tests check pending: %s' % ', '.join(summary['pending']))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:
@@ -232,7 +242,8 @@ def write_plan_out(path, plan, summary):
     product's state."""
     data = {'states': {iid: s.value for iid, (s, _st) in sorted(plan.states.items())},
             'counts': summary['states'], 'actions': summary['actions'],
-            'limbo': summary.get('limbo') or {}, 'breaches': summary.get('breaches') or []}
+            'limbo': summary.get('limbo') or {}, 'breaches': summary.get('breaches') or [],
+            'gate': summary.get('gate') or []}
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=1, sort_keys=True)
 

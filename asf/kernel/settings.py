@@ -81,7 +81,12 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    inbox_bugs: true}          # a Bug card the session could not mint is filed
                                               # through the inbox; answered with its path
       gate:       {window_h: 24, first_push_green_min: 0.7, landed_min: 5,
-                   silent_stuck_max: 0, since: 2026-10-09T14:00:00Z}   # asf kernel gate
+                   silent_stuck_max: 0, since: 2026-10-09T14:00:00Z,   # asf kernel gate
+                   satisfied: true}           # before a fresh Task/Bug launches: the tests it
+                                              # names, absent when it was planned, run green on
+                                              # a fresh worktree of the trunk -> Done ("satisfied
+                                              # on main at <sha>"), nothing launched
+                                              # (asf.kernel.needed; code, never an LLM)
       waits:      {targets: {seat: 10m, ci: 10m, review: 30m, train: 30m, merge: 10m,
                              conflict: 0m, stuck: 0m}}   # per wait class (asf.kernel.waits):
                                               # a wait older than its class's target is ⚠ in
@@ -104,8 +109,11 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # session past its class's p90 with no push (2x
                                               # with one), CI past 2x the ci p90
                    bound_min_samples: 20}
-      floor:      {close_orphan_prs: true}    # an open PR on a kernel branch whose item is not on
+      floor:      {close_orphan_prs: true,    # an open PR on a kernel branch whose item is not on
                                               # the record, Done or retired is closed (comment)
+                   cancel_stale_ci: true}     # a queued/running CI run whose PRs are all closed,
+                                              # or whose head is no longer its PR's head, is
+                                              # cancelled (the runs API, under the rate guard)
       install:    {shadow: true,              # asf kernel install dry-runs the new venv's tick on
                                               # live facts first: a crash keeps the old plists
                    max_state_changes: 25,     # more items changing state than this (or Launch
@@ -185,12 +193,12 @@ SPEC = {
                 'test_runs_per_tick': (1, int), 'gates': (True, bool),
                 'inbox_bugs': (True, bool)},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
-             'silent_stuck_max': (0, int), 'since': (None, 'time')},
+             'silent_stuck_max': (0, int), 'since': (None, 'time'), 'satisfied': (True, bool)},
     'waits': {'targets': (WAIT_TARGETS, 'targets'), 'breach': (True, bool),
               'max_session_age': ('3h', 'duration'),
               'max_review_session_age': ('90m', 'duration'),
               'max_ci_age': ('1h', 'duration'), 'bound_min_samples': (20, int)},
-    'floor': {'close_orphan_prs': (True, bool)},
+    'floor': {'close_orphan_prs': (True, bool), 'cancel_stale_ci': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int),
                 'lock_timeout_s': (600, int)},
 }

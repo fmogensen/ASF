@@ -209,6 +209,24 @@ class FileBug:
 
 
 @dataclasses.dataclass
+class Satisfied:
+    """The still-needed gate found ``item_id`` already done on the trunk: ``tests`` (new since it
+    was planned) pass on a fresh worktree of trunk ``sha``. It is Done with the note
+    ``satisfied on main at <sha>: <tests>`` and nothing is launched (:mod:`asf.kernel.needed`)."""
+    item_id: str
+    sha: str
+    tests: list = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class CancelRun:
+    """Cancel workflow run ``run_id``: ``why`` it can no longer matter (its PR is closed, or it
+    runs on a head that is no longer its PR's head). Never rerun."""
+    run_id: int
+    why: str = ''
+
+
+@dataclasses.dataclass
 class Plan:
     """The whole decision of one tick. ``states`` maps every item id the kernel judged (Tasks and
     Bugs, plus the derived state of every Feature and Story) to ``(State, Stuck or None)`` — the
@@ -224,7 +242,9 @@ class Plan:
     safety net's verdict when the trunk is red (``{'sha', 'action'}``, logged ``MAIN RED <sha>
     -> <action>``; None when green or unread: :mod:`asf.kernel.mainline`). ``wip`` is the WIP
     cap's hold this tick (``{'open', 'cap', 'held'}``: open PRs in Review + Landing, the cap, the
-    new builds/plans/specs that wait; None when it holds nothing back)."""
+    new builds/plans/specs that wait; None when it holds nothing back). ``gate`` are the
+    still-needed gate's lines (:func:`asf.kernel.needed.gate_line`): ``{'item', 'verdict',
+    'why'}`` each."""
     states: dict = dataclasses.field(default_factory=dict)
     actions: list = dataclasses.field(default_factory=list)
     idle: dict = None
@@ -233,6 +253,7 @@ class Plan:
     breaches: list = dataclasses.field(default_factory=list)
     main: dict = None
     wip: dict = None
+    gate: list = dataclasses.field(default_factory=list)
 
 
 def describe(action):
@@ -280,4 +301,9 @@ def describe(action):
                                                 action.branch)
     if isinstance(action, FileBug):
         return 'file bug: %s' % action.title
+    if isinstance(action, Satisfied):
+        return 'SATISFIED %s on main at %s: %s' % (action.item_id, action.sha[:9],
+                                                   ', '.join(action.tests))
+    if isinstance(action, CancelRun):
+        return 'cancel run %s: %s' % (action.run_id, action.why)
     return repr(action)

@@ -91,6 +91,10 @@ class Item:
     retired card reads as Done): the next tick clears those fields off the card.
     ``reverted`` are the numbers of the item's merged PRs the kernel reverted off a red main
     (:mod:`asf.kernel.mainline`): such a merge no longer makes the item Done.
+    ``plan`` is the plan document the card links (``links: {plan: …}``, '' when none);
+    ``created`` the card's creation date (``created:``, else its History's ``created`` line, else
+    its ``stage_since``; '' when unknown): the still-needed gate (:mod:`asf.kernel.needed`) dates
+    the item's baseline by them. ``signature`` is a Bug card's ``signature:`` ('' when none).
     """
     id: str
     type: str = 'task'
@@ -116,6 +120,22 @@ class Item:
     rebuilds: int = 0
     stale_stuck: bool = False
     reverted: list = dataclasses.field(default_factory=list)
+    plan: str = ''
+    created: str = ''
+    signature: str = ''
+
+
+@dataclasses.dataclass
+class CIRun:
+    """One workflow run still ``queued`` or ``in_progress`` on the product's repo
+    (:meth:`asf.kernel.ports.RealGitHub.active_runs`): its ``run_id``, the ``head_sha`` and
+    ``branch`` it runs on, its ``event`` (``pull_request``, ``push``, …) and the numbers of the
+    pull requests GitHub ties it to (``prs``; empty for a fork's or an unknown one)."""
+    run_id: int
+    head_sha: str = ''
+    branch: str = ''
+    event: str = ''
+    prs: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -306,7 +326,13 @@ class Facts:
     (:class:`MainCommit`, newest first; empty when unread): the main safety net
     (:mod:`asf.kernel.mainline`) judges the newest completed required checks on them. ``seats``
     is how many sessions the host can run now, live ones included (local seats plus the cloud
-    seats its accounts and breaker allow; None: unknown, ``Config.max_sessions`` holds)."""
+    seats its accounts and breaker allow; None: unknown, ``Config.max_sessions`` holds).
+    The still-needed gate's facts (:mod:`asf.kernel.needed`): ``needed`` maps a launch
+    candidate to its probe (``{ids, baseline, tests}``); ``landed_shas`` maps each sha a done
+    REPORT names to its full sha when the trunk holds it ('' when not). ``ci_runs`` are the
+    repo's queued and running workflow runs (:class:`CIRun`, read before the PRs) and
+    ``open_heads`` every open PR's number -> head sha (None when unread): a run whose PRs are all
+    closed, or whose head is no longer its PR's head, is cancelled."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -327,6 +353,10 @@ class Facts:
     strict: bool = True
     main: list = dataclasses.field(default_factory=list)
     seats: int = None
+    needed: dict = dataclasses.field(default_factory=dict)
+    landed_shas: dict = dataclasses.field(default_factory=dict)
+    ci_runs: list = dataclasses.field(default_factory=list)
+    open_heads: dict = None
 
 
 @dataclasses.dataclass
@@ -373,7 +403,12 @@ class Config:
     off, or with several candidates, a Bug is filed for a fix session
     (:class:`asf.kernel.actions.FileBug`). ``max_open_prs`` is the WIP cap: while the items in
     Review plus Landing exceed it, no new build, plan or spec launches — their seats go to fix
-    rounds and reviews (None: no cap — the bare model's default)."""
+    rounds and reviews (None: no cap — the bare model's default).
+    The still-needed gate (``kernel.gate``,
+    :mod:`asf.kernel.needed`): ``needed_satisfied`` — a fresh Task or Bug whose named tests are
+    new since its plan and green on the trunk is Done, not launched.
+    ``cancel_stale_ci``: a queued or running CI run whose PRs are closed, or whose head is no
+    longer its PR's head, is cancelled (:class:`asf.kernel.actions.CancelRun`)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -405,3 +440,5 @@ class Config:
     main_red_revert: bool = False
     revert_branch: str = ''
     max_open_prs: int = None
+    needed_satisfied: bool = False
+    cancel_stale_ci: bool = False

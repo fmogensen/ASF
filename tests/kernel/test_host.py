@@ -114,7 +114,8 @@ class Settings(unittest.TestCase):
         self.assertEqual(P.config_for(env.Product('sample', {'repo_slug': 'o/r'})).update_parallel,
                          2)
         self.assertEqual(k['gate'], {'window_h': 24, 'first_push_green_min': 0.7, 'landed_min': 5,
-                                     'silent_stuck_max': 0, 'since': None})
+                                     'silent_stuck_max': 0, 'since': None, 'satisfied': True})
+        self.assertTrue(k['floor']['cancel_stale_ci'])
 
     def test_a_malformed_value_refuses_the_load_and_an_unknown_key_warns(self):
         text = ('product: sample\nrepo_slug: o/r\nkernel:\n  launch:\n    rank: random\n'

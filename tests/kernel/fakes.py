@@ -136,6 +136,9 @@ class FakeGitHub:
     def branches(self):
         return copy.deepcopy(self._branches)
 
+    def cancel_run(self, run_id):
+        self._do('cancel_run', run_id)
+
     def archive_and_reset(self, pr, branch, head_sha, comment):
         self._do('archive_and_reset', pr)
         self.archived = getattr(self, 'archived', []) + [(pr, branch, head_sha, comment)]

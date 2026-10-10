@@ -150,6 +150,13 @@ item and the actions of one tick. The rules it holds, in the design's words:
   ended and relaunched; a PR's required CI past twice the ``ci`` p90 is cancelled
   (:class:`Rerun` ``cancel``) and its cancelled check rerun next tick. A Stuck on the operator
   waits on a console question and is not LIMBO.
+- Still needed (:mod:`asf.kernel.needed`, ``config.needed_satisfied``): before every launch of a
+  Ready Task or Bug the tests its card names, new since it was planned, are run on the trunk —
+  all green, it is Done (:class:`Satisfied`) and nothing launches; a done REPORT that pushed
+  nothing and names a landed sha and passing tests is Done the same way; a kernel PR that
+  changes nothing is closed (Done, or Ready with a finding). A queued or running CI run whose
+  PRs are closed, or whose head is no longer its PR's head, is cancelled
+  (``config.cancel_stale_ci``, :class:`CancelRun`).
 - A clean floor (``config.close_floor``): an open PR on a kernel branch prefix whose item is not
   on the record (``Facts.orphan_prs``), or is Done or retired (not reopened, not a Feature whose
   spec only landed) and held by no live session, is closed with a comment (:class:`ClosePR`);
@@ -171,6 +178,7 @@ from asf.kernel import actions as A
 from asf.kernel import idclaims
 from asf.kernel import resolvers
 from asf.kernel import mainline
+from asf.kernel import needed
 from asf.kernel import model as M
 from asf.kernel import reports as R
 from asf.kernel import waits as W
@@ -243,8 +251,9 @@ IDLE_REASONS = {
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
 ORDER = (A.FileInbox, A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem,
-         A.MarkStuck, A.MintStory, A.ArchiveAndReset, A.ClosePR, A.RevertPR, A.FileBug, A.OpenPR,
-         A.Rerun, A.UpdateBranch, A.EnableAutoMerge, A.MergePR, A.Launch)
+         A.Satisfied, A.MarkStuck, A.MintStory, A.ArchiveAndReset, A.ClosePR, A.CancelRun,
+         A.RevertPR, A.FileBug, A.OpenPR, A.Rerun, A.UpdateBranch, A.EnableAutoMerge, A.MergePR,
+         A.Launch)
 
 #: the attempt a live session ended past ``Config.max_session_age_h`` leaves on its item
 OVER_AGE = 'session ran past its max age'
@@ -343,6 +352,8 @@ def decide(facts, config):
             actions.append(A.EndSession(s.job, free_worktree=True))
     over_age = _over_age(facts, config)
     actions += [A.EndSession(s.job, free_worktree=False) for s, _age in over_age]
+    facts, found_done, done = needed.take_done(facts, config)  # the still-needed gate
+    actions += found_done
     closes = floor_closes(facts, config)
     closing = {a.item_id for a in closes if a.item_id in items}
 
@@ -352,6 +363,13 @@ def decide(facts, config):
                     else _park(items[iid], facts, config) if iid in parked
                     else _judge(items[iid], facts, config, actions)) for iid in sorted(items)}
     actions += closes
+    gate_actions, gate, gate_notes = needed.judge(facts, config, judged, _Judged, done)
+    shut = {a.pr for a in gate_actions if isinstance(a, A.ClosePR)}
+    actions = [a for a in actions if not (isinstance(a, (A.EnableAutoMerge, A.UpdateBranch,
+                                                         A.MergePR)) and a.pr in shut)]
+    actions += gate_actions
+    actions += needed.stale_runs(facts, config, {a.pr for a in actions
+                                                 if isinstance(a, A.ClosePR)})
     for iid, j in judged.items():
         old = items[iid]
         if j.state is State.STUCK and (old.state is not State.STUCK or old.stuck != j.stuck):
@@ -379,6 +397,8 @@ def decide(facts, config):
     train, notes = _merge_train(items, judged, config, blocks, facts.now,
                                 first={i for i, (c, _a) in due.items() if c in ('train', 'merge')})
     actions += train
+    for iid, texts in gate_notes.items():
+        notes.setdefault(iid, []).extend(texts)
     main_actions, main = mainline.judge(facts, config)
     for a in main_actions:
         if isinstance(a, A.RevertPR):  # back to Ready now; relaunched once the revert is on
@@ -399,7 +419,7 @@ def decide(facts, config):
     return A.Plan(states=states, actions=actions, idle=idle, notes=notes,
                   limbo=limbo(facts, config, judged, states, parked, children, actions, queued,
                               stalled),
-                  breaches=found, main=main, wip=wip or None)
+                  breaches=found, main=main, wip=wip or None, gate=gate)
 
 
 def blind_plan(facts):

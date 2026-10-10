@@ -20,7 +20,9 @@ matched and returns ``{probe key: result}``:
 
 Each result is kept in ``state/<product>/kernel-resolve.json`` by probe key (a question asked again
 is not re-run); at most ``test_runs_per_tick`` test runs happen per tick, the rest wait for the
-next. A dry run (:mod:`asf.mutation_guard` active) fetches nothing and runs no test; it reads
+next — a ``more`` call (the still-needed gate's, :mod:`asf.kernel.needed_probe`, after the
+questions') counts against the same cap. A dry run (:mod:`asf.mutation_guard` active)
+fetches nothing and runs no test; it reads
 symbols off the local ``origin/<main>`` and the cache. A disabled class is never probed.
 """
 import ast
@@ -58,6 +60,7 @@ class TrunkProbe:
         self.gates = tuple(gates or ())
         self.enabled = {R.TRUNK_TESTS: trunk_tests, R.SYMBOL: symbols, R.GATE: bool(self.gates)}
         self.test_runs_per_tick = test_runs_per_tick
+        self.spent = 0  # test/gate runs this port made this tick, across probe() calls
 
     @classmethod
     def for_product(cls, product, state_dir):
@@ -92,28 +95,31 @@ class TrunkProbe:
 
     # ---- the probe ----------------------------------------------------------------------------
 
-    def probe(self, probes):
-        """``{probe key: result}`` for ``probes`` (see the module doc)."""
+    def probe(self, probes, more=False):
+        """``{probe key: result}`` for ``probes`` (see the module doc). ``more``: a second call of
+        the same tick — the runs the first one made count against the cap."""
         from asf import mutation_guard
+        if not more:
+            self.spent = 0
         dry = mutation_guard.is_active()
         probes = [p for p in dict.fromkeys(probes) if self.enabled.get(p.cls)]
         if not probes or not self.repo:
             return {}
         cache = self._load()
-        out, fetched, runs, sha = {}, False, 0, None
+        out, fetched, sha = {}, False, None
         for p in probes:
             if p.cls == R.GATE:
-                if dry or runs >= self.test_runs_per_tick:
+                if dry or self.spent >= self.test_runs_per_tick:
                     continue
                 result, ran = self._gate(cache, *p.target)
-                runs += ran
+                self.spent += ran
                 out[p.key] = result
                 self._save(cache)
                 continue
             if p.key in cache:
                 out[p.key] = cache[p.key]
                 continue
-            if p.cls == R.TRUNK_TESTS and (dry or runs >= self.test_runs_per_tick):
+            if p.cls == R.TRUNK_TESTS and (dry or self.spent >= self.test_runs_per_tick):
                 continue
             if not fetched and not dry:
                 from asf import gitops
@@ -123,7 +129,7 @@ class TrunkProbe:
             if not sha:
                 return out
             if p.cls == R.TRUNK_TESTS:
-                runs += 1
+                self.spent += 1
                 result = self._run_tests(sha, p.target)
             else:
                 result = self._symbol(sha, p.target[0])

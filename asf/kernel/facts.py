@@ -32,6 +32,10 @@ The trunk's ruleset strictness (``Facts.strict``, :meth:`asf.kernel.ports.RealGi
 the rules read once a tick, shared with the required checks) and its newest commits
 (``Facts.main``, :meth:`asf.kernel.ports.RealGitHub.main_commits`) are read when the port has
 them; an unreadable strictness is True (the merge train stays), unreadable commits are none.
+The still-needed gate's probe (:mod:`asf.kernel.needed_probe`, after the question probes, so the
+two share the trunk probe's per-tick cap) fills ``Facts.needed`` and ``Facts.landed_shas``; the
+repo's queued and running CI runs are read before the PRs (``Facts.ci_runs``) and every open PR's
+head after (``Facts.open_heads``, off the port's open listing).
 
 A GitHub read that fails (the port has already retried a transient one) leaves no partial PR
 facts: ``prs``, GitHub's reviews and the pushed branches are empty and ``Facts.github_error``
@@ -182,11 +186,48 @@ def read_seats(ports):
         return None
 
 
+def read_runs(ports):
+    """``Facts.ci_runs``: the repo's queued and running workflow runs
+    (:meth:`asf.kernel.ports.RealGitHub.active_runs`), read *before* the PRs — a run's PR then
+    open and missing from the listing after is closed for certain; ``[]`` when the port has no
+    such read, is slowed by the rate guard, or fails."""
+    from asf import gh_limit
+    from asf.kernel.ports import PortError
+    read = getattr(ports.github, 'active_runs', None)
+    if read is None:
+        return []
+    try:
+        return list(read() or [])
+    except (PortError, OSError, gh_limit.RateLimited):
+        return []
+
+
+def read_needed(ports, items, prs, sessions):
+    """``(Facts.needed, Facts.landed_shas)`` off the still-needed gate's probe
+    (:class:`asf.kernel.needed_probe.NeededProbe` over ``ports.trunk``); empty when the ports have
+    no trunk probe or a read fails (every item then launches as before)."""
+    trunk = getattr(ports, 'trunk', None)
+    if trunk is None or not hasattr(trunk, 'repo'):
+        return {}, {}
+    from asf.kernel.needed_probe import NeededProbe
+    probe = NeededProbe(trunk)
+    try:
+        needed = probe.read(items, prs, sessions)
+    except Exception:  # noqa: BLE001 — an unprobed item launches as before
+        needed = {}
+    try:
+        landed = probe.landed(sessions)
+    except Exception:  # noqa: BLE001
+        landed = {}
+    return needed, landed
+
+
 def read_facts(ports):
     """The :class:`~asf.kernel.model.Facts` the three ports describe now."""
     record = ports.record
     items = record.items()
     orphans = []
+    runs = read_runs(ports)
     prs, gh_reviews, pushed, github_error = read_github(ports, items, orphans)
     reviews = list(record.reviews()) + gh_reviews
     last_jobs = getattr(ports.sessions, 'last_jobs', None)
@@ -207,11 +248,15 @@ def read_facts(ports):
     seats = read_seats(ports)
     look_bad = getattr(record, 'unreadable', None)
     strict, main = read_trunk(ports) if not github_error else (True, [])
+    resolved = read_resolved(ports, items, sessions, prs)
+    needed, landed = read_needed(ports, items, prs, sessions) if not github_error else ({}, {})
+    heads = getattr(ports.github, 'open_heads', None) if not github_error else None
     return Facts(unreadable=dict(look_bad() or {}) if look_bad else {},
                  items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
                  stranded=stranded, id_claims=read_id_claims(record, items, sessions),
-                 resolved=read_resolved(ports, items, sessions, prs),
+                 resolved=resolved, needed=needed, landed_shas=landed, ci_runs=runs,
+                 open_heads=dict(heads) if isinstance(heads, dict) else None,
                  github_error=github_error, orphan_prs=orphans, strict=strict, main=main,
                  seats=seats,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

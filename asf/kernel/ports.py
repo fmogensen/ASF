@@ -175,7 +175,29 @@ def item_from_card(rec):
         notes=[str(n) for n in as_list(machine.get(NOTES))],
         reverted=[int(n) for n in as_list(machine.get(REVERTED)) if str(n).isdigit()],
         stuck_since=(str(machine.get(STUCK_SINCE)) if stuck is not None and machine.get(STUCK_SINCE)
-                     else None))
+                     else None),
+        plan=_plan_link(meta), created=_created(meta, machine, rec.get('body') or ''),
+        signature=str(meta.get('signature') or ''))
+
+
+#: a History line that dates the card (``- 2026-09-24: created (inbox) …``)
+CREATED_RE = re.compile(r'^\s*-\s*(\d{4}-\d{2}-\d{2})\b[^\n]*\bcreated\b', re.M)
+
+
+def _plan_link(meta):
+    links = meta.get('links')
+    return str(links.get('plan') or '') if isinstance(links, dict) else ''
+
+
+def _created(meta, machine, body):
+    """The card's creation date: ``created:``, else its History's first ``created`` line, else
+    ``stage_since`` ('' when none)."""
+    if meta.get('created'):
+        return str(meta.get('created'))
+    m = CREATED_RE.search(body)
+    if m:
+        return m.group(1)
+    return str(machine.get('stage_since') or '')
 
 
 def declared_stories_of(rec):
@@ -770,6 +792,7 @@ class RealGitHub:
         self._git = git
         self.log = log or _quiet
         self.budget, self.slow, self._budget_read = None, False, False
+        self.open_heads = None  # every open PR's number -> head sha, once the PRs are read
         try:
             self._slow_below = float(product.kernel['github']['slow_below'])
         except (AttributeError, KeyError, TypeError, ValueError):
@@ -841,6 +864,8 @@ class RealGitHub:
         if not r.ok:
             raise PortError('open PRs unreadable: %s' % r.reason)
         out = []
+        self.open_heads = {d['number']: d.get('headRefOid') or '' for d in r.data or []
+                           if isinstance(d, dict) and d.get('number')}
         for d in r.data or []:
             if self._revert_branch(d.get('headRefName')):
                 continue  # the kernel's revert of a red trunk: never its item's own PR
@@ -1134,6 +1159,34 @@ class RealGitHub:
             return
         self._write(['run', 'rerun', str(run_id), '-R', self.slug, '--failed'],
                     'rerun %d' % run_id)
+
+    #: the run statuses :meth:`active_runs` lists
+    ACTIVE_RUN_STATUSES = ('queued', 'in_progress')
+
+    def active_runs(self):
+        """The repo's queued and running workflow runs (:class:`~asf.kernel.model.CIRun`, at most
+        100 of each status): two reads, none while the budget is :attr:`slow`. Read before
+        :meth:`prs`, so a run whose PR was open then and is missing from the open listing after
+        is one whose PR closed."""
+        self.read_budget()
+        if self.slow:
+            return []
+        out = []
+        for status in self.ACTIVE_RUN_STATUSES:
+            r = self._gh(['api', 'repos/%s/actions/runs?status=%s&per_page=100'
+                          % (self.slug, status)])
+            if not r.ok:
+                raise PortError('%s runs unreadable: %s' % (status, r.reason))
+            for d in (r.data or {}).get('workflow_runs') or []:
+                out.append(M.CIRun(
+                    run_id=d.get('id'), head_sha=str(d.get('head_sha') or ''),
+                    branch=str(d.get('head_branch') or ''), event=str(d.get('event') or ''),
+                    prs=[p.get('number') for p in d.get('pull_requests') or []
+                         if isinstance(p, dict) and p.get('number')]))
+        return out
+
+    def cancel_run(self, run_id):
+        self._write(['run', 'cancel', str(run_id), '-R', self.slug], 'cancel %s' % run_id)
 
     def _prefixes(self):
         conv = self.product.conventions
@@ -1839,6 +1892,8 @@ def config_for(product, cfg=None, github=None):
         max_ci_age_h=(k['waits']['max_ci_age'] / 3600 if k['waits']['breach']
                       and k['waits']['max_ci_age'] else None),
         close_floor=bool(k['floor']['close_orphan_prs']),
+        cancel_stale_ci=bool(k['floor']['cancel_stale_ci']),
+        needed_satisfied=bool(k['gate']['satisfied']),
         main_red_revert=bool(k['landing']['main_red_revert']),
         revert_branch=conv.prefix('revert'),
         max_open_prs=int(k['launch']['max_open_prs']) or None)

@@ -570,6 +570,16 @@ kernel:
     landed_min: 5           # Tasks/Bugs landed via kernel PRs since `since`
     silent_stuck_max: 0     # Stuck items with no reason or no owner
     # since: 2026-10-09T14:00:00Z   # the proof's start
+    satisfied: true         # still needed? Before every launch of a Ready Task or Bug, the tests
+                            # its card names as proof (`proves:` lines, test ids in its
+                            # Acceptance, a Bug's `Fixes:` lines and `signature`; never its plan's
+                            # lines) that did not exist when it was planned are run on a fresh
+                            # worktree of origin's trunk (resolve.test_runs_per_tick, shared). All
+                            # green: Done, note "satisfied on main at <sha>: <tests>", nothing
+                            # launched (SATISFIED on the tick line); not run yet: the launch waits
+                            # a tick. A done REPORT that pushed nothing and names a landed sha and
+                            # passing tests is Done the same way; a kernel PR that changes nothing
+                            # is closed (Done if green on main, else relaunched with a finding)
   waits:
     targets:                # per wait class (`asf kernel waits`): a wait older than its target is
       seat: 10m             # flagged ⚠ there and counted on the tick line ("over-target waits");
@@ -602,6 +612,9 @@ kernel:
     close_orphan_prs: true  # an open PR on a kernel branch (code/fix/spec/plan prefix) whose item
                             # is not on the record, Done or retired is closed with a comment
                             # naming why (the branch is kept); a reopened item keeps its PR
+    cancel_stale_ci: true   # a queued/running CI run whose PRs are all closed, or whose head is no
+                            # longer its PR's head, is cancelled (two runs-API reads a tick, none
+                            # while GitHub calls are low: kernel.github.slow_below)
   install:                  # `asf kernel install`'s shadow preflight
     shadow: true            # before the plists move to another venv, that venv's
                             # `asf kernel tick --dry-run` runs on the live facts (read-only); a

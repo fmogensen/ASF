@@ -44,6 +44,9 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   note; a :class:`~asf.kernel.actions.FileBug` writes its Bug card (once per key);
 - a session that ended without a REPORT is an attempt :data:`asf.kernel.decide.NO_REPORT` and
   its worktree is kept: the relaunch continues on it;
+- a :class:`~asf.kernel.actions.Satisfied` writes Done and the note ``satisfied on main at
+  <sha>: <tests>`` (:mod:`asf.kernel.needed`); its ended session's unpushed HEAD is not
+  published (no empty commit); a :class:`~asf.kernel.actions.CancelRun` cancels the run;
 - a review session that ended has its report's verdict lines
   (:func:`asf.kernel.briefs.parse_verdict`) recorded on the review ledger keyed by the tree and
   the PR change it was launched on — or, when it printed none, an attempt :data:`NO_VERDICT`.
@@ -182,6 +185,8 @@ class _Applier:
             self.attempt(s.item_id, NO_REPORT)
             free = False  # the relaunch continues on its worktree and branch
         sha = host_push_sha(s)
+        if any(isinstance(x, A.Satisfied) and x.item_id == s.item_id for x in self.plan.actions):
+            sha = ''  # already done on main: no empty commit is published
         if sha:
             try:
                 note = self.ports.sessions.push_rebase(s, sha)
@@ -265,6 +270,18 @@ class _Applier:
         if a.note and a.note not in notes:
             self.set(a.item_id, **{P.NOTES: notes + [a.note]})
         return 'revert PR #%s, auto-merge on' % number
+
+    def Satisfied(self, a):
+        from asf.kernel.needed import note
+        text = note(a.sha, a.tests)
+        notes = self.field(a.item_id, P.NOTES, [])
+        if text not in notes:
+            self.set(a.item_id, **{P.NOTES: notes + [text]})
+        self.set(a.item_id, **{P.STATE: State.DONE.value})
+        return text
+
+    def CancelRun(self, a):
+        self.ports.github.cancel_run(a.run_id)
 
     def FileBug(self, a):
         return 'filed %s' % self.ports.record.file_bug(a.key, a.title, a.body, a.rank)
