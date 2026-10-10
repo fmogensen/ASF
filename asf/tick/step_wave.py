@@ -846,7 +846,22 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
         if bypass:
             bypass_open = False                 # one bypass at a time, across the whole wave
         if act:
-            wrow, brief = build(row, bypass)
+            try:
+                wrow, brief = build(row, bypass)
+            except Exception as e:  # noqa: BLE001 — one row's brief never costs the rest
+                # B-83575: build() used to raise straight out of screen(), aborting the wave
+                # before _wave() ever ran — a free seat and a launchable row sat idle, tick
+                # after tick, while the preview (preview_row, never the real brief builder)
+                # kept reporting the row as launchable (B-82809)
+                room += 1
+                if bypass:
+                    bypass_open = True
+                why = f'brief build failed: {(str(e) or type(e).__name__).splitlines()[0]}'
+                say(f'waits    {job:<24} {row.item_id:<10} — {why}')
+                import traceback
+                say(traceback.format_exc().rstrip())
+                result.append(Screened(row, why, WAITS))
+                continue
             capped = 'parked' if relaunch_capped(product, row, wrow, out) else ''
         else:
             wrow, brief = preview_row(product, row, items), None
