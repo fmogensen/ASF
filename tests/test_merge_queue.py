@@ -896,6 +896,8 @@ class DropReasonTests(QueueRepo):
             why = line.split('dropped — ', 1)[1]
             self.assertTrue(why.startswith('red on '))
             self.assertNotIn("'s (", why)
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
 
     def test_red_on_the_trunk_too_the_drop_line_is_unchanged(self):
         self.queue_pass(self.lane(), self.entries())
@@ -910,6 +912,8 @@ class DropReasonTests(QueueRepo):
         self.assertTrue(why.startswith('red on '))
         self.assertNotIn("'s (", why)
         self.assertEqual(self.batches(), [])
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
 
     def test_a_lone_member_whose_log_named_no_file_keeps_the_unchanged_drop_line(self):
         self.queue_pass(self.lane(), self.entries()[:1])
@@ -920,6 +924,8 @@ class DropReasonTests(QueueRepo):
         why = line.split('dropped — ', 1)[1]
         self.assertTrue(why.startswith('red on '))
         self.assertNotIn("'s (", why)
+        self.assertTrue(any("red: " in r for r in self.red_ledger_rows()), self.red_ledger_rows())
+        self.assertFalse(any('#1' in r for r in self.red_ledger_rows()), self.red_ledger_rows())
 
     def test_culprit_texts_head_names_the_covering_test_for_a_hop_culprit(self):
         self.push_main({'tests/test_bars.py': 'apps.site.day-bars\n'}, 'add a test')
