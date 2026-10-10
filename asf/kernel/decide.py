@@ -1566,7 +1566,7 @@ def _mint(facts, parked):
 #: open PR, a review, a groom-fill of a card the Definition of Ready holds (capped a tick: a
 #: build needs a ready card, and a full house of builds would starve it), a build of a Task/Bug,
 #: a plan, a spec
-FINISH_FIRST = ('fix', 'review', 'groom', 'build', 'plan', 'spec')
+FINISH_FIRST = ('fix', 'review', 'build', 'plan', 'spec', 'groom')
 
 #: the launch classes the WIP cap (``Config.max_open_prs``) holds back: new work
 NEW_WORK = ('build', 'plan', 'spec')
@@ -1595,7 +1595,8 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
     ``'overlap'`` and every WIP hold to ``'wip'``. After the reviews come the groom-fill sessions of
     the cards the Definition of Ready holds (``unready``), at most ``config.dor_fill_per_tick`` a
     tick and
-    ``config.dor_max_fills`` a card, never held by the WIP cap or a file overlap (they only read)."""
+    ``config.dor_max_fills`` a card, with live ones at most ``config.dor_max_concurrent`` seats,
+    after the fix rounds, reviews, builds, plans and specs, never held by the WIP cap or a file overlap (they only read)."""
     items = facts.items
     free = _free(facts, config)
     inherit = config.rank != 'own'
@@ -1625,8 +1626,10 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
     busy = [items[i].writes for i in items
             if states[i][0] is State.BUILDING and _visible(items, i, parked)]
     out, skipped, held, fills = [], {}, 0, 0
+    live_fills = sum(1 for s in facts.sessions if s.alive and s.kind == D.GROOM_FILL)
     for cls, iid, _key in cands:
-        if cls == 'groom' and fills >= config.dor_fill_per_tick:
+        if cls == 'groom' and (fills >= config.dor_fill_per_tick or fills + live_fills
+                               >= config.dor_max_concurrent):
             continue
         if over and cls in NEW_WORK:
             skipped[iid] = queued[iid] = 'wip'

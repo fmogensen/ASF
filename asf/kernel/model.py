@@ -467,6 +467,7 @@ class Config:
     dor: bool = False
     dor_fill_per_tick: int = 3
     dor_max_fills: int = 2
+    dor_max_concurrent: int = 2
     groom_branch: str = 'groom-fill/'
     risk_high: tuple = ()
     risk_large_lines: int = 0

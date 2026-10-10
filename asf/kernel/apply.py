@@ -267,6 +267,9 @@ class _Applier:
         note = None
         if v is None:
             note = '%s: groom-fill verdict rejected: %s' % (s.job, why)
+            if D.format_only(why):  # a format slip is not an attempt: the fill is given back
+                n = self.field(s.item_id, P.DOR_FILLS, 0)
+                self.set(s.item_id, **{P.DOR_FILLS: max(0, n - 1)})
         else:
             try:
                 if v.verdict == 'superseded':

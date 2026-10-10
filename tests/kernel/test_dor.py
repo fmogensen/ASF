@@ -142,7 +142,7 @@ class Decide(unittest.TestCase):
         tasks = [ready_task('T-%04d' % n, writes=[]) for n in range(1, 6)]
         tasks.append(B.task('T-0009', state=State.REVIEW, parent='F-0001'))
         f = world(*tasks, prs=[B.pr(9, 'T-0009')])
-        plan = decide(f, cfg(dor_fill_per_tick=3, max_sessions=10))
+        plan = decide(f, cfg(dor_fill_per_tick=3, dor_max_concurrent=3, max_sessions=10))
         kinds = [(a.kind, a.item_id) for a in B.of(plan, A.Launch)]
         self.assertEqual(kinds[0], ('review', 'T-0009'))
         self.assertEqual([k for k, _i in kinds[1:]], ['groom-fill'] * 3)
@@ -152,7 +152,17 @@ class Decide(unittest.TestCase):
         f = world(ready_task('T-0001', writes=[]), ready_task('T-0002'))
         plan = decide(f, cfg(max_sessions=1))
         self.assertEqual([(a.kind, a.item_id) for a in B.of(plan, A.Launch)],
-                         [('groom-fill', 'T-0001')], 'a groom-fill is not starved by builds')
+                         [('build', 'T-0002')], 'a build of a ready card comes before a fill')
+
+    def test_groom_fills_hold_at_most_max_concurrent_seats(self):
+        tasks = [ready_task('T-%04d' % n, writes=[]) for n in range(1, 6)]
+        f = world(*tasks)
+        plan = decide(f, cfg(dor_fill_per_tick=5, dor_max_concurrent=2, max_sessions=10))
+        self.assertEqual(len(B.of(plan, A.Launch)), 2)
+        live = [B.session('groom-fill-t-0009', 'T-0009', kind='groom-fill', alive=True)]
+        plan = decide(world(*tasks, sessions=live),
+                      cfg(dor_fill_per_tick=5, dor_max_concurrent=2, max_sessions=10))
+        self.assertEqual(len(B.of(plan, A.Launch)), 1, 'a live fill uses one of the two')
 
     def test_the_idle_alarm_names_the_hold(self):
         plan = decide(world(ready_task(writes=[], dor_fills=2)), cfg(dor_max_fills=3,
@@ -249,6 +259,30 @@ class Verdict(unittest.TestCase):
         self.assertEqual(dor.parse_verdict(base + 'superseded_by: ABC1234')[0].superseded_by,
                          'abc1234')
 
+    def test_a_missing_risk_raise_means_none(self):
+        for line in ('', 'risk_raise:\n', 'risk_raise: \'\'\n', 'risk_raise: "" # x\n'):
+            v, why = dor.parse_verdict('GROOM-FILL\nverdict: proceed\n%sreason: ok\n' % line)
+            self.assertEqual((why, v.risk_raise), ('', 'none'), line)
+        v, why = dor.parse_verdict('GROOM-FILL\nverdict: proceed\nrisk_raise: sky\nreason: ok\n')
+        self.assertIsNone(v)
+
+    def test_acceptance_may_be_a_string_or_bullets(self):
+        one = ('GROOM-FILL\nverdict: fill\nacceptance: a holds — tests/test_a.py::A\n'
+               'writes: asf/a.py\nrisk_raise: none\nreason: x\n')
+        v, why = dor.parse_verdict(one)
+        self.assertEqual((why, v.acceptance, v.writes),
+                         ('', ['a holds — tests/test_a.py::A'], ['asf/a.py']))
+        bullets = ('GROOM-FILL\nverdict: fill\nacceptance:\n- a holds — tests/test_a.py::A\n'
+                   '* b holds — tests/test_a.py::B\nwrites:\n- asf/a.py\n- tests/test_a.py\n'
+                   'risk_raise: none\nreason: x\n')
+        v, why = dor.parse_verdict(bullets)
+        self.assertEqual(why, '')
+        self.assertEqual(len(v.acceptance), 2)
+        self.assertEqual(v.writes, ['asf/a.py', 'tests/test_a.py'])
+        v, why = dor.parse_verdict('GROOM-FILL\nverdict: fill\nacceptance: ["x"]\n'
+                                   'writes: []\nrisk_raise: none\nreason: x\n')
+        self.assertIsNone(v, 'no test named is still rejected')
+
     def test_proceed_needs_only_the_reason(self):
         v, _ = dor.parse_verdict('```\nGROOM-FILL\nverdict: proceed\nrisk_raise: none\n'
                                  'reason: ready as is\n```\n')
@@ -325,6 +359,13 @@ class Apply(unittest.TestCase):
         self.assertEqual(rec.filled, [])
         self.assertTrue(any('groom-fill verdict rejected: acceptance' in n
                             for n in rec.fields['T-0001'][P.NOTES]))
+
+    def test_a_format_only_rejection_gives_the_fill_back(self):
+        it = ready_task(writes=[], dor_fills=1)
+        rec, _ = _end('GROOM-FILL\nverdict: proceed\nrisk_raise: sky\nreason: x\n', it)
+        self.assertEqual(rec.fields['T-0001'][P.DOR_FILLS], 0)
+        rec, _ = _end('GROOM-FILL\nverdict: fill\nrisk_raise: none\nreason: x\n', it)
+        self.assertNotIn(P.DOR_FILLS, rec.fields['T-0001'], 'absent content keeps the fill spent')
 
     def test_risk_raise_high_is_a_note(self):
         rec, _ = _end('GROOM-FILL\nverdict: proceed\nrisk_raise: high\nreason: touches CI\n')
@@ -448,7 +489,8 @@ class Settings(unittest.TestCase):
 
     def test_the_dor_block_and_its_defaults(self):
         k = settings.read(None)
-        self.assertEqual(k['dor'], {'enabled': False, 'fill_per_tick': 3, 'max_fills': 2})
+        self.assertEqual(k['dor'], {'enabled': False, 'fill_per_tick': 3, 'max_fills': 2,
+                                    'max_concurrent': 2})
         self.assertEqual(k['models']['groom-fill'], settings.LIGHT_MODEL)
         self.assertEqual(settings.read({'dor': {'enabled': True}})['dor']['enabled'], True)
 

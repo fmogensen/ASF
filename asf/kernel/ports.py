@@ -2094,7 +2094,8 @@ def config_for(product, cfg=None, github=None):
         revert_branch=conv.prefix('revert'),
         max_open_prs=int(k['launch']['max_open_prs']) or None,
         dor=bool(k['dor']['enabled']), dor_fill_per_tick=int(k['dor']['fill_per_tick']),
-        dor_max_fills=int(k['dor']['max_fills']), groom_branch=conv.prefix('groom-fill'),
+        dor_max_fills=int(k['dor']['max_fills']),
+        dor_max_concurrent=int(k['dor']['max_concurrent']), groom_branch=conv.prefix('groom-fill'),
         risk_high=tuple(k['risk']['high']), risk_large_lines=int(k['risk']['large_lines']))
 
 

@@ -124,7 +124,8 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # parked, and a parent that is not Done; else it
                                               # stays New (dor: <missing>) and a groom-fill
                                               # session (models.groom-fill) fills the card
-                   fill_per_tick: 3,          # groom-fills a tick (after reviews, before builds)
+                   fill_per_tick: 3,          # groom-fills a tick (after fixes, reviews, builds)
+                   max_concurrent: 2,         # groom-fill seats held at any time
                    max_fills: 2}              # groom-fill sessions per card, then Stuck
       risk:       {high: [],                  # path globs: an item whose writes (or PR files)
                                               # hit one is high-risk — its review runs on
@@ -223,7 +224,8 @@ SPEC = {
               'max_review_session_age': ('90m', 'duration'),
               'max_ci_age': ('1h', 'duration'), 'bound_min_samples': (20, int)},
     'main_move': {'alarm_minutes': (5, float), 'window_ticks': (15, int)},
-    'dor': {'enabled': (False, bool), 'fill_per_tick': (3, int), 'max_fills': (2, int)},
+    'dor': {'enabled': (False, bool), 'fill_per_tick': (3, int), 'max_fills': (2, int),
+            'max_concurrent': (2, int)},
     'risk': {'high': ((), 'globs'), 'large_lines': (800, int)},
     'floor': {'close_orphan_prs': (True, bool), 'cancel_stale_ci': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int),

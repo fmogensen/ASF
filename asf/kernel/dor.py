@@ -201,6 +201,9 @@ class Verdict:
         self.risk_raise, self.reason = risk_raise, reason
 
 
+BULLET = re.compile(r'^(?:[-*•]|\d+[.)])\s+')
+
+
 def _list(value):
     text = str(value or '').strip()
     if not text:
@@ -210,8 +213,9 @@ def _list(value):
     except ValueError:
         if text.startswith('[') and text.endswith(']'):
             got = [p.strip().strip('"\'') for p in text[1:-1].split(',')]
-        else:
-            return None
+        else:  # a bare string or bullet lines: one entry per line
+            got = [re.sub(r'^(?:[-*•]|\d+[.)])\s+', '', ln.strip()).strip('`"\'')
+                   for ln in text.splitlines()]
     if not isinstance(got, list) or not all(isinstance(g, str) for g in got):
         return None
     return [g.strip() for g in got if g.strip()]
@@ -246,6 +250,9 @@ def block(text):
             out[key] = m.group(2).strip()
         elif key and s and _open_list(out[key]):  # a list written over several lines
             out[key] += ' ' + s
+        elif key in ('acceptance', 'writes') and s and BULLET.match(s) \
+                and not _uncomment(out[key]).startswith('['):  # bullet lines under the key
+            out[key] += '\n' + s
     return out
 
 
@@ -253,6 +260,12 @@ def _open_list(value):
     """Whether ``value`` opens a ``[`` list it has not closed yet."""
     v = _uncomment(value)
     return v.startswith('[') and v.count('[') > v.count(']')
+
+
+def format_only(why):
+    """Whether a rejection (:func:`parse_verdict`) came from the format alone — an unusable
+    ``risk_raise`` or a missing ``reason``, not absent content — so its fill is given back."""
+    return str(why).startswith(('risk_raise ', 'reason: missing'))
 
 
 def parse_verdict(text):
@@ -265,7 +278,7 @@ def parse_verdict(text):
     verdict = _plain(got.get('verdict')).lower()
     if verdict not in VERDICTS:
         return None, 'verdict %r is not one of %s' % (verdict, ' | '.join(VERDICTS))
-    risk = _uncomment(got.get('risk_raise')).strip('`"\'').lower()
+    risk = _uncomment(got.get('risk_raise')).strip('`"\'').lower() or 'none'  # absent: none
     if risk not in RISKS:
         return None, 'risk_raise %r is not one of %s' % (risk, ' | '.join(RISKS))
     why = _plain(got.get('reason'))
