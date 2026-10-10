@@ -84,6 +84,23 @@ BEFORE THE PUSH: every test you added and the ones covering the files you change
 it pass is a failed Feature, not a passed one. CI, the gate, the customer-content check and the
 merge are the lane's — you push, it lands.
 
+## Before the push
+
+level: high (size class large)
+
+| check | result | confidence | evidence |
+| --- | --- | --- | --- |
+| the diff stays inside the declared footprint | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every changed function is reachable, and every caller it changed still compiles | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| the tests the change names were run, and their last line is green | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| no secret value, no host name and no account name is printed or committed | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every error path added is reached by something, and raises or returns what its caller reads | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every value read from outside the process is checked before it is used | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| a changed behaviour has a test that fails when the change is reverted | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| nothing added duplicates something the repo already has | <pass\|fail> | <n/a\|high\|medium\|low> | 
+
+The rows above with a command are run by your `pre-push` hook: a red one refuses the push and prints what failed. Paste the table, filled, in your report.
+
 Final message: the pushed sha, the files written, the test lines, what the note says was left out.
 
 ## The heartbeat, the marker, and the report

@@ -50,6 +50,10 @@ CHEAP = 'cheap'
 KINDS = ('spec', 'spec-amend', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate',
          'fix-bug', 'correct', 'groom', 'groom-clerk', 'reshape', 'spec-plan', 'direct',
          'delivery-plan', 'delivery-code', 'replan')
+#: The code kinds whose brief carries :func:`rubric_block` (S-77506) — no ``CODE_KINDS`` constant
+#: exists to reuse; ``delivery-code`` is also a code kind in :data:`KINDS` and is deliberately
+#: not one of these five.
+RUBRIC_KINDS = ('coder', 'correct', 'fixer', 'fix-bug', 'direct')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug', 'spec_plan': 'spec-plan'}
 #: The class of an item, for picking its model within a kind: a Bug's severity, else its type;
@@ -174,6 +178,7 @@ class Brief:
     add_dirs: list
     id_ranges_needed: bool
     card_digest: str = ''
+    writes_boundary: list = dataclasses.field(default_factory=list)
 
 
 # ---- the kind ----------------------------------------------------------------
@@ -366,6 +371,29 @@ def card_digest(product, item_id, index):
     return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()[:16]
 
 
+#: The brief kinds :func:`writes_boundary_for` never computes a footprint for — a spec, a plan
+#: and a review do not push the Feature's code, so the door's footprint refusal (S-77505) does
+#: not apply to them even when their item happens to be a Task.
+NO_WRITES_BOUNDARY_KINDS = ('spec', 'plan', 'review')
+
+
+def writes_boundary_for(product, kind, item_id, index):
+    """``Brief.writes_boundary`` (C12): the Feature footprint of ``item_id``
+    (:func:`asf.feeder.widen.delivery_footprint`) plus the product's ``shared_writes``
+    (:func:`asf.feeder.footprint.shared_writes`), de-duplicated in first-seen order. ``[]`` for a
+    kind in :data:`NO_WRITES_BOUNDARY_KINDS`, for an item that is not a Task, and — by
+    ``delivery_footprint``'s own answer — for a Task whose Feature has no ``writes:``."""
+    if kind in NO_WRITES_BOUNDARY_KINDS:
+        return []
+    items = feeder_rows.items_of(index) if index else {}
+    if (items.get(item_id) or {}).get('type') != 'task':
+        return []
+    from asf.feeder import footprint, widen
+    conv = getattr(product, 'conventions', None) if product is not None else None
+    return list(dict.fromkeys([*widen.delivery_footprint(items, item_id),
+                                *footprint.shared_writes(conv)]))
+
+
 # ---- the text ----------------------------------------------------------------
 
 def item_line(row, item):
@@ -464,6 +492,46 @@ def pre_push_block(product):
     return '\n\n' + PRE_PUSH_RULE.format(command=command) if command else ''
 
 
+#: The line that closes :func:`rubric_block` — the door reads the same table the session ticks.
+RUBRIC_TAIL = ("The rows above with a command are run by your `pre-push` hook: a red one "
+               "refuses the push and prints what failed. Paste the table, filled, in your "
+               "report.")
+
+
+def rubric_block(product, kind, facts):
+    """``## Before the push``, for a :data:`RUBRIC_KINDS` brief: ``precheck.render_table``'s
+    skeleton for this brief's derived level and the classes the Task's ``writes:`` reach, then
+    one row per ``pre_push_checks`` rule those ``writes:`` reach — the rows the door will check
+    itself. ``''`` for any other kind.
+
+    ``asf/prepush.py`` (the door, Task 1) is not yet on this branch, so ``rules``/``reaching`` are
+    computed here exactly as that module's spec states them: an unset ``pre_push_checks`` (true
+    today, since ``Conventions.pre_push_checks`` does not exist yet either) leaves the rule rows
+    out, same as the spec's own documented case."""
+    if product is None or kind not in RUBRIC_KINDS:
+        return ''
+    from asf import precheck
+    from asf import size as size_mod
+    from asf.feeder import footprint
+    from asf.security import paths as security_paths
+    conv = getattr(product, 'conventions', None)
+    writes = facts.get('writes') or []
+    # asf.conventions.Conventions carries no resolved SizeConfig yet; the module's own default
+    # (asf/conventions.py:1133 falls back the same way for slice_max_files)
+    size_class, _kind, _why = size_mod.classify(writes, size_mod.SizeConfig())
+    hit = {name: globs for name, globs in security_paths.classes(conv).items()
+           if any(footprint.globs_overlap(w, g) for w in writes for g in globs)}
+    level, why = precheck.level_for(size_class, None, None, security=bool(hit))
+    table = precheck.render_table(level, precheck.security_dimensions(hit))
+    rules_fn = getattr(conv, 'pre_push_checks', None)
+    rules = rules_fn() if callable(rules_fn) else []
+    reaching = [r for r in rules
+                if any(footprint.globs_overlap(w, g) for w in writes for g in (r.get('paths') or ()))]
+    rows = ''.join(f"\n| {r.get('why', '')} | <pass\\|fail> | <n/a\\|high\\|medium\\|low> | "
+                   f"`{r.get('run', '')}` — {', '.join(r.get('paths') or ())} |" for r in reaching)
+    return (f'\n\n## Before the push\n\nlevel: {level} ({why})\n\n{table}{rows}\n\n{RUBRIC_TAIL}')
+
+
 def _external_ci(product):
     if product is None:
         return False
@@ -491,6 +559,7 @@ def context(product, row, kind, facts):
         'gate_before_push_direct': gate_before_push_direct(product),
         'pre_push_check': pre_push_block(product),
         'pre_push_doc': pre_push_doc_block(product, kind),
+        'rubric': rubric_block(product, kind, facts),
         'test_command': preamble_mod.conventions(product).test_command
         or '(none set — run the tests you add)',
         'row_kind': getattr(row, 'kind', '') or '',
@@ -854,7 +923,8 @@ def build(product, row, index, inflight=None, repo_facts=None):
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
                  model=model_for(product, kind, facts['item'], ctx['item_id']), add_dirs=add_dirs_for(product, row, kind),
                  id_ranges_needed=id_ranges_needed(kind),
-                 card_digest=card_digest(product, ctx['item_id'], index))
+                 card_digest=card_digest(product, ctx['item_id'], index),
+                 writes_boundary=writes_boundary_for(product, kind, ctx['item_id'], index))
 
 
 # ---- the CLI verb ------------------------------------------------------------

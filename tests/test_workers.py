@@ -382,6 +382,15 @@ class TestRows(unittest.TestCase):
         self.assertIsNone(pool_mod.parse_row('not a row'))
         self.assertEqual(pool_mod.parse_row('{"job": "j", "item": "T-1"}').job, 'j')
 
+    def test_row_writes_boundary_defaults_empty_and_round_trips_through_from_dict(self):
+        self.assertEqual(pool_mod.Row('j', 'T-1').writes_boundary, [])
+        r = pool_mod.Row('j', 'T-1', writes_boundary=['a.py', 'b.py'])
+        self.assertEqual(r.writes_boundary, ['a.py', 'b.py'])
+        self.assertEqual(pool_mod.Row.from_dict({'job': 'j', 'item': 'T-1',
+                                                 'writes_boundary': ['a.py']}).writes_boundary,
+                         ['a.py'])
+        self.assertEqual(pool_mod.Row.from_dict({'job': 'j', 'item': 'T-1'}).writes_boundary, [])
+
 
 class TestPick(unittest.TestCase):
     def pool(self, accounts, live=(), usage=None, reserve=None):
@@ -558,6 +567,25 @@ class TestSpawn(Home):
         spawn_mod.spawn(self.product, row, self.acct(), 'fix the bug\n', runtime=rt, cfg=self.cfg)
         self.assertEqual(pool_mod.load_sessions(self.product)['fix-b-0001']['card_digest'],
                          'abcd1234abcd1234')
+
+    def test_spawn_env_carries_asf_writes_for_a_nonempty_boundary(self):
+        # S-77505's last bullet: spawn's env arms the door's footprint refusal, space-joined
+        # exactly as pushlog.env_for's own ASF_PUSH_LOG is one path, not a list.
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        row = s1_row()
+        row.writes_boundary = ['app/checkout/attempts.py', 'tests/test_checkout.py']
+        spawn_mod.spawn(self.product, row, self.acct(), 'fix the bug\n', runtime=rt, cfg=self.cfg)
+        job, _brief = rt.calls[0]
+        self.assertEqual(job.env['ASF_WRITES'], 'app/checkout/attempts.py tests/test_checkout.py')
+
+    def test_spawn_env_carries_no_asf_writes_key_for_an_empty_boundary(self):
+        # unset means nothing is refused — an absent key, not an empty string.
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        row = s1_row()
+        row.writes_boundary = []
+        spawn_mod.spawn(self.product, row, self.acct(), 'fix the bug\n', runtime=rt, cfg=self.cfg)
+        job, _brief = rt.calls[0]
+        self.assertNotIn('ASF_WRITES', job.env)
 
     def test_the_ledger_line_keeps_the_head_a_held_branch_was_launched_on(self):
         """The loop guard (:func:`asf.workers.lifecycle.same_head_loop`) counts launches on one

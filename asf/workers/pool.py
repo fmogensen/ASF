@@ -141,7 +141,8 @@ class Row:
 
     def __init__(self, job, item, state='', action='', title='', model='', kind=None,
                  severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=(),
-                 card_digest='', cloud_ok=False, host_load_bypass=False, local_only=False):
+                 card_digest='', cloud_ok=False, host_load_bypass=False, local_only=False,
+                 writes_boundary=None):
         self.job = job
         self.item = item
         self.state = state
@@ -172,6 +173,9 @@ class Row:
         #: rule, :func:`asf.tick.step_wave.s1_bypass_live`) — carried onto the session ledger so
         #: a later wave can see the bypass is still live.
         self.host_load_bypass = bool(host_load_bypass)
+        #: :func:`asf.briefs.build.Brief.writes_boundary` as this row's brief stated it — the
+        #: Feature footprint ``spawn`` arms the door's refusal with (``ASF_WRITES``)
+        self.writes_boundary = list(writes_boundary or [])
 
     @property
     def is_fix(self):
@@ -188,7 +192,8 @@ class Row:
                    kind=d.get('kind'), severity=d.get('severity'), feature=d.get('feature'),
                    lane=d.get('lane'), branch=d.get('branch'), test=d.get('test'),
                    cloud_ok=d.get('cloud_ok') or d.get('cloud-ok'),
-                   host_load_bypass=d.get('host_load_bypass'), local_only=d.get('local_only'))
+                   host_load_bypass=d.get('host_load_bypass'), local_only=d.get('local_only'),
+                   writes_boundary=d.get('writes_boundary'))
 
     def __repr__(self):
         return f'Row({self.state} → {self.action} {self.item} {self.job})'

@@ -906,5 +906,19 @@ class HarvestWidenTests(unittest.TestCase):
                          ['web/lib/other.ts', 'web/lib/y.tsx'])
 
 
+class WidenFootprintUnchangedByTheWireTests(unittest.TestCase):
+    """S-77505's last bullet: Task 2 (``Brief.writes_boundary`` → ``pool.Row`` → ``spawn``'s
+    env) touches neither ``asf.tick.widen_footprint`` nor ``asf.feeder.widen`` — the tick still
+    widens and still holds exactly what it holds today."""
+
+    def test_neither_module_byte_changed_against_origin_main(self):
+        import subprocess
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run(['git', 'diff', '--exit-code', 'origin/main', '--',
+                              'asf/tick/widen_footprint.py', 'asf/feeder/widen.py'],
+                             cwd=repo_root, capture_output=True)
+        self.assertEqual(out.returncode, 0, out.stdout.decode() + out.stderr.decode())
+
+
 if __name__ == '__main__':
     unittest.main()

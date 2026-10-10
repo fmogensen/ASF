@@ -59,6 +59,23 @@ THE TEST THAT CLOSES IT: tests/test_checkout.py::test_timeout_is_pending_not_500
 Write that test FIRST and watch it fail, then make it pass. The harvest requires it by name: a
 fix that lands without a test that failed before it is not a landed fix, it is a claim.
 
+## Before the push
+
+level: high (size class large)
+
+| check | result | confidence | evidence |
+| --- | --- | --- | --- |
+| the diff stays inside the declared footprint | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every changed function is reachable, and every caller it changed still compiles | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| the tests the change names were run, and their last line is green | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| no secret value, no host name and no account name is printed or committed | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every error path added is reached by something, and raises or returns what its caller reads | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every value read from outside the process is checked before it is used | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| a changed behaviour has a test that fails when the change is reverted | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| nothing added duplicates something the repo already has | <pass\|fail> | <n/a\|high\|medium\|low> | 
+
+The rows above with a command are run by your `pre-push` hook: a red one refuses the push and prints what failed. Paste the table, filled, in your report.
+
 Branch `fix/B-0001`, cut from `origin/main` — the row names it; do not cut a second one.
 
 Do the smallest change that makes the test pass. A refactor you noticed on the way, a second bug

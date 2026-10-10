@@ -71,6 +71,19 @@ BEFORE THE PUSH: the Task's Gate commands, and its acceptance tests byte-identic
 and passing. Paste the last line of each in the report. A test you changed to make it pass is a
 failed Task, not a passed one.
 
+## Before the push
+
+level: low (size class small)
+
+| check | result | confidence | evidence |
+| --- | --- | --- | --- |
+| the diff stays inside the declared footprint | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every changed function is reachable, and every caller it changed still compiles | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| the tests the change names were run, and their last line is green | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| no secret value, no host name and no account name is printed or committed | <pass\|fail> | <n/a\|high\|medium\|low> | 
+
+The rows above with a command are run by your `pre-push` hook: a red one refuses the push and prints what failed. Paste the table, filled, in your report.
+
 PROVES — the acceptance lines your tests tick: (this Task lists no Story — say so in the report)
 Before the push, every line above that your tests now prove carries a trailer on its own line in
 one of your commit messages:

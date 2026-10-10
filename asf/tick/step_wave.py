@@ -672,6 +672,7 @@ def worker_row(row, brief, items, host_load_bypass=False):
                         feature=row.feature_id or None, branch=row.branch or None,
                         add_dirs=getattr(brief, 'add_dirs', None) or (),
                         card_digest=getattr(brief, 'card_digest', '') or '',
+                        writes_boundary=getattr(brief, 'writes_boundary', None) or [],
                         host_load_bypass=host_load_bypass,
                         local_only=cloud_mod.truthy(item.get('local_only')))
 

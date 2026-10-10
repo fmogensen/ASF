@@ -1260,6 +1260,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
         os.makedirs(d, exist_ok=True)
         if d not in add_dirs:
             add_dirs.append(d)
+    writes_boundary = getattr(row, 'writes_boundary', None) or []
     with _STATE_LOCK:
         hooks_dir = githooks.ensure(product)
         from asf import hooks as hooks_mod  # local: hooks imports pool, the launch's side
@@ -1274,6 +1275,13 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                **pushlog.env_for(product, row.job, row.kind),
                                **refusals.env_for(product, row.job),
                                **prepush.env_for(product, row.job),
+                               # ASF_WRITES — the door's footprint refusal (S-77505); this row's
+                               # writes_boundary is the Feature footprint the brief already
+                               # printed (asf.briefs.build.Brief.writes_boundary), matching the
+                               # shape asf.prepush.boundary_env states (unset for an empty
+                               # boundary, so an unarmed door refuses nothing)
+                               **({'ASF_WRITES': ' '.join(writes_boundary)} if writes_boundary
+                                  else {}),
                                'ASF_PUSH_ALLOW': push_allow(product, row, branch),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid,
                                'ASF_READ_ROOTS': os.pathsep.join(add_dirs)},

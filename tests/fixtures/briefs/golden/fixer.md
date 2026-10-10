@@ -70,6 +70,19 @@ report saying what you checked, why no change was needed, and the sha that alrea
 Re-run the acceptance tests and the Gate, and append one line per C to the report: what it asked,
 where it is now closed.
 
+## Before the push
+
+level: low (size class small)
+
+| check | result | confidence | evidence |
+| --- | --- | --- | --- |
+| the diff stays inside the declared footprint | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every changed function is reachable, and every caller it changed still compiles | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| the tests the change names were run, and their last line is green | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| no secret value, no host name and no account name is printed or committed | <pass\|fail> | <n/a\|high\|medium\|low> | 
+
+The rows above with a command are run by your `pre-push` hook: a red one refuses the push and prints what failed. Paste the table, filled, in your report.
+
 Final message: the pushed sha, one line per C, the gate lines.
 
 ## The heartbeat, the marker, and the report

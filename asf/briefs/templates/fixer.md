@@ -16,6 +16,6 @@ ALWAYS PUSH SOMETHING — even when the honest answer is "nothing to change". Th
 report saying what you checked, why no change was needed, and the sha that already carries it.
 
 Re-run the acceptance tests and the Gate, and append one line per C to the report: what it asked,
-where it is now closed.
+where it is now closed.{rubric}
 
 Final message: the pushed sha, one line per C, the gate lines.

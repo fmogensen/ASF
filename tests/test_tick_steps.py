@@ -1343,6 +1343,24 @@ class StaleBriefsTests(StepsTestCase):
                                       card_digest='abcd' * 4)
         self.assertEqual(step_wave.worker_row(row, brief, INDEX['items']).card_digest, 'abcd' * 4)
 
+    def test_worker_row_carries_writes_boundary_onto_the_pool_row(self):
+        # S-77505's last three bullets, Task 2's own: the brief's Brief.writes_boundary rides the
+        # same wire card_digest does.
+        row = feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'LAUNCH', 'fix-bug', 'fix/B-0001', '')
+        brief = types.SimpleNamespace(kind='fix-bug', model='Opus', add_dirs=[], card_digest='',
+                                      writes_boundary=['app/checkout/attempts.py', 'tests/test_checkout.py'])
+        wrow = step_wave.worker_row(row, brief, INDEX['items'])
+        self.assertEqual(wrow.writes_boundary, ['app/checkout/attempts.py', 'tests/test_checkout.py'])
+
+    def test_worker_row_carries_no_writes_boundary_when_the_brief_has_none(self):
+        row = feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'LAUNCH', 'fix-bug', 'fix/B-0001', '')
+        brief = types.SimpleNamespace(kind='fix-bug', model='Opus', add_dirs=[], card_digest='')
+        self.assertEqual(step_wave.worker_row(row, brief, INDEX['items']).writes_boundary, [])
+
+    def test_preview_row_sets_no_writes_boundary(self):
+        row = feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'LAUNCH', 'fix-bug', 'fix/B-0001', '')
+        self.assertEqual(step_wave.preview_row(self.product, row, INDEX['items']).writes_boundary, [])
+
 
 class PrsStepTests(StepsTestCase):
     """A ``pull-request`` landing: the PR is the mechanism, and opening it is the lane's T2

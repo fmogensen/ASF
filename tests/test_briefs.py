@@ -693,6 +693,98 @@ class PrePushGateTests(unittest.TestCase):
         self.assertIn(preamble_mod.HOOK_REFUSAL_RULE, text)
 
 
+class RubricBlockTests(unittest.TestCase):
+    """S-77506: the code brief carries the rubric, and its rows name the checks the door will
+    run. ``asf/prepush.py`` and ``Conventions.pre_push_checks`` (Task 1) are not yet on this
+    branch — the rule-row cases attach a ``pre_push_checks`` method to the product's
+    :class:`Conventions` instance the way Task 1's own method will read, so this module's own
+    reaching/formatting logic is proved now and nothing here changes once Task 1 lands."""
+
+    from asf import precheck as precheck_mod
+
+    def _text(self, product_=None, kind='coder'):
+        return briefs.build(product_ or product(), ROWS[kind], index(), [], REPO_FACTS).text
+
+    def test_a_coder_brief_carries_a_table_precheck_parses_clean(self):
+        text = self._text()
+        self.assertIn('## Before the push', text)
+        rows, faults = self.precheck_mod.parse(text)
+        self.assertTrue(rows)
+        self.assertEqual(faults, [f'row {r.line}: {cell} is unfilled (<{opts}>)'
+                                  for r in rows
+                                  for cell, opts in (('result', 'pass|fail'),
+                                                     ('confidence', 'n/a|high|medium|low'))])
+
+    def test_level_is_low_for_a_small_task_with_no_diff(self):
+        text = self._text()  # T-0001: 2 files
+        self.assertEqual(self.precheck_mod.level_of(text), 'low')
+
+    def test_level_is_high_for_a_larger_task(self):
+        idx = index()
+        idx['items']['T-0001']['writes'] = [f'app/f{i}.py' for i in range(10)]
+        text = briefs.build(product(), ROWS['coder'], idx, [], REPO_FACTS).text
+        self.assertEqual(self.precheck_mod.level_of(text), 'high')
+
+    def test_a_security_class_floors_the_level_and_adds_its_row(self):
+        idx = index()
+        idx['items']['T-0001']['writes'] = ['asf/auth/login.py']
+        p = product(conventions={'security': {'paths': {'auth': ['asf/auth/**']}}})
+        text = briefs.build(p, ROWS['coder'], idx, [], REPO_FACTS).text
+        self.assertEqual(self.precheck_mod.level_of(text), 'high')
+        self.assertIn('auth: every path the diff adds or changes here enforces', text)
+        for dim in self.precheck_mod.SECURITY_DIMENSIONS:
+            self.assertIn(dim, text)
+
+    def test_a_rule_the_writes_reach_gets_a_row_naming_its_why_run_and_paths(self):
+        idx = index()
+        idx['items']['T-0001']['writes'] = ['asf/foo.py']
+        p = product()
+        rule = {'paths': ['asf/**', 'tests/**'],
+               'run': 'python3 tools/run_tests.py --touched origin/main --shards 2',
+               'why': 'every test module that covers a file you touched, each module whole'}
+        other = {'paths': ['asf/schema.py'], 'run': 'python3 -m asf.schema --check',
+                'why': 'the schema and migration lists the record reads'}
+        p.conventions  # build and cache the Conventions instance
+        with mock.patch.object(p.conventions, 'pre_push_checks', create=True,
+                              return_value=[rule, other]):
+            text = briefs.build(p, ROWS['coder'], idx, [], REPO_FACTS).text
+        self.assertIn(rule['why'], text)
+        self.assertIn(rule['run'], text)
+        self.assertIn('asf/**, tests/**', text)
+        self.assertNotIn(other['why'], text)  # not reached by asf/foo.py
+
+    def test_pre_push_checks_unset_leaves_the_dimension_rows_alone(self):
+        text = self._text()
+        rows, _ = self.precheck_mod.parse(text)
+        self.assertEqual(len(rows),
+                         len(self.precheck_mod.dimensions(self.precheck_mod.level_of(text))))
+
+    def test_doc_and_housekeeping_briefs_carry_no_rubric(self):
+        for kind in ('spec', 'plan', 'review', 'groom', 'close'):
+            with self.subTest(kind=kind):
+                text = briefs.build(product(), ROWS[kind], index(), [], REPO_FACTS).text
+                self.assertNotIn('## Before the push', text)
+
+    def test_precheck_module_is_untouched(self):
+        import subprocess
+        out = subprocess.run(['git', 'diff', '--exit-code', 'origin/main', '--', 'asf/precheck.py'],
+                             cwd=REPO_ROOT, capture_output=True)
+        self.assertEqual(out.returncode, 0, out.stdout.decode() + out.stderr.decode())
+
+    def test_pre_push_block_and_rubric_sit_beside_each_other(self):
+        p = product(conventions={'pre_push_check': 'make lint'})
+        text = self._text(p)
+        self.assertIn('MUST RUN BEFORE EVERY PUSH', text)
+        self.assertIn('## Before the push', text)
+
+    def test_the_brief_stays_under_preamble_max_lines(self):
+        text = self._text()
+        main_cap = preamble_mod.max_lines(product())
+        # the preamble section alone is capped; the rubric sits after it in the job template,
+        # so this is a smoke check that adding it did not blow past a sane total.
+        self.assertLessEqual(len(text.splitlines()), main_cap + 400)
+
+
 class ReservedInFlightTests(unittest.TestCase):
     """F-0208 T3: the planner reads what is held before it books — one untrimmable line under
     ``Writes:`` and above ``Sessions in flight:``, absent for a product that declares no
@@ -1173,6 +1265,64 @@ class CardDigestTests(unittest.TestCase):
 
     def test_an_item_the_index_does_not_hold_still_digests(self):
         self.assertRegex(self.digest('T-9999'), r'^[0-9a-f]{16}$')
+
+
+class WritesBoundaryTests(unittest.TestCase):
+    """S-77505's last three bullets: ``Brief.writes_boundary`` is the Feature footprint plus
+    ``shared_writes``, de-duplicated in first-seen order, for a code kind with a Task."""
+
+    def _index(self):
+        items = {
+            'F-1': {'id': 'F-1', 'type': 'feature', 'parent': None},
+            'T-1': {'id': 'T-1', 'type': 'task', 'parent': 'F-1', 'writes': ['a.py', 'shared.lock']},
+            'T-2': {'id': 'T-2', 'type': 'task', 'parent': 'F-1', 'writes': ['b.py', 'a.py']},
+            'F-2': {'id': 'F-2', 'type': 'feature', 'parent': None},
+            'T-3': {'id': 'T-3', 'type': 'task', 'parent': 'F-2', 'writes': []},
+            'B-1': {'id': 'B-1', 'type': 'bug', 'parent': None},
+        }
+        return {'items': items}
+
+    def test_feature_footprint_plus_shared_writes_deduped_first_seen(self):
+        p = product(conventions={'shared_writes': ['shared.lock', 'd.txt']})
+        self.assertEqual(build_mod.writes_boundary_for(p, 'coder', 'T-1', self._index()),
+                         ['a.py', 'shared.lock', 'b.py', 'd.txt'])
+
+    def test_a_spec_plan_or_review_kind_is_empty_even_for_a_task_item(self):
+        p = product(conventions={'shared_writes': ['d.txt']})
+        for kind in ('spec', 'plan', 'review'):
+            with self.subTest(kind=kind):
+                self.assertEqual(build_mod.writes_boundary_for(p, kind, 'T-1', self._index()), [])
+
+    def test_an_item_that_is_not_a_task_is_empty(self):
+        p = product(conventions={'shared_writes': ['d.txt']})
+        self.assertEqual(build_mod.writes_boundary_for(p, 'coder', 'B-1', self._index()), [])
+        self.assertEqual(build_mod.writes_boundary_for(p, 'coder', 'F-1', self._index()), [])
+
+    def test_a_task_whose_feature_has_no_writes_is_empty_with_no_shared_writes_set(self):
+        p = product()
+        self.assertEqual(build_mod.writes_boundary_for(p, 'coder', 'T-3', self._index()), [])
+
+    def test_a_task_whose_feature_has_no_writes_still_carries_shared_writes(self):
+        # PD1/step 2: delivery_footprint answers [] on its own; shared_writes is still appended —
+        # a shared path is never refused (S-77505's fourth bullet).
+        p = product(conventions={'shared_writes': ['d.txt']})
+        self.assertEqual(build_mod.writes_boundary_for(p, 'coder', 'T-3', self._index()), ['d.txt'])
+
+    def test_every_rubric_kind_computes_it_the_same_way(self):
+        p = product()
+        for kind in build_mod.RUBRIC_KINDS:
+            with self.subTest(kind=kind):
+                self.assertEqual(build_mod.writes_boundary_for(p, kind, 'T-1', self._index()),
+                                 ['a.py', 'shared.lock', 'b.py'])
+
+    def test_the_brief_carries_it(self):
+        brief = briefs.build(product(), ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertEqual(brief.writes_boundary,
+                         ['app/checkout/attempts.py', 'tests/test_checkout.py'])
+
+    def test_a_doc_brief_carries_none(self):
+        brief = briefs.build(product(), ROWS['spec'], index(), [], REPO_FACTS)
+        self.assertEqual(brief.writes_boundary, [])
 
 
 class KindModelGrantTest(unittest.TestCase):

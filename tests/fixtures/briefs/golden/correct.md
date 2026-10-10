@@ -46,6 +46,23 @@ left out: the retry itself, F-0001 owns it
 
 The harvest gate held `fix/B-0001` and sent it back to you: your worktree is already on `fix/B-0001`, and a rebase onto `origin/main` was started for you if the branch needed one — if `git status` shows a conflict it is still in place: resolve it (otherwise carry on; a branch merely behind the trunk is never rebased just to catch up), fix what the failure below names (a conflict is resolved so both sides survive), run the targeted tests for the files you changed, and push the same branch — never a new one, never a merge of `origin/fix/B-0001` or `origin/main` into it, never a force. A push refused as non-fast-forward is the rebase you were handed: stop there and report `pushed: rebased <sha> — the factory publishes`. Change nothing the failure does not ask for; paste the tests' last line in the report.
 
+## Before the push
+
+level: high (size class large)
+
+| check | result | confidence | evidence |
+| --- | --- | --- | --- |
+| the diff stays inside the declared footprint | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every changed function is reachable, and every caller it changed still compiles | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| the tests the change names were run, and their last line is green | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| no secret value, no host name and no account name is printed or committed | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every error path added is reached by something, and raises or returns what its caller reads | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| every value read from outside the process is checked before it is used | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| a changed behaviour has a test that fails when the change is reverted | <pass\|fail> | <n/a\|high\|medium\|low> | 
+| nothing added duplicates something the repo already has | <pass\|fail> | <n/a\|high\|medium\|low> | 
+
+The rows above with a command are run by your `pre-push` hook: a red one refuses the push and prints what failed. Paste the table, filled, in your report.
+
 THE BOUNDARY IS `writes:` — (none declared)
 When the failure below says the footprint was widened, the paths it added are inside that list now: change them as the failure asks. A file still outside it that must change goes, as a full repo path, on the REPORT's `needs writes:` line with `status: partial` — never edited, never a question to a person.
 

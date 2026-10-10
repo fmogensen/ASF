@@ -9,7 +9,7 @@ THE FIX, from the card:
 
 THE TEST THAT CLOSES IT: {tests}
 Write that test FIRST and watch it fail, then make it pass. The harvest requires it by name: a
-fix that lands without a test that failed before it is not a landed fix, it is a claim.{pre_push_check}
+fix that lands without a test that failed before it is not a landed fix, it is a claim.{pre_push_check}{rubric}
 
 Branch `{branch}`, cut from `origin/{main}` — the row names it; do not cut a second one.
 

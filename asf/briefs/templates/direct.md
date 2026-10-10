@@ -27,6 +27,6 @@ IN THIS ORDER:
 
 {gate_before_push_direct} Paste the last line of each in the report. A test you changed to make
 it pass is a failed Feature, not a passed one. CI, the gate, the customer-content check and the
-merge are the lane's — you push, it lands.{pre_push_check}
+merge are the lane's — you push, it lands.{pre_push_check}{rubric}
 
 Final message: the pushed sha, the files written, the test lines, what the note says was left out.
