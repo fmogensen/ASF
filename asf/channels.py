@@ -249,9 +249,9 @@ def s1_in_window(root, since, now=None):
     return rows
 
 
-def _cadence_row(log, now, cfg):
+def _cadence_row(log, now, opts):
     from asf.release import Criterion
-    days = cfg['stable_every_days']
+    days = opts['stable_every_days']
     stable = log.get('stable') or {}
     age_h = _hours_since(stable.get('at'), now) if stable.get('at') else None
     if age_h is None:
@@ -266,10 +266,10 @@ def _cadence_row(log, now, cfg):
                      f'{tag} promoted {age_d:.0f} d ago — due in {days - age_d:.0f} d')
 
 
-def _dwell_row(log, candidate, now, cfg):
+def _dwell_row(log, candidate, now, opts):
     from asf.release import Criterion
     tag, commit = candidate
-    hours = cfg['edge_dwell_h']
+    hours = opts['edge_dwell_h']
     entry = next((e for e in (log.get('edge_log') or []) if e.get('commit') == commit), None)
     if entry is None:
         return Criterion('dwell', 'Dwell (hours published on edge)', False,
@@ -282,10 +282,10 @@ def _dwell_row(log, candidate, now, cfg):
                      f'{tag} on edge {age_h:.0f} h ({hours} h)')
 
 
-def _rehearsal_row(product, candidate, cfg, run):
+def _rehearsal_row(product, candidate, opts, run):
     from asf.release import Criterion
     tag, commit = candidate
-    name = cfg['rehearsal_check']
+    name = opts['rehearsal_check']
     if str(name).strip().lower() == 'off':
         return Criterion('rehearsal', 'Rehearsal (the named check succeeded)', True,
                          'n/a (release.channels.rehearsal_check off)')
@@ -297,7 +297,7 @@ def _rehearsal_row(product, candidate, cfg, run):
                      detail)
 
 
-def _no_s1_row(root, log, candidate, now, cfg):
+def _no_s1_row(root, log, candidate, now, opts):
     from asf.release import Criterion
     from asf import release_preview
     _tag, commit = candidate
@@ -318,13 +318,13 @@ def _no_s1_row(root, log, candidate, now, cfg):
                      f'no S1 since {since}' if since else 'no S1')
 
 
-def stable_rows(product, root, log, candidate, now, cfg=None, run=subprocess.run):
+def stable_rows(product, root, log, candidate, now, opts=None, run=subprocess.run):
     """``[Criterion]`` for promoting ``candidate`` (a ``(tag, commit)`` off the edge log) to
     stable: the cadence, the dwell, the rehearsal and the S1 window — in that order, each with
     the evidence an operator reads instead of asking. ``candidate`` ``None`` (or with no tag or
     no commit) makes every row unmet with one evidence line saying why there is no candidate."""
     from asf.release import Criterion
-    cfg = cfg if cfg is not None else settings(product)
+    opts = opts if opts is not None else settings(product)
     if not candidate or not candidate[0] or not candidate[1]:
         why = 'no candidate: edge has not published a tag yet'
         return [Criterion('cadence', 'Cadence (days since the last stable release)', False, why),
@@ -333,6 +333,6 @@ def stable_rows(product, root, log, candidate, now, cfg=None, run=subprocess.run
                 Criterion('no_s1', 'No S1 (open, or touched since the candidate reached edge)',
                          False, why)]
     now = _parse(now) or now
-    return [_cadence_row(log, now, cfg), _dwell_row(log, candidate, now, cfg),
-            _rehearsal_row(product, candidate, cfg, run),
-            _no_s1_row(root, log, candidate, now, cfg)]
+    return [_cadence_row(log, now, opts), _dwell_row(log, candidate, now, opts),
+            _rehearsal_row(product, candidate, opts, run),
+            _no_s1_row(root, log, candidate, now, opts)]
