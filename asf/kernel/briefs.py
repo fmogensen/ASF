@@ -315,7 +315,8 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
                        'entr%s left out' % (kind, item.id, limit, dropped,
                                             'y' if dropped == 1 else 'ies'))
     if launch.kind == 'review' and pr is not None and light_review(product, pr):
-        b = _light_brief(product, launch, item, pr, model_for(product, LIGHT_REVIEW))
+        b = _light_brief(product, launch, item, pr, getattr(launch, 'model', '')
+                         or model_for(product, LIGHT_REVIEW))
         extra = (['## Operator answers', ''] + ['- %s' % a for a in answers] + ['']
                  if answers else []) + [VERDICT_RULE]
         return dataclasses.replace(b, text=b.text.rstrip('\n') + '\n\n'

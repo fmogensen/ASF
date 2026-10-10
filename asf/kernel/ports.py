@@ -627,8 +627,16 @@ class RealRecord:
 #: the open-PR fields one ``gh pr list`` reads
 PR_FIELDS = ('number', 'headRefName', 'headRefOid', 'baseRefName', 'mergeable',
              'mergeStateStatus', 'autoMergeRequest', 'files', 'statusCheckRollup',
-             'latestReviews')
+             'latestReviews', 'additions', 'deletions')
 _HUNK = re.compile(r'^@@[^@]*@@')
+
+
+def _lines(d):
+    """A PR's additions plus deletions off its listing (0 when unread)."""
+    try:
+        return int(d.get('additions') or 0) + int(d.get('deletions') or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def change_id(files):
@@ -754,7 +762,8 @@ def strict_from_rules(rules):
 MAIN_QUERY = '''query($owner:String!,$name:String!,$ref:String!,$n:Int!){
  repository(owner:$owner,name:$name){ref(qualifiedName:$ref){target{... on Commit{
   history(first:$n){nodes{oid messageHeadline
-   associatedPullRequests(first:3){nodes{number headRefName merged files(first:100){nodes{path}}}}
+   associatedPullRequests(first:3){nodes{number headRefName merged additions deletions
+    files(first:100){nodes{path}}}}
    statusCheckRollup{contexts(first:100){nodes{__typename
     ... on CheckRun{name status conclusion detailsUrl startedAt completedAt}
     ... on StatusContext{context state targetUrl createdAt}}}}}}}}}}}'''
@@ -995,7 +1004,8 @@ class RealGitHub:
                   checks=newest_checks(d.get('statusCheckRollup') or []),
                   auto_merge=bool(d.get('autoMergeRequest')),
                   clean=d.get('mergeStateStatus') == 'CLEAN',
-                  auto_merge_at=str((d.get('autoMergeRequest') or {}).get('enabledAt') or ''))
+                  auto_merge_at=str((d.get('autoMergeRequest') or {}).get('enabledAt') or ''),
+                  lines=_lines(d))
         pr.tree_sha = self._tree(pr.head_sha)
         pr.change_id = self._change(d.get('baseRefName') or self.product.main, pr.head_sha)
         pr.latest_reviews = d.get('latestReviews') or []
@@ -1133,7 +1143,7 @@ class RealGitHub:
                 item_id='' if self._revert_branch(branch) else (item_of_branch(branch) or ''),
                 files=[f.get('path') for f in ((p.get('files') or {}).get('nodes') or [])
                        if f.get('path')],
-                checks=newest_checks(rollup))
+                checks=newest_checks(rollup), lines=_lines(p))
             reds = [k for k in c.checks if k.status == 'completed'
                     and k.conclusion in M.RED_CONCLUSIONS and k.run_id]
             if reds and not detailed:
@@ -1997,7 +2007,8 @@ def config_for(product, cfg=None, github=None):
         revert_branch=conv.prefix('revert'),
         max_open_prs=int(k['launch']['max_open_prs']) or None,
         dor=bool(k['dor']['enabled']), dor_fill_per_tick=int(k['dor']['fill_per_tick']),
-        dor_max_fills=int(k['dor']['max_fills']), groom_branch=conv.prefix('groom-fill'))
+        dor_max_fills=int(k['dor']['max_fills']), groom_branch=conv.prefix('groom-fill'),
+        risk_high=tuple(k['risk']['high']), risk_large_lines=int(k['risk']['large_lines']))
 
 
 

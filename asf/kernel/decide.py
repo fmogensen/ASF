@@ -387,6 +387,7 @@ def decide(facts, config):
     actions += needed.stale_runs(facts, config, {a.pr for a in actions
                                                  if isinstance(a, A.ClosePR)})
     unready = hold_unready(items, judged, facts, config, parked_all)
+    risky = hold_risky(items, judged, facts, config, actions)
     for iid, j in judged.items():
         old = items[iid]
         if j.state is State.STUCK and (old.state is not State.STUCK or old.stuck != j.stuck):
@@ -408,12 +409,13 @@ def decide(facts, config):
     for iid, (cls, _age) in due.items():  # green, auto-merge on, yet not merged past its target:
         j = judged.get(iid)                # GitHub's listing may call a PR clean that is behind
         if (cls == 'merge' and facts.strict and j is not None and j.state is State.LANDING
+                and iid not in risky
                 and j.behind_pr is None and not j.updating):
             j.behind_pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
                               key=lambda p: p.number, default=None)
     train, notes = _merge_train(items, judged, config, blocks, facts.now,
                                 first={i for i, (c, _a) in due.items() if c in ('train', 'merge')})
-    for iid, why in unready.items():
+    for iid, why in list(unready.items()) + list(risky.items()):
         notes.setdefault(iid, []).append(why)
     actions += train
     for iid, texts in gate_notes.items():
@@ -426,7 +428,7 @@ def decide(facts, config):
         if not (isinstance(a, A.Rerun) and a.run_id in have):
             actions.append(a)
     actions += _mint(facts, parked_all)
-    queued, wip = {}, {}
+    queued, wip = dict.fromkeys(risky, 'risk'), {}
     launches, skipped = (([], {}) if facts.paused
                          else _launches(facts, config, judged, children, states, parked, blocks,
                                         due, queued, wip, unready))
@@ -726,6 +728,92 @@ def blocked_on(it, stuck, text, facts, parked=()):
                 or not (_unmerged(x, facts, parked) or (x in it.after and x not in items))):
             continue
         out.append(x)
+    return out
+
+
+#: the reason prefix of a high-risk Landing PR held back (:func:`hold_risky`)
+RISK = 'risk: '
+
+
+def _open_pr_of(iid, facts):
+    return max((p for p in facts.prs if p.item_id == iid and not p.merged),
+               key=lambda p: p.number, default=None)
+
+
+def _hits(paths, globs):
+    return bool(globs) and any(fnmatch.fnmatchcase(f, g) for f in paths for g in globs)
+
+
+def high_risk(it, pr, config):
+    """Whether ``it`` (with its open ``pr``, or None) is high-risk under the product's coarse
+    flag: its ``writes`` (or the PR's files) hit a ``config.risk_high`` glob, or the PR's diff is
+    over ``config.risk_large_lines`` lines."""
+    globs = tuple(config.risk_high or ())
+    if globs and (_overlap(list(it.writes), globs) or _hits(pr.files if pr else (), globs)):
+        return True
+    return bool(pr is not None and config.risk_large_lines and pr.lines > config.risk_large_lines)
+
+
+def _merge_high(c, items, config):
+    """Whether trunk commit ``c`` merged a high-risk change: its PR's files or diff, or its
+    item's ``writes``."""
+    if c.pr is None:
+        return False
+    it = items.get(c.item_id)
+    globs = tuple(config.risk_high or ())
+    return bool((it is not None and globs and _overlap(list(it.writes), globs))
+                or _hits(c.files, globs)
+                or (config.risk_large_lines and c.lines > config.risk_large_lines))
+
+
+def _main_green(c, config):
+    """Whether every required check on trunk commit ``c`` completed green (every check, with
+    none named)."""
+    req = [k for k in c.checks if required(k.name, config)]
+    names = {k.name for k in req}
+    return bool(req) and all(n in names for n in config.required_checks) and all(
+        k.status == 'completed' and k.conclusion in ('success', 'neutral', 'skipped')
+        for k in req)
+
+
+def hold_risky(items, judged, facts, config, actions):
+    """``{item: why}``: the high-risk Landing PRs (:func:`high_risk`) held back this tick — no
+    auto-merge, no direct merge, no merge-train update — while (a) the newest high merge on the
+    trunk (``Facts.main``) has not gone green on its required checks, or (b) another high PR with
+    overlapping ``writes`` (or files) holds the landing lane: the one with auto-merge already on,
+    else the lowest PR number. ``judged`` and ``actions`` are updated in place."""
+    if not config.risk_high and not config.risk_large_lines:
+        return {}
+    high = {}
+    for iid in sorted(judged):
+        if judged[iid].state is State.LANDING:
+            pr = _open_pr_of(iid, facts)
+            if pr is not None and high_risk(items[iid], pr, config):
+                high[iid] = pr
+    if not high:
+        return {}
+    out = {}
+    last = next((c for c in facts.main or () if _merge_high(c, items, config)), None)
+    if last is not None and not _main_green(last, config):
+        why = RISK + 'after high merge %s (#%s) the trunk is not green yet' % (last.sha[:9],
+                                                                               last.pr)
+        out = {iid: why for iid in high if not high[iid].merged}
+    else:
+        lane = []
+        for iid in sorted(high, key=lambda i: (not high[i].auto_merge, high[i].number)):
+            paths = list(items[iid].writes) + list(high[iid].files)
+            holder = next((h for h in lane if _overlap(paths, list(items[h].writes)
+                                                       + list(high[h].files))), None)
+            if holder is None:
+                lane.append(iid)
+            else:
+                out[iid] = RISK + 'high, overlapping writes: waits for #%d (%s) to land' % (
+                    high[holder].number, holder)
+    held = {high[iid].number for iid in out}
+    actions[:] = [a for a in actions if not (isinstance(a, (A.EnableAutoMerge, A.MergePR))
+                                             and a.pr in held)]
+    for iid in out:
+        judged[iid].behind_pr = None
     return out
 
 
@@ -1516,7 +1604,10 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
             queued[iid] = 'seat'
             continue
         if cls == 'review':
-            out.append(A.Launch('review', iid, judged[iid].review_branch, local=iid in due))
+            pr = _open_pr_of(iid, facts)
+            out.append(A.Launch('review', iid, judged[iid].review_branch, local=iid in due,
+                                model=config.strong_model if high_risk(items[iid], pr, config)
+                                else ''))
             free -= 1
             continue
         if cls == 'groom':
@@ -1832,6 +1923,8 @@ def _why_no_breach_action(iid, cls, facts, states, judged, queued):
         return 'file overlap with a Building item'
     if queued.get(iid) == 'wip':
         return 'WIP cap: open PRs over kernel.launch.max_open_prs'
+    if queued.get(iid) == 'risk':
+        return 'high risk: lands one at a time, after a green trunk'
     if judged[iid].hold:
         return 'held this tick'
     return {'ci': 'CI in flight', 'merge': 'waits on GitHub auto-merge',
@@ -1932,7 +2025,7 @@ def _stalled(iid, state, stuck, facts, config, j, queued, stalled):
             limbo_reason_stuck(stuck)
     if state is State.BUILDING:
         return '' if live else 'Building with no live session'
-    if live or j.hold or queued.get(iid) in ('seat', 'overlap', 'wip'):
+    if live or j.hold or queued.get(iid) in ('seat', 'overlap', 'wip', 'risk'):
         return ''
     if state is State.READY:
         return 'Ready, launches paused' if facts.paused else 'Ready, not launched'

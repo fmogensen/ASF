@@ -123,6 +123,13 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # session (models.groom-fill) fills the card
                    fill_per_tick: 3,          # groom-fill launches a tick (after finishing work)
                    max_fills: 2}              # groom-fill sessions per card, then Stuck
+      risk:       {high: [],                  # path globs: an item whose writes (or PR files)
+                                              # hit one is high-risk — its review runs on
+                                              # stuck.strong_model, no second high PR with
+                                              # overlapping writes lands beside it, and after a
+                                              # high merge the next waits until the trunk's
+                                              # required checks on that merge are green
+                   large_lines: 800}          # ... and so is a PR whose diff is over this
       floor:      {close_orphan_prs: true,    # an open PR on a kernel branch whose item is not on
                                               # the record, Done or retired is closed (comment)
                    cancel_stale_ci: true}     # a queued/running CI run whose PRs are all closed,
@@ -214,6 +221,7 @@ SPEC = {
               'max_ci_age': ('1h', 'duration'), 'bound_min_samples': (20, int)},
     'main_move': {'alarm_minutes': (5, float), 'window_ticks': (15, int)},
     'dor': {'enabled': (False, bool), 'fill_per_tick': (3, int), 'max_fills': (2, int)},
+    'risk': {'high': ((), 'globs'), 'large_lines': (800, int)},
     'floor': {'close_orphan_prs': (True, bool), 'cancel_stale_ci': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int),
                 'lock_timeout_s': (600, int)},

@@ -172,7 +172,8 @@ class PR:
     ``mergeStateStatus`` DIRTY; an UNKNOWN ``mergeable`` stays unknown). ``files`` are the
     paths the PR changes. ``auto_merge``: auto-merge is already enabled (``auto_merge_at``:
     since when, ISO-8601 UTC, '' when unknown); ``merged``: it landed. ``clean``: GitHub's
-    ``mergeStateStatus`` is CLEAN (mergeable now, every rule met)."""
+    ``mergeStateStatus`` is CLEAN (mergeable now, every rule met). ``lines``: its additions plus
+    deletions (0 when unread) — a diff over ``Config.risk_large_lines`` is a high-risk change."""
     number: int
     branch: str
     item_id: str
@@ -187,6 +188,7 @@ class PR:
     merged: bool = False
     auto_merge_at: str = ''
     clean: bool = False
+    lines: int = 0
 
 
 @dataclasses.dataclass
@@ -296,6 +298,7 @@ class MainCommit:
     item_id: str = ''
     files: list = dataclasses.field(default_factory=list)
     checks: list = dataclasses.field(default_factory=list)
+    lines: int = 0
 
 
 @dataclasses.dataclass
@@ -328,7 +331,7 @@ class Facts:
     then is a
     merely BEHIND PR updated, through the merge train — without it GitHub merges a green PR
     behind its base, so an update would only burn CI. ``main`` are the trunk's newest commits
-    (:class:`MainCommit`, newest first; empty when unread): the main safety net
+    (:class:`MainCommit`, newest first, with the merged PR's ``lines``; empty when unread): the main safety net
     (:mod:`asf.kernel.mainline`) judges the newest completed required checks on them. ``seats``
     is how many sessions the host can run now, live ones included (local seats plus the cloud
     seats its accounts and breaker allow; None: unknown, ``Config.max_sessions`` holds).
@@ -420,7 +423,12 @@ class Config:
     ``dor``: the Definition of Ready (:mod:`asf.kernel.dor`) holds a Task or Bug New until its
     card names a test, its writes, its ``after:`` and its parent (off — the bare model's
     default); ``dor_fill_per_tick`` groom-fill sessions launch a tick for the cards it holds, at
-    most ``dor_max_fills`` per card (then Stuck on the operator), on ``groom_branch`` + the id."""
+    most ``dor_max_fills`` per card (then Stuck on the operator), on ``groom_branch`` + the id.
+    ``risk_high`` (path globs) and ``risk_large_lines``: an item is high-risk when its ``writes``
+    (or its PR's files) hit a glob, or its PR's diff is over that many lines
+    (:func:`asf.kernel.decide.high_risk`): its review runs on ``strong_model``, no second high PR
+    with overlapping writes lands beside it, and after a high merge the next high one waits until
+    the trunk's required checks on that merge are green (none: off — the bare model's default)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -458,3 +466,5 @@ class Config:
     dor_fill_per_tick: int = 3
     dor_max_fills: int = 2
     groom_branch: str = 'groom-fill/'
+    risk_high: tuple = ()
+    risk_large_lines: int = 0

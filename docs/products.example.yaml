@@ -634,6 +634,15 @@ kernel:
     fill_per_tick: 3        # groom-fill launches a tick, after fix rounds, reviews and builds
     max_fills: 2            # groom-fill sessions per card; then Stuck on the operator (judged
                             # afresh every tick: a card mended by hand starts)
+  risk:                     # the coarse risk flag, from this file only
+    high: []                # path globs: an item whose writes: (or its PR's files) hit one is
+                            # high-risk — its review runs on stuck.strong_model; no second high
+                            # PR with overlapping writes lands beside it (the one with auto-merge
+                            # on, else the lowest number, goes first); and after a high merge the
+                            # next high one waits until the trunk's required checks on that
+                            # merge are green. ASF's own: [asf/record/**, .github/**,
+                            # asf/kernel/**, tools/**]
+    large_lines: 800        # ... and so is a PR whose diff (additions + deletions) is over this
   floor:
     close_orphan_prs: true  # an open PR on a kernel branch (code/fix/spec/plan prefix) whose item
                             # is not on the record, Done or retired is closed with a comment
