@@ -740,6 +740,121 @@ class HeavyCiMissingLabelRowTest(unittest.TestCase):
         self.assertEqual(out[0].reason, 'lane MERGING PR #9: ok')
 
 
+class ReviewAttemptFloorTests(unittest.TestCase):
+    """S-36503: a head whose reviewers keep filing nothing gets a non-launching ``WAITS ON
+    hold`` row naming the count, at :func:`rows.attempt_limit`; the round resets the moment the
+    head moves (a fresh ``head_at``, read by :func:`lifecycle.occupancy` as 0 attempts)."""
+
+    ITEMS = {'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                       'writes': ['a.py']}}
+
+    def test_below_the_limit_the_launching_row_is_emitted_as_today(self):
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 1, 'attempts': 2}}}
+        out = rows.lane_rows(self.ITEMS, product(), set(), occ)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.PUSHED_REVIEW)
+        self.assertTrue(out[0].launches)
+
+    def test_at_the_limit_a_non_launching_waits_row_names_the_count_and_no_review_row_beside_it(self):
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 1, 'attempts': 3}}}
+        out = rows.lane_rows(self.ITEMS, product(), set(), occ)
+        self.assertEqual(len(out), 1)
+        r = out[0]
+        self.assertFalse(r.launches)
+        self.assertEqual(r.waits_on, 'hold')
+        self.assertIn('3', r.action)
+        self.assertEqual(r.kind, rows.PUSHED_REVIEW)
+
+    def test_attempt_limit_from_conventions_takes_effect(self):
+        p = product(conventions={'attempt_limit': 2})
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 1, 'attempts': 2}}}
+        out = rows.lane_rows(self.ITEMS, p, set(), occ)
+        self.assertFalse(out[0].launches)
+        self.assertEqual(out[0].waits_on, 'hold')
+
+    def test_moving_the_head_resets_attempts_and_restores_the_launching_row(self):
+        held = {'branch': 'task/T-0001', 'round': 1, 'attempts': 3}
+        out = rows.lane_rows(self.ITEMS, product(), set(), {'review': {'T-0001': held}})
+        self.assertFalse(out[0].launches)
+        moved = dict(held, attempts=0)  # a new head_at: occupancy would read 0 attempts here
+        out2 = rows.lane_rows(self.ITEMS, product(), set(), {'review': {'T-0001': moved}})
+        self.assertTrue(out2[0].launches)
+        self.assertEqual(out2[0].kind, rows.PUSHED_REVIEW)
+        self.assertEqual(out2[0].branch, out[0].branch)
+
+    def test_an_entry_with_no_attempts_key_at_all_reads_as_zero(self):
+        # today's shape, before occupancy's attempts patch runs: h.get('attempts') reads None as 0
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 1}}}
+        out = rows.lane_rows(self.ITEMS, product(), set(), occ)
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].launches)
+
+
+class ReviewRoundCeilingTests(unittest.TestCase):
+    """S-36504: a review round that reaches :func:`rows.stalemate_round` adjudicates instead of
+    asking for another reviewer — tested before the floor (S-36503), so a head that is both past
+    the round ceiling and has dead review attempts adjudicates, not waits."""
+
+    ITEMS = {'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                       'writes': ['a.py']}}
+
+    def test_below_the_ceiling_emits_pushed_review_as_today(self):
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 3}}}
+        out = rows.lane_rows(self.ITEMS, product(), set(), occ)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.PUSHED_REVIEW)
+        self.assertTrue(out[0].launches)
+
+    def test_at_and_above_the_ceiling_emits_one_adjudicate_row_and_no_review_row_beside_it(self):
+        for rnd in (4, 5):
+            with self.subTest(round=rnd):
+                occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': rnd}}}
+                out = rows.lane_rows(self.ITEMS, product(), set(), occ)
+                self.assertEqual(len(out), 1)
+                r = out[0]
+                self.assertEqual(r.kind, rows.STALEMATE)
+                self.assertEqual(r.brief_kind, 'adjudicate')
+                self.assertTrue(r.launches)
+
+    def test_stalemate_round_from_conventions_takes_effect(self):
+        p = product(conventions={'stalemate_round': 2})
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 2}}}
+        out = rows.lane_rows(self.ITEMS, p, set(), occ)
+        self.assertEqual(out[0].kind, rows.STALEMATE)
+
+    def test_the_ceiling_is_tested_before_the_floor(self):
+        # both round and attempts over their limits in the same entry: adjudicates, not waits
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 4, 'attempts': 3}}}
+        out = rows.lane_rows(self.ITEMS, product(), set(), occ)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.STALEMATE)
+        self.assertTrue(out[0].launches)
+
+    def test_a_foreign_pr_item_reaches_the_ceiling_like_any_other(self):
+        occ = {'review': {'PR-30': {'branch': 'cloud/pr-30', 'round': 4}}}
+        out = rows.lane_rows({}, product(), set(), occ)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.STALEMATE)
+
+    def test_a_direct_feature_reaching_the_ceiling_gets_one_adjudicate_row_not_two(self):
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active'}}
+        occ = {'review': {'F-0001': {'branch': 'cloud/direct-F-0001', 'round': 4}}}
+        out = rows.lane_rows(items, product(), set(), occ)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.STALEMATE)
+        self.assertEqual(out[0].brief_kind, 'adjudicate')
+
+    def test_the_adjudicate_row_is_legal_under_i4_and_survives_the_feeder_gate(self):
+        from unittest import mock
+        occ = {'review': {'T-0001': {'branch': 'task/T-0001', 'round': 4}}}
+        out = rows.lane_rows(self.ITEMS, product(), set(), occ)
+        ctx = invariants.FeederContext(rows=out, lanes={'task/T-0001': {'state': 'REVIEW'}})
+        self.assertEqual(invariants.check_i4(ctx), [])
+        with mock.patch.object(invariants, 'feeder_context', return_value=ctx):
+            kept = invariants.feeder_gate(product(), out, {})
+        self.assertEqual(kinds(kept), [(rows.STALEMATE, 'T-0001')])
+
+
 class FeederHoldTest(unittest.TestCase):
     """``feeder.hold``: a held class's new-work rows wait on the hold; everything else runs."""
 
