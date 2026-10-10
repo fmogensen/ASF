@@ -1300,6 +1300,7 @@ def launch_now(ctx, out=print):
     the two never launch it twice."""
     from asf.views import index_reader
     product = ctx.product
+    paused = pause_mod.held(product)            # F-0137: the operator's own hold, durable
     root = ctx.record_root()
     items, _generated = index_reader.load(root)
     if product.repo_dir:
@@ -1327,8 +1328,12 @@ def launch_now(ctx, out=print):
         return worker_row(row, brief, items, host_load_bypass=bypass), brief
 
     screened = screen(product, planned, items, running, held, seats, (host_held, host_why),
-                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx)
+                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx, paused=paused)
     starting = [s for s in screened if s.starts]
+    if paused:
+        out(f'wave: {pause_mod.hold_reason(paused)} — no new session this run; '
+            f'recording and harvesting go on, and the sessions in flight finish and land')
+        return 0
     if host_held and not any(s.bypass for s in starting):
         out(f'wave: held: {host_why} — no new session this run; running sessions go on')
         return 0

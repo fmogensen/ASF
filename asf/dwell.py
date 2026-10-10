@@ -526,7 +526,9 @@ def launchable_idle(facts):
         return []
     out = []
     for s in screened:
-        if not s.row.launches or s.kind == step_wave.NO_SEAT:
+        # the operator's own pause is not an idle seat: it holds every row on purpose, so a
+        # paused product must never breach 10 minutes into the hold it asked for — B-84833
+        if not s.row.launches or s.kind in (step_wave.NO_SEAT, step_wave.PAUSED):
             continue
         # the groom row speaks for the day's open questions, not for the item it happens to be
         # named after (the same exception asf.feeder.rows.hold_unlanded makes) — B-84837
