@@ -261,5 +261,23 @@ class Cli(unittest.TestCase):
             env.ASF_HOME = old
 
 
+class RefusedPublish(unittest.TestCase):
+    """A record commit the pre-commit refuses never crashes the tick: one line, then the
+    summary as always."""
+
+    def test_a_refused_commit_does_not_raise_from_tick(self):
+        rec = F.FakeRecord([B.task('T-0001', rank=1)])
+
+        def refuse(message):
+            raise P.PublishRefused('record commit refused: tasks/T-0001.md — name (x)')
+        rec.publish = refuse
+        lines = []
+        summary = loop.tick(env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'}),
+                            ports=F.ports(record=rec, sessions=F.FakeSessions()),
+                            config=B.config(), state_dir=tempfile.mkdtemp(), out=lines.append)
+        self.assertEqual(summary['written'], ['T-0001'])
+        self.assertIn('publish FAILED: record commit refused: tasks/T-0001.md — name (x)', lines)
+
+
 if __name__ == '__main__':
     unittest.main()

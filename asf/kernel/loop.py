@@ -174,7 +174,10 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             result = apply(plan, facts, ports, log=out)
             publish = getattr(ports.record, 'publish', None)
             if publish and result.written:
-                publish('kernel: tick (%d card(s))' % len(result.written))
+                try:
+                    publish('kernel: tick (%d card(s))' % len(result.written))
+                except Exception as e:  # a refused or failed record commit never ends the tick
+                    out('publish FAILED: %s' % (str(e).splitlines() or [type(e).__name__])[0])
             save_plan(state_dir, plan, facts)
     except Locked as e:
         out('kernel tick: another tick holds %s' % e)

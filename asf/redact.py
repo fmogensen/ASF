@@ -242,6 +242,23 @@ def scrub(text, pats, token=SCRUB_TOKEN):
     return out
 
 
+#: What a protected name becomes in text the kernel writes into a card: the role, not the name.
+NAME_ROLE = 'a worker account'
+#: A home directory in a path (``/Users/<login>``, ``/home/<login>``): the login is often an
+#: account name, so card text says ``~`` instead.
+_HOME_RE = re.compile(r'/(?:Users|home)/[^/\s:\'"]+')
+
+
+def scrub_roles(text, pats):
+    """``text`` as a card may carry it: a home-directory prefix becomes ``~``, a protected name
+    becomes :data:`NAME_ROLE`, a secret :data:`SCRUB_TOKEN` — so the redaction gate never has a
+    finding in it and the record commit is never refused over it."""
+    out = _HOME_RE.sub('~', str(text or ''))
+    for pat in pats or ():
+        out = pat.regex.sub(NAME_ROLE if pat.kind == 'name' else SCRUB_TOKEN, out)
+    return out
+
+
 _DEFAULT_CACHE = {}
 
 

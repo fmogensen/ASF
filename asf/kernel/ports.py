@@ -180,6 +180,32 @@ def _jsonl(path):
     return out
 
 
+class PublishRefused(RuntimeError):
+    """The record's pre-commit refused the tick's commit; the message is one log line."""
+
+
+def refusal_line(err):
+    """One line from a refused record commit: the files and the finding classes it named."""
+    text = '%s\n%s' % (getattr(err, 'stdout', '') or '', getattr(err, 'stderr', '') or '')
+    found = re.findall(r'^(\S+?):\d+: (\w+) \(([^)]*)\)', text, re.M)
+    if not found:
+        return 'record commit refused (exit %s)' % getattr(err, 'returncode', '?')
+    files = sorted({f for f, _k, _s in found})
+    kinds = sorted({'%s (%s)' % (k, src) for _f, k, src in found})
+    return 'record commit refused: %s — %s' % (', '.join(files), ', '.join(kinds))
+
+
+def scrub_value(value, fn):
+    """``value`` with ``fn`` applied to every string inside it (lists, tuples, dicts)."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        return {k: scrub_value(v, fn) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(scrub_value(v, fn) for v in value)
+    return value
+
+
 class RealRecord:
     """The product's record (``backlog_dir``), its trunk's specs (``repo_dir``/``specs_dir``)
     and its state directory's ledgers (answers, kernel reviews, the launch pause)."""
@@ -190,6 +216,15 @@ class RealRecord:
         self.root = product.backlog_dir
         self.state_dir = state_dir or os.path.join(env.ASF_HOME, 'state', product.name)
         self._cards = None
+
+    def _scrub(self, value):
+        """``value`` with every string in it passed through :func:`asf.redact.scrub_roles` — the
+        kernel copies text from session reports, launch failures and CI logs into cards, and a
+        worker account's name (or a home path naming one) there makes the record's pre-commit
+        refuse the whole tick's commit."""
+        from asf import redact
+        pats = redact.default_patterns(self.root)
+        return scrub_value(value, lambda t: redact.scrub_roles(t, pats))
 
     def _load(self):
         if self._cards is None:
@@ -276,7 +311,7 @@ class RealRecord:
             text = f.read()
         meta, body = frontmatter.parse(text, path=rec['relpath'])
         keys = set(getattr(meta, 'machine_keys', set()))
-        for k, v in fields.items():
+        for k, v in self._scrub(dict(fields)).items():
             if v is None or v == []:
                 meta.pop(k, None)
                 keys.discard(k)
@@ -298,14 +333,45 @@ class RealRecord:
             return
         if feature_id not in cards:
             raise PortError('%s: parent %s is not on the record' % (story_id, feature_id))
-        write_new_item(self.root, cards, 'story', story_id, {'title': title, 'parent': feature_id},
+        write_new_item(self.root, cards, 'story', story_id,
+                       {'title': self._scrub(title), 'parent': feature_id},
                        '', today(), 'kernel: declared by the landed spec',
-                       acceptance=list(acceptance), shape=('parent-feature', 'story'))
+                       acceptance=self._scrub(list(acceptance)), shape=('parent-feature', 'story'))
 
     def publish(self, message):
-        """Commit and push what this tick wrote, through the record's one push."""
+        """Commit and push what this tick wrote, through the record's one push. Every card the
+        tick changed is scrubbed on disk first (:meth:`scrub_changed`), so a stray name is
+        replaced, not refused; a commit the pre-commit still refuses is raised as
+        :class:`PublishRefused` (one line: the files and the finding classes) for the tick to
+        log — the refused paths are put back, so the next tick writes them again."""
+        import subprocess
         from asf.record import publish
-        publish.publish_changes(self.root, self._before, message)
+        self.scrub_changed()
+        try:
+            publish.publish_changes(self.root, self._before, message)
+        except subprocess.CalledProcessError as e:
+            raise PublishRefused(refusal_line(e)) from None
+
+    def scrub_changed(self):
+        """Pass every card file changed since :meth:`snapshot` through the scrubber in place;
+        the paths it changed."""
+        from asf import redact
+        from asf.record import publish
+        before = getattr(self, '_before', None)
+        if before is None:
+            return []
+        pats = redact.default_patterns(self.root)
+        fixed = []
+        for rel, content in sorted(publish._dirty(self.root).items()):
+            if content is None or not rel.endswith('.md') or before.get(rel) == content:
+                continue
+            text = content.decode('utf-8', errors='replace')
+            clean = redact.scrub_roles(text, pats)
+            if clean != text:
+                with open(os.path.join(self.root, rel), 'w', encoding='utf-8') as f:
+                    f.write(clean)
+                fixed.append(rel)
+        return fixed
 
     def snapshot(self):
         from asf.record import publish

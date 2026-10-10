@@ -304,5 +304,56 @@ class Helpers(unittest.TestCase):
         self.assertIn('sp/**', cfg.doc_paths)
 
 
+class Scrub(unittest.TestCase):
+    """Card text the kernel writes carries no worker account name: the record's pre-commit
+    would refuse the whole tick's commit over one (2026-10-10: a launch failure naming an
+    external worktree under a home directory named for the account landed in a card)."""
+
+    def setUp(self):
+        from unittest import mock
+        from asf import redact
+        Record.setUp(self)
+        pats = redact.patterns(cfg={'worker_pool': {'accounts': [{'name': 'zelda'}]}},
+                               environ={})
+        patcher = mock.patch('asf.redact.default_patterns', return_value=pats)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_note_naming_an_account_is_scrubbed_before_the_write(self):
+        leak = ('launch: branch checked out in an external worktree '
+                '/home/someone/Code/x/.claude/worktrees/agent-1; cloud run on Zelda failed')
+        P.RealRecord(self.product, state_dir=self.state).write_fields('T-0001', {
+            P.ATTEMPTS: [leak], P.STUCK_REASON: leak, P.NOTES: ['asked zelda: why?']})
+        with open(os.path.join(self.root, 'tasks', 'T-0001.md')) as f:
+            text = f.read()
+        self.assertNotIn('zelda', text.lower())
+        self.assertIn('~/Code/x/.claude/worktrees/agent-1', text)
+        self.assertIn('cloud run on a worker account failed', text)
+
+    def test_a_card_changed_on_disk_is_scrubbed_before_the_commit(self):
+        from unittest import mock
+        rec = P.RealRecord(self.product, state_dir=self.state)
+        rec._before = {}
+        path = os.path.join(self.root, 'tasks', 'T-0001.md')
+        with open(path, 'a') as f:
+            f.write('seen by zelda\n')
+        with open(path, 'rb') as f:
+            dirty = {'tasks/T-0001.md': f.read()}
+        with mock.patch('asf.record.publish._dirty', return_value=dirty):
+            self.assertEqual(rec.scrub_changed(), ['tasks/T-0001.md'])
+        with open(path) as f:
+            self.assertNotIn('zelda', f.read())
+
+    def test_a_refused_commit_is_one_line_naming_files_and_classes(self):
+        err = subprocess.CalledProcessError(
+            1, ['commit'], output='',
+            stderr='features/F-0301.md:25: name (worker_pool.accounts)\n'
+                   'index.json:32850: name (worker_pool.accounts)\n'
+                   'redact: refused — 2 finding(s)\n')
+        self.assertEqual(P.refusal_line(err),
+                         'record commit refused: features/F-0301.md, index.json — '
+                         'name (worker_pool.accounts)')
+
+
 if __name__ == '__main__':
     unittest.main()
