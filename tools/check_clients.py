@@ -17,8 +17,9 @@ migrated the site, so the ratchet keeps the gain.
 The same count, with a ceiling of 0, holds each connector's executable to its connector module
 (:mod:`asf.connectors`): ``claude`` (an argv, a ``which``, or a default-binary assignment of the
 coding-agent CLI) only in asf/connectors/claude_code.py, ``launchctl`` only in
-asf/connectors/launchd.py, ``systemctl`` only in asf/connectors/systemd.py. ``pipx`` is the
-installer kind and stays allowed everywhere for now (not counted).
+asf/connectors/launchd.py, ``systemctl`` only in asf/connectors/systemd.py, ``openssl`` only in
+asf/ghapp.py (the one module that signs a JWT — F-0333). ``pipx`` is the installer kind and stays
+allowed everywhere for now (not counted).
 
 One more rule, live once :mod:`asf.gitpush` declares ``__gitpush_door__ = True`` (the push
 door takes a ref guard): every ``gitpush.push(`` call in asf/ passes ``guard=``. The rule keys on
@@ -48,6 +49,7 @@ PATTERNS = {
                          r"""=\s*['"]claude['"]\s*(#.*)?$"""),
     'launchctl': re.compile(r"""['"]launchctl['"]"""),
     'systemctl': re.compile(r"""['"]systemctl['"]"""),
+    'openssl': re.compile(r"""['"]openssl['"]"""),
 }
 KINDS = tuple(PATTERNS)
 #: Where each kind's executable may be invoked: its client or connector module.
@@ -57,6 +59,7 @@ OWNERS = {
     'claude': frozenset({'asf/connectors/claude_code.py'}),
     'launchctl': frozenset({'asf/connectors/launchd.py'}),
     'systemctl': frozenset({'asf/connectors/systemd.py'}),
+    'openssl': frozenset({'asf/ghapp.py'}),
 }
 
 
