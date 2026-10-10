@@ -83,6 +83,24 @@ item and the actions of one tick. The rules it holds, in the design's words:
   (:func:`legacy_relaunch`, :class:`ClearStuck`): "ended without a REPORT" with no
   :data:`NO_REPORT` attempt yet gets its one relaunch; "done without a push: pushed: no — hook
   refused" is relaunched once with :data:`HOOK_FINDING`.
+- Stuck never sits (``config.escalate_after_h`` / ``config.rebuild_after_h``, hours; the product
+  defaults are 0: on the tick the Stuck appears; None turns a rule off). A Stuck the kernel can
+  resolve by its reason class is resolved once it is that old:
+
+  - a required red off the PR (owner ci) gets one more rerun than ``max_reruns``, then a fix round
+    carrying the red (:func:`red_finding`);
+  - a session that stopped (owner session: ``partial``, ``blocked``, done without a push, no
+    REPORT twice) is relaunched once with its report's words as the finding
+    (:func:`escalate_session`, a :data:`RELAUNCH` marker);
+  - the fix-round cap gets one extra round (:data:`STRONG_ROUND`) on ``config.strong_model``
+    carrying every finding the item holds; when that round fails too, the item is rebuilt;
+  - a conflict the rebase session could not resolve is rebuilt (``rebuild_after_h``):
+    :class:`ArchiveAndReset` archives the branch to ``archive/<branch>``, closes the PR and returns
+    the item to Ready on a fresh branch — at most :data:`MAX_REBUILDS` per item (``Item.rebuilds``).
+
+  A recorded Stuck at the cap or on such a conflict is judged afresh every tick, so its age is
+  read off ``Item.stuck_since`` against ``Facts.now``. A question to the operator is never
+  resolved by the kernel: it waits for an answer.
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -94,6 +112,7 @@ included) are written to ``Item.findings`` when it launches. An item whose sessi
 this tick is not relaunched until the next tick has read the record again.
 """
 import dataclasses
+import datetime
 import fnmatch
 import re
 
@@ -159,8 +178,9 @@ IDLE_REASONS = {
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
-ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem, A.MarkStuck, A.MintStory, A.OpenPR, A.Rerun,
-         A.UpdateBranch, A.EnableAutoMerge, A.Launch)
+ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem, A.MarkStuck,
+         A.MintStory, A.ArchiveAndReset, A.OpenPR, A.Rerun, A.UpdateBranch, A.EnableAutoMerge,
+         A.Launch)
 
 #: the prefix of a Stuck reason a ``done`` REPORT left (its ``NEEDS OPERATOR:`` question, before
 #: a done-and-pushed session moved on): with its branch pushed it is re-judged to an OpenPR
@@ -198,6 +218,20 @@ RED = 'red'
 #: the most characters of a failed log's tail a finding carries
 LOG_TAIL_MAX = 1500
 
+#: the prefix of the finding a session's escalated relaunch carries (after :data:`RELAUNCH` on the
+#: attempt that marks it): the Stuck reason in the report's own words follows
+ESCALATED = 'escalated: '
+
+#: what an escalated relaunch's finding says, around the Stuck reason
+ESCALATED_ASK = ('the previous session stopped (%s) — pick up from its report and branch, and '
+                 'finish the item')
+
+#: the attempt that marks the one extra fix round past the cap, on ``Config.strong_model``
+STRONG_ROUND = ESCALATED + 'one more fix round on the strong model, with every finding'
+
+#: the times one item is archived and built afresh (:class:`asf.kernel.actions.ArchiveAndReset`)
+MAX_REBUILDS = 1
+
 #: the plan note of a behind Landing PR the merge train holds back this tick (its place in the
 #: queue, of how many are behind)
 TRAIN_NOTE = 'queued for update (merge train, %d of %d)'
@@ -219,6 +253,7 @@ class _Judged:
     findings: list = dataclasses.field(default_factory=list)
     behind_pr: object = None
     updating: bool = False
+    model: str = ''
 
 
 def decide(facts, config):
@@ -277,7 +312,8 @@ def _judge(it, facts, config, actions):
     """``it``'s :class:`_Judged` from its own card, sessions, PRs, reviews and answers; appends the
     item's own actions (answers, PR upkeep) to ``actions``."""
     stuck = (it.stuck if it.state is State.STUCK and not _legacy_conflict(it.stuck)
-             and not _red_off(it.stuck) and R.meaningful(it.stuck.reason) else None)
+             and not _red_off(it.stuck) and not _rejudged(it.stuck, config)
+             and R.meaningful(it.stuck.reason) else None)
     question = it.question
     hold = False
     attempts = list(it.attempts)
@@ -343,8 +379,18 @@ def _judge(it, facts, config, actions):
             actions.append(open_pr_action(it, branch, pushed))
             return _Judged(State.REVIEW, hold=True)
     if stuck:
+        again = (escalate_session(it, stuck) if stuck.owner == 'session' and not live
+                 and _due(config.escalate_after_h, it, facts) else None)
+        if again:  # a recorded session Stuck old enough: its one relaunch, next tick
+            actions.append(A.ClearStuck(it.id, again))
+            return _Judged(State.READY, hold=True)
         return _Judged(State.STUCK, _keep(stuck))
     if ended_stuck:
+        again = (escalate_session(it, ended_stuck) if ended_stuck.owner == 'session'
+                 and _due(config.escalate_after_h, it, facts, fresh=True) else None)
+        if again:  # resolved on the tick it appears: relaunched next tick with the report
+            actions.append(A.ClearStuck(it.id, again))
+            return _Judged(State.READY, hold=True)
         return _Judged(State.STUCK, ended_stuck)
     if question:
         return _Judged(State.STUCK, _stuck(question, 'operator'))
@@ -375,6 +421,61 @@ def _answers_stuck(answer, it):
     """Whether ``answer`` (already filtered by the facts) clears ``it``'s Stuck afresh though its
     text is on the card: both times are known, so the facts let only a newer answer through."""
     return it.state is State.STUCK and bool(answer.at) and bool(it.stuck_since)
+
+
+def _rejudged(stuck, config):
+    """Whether a recorded Stuck is judged afresh every tick so the kernel can resolve it: the
+    fix-round cap or a conflict the rebase session could not resolve (:func:`capped`), while
+    either escalation rule is on."""
+    return capped(stuck) and (config.escalate_after_h is not None
+                              or config.rebuild_after_h is not None)
+
+
+def stuck_age_h(since, now):
+    """Hours from ``since`` to ``now`` (both ISO-8601 UTC), or None when either is unreadable."""
+    a, b = _utc(since), _utc(now)
+    return None if a is None or b is None else (b - a).total_seconds() / 3600
+
+
+def _utc(value):
+    try:
+        t = datetime.datetime.fromisoformat(str(value or '').replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=datetime.timezone.utc)
+
+
+def _due(threshold, it, facts, fresh=False):
+    """Whether a Stuck of ``it`` is old enough for the kernel to resolve under ``threshold``
+    hours: None never; 0 (or less) at once; else a Stuck recorded on the card (not ``fresh``: this
+    tick's) whose age (:func:`stuck_age_h`) reaches it — an unknown age counts as old enough."""
+    if threshold is None:
+        return False
+    if threshold <= 0:
+        return True
+    if fresh or it.state is not State.STUCK:
+        return False
+    age = stuck_age_h(it.stuck_since, getattr(facts, 'now', ''))
+    return age is None or age >= threshold
+
+
+def escalate_session(it, stuck):
+    """The attempt a session-owned Stuck is resolved with — one relaunch marker carrying the
+    reason in the report's own words — or None when ``it`` already had its escalated relaunch."""
+    if any(str(a).startswith(RELAUNCH + ESCALATED) for a in it.attempts):
+        return None
+    return RELAUNCH + ESCALATED + ESCALATED_ASK % R.cap(stuck.reason, ANSWER_MAX)
+
+
+def _rebuild(it, pr, reason, config, facts, actions):
+    """Ready (held this tick) with an :class:`ArchiveAndReset` of ``pr`` when ``it`` may still be
+    rebuilt (``Item.rebuilds`` under :data:`MAX_REBUILDS`) and its Stuck is old enough
+    (``config.rebuild_after_h``; a Stuck recorded on another reason is this tick's), else None."""
+    if it.rebuilds >= MAX_REBUILDS or not _due(config.rebuild_after_h, it, facts,
+                                               fresh=not capped(it.stuck)):
+        return None
+    actions.append(A.ArchiveAndReset(it.id, pr.number, pr.branch, pr.head_sha, reason))
+    return _Judged(State.READY, hold=True)
 
 
 def answer_attempt(text):
@@ -622,9 +723,10 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
         if not granted and any(rebase_finding(f, pr.number) for f in it.findings):
             reason = ('%s the rebase session could not resolve: PR #%d still conflicts on head %s'
                       % (CONFLICT, pr.number, pr.head_sha or '?'))
-            return _Judged(State.STUCK, Stuck(reason, 'operator', CONFLICT_NEXT % pr.number))
+            return (_rebuild(it, pr, reason, config, facts, actions)
+                    or _Judged(State.STUCK, Stuck(reason, 'operator', CONFLICT_NEXT % pr.number)))
         return _fix_round(it, pr, '%s: PR #%d' % (CONFLICT, pr.number), config,
-                          [rebase_finding_for(pr.number)], extra)
+                          [rebase_finding_for(pr.number)], extra, facts, actions)
 
     reds = [c for c in pr.checks if c.status == 'completed' and c.conclusion in RED_CONCLUSIONS]
     gating = [c for c in reds if required(c.name, config)]
@@ -634,10 +736,15 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
     own = [c for c in gating if on_pr(c, pr)]
     if own:
         return _fix_round(it, pr, '%s: %s' % (RED, ', '.join(c.name for c in own)), config,
-                          [red_finding(c) for c in own], extra)
+                          [red_finding(c) for c in own], extra, facts, actions)
+    esc = _due(config.escalate_after_h, it, facts,
+               fresh=not _red_off(it.stuck if it.state is State.STUCK else None))
     for c in gating:
-        if c.attempt - 1 < config.max_reruns:
+        if c.attempt - 1 < config.max_reruns + (1 if esc else 0):
             actions.append(A.Rerun(c.run_id))
+        elif esc:  # its one more rerun is spent: the red is the PR's to fix after all
+            return _fix_round(it, pr, '%s: %s' % (RED, c.name), config, [red_finding(c)], extra,
+                              facts, actions)
         else:
             return _Judged(State.STUCK, _stuck('%s%d rerun(s): %s'
                                                % (RED_OFF, c.attempt - 1, c.name), 'ci'))
@@ -649,7 +756,8 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
     if verdict is None:
         return _Judged(State.REVIEW, review_branch=pr.branch)
     if verdict.verdict != 'approve':
-        return _fix_round(it, pr, 'review: changes requested', config, extra=extra)
+        return _fix_round(it, pr, 'review: changes requested', config, extra=extra, facts=facts,
+                          actions=actions)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
     if pr.behind:
@@ -722,14 +830,30 @@ def _red_off(stuck):
     return stuck is not None and stuck.owner == 'ci' and str(stuck.reason).startswith(RED_OFF)
 
 
-def _fix_round(it, pr, reason, config, findings=(), extra=0):
+def _fix_round(it, pr, reason, config, findings=(), extra=0, facts=None, actions=None):
     """Ready on ``pr``'s branch for one more fix round (carrying ``findings`` and an operator
-    answer's text into the launch), or Stuck(operator) past the cap: ``config.max_fix_rounds``
-    plus the ``extra`` rounds operator answers granted."""
-    if it.fix_rounds + 1 > config.max_fix_rounds + extra:
-        return _Judged(State.STUCK, _stuck('%s after %d fix rounds' % (reason, it.fix_rounds),
-                                           'operator'))
-    answered = [f for f in relaunch_findings(it) if f.startswith(ANSWERED)]
+    answer's text into the launch), or past the cap — ``config.max_fix_rounds`` plus the
+    ``extra`` rounds operator answers granted: one extra round on ``config.strong_model`` with
+    every finding the item holds (:data:`STRONG_ROUND`, once ``escalate_after_h`` allows), then
+    a rebuild (:func:`_rebuild`), else Stuck(operator)."""
+    cap = config.max_fix_rounds + extra
+    strong = STRONG_ROUND in it.attempts
+    if it.fix_rounds + 1 > cap + (1 if strong else 0):
+        stuck = _stuck('%s after %d fix rounds' % (reason, it.fix_rounds), 'operator')
+        if actions is None:
+            return _Judged(State.STUCK, stuck)
+        if not strong and _due(config.escalate_after_h, it, facts,
+                               fresh=not capped(it.stuck)):
+            actions.append(A.ClearStuck(it.id, STRONG_ROUND))
+            strong = True
+        else:
+            return (_rebuild(it, pr, stuck.reason, config, facts, actions) if strong else None) \
+                or _Judged(State.STUCK, stuck)
+    answered = [f for f in relaunch_findings(it) if f.startswith((ANSWERED, ESCALATED))]
+    if strong and it.fix_rounds + 1 > cap:  # the one extra round: the strong model, every finding
+        every = list(findings) + [f for f in it.findings if f not in findings]
+        return _Judged(State.READY, branch=pr.branch, findings=every + answered,
+                       model=config.strong_model)
     return _Judged(State.READY, branch=pr.branch, findings=list(findings) + answered)
 
 
@@ -928,7 +1052,7 @@ def _launches(facts, config, judged, children, states, parked, blocks=None):
             continue
         kind = _kind(items[iid], facts)
         out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config, items[iid]),
-                            list(judged[iid].findings)))
+                            list(judged[iid].findings), judged[iid].model))
         busy.append(items[iid].writes)
         free -= 1
     return out, skipped

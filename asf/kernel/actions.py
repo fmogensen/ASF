@@ -12,11 +12,14 @@ import dataclasses
 class Launch:
     """Start one session of ``kind`` (``build``, ``review``, ``spec``, ``plan``) for ``item_id`` on
     ``branch``. The session gets the branch and a brief only; the host mints ids and writes cards.
-    ``findings`` are what a fix round answers beyond the review's (a rebase round's ask)."""
+    ``findings`` are what a fix round answers beyond the review's (a rebase round's ask).
+    ``model``: the model this one launch runs on instead of its kind's ('' keeps the kind's) —
+    the one extra fix round past the cap runs on ``Config.strong_model``."""
     kind: str
     item_id: str
     branch: str
     findings: list = dataclasses.field(default_factory=list)
+    model: str = ''
 
 
 @dataclasses.dataclass
@@ -110,12 +113,29 @@ class ApplyAnswer:
 
 @dataclasses.dataclass
 class ClearStuck:
-    """A legacy Stuck the newer rules re-judge: append ``attempt`` to ``item_id``'s attempts (the
-    one relaunch it is given — a :data:`asf.kernel.decide.NO_REPORT`, or a
-    :data:`asf.kernel.decide.RELAUNCH` marker carrying a finding); its Stuck is cleared with the
+    """A Stuck the kernel resolves by itself (a legacy one the newer rules re-judge, or one it
+    escalates: :func:`asf.kernel.decide.escalate_session`, the extra fix round past the cap):
+    append ``attempt`` to ``item_id``'s attempts (the one relaunch it is given — a
+    :data:`asf.kernel.decide.NO_REPORT`, a :data:`asf.kernel.decide.RELAUNCH` marker carrying a
+    finding, or the :data:`asf.kernel.decide.STRONG_ROUND` marker); its Stuck is cleared with the
     item's state."""
     item_id: str
     attempt: str
+
+
+@dataclasses.dataclass
+class ArchiveAndReset:
+    """Build ``item_id`` afresh: its PR ``pr`` cannot land (a conflict its rebase session could not
+    resolve, or the fix-round cap after the strong round). The host pushes ``head_sha`` to
+    ``archive/<branch>``, closes the PR with a comment naming ``reason`` and the archive, and
+    deletes ``branch``; the record clears ``kernel_fix_rounds``, ``kernel_extra_rounds``,
+    ``kernel_attempts`` and ``kernel_findings``, adds one to ``kernel_rebuilds`` and the item is
+    Ready on a fresh branch from the trunk. At most once per item."""
+    item_id: str
+    pr: int
+    branch: str
+    head_sha: str
+    reason: str
 
 
 @dataclasses.dataclass

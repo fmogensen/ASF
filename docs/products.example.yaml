@@ -498,6 +498,16 @@ kernel:
   idle_alarm:
     enabled: true           # the plan carries an `idle` record when seats are free, work waits,
     min_free_seats: 1       # and nothing launches; tick prints IDLE, status shows it on top
+  stuck:                    # Stuck never sits: what the kernel can resolve, it resolves
+    escalate_after_h: 0     # a Stuck owned by a session or CI this old (0: the tick it appears):
+                            # a red off the PR gets one more rerun, then a fix round; a stopped
+                            # session one relaunch with its report as findings; the fix-round
+                            # cap one extra round on strong_model with every finding
+    rebuild_after_h: 0      # a conflict the rebase could not resolve, or the cap after that extra
+                            # round, this old: archive the branch to archive/<branch>, close the
+                            # PR, rebuild fresh from the trunk — at most once per item
+    strong_model: claude-opus-5   # the extra round's model. Operator questions are never
+                            # resolved: `asf kernel status` puts them in a "needs you" block
   gate:
     window_h: 24            # first-push-green is measured over PRs opened in the last window_h
     first_push_green_min: 0.7

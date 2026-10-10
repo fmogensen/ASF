@@ -7,7 +7,13 @@ states are the last tick's plan (``state/<product>/kernel-plan.json``, written b
 tick), so the table costs no network call; ``live=True`` (``--live``), or no plan on disk yet,
 decides afresh on the facts now (no action is applied). A Stuck item's age is from its card's
 ``kernel_stuck_since``, ``-`` until a tick has recorded it. The biggest wait
-(:func:`asf.kernel.waits.biggest_line`, from the wait ledger) heads the table.
+(:func:`asf.kernel.waits.biggest_line`, from the wait ledger) heads the table, after the
+"Needs you" block when there is one.
+
+The kernel resolves every Stuck it can by itself (:mod:`asf.kernel.decide`: "Stuck never sits");
+what is left on the operator is a question for a person. When any operator-owned Stuck is at least
+``kernel.stuck.escalate_after_h`` old (0: from minute zero; an unknown age counts), a "Needs you"
+block with each one's age leads the table (:func:`needs_you`).
 """
 import collections
 import datetime
@@ -29,6 +35,28 @@ def _age(since, now):
         return '-'
     hours = (now - t).total_seconds() / 3600
     return '%dh' % hours if hours < 48 else '%dd' % (hours / 24)
+
+
+def age_hours(age):
+    """The hours an :func:`_age` cell says (``5h``, ``3d``), or None for ``-``."""
+    text = str(age or '')
+    try:
+        return float(text[:-1]) * (24 if text.endswith('d') else 1) if text[-1:] in 'hd' else None
+    except ValueError:
+        return None
+
+
+def needs_you(stuck, after_h=0):
+    """The operator-owned rows of ``stuck`` (:func:`rows`) at least ``after_h`` hours old (an
+    unknown age counts), oldest first: the questions only a person can answer."""
+    out = []
+    for row in stuck:
+        if row[2] != 'operator':
+            continue
+        h = age_hours(row[4])
+        if h is None or h >= (after_h or 0):
+            out.append(row)
+    return sorted(out, key=lambda r: (-(age_hours(r[4]) or 0), r[0]))
 
 
 def _cell(text, width=80):
@@ -81,11 +109,21 @@ def rows_from_plan(data, record, now=None):
     return stuck, counts, sessions
 
 
-def render(stuck, counts, sessions, idle=None, notes=None):
+def render(stuck, counts, sessions, idle=None, notes=None, needs_after_h=None, head=''):
     """The three blocks as markdown tables (the console draws them as boxes), the idle alarm
-    (:func:`asf.kernel.loop.idle_line`) first when it is raised, the notes last when any."""
+    (:func:`asf.kernel.loop.idle_line`) first when it is raised, the notes last when any. With
+    ``needs_after_h`` (hours) set, a "Needs you" block (:func:`needs_you`) leads when any
+    operator-owned Stuck is that old; ``head`` (the biggest wait) comes right after it."""
     from asf.kernel.loop import idle_line
-    out = [idle_line(idle), ''] if idle else []
+    out = []
+    asks = needs_you(stuck, needs_after_h) if needs_after_h is not None else []
+    if asks:
+        out += ['## Needs you', '', '| item | age | question |', '| --- | --- | --- |']
+        out += ['| %s | %s | %s |' % (iid, age, _cell(reason, 120))
+                for iid, reason, _owner, _n, age in asks]
+        out.append('')
+    out += [head.rstrip('\n'), ''] if head else []
+    out += [idle_line(idle), ''] if idle else []
     out += ['## Stuck', '', '| item | owner | blocks | age | reason |', '| --- | --- | --- | --- | --- |']
     out += ['| %s | %s | %d | %s | %s |' % (iid, owner, n, age, _cell(reason))
             for iid, reason, owner, n, age in stuck] or ['| - | - | 0 | - | nothing stuck |']
@@ -119,8 +157,9 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
             data = None
     if data is not None:
         record = ports.record if ports else P.RealRecord(product)
-        text = top + render(*rows_from_plan(data, record), idle=data.get('idle'),
-                      notes=data.get('notes')) \
+        text = render(*rows_from_plan(data, record), idle=data.get('idle'),
+                      notes=data.get('notes'), needs_after_h=_needs_after(product),
+                      head=top) \
             + '\n\n(the tick of %s; --live for now)' \
             % data.get('at', '?')
         out(text)
@@ -128,6 +167,15 @@ def status(product, ports=None, config=None, out=print, live=False, state_dir=No
     ports = ports or P.real_ports(product)
     config = config or P.config_for(product, github=ports.github)
     stuck, counts, sessions, idle, notes = rows(ports, config, with_idle=True, with_notes=True)
-    text = top + render(stuck, counts, sessions, idle=idle, notes=notes)
+    text = render(stuck, counts, sessions, idle=idle, notes=notes,
+                  needs_after_h=_needs_after(product), head=top)
     out(text)
     return text
+
+
+def _needs_after(product):
+    """``kernel.stuck.escalate_after_h`` of ``product`` (0 when its block cannot be read)."""
+    try:
+        return float(product.kernel['stuck']['escalate_after_h'])
+    except Exception:  # noqa: BLE001 — the table never fails on a setting
+        return 0.0

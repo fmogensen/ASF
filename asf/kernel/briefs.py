@@ -278,7 +278,8 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
     b = floor.build(product, row, index, [], rf)
     b = dataclasses.replace(b, text=kernel_push_text(b.text, launch.branch,
                                                      getattr(product, 'main', 'main') or 'main'),
-                            model=model_for(product, kind) or b.model)
+                            model=getattr(launch, 'model', '') or model_for(product, kind)
+                            or b.model)
     extra = []
     if findings and not fix:
         extra += ['## Findings', ''] + ['- %s' % f for f in findings] + ['']

@@ -28,6 +28,16 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    stale_after_s: 900}        # a plan older than this, and no tick running: kick
       idle_alarm: {enabled: true,             # Plan.idle when seats are free and nothing launches
                    min_free_seats: 1}
+      stuck:      {escalate_after_h: 0,       # a Stuck owned by a session or CI is resolved this
+                                              # old: a red off the PR one more rerun then a fix
+                                              # round; a stopped session one relaunch with its
+                                              # report; the fix-round cap one extra round on
+                                              # strong_model (0: on the tick it appears)
+                   rebuild_after_h: 0,        # a conflict the rebase could not resolve (or the cap
+                                              # after the strong round) this old: archive the
+                                              # branch, close the PR, rebuild fresh — once per item
+                   strong_model: claude-opus-5}   # the extra round's model; operator questions
+                                              # are never resolved: status shows them on top
       gate:       {window_h: 24, first_push_green_min: 0.7, landed_min: 5,
                    silent_stuck_max: 0, since: 2026-10-09T14:00:00Z}   # asf kernel gate
       waits:      {targets: {seat: 10m, ci: 10m, review: 30m, train: 30m, merge: 10m,
@@ -95,6 +105,8 @@ SPEC = {
     'landing': {'update_parallel': (2, int)},
     'watch': {'interval_s': (600, int), 'stale_after_s': (900, int)},
     'idle_alarm': {'enabled': (True, bool), 'min_free_seats': (1, int)},
+    'stuck': {'escalate_after_h': (0, float), 'rebuild_after_h': (0, float),
+              'strong_model': (HEAVY_MODEL, 'text')},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time')},
     'waits': {'targets': (WAIT_TARGETS, 'targets')},

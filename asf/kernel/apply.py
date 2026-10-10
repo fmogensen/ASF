@@ -30,6 +30,10 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   ``kernel_extra_rounds`` and drops the spent rebase finding; a :class:`~asf.kernel.actions.ClearStuck` appends
   its attempt; a build launched off a PR carries the launch's findings (a granted relaunch's)
   into the brief, and writes no fix round;
+- an :class:`~asf.kernel.actions.ArchiveAndReset` has the host keep the PR's head as
+  ``archive/<branch>``, close the PR with a comment and delete the branch; then the card's fix
+  rounds, extra rounds, attempts and findings are cleared and ``kernel_rebuilds`` goes up by one
+  (a failed host step leaves the card as it was: the next tick judges the PR again);
 - a session that ended without a REPORT is an attempt :data:`asf.kernel.decide.NO_REPORT` and
   its worktree is kept: the relaunch continues on it;
 - a review session that ended has its report's verdict lines
@@ -115,6 +119,9 @@ def describe(action):
         return 'publish %s rebase of %s' % (action.item_id, action.job)
     if isinstance(action, A.NoteItem):
         return 'note %s: %s' % (action.item_id, action.text)
+    if isinstance(action, A.ArchiveAndReset):
+        return 'rebuild %s: archive %s, close #%d (%s)' % (action.item_id, action.branch,
+                                                           action.pr, action.reason)
     return repr(action)
 
 
@@ -135,7 +142,8 @@ class _Applier:
             return default
         return {P.ATTEMPTS: list(it.attempts), P.FIX_ROUNDS: it.fix_rounds,
                 P.ANSWERS: list(it.answers), P.NOTES: list(it.notes),
-                P.EXTRA_ROUNDS: it.extra_rounds, P.FINDINGS: list(it.findings)}.get(key, default)
+                P.EXTRA_ROUNDS: it.extra_rounds, P.FINDINGS: list(it.findings),
+                P.REBUILDS: it.rebuilds}.get(key, default)
 
     def set(self, iid, **fields):
         self.updates.setdefault(iid, {}).update(fields)
@@ -160,6 +168,16 @@ class _Applier:
 
     def ClearStuck(self, a):
         self.attempt(a.item_id, a.attempt)
+
+    def ArchiveAndReset(self, a):
+        comment = ('Closed by the kernel: %s. The head %s is kept as `%s%s`; %s is rebuilt '
+                   'fresh from the trunk.' % (a.reason, a.head_sha or '?', P.ARCHIVE_PREFIX,
+                                              a.branch, a.item_id))
+        archive = self.ports.github.archive_and_reset(a.pr, a.branch, a.head_sha, comment)
+        self.set(a.item_id, **{P.FIX_ROUNDS: 0, P.EXTRA_ROUNDS: 0, P.ATTEMPTS: [],
+                               P.FINDINGS: [],
+                               P.REBUILDS: self.field(a.item_id, P.REBUILDS, 0) + 1})
+        return 'archived as %s' % archive
 
     def NoteItem(self, a):
         notes = self.field(a.item_id, P.NOTES, [])

@@ -81,6 +81,8 @@ class Item:
     ``reopened`` is set when a Done item was reopened. ``stuck_since`` is when the card's Stuck
     was recorded (ISO-8601 UTC, None when unknown): an operator answer given after it clears it.
     ``extra_rounds`` are the fix rounds operator answers granted beyond ``max_fix_rounds``.
+    ``rebuilds`` counts the times the kernel archived the item's branch, closed its PR and built
+    it afresh (:class:`asf.kernel.actions.ArchiveAndReset`): at most once per item.
     """
     id: str
     type: str = 'task'
@@ -102,6 +104,7 @@ class Item:
     notes: list = dataclasses.field(default_factory=list)
     stuck_since: str = None
     extra_rounds: int = 0
+    rebuilds: int = 0
 
 
 @dataclasses.dataclass
@@ -243,7 +246,9 @@ class Facts:
     spec merged to trunk. ``paused`` holds every launch; nothing else. ``branches`` are the
     :class:`Branch` values on origin under the kernel's work prefixes. ``stranded`` are the ended
     :class:`Session` values (``unpushed``/``push_refused`` read) whose kept worktree holds a rebase
-    a Stuck item's refused force-push left (:func:`asf.kernel.decide.stranded`)."""
+    a Stuck item's refused force-push left (:func:`asf.kernel.decide.stranded`). ``now`` is the
+    tick's time (ISO-8601 UTC, '' when unknown): a recorded Stuck's age is ``now`` less its
+    ``Item.stuck_since``."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -253,6 +258,7 @@ class Facts:
     paused: bool = False
     branches: list = dataclasses.field(default_factory=list)
     stranded: list = dataclasses.field(default_factory=list)
+    now: str = ''
 
 
 @dataclasses.dataclass
@@ -271,8 +277,11 @@ class Config:
     ``idle_alarm``/``idle_min_free``: the plan carries an ``idle`` record when at least that many
     seats are free, work waits and nothing launches. ``update_parallel`` is the merge train's
     length: at most that many Landing PRs are brought up to date (or still run their checks after
-    one) at once. The product file's ``kernel:`` block sets
-    them (:mod:`asf.kernel.settings`)."""
+    one) at once. ``escalate_after_h`` / ``rebuild_after_h``: a Stuck the kernel can resolve by
+    itself is resolved once it is this many hours old (0: on the tick it appears; None: never —
+    the bare model's default, so a unit test opts in); ``strong_model`` is the model the one
+    extra fix round past the cap runs on. The product file's ``kernel:`` block sets
+    them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -286,3 +295,6 @@ class Config:
     idle_alarm: bool = True
     idle_min_free: int = 1
     update_parallel: int = 2
+    escalate_after_h: float = None
+    rebuild_after_h: float = None
+    strong_model: str = ''

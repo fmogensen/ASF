@@ -21,6 +21,8 @@ that rule, so it is the same everywhere. The pushed branches
 refused force-push left (:func:`asf.kernel.decide.stranded`) has its last ended session's kept
 worktree read (``sessions.stranded``, when the port has it) into ``Facts.stranded``.
 """
+import datetime
+
 from asf.kernel.decide import stranded as decide_stranded
 from asf.kernel.model import Facts, State
 
@@ -59,4 +61,5 @@ def read_facts(ports):
                 stranded.append(s)
     return Facts(items=items, prs=prs, sessions=list(ports.sessions.sessions()), reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
-                 stranded=stranded)
+                 stranded=stranded, now=datetime.datetime.now(datetime.timezone.utc).strftime(
+                     '%Y-%m-%dT%H:%M:%SZ'))

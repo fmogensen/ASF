@@ -27,6 +27,8 @@ marker), so every old writer carries them through byte for byte
 - ``kernel_extra_rounds``: fix rounds granted beyond ``max_fix_rounds`` — one per operator
   answer to a Stuck at the fix-round cap (or a conflict its rebase session could not resolve);
   the item's cap is ``max_fix_rounds`` + this.
+- ``kernel_rebuilds``: the times the kernel archived the item's branch, closed its PR and built
+  it afresh (:class:`~asf.kernel.actions.ArchiveAndReset`): at most once per item.
 - ``kernel_attempts``: the reason of each failed attempt, oldest first.
 - ``kernel_findings``: the review findings handed to the next fix round.
 - ``kernel_answers``: the operator answers already applied; ``kernel_question``: the open one.
@@ -52,9 +54,12 @@ STATE, ATTEMPTS, FIX_ROUNDS = 'kernel_state', 'kernel_attempts', 'kernel_fix_rou
 FINDINGS, ANSWERS, QUESTION = 'kernel_findings', 'kernel_answers', 'kernel_question'
 STUCK_REASON, STUCK_OWNER = 'kernel_stuck_reason', 'kernel_stuck_owner'
 STUCK_NEXT, STUCK_SINCE, REOPENED = 'kernel_stuck_next', 'kernel_stuck_since', 'kernel_reopened'
-NOTES, EXTRA_ROUNDS = 'kernel_notes', 'kernel_extra_rounds'
+NOTES, EXTRA_ROUNDS, REBUILDS = 'kernel_notes', 'kernel_extra_rounds', 'kernel_rebuilds'
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
-               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS)
+               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS, REBUILDS)
+
+#: the branch prefix a rebuilt item's old head is pushed under (:class:`ArchiveAndReset`)
+ARCHIVE_PREFIX = 'archive/'
 
 #: the card types the kernel judges (decisions and rules are never work)
 WORK_TYPES = ('epic', 'feature', 'story', 'task', 'bug')
@@ -109,6 +114,7 @@ class GitHubPort(typing.Protocol):
     def rerun(self, run_id) -> None: ...
     def branches(self) -> list: ...                     # [Branch] under the work prefixes
     def open_pr(self, branch, base, title, body) -> int: ...  # the PR number (new or existing)
+    def archive_and_reset(self, pr, branch, head_sha, comment) -> str: ...  # the archive branch
 
 
 class SessionPort(typing.Protocol):
@@ -155,6 +161,7 @@ def item_from_card(rec):
         state=state, stuck=stuck, attempts=[str(a) for a in as_list(machine.get(ATTEMPTS))],
         fix_rounds=int(machine.get(FIX_ROUNDS) or 0),
         extra_rounds=int(machine.get(EXTRA_ROUNDS) or 0),
+        rebuilds=int(machine.get(REBUILDS) or 0),
         findings=[str(f) for f in as_list(machine.get(FINDINGS))],
         answers=[str(a) for a in as_list(machine.get(ANSWERS))],
         question=machine.get(QUESTION) or None, reopened=bool(machine.get(REOPENED)),
@@ -685,6 +692,24 @@ class RealGitHub:
             return number
         raise PortError('open PR %s: %s' % (branch, r.reason or 'no PR number in the reply'))
 
+    def archive_and_reset(self, pr, branch, head_sha, comment):
+        """Keep ``branch``'s head ``head_sha`` as ``archive/<branch>`` (created, or moved there),
+        close PR ``pr`` with ``comment`` and delete ``branch`` on origin. Returns the archive
+        branch. The archive is written first: a failure before the delete loses nothing."""
+        if not head_sha:
+            raise PortError('archive %s: no head sha' % branch)
+        archive = ARCHIVE_PREFIX + branch
+        r = self._gh(['api', '-X', 'POST', 'repos/%s/git/refs' % self.slug,
+                      '-f', 'ref=refs/heads/%s' % archive, '-f', 'sha=%s' % head_sha])
+        if not r.ok:
+            self._write(['api', '-X', 'PATCH', 'repos/%s/git/refs/heads/%s' % (self.slug, archive),
+                         '-f', 'sha=%s' % head_sha, '-F', 'force=true'], 'archive %s' % archive)
+        self._write(['pr', 'close', str(pr), '-R', self.slug, '--comment', comment],
+                    'close #%d' % pr)
+        self._write(['api', '-X', 'DELETE', 'repos/%s/git/refs/heads/%s' % (self.slug, branch)],
+                    'delete %s' % branch)
+        return archive
+
 
 # ---- sessions -----------------------------------------------------------------------------------
 
@@ -1180,7 +1205,7 @@ def config_for(product, cfg=None, github=None):
     """The :class:`~asf.kernel.model.Config` of ``product``: branch prefixes, document roots and
     the required checks (:func:`required_checks_for`, asking ``github`` when the conventions name
     none) from its conventions; ``max_sessions`` (:func:`lane_seats`: local + cloud), ``rank``, the idle alarm and the merge train's
-    ``update_parallel`` from its ``kernel:``
+    ``update_parallel``, and the Stuck escalation (``kernel.stuck``) from its ``kernel:``
     block (:mod:`asf.kernel.settings`, each with its documented default)."""
     conv = product.conventions
     k = product.kernel
@@ -1192,7 +1217,10 @@ def config_for(product, cfg=None, github=None):
         max_sessions=sum(lane_seats(product, cfg)), rank=k['launch']['rank'],
         idle_alarm=bool(k['idle_alarm']['enabled']),
         idle_min_free=int(k['idle_alarm']['min_free_seats']),
-        update_parallel=int(k['landing']['update_parallel']))
+        update_parallel=int(k['landing']['update_parallel']),
+        escalate_after_h=float(k['stuck']['escalate_after_h']),
+        rebuild_after_h=float(k['stuck']['rebuild_after_h']),
+        strong_model=str(k['stuck']['strong_model']))
 
 
 

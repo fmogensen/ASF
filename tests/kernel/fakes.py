@@ -29,6 +29,9 @@ class FakeRecord:
             it.attempts = list(f.get(P.ATTEMPTS, it.attempts))
             it.fix_rounds = f.get(P.FIX_ROUNDS, it.fix_rounds)
             it.extra_rounds = f.get(P.EXTRA_ROUNDS, it.extra_rounds)
+            it.rebuilds = f.get(P.REBUILDS, it.rebuilds)
+            if P.STUCK_SINCE in f:
+                it.stuck_since = f[P.STUCK_SINCE]
             it.answers = list(f.get(P.ANSWERS, it.answers))
             it.findings = list(f.get(P.FINDINGS, it.findings))
             out[iid] = it
@@ -100,6 +103,13 @@ class FakeGitHub:
 
     def branches(self):
         return copy.deepcopy(self._branches)
+
+    def archive_and_reset(self, pr, branch, head_sha, comment):
+        self._do('archive_and_reset', pr)
+        self.archived = getattr(self, 'archived', []) + [(pr, branch, head_sha, comment)]
+        self._prs = [p for p in self._prs if p.number != pr]
+        self._branches = [b for b in self._branches if b.name != branch]
+        return P.ARCHIVE_PREFIX + branch
 
     def open_pr(self, branch, base, title, body):
         self._do('open_pr', branch)
