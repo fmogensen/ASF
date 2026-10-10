@@ -18,6 +18,15 @@ cite a decision id (``D-nnnn``, outside a code span) the decision register lacks
 citing an S-/T-/B- id no claim covers, or redeclaring one the record holds
 (:mod:`asf.record.idcheck`); a Task whose (parent, stories, writes) equals an open Task's — or
 an earlier Task of the same plan — is not minted, and its line names the existing id.
+
+The card carries the plan Task's acceptance (F-0343): the commands of its ``**Acceptance**``
+block become the card's ``## Acceptance`` lines (:func:`acceptance_of`), and a Task longer than
+:data:`DESCRIPTION_CHARS` loses prose only — its ``stories:``/``writes:``/``after:`` lines, its
+``**Gate**`` block and its ``**Acceptance**`` block are kept whole (:func:`card_description`).
+Before this every card was born with an empty ``- [ ]`` Acceptance and a description cut at the
+first 4000 characters — past which a long Task's Gate and Acceptance sat — so the Definition of
+Ready held every minted Task New and spent a groom-fill session re-deriving what the reviewed plan
+already said. :func:`backfill_acceptance` repairs a card minted that way, once, from its plan.
 """
 import re
 
@@ -34,6 +43,145 @@ DONE_STATES = ('Resolved', 'Closed')
 STORIES_LINE_RE = re.compile(r'^\s*stories\s*:\s*(.+)$', re.IGNORECASE | re.MULTILINE)
 STORY_ID_RE = re.compile(rf'\bS-{ID_DIGITS}\b')
 DESCRIPTION_CHARS = 4000
+
+#: a ``**Gate**`` / ``**Acceptance**`` block head in a plan Task: the bold word (or a heading)
+#: alone, or followed by ``:``, ``(…)`` or a dash — not prose that merely starts with the word
+_BLOCK_HEAD = r'^\s*(?:\*\*{word}\*\*|#{{2,6}}\s*{word})(?=\s*(?:$|[:(\u2014\u2013-]))(.*)$'
+GATE_HEAD_RE = re.compile(_BLOCK_HEAD.format(word='Gate'), re.IGNORECASE)
+ACCEPTANCE_HEAD_RE = re.compile(_BLOCK_HEAD.format(word='Acceptance'), re.IGNORECASE)
+#: where an Acceptance block ends: a heading at Task level or above, or the next bold block head
+_BLOCK_END_RE = re.compile(r'^(?:#{1,3}\s|\s*\*\*(?:Files|Steps|Gate|Notes?|Risks?)\*\*)',
+                           re.IGNORECASE)
+#: the machine-read lines under a Task heading (the plan template's TASK LINES)
+KEY_LINE_RE = re.compile(r'^\s*(?:stories|writes|after|files)\s*:', re.IGNORECASE)
+_LABEL_RE = re.compile(r'^\s*\*\*(.+?)\*\*\s*:?\s*$')
+
+
+def _fence(line):
+    return line.strip().startswith('```')
+
+
+def gate_span(lines):
+    """(start, end) of the ``**Gate**`` block in ``lines``: its head line through the close of
+    the fence that follows it (the head line alone when no fence follows); None without one."""
+    for i, line in enumerate(lines):
+        if not GATE_HEAD_RE.match(line):
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j < len(lines) and _fence(lines[j]):
+            k = j + 1
+            while k < len(lines) and not _fence(lines[k]):
+                k += 1
+            return i, min(k + 1, len(lines))
+        return i, i + 1
+    return None
+
+
+def acceptance_span(lines):
+    """(start, end) of the ``**Acceptance**`` block in ``lines``: its head line up to the next
+    heading of Task level or above, or the next bold block head (outside a fence); None without
+    one."""
+    for i, line in enumerate(lines):
+        if not ACCEPTANCE_HEAD_RE.match(line):
+            continue
+        inside, k = False, i + 1
+        while k < len(lines):
+            if _fence(lines[k]):
+                inside = not inside
+            elif not inside and _BLOCK_END_RE.match(lines[k]):
+                break
+            k += 1
+        while k > i + 1 and not lines[k - 1].strip():
+            k -= 1
+        return i, k
+    return None
+
+
+def acceptance_of(body):
+    """The card's ``## Acceptance`` lines from a plan Task's ``**Acceptance**`` block, in order:
+    each command of its fences (a ``\\`` continuation joined, ``#`` comments dropped) in
+    backticks, prefixed by the bold label above it when there is one; each bullet outside a
+    fence; an inline ``**Acceptance**: <text>``. [] when the Task has no such block."""
+    lines = str(body or '').splitlines()
+    span = acceptance_span(lines)
+    if span is None:
+        return []
+    start, end = span
+    out = []
+    inline = ACCEPTANCE_HEAD_RE.match(lines[start]).group(1).strip()
+    if inline.startswith(':') and inline[1:].strip():
+        out.append(inline[1:].strip())
+    label, inside, cmd, bullet = None, False, '', None
+
+    def flush():
+        if bullet:
+            out.append(bullet)
+        return None
+
+    for line in lines[start + 1:end]:
+        if _fence(line):
+            bullet = flush()
+            inside = not inside
+            continue
+        text = line.strip()
+        if bullet is not None and not inside:
+            if text and line[:1].isspace() and not re.match(r'^\s*[-*]\s', line):
+                bullet = f'{bullet} {text}'  # a wrapped bullet: its indented continuation
+                continue
+            bullet = flush()
+        if inside:
+            if not text or (text.startswith('#') and not cmd):
+                continue
+            cmd = (cmd + ' ' + text.rstrip('\\').strip()).strip()
+            if text.endswith('\\'):
+                continue
+            out.append(f'{label}: `{cmd}`' if label else f'`{cmd}`')
+            cmd = ''
+            continue
+        m = _LABEL_RE.match(line)
+        if m:
+            label = m.group(1).strip()
+            continue
+        m = re.match(r'^\s*[-*]\s+(?:\[[ xX]?\]\s*)?(.+)$', line)
+        if m:
+            bullet = m.group(1).strip()
+    flush()
+    if cmd:
+        out.append(f'{label}: `{cmd}`' if label else f'`{cmd}`')
+    return list(dict.fromkeys(out))
+
+
+def card_description(body, limit=DESCRIPTION_CHARS, plan_path=None):
+    """The card's description from a plan Task's ``body``: the body whole when it fits ``limit``;
+    else its key lines (``stories:``/``writes:``/``after:``/``Files:``), its prose cut to what is
+    left of ``limit``, and its ``**Gate**`` and ``**Acceptance**`` blocks whole — prose is cut,
+    never the lines the Definition of Ready and the coder read."""
+    body = str(body or '').strip()
+    if len(body) <= limit:
+        return body
+    lines = body.splitlines()
+    keep = set()
+    for span in (gate_span(lines), acceptance_span(lines)):
+        if span:
+            keep.update(range(*span))
+    blocks = '\n'.join(l for i, l in enumerate(lines) if i in keep)
+    keys = [l for i, l in enumerate(lines) if i not in keep and KEY_LINE_RE.match(l)]
+    rest = [l for i, l in enumerate(lines) if i not in keep and not KEY_LINE_RE.match(l)]
+    head = '\n'.join(keys)
+    where = f' — the whole Task is in {plan_path}' if plan_path else ''
+    marker = f'\n\n[… prose cut at {limit} characters{where}]'
+    # the two paragraph joins, the marker and a fence the cut may have to close
+    budget = max(limit - len(head) - len(blocks) - len(marker) - 8, 0)
+    prose = '\n'.join(rest).strip()
+    if len(prose) > budget:
+        cut = prose[:budget]
+        cut = cut[:cut.rfind('\n')] if '\n' in cut else ''
+        if sum(1 for l in cut.splitlines() if _fence(l)) % 2:
+            cut += '\n```'
+        prose = cut.rstrip() + marker
+    return '\n\n'.join(p for p in (head, prose, blocks) if p.strip())
 
 
 def stories_of(body, canonical):
@@ -98,10 +246,105 @@ def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
     writer through the record stage (R14): a card an invariant refuses is not written, the rest
     are."""
     from asf.record import stage
+    stage.guarded(root, 'plan-tasks', backfill_acceptance, (ev, out, read_ref, product),
+                  product=product, out=out)
     made, staged, _findings = stage.guarded(root, 'plan-tasks', _mint, (product, ev, out, read_ref),
                                             product=product, out=out)
     refused = set(staged.refused)
     return [i for i in made if not any(p.endswith(f"/{i}.md") for p in refused)]
+
+
+def _empty_acceptance(body):
+    from asf.kernel.dor import acceptance_lines
+    return not acceptance_lines(body)
+
+
+def backfill_acceptance(root, ev, out=print, read_ref=None, product=None):
+    """The one-shot repair of a Task minted before F-0343: an open ``New`` card of a landed plan
+    (``links.plan``) whose ``## Acceptance`` is empty gets its plan Task's acceptance lines
+    (:func:`acceptance_of`) — a retired card, or one under a retired or Done Feature, is not
+    work and is left alone — and, when its description is still the minter's cut — the
+    description :func:`card_description` composes, with a History line. The card is its plan
+    Task by title (:func:`asf.record.plan_order.task_ids`). Idempotent: a card with an
+    acceptance line (a groom-fill's, or this pass's) is never touched, nor one whose plan Task
+    has no acceptance block. Returns the ids written."""
+    from asf.record import frontmatter, writer
+    from asf.record.core import now_iso, parse_sections, render_sections
+    from asf.record.ingest import append_history_lines, _path_only
+    from asf.record.plan_order import task_ids
+    from asf.tick.migrate import plan_task_records
+    by_id, _errors = load_items(root)
+    canonical, _dupes = canonicalize(by_id)
+    todo = {}  # plan path -> {card id: meta}
+    for iid, rec in canonical.items():
+        m = rec['meta']
+        path = (m.get('links') or {}).get('plan')
+        parent = (canonical.get(m.get('parent')) or {}).get('meta') or {}
+        if (m.get('type') == 'task' and path and m.get('state', 'New') == 'New'
+                and not is_retired(m) and not is_retired(parent)
+                and parent.get('state') not in DONE_STATES
+                and _empty_acceptance(rec.get('body') or '')):
+            todo.setdefault(path, {})[iid] = m
+    if not todo:
+        return []
+    refs = {}
+    for f in ((ev or {}).get('features') or {}).values():
+        ref = plan_ref(f)
+        if ref and _path_only(ref) in todo:
+            refs.setdefault(_path_only(ref), ref)
+    if not refs:
+        return []
+    if read_ref is not None:
+        texts = {path: read_ref(ref) for path, ref in refs.items()}
+    else:
+        got = evidence.read_refs(list(refs.values()), product=product)
+        texts = {path: got.get(ref) for path, ref in refs.items()}
+    known = None
+    written = []
+    for path in sorted(refs):
+        text = texts.get(path)
+        if not text:
+            continue
+        records = plan_task_records(text)
+        cards = {i: r['meta'] for i, r in canonical.items()
+                 if r['meta'].get('type') == 'task'
+                 and (r['meta'].get('links') or {}).get('plan') == path}
+        by_num = task_ids(records, cards)
+        for t in records:
+            num = re.match(r'T(\d+)', t['tid'])
+            cid = by_num.get(int(num.group(1))) if num else None
+            if cid not in todo[path]:
+                continue
+            if known is None:
+                known = decisions.register(canonical, product)
+            full = decisions.normalise(t['body'].strip(), known)
+            acceptance = acceptance_of(full)
+            if not acceptance:
+                continue
+            rec = canonical[cid]
+            meta, body = frontmatter.parse(rec['text'], path=rec.get('relpath') or rec['path'])
+            pre, sections = parse_sections(body)
+            what = 'acceptance'
+            for sec in sections:
+                head = sec[0].strip()
+                if head == '## Acceptance':
+                    sec[1] = '\n' + ''.join(f'- [ ] {a}\n' for a in acceptance) + '\n'
+                elif head == '## Description' and sec[1].strip() == full[:DESCRIPTION_CHARS].strip() \
+                        and len(full) > DESCRIPTION_CHARS:
+                    sec[1] = '\n' + card_description(full, plan_path=path) + '\n\n'
+                    what = 'acceptance and the Gate/Acceptance blocks the 4000-char cut dropped'
+            if not any(sec[0].strip() == '## Acceptance' for sec in sections):
+                continue
+            body = append_history_lines(render_sections(pre, sections), [
+                f'- {today()}: plan-tasks: {what} carried from {path} (F-0343)'])
+            meta['updated'] = now_iso()
+            text_out = frontmatter.render(meta, body)
+            writer.write_card(rec['path'], text_out)
+            written.append(cid)
+    if written:
+        out(f"plan-tasks: acceptance carried onto {len(written)} Task(s) from their plans: "
+            f"{', '.join(sorted(written))}")
+    return written
 
 
 def _mint(root, product, ev, out=print, read_ref=None):
@@ -250,9 +493,10 @@ def _mint(root, product, ev, out=print, read_ref=None):
                     f'"{subject[:60]}" — minted Closed ({reason})')
             new_id = mint_id(root, canonical, 'task')
             keys[new_id] = idcheck.task_key(fid, typed.get('stories'), typed.get('writes'))
-            body = decisions.normalise(t['body'].strip(), known)[:DESCRIPTION_CHARS]
+            full = decisions.normalise(t['body'].strip(), known)
+            body = card_description(full, plan_path=plan_path)
             write_new_item(root, canonical, 'task', new_id, typed, body, today(), why,
-                           state=state)
+                           state=state, acceptance=acceptance_of(full))
             ids.append(new_id)
         made.extend(ids)
         out(f"plan-tasks: {fid}: {len(ids)} Task(s) from {plan_path}: {', '.join(ids)}")
