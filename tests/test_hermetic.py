@@ -208,8 +208,11 @@ class OneBuilderTests(unittest.TestCase):
                               env={'BACKLOG_ID_RANGE': 'S:5000-5049'})
         base = dict(LEAKS, PATH='/bin', HOME='/me', FAKE_SECRET='x')
         env = runtime_mod.build_env(job, base=base)
+        # F-0116: the session commits as the agent, through the same git_config channel
+        from asf import identity as identity_mod
         self.assertEqual(env, dict(hermetic.build(base, home='/homes/a', pythonpath=False,
-                                                  mode='worker'),
+                                                  mode='worker',
+                                                  git_config=identity_mod.git_config_pairs(acct)),
                                    CLAUDE_CONFIG_DIR='/cfg/a', ASF_PRODUCT='sample', ASF_JOB='j1',
                                    BACKLOG_ID_RANGE='S:5000-5049', ASF_HOME=env_mod.ASF_HOME))
         # what a session inherits from the tick never reaches it: its identity is its own
@@ -276,6 +279,35 @@ class OneBuilderTests(unittest.TestCase):
         # is the mode that twin exists for: it loads the module top-level (the ids it prints are
         # `test_00_home.HomeIsHermetic…`, not `tests.test_00_home…`) and never runs the package.
         # HomeIsHermetic asserts the same three things, so running it here pins the other twin.
+        out = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests',
+                              '-p', 'test_00_home.py'], cwd=root, env=base,
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_both_entry_points_drop_a_planted_user_identity_the_default_strip_keeps(self):
+        # RD3/F-0116 (P5): a worker session's own user.name/user.email outranks a fixture repo's
+        # repo-local identity, so a suite run from inside one would read every fixture's planted
+        # author back as the caller's — tests.test_tick, tests.test_lifecycle and tests.test_shadow
+        # all build fixtures that way. The two entry points drop the pair; strip_git_config's own
+        # default (PD11, pinned above by test_stripping_leaves_the_remaining_pairs_contiguous)
+        # keeps it, because a worker session's git invocations outside the suite still need it.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base = dict(os.environ, PYTHONPATH=root)
+        base.pop('ASF_TESTS_HOME', None)
+        base.pop('ASF_HOME', None)
+        hermetic.strip_git_config(base)
+        hermetic._git_config(base, [('user.name', 'Caller'),
+                                    ('user.email', 'caller@example.invalid')])
+        probe = ('import os, json;'
+                 'from asf import hermetic;'
+                 'print(json.dumps([k.lower() for k, _ in hermetic.git_config_pairs(os.environ)]))')
+        for entry in ('import tests', 'import tests.test_00_home'):
+            out = subprocess.run([sys.executable, '-c', f'{entry}; {probe}'], cwd=root, env=base,
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            got = json.loads(out.stdout.splitlines()[-1])
+            self.assertNotIn('user.name', got, entry)
+            self.assertNotIn('user.email', got, entry)
         out = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests',
                               '-p', 'test_00_home.py'], cwd=root, env=base,
                              capture_output=True, text=True)
@@ -442,7 +474,7 @@ class SuiteGitIdentityTests(unittest.TestCase):
         'test_redact.py': 6,
         'test_release_preview.py': 2,
         'test_sample_product.py': 4,
-        'test_session_identity.py': 2,
+        'test_session_identity.py': 4,  # +2, F-0116 AgentIdentityTest's own P5 fixture (deliberate)
         'test_shadow.py': 5,
         'test_tick.py': 4,
         'test_tick_steps.py': 2,

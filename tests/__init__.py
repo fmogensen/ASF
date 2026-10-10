@@ -29,10 +29,13 @@ os.environ['ASF_HOST_READING'] = '0 1 0'
 os.environ[hermetic.RUNTIME_CONFIG_DIR] = os.path.join(os.environ['ASF_HOME'], 'runtime-config')
 # B-0114: a session that runs the suite carries its own core.hooksPath in GIT_CONFIG_*, and git
 # applies it to every repo — a fixture repo this suite creates would answer with the caller's hook
-# dir, and `asf hooks install` would call those hooks foreign. `tests/test_00_home.py` drops it for
-# `discover -s tests`; this drops it for every other entry point, `python -m unittest tests.<mod>`
-# first among them, since importing any test module imports this package before that one.
-hermetic.strip_git_config(os.environ)
+# dir, and `asf hooks install` would call those hooks foreign. The same leak in the identity
+# direction (F-0116, P5): a worker session's own user.name/user.email outranks every fixture's
+# repo-local identity, so a suite run from inside one would read every fixture's planted author
+# back as the caller's. `tests/test_00_home.py` drops both for `discover -s tests`; this drops
+# them for every other entry point, `python -m unittest tests.<mod>` first among them, since
+# importing any test module imports this package before that one.
+hermetic.strip_git_config(os.environ, hermetic.GIT_CONFIG_NOT_INHERITED_BY_SUITE)
 # The same leak through a hook's own variables: a suite run from a pre-commit / pre-push hook
 # inherits GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE, and every `git -C <fixture>` would then act on
 # the caller's repo — a fixture's hook (review-b-0111's /x/asf) written into a real checkout.
