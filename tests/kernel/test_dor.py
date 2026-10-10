@@ -96,6 +96,17 @@ class Checks(unittest.TestCase):
         self.assertEqual(self.gaps(ready_task(writes=['nodir/deep/new.py'],
                                               creates=['nodir/deep/new.py'])), [])
 
+    def test_ii_a_new_subtree_under_an_existing_top_directory_passes(self):
+        # live 2026-10-10: T-80574's "tests/rehearsal/record/**" re-armed a groom-fill every answer
+        self.assertEqual(self.gaps(ready_task(writes=['asf/a.py', 'tests/rehearsal/record/**'])), [])
+        self.assertEqual(self.gaps(ready_task(writes=['tests/rehearsal/record/x.json'])), [])
+        self.assertEqual(self.gaps(ready_task(writes=['asf/newpkg/deep/'])), [])
+        self.assertEqual(self.gaps(ready_task(writes=['asf/pkg/zz/deep/new.py'])),
+                         ['writes not on trunk: asf/pkg/zz/deep/new.py'],
+                         'nearest ancestor asf/pkg is not a top directory')
+        self.assertEqual(self.gaps(ready_task(writes=['nodir/deep/**'])),
+                         ['writes not on trunk: nodir/deep/**'])
+
     def test_iii_after_ids_must_be_on_the_record_and_not_parked(self):
         it = ready_task(after=['T-0404'])
         self.assertEqual(self.gaps(it), ['after: not on the record: T-0404'])
@@ -103,6 +114,15 @@ class Checks(unittest.TestCase):
         it = ready_task(after=['T-0002'])
         items = {'F-0001': B.item('F-0001'), 'T-0001': it, 'T-0002': other}
         self.assertEqual(self.gaps(it, items, parked={'T-0002'}), ['after: parked: T-0002'])
+
+    def test_iii_a_done_or_retired_dependency_satisfies_the_edge(self):
+        # live 2026-10-10 13:04Z: T-78813 Stuck on "after: parked: T-0775, T-76352", both retired
+        # (a retired card reads as Done and priority later, so it was in the parked set)
+        retired = B.task('T-0002', state=State.DONE, priority='later')
+        done = B.task('T-0003', state=State.DONE)
+        it = ready_task(after=['T-0002', 'T-0003'])
+        items = {'F-0001': B.item('F-0001'), 'T-0001': it, 'T-0002': retired, 'T-0003': done}
+        self.assertEqual(self.gaps(it, items, parked={'T-0002', 'T-0003'}), [])
 
     def test_iv_parent_must_exist_and_not_be_done(self):
         self.assertEqual(self.gaps(ready_task(parent='F-0404')),
@@ -184,15 +204,21 @@ class Decide(unittest.TestCase):
         self.assertEqual(B.launched(plan), [])
         self.assertEqual([type(a) for a in plan.actions], [A.EndSession])
 
-    def test_spent_fills_make_it_stuck_on_the_operator_judged_afresh(self):
+    def test_spent_fills_park_it_new_off_the_operator_queue_judged_afresh(self):
         plan = decide(world(ready_task(writes=[], dor_fills=2)), cfg())
-        self.assertEqual(B.state(plan, 'T-0001'), State.STUCK)
-        self.assertEqual(B.stuck(plan, 'T-0001').owner, 'operator')
-        self.assertTrue(B.stuck(plan, 'T-0001').reason.startswith('dor: writes: empty'))
+        self.assertEqual(B.state(plan, 'T-0001'), State.NEW)
+        self.assertIsNone(B.stuck(plan, 'T-0001'))
+        self.assertEqual(plan.dor, {'T-0001': 'dor: writes: empty (parked after 2 fills)'})
+        self.assertEqual(B.of(plan, A.Launch), [], 'no further groom-fill')
         recorded = ready_task(state=State.STUCK, dor_fills=2,
                               stuck=B.M.Stuck('dor: writes: empty — 2', 'operator'))
         plan = decide(world(recorded), cfg())
         self.assertEqual(B.launched(plan), ['T-0001'], 'mended by hand: it starts')
+        recorded = ready_task(writes=[], state=State.STUCK, dor_fills=2,
+                              stuck=B.M.Stuck('dor: writes: empty — 2', 'operator'))
+        plan = decide(world(recorded), cfg())
+        self.assertEqual(B.state(plan, 'T-0001'), State.NEW, 'a recorded dor Stuck leaves the queue')
+        self.assertEqual(B.of(plan, A.Launch), [])
 
     def test_a_fix_round_on_an_open_pr_is_never_held(self):
         it = ready_task(writes=[], state=State.REVIEW)

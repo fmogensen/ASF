@@ -7,15 +7,18 @@ Pure: reads nothing but its arguments. A Task or Bug starts (``decide`` makes it
   test file path, or a dotted test module ``tests.test_x[.Class]``), or a line of its
   ``**Gate**`` fenced block names a test module that is on the trunk or in its ``writes:``;
 - (ii) **writes**: ``writes:`` is not empty and each path is on the trunk (a glob: some trunk
-  file matches it) or sits in a directory that is (a new file in an existing directory) or declared new (its ``creates:`` names it). With the trunk unread
+  file matches it) or sits in a directory that is (a new file in an existing directory), or the nearest ancestor on
+  the trunk is a top-level directory (a new subtree, ``tests/x/**``), or declared new (its ``creates:`` names it). With the trunk unread
   (``trunk`` None) only the emptiness is checked;
 - (iii) **after**: every ``after:`` id is on the record, and none is parked (``priority:
-  later`` on it or an ancestor): a parked blocker never finishes;
+  later`` on it or an ancestor) and not Done: a parked blocker never finishes, while a Done or
+  retired one (a retired card reads as Done) already has;
 - (iv) **parent**: a named ``parent`` is on the record and not Done; a Task names one.
 
 A card that fails stays New with the reason ``dor: <what is missing>`` and the kernel launches a
 ``groom-fill`` session for it (``kernel.dor.fill_per_tick`` a tick, ``kernel.dor.max_fills`` per
-item). The session judges only; it ends with a ``GROOM-FILL`` block (:data:`VERDICT_SCHEMA`) that
+item; once spent the card stays New, ``dor: <what> (parked after N fills)``, off the operator's
+queue and with no further fill). The session judges only; it ends with a ``GROOM-FILL`` block (:data:`VERDICT_SCHEMA`) that
 :func:`parse_verdict` reads and validates — a block missing a required field is rejected whole,
 and code applies the rest (:mod:`asf.kernel.apply`).
 """
@@ -142,6 +145,18 @@ def parent_on_trunk(path, trunk):
     return on_trunk(p.rstrip('/').rsplit('/', 1)[0], trunk)
 
 
+def under_top_dir(path, trunk):
+    """Whether ``path`` (a file, a directory or a glob) is a new subtree under an existing top
+    directory: the nearest ancestor of its literal part that is on the trunk is a top-level
+    directory of the repo (``tests/rehearsal/record/**`` with only ``tests/`` there)."""
+    comps = path.strip().strip('/').split('/')
+    lit = next((i for i, c in enumerate(comps) if any(ch in c for ch in '*?[')), len(comps) - 1)
+    for n in range(lit, 0, -1):  # the ancestors of the literal part, nearest first
+        if on_trunk('/'.join(comps[:n]), trunk):
+            return n == 1
+    return False
+
+
 def _named(path, writes):
     return any(path == w or fnmatch.fnmatchcase(path, w) for w in writes)
 
@@ -162,14 +177,15 @@ def missing(it, items, trunk=None, parked=()):
         out.append('writes: empty')
     elif trunk is not None:
         absent = [w for w in writes if not on_trunk(w, trunk) and not parent_on_trunk(w, trunk)
-                  and not _named(w, creates)]
+                  and not under_top_dir(w, trunk) and not _named(w, creates)]
         if absent:
             out.append('writes not on trunk: %s' % ', '.join(absent[:3])
                        + (' (+%d)' % (len(absent) - 3) if len(absent) > 3 else ''))
     gone = [a for a in it.after if a not in items]
     if gone:
         out.append('after: not on the record: %s' % ', '.join(gone))
-    held = [a for a in it.after if a in items and a in parked]
+    held = [a for a in it.after if a in items and a in parked
+            and items[a].state.value != 'done']  # a Done or retired blocker has finished
     if held:
         out.append('after: parked: %s' % ', '.join(held))
     if it.parent:

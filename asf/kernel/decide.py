@@ -658,8 +658,8 @@ def hold_unready(items, judged, facts, config, parked):
     """``{item: dor reason}``: every Task or Bug about to start (Ready, no open PR) that the
     Definition of Ready (``config.dor``, :func:`asf.kernel.dor.missing`) holds — New with the
     reason ``dor: <missing>``; once ``config.dor_max_fills`` groom-fill sessions could not make it
-    ready, Stuck on the operator with that reason (judged afresh every tick: a card mended by hand
-    starts). ``judged`` is updated in place."""
+    ready, still New with ``(parked after N fills)`` appended — never Stuck(operator), no further
+    fill (judged afresh every tick: a card mended by hand starts). ``judged`` is updated in place."""
     if not config.dor:
         return {}
     out = {}
@@ -671,12 +671,9 @@ def hold_unready(items, judged, facts, config, parked):
         if not gaps:
             continue
         why = D.reason(gaps)
-        if it.dor_fills >= config.dor_max_fills:
-            judged[iid] = _Judged(State.STUCK, _stuck(
-                '%s — %d groom-fill session(s) could not make it ready' % (why, it.dor_fills),
-                'operator'))
-        else:
-            judged[iid] = _Judged(State.NEW, hold=j.hold, dor=why)
+        if it.dor_fills >= config.dor_max_fills:  # parked: no further fill, no operator Stuck
+            why = '%s (parked after %d fills)' % (why, it.dor_fills)
+        judged[iid] = _Judged(State.NEW, hold=j.hold, dor=why)
         out[iid] = why
     return out
 
