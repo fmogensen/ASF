@@ -32,6 +32,8 @@ LIGHT_REVIEW = 'light-review'
 
 #: the floor's brief kind of a fix round (the round answers a correction: findings or a red)
 FIX_KIND = 'correct'
+#: the least room the operator's answers keep in a brief whose findings fill the cap.
+FINDINGS_ANSWERS_FLOOR = 500
 
 VERDICT_RULE = """## The kernel's verdict lines
 
@@ -309,11 +311,20 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
         return _groom_brief(product, launch, item, findings,
                             getattr(launch, 'model', '') or model_for(product, D.GROOM_FILL))
     limit = kernel_block(product)['briefs']['max_appended_chars']
-    (findings, answers), dropped = cap_sections([list(findings), list(item.answers)], limit)
+    # The review's findings are never capped: each FINDINGS line reaches the session whole, in its
+    # own section (a cloud session cannot read the review report, which lives in the host's
+    # session log). The cap trims the operator's answers first, to what the findings leave.
+    findings = [str(f) for f in findings]
+    spent = sum(len(f) for f in findings)
+    room = max(limit - spent, FINDINGS_ANSWERS_FLOOR) if limit else 0
+    (answers,), dropped = cap_sections([list(item.answers)], room)
     if dropped:
-        (log or print)('brief %s %s: findings and answers capped at %d chars — %d older '
-                       'entr%s left out' % (kind, item.id, limit, dropped,
+        (log or print)('brief %s %s: answers capped at %d chars — %d older '
+                       'entr%s left out' % (kind, item.id, room, dropped,
                                             'y' if dropped == 1 else 'ies'))
+    if limit and spent > limit:
+        (log or print)('brief %s %s: findings alone are %d chars, over the %d cap — all kept whole'
+                       % (kind, item.id, spent, limit))
     if launch.kind == 'review' and pr is not None and light_review(product, pr):
         b = _light_brief(product, launch, item, pr, getattr(launch, 'model', '')
                          or model_for(product, LIGHT_REVIEW))
@@ -341,8 +352,9 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
                             model=getattr(launch, 'model', '') or model_for(product, kind)
                             or b.model)
     extra = []
-    if findings and not fix:
-        extra += ['## Findings', ''] + ['- %s' % f for f in findings] + ['']
+    if findings:
+        extra += ['## Review findings (every line, in full)', ''] + [
+            '- %s' % f for f in findings] + ['']
     if answers:
         extra += ['## Operator answers', ''] + ['- %s' % a for a in answers]
     if launch.kind == 'review':

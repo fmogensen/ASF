@@ -382,7 +382,7 @@ class Cap(unittest.TestCase):
         kept, dropped = KB.cap_sections([['z' * 900]], 500)
         self.assertEqual((len(kept[0][0]), dropped), (500, 1))
 
-    def test_a_brief_caps_findings_and_answers_and_logs_it(self):
+    def test_a_brief_caps_the_answers_never_the_findings_and_logs_it(self):
         lines = []
         item = B.task('T-0001', answers=['old answer ' + 'o' * 3000, 'new answer'])
         findings = ['finding %d %s' % (n, 'f' * 600) for n in range(10)]
@@ -391,13 +391,12 @@ class Cap(unittest.TestCase):
             index = json.load(f)
         b = KB.build(product(), A.Launch('build', 'T-0001', 'worker/T-0001'), item, findings,
                      index=index, repo_facts=lambda *_: None, log=lines.append)
-        self.assertIn('finding 9 ', b.text)
+        for n in range(10):
+            self.assertIn('finding %d ' % n, b.text)
         self.assertIn('new answer', b.text)
-        self.assertNotIn('finding 0 ', b.text)
-        self.assertEqual(len(lines), 1)
-        self.assertIn('capped at 4000', lines[0])
-        added = sum(len(x) for x in findings + list(item.answers) if x[:12] in b.text)
-        self.assertLessEqual(added, 4000)
+        self.assertNotIn('old answer', b.text)
+        self.assertTrue(any('answers capped' in ln for ln in lines))
+        self.assertTrue(any('findings alone' in ln for ln in lines))
 
 
 class NoSeatWaits(unittest.TestCase):
