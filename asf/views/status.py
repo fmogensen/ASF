@@ -390,10 +390,12 @@ def _stale_after_s(product, duration_s):
 def stale_cell(root, product):
     """B-0124: the record step's own health first (:func:`asf.tick.record_health.line`) — the
     one artifact that survives when the push that would carry a ``metrics/ticks`` line can't
-    reach origin, which is exactly when a failing record step needs to be readable. When that
-    stamp says the last tick landed (or none has run on this host), the fallback is the index's
-    own age against twice the record clock's period — the tick may not even be firing. ``None``
-    (no row) when neither says the table is stale.
+    reach origin, which is exactly when a failing record step needs to be readable. That same
+    read also says when a landed record step's push never reached the operator's own checkout —
+    ``CHECKOUT <n> BEHIND …`` — because a record that derived fine is not the same claim as a
+    push the read views can see (F-0260). When that read says neither, the fallback is the
+    index's own age against twice the record clock's period — the tick may not even be firing.
+    ``None`` (no row) when nothing says the table is stale.
 
     F-0221: the fallback then judges the tick's real cadence. The age is taken from the freshest
     thing in the checkout that says a tick finished a record — a ``metrics/ticks`` line stamped at

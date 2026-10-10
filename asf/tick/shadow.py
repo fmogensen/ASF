@@ -18,6 +18,7 @@ pushed), because the read views read it.
 import os
 import re
 import subprocess
+from collections import namedtuple
 
 from asf import env
 
@@ -194,62 +195,124 @@ def _resolve_by_ownership(path):
     return _sh(['git', 'add', '-A'], cwd=path, check=False).returncode == 0
 
 
-def sync_operator_checkout(product, out=print):
+#: What one attempt at the operator's checkout came to (F-0260). ``moved``: it was
+#: fast-forwarded. ``why``: ``None``, or one of ``'off-trunk'``, ``'local-changes'``,
+#: ``'merge-refused'``. ``behind``: how many commits of ``origin/<trunk>`` it lacks — read
+#: whether or not ``why`` is set (PD15: a dirty or off-trunk tree cannot be fast-forwarded
+#: whether or not there is anything to catch up on). ``paths``: the record-relative paths that
+#: block it, sorted, capped at :data:`SYNC_PATHS_MAX` — never the checkout's own filesystem path
+#: (D10). ``detail``: the one extra fact a line needs and ``paths`` doesn't carry — the branch
+#: name for ``'off-trunk'``, git's own last line for ``'merge-refused'``.
+Sync = namedtuple('Sync', 'moved why behind paths detail')
+
+#: How many record-relative paths a refusal line or event names before it stops — the cap
+#: ``parked_cell`` already uses for the same job (``asf/views/status.py``): the line is for a
+#: person to read, not a manifest.
+SYNC_PATHS_MAX = 3
+
+
+def _no_sync():
+    return Sync(False, None, 0, [], None)
+
+
+def _refusal_line(sync, trunk):
+    """The three refusal lines, byte for byte (F-0260 D10): the checkout's drift and the
+    record-relative paths that block it — never a filesystem path, never ``repo``."""
+    if sync.why == 'off-trunk':
+        extra = f'on {sync.detail}, not {trunk}'
+    elif sync.why == 'local-changes':
+        extra = f'local changes: {", ".join(sync.paths)}'
+    else:
+        extra = f'merge refused: {sync.detail}'
+    return f'record: the record checkout is not fast-forwarded — {sync.behind} behind, {extra}'
+
+
+def probe_operator_checkout(product, out=print):
+    """Read-only: whether the operator's record checkout (``backlog_dir``) can be fast-forwarded
+    to ``origin/<trunk>``, and why not — without touching it. The guards, the fetch and the
+    ahead/behind read (:func:`_counts`) :func:`sync_operator_checkout` used to make itself move
+    here unchanged (F-0260 PD4/RD6: the file's raw ``git`` call count must not rise); the merge
+    and the stranded-commit rebase — the writes — stay where they were. Prints the refusal line,
+    D10-worded, and returns a :class:`Sync` naming it when ``why`` is set — unconditional on
+    ``ahead``/``behind`` (PD15); returns a silent :class:`Sync` (``why=None``) otherwise.
+    ``out=None`` is always silent, whatever it finds."""
+    repo = product.backlog_dir
+    if not repo or not os.path.isdir(os.path.join(repo, '.git')):
+        return _no_sync()
+    if os.path.realpath(repo) == os.path.realpath(record_dir(product)):
+        return _no_sync()
+    if _sh(['git', 'fetch', '-q', 'origin'], cwd=repo, check=False).returncode != 0:
+        return _no_sync()
+    trunk = _default_branch(repo)
+    ahead, behind = _counts(repo, trunk)
+    if ahead is None:
+        return _no_sync()
+    head = _sh(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo, check=False).stdout.strip()
+    if head != trunk:
+        sync = Sync(False, 'off-trunk', behind, [], head or 'a detached HEAD')
+        if out:
+            out(_refusal_line(sync, trunk))
+        return sync
+    status = _sh(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=repo, check=False).stdout
+    if status.strip():
+        paths = sorted(l[3:].strip() for l in status.splitlines() if l.strip())[:SYNC_PATHS_MAX]
+        sync = Sync(False, 'local-changes', behind, paths, None)
+        if out:
+            out(_refusal_line(sync, trunk))
+        return sync
+    return Sync(False, None, behind, [], None)
+
+
+def sync_operator_checkout(product, out=print, probe=None):
     """Bring the operator's record checkout (``backlog_dir``) level with ``origin/<trunk>``.
 
     The tick commits and pushes from its own clone; ``asf status``'s Decisions row, ``asf
     backlog`` and ``asf next`` read ``backlog_dir``. Only a console command run there pulled it,
     so answers the tick applied and pushed never showed: the checkout sat where the last console
     command left it and the Decisions count froze. The same rule as the product checkout's
-    (``harvest.sync_checkout``, B-0042): only on the trunk with a clean tree; anything else is
-    left alone and named in one line — a dirty tree once, until it is clean again (F-0260).
+    (``harvest.sync_checkout``, B-0042): only on the trunk with a clean tree, only ``--ff-only``
+    when behind alone; anything else is left alone and named every tick it holds (D5, RD4 — no
+    marker suppresses the line).
 
-    Behind only: ``--ff-only``. Ahead — a record commit ``asf new``/``asf inbox`` made there whose
-    push was refused (:data:`UNPUSHED_MARKER`), stranded until now (F-0260): the local commits
-    are rebased onto ``origin/<trunk>``, an ``index.json`` conflict re-derived (``asf index``),
-    and pushed through :func:`push`. Any other conflict is aborted — the checkout as it was — and
-    named. Silent when already current. True when moved."""
+    Behind only: ``--ff-only``, wrapped in a :class:`Sync`. Ahead — a record commit ``asf
+    new``/``asf inbox`` made there whose push was refused (:data:`UNPUSHED_MARKER`), stranded
+    until now (F-0260, RD3): the local commits are rebased onto ``origin/<trunk>``, an
+    ``index.json`` conflict re-derived (``asf index``), and pushed through :func:`push` —
+    :func:`_rebase_and_push`'s own ``bool``, unwrapped, unchanged by this Task. Silent when
+    already current.
+
+    ``probe``: a :class:`Sync` already read by :func:`probe_operator_checkout` (PD1/PD15).
+    Already refused — returned untouched, with nothing printed again; the line was said when it
+    was taken. Otherwise (``None``, or a probe that found nothing wrong) the checkout is probed
+    again, silently — a push may have moved origin since, or the tree may have gone dirty since
+    — and, newly found here, said once through this call's own ``out``."""
+    already_said = probe is not None and probe.why
+    sync = probe if already_said else probe_operator_checkout(product, out=None)
     repo = product.backlog_dir
-    if not repo or not os.path.isdir(os.path.join(repo, '.git')):
-        return False
-    if os.path.realpath(repo) == os.path.realpath(record_dir(product)):
-        return False
-    if _sh(['git', 'fetch', '-q', 'origin'], cwd=repo, check=False).returncode != 0:
-        return False
+    if sync.why:
+        if not already_said:
+            out(_refusal_line(sync, _default_branch(repo)))
+        return sync
     trunk = _default_branch(repo)
     ahead, behind = _counts(repo, trunk)
-    if ahead is None:
-        return False
-    if not (ahead or behind):
-        _drop(repo, UNPUSHED_MARKER)
-        return False
-    head = _sh(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo, check=False).stdout.strip()
-    if head != trunk:
-        out(f'record: {repo} not fast-forwarded — on {head or "a detached HEAD"}, not {trunk}')
-        return False
-    if _sh(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=repo,
-           check=False).stdout.strip():
-        if not os.path.exists(_git_path(repo, DIRTY_MARKER)):
-            out(f'record: {repo} not fast-forwarded — working tree has local changes '
-                f'({ahead} ahead, {behind} behind; named once, until it is clean)')
-            _write(repo, DIRTY_MARKER, f'{ahead} ahead, {behind} behind\n')
-        return False
-    _drop(repo, DIRTY_MARKER)
     if ahead:
         return _rebase_and_push(repo, trunk, ahead, out)
+    if not behind:
+        _drop(repo, UNPUSHED_MARKER)
+        return Sync(False, None, 0, [], None)
     merge = _sh(['git', 'merge', '-q', '--ff-only', f'origin/{trunk}'], cwd=repo, check=False)
     if merge.returncode != 0:
         detail = (merge.stderr or merge.stdout).strip().splitlines()
-        out(f'record: {repo} not fast-forwarded — {detail[-1] if detail else "merge refused"}')
-        return False
-    return True
+        refused = Sync(False, 'merge-refused', behind, [],
+                       detail[-1] if detail else 'merge refused')
+        out(_refusal_line(refused, trunk))
+        return refused
+    return Sync(True, None, behind, [], None)
 
 
 #: In the record checkout's git dir: a record commit made there whose push was refused (written
 #: by :mod:`asf.record.publish`, the stranded commits listed); the sync that pushes them drops it.
 UNPUSHED_MARKER = 'asf-record-unpushed'
-#: In the record checkout's git dir: its dirty tree was named once; dropped once it is clean.
-DIRTY_MARKER = 'asf-record-dirty'
 
 
 def _git_path(repo, name):

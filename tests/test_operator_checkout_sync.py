@@ -5,6 +5,7 @@ The tick works in its own clone and pushes; the read views (``asf status``'s Dec
 pull it, so a groom whose answers the tick applied and pushed still showed every card
 undecided in ``asf status`` — the checkout sat where the last console command left it."""
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -13,7 +14,7 @@ import unittest
 from contextlib import redirect_stdout
 
 from asf import env
-from asf.tick import tick
+from asf.tick import shadow, tick
 
 
 def _git(args, cwd):
@@ -21,7 +22,18 @@ def _git(args, cwd):
                           text=True).stdout.strip()
 
 
-class OperatorCheckoutSyncTests(unittest.TestCase):
+def _args(**kw):
+    import argparse
+    base = dict(product='sample', shadow=False, fresh=False, steps=None, manifest=False, daily=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+class RefusedSyncIsReadableTests(unittest.TestCase):
+    """A2 (F-0260): the operator's record checkout the tick cannot fast-forward says so every
+    tick, with the drift and the record-relative paths that block it — never the checkout's own
+    filesystem path (D10) — and the record step itself still reads ``ok`` (D4)."""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='checkout_sync_')
         seed = os.path.join(self.tmp, 'seed')
@@ -63,6 +75,42 @@ class OperatorCheckoutSyncTests(unittest.TestCase):
         with open(os.path.join(self.checkout, 'bugs', 'B-0001.md')) as f:
             return f.read()
 
+    def dirty_the_checkout(self):
+        with open(os.path.join(self.checkout, 'bugs', 'B-0001.md'), 'a') as f:
+            f.write('hand edit\n')
+
+    def origin_moves(self, n):
+        """``n`` more commits land on origin from a clone of its own, elsewhere — never through
+        ``self.checkout``, which stays exactly where it was."""
+        other = tempfile.mkdtemp(prefix='elsewhere_', dir=self.tmp)
+        _git(['clone', '-q', self.origin, other], self.tmp)
+        _git(['config', 'user.email', 'a@example.com'], other)
+        _git(['config', 'user.name', 'a'], other)
+        for i in range(n):
+            with open(os.path.join(other, 'bugs', f'B-{i + 2:04d}.md'), 'w') as f:
+                f.write(f'---\nid: B-{i + 2:04d}\n---\n')
+            _git(['add', '-A'], other)
+            _git(['commit', '-q', '-m', f'elsewhere {i}'], other)
+        _git(['push', '-q', 'origin', 'HEAD:main'], other)
+
+    def events_of_kind(self, kind):
+        """``metrics/events/<day>.jsonl`` out of the record clone (:func:`ctx.event`'s own
+        write) — read directly by the fixed path :func:`asf.tick.shadow.record_dir` derives from
+        this product and ``env.ASF_HOME``, since every ``_tick_decides`` call resets that same
+        clone rather than making a new one."""
+        root = shadow.record_dir(self.product)
+        found = []
+        events_dir = os.path.join(root, 'metrics', 'events')
+        if not os.path.isdir(events_dir):
+            return found
+        for name in sorted(os.listdir(events_dir)):
+            with open(os.path.join(events_dir, name), encoding='utf-8') as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if raw and json.loads(raw).get('kind') == kind:
+                        found.append(json.loads(raw))
+        return found
+
     def test_a_pushed_tick_fast_forwards_the_operator_checkout(self):
         rc, _out = self._tick_decides()
         self.assertEqual(rc, 0)
@@ -71,14 +119,66 @@ class OperatorCheckoutSyncTests(unittest.TestCase):
         self.assertIn('decided: true', self._checkout_card())
 
     def test_a_checkout_with_local_edits_is_left_alone_and_named(self):
-        with open(os.path.join(self.checkout, 'bugs', 'B-0001.md'), 'a') as f:
-            f.write('hand edit\n')
+        """Unchanged (P18), with the drift and the record-relative path added to the line."""
+        self.dirty_the_checkout()
         before = _git(['rev-parse', 'HEAD'], self.checkout)
         rc, out = self._tick_decides()
         self.assertEqual(rc, 0)
         self.assertEqual(_git(['rev-parse', 'HEAD'], self.checkout), before)
         self.assertIn('hand edit', self._checkout_card())
         self.assertIn('not fast-forwarded', out)
+        self.assertIn('local changes: bugs/B-0001.md', out)
+        self.assertNotIn(self.checkout, out)           # D10: never the machine path
+
+    def test_a_refused_sync_raises_a_needs_operator_line_with_the_drift(self):
+        self.dirty_the_checkout()
+        self.origin_moves(3)
+        _rc, out = self._tick_decides()
+        line = next(l for l in out.splitlines() if l.startswith('NEEDS OPERATOR:'))
+        self.assertIn('the record checkout', line)
+        self.assertIn('behind', line)
+        self.assertIn('bugs/B-0001.md', line)
+        self.assertNotIn(self.checkout, line)
+
+    def test_the_needs_operator_line_is_said_again_on_the_next_tick(self):
+        """D5: pure over the checkout's state — no ledger, no marker, said until it is gone."""
+        self.dirty_the_checkout()
+        self.assertIn('NEEDS OPERATOR:', self._tick_decides()[1])
+        self.assertIn('NEEDS OPERATOR:', self._tick_decides()[1])
+
+    def test_a_refused_sync_writes_one_event_naming_no_machine_path(self):
+        self.dirty_the_checkout()
+        self._tick_decides()
+        ev = self.events_of_kind('record_checkout_stale')
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]['why'], 'local-changes')
+        self.assertEqual(ev[0]['paths'], ['bugs/B-0001.md'])
+        self.assertNotIn(self.checkout, json.dumps(ev[0]))
+
+    def test_the_record_step_still_reads_ok_and_the_later_steps_still_run(self):
+        """D4: a dirty operator checkout must not trip B-0083 and stop the factory."""
+        from unittest import mock
+        self.dirty_the_checkout()
+        os.makedirs(os.path.join(env.ASF_HOME, 'products'), exist_ok=True)
+        with open(env.product_path('sample'), 'w') as f:
+            f.write(f'repo_slug: x/y\nbacklog_dir: {self.checkout}\n')
+        with mock.patch.object(tick, 'run_step0', lambda root, product, fresh=False: None), \
+                mock.patch.object(tick, 'run_record_tail_step', lambda ctx: None):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = tick.cmd_tick(_args(steps='record'))
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn('[step:record]', out)
+        self.assertIn('ok=yes', out)
+        self.assertNotIn('nothing else ran', out)
+
+    def test_a_clean_checkout_says_nothing_and_still_fast_forwards(self):
+        _rc, out = self._tick_decides()
+        self.assertNotIn('NEEDS OPERATOR:', out)
+        self.assertNotIn('not fast-forwarded', out)
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.checkout),
+                         _git(['rev-parse', 'main'], self.origin))
 
     def test_no_change_tick_still_catches_the_checkout_up(self):
         # origin moved by someone else's push (a session, another console): the next tick,
@@ -202,7 +302,9 @@ class StrandedRecordCommitsTests(unittest.TestCase):
         self.assertFalse(os.path.isdir(os.path.join(self.checkout, '.git', 'rebase-merge')))
         self.assertEqual(self._drift(), (1, 1))
 
-    def test_a_dirty_tree_is_named_once_and_synced_once_clean(self):
+    def test_a_dirty_tree_is_named_every_sync_while_it_holds(self):
+        """RD4: the trunk's own DIRTY_MARKER used to suppress this on the second call —
+        removed, so the refusal is said every tick the tree stays dirty, not only the first."""
         self._card(self.checkout, 'F-0002')
         self._card(self.other, 'F-0010')
         _git(['push', '-q', 'origin', 'HEAD:main'], self.other)
@@ -212,8 +314,9 @@ class StrandedRecordCommitsTests(unittest.TestCase):
         _moved, first = self._sync()
         _moved, second = self._sync()
         self.assertEqual(len(first), 1)
-        self.assertIn('working tree has local changes', first[0])
-        self.assertEqual(second, [])
+        self.assertIn('local changes: README.md', first[0])
+        self.assertEqual(len(second), 1)
+        self.assertIn('local changes: README.md', second[0])
         self.assertEqual(_git(['rev-parse', 'HEAD'], self.checkout), before)
         _git(['checkout', '--', 'README.md'], self.checkout)
         moved, lines = self._sync()
