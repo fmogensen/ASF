@@ -206,7 +206,8 @@ class OneResolverTests(unittest.TestCase):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         resolvers, explicit = [], []
         for path in sorted(glob.glob(os.path.join(root, 'asf', '**', '*.py'), recursive=True)):
-            tree = ast.parse(open(path, encoding='utf-8').read(), filename=path)
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=path)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
