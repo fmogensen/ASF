@@ -37,8 +37,12 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    rebuild_after_h: 0,        # a conflict the rebase could not resolve (or the cap
                                               # after the strong round) this old: archive the
                                               # branch, close the PR, rebuild fresh — once per item
-                   strong_model: claude-opus-5}   # the extra round's model; operator questions
-                                              # are never resolved: status shows them on top
+                   strong_model: claude-opus-5,   # the extra round's model; operator questions
+                                              # are never resolved: status shows them on top —
+                   id_claim_answer: true,     # except one that only asks whether an id claim
+                                              # covers ids it cites: the kernel reads the claim
+                                              # refs and answers (keep, or re-mint)
+                   id_claim_prefixes: [S, T]} # the id prefixes such a question is checked for
       gate:       {window_h: 24, first_push_green_min: 0.7, landed_min: 5,
                    silent_stuck_max: 0, since: 2026-10-09T14:00:00Z}   # asf kernel gate
       waits:      {targets: {seat: 10m, ci: 10m, review: 30m, train: 30m, merge: 10m,
@@ -108,7 +112,8 @@ SPEC = {
     'watch': {'interval_s': (600, int), 'stale_after_s': (900, int)},
     'idle_alarm': {'enabled': (True, bool), 'min_free_seats': (1, int)},
     'stuck': {'escalate_after_h': (0, float), 'rebuild_after_h': (0, float),
-              'strong_model': (HEAVY_MODEL, 'text')},
+              'strong_model': (HEAVY_MODEL, 'text'), 'id_claim_answer': (True, bool),
+              'id_claim_prefixes': (('S', 'T'), 'words')},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time')},
     'waits': {'targets': (WAIT_TARGETS, 'targets')},
@@ -220,6 +225,7 @@ def read(block):
                                if v is not None}
     out['review']['light_paths'] = list(out['review']['light_paths'])
     out['launch']['cloud_kinds'] = list(out['launch']['cloud_kinds'])
+    out['stuck']['id_claim_prefixes'] = list(out['stuck']['id_claim_prefixes'])
     if out['launch']['local_max'] is None:
         out['launch']['local_max'] = out['launch']['max_sessions']
     return out

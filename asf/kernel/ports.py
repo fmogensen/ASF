@@ -287,6 +287,34 @@ class RealRecord:
                 for r in _jsonl(os.path.join(self.state_dir, ANSWERS_FILE))
                 if r.get('item') and r.get('text')]
 
+    def id_claims(self, ids):
+        """``{id: (ref, sha)}`` of the claim on the record repo's origin
+        (:func:`asf.workers.spawn.claim_repo`, ``refs/asf/ids/*`` fetched first) covering each of
+        ``ids``, ``''`` when none does; ``{}`` when the claims cannot be read from origin (no
+        record repo, no origin, a failed fetch) — the question then stays with the operator."""
+        from asf import gitops
+        from asf.record import idclaim
+        from asf.workers import spawn
+        repo = spawn.claim_repo(self.product)
+        if not repo:
+            return {}
+        try:
+            idclaim.fetch(repo)
+        except idclaim.ClaimError:
+            return {}
+        cl = idclaim.claims(repo)
+        out, shas = {}, {}
+        for iid in ids:
+            c = idclaim.covers(cl, iid)
+            if c is None:
+                out[iid] = ''
+                continue
+            if c.ref not in shas:
+                r = gitops.git(['rev-parse', '--verify', '-q', c.ref], repo)
+                shas[c.ref] = (r.stdout or '').strip() if r.ok else ''
+            out[iid] = (c.ref, shas[c.ref])
+        return out
+
     def reviews(self):
         return [M.Review(str(r['item']), str(r.get('tree_sha') or r['tree']), str(r['verdict']),
                          [str(f) for f in as_list(r.get('findings'))],
@@ -1249,7 +1277,9 @@ def config_for(product, cfg=None, github=None):
         update_parallel=int(k['landing']['update_parallel']),
         escalate_after_h=float(k['stuck']['escalate_after_h']),
         rebuild_after_h=float(k['stuck']['rebuild_after_h']),
-        strong_model=str(k['stuck']['strong_model']))
+        strong_model=str(k['stuck']['strong_model']),
+        id_claim_answer=bool(k['stuck']['id_claim_answer']),
+        id_claim_prefixes=tuple(str(p) for p in k['stuck']['id_claim_prefixes']))
 
 
 

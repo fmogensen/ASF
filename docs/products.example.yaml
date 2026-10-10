@@ -508,7 +508,14 @@ kernel:
                             # round, this old: archive the branch to archive/<branch>, close the
                             # PR, rebuild fresh from the trunk — at most once per item
     strong_model: claude-opus-5   # the extra round's model. Operator questions are never
-                            # resolved: `asf kernel status` puts them in a "needs you" block
+                            # resolved: `asf kernel status` puts them in a "needs you" block —
+    id_claim_answer: true   # except a session question that only asks whether an id claim
+                            # covers ids it cites (it names a claim and offers a re-mint): the
+                            # kernel reads refs/asf/ids/* on the record's origin and answers —
+                            # "the claim stands, keep" (every id covered, none on the record under
+                            # another item) or "re-mint from your current block"; a claim it
+                            # cannot read leaves the question with the operator
+    id_claim_prefixes: [S, T]   # the id prefixes such a question is checked for
   gate:
     window_h: 24            # first-push-green is measured over PRs opened in the last window_h
     first_push_green_min: 0.7

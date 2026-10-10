@@ -19,9 +19,14 @@ items (``priority: later`` on the item or an ancestor) are not filtered here: ``
 that rule, so it is the same everywhere. The pushed branches
 (:meth:`asf.kernel.ports.RealGitHub.branches`) count only for items on the record. A Stuck item a
 refused force-push left (:func:`asf.kernel.decide.stranded`) has its last ended session's kept
-worktree read (``sessions.stranded``, when the port has it) into ``Facts.stranded``.
+worktree read (``sessions.stranded``, when the port has it) into ``Facts.stranded``. The ids an
+id-claim question cites (:func:`claim_questions`) are looked up on the record's origin
+(``record.id_claims``, when the port has it) into ``Facts.id_claims``.
 """
 import datetime
+import string
+
+from asf.kernel import idclaims
 
 from asf.kernel.decide import stranded as decide_stranded
 from asf.kernel.model import Facts, State
@@ -37,6 +42,37 @@ def answer_counts(answer, it):
     if answer.at and it.stuck_since:
         return str(answer.at) > str(it.stuck_since)
     return it.stuck.owner == 'operator'
+
+
+def claim_questions(items, sessions):
+    """``[(item id, text)]``: every ended session's question, and every operator-Stuck item's
+    question (else its reason), that :func:`asf.kernel.idclaims.is_claim_question` recognises."""
+    out = []
+    for s in sessions:
+        if s.ended and not s.alive and s.kind != 'review' and s.question:
+            out.append((s.item_id, s.question))
+    for iid in sorted(items):
+        it = items[iid]
+        if it.state is State.STUCK and it.stuck is not None and it.stuck.owner == 'operator':
+            out.append((iid, it.question or it.stuck.reason))
+    return [(iid, t) for iid, t in out if iid in items and idclaims.is_claim_question(t)]
+
+
+def read_id_claims(record, items, sessions):
+    """``Facts.id_claims`` for the ids the claim questions cite (every prefix: ``decide`` narrows
+    to the configured ones); ``{}`` when there is none or the port cannot read claims."""
+    look = getattr(record, 'id_claims', None)
+    ids = []
+    for iid, text in claim_questions(items, sessions):
+        for i in idclaims.cited(text, string.ascii_uppercase, exclude=(iid,)) or ():
+            if i not in ids:
+                ids.append(i)
+    if not look or not ids:
+        return {}
+    try:
+        return dict(look(ids) or {})
+    except Exception:  # noqa: BLE001 — an unreadable claim leaves the question with the operator
+        return {}
 
 
 def read_facts(ports):
@@ -59,7 +95,8 @@ def read_facts(ports):
             s = look(iid)
             if s is not None:
                 stranded.append(s)
-    return Facts(items=items, prs=prs, sessions=list(ports.sessions.sessions()), reviews=reviews,
+    sessions = list(ports.sessions.sessions())
+    return Facts(items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
-                 stranded=stranded, now=datetime.datetime.now(datetime.timezone.utc).strftime(
-                     '%Y-%m-%dT%H:%M:%SZ'))
+                 stranded=stranded, id_claims=read_id_claims(record, items, sessions),
+                 now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

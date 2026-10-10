@@ -251,7 +251,9 @@ class Facts:
     :class:`Session` values (``unpushed``/``push_refused`` read) whose kept worktree holds a rebase
     a Stuck item's refused force-push left (:func:`asf.kernel.decide.stranded`). ``now`` is the
     tick's time (ISO-8601 UTC, '' when unknown): a recorded Stuck's age is ``now`` less its
-    ``Item.stuck_since``."""
+    ``Item.stuck_since``. ``id_claims`` maps each id a session's id-claim question cites
+    (:mod:`asf.kernel.idclaims`) to the ``(ref, sha)`` of the claim on the record's origin that
+    covers it, or ``''`` when none does; an id it could not read is absent."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -262,6 +264,7 @@ class Facts:
     branches: list = dataclasses.field(default_factory=list)
     stranded: list = dataclasses.field(default_factory=list)
     now: str = ''
+    id_claims: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -283,7 +286,9 @@ class Config:
     one) at once. ``escalate_after_h`` / ``rebuild_after_h``: a Stuck the kernel can resolve by
     itself is resolved once it is this many hours old (0: on the tick it appears; None: never —
     the bare model's default, so a unit test opts in); ``strong_model`` is the model the one
-    extra fix round past the cap runs on. The product file's ``kernel:`` block sets
+    extra fix round past the cap runs on. ``id_claim_answer``: a session question that only asks
+    whether an id claim covers ids it cites (prefixes ``id_claim_prefixes``) is answered by the
+    kernel from ``Facts.id_claims`` (:mod:`asf.kernel.idclaims`). The product file's ``kernel:`` block sets
     them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
@@ -301,3 +306,5 @@ class Config:
     escalate_after_h: float = None
     rebuild_after_h: float = None
     strong_model: str = ''
+    id_claim_answer: bool = True
+    id_claim_prefixes: tuple = ('S', 'T')

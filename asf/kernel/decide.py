@@ -100,7 +100,12 @@ item and the actions of one tick. The rules it holds, in the design's words:
 
   A recorded Stuck at the cap or on such a conflict is judged afresh every tick, so its age is
   read off ``Item.stuck_since`` against ``Facts.now``. A question to the operator is never
-  resolved by the kernel: it waits for an answer.
+  resolved by the kernel: it waits for an answer — save one that only asks whether an id claim
+  covers ids it cites (``config.id_claim_answer``, :mod:`asf.kernel.idclaims`): the kernel
+  answers it from ``Facts.id_claims`` (:class:`ApplyAnswer`; "the claim stands, keep" with the
+  refs it verified, or "re-mint from your current block") and the item is relaunched carrying the
+  answer, on the tick the session ends or on a recorded operator Stuck. A claim it could not read
+  leaves the question with the operator.
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -117,6 +122,8 @@ import fnmatch
 import re
 
 from asf.kernel import actions as A
+from asf.kernel import idclaims
+from asf.kernel import model as M
 from asf.kernel import reports as R
 from asf.kernel.model import OWNERS, RED_CONCLUSIONS, State, Stuck, verdict_holds
 from asf.kernel.stories import declared_stories
@@ -319,7 +326,11 @@ def _judge(it, facts, config, actions):
     attempts = list(it.attempts)
     answered = granted = False
     extra = it.extra_rounds
-    for a in facts.answers:
+    answers = list(facts.answers)
+    auto = _claim_answer(it, facts, config)
+    if auto and not any(a.item_id == it.id for a in answers):
+        answers.append(M.Answer(it.id, auto))  # the kernel answers it, as the operator would
+    for a in answers:
         if a.item_id == it.id and not answered and (
                 a.text not in it.answers or _answers_stuck(a, it)):
             granted = it.state is State.STUCK and capped(it.stuck)
@@ -344,7 +355,7 @@ def _judge(it, facts, config, actions):
     live = [s for s in sessions if s.alive]
     prs = [p for p in facts.prs if p.item_id == it.id]
     open_pr = max((p for p in prs if not p.merged), key=lambda p: p.number, default=None)
-    ended_stuck, api_detail, pushed = None, '', None
+    ended_stuck, api_detail, pushed, asked = None, '', None, None
     for s in sessions:
         if s.alive:
             continue
@@ -369,7 +380,9 @@ def _judge(it, facts, config, actions):
             pushed = s
             _note(it, pushed_note(s), actions)
         else:
-            ended_stuck = _ended_stuck(s, open_pr) or ended_stuck
+            ended = _ended_stuck(s, open_pr)
+            if ended is not None:
+                ended_stuck, asked = ended, s
 
     if open_pr is None and any(p.merged for p in prs) and not it.reopened:
         return _Judged(State.DONE)
@@ -385,6 +398,13 @@ def _judge(it, facts, config, actions):
             actions.append(A.ClearStuck(it.id, again))
             return _Judged(State.READY, hold=True)
         return _Judged(State.STUCK, _keep(stuck))
+    if ended_stuck and ended_stuck.owner == 'operator' and asked is not None and not answered:
+        auto = _claim_answer(it, facts, config, asked.question)
+        if auto:  # an id-claim question the facts answer: relaunched next tick carrying it
+            actions.append(A.ApplyAnswer(it.id, auto))
+            if it.state is not State.STUCK:  # the applier resets only a Stuck card's attempts
+                actions.append(A.ClearStuck(it.id, answer_attempt(auto)))
+            return _Judged(State.READY, hold=True)
     if ended_stuck:
         again = (escalate_session(it, ended_stuck) if ended_stuck.owner == 'session'
                  and _due(config.escalate_after_h, it, facts, fresh=True) else None)
@@ -415,6 +435,21 @@ def _judge(it, facts, config, actions):
     if it.type not in BUILDABLE and it.type != DOCUMENTED:
         return _Judged(State.NEW, hold=hold)  # only a Feature gets a spec or plan launch
     return _Judged(State.READY, hold=hold, findings=relaunch_findings(it))
+
+
+def _claim_answer(it, facts, config, text=None):
+    """The kernel's answer to a question that only asks whether an id claim covers the ids it
+    cites (:func:`asf.kernel.idclaims.answer`), or None. ``text`` is an ended session's question;
+    without it, ``it``'s recorded operator Stuck (its question, else its reason) is read, and an
+    answer already on the card is never given again."""
+    if not config.id_claim_answer:
+        return None
+    if text is None:
+        if it.state is not State.STUCK or it.stuck is None or it.stuck.owner != 'operator':
+            return None
+        text = it.question or it.stuck.reason
+    auto = idclaims.answer(it, text, facts, tuple(config.id_claim_prefixes))
+    return auto if auto and auto not in it.answers else None
 
 
 def _answers_stuck(answer, it):

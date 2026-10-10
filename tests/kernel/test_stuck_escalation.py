@@ -50,7 +50,8 @@ class Settings(unittest.TestCase):
     def test_the_stuck_block_defaults_to_zero_hours_and_the_strong_model(self):
         block = settings.read(None)['stuck']
         self.assertEqual(block, {'escalate_after_h': 0, 'rebuild_after_h': 0,
-                                 'strong_model': settings.HEAVY_MODEL})
+                                 'strong_model': settings.HEAVY_MODEL,
+                                 'id_claim_answer': True, 'id_claim_prefixes': ['S', 'T']})
         self.assertEqual(settings.read({'stuck': {'escalate_after_h': 2}})['stuck']
                          ['escalate_after_h'], 2)
         errors, _ = settings.problems({'stuck': {'rebuild_after_h': -1}})
