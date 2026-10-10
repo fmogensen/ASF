@@ -73,6 +73,40 @@ never writes the real ledger, never opens or merges a PR, and never launches a s
 lane table before resuming the clock: every branch and PR the lane already knows about must show
 a state, and no line should read `INVARIANT`.
 
+## The release channel
+
+A product whose repo is not ASF's own source has no checkout to compare against the trunk, so it
+cannot dogfood ASF's own head the way the factory does. Instead its tick checks ASF's newest
+**release tag** — read from the remote at most once an hour, into one cache shared by every
+product — against the `upgrade:` word the product file declares under `conventions.flags`:
+
+- `auto` installs the new tag.
+- `notify` (the default) prints `UPGRADE AVAILABLE <old> → <new>` once per tag, in the tick's log
+  and in its digest, and installs nothing.
+- `off` says nothing.
+
+A declared word that is none of the three reads as `notify` and is a doctor RED naming the typo
+verbatim — a mistyped key is never the reason a product is upgraded, or notified, unattended.
+
+Under `auto`, with a newer tag and nothing of the product's own mid-landing, the tick installs it
+through the existing install protocol, then re-renders the product's clocks and runs `asf doctor`
+through the *new* install's own binary — never in the process still holding the old package. Two
+lines are logged: the policy's own `upgrade: <old> → <new>`, and the sha-shaped `tick: ran asf
+upgrade (<old sha> → <new sha>), exit 0` that `asf release-readiness` mines for the upgrade-safety
+criterion. The tick ends there; its remaining steps run on the next tick.
+
+If that new doctor comes back RED, the tick prints `rollback: doctor RED after <new> —
+reinstalling <old>`, puts the previous release's pin back, re-renders the clocks again, and files
+one Bug — severity S1, one per `(release tag, doctor RED)` pair however many products or ticks hit
+it — so the product is never silently stuck on a release it cannot take. The doctor's own
+`upgrade` row then reads RED too, for as long as that rolled-back tag is still the newest one
+known: once a newer tag is cut, the channel tries that one and the row goes green again by
+itself.
+
+A product whose repo *is* ASF's own source is never on this channel: it takes ASF's trunk head
+directly, several times a day, under `approvals.upgrade` — that is how a release gets tested
+before it is cut, and nothing about it changes here.
+
 ## Schema migrations
 
 The record carries a schema version (`index.json`'s `schema_version`). When a release raises it,
