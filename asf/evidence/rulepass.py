@@ -159,21 +159,23 @@ def cosmetic(dispute, label, text):
 def precedent(product, items, dispute, label, text):
     """``('precedent', <sentence>, <cite>)`` or ``None``: :func:`asf.evidence.rulings.covers`
     over the item's :func:`standing` rulings first — a job back means ``cite`` is that job and
-    the stamp of the ruling it came from; else the finding's own text names a ``D-nnnn`` that
-    :func:`asf.evidence.precedent.entries` confirms with a status outside
-    :data:`asf.evidence.precedent.STALE_STATUS`, compared lower-cased (PD15) — then ``cite`` is
-    ``brief_section``'s own row grammar. No lexical or semantic guess, ever (Out)."""
+    the stamp of the ruling it came from; else the finding's own text names a ``D-nnnn`` or a
+    path under :data:`asf.record.decisions.DOCS_DIR` that :func:`asf.evidence.precedent.entries`
+    carries, confirmed with a status outside :data:`asf.evidence.precedent.STALE_STATUS`,
+    compared lower-cased (PD15) — then ``cite`` is ``brief_section``'s own row grammar. No
+    lexical or semantic guess, ever (Out)."""
     rulings_list = standing(product, dispute.item)
     job = rulings.covers(rulings_list, label, text)
     if job:
         at = next((r['at'] for r in reversed(rulings_list) if r['job'] == job), '')
         cite = f'{job} {at}'.strip()
         return ('precedent', f'{label} is already settled by a standing ruling ({cite}).', cite)
+    rows = precedent_mod.entries(product, items)
     ids = decisions.ID_RE.findall(text or '')
-    if not ids:
-        return None
-    rows = {row['id']: row for row in precedent_mod.entries(product, items)}
-    row = rows.get(ids[0])
+    if ids:
+        row = next((r for r in rows if r['id'] == ids[0]), None)
+    else:
+        row = next((r for r in rows if r['path'] and r['path'] in (text or '')), None)
     if not row:
         return None
     status = (row.get('status') or '').strip().lower()
