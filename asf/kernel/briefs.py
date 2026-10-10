@@ -45,6 +45,29 @@ commit's body (on its own ref, as the CLOUD block says — never the PR branch) 
 message: the same lines go there, after the REPORT. A review that ends without a
 `VERDICT:` line counts as no review and is run again."""
 
+#: what a review does about tests: CI is the test gate and its result is a fact in the brief; the
+#: reviewer reads the diff against the acceptance and the spec (a review that reran the touched
+#: suite on a busy host ran 85 minutes, 65 of them waiting on it)
+CI_RULE = """## CI is the test gate — do not run the suite
+
+{ci_fact}
+
+Do NOT run the full or the touched test suite (`run_tests.py`, `--touched`, `unittest discover`,
+`pytest` over a directory, `make test`): CI already did, on this exact head, and a rerun on this
+host only duplicates it and holds your seat. Your review is reading the diff against the
+acceptance and the spec. Run at most one or two specific test cases, and only to check a doubt
+the diff leaves, each under a short timeout (`timeout 120 …`); say which and why in the evidence."""
+
+#: the floor's review-table rows that ask for a test run, and what a kernel review checks instead
+_TEST_ROW_REWRITES = (
+    (re.compile(r'^\| those tests were run and are green \|.*\|$', re.M),
+     '| the acceptance tests are green in CI on this head | pass \\| fail '
+     '| the CI check and its URL, from the CI section |'),
+    (re.compile(r'^\| the Gate commands are green \|.*\|$', re.M),
+     '| the Gate commands are green in CI on this head | pass \\| fail '
+     '| the CI check and its URL, from the CI section |'),
+)
+
 #: a docs-only PR's review (:func:`light_review`): the kernel's own short brief, on the light model
 LIGHT_REVIEW_TEXT = """# Light review: {item_id} — PR #{pr} (documentation only)
 
@@ -59,6 +82,8 @@ Check only this, and keep it short:
 - it contradicts no document beside it;
 - no secret, private name or host detail;
 - it renders: headings, lists, code fences and tables are well formed.
+
+{ci_rule}
 
 Never edit, commit or push anything here (a cloud session's one report commit, on its own ref,
 excepted): you only read. Block only on a wrong fact, a contradiction or a leak; wording is a
@@ -266,6 +291,24 @@ def cap_sections(sections, limit):
     return keep, dropped
 
 
+def ci_fact(product, pr):
+    """The CI result on ``pr``'s head as one fact: ``CI is green on head `<sha>`: <check> <run
+    URL>, …`` (the run URL from the product's ``repo_slug`` and the check's run id), or what is
+    not green. The kernel launches a review only on green (:func:`asf.kernel.decide.ci_green`)."""
+    slug = getattr(product, 'repo_slug', '') or ''
+    checks = list(getattr(pr, 'checks', None) or ())
+    done = [c for c in checks if c.status == 'completed']
+    bad = [c for c in checks if c not in done or c.conclusion in RED_CONCLUSIONS]
+    parts = ['%s — %s' % (c.name, 'https://github.com/%s/actions/runs/%s' % (slug, c.run_id)
+                          if slug and c.run_id else 'run url unknown') for c in done if c not in bad]
+    head = getattr(pr, 'head_sha', '') or '?'
+    if bad or not checks:
+        return ('CI is NOT confirmed green on head `%s` (%s): trust no result, and say so in the '
+                'review.' % (head, ', '.join('%s %s' % (c.name, c.conclusion or c.status)
+                                              for c in bad) or 'no checks reported'))
+    return 'CI is green on head `%s`:\n%s' % (head, '\n'.join('- %s' % p for p in parts))
+
+
 def _light_brief(product, launch, item, pr, model):
     """The :class:`asf.briefs.build.Brief` of a docs-only PR's review: :data:`LIGHT_REVIEW_TEXT`,
     the operator's answers and :data:`VERDICT_RULE`."""
@@ -276,7 +319,8 @@ def _light_brief(product, launch, item, pr, model):
     text = LIGHT_REVIEW_TEXT.format(
         item_id=item.id, pr=pr.number, branch=launch.branch, head=pr.head_sha or '?',
         main=getattr(product, 'main', 'main') or 'main', files='\n'.join(shown),
-        title_line=('The card: %s\n\n' % item.title) if item.title else '')
+        title_line=('The card: %s\n\n' % item.title) if item.title else '',
+        ci_rule=CI_RULE.format(ci_fact=ci_fact(product, pr)))
     return floor.Brief(kind=LIGHT_REVIEW, item_id=item.id, text=text, model=model, add_dirs=[],
                        id_ranges_needed=False)
 
@@ -360,6 +404,9 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
     if launch.kind == 'review':
         if pr is not None:
             extra += ['', 'The PR under review: #%d, head `%s`.' % (pr.number, pr.head_sha)]
+            extra += ['', CI_RULE.format(ci_fact=ci_fact(product, pr))]
+            for pat, repl in _TEST_ROW_REWRITES:
+                b = dataclasses.replace(b, text=pat.sub(lambda m, r=repl: r, b.text))
         extra += ['', VERDICT_RULE]
     if extra:
         b = dataclasses.replace(b, text=b.text.rstrip('\n') + '\n\n' + '\n'.join(extra).strip()

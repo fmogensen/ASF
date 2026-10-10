@@ -1243,6 +1243,8 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
         if r.item_id == it.id and verdict_holds(r, pr):
             verdict = r
     if verdict is None:
+        if not ci_green(pr, config):  # CI is the test gate: a review is worth running once it is
+            return _Judged(State.REVIEW)
         return _Judged(State.REVIEW, review_branch=pr.branch)
     if verdict.verdict != 'approve':
         return _fix_round(it, pr, 'review: changes requested', config, extra=extra, facts=facts,
@@ -1257,6 +1259,19 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
     if pr.behind and facts.strict:  # not strict: GitHub merges it behind, an update burns CI
         return _Judged(State.LANDING, behind_pr=pr)
     return _Judged(State.LANDING)
+
+
+def ci_green(pr, config):
+    """Whether ``pr``'s head has its CI result and it is green: every required check reported and
+    completed ``success``/``neutral``/``skipped`` (with none named, every check on the head, and
+    a head with no check at all has no CI to wait for). A review is launched, and valued, only
+    then: the checks are the test gate, so the reviewer reads and never reruns the suite."""
+    req = [c for c in pr.checks if required(c.name, config)]
+    names = {c.name for c in req}
+    if not all(n in names for n in config.required_checks):
+        return False
+    return all(c.status == 'completed' and c.conclusion in ('success', 'neutral', 'skipped')
+               for c in req)
 
 
 def auto_merge_idle(pr, config):
