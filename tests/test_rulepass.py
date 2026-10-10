@@ -1,19 +1,25 @@
 """tests.test_rulepass — the disputes code rules before any adjudicate session is spawned.
 
 Pure, over built ``Dispute``s and a fake product with a ``docs/decisions/`` folder, the fixture
-shape ``tests/test_precedent.py`` already uses (F-0300, S-78054). No ``screen`` cases here: those
-are a later Task's, in this same module.
+shape ``tests/test_precedent.py`` already uses (F-0300, S-78054). ``ScreenRuledTests`` and
+``WaiversTests`` are a later Task's own: :func:`asf.tick.step_wave.screen`'s check and
+:func:`asf.tick.step_wave.waivers`, both over ``rulepass.dispute`` mocked out — the dispute
+table itself is proven above, pure.
 """
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 from asf import env
 from asf.evidence import rulepass as rp
 from asf.evidence import rulings
+from asf.feeder import rows as feeder_rows
+from asf.tick import step_wave
 from asf.workers import lifecycle
+from asf.workers import pool as pool_mod
 
 
 class _TempProduct(unittest.TestCase):
@@ -215,6 +221,279 @@ class ApplyTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(len(out), 1)
         self.assertIn('T-0001', out[0])
+
+
+def _adjudicate_row(item_id='T-0001', branch='worker/T-0001', kind=feeder_rows.STALEMATE):
+    return feeder_rows.Row(tier=2, kind=kind, item_id=item_id, feature_id='F-0001',
+                           action=feeder_rows.LAUNCH, brief_kind='adjudicate', branch=branch,
+                           reason='')
+
+
+def _plan_code_row(item_id='T-0002', branch='worker/T-0002'):
+    return feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=item_id,
+                           feature_id='F-0001', action=feeder_rows.LAUNCH, brief_kind='task',
+                           branch=branch, reason='')
+
+
+def _build(row, _bypass):
+    return (pool_mod.Row(step_wave.job_name(row.brief_kind, row.item_id), row.item_id,
+                        branch=row.branch),
+            types.SimpleNamespace(text='brief', kind=row.brief_kind))
+
+
+def _not_capped(_product, _row, wrow):
+    """:func:`step_wave.relaunch_assessment`'s shape, patched in: never capped, never parked."""
+    wrow.cause = ''
+    return (None, None, None)
+
+
+def _quiet_ctx():
+    return types.SimpleNamespace(event=lambda *a, **k: None)
+
+
+class ScreenRuledTests(_TempProduct):
+    """S-78055: the check :func:`asf.tick.step_wave.screen` runs on an adjudicate row, between
+    the operator's pause and the host hold — ``rulepass.dispute`` mocked out, ``rule`` and the
+    card write real, so a cosmetic ruling is proven end to end without reading a real review."""
+
+    def _events_ctx(self):
+        events = []
+        return types.SimpleNamespace(event=lambda kind, **f: events.append((kind, f))), events
+
+    def _seed(self, product, item='T-0001'):
+        self.write_card(product, item, history_lines=['- 2026-10-01 09:00 create: opened'])
+
+    def _rulings(self, product, item='T-0001'):
+        path = os.path.join(product.backlog_dir, 'tasks', f'{item}.md')
+        with open(path, encoding='utf-8') as f:
+            return rulings.parse(f.read())
+
+    def test_all_cosmetic_dispute_rules_and_writes_once(self):
+        product = self.product(flag='on')
+        self._seed(product)
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        row = _adjudicate_row()
+        ctx, events = self._events_ctx()
+        lines = []
+        with mock.patch.object(rp, 'dispute', return_value=d):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=True,
+                                        out=lines.append, build=_build, ctx=ctx,
+                                        record_root=lambda: product.backlog_dir)
+        self.assertEqual([s.kind for s in screened], [step_wave.RULED])
+        self.assertFalse(screened[0].starts)
+        after = self._rulings(product)
+        self.assertEqual(len(after), 1)
+        self.assertEqual(after[0]['job'], 'rule-pass')
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], 'rule_pass')
+        self.assertEqual(events[0][1]['item'], 'T-0001')
+        self.assertEqual(len([l for l in lines if l.startswith('ruled')]), 1)
+
+    def test_ruled_row_frees_its_seat_to_the_next_row(self):
+        product = self.product(flag='on')
+        self._seed(product)
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        ruled_row, code_row = _adjudicate_row(), _plan_code_row()
+        ctx, _events = self._events_ctx()
+        with mock.patch.object(rp, 'dispute', return_value=d), \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [ruled_row, code_row], {}, [], {}, 1, act=True,
+                                        out=lambda _l: None, build=_build, ctx=ctx,
+                                        record_root=lambda: product.backlog_dir)
+        kinds = {s.row.item_id: s for s in screened}
+        self.assertEqual(kinds['T-0001'].kind, step_wave.RULED)
+        self.assertFalse(kinds['T-0001'].starts)
+        self.assertEqual(kinds['T-0002'].kind, step_wave.STARTS)
+        self.assertTrue(kinds['T-0002'].starts)
+
+    def test_preview_rules_quietly_and_writes_nothing(self):
+        product = self.product(flag='on')
+        self._seed(product)
+        before = self._rulings(product)
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        row = _adjudicate_row()
+        lines = []
+        with mock.patch.object(rp, 'dispute', return_value=d):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=False,
+                                        out=lines.append)
+        self.assertEqual([s.kind for s in screened], [step_wave.RULED])
+        self.assertFalse(screened[0].starts)
+        self.assertEqual(self._rulings(product), before)
+        self.assertEqual(lines, [])
+
+    def test_flag_off_starts_as_today(self):
+        product = self.product(flag='off')
+        row = _adjudicate_row()
+        with mock.patch.object(rp, 'dispute', side_effect=AssertionError('must not be called')), \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=True,
+                                        out=lambda _l: None, build=_build, ctx=_quiet_ctx())
+        self.assertEqual(screened[0].kind, step_wave.STARTS)
+        self.assertTrue(screened[0].starts)
+
+    def test_one_correctness_item_blocks_the_ruling(self):
+        product = self.product(flag='on')
+        self._seed(product)
+        before = self._rulings(product)
+        d = _dispute(finding=('asf/flake.py', 'asf/other.py'),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),
+                              ('C2', 'this raises an exception under load')))
+        row = _adjudicate_row()
+        with mock.patch.object(rp, 'dispute', return_value=d), \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=True,
+                                        out=lambda _l: None, build=_build, ctx=_quiet_ctx(),
+                                        record_root=lambda: product.backlog_dir)
+        self.assertEqual(screened[0].kind, step_wave.STARTS)
+        self.assertTrue(screened[0].starts)
+        self.assertEqual(self._rulings(product), before)
+
+    def test_bug_rows_and_capped_rows_are_never_disputed(self):
+        product = self.product(flag='on')
+        bug_row = _adjudicate_row(item_id='B-0001', branch='fix/B-0001')
+        capped_row = _adjudicate_row(item_id='T-0003', branch='worker/T-0003')
+        with mock.patch.object(rp, 'dispute', return_value=None) as m, \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [bug_row, capped_row], {}, [], {}, 2, act=True,
+                                        out=lambda _l: None, build=_build, ctx=_quiet_ctx())
+        self.assertEqual(m.call_count, 2)
+        self.assertEqual([s.kind for s in screened], [step_wave.STARTS, step_wave.STARTS])
+        self.assertTrue(all(s.starts for s in screened))
+
+    def test_pause_holds_before_the_rule_check_runs(self):
+        product = self.product(flag='on')
+        row = _adjudicate_row()
+        paused = {'reason': 'maintenance', 'by': 'operator', 'at': '2026-10-08 10:00'}
+        with mock.patch.object(rp, 'dispute', side_effect=AssertionError('must not be called')):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=True,
+                                        out=lambda _l: None, paused=paused, ctx=_quiet_ctx())
+        self.assertEqual(screened[0].kind, step_wave.PAUSED)
+        self.assertFalse(screened[0].starts)
+
+    def test_host_hold_does_not_stop_the_rule_check(self):
+        product = self.product(flag='on')
+        self._seed(product)
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        row = _adjudicate_row()
+        ctx, events = self._events_ctx()
+        with mock.patch.object(rp, 'dispute', return_value=d):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2,
+                                        host=(True, 'host pressure load 9/1'), act=True,
+                                        out=lambda _l: None, build=_build, ctx=ctx,
+                                        record_root=lambda: product.backlog_dir)
+        self.assertEqual(screened[0].kind, step_wave.RULED)
+        self.assertFalse(screened[0].starts)
+        self.assertEqual(len(events), 1)
+
+    def test_an_already_waived_finding_is_quiet_and_starts(self):
+        product = self.product(flag='on')
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        ruling = rp.rule(product, d, items={})
+        line = rp.history_line(ruling, now='2026-10-08T10:30:00')
+        self.write_card(product, 'T-0001', history_lines=[line])
+        before = self._rulings(product)
+        row = _adjudicate_row()
+        ctx, events = self._events_ctx()
+        lines = []
+        with mock.patch.object(rp, 'dispute', return_value=d), \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=True,
+                                        out=lines.append, build=_build, ctx=ctx,
+                                        record_root=lambda: product.backlog_dir)
+        self.assertEqual(screened[0].kind, step_wave.STARTS)
+        self.assertTrue(screened[0].starts)
+        self.assertEqual(self._rulings(product), before)
+        self.assertEqual(events, [])
+        self.assertEqual([l for l in lines if l.startswith('ruled')], [])
+
+    def test_apply_raising_starts_the_row_and_logs_one_line(self):
+        product = self.product(flag='on')
+        held_row = feeder_rows.Row(tier=1, kind=feeder_rows.FIX_CORRECT, item_id='T-0009',
+                                   feature_id='F-0001', action=feeder_rows.LAUNCH,
+                                   brief_kind='correct', branch='worker/T-0009', reason='')
+        wait_row = feeder_rows.Row(tier=1, kind=feeder_rows.PLAN_CODE, item_id='T-0010',
+                                   feature_id='F-0001', action='WAITS ON T-0009',
+                                   brief_kind='task', branch='', reason='')
+        adjudicate_row = _adjudicate_row()
+        held = {'T-0009': ('touch_amendable_set', 'human-now')}
+        lines = []
+        with mock.patch.object(rp, 'dispute', side_effect=RuntimeError('boom')), \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [held_row, wait_row, adjudicate_row], {},
+                                        [], held, 2, act=True, out=lines.append, build=_build,
+                                        ctx=_quiet_ctx())
+        kinds = {s.row.item_id: s for s in screened}
+        self.assertEqual(kinds['T-0009'].kind, step_wave.HELD)
+        self.assertEqual(kinds['T-0010'].kind, step_wave.WAITS)
+        self.assertEqual(kinds['T-0001'].kind, step_wave.STARTS)
+        self.assertTrue(kinds['T-0001'].starts)
+        error_lines = [l for l in lines if 'could not rule' in l]
+        self.assertEqual(len(error_lines), 1)
+        self.assertIn('T-0001', error_lines[0])
+
+    def test_wave_clock_never_files_a_ruling_so_the_row_starts(self):  # PD5
+        product = self.product(flag='on')
+        self._seed(product)
+        before = self._rulings(product)
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        row = _adjudicate_row()
+        lines = []
+        with mock.patch.object(rp, 'dispute', return_value=d), \
+             mock.patch.object(step_wave, 'relaunch_assessment', side_effect=_not_capped):
+            screened = step_wave.screen(product, [row], {}, [], {}, 2, act=True,
+                                        out=lines.append, build=_build, ctx=_quiet_ctx())
+        self.assertEqual(screened[0].kind, step_wave.STARTS)
+        self.assertTrue(screened[0].starts)
+        self.assertEqual(self._rulings(product), before)
+        self.assertEqual(len([l for l in lines if l.startswith('ruled')]), 1)
+
+
+class WaiversTests(_TempProduct):
+    """S-78056: :func:`asf.tick.step_wave.waivers` — the membership both feeder branches read,
+    built over ``rulepass.dispute`` mocked out and ``rulepass.waived`` real, over a real card."""
+
+    def test_waivers_matches_the_correction_finding_key(self):
+        product = self.product(flag='on')
+        d = _dispute(finding=('asf/flake.py',),
+                     entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        ruling = rp.rule(product, d, items={})
+        line = rp.history_line(ruling, now='2026-10-08T10:30:00')
+        self.write_card(product, 'T-0001', history_lines=[line])
+        index = {'T-0001': {'id': 'T-0001', 'type': 'task'}}
+        with mock.patch.object(rp, 'dispute', return_value=d):
+            out = step_wave.waivers(product, 'unused-root', index)
+        self.assertEqual(out, {'T-0001': '2026-10-08 10:30'})
+
+    def test_waivers_excludes_a_mismatched_finding_key(self):
+        product = self.product(flag='on')
+        card_dispute = _dispute(
+            finding=('asf/other.py',),
+            entries=(('C1', 'squash these commits into one over asf/other.py'),))
+        ruling = rp.rule(product, card_dispute, items={})
+        line = rp.history_line(ruling, now='2026-10-08T10:30:00')
+        self.write_card(product, 'T-0001', history_lines=[line])
+        current_dispute = _dispute(
+            finding=('asf/flake.py',),
+            entries=(('C1', 'squash these commits into one over asf/flake.py'),))
+        index = {'T-0001': {'id': 'T-0001', 'type': 'task'}}
+        with mock.patch.object(rp, 'dispute', return_value=current_dispute):
+            out = step_wave.waivers(product, 'unused-root', index)
+        self.assertEqual(out, {})
+
+    def test_waivers_is_empty_with_the_flag_off_or_an_unreadable_review(self):
+        index = {'T-0001': {'id': 'T-0001', 'type': 'task'}}
+        product_off = self.product(flag='off')
+        with mock.patch.object(rp, 'dispute', side_effect=AssertionError('must not be called')):
+            self.assertEqual(step_wave.waivers(product_off, 'root', index), {})
+        product_on = self.product(flag='on')
+        with mock.patch.object(rp, 'dispute', side_effect=OSError('review unreadable')):
+            self.assertEqual(step_wave.waivers(product_on, 'root', index), {})
 
 
 if __name__ == '__main__':
