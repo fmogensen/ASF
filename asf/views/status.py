@@ -114,12 +114,15 @@ def _plan(root, product):
     # close or the relaunch cap, all of which live only in step_wave.screen)
     cloud = step_wave.cloud_settings(product)
     cloud_ready = step_wave.cloud_readiness(product, cloud)
-    _held, _hold, extra = step_wave.split_hold(cloud, cloud_ready, False, '')
+    cloud_inflight = step_wave.cloud_mod.inflight_all() if cloud.on else 0
+    _held, _hold, extra = step_wave.split_hold(cloud, cloud_ready, False, '',
+                                               inflight=cloud_inflight)
     seats = cap + extra
     planned, _dropped = step_wave.gated_plan(planning_items, product, running, seats, inputs,
                                              out=lambda _line: None)
     host_held, host_why, reading = step_wave.host_hold(planned)
-    host_held, _local, _extra = step_wave.split_hold(cloud, cloud_ready, host_held, host_why)
+    host_held, _local, _extra = step_wave.split_hold(cloud, cloud_ready, host_held, host_why,
+                                                      inflight=cloud_inflight)
     bypass_open = bool(host_held
                        and host_mod.load_only_hold(reading,
                                                    host_mod.guards_from_config(env.load_config()))
