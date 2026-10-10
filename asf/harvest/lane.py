@@ -5083,6 +5083,40 @@ class GitHubHost(Host):
                  state=WAITING_CI)
         return True
 
+    def infra_gate(self, f, number, required, checks, probe=False):
+        """True (and the gate judges nothing this pass) when ``checks`` sit under an infra red
+        (:func:`asf.flake.infra_class`: a phantom run or a lost runner) and the factory answered
+        it — re-run once on this head, or one watchdog breach on the second. A lost-runner red
+        sent to a correct round is a session against a head nothing is wrong with, and a phantom
+        waited out is a PR held until someone re-runs it by hand (F-0295).
+
+        ``probe``: a head that is not red is re-read at most once per
+        :data:`asf.flake.PHANTOM_PROBE_S`. False when there is no infra red, when the re-run was
+        refused, or when nothing could be read: the gate judges exactly as before."""
+        from asf import flake
+        lane, out = self.lane, self.lane.out
+        head = exact_head(f) or f.get('head')
+        if not head or not checks:
+            return False
+        try:
+            infra = flake.infra_class(self.slug, checks, required, gh=H._gh,
+                                      state_dir=lane.state_dir if probe else None)
+        except Exception:   # noqa: BLE001 — unreadable: judged as before
+            return False
+        if not infra:
+            return False
+        cls, rid, attempt = infra
+        got = flake.infra_rerun(lane.state_dir, self.slug, head, rid, cls,
+                                where=f'PR #{number}', out=out, gh=H._gh, attempt=attempt)
+        if got == 'refused':
+            return False
+        said = {'rerun': 're-run queued', 'held': 're-run queued, awaiting it',
+                'breach': 'watchdog breach — re-run once already, not again'}
+        out(f'waiting {f["branch"]}: PR #{number} infra red ({cls}) at {head[:9]} — '
+            f'{said.get(got, got)}, never a correct round')
+        wait(lane, f, f'infra red ({cls}): {said.get(got, got)}', state=WAITING_CI)
+        return True
+
     def check_gate(self, f, number, files):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
         checks passed under ``wait``), or None when it waits or went back. Under
@@ -5119,6 +5153,8 @@ class GitHubHost(Host):
             now = lane.now or time.time()
             since = (rec.get('ci_since') if rec.get('state') == WAITING_CI and rec.get('ci_since')
                      else now)
+            if self.infra_gate(f, number, required, judged_pending(checks, required), probe=True):
+                return None     # a phantom under the checks it waits on: re-run, not waited out
             lane.out(f'waiting {b}: PR #{number} checks pending — {detail} '
                      f'({int((now - float(since)) // 60)} min)')
             wait(lane, f, f'checks pending: {detail}', state=WAITING_CI, ci_since=since)
@@ -5141,6 +5177,12 @@ class GitHubHost(Host):
                 return None
             if self.cut_short(f, number, [c for c in checks if c.get('bucket') in RED_BUCKETS
                                           and c.get('name') in red], red):
+                return None
+            # a lost runner or a phantom (asf.flake.classify_red): infra, re-run once on this
+            # head, never a correct round — a second on the same head is a watchdog breach
+            if self.infra_gate(f, number, required, [c for c in checks
+                                                     if c.get('bucket') in RED_BUCKETS
+                                                     and c.get('name') in red]):
                 return None
             on_trunk = self.trunk_red(red)
             try:
@@ -5191,6 +5233,10 @@ class GitHubHost(Host):
             return None
         kick = {}
         if skipped or missing:
+            # a required job that never got a job at all is the card's phantom: the run behind
+            # the head's other checks says so, and it is re-run once rather than gated locally
+            if self.infra_gate(f, number, required, checks, probe=True):
+                return None
             stalled = self.stalled(f, number)
             if stalled == 'back':
                 return None
@@ -5630,6 +5676,13 @@ def not_required_red(checks, required):
         return []
     return [c.get('name') or '?' for c in checks
             if c.get('bucket') in RED_BUCKETS and not required_name(c.get('name'), required)]
+
+
+def judged_pending(checks, required=()):
+    """The required checks of ``checks`` that have not reached a verdict — what the gate is
+    waiting on, and the only runs its phantom probe reads."""
+    return [c for c in checks or () if c.get('bucket') == 'pending'
+            and (not required or required_name(c.get('name'), required))]
 
 
 def protected_checks(slug, trunk, state_dir, now=None):
