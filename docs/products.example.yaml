@@ -116,7 +116,9 @@ conventions:
   # the dwell-time watchdog (asf.dwell; `asf watchdog`, and the tick's `watchdog` step, which runs
   # with every wave): the longest each state may last, in minutes, or `off` (defaults shown).
   # Only check_cancelled (re-run the failed jobs once per head) and ungrantable_hold (drop it)
-  # act; every other breach is a `watchdog: BREACH` line, a `watchdog` event and a Bug.
+  # act; every other breach is a `watchdog: BREACH` line, a `watchdog` event and a Bug — one per
+  # state (signature `watchdog <state>`, the symptom class, never the instance): a breach of a
+  # state whose Bug is open appends its key's evidence there and adds one to its `count:`.
   # watchdog:
   #   tick_running: 15
   #   pr_green_not_landing: 30
@@ -217,7 +219,10 @@ conventions:
   # the notes' Upgrade line; {repo_slug} and {tag} substituted; "" leaves it out.
   release_install: 'pipx install --force "git+https://github.com/{repo_slug}.git@{tag}"'
   # asf.groom.inbox: where a dropped .md becomes a card. Leave out and the product has no such
-  # thing — nothing looks for it.
+  # thing — nothing looks for it. A machine-filed card (one carrying `signature:`) is keyed on its
+  # symptom class — item ids, PR numbers and shas taken out (`watchdog <state>: <key>` is
+  # `watchdog <state>`): a repeat of an open Bug's class appends its evidence to that Bug and
+  # adds one to its `count:` instead of minting another.
   intake_dir: inbox
   # globs that are documentation beside specs_dir/plans_dir/reviews_dir: a branch touching only
   # these lands as docs, and a trunk that moved only here does not re-gate (default []).

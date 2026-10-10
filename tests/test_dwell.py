@@ -433,18 +433,21 @@ class StepAndCliTests(DwellTestCase):
         self.assertEqual(events[0][1]['state'], 'tick_running')
         self.assertEqual([f.state for f in cards.call_args[0][2]], ['tick_running'])
 
-    def test_a_breach_is_one_bug_per_state_and_key(self):
+    def test_a_breach_is_one_bug_per_state(self):
         f = dwell.Finding('runner_offline', 'r1', 'runner r1 is offline')
         f.limit_min, f.age_s = 10, 900
+        g = dwell.Finding('runner_offline', 'r2', 'runner r2 is offline')
+        g.limit_min, g.age_s = 10, 900
         info = dwell.bug_info(f)
         self.assertEqual(info['severity'], 'S3')        # an alarm, never an auto-launched fix
-        with mock.patch('asf.tick.file_bugs._file_or_bump_bug', return_value='filed') as file_, \
+        with mock.patch('asf.tick.file_bugs.file_new_bug', return_value='filed') as file_, \
                 mock.patch('asf.record.core.load_items', return_value=({}, [])), \
                 mock.patch('asf.record.index.do_index'), \
                 mock.patch.object(approvals, 'level_of', return_value='auto'):
-            out = dwell.file_cards(self.product, self.tmp, [f, f], out=lambda _l: None)
-        self.assertEqual(out, {'watchdog runner_offline: r1': 'filed'})
+            out = dwell.file_cards(self.product, self.tmp, [f, f, g], out=lambda _l: None)
+        self.assertEqual(out, {'watchdog runner_offline': 'filed'})
         self.assertEqual(file_.call_count, 1)
+        self.assertEqual(len(file_.call_args[0][3]['evidence']), 2)
 
     def test_a_held_file_bug_level_files_nothing(self):
         f = dwell.Finding('runner_offline', 'r1', 'x')
@@ -453,7 +456,7 @@ class StepAndCliTests(DwellTestCase):
                 mock.patch('asf.tick.file_bugs._file_or_bump_bug') as file_:
             dwell.file_cards(self.product, self.tmp, [f], out=lines.append)
         file_.assert_not_called()
-        self.assertEqual(lines, ['held file_bug on watchdog runner_offline: r1 — widen '
+        self.assertEqual(lines, ['held file_bug on watchdog runner_offline — widen '
                                  'approvals: file_bug in products/<p>.yaml'])
 
     def test_the_cli_reports_and_exits_1_on_a_breach(self):
