@@ -137,6 +137,15 @@ class Landing(unittest.TestCase):
                 self.assertIn('risk: after high merge abc123456 (#9) the trunk is not green yet',
                               plan.notes['T-1'])
 
+    def test_a_newer_green_trunk_commit_proves_the_high_merge_green(self):
+        # F-0337 (2026-10-10): the high merge's own CI never ran (a newer push superseded it);
+        # the newer trunk commit carries that change and is green, so the next high PR lands
+        a = landing('T-1', 1, ['asf/record/core.py'])
+        main = [merged_on_main('def456789', 10, 'T-10', ['asf/a.py']),
+                M.MainCommit(sha='abc123456', pr=9, branch='worker/T-9', item_id='T-9',
+                             files=['asf/kernel/apply.py'], checks=[])]
+        self.assertEqual(auto_merged(decide(approved(a, main=main), cfg())), [1])
+
     def test_a_low_merge_on_main_holds_nothing(self):
         a = landing('T-1', 1, ['asf/record/core.py'])
         main = [merged_on_main('abc', 9, 'T-9', ['asf/a.py'], status='in_progress')]

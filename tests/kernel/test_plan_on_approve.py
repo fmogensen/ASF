@@ -130,6 +130,35 @@ class TheSpecPrStaysTheFeaturesPr(unittest.TestCase):
         self.assertEqual(B.state(plan, 'F-0001'), State.REVIEW)
 
 
+class ASpecAndAPlanPrCoexist(unittest.TestCase):
+    """F-0337 (2026-10-10): with the plan PR open beside the approved spec PR, the "newer open
+    PR" rule put the spec PR in LIMBO. The rule compares a Feature's PRs within one lane only."""
+
+    def test_no_limbo_for_the_spec_and_plan_pair(self):
+        plan = plan_of([spec_pr(), plan_pr()])
+        self.assertNotIn('PR #7', plan.limbo)
+        self.assertNotIn('PR #9', plan.limbo)
+
+    def test_the_spec_lands_first_and_the_plan_pr_is_not_merged(self):
+        plan = plan_of([spec_pr(), plan_pr()])
+        landing = [a.pr for a in B.of(plan, A.EnableAutoMerge)] + \
+            [a.pr for a in B.of(plan, A.MergePR)]
+        self.assertIn(7, landing)
+        self.assertNotIn(9, landing)
+
+    def test_two_open_prs_on_one_lane_still_show_the_older_in_limbo(self):
+        plan = plan_of([spec_pr(), plan_pr(), plan_pr(number=11)])
+        self.assertEqual(plan.limbo.get('PR #9'), 'F-0001 has a newer open PR #11')
+        self.assertNotIn('PR #7', plan.limbo)
+
+    def test_a_review_verdict_with_no_pr_is_keyed_to_its_own_branchs_pr(self):
+        from asf.kernel import apply as AP
+        facts = B.facts([feature()], prs=[plan_pr(), spec_pr()])
+        s = B.session('review-f-0001', 'F-0001', kind='review', branch='spec/F-0001',
+                      alive=False, ended=True)
+        self.assertEqual(AP._session_pr(s, facts).number, 7)
+
+
 class TheApplierAndTheBrief(unittest.TestCase):
 
     def tick(self, rec, gh, sess, briefer=F.brief, product=None):
