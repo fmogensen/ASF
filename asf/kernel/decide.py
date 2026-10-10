@@ -1008,7 +1008,7 @@ def done_and_pushed(s, facts=None):
     a bare sha, ``rebased <sha>``) with the session's branch on origin (``facts.branches``)."""
     if s.status != R.DONE:
         return False
-    if s.result == 'pushed' or host_pushes(s):
+    if s.result == 'pushed' or host_pushes(s) or s.claim_landed:
         return True
     return facts is not None and _claimed_on_origin((s.fields or {}).get('pushed'), s.item_id,
                                                     s.branch, facts)

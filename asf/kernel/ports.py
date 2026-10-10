@@ -1461,6 +1461,11 @@ class RealSessions:
                 unpushed, refused = unpushed_head(
                     run.get('worktree') or '', run.get('branch') or '', self.product.main,
                     refguard_listed(self.product))
+            landed = False
+            if result is not None and kind not in READ_ONLY and not pushed \
+                    and said['status'] == reports.DONE:
+                landed = claim_landed(getattr(self.product, 'repo_dir', None),
+                                      run.get('branch') or '', (said['fields'] or {}).get('pushed'))
             out.append(M.Session(
                 job=run['job'], item_id=run['item'], kind=kind, pid=run.get('pid'), alive=alive,
                 # a cloud run the remote status calls over has ended: it never reads as a dead pid
@@ -1473,7 +1478,7 @@ class RealSessions:
                 worktree=run.get('worktree') or '', branch=run.get('branch') or '',
                 status=said['status'],
                 fields=said['fields'], api_error=said['api_error'],
-                unpushed=unpushed, push_refused=refused))
+                unpushed=unpushed, push_refused=refused, claim_landed=landed))
             out[-1].started = run.get('started') or ''
         return out
 
@@ -1910,6 +1915,34 @@ def overwritable(wt, head, origin, branch):
         return ''
     return ('origin/%s holds %d commit(s) this branch never had (%s) — fetch it and carry them '
             'by hand, then push' % (branch, len(lost), ', '.join(lost[:5])))
+
+
+def claim_landed(repo, branch, value):
+    """Whether a REPORT's ``pushed:`` ``value`` claims a push that origin holds now: the branch's
+    head is read fresh (``git fetch`` of that one branch, never a cached listing) and the sha the
+    claim names is that head or an ancestor of it (the session's report commit may sit on top of
+    the pushed sha). A claim naming no sha counts when the branch is on origin."""
+    from asf import gitops
+    from asf.kernel import reports
+    claimed, sha = reports.pushed_claim(value)
+    if not (claimed and branch and repo and os.path.isdir(repo)):
+        return False
+    git = gitops.git
+    ref = 'refs/heads/%s' % branch
+    got = git(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', ref], repo,
+              timeout=120)
+    if not got.ok:
+        return False
+    head = git(['ls-remote', 'origin', ref], repo, timeout=60)
+    top = str(head.data or '').split('\t')[0].strip() if head.ok else ''
+    if not top:
+        return False
+    if not sha:
+        return True
+    full = git(['rev-parse', '--verify', '--quiet', '%s^{commit}' % sha], repo, timeout=60)
+    if not full.ok or not full.data:
+        return False
+    return git(['merge-base', '--is-ancestor', full.data, top], repo, timeout=60).ok
 
 
 def unpushed_head(wt, branch, main='main', protected=None):

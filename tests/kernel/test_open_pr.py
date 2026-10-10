@@ -210,3 +210,71 @@ class RealPort(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReportedPushBehindTheHead(unittest.TestCase):
+    """Live 2026-10-10 12:14Z: F-0324's plan session reported ``pushed: yes 5b8e144…`` and its
+    report commit sits on top of that sha (origin ``plan/F-0324`` at 5512983…): the branch is not
+    among the work-prefix branches, so only the session's own check of the fresh remote head
+    (``Session.claim_landed``: the sha is the head or an ancestor of it) can say it was pushed."""
+
+    SHA = '5b8e144de8f66696974b4c34ca013b555eec8acc'
+
+    def _session(self, landed):
+        return B.session('plan-f-0324-1', 'F-0324', kind='plan', alive=False, ended=True,
+                         result='report', status='done', branch='plan/F-0324',
+                         claim_landed=landed,
+                         fields={'status': 'done', 'pushed': 'yes ' + self.SHA})
+
+    def test_a_claimed_sha_under_the_remote_head_is_pushed_not_stuck(self):
+        it = B.item('F-0324', title='A feature', rank=1, state=State.BUILDING)
+        plan = decide(B.facts([it], sessions=[self._session(True)]), B.config())
+        self.assertEqual(B.of(plan, A.MarkStuck), [])
+        self.assertNotEqual(B.state(plan, 'F-0324'), State.STUCK)
+
+    def test_a_claimed_sha_not_under_the_remote_head_is_still_stuck(self):
+        it = B.item('F-0324', title='A feature', rank=1, state=State.BUILDING)
+        plan = decide(B.facts([it], sessions=[self._session(False)]), B.config())
+        self.assertTrue(B.stuck(plan, 'F-0324').reason.startswith('done without a push'))
+
+
+class ClaimLanded(unittest.TestCase):
+    """:func:`asf.kernel.ports.claim_landed` reads the remote head fresh and tests ancestry."""
+
+    def setUp(self):
+        import os
+        import subprocess
+        self.tmp = tempfile.mkdtemp()
+        self.origin = os.path.join(self.tmp, 'o.git')
+        self.repo = os.path.join(self.tmp, 'r')
+
+        def sh(*a, cwd=self.tmp):
+            return subprocess.run(a, cwd=cwd, check=True, capture_output=True, text=True,
+                                  env=dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t',
+                                           GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+                                  ).stdout.strip()
+        self.sh = sh
+        sh('git', 'init', '-q', '--bare', self.origin)
+        sh('git', 'clone', '-q', self.origin, self.repo)
+        sh('git', 'checkout', '-q', '-b', 'plan/F-0324', cwd=self.repo)
+        sh('git', 'commit', '-q', '--allow-empty', '-m', 'plan', cwd=self.repo)
+        self.pushed = sh('git', 'rev-parse', 'HEAD', cwd=self.repo)
+        sh('git', 'push', '-q', 'origin', 'plan/F-0324', cwd=self.repo)
+        # the report commit lands on top, from another clone: this checkout has never seen it
+        other = os.path.join(self.tmp, 'x')
+        sh('git', 'clone', '-q', '-b', 'plan/F-0324', self.origin, other)
+        sh('git', 'commit', '-q', '--allow-empty', '-m', 'report', cwd=other)
+        self.head = sh('git', 'rev-parse', 'HEAD', cwd=other)
+        sh('git', 'push', '-q', 'origin', 'plan/F-0324', cwd=other)
+
+    def test_the_pushed_sha_under_the_head_the_report_commit_moved_counts(self):
+        self.assertTrue(P.claim_landed(self.repo, 'plan/F-0324', 'yes ' + self.pushed))
+        self.assertTrue(P.claim_landed(self.repo, 'plan/F-0324', 'yes ' + self.head))
+        self.assertTrue(P.claim_landed(self.repo, 'plan/F-0324', 'yes ' + self.pushed[:9]))
+        self.assertTrue(P.claim_landed(self.repo, 'plan/F-0324', 'yes'))
+
+    def test_an_unknown_sha_a_no_line_or_a_missing_branch_does_not(self):
+        self.assertFalse(P.claim_landed(self.repo, 'plan/F-0324', 'yes ' + 'ab' * 20))
+        self.assertFalse(P.claim_landed(self.repo, 'plan/F-0324', 'no — nothing'))
+        self.assertFalse(P.claim_landed(self.repo, 'plan/F-9999', 'yes ' + self.pushed))
+        self.assertFalse(P.claim_landed('', 'plan/F-0324', 'yes ' + self.pushed))

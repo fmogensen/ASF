@@ -224,6 +224,8 @@ class Session:
     its pre-rebase history — or every one of its commits patch-equivalent to one here), so the
     host pushes it with a lease; ``push_refused`` is why such a HEAD is not pushed (origin holds
     a commit the local history never had), or ''.
+    ``claim_landed``: the REPORT's ``pushed:`` line claims a push and the sha it names is the head of
+    the session's branch on origin, read fresh, or an ancestor of it (:func:`asf.kernel.ports.claim_landed`).
     ``cloud``: the session runs in the cloud lane — ``alive`` is the remote run's status and
     ``ended`` is set once that status is over (never a dead pid); its REPORT is the report commit
     it pushed (:func:`asf.workers.cloud.sync`). ``started`` is when it was launched (ISO-8601
@@ -248,6 +250,7 @@ class Session:
     branch: str = ''
     unpushed: str = ''
     push_refused: str = ''
+    claim_landed: bool = False
     cloud: bool = False
     started: str = ''
 
