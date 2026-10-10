@@ -1631,6 +1631,17 @@ class WaitsOnWhatActuallyHoldsIt(unittest.TestCase):
         r = self.only_wait(self.cand(occupancy=occupancy))
         self.assertEqual(r.waits_on, 'session')
 
+    def test_an_inflight_what_if_never_outranks_the_real_ledger(self):
+        """RC1: the merge order is unchanged — ``occ['busy']`` is last, so for an id the real
+        ledger already calls busy, an ``--inflight`` what-if for that same id never overrides it
+        (the opposite would let a stale or hypothetical override silently beat the ledger's own
+        words)."""
+        occupancy = self.bare(busy={'B-0001': 'session fix-bug-b-9999 running'})
+        r = self.only_wait(self.cand(inflight=[dict(S1_SESSION, job='fix-bug-b-0001')],
+                                     occupancy=occupancy))
+        self.assertEqual(r.waits_on, 'session')
+        self.assertEqual(r.reason, 'S1 open, decided: session fix-bug-b-9999 running')
+
     def test_the_feeder_and_the_ledger_write_the_same_sentence(self):
         self.assertEqual(rows.FINISHED_WAIT, lifecycle.FINISHED_WAIT)
         d = tempfile.mkdtemp()

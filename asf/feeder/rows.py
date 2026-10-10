@@ -2652,14 +2652,14 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     running = running_footprints(items, busy)
     corrected, spoken = correction_rows(items, product, busy, corrections)
     rows = corrected + lane_rows(items, product, live | spoken, occ)
-    # ``inflight`` is a what-if the caller may have handed in to replace the live sessions
-    # (``asf next --inflight``, B-0042): it outranks what the real ledger's own occupancy says,
-    # so it merges last (F-0205)
-    held_by = {**{i: ('harvest' if w == FINISHED_WAIT else 'landing', w)
+    # merge order is unchanged (RC1): ``occ['busy']`` is last, so a live run's own words in the
+    # real ledger win over a stale ``waiting_landing`` entry, or an ``--inflight`` what-if
+    # (B-0042), for the same id
+    held_by = {**{i: ('session', session_wait(session_of(inflight, i)))
+                  for i in inflight_ids(inflight)},
+               **{i: ('harvest' if w == FINISHED_WAIT else 'landing', w)
                   for i, w in (occ.get('waiting_landing') or {}).items()},
-               **{i: ('session', w) for i, w in (occ.get('busy') or {}).items()},
-               **{i: ('session', session_wait(session_of(inflight, i)))
-                  for i in inflight_ids(inflight)}}
+               **{i: ('session', w) for i, w in (occ.get('busy') or {}).items()}}
     bugs = bug_rows(items, product, busy | spoken, attempts, held_by)
     rows += [r for r in bugs if r.launches]
     bug_waits = [r for r in bugs if not r.launches]
