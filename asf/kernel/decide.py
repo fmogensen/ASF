@@ -22,9 +22,12 @@ item and the actions of one tick. The rules it holds, in the design's words:
   (``config.doc_branches``) included.
 - Landing: an approved PR gets :class:`EnableAutoMerge`; a behind one :class:`UpdateBranch` —
   a merge train: at most ``config.update_parallel`` Landing PRs are brought up to date at once.
-  The behind, non-conflicting ones are taken in (effective rank, PR number) order; the free
-  places are ``update_parallel`` less the non-conflicting Landing PRs not behind whose required
-  checks still run on their head (an update in flight). The rest wait in Landing with the plan note
+  The behind, non-conflicting ones are taken in :func:`train_key` order: an auto-merge PR
+  waiting ``config.landing_max_wait_h`` or more first (longest wait first), then the most items
+  it unblocks through ``after:``, then effective rank, then PR number; the free places are
+  ``update_parallel`` less the non-conflicting Landing PRs whose CI still runs on their head
+  (:func:`in_flight`: a required check pending, or not yet reported while other checks run) —
+  behind or not: such a PR is never updated again until its CI ends. The rest wait in Landing with the plan note
   :data:`TRAIN_NOTE` ("queued for update (merge train, k of n)"), never written to the card.
   Behind is GitHub's ``mergeStateStatus == BEHIND`` only: a PR a non-strict base would merge as
   is never needs an update.
@@ -290,7 +293,7 @@ def decide(facts, config):
     _apply_waits(items, judged, children, states, parked)
     blocks = _count_blocked(items, states, parked)
 
-    train, notes = _merge_train(items, judged, config)
+    train, notes = _merge_train(items, judged, config, blocks, facts.now)
     actions += train
     actions += _mint(facts, parked)
     launches, skipped = (([], {}) if facts.paused
@@ -301,19 +304,45 @@ def decide(facts, config):
     return A.Plan(states=states, actions=actions, idle=idle, notes=notes)
 
 
-def _merge_train(items, judged, config):
+def _merge_train(items, judged, config, blocks=None, now=''):
     """``(UpdateBranch actions, {item: [note]})`` of the merge train: the behind Landing PRs in
-    (effective rank, PR number) order, as many as ``config.update_parallel`` less the updates in
-    flight allows; the rest get :data:`TRAIN_NOTE`."""
+    :func:`train_key` order, as many as ``config.update_parallel`` less the updates in flight
+    allows; the rest get :data:`TRAIN_NOTE`."""
+    blocks = blocks or {}
     behind = sorted((iid for iid, j in judged.items() if j.behind_pr is not None),
-                    key=lambda iid: (launch_order(iid, items, config.rank != 'own')[0],
-                                     judged[iid].behind_pr.number))
+                    key=lambda iid: train_key(iid, judged[iid].behind_pr, items, config,
+                                              blocks, now))
     running = sum(1 for j in judged.values() if j.updating)
     free = max(0, config.update_parallel - running)
     actions = [A.UpdateBranch(judged[iid].behind_pr.number) for iid in behind[:free]]
     notes = {iid: [TRAIN_NOTE % (k, len(behind))]
              for k, iid in enumerate(behind, 1) if k > free}
     return actions, notes
+
+
+def train_key(iid, pr, items, config, blocks, now):
+    """The merge train's order of behind PR ``pr`` (item ``iid``): first every auto-merge PR
+    waiting at least ``config.landing_max_wait_h`` hours since auto-merge was enabled
+    (``PR.auto_merge_at``), the longest wait first — none starves; then the most items it
+    unblocks (``blocks``: transitively through ``after:``), then effective rank, then the oldest
+    PR."""
+    waited = stuck_age_h(pr.auto_merge_at, now) if pr.auto_merge and pr.auto_merge_at else None
+    starved = (config.landing_max_wait_h is not None and waited is not None
+               and waited >= config.landing_max_wait_h)
+    return (0 if starved else 1, -waited if starved else 0, -blocks.get(iid, 0),
+            launch_order(iid, items, config.rank != 'own')[0], pr.number)
+
+
+def in_flight(pr, config):
+    """Whether ``pr``'s head still runs the CI that gates it: a required check not completed, or
+    a required check not yet reported while another check on the head still runs (a required
+    aggregate job is created only once the jobs it needs finish). An update now would only
+    restart that CI, and a peer landing meanwhile would make it stale."""
+    running = [c for c in pr.checks if c.status != 'completed']
+    if any(required(c.name, config) for c in running):
+        return True
+    names = {c.name for c in pr.checks}
+    return bool(running) and any(n not in names for n in config.required_checks)
 
 
 # ---- pass one: each item on its own facts -------------------------------------------------------
@@ -799,10 +828,11 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
                           actions=actions)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
+    if in_flight(pr, config):  # its CI runs on: no update until it ends (a red: a fix round)
+        return _Judged(State.LANDING, updating=True)
     if pr.behind:
         return _Judged(State.LANDING, behind_pr=pr)
-    return _Judged(State.LANDING, updating=any(
-        c.status != 'completed' and required(c.name, config) for c in pr.checks))
+    return _Judged(State.LANDING)
 
 
 def conflict_attempt(pr_number, head_sha):

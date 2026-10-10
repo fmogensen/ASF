@@ -142,7 +142,8 @@ class PR:
     PR changes it ('' when unread). ``behind``: the base moved past
     the PR's base; ``conflicting``: GitHub cannot merge it as is (``mergeable`` CONFLICTING or
     ``mergeStateStatus`` DIRTY; an UNKNOWN ``mergeable`` stays unknown). ``files`` are the
-    paths the PR changes. ``auto_merge``: auto-merge is already enabled; ``merged``: it landed."""
+    paths the PR changes. ``auto_merge``: auto-merge is already enabled (``auto_merge_at``:
+    since when, ISO-8601 UTC, '' when unknown); ``merged``: it landed."""
     number: int
     branch: str
     item_id: str
@@ -155,6 +156,7 @@ class PR:
     checks: list = dataclasses.field(default_factory=list)
     auto_merge: bool = False
     merged: bool = False
+    auto_merge_at: str = ''
 
 
 @dataclasses.dataclass
@@ -288,7 +290,8 @@ class Config:
     ``idle_alarm``/``idle_min_free``: the plan carries an ``idle`` record when at least that many
     seats are free, work waits and nothing launches. ``update_parallel`` is the merge train's
     length: at most that many Landing PRs are brought up to date (or still run their checks after
-    one) at once. ``escalate_after_h`` / ``rebuild_after_h``: a Stuck the kernel can resolve by
+    one) at once; ``landing_max_wait_h``: an auto-merge PR waiting that many hours is first in
+    the train (None: no bound — the bare model's default). ``escalate_after_h`` / ``rebuild_after_h``: a Stuck the kernel can resolve by
     itself is resolved once it is this many hours old (0: on the tick it appears; None: never —
     the bare model's default, so a unit test opts in); ``strong_model`` is the model the one
     extra fix round past the cap runs on. ``id_claim_answer``: a session question that only asks
@@ -308,6 +311,7 @@ class Config:
     idle_alarm: bool = True
     idle_min_free: int = 1
     update_parallel: int = 2
+    landing_max_wait_h: float = None
     escalate_after_h: float = None
     rebuild_after_h: float = None
     strong_model: str = ''

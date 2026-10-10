@@ -388,6 +388,84 @@ class MergeTrain(unittest.TestCase):
         moved = plan('head-2')  # a new head is judged afresh
         self.assertEqual([u.pr for u in B.of(moved, A.UpdateBranch)], [4])
 
+    def test_the_pr_that_unblocks_the_most_goes_first(self):
+        # T-0432 is unranked but 3 items wait on it through after: (one transitively)
+        items = [B.task('T-0432', state=State.LANDING, rank=None),
+                 B.task('T-0001', state=State.LANDING, rank=1),
+                 B.task('T-0002', state=State.LANDING, rank=2),
+                 B.task('T-0003', state=State.LANDING, rank=3),
+                 B.task('T-0501', state=State.NEW, after=['T-0432']),
+                 B.task('T-0502', state=State.NEW, after=['T-0432']),
+                 B.task('T-0503', state=State.NEW, after=['T-0501']),
+                 B.task('T-0601', state=State.NEW, after=['T-0003'])]
+        prs = [B.pr(1255, 'T-0432', behind=True, auto_merge=True),
+               B.pr(1300, 'T-0001', behind=True, auto_merge=True),
+               B.pr(1301, 'T-0002', behind=True, auto_merge=True),
+               B.pr(1302, 'T-0003', behind=True, auto_merge=True)]
+        landing = [i for i in items if i.state is State.LANDING]
+        plan = decide(B.facts(items, prs=prs, reviews=[B.review(i.id) for i in landing]),
+                      B.config(update_parallel=2))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [1255, 1302])
+        from asf.kernel.decide import TRAIN_NOTE
+        self.assertEqual(plan.notes['T-0001'], [TRAIN_NOTE % (3, 4)])
+        self.assertEqual(plan.notes['T-0002'], [TRAIN_NOTE % (4, 4)])
+
+    def test_a_required_check_not_yet_reported_while_ci_runs_holds_a_place(self):
+        # the required aggregate (tests) is created only after the shards: until then the
+        # head's CI is in flight all the same, and a second update would race it
+        running = B.task('T-0200', state=State.LANDING, rank=50)
+        pr = B.pr(20, 'T-0200', auto_merge=True,
+                  checks=[B.check('part 1', status='in_progress'), B.check('notes')])
+        plan = decide(self.world(extra=[running], extra_prs=[pr]),
+                      B.config(update_parallel=2, required_checks=('tests',)))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [13])
+
+    def test_a_behind_pr_whose_ci_still_runs_is_not_updated_again(self):
+        # main moved under a PR mid-CI: its run finishes first (a red goes to a fix round),
+        # and it keeps its train place meanwhile
+        items = [B.task('T-0001', state=State.LANDING, rank=1),
+                 B.task('T-0002', state=State.LANDING, rank=2),
+                 B.task('T-0003', state=State.LANDING, rank=3)]
+        prs = [B.pr(1, 'T-0001', behind=True, auto_merge=True,
+                    checks=[B.check('tests', status='in_progress')]),
+               B.pr(2, 'T-0002', behind=True, auto_merge=True),
+               B.pr(3, 'T-0003', behind=True, auto_merge=True)]
+        plan = decide(B.facts(items, prs=prs, reviews=[B.review(i.id) for i in items]),
+                      B.config(update_parallel=2, required_checks=('tests',)))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [2])
+        self.assertEqual(B.state(plan, 'T-0001'), State.LANDING)
+
+    def test_a_behind_pr_red_after_its_update_gets_a_fix_round_not_another_update(self):
+        items = [B.task('T-0001', state=State.LANDING, rank=1)]
+        prs = [B.pr(1, 'T-0001', behind=True, auto_merge=True,
+                    checks=[B.check('tests', conclusion='failure', failing_files=['src/a.py'])])]
+        plan = decide(B.facts(items, prs=prs, reviews=[B.review('T-0001')]),
+                      B.config(update_parallel=2, required_checks=('tests',)))
+        self.assertEqual(B.of(plan, A.UpdateBranch), [])
+        self.assertEqual(B.state(plan, 'T-0001'), State.READY)
+
+    def test_an_auto_merge_pr_past_max_wait_is_first_in_line(self):
+        items = [B.task('T-0001', state=State.LANDING, rank=1),
+                 B.task('T-0002', state=State.LANDING, rank=2),
+                 B.task('T-0009', state=State.LANDING, rank=None),
+                 B.task('T-0010', state=State.LANDING, rank=None),
+                 B.task('T-0501', state=State.NEW, after=['T-0001'])]
+        prs = [B.pr(1, 'T-0001', behind=True, auto_merge=True,
+                    auto_merge_at='2026-10-10T05:30:00Z'),
+               B.pr(2, 'T-0002', behind=True, auto_merge=True,
+                    auto_merge_at='2026-10-10T05:00:00Z'),
+               B.pr(9, 'T-0009', behind=True, auto_merge=True,
+                    auto_merge_at='2026-10-10T03:00:00Z'),   # waited 3 h: starved
+               B.pr(10, 'T-0010', behind=True, auto_merge=True,
+                    auto_merge_at='2026-10-10T01:00:00Z')]   # waited 5 h: longest first
+        landing = [i for i in items if i.state is State.LANDING]
+        f = B.facts(items, prs=prs, reviews=[B.review(i.id) for i in landing],
+                    now='2026-10-10T06:00:00Z')
+        plan = decide(f, B.config(update_parallel=3, landing_max_wait_h=2))
+        self.assertEqual([u.pr for u in B.of(plan, A.UpdateBranch)], [10, 9, 1])
+        never = decide(f, B.config(update_parallel=3))   # the bare model: no bound
+        self.assertEqual([u.pr for u in B.of(never, A.UpdateBranch)], [1, 2, 9])
+
     def test_a_pr_not_behind_needs_no_update(self):
         items = [B.task('T-0001', state=State.LANDING)]
         plan = decide(B.facts(items, prs=[B.pr(1, 'T-0001')], reviews=[B.review('T-0001')]),

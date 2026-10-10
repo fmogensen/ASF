@@ -153,6 +153,10 @@ class GitHub(unittest.TestCase):
                                 'headRefOid': 'h1', 'mergeable': mergeable,
                                 'mergeStateStatus': state}).conflicting
         self.assertTrue(conflicting('UNKNOWN', 'DIRTY'))
+        armed = gh._open_pr({'number': 7, 'headRefName': 'worker/t-0001-slug',
+                             'autoMergeRequest': {'enabledAt': '2026-10-10T01:14:38Z'}})
+        self.assertEqual((armed.auto_merge, armed.auto_merge_at),
+                         (True, '2026-10-10T01:14:38Z'))
         self.assertTrue(conflicting('CONFLICTING', 'BLOCKED'))
         self.assertFalse(conflicting('UNKNOWN', 'BEHIND'))
         self.assertFalse(conflicting('MERGEABLE', 'CLEAN'))

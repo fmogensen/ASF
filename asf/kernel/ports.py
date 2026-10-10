@@ -600,7 +600,8 @@ class RealGitHub:
                   conflicting=(d.get('mergeable') == 'CONFLICTING'
                                or d.get('mergeStateStatus') == 'DIRTY'), files=files,
                   checks=newest_checks(d.get('statusCheckRollup') or []),
-                  auto_merge=bool(d.get('autoMergeRequest')))
+                  auto_merge=bool(d.get('autoMergeRequest')),
+                  auto_merge_at=str((d.get('autoMergeRequest') or {}).get('enabledAt') or ''))
         pr.tree_sha = self._tree(pr.head_sha)
         pr.change_id = self._change(d.get('baseRefName') or self.product.main, pr.head_sha)
         pr.latest_reviews = d.get('latestReviews') or []
@@ -1309,6 +1310,7 @@ def config_for(product, cfg=None, github=None):
         idle_alarm=bool(k['idle_alarm']['enabled']),
         idle_min_free=int(k['idle_alarm']['min_free_seats']),
         update_parallel=int(k['landing']['update_parallel']),
+        landing_max_wait_h=float(k['landing']['max_wait_h']),
         escalate_after_h=float(k['stuck']['escalate_after_h']),
         rebuild_after_h=float(k['stuck']['rebuild_after_h']),
         strong_model=str(k['stuck']['strong_model']),
