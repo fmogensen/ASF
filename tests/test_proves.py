@@ -435,6 +435,99 @@ class UnknownStoryTests(unittest.TestCase):
         self.assertEqual((len(counted), refused), (2, []))
 
 
+class QuarantinedClaimTests(unittest.TestCase):
+    """F-0341: a ``Proves:`` line naming a test the product's quarantine list holds proves
+    nothing, and says so: ``Not proved: … — quarantined test: <entry>``."""
+
+    def test_the_cards_own_acceptance_one_counted_one_refused(self):
+        entries = proves.quarantine_entries('tests/a.py::Case\n')
+        text = ('Proves: S-124005 line 1 — tests/a.py::Case::test_x\n'
+                'Proves: S-124005 line 2 — tests/c.py\n')
+        counted, refused = proves.parse_all(text, quarantined=entries)
+        self.assertEqual([c.line for c in counted], [2])
+        self.assertEqual([(c.line, c.refusal) for c in refused],
+                          [(1, 'quarantined test: tests/a.py::Case')])
+
+    def test_a_refused_claim_is_never_among_the_counted(self):
+        counted, refused = proves.parse_all(
+            'Proves: S-124005 line 1 — tests/a.py\n', quarantined=['tests/a.py'])
+        self.assertEqual(counted, [])
+        self.assertEqual(len(refused), 1)
+
+    def test_one_id_per_line_in_file_order_duplicates_collapsed(self):
+        text = 'tests/a.py\ntests/b.py\ntests/a.py\n'
+        self.assertEqual(proves.quarantine_entries(text), ['tests/a.py', 'tests/b.py'])
+
+    def test_a_whole_line_comment_and_a_trailing_one_are_dropped(self):
+        text = '# a whole-line comment\ntests/a.py  # trailing comment\n'
+        self.assertEqual(proves.quarantine_entries(text), ['tests/a.py'])
+
+    def test_blank_lines_yield_nothing(self):
+        self.assertEqual(proves.quarantine_entries('\n   \n'), [])
+
+    def test_a_leading_list_marker_and_surrounding_quotes_are_stripped(self):
+        text = '- tests/a.py\n* "tests/b.py"\n+ \'tests/c.py\'\n'
+        self.assertEqual(proves.quarantine_entries(text),
+                          ['tests/a.py', 'tests/b.py', 'tests/c.py'])
+
+    def test_a_leading_dot_slash_is_stripped_from_an_entry_quotes_first(self):
+        self.assertEqual(proves.quarantine_entries('./tests/a.py\n'), ['tests/a.py'])
+        self.assertEqual(proves.quarantine_entries('- "./tests/a.py"\n'), ['tests/a.py'])
+
+    def test_a_leading_dot_slash_is_stripped_from_the_claim_too(self):
+        self.assertEqual(proves.quarantined_by('./tests/a.py', ['tests/a.py']), 'tests/a.py')
+
+    def test_an_entry_naming_the_file_quarantines_a_node_inside_it(self):
+        self.assertEqual(proves.quarantined_by('tests/a.py::Case::test_x', ['tests/a.py']),
+                          'tests/a.py')
+
+    def test_an_entry_naming_a_node_quarantines_the_file_whole(self):
+        self.assertEqual(proves.quarantined_by('tests/a.py', ['tests/a.py::Case']),
+                          'tests/a.py::Case')
+
+    def test_the_same_id_matches(self):
+        self.assertEqual(proves.quarantined_by('tests/a.py::Case', ['tests/a.py::Case']),
+                          'tests/a.py::Case')
+
+    def test_a_node_separator_boundary_match(self):
+        self.assertEqual(
+            proves.quarantined_by('tests/a.py::Case::test_x', ['tests/a.py::Case']),
+            'tests/a.py::Case')
+
+    def test_a_node_that_merely_starts_with_the_entrys_name_does_not_match(self):
+        self.assertEqual(proves.quarantined_by(
+            'tests/a.py::Case::test_xyz', ['tests/a.py::Case::test_x']), '')
+
+    def test_a_path_suffix_does_not_match(self):
+        self.assertEqual(proves.quarantined_by('tests/a.py', ['a.py']), '')
+
+    def test_different_files_never_match(self):
+        self.assertEqual(proves.quarantined_by('tests/a.py', ['tests/b.py']), '')
+
+    def test_quarantined_none_and_empty_refuse_nothing(self):
+        text = 'Proves: S-124005 line 1 — tests/a.py\n'
+        for quarantined in (None, ()):
+            counted, refused = proves.parse_all(text, quarantined=quarantined)
+            self.assertEqual(len(counted), 1, quarantined)
+            self.assertEqual(refused, [], quarantined)
+
+    def test_a_qualified_and_quarantined_claim_is_refused_as_partial_claim(self):
+        text = 'Proves: S-124005 line 1 — tests/a.py (only)\n'
+        _c, refused = proves.parse_all(text, quarantined=['tests/a.py'])
+        self.assertEqual(refused[0].refusal, 'partial claim: "only"')
+
+    def test_an_unknown_story_on_a_quarantined_test_is_refused_as_unknown_story(self):
+        text = 'Proves: S-29504 line 1 — tests/a.py\n'
+        _c, refused = proves.parse_all(text, known={'S-0001'}, quarantined=['tests/a.py'])
+        self.assertEqual(refused[0].refusal, 'unknown story')
+
+    def test_render_not_proved_names_the_entry(self):
+        _c, refused = proves.parse_all(
+            'Proves: S-124005 line 1 — tests/a.py\n', quarantined=['tests/a.py'])
+        self.assertEqual(proves.render_not_proved(refused),
+                         '- S-124005 line 1 — quarantined test: tests/a.py (tests/a.py)')
+
+
 class UnprovedReasonTests(unittest.TestCase):
     BODY = ("## Acceptance\n- [ ] one\n- [ ] two\n- [ ] three\n- [ ] four\n- [ ] five\n"
             "- [ ] six\n## History\n")

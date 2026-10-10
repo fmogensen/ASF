@@ -2,7 +2,9 @@
 trailer on a Task's commits names the Story acceptance line the test proves; this module parses
 it, counts the bullets ``line <n>`` counts against, validates one Task's claims against the
 record, reads git for a branch's claims through an injected callable (never ``subprocess``,
-D11), and flips a bullet from ``- [ ]`` to ``- [x]`` — once, never in reverse (D7).
+D11), and flips a bullet from ``- [ ]`` to ``- [x]`` — once, never in reverse (D7). A claim naming
+a test the product's quarantine list holds proves nothing either: nothing ran it, so nothing
+about it went green (F-0341).
 
 A claim proves a line **whole** (F-0257). One whose prose qualifies it — ``only``, ``partial``,
 ``half`` and the rest of :data:`PARTIAL_MARKERS` — is refused: :func:`parse` does not return it,
@@ -39,6 +41,9 @@ PARTIAL_CLAIM = 'partial claim'
 #: Why a claim on an id the record holds no Story card for proves nothing (F-0285): a spec that
 #: cited Story ids nobody minted, and a Task that then wrote ``Proves:`` lines against them.
 UNKNOWN_STORY = 'unknown story'
+#: Why a claim whose named test the product's quarantine file lists proves nothing (F-0341): a
+#: quarantined test is one the product's CI does not run, so no run of it made its line green.
+QUARANTINED = 'quarantined test'
 
 
 def partial_markers():
@@ -54,6 +59,13 @@ def partial_markers():
 _QUOTED_RE = re.compile(r'"[^"\n]*"|“[^”\n]*”|`[^`\n]*`')
 #: What a token must be stripped of before it is judged a citation or read as prose.
 _EDGE = '`"\'()[]{},;.:'
+
+#: A quarantine file's comment: a whole line, or the tail of one after whitespace. A ``#`` with no
+#: space before it is part of the id (a test name may carry one).
+_QUARANTINE_COMMENT_RE = re.compile(r'(?:^|(?<=\s))#.*$')
+#: The list marker a yaml sequence of ids carries (``- tests/a.py``), stripped so one parse reads
+#: a bare list file and a yaml list of strings alike (C3).
+_QUARANTINE_MARKER_RE = re.compile(r'^[-*+][ \t]+')
 
 
 def claim_prose(test):
@@ -101,7 +113,46 @@ class Claim:
     refusal: str = ''   # '' when the claim counts; else why this line is not proved
 
 
-def parse_all(text, markers=None, known=None):
+def quarantine_entries(text):
+    """The test ids a product's quarantine file lists, in file order, duplicates collapsed.
+
+    One id per line: a ``#`` comment dropped, a leading list marker and surrounding quotes
+    stripped, a leading ``./`` stripped, blank lines yielding nothing (C3). A line this parse
+    cannot make an id of yields a token that matches nothing, never an exception: an unreadable
+    quarantine file refuses no claim (C9)."""
+    seen = set()
+    entries = []
+    for line in (text or '').splitlines():
+        line = _QUARANTINE_COMMENT_RE.sub('', line).strip()
+        line = _QUARANTINE_MARKER_RE.sub('', line).strip()
+        line = line.strip('\'"')
+        if line.startswith('./'):
+            line = line[2:]
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        entries.append(line)
+    return entries
+
+
+def quarantined_by(test, entries):
+    """The first entry of ``entries`` that quarantines ``test``, else ``''``.
+
+    An entry quarantines a claim's test when the two name the same file and neither names a node
+    outside the other's: the same id; an entry naming the file alone against a claim on a node in
+    it; an entry naming a node against a claim on the file whole; either one a ``::``-boundary
+    prefix of the other. A line is proved whole or it is not proved (F-0257), and a named test one
+    of whose cases the product does not run is not a whole proof."""
+    test = test[2:] if test.startswith('./') else test
+    for entry in entries or ():
+        candidate = entry[2:] if entry.startswith('./') else entry
+        if (candidate == test or test.startswith(candidate + '::')
+                or candidate.startswith(test + '::')):
+            return entry
+    return ''
+
+
+def parse_all(text, markers=None, known=None, quarantined=None):
     """``(counted, refused)`` — every claim in ``text``, in first-seen order, duplicates
     collapsed on ``(story, line, test)``. A claim whose prose carries a partial marker
     (:func:`partial_marker`) goes in ``refused`` with ``refusal`` set to
@@ -109,7 +160,9 @@ def parse_all(text, markers=None, known=None):
     proved (F-0257). A line that says ``Proves`` but names no id, no line or no test is in
     neither and raises nothing. ``known``: the record's Story ids (or ``{id: meta}``) — given,
     a claim on any other id goes in ``refused`` as :data:`UNKNOWN_STORY` and renders as
-    ``Not proved: … — unknown story`` (F-0285)."""
+    ``Not proved: … — unknown story`` (F-0285). ``quarantined``: the product's quarantine list
+    (:func:`quarantine_entries`) — given, a claim whose test :func:`quarantined_by` matches goes
+    in ``refused`` as ``'quarantined test: <entry>'`` (F-0341)."""
     seen = set()
     counted, refused = [], []
     for m in CLAIM_RE.finditer(text):
@@ -124,6 +177,10 @@ def parse_all(text, markers=None, known=None):
         refusal = f'{PARTIAL_CLAIM}: "{marker}"' if marker else ''
         if not refusal and known is not None and not _is_story(story, known):
             refusal = UNKNOWN_STORY
+        if not refusal and quarantined:
+            entry = quarantined_by(test, quarantined)
+            if entry:
+                refusal = f'{QUARANTINED}: {entry}'
         claim = Claim(story=story, line=line, test=test, raw=m.group(0), refusal=refusal)
         (refused if refusal else counted).append(claim)
     return counted, refused
