@@ -230,6 +230,7 @@ class Context:
         self.health_freed = False         # health ended, held or corrected a run this tick
         self.runs_before_wave = None      # {job: run identity} on the ledger as the wave began
         self.cadence = None               # this tick's asf.tick.cadence.Cadence, once made
+        self.upgrade_line = None          # the release channel's own notify line (upgrade.release_report)
         from asf.facts import cache as facts_cache, landing as facts_landing
         facts_cache.clear()  # a tick reads its facts afresh (asf.facts.cache)
         # under flags.facts shadow|new: the pass's one open-PR read, the shadow's only gh fact
@@ -514,8 +515,12 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     from asf import drift, upgrade
     locks = locks or Locks(product, held=True)
     # the version check can upgrade the install: never under a running tick, and never worth
-    # delaying a command clock for (the running tick prints it)
+    # delaying a command clock for (the running tick prints it). A product whose repo is the
+    # factory's own source is on the trunk channel (drift.report); every other one is on the
+    # release channel (upgrade.release_report) — chosen by structure, never by a flag a product
+    # file could get wrong (D3).
     upgraded = []
+    released = []
 
     def run_upgrade(head):
         upgraded.append(upgrade.cmd_upgrade(_ns(skip_pipx=False, ref=head, owner=product.name,
@@ -524,12 +529,19 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
 
     with locks.record('version check', wait_s=0) as ok:
         if ok:
-            drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
-                         upgrade=run_upgrade)
+            if drift.is_factory_source(product.repo_dir or ''):
+                drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
+                             upgrade=run_upgrade)
+            else:
+                released.append(upgrade.release_report(ctx))
     if upgraded and upgraded[-1] == 0:
         # this process still runs the old package over a replaced install: a later lazy import
         # would load the new one half-way through the tick, so the steps wait for the next tick
         print('tick: the install was upgraded under this tick; its steps run on the next tick')
+        return 0
+    if released and released[-1] in ('installed', 'rolled-back', 'failed'):
+        # the release channel's own install or rollback replaced the package the same way
+        print('tick: the install was changed under this tick; its steps run on the next tick')
         return 0
     if upgraded and upgraded[-1] == drift.DEFERRED and upgrade.read_pending(product.name):
         # the owner already drained for upgrade.drain_wait_s and the floor is still busy. It

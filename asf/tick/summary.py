@@ -195,16 +195,20 @@ def _step_word(r):
     return f"{r['step']} FAILED ({reason})" if reason else f"{r['step']} FAILED"
 
 
-def digest(ran, counts, stale_line=None):
+def digest(ran, counts, stale_line=None, upgrade_line=None):
     """What this tick did: each step and whether it ran ok, then the non-zero counters (launches,
     merges, stalls, refusals, relaunches) — and, when the record is stale (B-0124), the same
     line ``asf status`` prints for it, so a tick that ran while the record kept failing says so
-    without a cross reference to the tick log."""
+    without a cross reference to the tick log. ``upgrade_line`` — the release channel's own
+    ``UPGRADE AVAILABLE`` line (:func:`asf.upgrade.release_report`), ``notify`` is once per tag —
+    follows it, so the operating session reads it without opening the log."""
     steps_line = ', '.join(_step_word(r) for r in ran)
     did = ', '.join(f'{name} {n}' for name, n in (counts or {}).items() if n)
     lines = [f"TICK — {steps_line or 'no step ran'}", did or 'nothing launched, merged or stalled']
     if stale_line:
         lines.append(stale_line)
+    if upgrade_line:
+        lines.append(upgrade_line)
     return lines
 
 
@@ -222,7 +226,8 @@ def run(ctx, chosen, out=print, now=None, alive=pid_alive, ran=None):
         out(render(inflight, done, titles(product), since, now, stamp is None))
         if ran is not None:
             from asf.tick import record_health
-            out('\n' + '\n'.join(digest(ran, getattr(ctx, 'counts', None), record_health.line(product))))
+            out('\n' + '\n'.join(digest(ran, getattr(ctx, 'counts', None), record_health.line(product),
+                                         getattr(ctx, 'upgrade_line', None))))
         write_stamp(product, clock_name, now)
     except Exception as e:  # noqa: BLE001
         first_line = str(e).strip().splitlines()[0] if str(e).strip() else ''

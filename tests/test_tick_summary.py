@@ -230,6 +230,23 @@ class TickDigestTests(SummaryTestCase):
         self.assertIn('launches 2, merges 1, relaunches 1', text)
         self.assertNotIn('stalls', text)
 
+    def test_the_release_channels_upgrade_line_follows_the_record_stale_line(self):
+        ctx = _ctx(self.product)
+        ctx.counts = {}
+        ctx.upgrade_line = 'UPGRADE AVAILABLE v0.1.62 → v0.1.63'
+        lines = []
+        summary.run(ctx, None, out=lines.append, now=NOW, alive=lambda pid: True, ran=[])
+        text = '\n'.join(lines)
+        self.assertIn('UPGRADE AVAILABLE v0.1.62 → v0.1.63', text)
+
+    def test_no_upgrade_line_adds_no_row(self):
+        ctx = _ctx(self.product)
+        ctx.counts = {}
+        lines = []
+        summary.run(ctx, None, out=lines.append, now=NOW, alive=lambda pid: True, ran=[])
+        text = '\n'.join(lines)
+        self.assertNotIn('UPGRADE AVAILABLE', text)
+
 
 OK_RESULT = {'type': 'result', 'subtype': 'success', 'is_error': False,
              'result': 'REPORT\nitem: F-0001\nstatus: done\npushed: yes abc1234\n'}

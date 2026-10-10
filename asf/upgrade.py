@@ -895,6 +895,166 @@ def _install(ref, run, out, pin=None, sha=None):
     return 0
 
 
+# ---- the release channel itself: ``release_report`` -------------------------------------------
+#
+# The product that is not the factory's own source takes the release, not the trunk, channel
+# (D3) — the tick's fork reads the structure, never a flag a product file could get wrong. One
+# state file per product, ``notified`` so ``notify`` says its piece once per tag and ``last`` so
+# the doctor's standing row (Task 6) can say what the channel last did.
+
+def _release_state_path(product):
+    """``<state_dir>/upgrade-release.json`` — the channel's own state for ``product``:
+    ``{'notified': <tag>, 'last': {'from', 'from_sha', 'to', 'at', 'result'}}``."""
+    return os.path.join(env.state_dir(product), 'upgrade-release.json')
+
+
+def _read_release_state(product):
+    return _read_json(_release_state_path(product))
+
+
+def _write_release_state(product, data):
+    _write_json(_release_state_path(product), data)
+
+
+#: how many of a RED doctor's own rows the rollback's filed Bug carries as evidence — the whole
+#: table in a Bug body is noise, the red rows are the finding
+UPGRADE_RED_EVIDENCE_CAP = 20
+
+
+def venv_bin(name='asf', run=subprocess.run):
+    """``<PIPX_LOCAL_VENVS>/asf-factory/bin/<name>`` — read the way :func:`new_install_commit`
+    already reads the venv's own python. ``None`` when pipx cannot be asked."""
+    venvs = (_out(run, ['pipx', 'environment', '--value', 'PIPX_LOCAL_VENVS']) or '').strip()
+    return os.path.join(venvs, PACKAGE_NAME, 'bin', name) if venvs else None
+
+
+def _new_asf(argv, run=subprocess.run, out=print, timeout=600):
+    """``<venv>/bin/asf <argv>`` → ``(rc, output)``. This process still holds the *old*
+    package's modules and its cached metadata, so everything that must see the new install runs
+    as a subprocess of it (D8) — calling the in-process equivalent would render the old clocks
+    and run the old doctor, the exact B-0135 tear the install protocol exists to prevent.
+    ``(2, <why>)`` when the binary is missing or will not start — a broken install rolls back
+    rather than being taken as fine."""
+    binary = venv_bin(run=run)
+    if not binary:
+        return 2, 'pipx could not be asked for the venv'
+    try:
+        p = run([binary, *argv], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 2, str(e)
+    output = (p.stdout or '') + (p.stderr or '')
+    if output:
+        out(output.rstrip('\n'))
+    return p.returncode, output
+
+
+def _release_line(old, old_sha, tag):
+    """``factory: asf <old> @ <old_sha7> · release <tag> · <current|BEHIND|release unreadable>``
+    — the release channel's parallel of :func:`asf.drift.line`. ``release unreadable`` is the
+    ``old is None`` case (D6): it says what it could not read."""
+    old_sha7 = (old_sha or '')[:7] or 'unknown'
+    tail = ('release unreadable' if old is None
+            else 'BEHIND' if newer(tag, old) else 'current')
+    return f'factory: asf {old or "unknown"} @ {old_sha7} · release {tag or "unknown"} · {tail}'
+
+
+def _red_rows(output):
+    """The RED rows of a doctor table (:func:`asf.doctor.format_table`'s ``name  status  detail``
+    shape) — the rollback's filed Bug carries these and nothing else."""
+    rows = [ln for ln in (output or '').splitlines() if ln.split()[1:2] == ['RED']]
+    return rows[:UPGRADE_RED_EVIDENCE_CAP]
+
+
+def _tick_upgrade_line(old, old_sha, tag, sha, rc=0):
+    """``tick: ran asf upgrade (<old>@<old_sha7> → <tag>@<sha7>), exit <rc>`` — the trunk
+    channel's exact form (PD9), matched by :data:`asf.release._UPGRADE_RE`'s optional ``\\S*@``
+    prefix. Both shas are written at seven characters, the regex's floor."""
+    return (f'tick: ran asf upgrade ({old}@{(old_sha or "")[:7]} → {tag}@{(sha or "")[:7]}), '
+            f'exit {rc}')
+
+
+def release_report(ctx, out=print, now=None, run=subprocess.run):
+    """The release channel's own tick line, for the product whose repo is not the factory's own
+    source (D3) — the parallel of :func:`asf.drift.report`. Returns one of ``'none' |
+    'notified' | 'held' | 'installed' | 'rolled-back' | 'failed'``. The whole body runs inside
+    one guard, the shape :func:`asf.drift.report` already uses: a version check has never been
+    allowed to stop a tick.
+
+    ``off`` and ``notify`` only read; ``auto`` reinstalls at the newest tag (unless a session is
+    mid-landing), re-renders the clocks and runs the doctor through the new binary — and on a RED
+    doctor puts the previous release back and files one S1 Bug (D7, D8, D9, D10, D11)."""
+    product = ctx.product
+    try:
+        policy = product.upgrade
+        url = repo_url(run)
+        tag, sha = latest_release(url, now, run)
+        old, old_sha = installed_release()
+        out(_release_line(old, old_sha, tag))
+        if policy == 'off':
+            return 'none'
+        if not newer(tag, old):
+            return 'none'
+        if policy == 'notify':
+            state = _read_release_state(product)
+            if state.get('notified') == tag:
+                return 'none'
+            line = f'UPGRADE AVAILABLE {old} → {tag}'
+            out(line)
+            ctx.upgrade_line = line
+            state['notified'] = tag
+            _write_release_state(product, state)
+            return 'notified'
+        # policy == 'auto'
+        held_on = mid_landing(product.name)
+        if held_on:
+            names = ', '.join(f'{item} on {branch}' for item, branch in held_on)
+            out(f'upgrade: held — {len(held_on)} item(s) mid-landing ({names})')
+            return 'held'
+        rc = install(ref=tag, sha=sha, owner=product.name, wait_s=drain_wait_s(), run=run, out=out)
+        if rc == DEFERRED:
+            return 'held'
+        state = _read_release_state(product)
+        if rc != 0:
+            out(f'upgrade: FAILED {old} → {tag} (exit {rc})')
+            state['last'] = {'from': old, 'from_sha': old_sha, 'to': tag,
+                              'at': now or time.time(), 'result': 'failed'}
+            _write_release_state(product, state)
+            return 'failed'
+        out(f'upgrade: {old} → {tag}')
+        out(_tick_upgrade_line(old, old_sha, tag, sha))
+        _new_asf(['scheduler', 'install', '--product', product.name], run, out)
+        doctor_rc, doctor_out = _new_asf(['doctor', '--product', product.name], run, out)
+        if doctor_rc == 0:
+            state['last'] = {'from': old, 'from_sha': old_sha, 'to': tag,
+                              'at': now or time.time(), 'result': 'installed'}
+            _write_release_state(product, state)
+            return 'installed'
+        # a RED doctor after the install: the previous release goes back (PD4 — by tag, verified
+        # by its sha, never installed by sha, which would strand the product on an unreadable pin)
+        out(f'rollback: doctor RED after {tag} — reinstalling {old}')
+        _install(old, run, out, sha=old_sha)
+        _new_asf(['scheduler', 'install', '--product', product.name], run, out)
+        from asf.tick import file_bugs, shadow
+        default_bug_epic = (os.environ.get('ASF_DEFAULT_BUG_EPIC')
+                            or product.conventions.default_bug_epic)
+        root = ctx.record_root()
+        file_bugs.file_upgrade_bug(root, tag, old, _red_rows(doctor_out),
+                                   default_bug_epic=default_bug_epic, out=out)
+        try:
+            if shadow.commit_local(root, f'file-bugs: upgrade {tag} doctor RED'):
+                shadow.push(root)
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f'upgrade: pushing the filed Bug failed ({e}) — the next RED tick bumps it',
+                  file=sys.stderr)
+        state['last'] = {'from': old, 'from_sha': old_sha, 'to': tag,
+                          'at': now or time.time(), 'result': 'rolled-back'}
+        _write_release_state(product, state)
+        return 'rolled-back'
+    except Exception as e:  # noqa: BLE001 — a version check never stops a tick
+        out(f'factory: release check failed ({str(e).strip() or type(e).__name__})')
+        return 'none'
+
+
 # ---- the per-product move: ``asf upgrade --product <p> --to <sha>`` ---------------------------
 #
 # A pinned product (``state/<p>/install.json``, :mod:`asf.installs`) runs its own venv,

@@ -699,6 +699,40 @@ def file_invariant_bugs(root, findings, level='auto', default_bug_epic=None, out
     return outcomes
 
 
+#: a rollback's signature: one Bug per ``(release tag, doctor RED)`` — the same bad release hits
+#: every product on the channel and every tick until a human acts (D11); never one Bug per
+#: product or per tick.
+UPGRADE_RED_SIG = 'upgrade {tag}: doctor RED'
+
+
+def file_upgrade_bug(root, tag, previous, evidence, default_bug_epic=None, out=print):
+    """File (or bump, once a day) the one Bug for release ``tag`` failing its doctor — the
+    product is held at ``previous`` (D11, PD10). Reuses :func:`_file_or_bump_bug` unchanged:
+    only the signature and the ``info`` dict are new, and both ``runs`` and ``evidence`` are
+    always present — that writer indexes them, it does not ``.get`` them. ``S1`` makes the Bug
+    ``decided`` for free (B-0089): a red release does not wait for the daily groom."""
+    sig = UPGRADE_RED_SIG.format(tag=tag)
+    by_id, _errors = load_items(root)
+    canonical, _dupes = canonicalize(by_id)
+    epic, _why = usable_bug_epic(canonical, default_bug_epic)
+    info = {
+        'title': f'asf {tag} fails its doctor — the product is held at {previous}',
+        'severity': 'S1',
+        'evidence': list(evidence),
+        'runs': [],
+        'acceptance': [f'`{sig}` is not seen again'],
+    }
+    outcome = _file_or_bump_bug(root, canonical, sig, info, today(), default_bug_epic=epic)
+    if outcome in ('skipped', 'bumped'):
+        rec = _find_bug_by_signature(canonical, sig)
+        if rec is not None and _note_new_places(rec, info, today()):
+            outcome = 'bumped'
+    if outcome == 'filed':
+        do_index(root)
+    out(f'file-bugs: upgrade {tag} doctor RED — {outcome}')
+    return outcome
+
+
 def _product(args):
     from asf import env
     try:

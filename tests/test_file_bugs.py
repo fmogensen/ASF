@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from asf.conventions import Conventions
 from asf.record import frontmatter
@@ -1229,3 +1230,71 @@ class RuleCheckFailureTests(unittest.TestCase):
         self._file_bugs()
         (meta, _body), = self._bugs()
         self.assertNotIn('parent', meta)
+
+
+class UpgradeRedBugTests(unittest.TestCase):
+    """D11/PD10: one S1 Bug per ``(release tag, doctor RED)`` — the signature's shape, the S1
+    severity (``decided`` for free, B-0089), the title naming both tags, the body carrying the
+    doctor's RED rows, and the once-a-day bump."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def _bugs(self):
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        return [r for r in canonical.values() if r['folder'] == 'bugs']
+
+    def test_the_signature_is_the_tag_and_doctor_red(self):
+        self.assertEqual(file_bugs.UPGRADE_RED_SIG.format(tag='v0.1.63'),
+                          'upgrade v0.1.63: doctor RED')
+
+    def test_files_one_s1_bug_decided_for_free(self):
+        outcome = file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62',
+                                             ['upgrade  RED   fails'], out=lambda *_a: None)
+        self.assertEqual(outcome, 'filed')
+        bugs = self._bugs()
+        self.assertEqual(len(bugs), 1)
+        typed, _machine = frontmatter.split_machine(bugs[0]['meta'])
+        self.assertEqual(typed['severity'], 'S1')
+        self.assertTrue(typed['decided'])
+        self.assertEqual(typed['signature'], 'upgrade v0.1.63: doctor RED')
+
+    def test_the_title_names_both_tags(self):
+        file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62', [], out=lambda *_a: None)
+        typed, _machine = frontmatter.split_machine(self._bugs()[0]['meta'])
+        self.assertIn('v0.1.63', typed['title'])
+        self.assertIn('v0.1.62', typed['title'])
+
+    def test_the_body_carries_the_doctor_red_rows(self):
+        file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62',
+                                   ['upgrade  RED   fails its doctor'], out=lambda *_a: None)
+        self.assertIn('upgrade  RED   fails its doctor', self._bugs()[0]['body'])
+
+    def test_a_second_tick_the_same_day_is_skipped_not_filed_again(self):
+        with mock.patch.object(file_bugs, 'today', return_value='2026-10-10'):
+            first = file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62', [],
+                                               out=lambda *_a: None)
+            second = file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62', [],
+                                               out=lambda *_a: None)
+        self.assertEqual(first, 'filed')
+        self.assertEqual(second, 'skipped')
+        self.assertEqual(len(self._bugs()), 1)
+
+    def test_bumped_once_a_day(self):
+        with mock.patch.object(file_bugs, 'today', return_value='2026-10-10'):
+            file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62', [], out=lambda *_a: None)
+        with mock.patch.object(file_bugs, 'today', return_value='2026-10-11'):
+            outcome = file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62', [],
+                                                 out=lambda *_a: None)
+        self.assertEqual(outcome, 'bumped')
+        bugs = self._bugs()
+        self.assertEqual(len(bugs), 1)
+        typed, _machine = frontmatter.split_machine(bugs[0]['meta'])
+        self.assertEqual(typed['count'], 2)
+
+    def test_a_different_release_files_a_different_bug(self):
+        file_bugs.file_upgrade_bug(self.root, 'v0.1.63', 'v0.1.62', [], out=lambda *_a: None)
+        file_bugs.file_upgrade_bug(self.root, 'v0.1.64', 'v0.1.62', [], out=lambda *_a: None)
+        self.assertEqual(len(self._bugs()), 2)

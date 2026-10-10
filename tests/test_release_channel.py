@@ -2,11 +2,16 @@ import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 from asf import env, upgrade
 from asf.harvest import lane
+from asf.record import frontmatter
+from asf.record.core import canonicalize, load_items
+from asf.tick import file_bugs as file_bugs_mod
+from asf.tick import tick
 
 
 class ProductUpgradePolicyTests(unittest.TestCase):
@@ -238,6 +243,305 @@ class TagInstallVerifiesByShaTests(unittest.TestCase):
         rc, out, m_ci = self._install(self.SHA, None, installed=self.SHA)
         self.assertEqual(rc, 0)
         self.assertEqual(m_ci.call_args.args[1], self.SHA)
+
+
+class NotifiesOncePerTagTests(_HomeCase):
+    """D3/step 4: ``notify`` says ``UPGRADE AVAILABLE`` once per tag, in the log and on
+    ``ctx.upgrade_line``; ``off`` never says it; a ``release_report`` whose every read raises
+    still returns and the tick carries on."""
+
+    def _product(self, policy='notify'):
+        return env.Product('p', {'repo_slug': 'a/b', 'conventions': {'flags': {'upgrade': policy}}})
+
+    def _ctx(self, policy='notify'):
+        return types.SimpleNamespace(product=self._product(policy), upgrade_line=None)
+
+    def _run(self, ctx, tag='v0.1.63', old='v0.1.62', old_sha='a' * 40):
+        lines = []
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=(tag, 'c' * 40)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=(old, old_sha)):
+            result = upgrade.release_report(ctx, out=lines.append)
+        return result, lines
+
+    def test_the_first_tick_at_a_new_tag_notifies(self):
+        ctx = self._ctx()
+        result, lines = self._run(ctx)
+        self.assertEqual(result, 'notified')
+        self.assertIn('UPGRADE AVAILABLE v0.1.62 → v0.1.63', lines)
+        self.assertEqual(ctx.upgrade_line, 'UPGRADE AVAILABLE v0.1.62 → v0.1.63')
+
+    def test_the_second_tick_at_the_same_tag_is_silent(self):
+        self._run(self._ctx())
+        result, lines = self._run(self._ctx())
+        self.assertEqual(result, 'none')
+        self.assertFalse(any('UPGRADE AVAILABLE' in ln for ln in lines), lines)
+        self.assertTrue(any(ln.startswith('factory:') for ln in lines), lines)
+
+    def test_a_newer_tag_notifies_again(self):
+        self._run(self._ctx())
+        result, lines = self._run(self._ctx(), tag='v0.1.64')
+        self.assertEqual(result, 'notified')
+        self.assertIn('UPGRADE AVAILABLE v0.1.62 → v0.1.64', lines)
+
+    def test_off_never_notifies(self):
+        result, lines = self._run(self._ctx('off'))
+        self.assertEqual(result, 'none')
+        self.assertFalse(any('UPGRADE AVAILABLE' in ln for ln in lines), lines)
+        self.assertTrue(any(ln.startswith('factory:') for ln in lines), lines)
+
+    def test_a_release_report_whose_every_read_raises_still_returns(self):
+        ctx = self._ctx()
+        lines = []
+        with mock.patch.object(upgrade, 'repo_url', side_effect=RuntimeError('boom')):
+            result = upgrade.release_report(ctx, out=lines.append)
+        self.assertEqual(result, 'none')
+        self.assertTrue(any('release check failed' in ln for ln in lines), lines)
+
+
+class TheTwoChannelsAreExclusiveTests(unittest.TestCase):
+    """D3: which channel a product's tick takes is chosen by structure — whether its ``repo_dir``
+    holds the factory's own source — never by a flag a product file could get wrong."""
+
+    def _run(self, repo_dir):
+        product = env.Product('p', {'repo_dir': repo_dir, 'main': 'main',
+                                     'ci': {'provider': 'none'}})
+        ctx = tick.Context(product)
+        with mock.patch('asf.drift.report') as m_drift, \
+                mock.patch('asf.upgrade.release_report', return_value='none') as m_release, \
+                mock.patch('asf.tick.summary.run'):
+            tick._run_steps(mock.Mock(), product, ctx, [], None)
+        return m_drift, m_release
+
+    def test_factory_source_takes_drift_never_release(self):
+        tmp = tempfile.mkdtemp(prefix='exclusive_test_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with open(os.path.join(tmp, 'pyproject.toml'), 'w', encoding='utf-8') as f:
+            f.write('[project]\nname = "asf-factory"\n')
+        m_drift, m_release = self._run(tmp)
+        m_drift.assert_called_once()
+        m_release.assert_not_called()
+
+    def test_a_customer_repo_takes_release_never_drift(self):
+        tmp = tempfile.mkdtemp(prefix='exclusive_test_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        m_drift, m_release = self._run(tmp)
+        m_drift.assert_not_called()
+        m_release.assert_called_once()
+
+    def test_no_repo_dir_at_all_takes_the_release_channel(self):
+        # `is_factory_source('')` opens `pyproject.toml` relative to the cwd: run from outside a
+        # factory checkout — as a real tick's would be — '' is not factory source either.
+        tmp = tempfile.mkdtemp(prefix='exclusive_test_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            m_drift, m_release = self._run(None)
+        finally:
+            os.chdir(cwd)
+        m_drift.assert_not_called()
+        m_release.assert_called_once()
+
+
+class AutoInstallsTheNewestTagTests(_HomeCase):
+    """D7/D8/D9: ``auto`` reinstalls at the newest tag (unless a session is mid-landing),
+    re-renders the clocks and runs the doctor through the new binary — never in-process — and
+    logs both lines (PD9)."""
+
+    SHA = 'b' * 40
+    OLD_SHA = 'a' * 40
+
+    def _product(self):
+        return env.Product('p', {'repo_slug': 'a/b', 'conventions': {'flags': {'upgrade': 'auto'}}})
+
+    def _ctx(self):
+        return types.SimpleNamespace(product=self._product(), upgrade_line=None)
+
+    def _run(self, doctor_rc=0, doctor_out='== DOCTOR p\nupgrade  ok    fine\n'):
+        calls = []
+        venv = os.path.join(self.tmp, 'venvs')
+        binary = os.path.join(venv, upgrade.PACKAGE_NAME, 'bin', 'asf')
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[:2] == ['pipx', 'environment']:
+                return mock.Mock(returncode=0, stdout=venv + '\n', stderr='')
+            if cmd[0] == binary and cmd[1] == 'doctor':
+                return mock.Mock(returncode=doctor_rc, stdout=doctor_out, stderr='')
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        ctx = self._ctx()
+        with mock.patch.object(upgrade, 'repo_url', return_value='https://example.invalid/x.git'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', self.SHA)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', self.OLD_SHA)), \
+                mock.patch.object(upgrade, 'mid_landing', return_value=[]), \
+                mock.patch.object(upgrade, 'other_ticks', return_value=[]), \
+                mock.patch.object(upgrade, 'ci_state', return_value=('clear', '')), \
+                mock.patch.object(upgrade, 'new_install_commit', return_value=self.SHA), \
+                mock.patch.object(upgrade, 'reload_clocks', return_value=[]):
+            lines = []
+            result = upgrade.release_report(ctx, out=lines.append, run=run)
+        return result, lines, calls, binary
+
+    def test_installs_renders_clocks_and_runs_doctor_in_order_through_the_new_binary(self):
+        result, lines, calls, binary = self._run()
+        self.assertEqual(result, 'installed')
+        pipx_install = next(c for c in calls if c[:2] == ['pipx', 'install'])
+        self.assertEqual(pipx_install, ['pipx', 'install', '--force',
+                                        'git+https://example.invalid/x.git@v0.1.63'])
+        scheduler_call = next(c for c in calls if c[0] == binary and c[1] == 'scheduler')
+        self.assertEqual(scheduler_call, [binary, 'scheduler', 'install', '--product', 'p'])
+        doctor_call = next(c for c in calls if c[0] == binary and c[1] == 'doctor')
+        self.assertEqual(doctor_call, [binary, 'doctor', '--product', 'p'])
+        self.assertLess(calls.index(pipx_install), calls.index(scheduler_call))
+        self.assertLess(calls.index(scheduler_call), calls.index(doctor_call))
+        self.assertIn('upgrade: v0.1.62 → v0.1.63', lines)
+        self.assertIn(upgrade._tick_upgrade_line('v0.1.62', self.OLD_SHA, 'v0.1.63', self.SHA),
+                      lines)
+
+    def test_a_session_mid_landing_holds_and_installs_nothing(self):
+        ctx = self._ctx()
+        lines = []
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', self.SHA)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', self.OLD_SHA)), \
+                mock.patch.object(upgrade, 'mid_landing',
+                                  return_value=[('T-0001', 'worker/T-0001')]), \
+                mock.patch.object(upgrade, 'install') as m_install:
+            result = upgrade.release_report(ctx, out=lines.append)
+        self.assertEqual(result, 'held')
+        m_install.assert_not_called()
+        self.assertTrue(any('upgrade: held' in ln and 'T-0001 on worker/T-0001' in ln
+                            for ln in lines), lines)
+
+    def test_a_deferred_install_is_held_and_records_nothing(self):
+        ctx = self._ctx()
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', self.SHA)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', self.OLD_SHA)), \
+                mock.patch.object(upgrade, 'mid_landing', return_value=[]), \
+                mock.patch.object(upgrade, 'install', return_value=upgrade.DEFERRED):
+            result = upgrade.release_report(ctx, out=lambda *_a: None)
+        self.assertEqual(result, 'held')
+        self.assertEqual(upgrade._read_release_state(ctx.product), {})
+
+    def test_a_non_zero_install_fails_and_records_failed(self):
+        ctx = self._ctx()
+        lines = []
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', self.SHA)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', self.OLD_SHA)), \
+                mock.patch.object(upgrade, 'mid_landing', return_value=[]), \
+                mock.patch.object(upgrade, 'install', return_value=1):
+            result = upgrade.release_report(ctx, out=lines.append)
+        self.assertEqual(result, 'failed')
+        self.assertTrue(any('upgrade: FAILED v0.1.62 → v0.1.63' in ln for ln in lines), lines)
+        self.assertEqual(upgrade._read_release_state(ctx.product)['last']['result'], 'failed')
+
+    def test_an_unreadable_installed_release_never_installs(self):
+        ctx = self._ctx()
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', self.SHA)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=(None, None)), \
+                mock.patch.object(upgrade, 'install') as m_install:
+            result = upgrade.release_report(ctx, out=lambda *_a: None)
+        self.assertEqual(result, 'none')
+        m_install.assert_not_called()
+
+
+class RedDoctorRollsBackTests(_HomeCase):
+    """D10/D11/PD4: a RED doctor after the install puts the previous *tag* back (verified by its
+    sha, never installed by sha — which would strand the product on an unreadable pin), files
+    one S1 Bug per ``(tag, doctor RED)``, and pushes the record clone that Bug lives in from the
+    channel itself."""
+
+    SHA = 'b' * 40
+    OLD_SHA = 'a' * 40
+    DOCTOR_RED_OUT = '== DOCTOR p\nupgrade  RED   asf v0.1.63 fails its doctor\n'
+
+    def _product(self, name='p'):
+        return env.Product(name, {'repo_slug': 'a/b', 'conventions': {'flags': {'upgrade': 'auto'}}})
+
+    def _root(self):
+        root = tempfile.mkdtemp(prefix='release_rollback_test_')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    def _ctx(self, product=None, root=None):
+        product = product or self._product()
+        root = root if root is not None else self._root()
+        return types.SimpleNamespace(product=product, upgrade_line=None, record_root=lambda: root)
+
+    def _run(self, ctx, push_result=True):
+        lines = []
+        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+                mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', self.SHA)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', self.OLD_SHA)), \
+                mock.patch.object(upgrade, 'mid_landing', return_value=[]), \
+                mock.patch.object(upgrade, 'install', return_value=0), \
+                mock.patch.object(upgrade, '_install') as m_install, \
+                mock.patch.object(upgrade, '_new_asf',
+                                  side_effect=[(0, ''), (1, self.DOCTOR_RED_OUT), (0, '')]), \
+                mock.patch('asf.tick.shadow.commit_local', return_value=True) as m_commit, \
+                mock.patch('asf.tick.shadow.push', return_value=push_result) as m_push:
+            result = upgrade.release_report(ctx, out=lines.append)
+        return result, lines, m_install, m_commit, m_push
+
+    def _bugs(self, root, sig='upgrade v0.1.63: doctor RED'):
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+        return [r for r in canonical.values()
+                if frontmatter.split_machine(r['meta'])[0].get('signature') == sig]
+
+    def test_a_red_doctor_rolls_back_and_files_one_bug(self):
+        ctx = self._ctx()
+        result, lines, m_install, m_commit, m_push = self._run(ctx)
+        self.assertEqual(result, 'rolled-back')
+        self.assertIn('rollback: doctor RED after v0.1.63 — reinstalling v0.1.62', lines)
+        m_install.assert_called_once_with('v0.1.62', mock.ANY, mock.ANY, sha=self.OLD_SHA)
+        self.assertTrue(any('file-bugs: upgrade v0.1.63 doctor RED — filed' in ln for ln in lines),
+                        lines)
+        m_commit.assert_called_once()
+        m_push.assert_called_once()
+        self.assertEqual(upgrade._read_release_state(ctx.product)['last']['result'], 'rolled-back')
+
+        bugs = self._bugs(ctx.record_root())
+        self.assertEqual(len(bugs), 1)
+        typed, _machine = frontmatter.split_machine(bugs[0]['meta'])
+        self.assertEqual(typed.get('severity'), 'S1')
+        self.assertTrue(typed.get('decided'))
+        self.assertIn('v0.1.63', typed.get('title') or '')
+        self.assertIn('v0.1.62', typed.get('title') or '')
+
+    def test_a_second_red_tick_at_the_same_tag_bumps_not_files(self):
+        root = self._root()
+        with mock.patch.object(file_bugs_mod, 'today', return_value='2026-10-10'):
+            self._run(self._ctx(root=root))
+        with mock.patch.object(file_bugs_mod, 'today', return_value='2026-10-11'):
+            result, lines, *_rest = self._run(self._ctx(root=root))
+        self.assertEqual(result, 'rolled-back')
+        self.assertTrue(any('file-bugs: upgrade v0.1.63 doctor RED — bumped' in ln for ln in lines),
+                        lines)
+        self.assertEqual(len(self._bugs(root)), 1)
+
+    def test_a_second_product_hitting_the_same_release_bumps_the_same_signature(self):
+        root = self._root()
+        with mock.patch.object(file_bugs_mod, 'today', return_value='2026-10-10'):
+            self._run(self._ctx(product=self._product('p'), root=root))
+        with mock.patch.object(file_bugs_mod, 'today', return_value='2026-10-11'):
+            result, lines, *_rest = self._run(self._ctx(product=self._product('q'), root=root))
+        self.assertEqual(result, 'rolled-back')
+        self.assertTrue(any('bumped' in ln for ln in lines), lines)
+        self.assertEqual(len(self._bugs(root)), 1)
+
+    def test_a_push_that_fails_does_not_raise_and_does_not_stop_the_rollback(self):
+        ctx = self._ctx()
+        result, lines, m_install, _m_commit, m_push = self._run(ctx, push_result=False)
+        self.assertEqual(result, 'rolled-back')
+        m_install.assert_called_once()
+        m_push.assert_called_once()
+        self.assertEqual(upgrade._read_release_state(ctx.product)['last']['result'], 'rolled-back')
 
 
 if __name__ == '__main__':
