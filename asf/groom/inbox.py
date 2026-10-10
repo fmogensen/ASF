@@ -13,7 +13,7 @@ from asf.record.publish import left_ahead, publish
 from asf.conventions import DEFAULT_INTAKE_DIR
 from asf.record.core import ID_DIGITS
 
-INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
+INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories|priority):\s*(.+?)\s*$', re.IGNORECASE)
 
 #: A title may open with its severity: `S1: p1-e2e is failing on main` (C4). Case-insensitive,
 #: and the match must leave a non-empty title behind — `S3: the third option` is a title, so the
@@ -21,6 +21,9 @@ INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(
 _SEVERITY_PREFIX_RE = re.compile(r'^\s*(S[123])\s*:\s*(?P<rest>\S.*?)\s*$', re.IGNORECASE)
 
 SEVERITIES = ('S1', 'S2', 'S3')
+
+#: the `priority:` words a note may declare, kept on the card it mints
+PRIORITIES = ('need', 'nice', 'later')
 
 #: A body-inferred signature is capped at the same length a signature is already capped at
 #: elsewhere, so it is never longer than one the metrics stream will store or one a flake-filed
@@ -437,6 +440,9 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
         type_, rule, parent = result.type, result.rule, result.parent
         new_id = mint_id(root, canonical, type_)
         typed = {'title': card.title, 'parent': parent, 'decided': False}
+        priority = (card.headers.get('priority') or '').strip().lower()
+        if priority in PRIORITIES:  # declared on the note: kept on the card (an Epic's too)
+            typed['priority'] = priority
         if type_ == 'bug':
             typed['severity'] = severity_of(card)
             typed['found_in'] = 'dev'
@@ -653,6 +659,7 @@ def stuck_s1_lines(root, intake_dir=None, groom_file=None, product=None):
 
 _CLAUSES = (
     (re.compile(r'^feature$', re.IGNORECASE), lambda m: ('type', 'feature'), 'feature'),
+    (re.compile(r'^epic$', re.IGNORECASE), lambda m: ('type', 'epic'), 'epic'),
     (re.compile(r'^bug\s+(.+)$', re.IGNORECASE), lambda m: ('signature', m.group(1).strip()), 'bug <signature>'),
     (re.compile(rf'^parent\s+([A-Z]-{ID_DIGITS})$', re.IGNORECASE), lambda m: ('parent', m.group(1).upper()), 'parent <id>'),
     (re.compile(r'^(S[123])$', re.IGNORECASE), lambda m: ('severity', m.group(1).upper()), 'S1|S2|S3'),
@@ -667,7 +674,7 @@ _CLAUSE_FORMS = ('close',) + tuple(form for _rx, _make, form in _CLAUSES)
 
 def parse_answer(answer):
     """An inbox answer: ``('close', None)``, ``({header: value}, None)`` from ``;``-separated
-    clauses — ``feature``, ``bug <signature>``, ``parent <id>``, ``S1|S2|S3`` — or
+    clauses — ``feature``, ``epic``, ``bug <signature>``, ``parent <id>``, ``S1|S2|S3`` — or
     ``(None, reason)`` when a clause is outside that grammar (the line then changes nothing).
     ``reason`` names the first clause that failed and the grammar it did not match; a clause
     carrying an em dash (or its ASCII stand-in, ``' - '``) gets the words that make the mistake

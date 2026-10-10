@@ -166,9 +166,11 @@ settle it.
   `close` (not worth building: a duplicate, already done, or obsolete).
 - The rule: work made obsolete under the 0.2 kernel (it fixes or extends the old floor's tick,
   harvest, lanes, feeder rows or groom file, which the kernel replaced) ⇒ `close` or `later`.
-- `kind`: `bug` when it reports a defect in what exists, `feature` when it asks for new work.
+- `kind`: `bug` when it reports a defect in what exists, `feature` when it asks for new work,
+  `epic` (an inbox note only) when it is a business outcome spanning several Features.
 - `parent`: the id it hangs under — a feature under an Epic, a bug under an Epic, a Feature or a
-  Story — chosen from the goals below or the card's own; `none` keeps the card's.
+  Story, an epic under nothing (`none`) — chosen from the goals below or the card's own; `none`
+  keeps the card's.
 - `severity` (bugs only): `S1` the factory stops or loses work, `S2` a wrong result with a
   workaround, `S3` cosmetic.
 

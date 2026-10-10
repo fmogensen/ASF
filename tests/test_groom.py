@@ -133,7 +133,7 @@ class InboxAnswerGrammarTests(unittest.TestCase):
         self.assertIsNone(parsed)
         self.assertNotIn('an answer carries no why', reason)
         self.assertIn('"nonsense" is not a clause', reason)
-        self.assertIn('close | feature | bug <signature> | parent <id> | S1|S2|S3', reason)
+        self.assertIn('close | feature | epic | bug <signature> | parent <id> | S1|S2|S3', reason)
 
     def test_a_bad_inbox_answer_and_a_good_one_on_one_page(self):
         root = make_repo()

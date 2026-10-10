@@ -24,7 +24,7 @@ SIZE = {  # the card's definitions, in one place; the History line and asf check
     'bug': 'a defect with a signature',
 }
 
-RULES = ('signature', 'writes', 'features-list', 'parent-feature', 'default')
+RULES = ('signature', 'writes', 'features-list', 'declared', 'parent-feature', 'default')
 
 #: The line or section that would make a card the type its `type:` line declares — the "fix line"
 #: F-0134 asks for, one per size, read by `_typed` (C4). Each entry completes the sentence
@@ -33,7 +33,7 @@ NEEDS = {
     'bug': 'a `signature:` line, and no `writes:` line — that is a Task',
     'task': 'a `writes:` line and a `parent:` naming a Feature or a Story, and no `signature:`',
     'story': 'a `parent:` naming a Feature, and an `## Acceptance` list',
-    'epic': 'a `## Features` list of two or more, and no `parent:` — an Epic has none',
+    'epic': 'no `parent:` line — an Epic has none',
     'feature': 'a `parent:` naming an Epic, and no `signature:` or `writes:` line',
 }
 
@@ -42,16 +42,25 @@ SHAPE_LINE_RE = re.compile(r'created \(([^)]*)\) — shape: (\S+) → (\w+)')
 DEFECT_WORDS_RE = re.compile(r'\b(broken|red|fails?|failing)\b', re.IGNORECASE)
 
 
+#: the states of an Epic whose work is over: never a guessed parent
+DONE_STATES = ('Resolved', 'Closed')
+
+
 def infer_parent_epic(canonical, tokens):
-    """The open Epic sharing the most title words with `tokens`, or None."""
-    best_id, best_n = None, 0
+    """The open Epic (not retired, not Resolved or Closed) sharing the most title words with
+    `tokens`, or None — None too on a tie, which is no guess (F-0345 went under the first of
+    several Epics tied on their release words)."""
+    best_id, best_n, tied = None, 0, False
     for iid, rec in sorted(canonical.items()):
-        if rec['meta'].get('type') != 'epic' or not is_open(rec):
+        if (rec['meta'].get('type') != 'epic' or not is_open(rec)
+                or rec['meta'].get('state') in DONE_STATES):
             continue
         shared = len(tokens & tokenize(rec['meta'].get('title', '')))
         if shared > best_n:
-            best_id, best_n = iid, shared
-    return best_id
+            best_id, best_n, tied = iid, shared, False
+        elif shared and shared == best_n:
+            tied = True
+    return None if tied else best_id
 
 
 def _typed(card, shape):
@@ -116,6 +125,14 @@ def derive(card, canonical, default_bug_parent=None):
         if not parent or canonical[parent]['meta'].get('type') not in PARENT_TYPES['task']:
             return Question('A Task hangs under a Feature or a Story — add parent: <id>.')
         return _typed(card, Shape('task', 'writes', parent))
+
+    if (headers.get('type') or '').strip().lower() == 'epic':
+        if parent:  # Epic > Feature > Story > Task: nothing is above an Epic
+            return Question(
+                f'`type: epic` is read, and an Epic has no parent — drop the `parent: {parent}` '
+                f'line, or change the `type:` line: under an Epic it is a Feature.'
+            )
+        return Shape('epic', 'declared', None)  # declared: its body is kept as written
 
     if len(card.features) >= 2:
         if parent:
