@@ -1,7 +1,6 @@
 ## Your job: review {item_id} — round {next_round}
 
-Read, in this order: the writer's report on `{branch}`, then the diff against `origin/{main}`,
-then the plan `{plan_path}` for the Task it claims to deliver.
+Read, in this order: {read_order}
 
 THE VERDICT IS A TABLE. Write `{review_path}` with exactly this shape — one row per check, and no
 row without evidence; a result with no evidence counts as `fail`:
