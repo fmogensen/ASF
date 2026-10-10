@@ -547,8 +547,17 @@ kernel:
                             # the tick logs "questions: resolved by code N, to the console M"
     test_timeout_s: 600     # the test run is killed past this, and the question stays open
     python: python3         # the interpreter the named tests run under
-    test_runs_per_tick: 1   # test runs per tick (each result is cached by question in
-                            # state/<product>/kernel-resolve.json); the rest wait a tick
+    test_runs_per_tick: 1   # test and gate runs per tick (each result is cached by question
+                            # in state/<product>/kernel-resolve.json); the rest wait a tick
+    gates: true             # "`bash tools/check_x.sh` was not run here (the cloud runtime
+                            # refused); confirm on the host": the kernel runs it — only a step of
+                            # conventions.pre_push_check — on a fresh detached worktree of the
+                            # session's branch head and answers "Confirmed on the factory host:
+                            # `<cmd>` on <branch> at <sha> -> <its last line>" (red: "fix it")
+    inbox_bugs: true        # "mint the Bug card … this session cannot: no record is mounted … `asf
+                            # new bug --title …`": the kernel files it through the record's inbox
+                            # (the question and the test ids it names as the body), then answers
+                            # "filed as inbox/<file>; do not mint reserved ids"
   gate:
     window_h: 24            # first-push-green is measured over PRs opened in the last window_h
     first_push_green_min: 0.7

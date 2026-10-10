@@ -141,6 +141,9 @@ class _Applier:
                 P.FINDINGS: [f for f in self.field(a.item_id, P.FINDINGS, [])
                              if not rebase_finding(f)]})
 
+    def FileInbox(self, a):
+        return 'filed %s' % self.ports.record.file_inbox(a.title, a.body)
+
     def ClearStuck(self, a):
         self.attempt(a.item_id, a.attempt)
 

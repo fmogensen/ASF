@@ -9,6 +9,11 @@ matched and returns ``{probe key: result}``:
   process group killed past it), then the worktree removed and pruned — the clean floor; a
   leftover from a crashed tick is swept first. ``{sha, ran, failed, ok}``; ``error`` when it could
   not tell (a timeout, a test id that does not load, nothing ran).
+- ``gate``: a step of the product's ``pre_push_check`` (:func:`gate_steps`; any other command
+  is refused) run with ``bash -c`` on a fresh detached worktree of ``origin/<branch>``'s head
+  (fetched first), the same clean floor: ``{sha, rc, last}`` (its last output line), cached by
+  command and head sha — a branch that moved runs it again. It counts against
+  ``test_runs_per_tick``.
 - ``symbol``: the dotted name's module read at ``origin/<main>`` (``git show``, no worktree) and
   walked with :mod:`ast`: ``{sha, exists, where (path:line), path, defined (its top-level
   classes)}``; ``error`` when no module of the name is at trunk.
@@ -47,18 +52,21 @@ class TrunkProbe:
     """The probe of ``repo``'s ``origin/<main>`` (see the module doc)."""
 
     def __init__(self, repo, main, state_dir, python='python3', timeout_s=600,
-                 trunk_tests=True, symbols=True, test_runs_per_tick=1):
+                 trunk_tests=True, symbols=True, test_runs_per_tick=1, gates=()):
         self.repo, self.main, self.state_dir = repo, main or 'main', state_dir
         self.python, self.timeout_s = python, timeout_s
-        self.enabled = {R.TRUNK_TESTS: trunk_tests, R.SYMBOL: symbols}
+        self.gates = tuple(gates or ())
+        self.enabled = {R.TRUNK_TESTS: trunk_tests, R.SYMBOL: symbols, R.GATE: bool(self.gates)}
         self.test_runs_per_tick = test_runs_per_tick
 
     @classmethod
     def for_product(cls, product, state_dir):
         k = product.kernel['resolve']
+        gates = gate_steps(product.conventions.get('pre_push_check')) if k['gates'] else ()
         return cls(product.repo_dir, product.main, state_dir, python=k['python'],
                    timeout_s=int(k['test_timeout_s']), trunk_tests=bool(k['trunk_tests']),
-                   symbols=bool(k['symbols']), test_runs_per_tick=int(k['test_runs_per_tick']))
+                   symbols=bool(k['symbols']), test_runs_per_tick=int(k['test_runs_per_tick']),
+                   gates=gates)
 
     # ---- the cache --------------------------------------------------------------------------
 
@@ -94,6 +102,14 @@ class TrunkProbe:
         cache = self._load()
         out, fetched, runs, sha = {}, False, 0, None
         for p in probes:
+            if p.cls == R.GATE:
+                if dry or runs >= self.test_runs_per_tick:
+                    continue
+                result, ran = self._gate(cache, *p.target)
+                runs += ran
+                out[p.key] = result
+                self._save(cache)
+                continue
             if p.key in cache:
                 out[p.key] = cache[p.key]
                 continue
@@ -121,6 +137,72 @@ class TrunkProbe:
         from asf import gitops
         return gitops.rev_parse(self.repo, 'origin/%s' % self.main) or ''
 
+    # ---- gate ------------------------------------------------------------------------------------
+
+    def _gate(self, cache, cmd, branch):
+        """``(result, ran)``: ``cmd`` (a :func:`gate_steps` step only) run on ``branch``'s head,
+        cached by command and head sha; ``ran`` 1 when it was run now."""
+        from asf import gitops
+        if cmd not in self.gates:
+            return {'error': '`%s` is not a pre_push_check step' % cmd}, 0
+        if not BRANCH_RE.match(branch or '') or '..' in branch:
+            return {'error': 'not a branch: %r' % branch}, 0
+        gitops.git(['fetch', '-q', 'origin', '+refs/heads/%s:refs/remotes/origin/%s'
+                    % (branch, branch)], self.repo)
+        sha = gitops.rev_parse(self.repo, 'origin/%s' % branch)
+        if not sha:
+            return {'error': 'no origin/%s' % branch}, 0
+        key = '%s:%s@%s' % (R.GATE, cmd, sha)
+        if key in cache:
+            return cache[key], 0
+        result = self._in_worktree(sha, lambda wt: self._shell(wt, cmd))
+        result.update(sha=sha, at=time.time())
+        cache[key] = result
+        return result, 1
+
+    def _shell(self, wt, cmd):
+        try:
+            p = subprocess.Popen(['bash', '-c', cmd], cwd=wt, env=self._env(wt),
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                 start_new_session=True)
+        except OSError as e:
+            return {'error': 'cannot run bash: %s' % e}
+        text = self._wait(p)
+        if text is None:
+            return {'error': 'timeout after %ds' % self.timeout_s}
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        return {'rc': p.returncode, 'last': lines[-1][:300] if lines else ''}
+
+    def _wait(self, p):
+        """``p``'s output, or None when it ran past the timeout (its process group killed)."""
+        try:
+            return p.communicate(timeout=self.timeout_s)[0]
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            p.communicate()
+            return None
+
+    def _in_worktree(self, sha, run):
+        """``run(worktree)`` on a fresh detached worktree of ``sha`` under :data:`TMP_DIR`, removed
+        and pruned after (a crashed tick's leftover swept first)."""
+        from asf import gitops
+        root = os.path.join(self.state_dir, TMP_DIR)
+        os.makedirs(root, exist_ok=True)
+        self._sweep(root)
+        wt = tempfile.mkdtemp(prefix='trunk-', dir=root)
+        try:
+            r = gitops.git(['worktree', 'add', '-q', '--force', '--detach', wt, sha], self.repo)
+            if not r.ok:
+                return {'error': 'worktree add: %s' % r.reason}
+            return run(wt)
+        finally:
+            gitops.git(['worktree', 'remove', '--force', wt], self.repo)
+            shutil.rmtree(wt, ignore_errors=True)
+            gitops.git(['worktree', 'prune'], self.repo)
+
     # ---- trunk-tests --------------------------------------------------------------------------
 
     def _sweep(self, root):
@@ -133,20 +215,7 @@ class TrunkProbe:
         gitops.git(['worktree', 'prune'], self.repo)
 
     def _run_tests(self, sha, ids):
-        from asf import gitops
-        root = os.path.join(self.state_dir, TMP_DIR)
-        os.makedirs(root, exist_ok=True)
-        self._sweep(root)
-        wt = tempfile.mkdtemp(prefix='trunk-', dir=root)
-        try:
-            r = gitops.git(['worktree', 'add', '-q', '--force', '--detach', wt, sha], self.repo)
-            if not r.ok:
-                return {'error': 'worktree add: %s' % r.reason}
-            return self._unittest(wt, ids)
-        finally:
-            gitops.git(['worktree', 'remove', '--force', wt], self.repo)
-            shutil.rmtree(wt, ignore_errors=True)
-            gitops.git(['worktree', 'prune'], self.repo)
+        return self._in_worktree(sha, lambda wt: self._unittest(wt, ids))
 
     def _env(self, wt):
         from asf import hermetic
@@ -163,14 +232,8 @@ class TrunkProbe:
                                  stderr=subprocess.STDOUT, text=True, start_new_session=True)
         except OSError as e:
             return {'error': 'cannot run %s: %s' % (self.python, e)}
-        try:
-            text, _ = p.communicate(timeout=self.timeout_s)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            p.communicate()
+        text = self._wait(p)
+        if text is None:
             return {'error': 'timeout after %ds' % self.timeout_s}
         return parse_unittest(text, p.returncode)
 
@@ -190,6 +253,21 @@ class TrunkProbe:
                 if src is not None:
                     return symbol_in(src, path, parts[n:])
         return {'error': 'no module of %s at trunk' % name}
+
+
+#: a branch name a gate probe fetches
+BRANCH_RE = re.compile(r'^[A-Za-z0-9][\w./-]*$')
+
+
+def gate_steps(value):
+    """The steps of a ``pre_push_check`` value (a command string, or a map with ``code``) split
+    on ``&&`` and ``;``, whitespace folded: the only commands a ``gate`` probe runs."""
+    if isinstance(value, dict):
+        value = value.get('code')
+    if not isinstance(value, str):
+        return ()
+    steps = (' '.join(s.split()) for s in re.split(r'&&|;', value))
+    return tuple(dict.fromkeys(s for s in steps if s))
 
 
 def parse_unittest(text, rc):

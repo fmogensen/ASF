@@ -352,6 +352,36 @@ class RealRecord:
             out[iid] = (c.ref, shas[c.ref])
         return out
 
+    def _intake(self):
+        return getattr(getattr(self.product, 'conventions', None), 'intake_dir', None) or 'inbox'
+
+    def inbox_filed(self, titles):
+        """``{title: path}``: the intake card (``<intake_dir>/<slug>.md``, or under ``done/``
+        once groomed) each title would be filed as, relative to the record; ``''`` when the record
+        holds none (:func:`asf.groom.inbox.file_card`'s name)."""
+        out = {}
+        for title in titles:
+            name = inbox_name(self._scrub(title))
+            found = ''
+            for rel in (name, 'done/' + name):
+                if os.path.exists(os.path.join(self.root, self._intake(), rel)):
+                    found = '%s/%s' % (self._intake().rstrip('/'), rel)
+                    break
+            out[title] = found
+        return out
+
+    def file_inbox(self, title, body):
+        """File one untyped card into the intake dir through :func:`asf.groom.inbox.file_card`
+        (it publishes); one already there is not filed again. The path, relative to the
+        record."""
+        from asf.groom import inbox
+        title = self._scrub(title)
+        have = self.inbox_filed([title])[title]
+        if have:
+            return have
+        path = inbox.file_card(self.root, self._intake(), title, '\n' + self._scrub(body))
+        return os.path.relpath(path, self.root)
+
     def reviews(self):
         return [M.Review(str(r['item']), str(r.get('tree_sha') or r['tree']), str(r['verdict']),
                          [str(f) for f in as_list(r.get('findings'))],
@@ -1697,6 +1727,11 @@ class Ports:
         self.trunk = trunk
 
 
+def inbox_name(title):
+    """The file name :func:`asf.groom.inbox.file_card` gives a card titled ``title``."""
+    return (re.sub(r'[^a-z0-9]+', '-', str(title).lower()).strip('-') or 'card') + '.md'
+
+
 def real_ports(product):
     from asf.kernel.briefs import Briefer
     from asf.kernel.trunk import TrunkProbe
@@ -1756,6 +1791,8 @@ def config_for(product, cfg=None, github=None):
         id_claim_prefixes=tuple(str(p) for p in k['stuck']['id_claim_prefixes']),
         resolve_trunk_tests=bool(k['resolve']['trunk_tests']),
         resolve_symbols=bool(k['resolve']['symbols']),
+        resolve_gates=bool(k['resolve']['gates']),
+        resolve_inbox_bugs=bool(k['resolve']['inbox_bugs']),
         wait_targets=dict(k['waits']['targets']) if k['waits']['breach'] else {},
         max_session_age_h=(k['waits']['max_session_age'] / 3600 if k['waits']['breach']
                            and k['waits']['max_session_age'] else None),

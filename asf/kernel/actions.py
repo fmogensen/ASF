@@ -132,6 +132,17 @@ class ApplyAnswer:
 
 
 @dataclasses.dataclass
+class FileInbox:
+    """File one untyped card titled ``title`` with ``body`` into the record's intake dir (the
+    groom types it and assigns its id): the Bug a session asked for and could not mint itself
+    (:mod:`asf.kernel.resolvers` ``inbox-bug``). A card of that title already in the intake dir
+    is not filed again; the next tick answers the question with its path."""
+    item_id: str
+    title: str
+    body: str
+
+
+@dataclasses.dataclass
 class ClearStuck:
     """A Stuck the kernel resolves by itself (a legacy one the newer rules re-judge, or one it
     escalates: :func:`asf.kernel.decide.escalate_session`, the extra fix round past the cap):
@@ -248,6 +259,8 @@ def describe(action):
             return 'RESOLVED %s %s -> %s' % (action.item_id, action.by,
                                              ' '.join(action.text.split())[:200])
         return 'answer %s' % action.item_id
+    if isinstance(action, FileInbox):
+        return 'file inbox card for %s: %s' % (action.item_id, action.title)
     if isinstance(action, ClearStuck):
         return 're-judge %s: %s' % (action.item_id, action.attempt)
     if isinstance(action, PushStranded):

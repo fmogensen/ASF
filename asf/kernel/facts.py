@@ -84,22 +84,34 @@ def claim_questions(items, sessions):
             if idclaims.is_claim_question(t)]
 
 
-def read_resolved(ports, items, sessions):
-    """``Facts.resolved``: the host's trunk probe (``ports.trunk``, :mod:`asf.kernel.trunk`) of
-    every probe :func:`asf.kernel.resolvers.match` finds in the :func:`open_questions`; ``{}``
-    when none matches, the ports have no probe, or it fails."""
-    probe = getattr(getattr(ports, 'trunk', None), 'probe', None)
+def read_resolved(ports, items, sessions, prs=()):
+    """``Facts.resolved``: for every probe :func:`asf.kernel.resolvers.match` finds in the
+    :func:`open_questions` (a ``gate`` one on :func:`asf.kernel.resolvers.branch_of`), the host's
+    trunk probe (``ports.trunk``, :mod:`asf.kernel.trunk`) or, for ``inbox-bug``, the record's
+    intake card (``record.inbox_filed``: ``{filed: path or ''}``); ``{}`` when none matches, the
+    port is missing, or it fails."""
     probes = []
-    for _iid, text in open_questions(items, sessions):
-        p = resolvers.match(text)
+    for iid, text in open_questions(items, sessions):
+        p = resolvers.match(text, resolvers.branch_of(iid, sessions, prs))
         if p is not None and p not in probes:
             probes.append(p)
-    if not probe or not probes:
-        return {}
-    try:
-        return dict(probe(probes) or {})
-    except Exception:  # noqa: BLE001 — an unprobed question stays with the operator
-        return {}
+    out = {}
+    probe = getattr(getattr(ports, 'trunk', None), 'probe', None)
+    run = [p for p in probes if p.cls in resolvers.PROBED]
+    if probe and run:
+        try:
+            out.update(probe(run) or {})
+        except Exception:  # noqa: BLE001 — an unprobed question stays with the operator
+            pass
+    filed = getattr(ports.record, 'inbox_filed', None)
+    bugs = [p for p in probes if p.cls == resolvers.INBOX_BUG]
+    if filed and bugs:
+        try:
+            got = filed([p.target[0] for p in bugs]) or {}
+            out.update({p.key: {'filed': got[p.target[0]]} for p in bugs if p.target[0] in got})
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def read_id_claims(record, items, sessions):
@@ -186,6 +198,6 @@ def read_facts(ports):
                  items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
                  stranded=stranded, id_claims=read_id_claims(record, items, sessions),
-                 resolved=read_resolved(ports, items, sessions),
+                 resolved=read_resolved(ports, items, sessions, prs),
                  github_error=github_error, orphan_prs=orphans, strict=strict, main=main,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

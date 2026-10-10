@@ -123,7 +123,10 @@ item and the actions of one tick. The rules it holds, in the design's words:
   :mod:`asf.kernel.resolvers` (``config.resolve_trunk_tests``, ``config.resolve_symbols``):
   whether named tests are red on trunk or only in a cloud sandbox, whether a symbol a question
   says does not exist exists — answered from ``Facts.resolved``; an unprobed or unsure one stays
-  with the operator. Every such answer is an :class:`ApplyAnswer` with ``by`` its class.
+  with the operator. Every such answer is an :class:`ApplyAnswer` with ``by`` its class. A gate
+  script a session could not run (``config.resolve_gates``) is answered from its run on the
+  branch head; a Bug card it could not mint (``config.resolve_inbox_bugs``) is filed first
+  (:class:`FileInbox`, the item stays on the operator) and answered once the record holds it.
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -235,9 +238,9 @@ IDLE_REASONS = {
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
-ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem, A.MarkStuck,
-         A.MintStory, A.ArchiveAndReset, A.ClosePR, A.RevertPR, A.FileBug, A.OpenPR, A.Rerun, A.UpdateBranch,
-         A.EnableAutoMerge, A.MergePR, A.Launch)
+ORDER = (A.FileInbox, A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem,
+         A.MarkStuck, A.MintStory, A.ArchiveAndReset, A.ClosePR, A.RevertPR, A.FileBug, A.OpenPR,
+         A.Rerun, A.UpdateBranch, A.EnableAutoMerge, A.MergePR, A.Launch)
 
 #: the attempt a live session ended past ``Config.max_session_age_h`` leaves on its item
 OVER_AGE = 'session ran past its max age'
@@ -460,6 +463,9 @@ def _judge(it, facts, config, actions):
     extra = it.extra_rounds
     answers = list(facts.answers)
     auto, auto_by = _auto_answer(it, facts, config) or (None, '')
+    if not auto and it.state is State.STUCK and it.stuck is not None \
+            and it.stuck.owner == 'operator':
+        _file_inbox(it, facts, config, it.question or it.stuck.reason, actions)
     if auto and not any(a.item_id == it.id for a in answers):
         answers.append(M.Answer(it.id, auto))  # the kernel answers it, as the operator would
     for a in answers:
@@ -534,6 +540,8 @@ def _judge(it, facts, config, actions):
         return _Judged(State.STUCK, _keep(stuck))
     if ended_stuck and ended_stuck.owner == 'operator' and asked is not None and not answered:
         auto, auto_by = _auto_answer(it, facts, config, asked.question) or (None, '')
+        if not auto:
+            _file_inbox(it, facts, config, asked.question, actions)
         if auto:  # a question the facts answer: relaunched next tick carrying it
             actions.append(A.ApplyAnswer(it.id, auto, by=auto_by))
             if it.state is not State.STUCK:  # the applier resets only a Stuck card's attempts
@@ -592,10 +600,25 @@ def _auto_answer(it, facts, config, text=None):
         auto = idclaims.answer(it, text, facts, tuple(config.id_claim_prefixes))
         if auto:
             return (auto, resolvers.ID_CLAIM) if auto not in it.answers else None
-    enabled = tuple(c for c, on in ((resolvers.TRUNK_TESTS, config.resolve_trunk_tests),
-                                    (resolvers.SYMBOL, config.resolve_symbols)) if on)
-    got = resolvers.resolve(text, facts, enabled)
+    branch = resolvers.branch_of(it.id, facts.sessions, facts.prs)
+    got = resolvers.resolve(text, facts, _resolving(config), branch)
     return got if got and got[0] not in it.answers else None
+
+
+def _resolving(config):
+    """The :mod:`asf.kernel.resolvers` classes ``config`` turns on."""
+    return tuple(c for c, on in ((resolvers.TRUNK_TESTS, config.resolve_trunk_tests),
+                                 (resolvers.SYMBOL, config.resolve_symbols),
+                                 (resolvers.GATE, config.resolve_gates),
+                                 (resolvers.INBOX_BUG, config.resolve_inbox_bugs)) if on)
+
+
+def _file_inbox(it, facts, config, text, actions):
+    """Append the :class:`FileInbox` a question asks for when the record does not hold its card
+    yet (:func:`asf.kernel.resolvers.to_file`); the next tick answers it with the card's path."""
+    card = resolvers.to_file(text, facts, it.id, _resolving(config))
+    if card:
+        actions.append(A.FileInbox(it.id, *card))
 
 
 def _answers_stuck(answer, it):

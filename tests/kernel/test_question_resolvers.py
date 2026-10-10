@@ -116,7 +116,8 @@ class Match(unittest.TestCase):
         self.assertEqual(R.match(R_0313_SYM), want)
 
     def test_other_questions_stay_with_the_console(self):
-        for q in (Q_0314_MINT, 'json or yaml?', 'whether tests.test_x fails?',
+        self.assertEqual(R.match(Q_0314_MINT).cls, R.INBOX_BUG, 'its own class, not trunk-tests')
+        for q in ('json or yaml?', 'whether tests.test_x fails?',
                   'whether the cloud is red?', 'whether `a.b` and `c.d` exist — `a.b` does not exist',
                   'whether the id claim covers S-1; or re-mint', ''):
             self.assertIsNone(R.match(q), q)
@@ -335,7 +336,8 @@ class Settings(unittest.TestCase):
     def test_defaults(self):
         s = settings.read(None)['resolve']
         self.assertEqual(s, {'trunk_tests': True, 'symbols': True, 'test_timeout_s': 600,
-                             'python': 'python3', 'test_runs_per_tick': 1})
+                             'python': 'python3', 'test_runs_per_tick': 1, 'gates': True,
+                             'inbox_bugs': True})
 
 
 if __name__ == '__main__':

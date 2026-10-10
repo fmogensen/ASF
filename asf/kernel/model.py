@@ -351,7 +351,9 @@ class Config:
     kernel from ``Facts.id_claims`` (:mod:`asf.kernel.idclaims`). ``resolve_trunk_tests`` /
     ``resolve_symbols``: a question whether named tests are red on trunk or only in a cloud
     sandbox, or whether a symbol it says does not exist exists, is answered by the kernel from
-    ``Facts.resolved`` (:mod:`asf.kernel.resolvers`). The product file's ``kernel:`` block sets
+    ``Facts.resolved`` (:mod:`asf.kernel.resolvers`). ``resolve_gates``: a repo gate script a
+    session could not run is answered from its run on the branch head; ``resolve_inbox_bugs``: a
+    Bug card a session could not mint is filed through the inbox, then answered. The product file's ``kernel:`` block sets
     them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0).
     ``wait_targets`` maps a wait class (``kernel.waits.targets``: ``seat``, ``review``, ``train``,
     ``stuck``, …) to seconds: an item whose current wait (``Facts.waits``) is older is a breach
@@ -388,6 +390,8 @@ class Config:
     id_claim_prefixes: tuple = ('S', 'T')
     resolve_trunk_tests: bool = True
     resolve_symbols: bool = True
+    resolve_gates: bool = True
+    resolve_inbox_bugs: bool = True
     wait_targets: dict = dataclasses.field(default_factory=dict)
     max_session_age_h: float = None
     max_review_age_h: float = None
