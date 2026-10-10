@@ -23,12 +23,14 @@ not true, not retired) is decided — by code where the facts already settle it,
 
 A verdict is applied through the groom's own answer grammar (:func:`answer_words`:
 ``yes``/``close``/``parent <id>``/``S1|S2|S3`` on a card; :func:`note_clauses`:
-``close``/``feature``/``epic``/``bug <signature>``/``parent <id>``/``S1|S2|S3`` on a note), and
+``close``/``feature``/``epic``/``story``/``bug <signature>``/``parent <id>``/``S1|S2|S3`` on a note), and
 ``need``/``nice``/``later`` set the card's ``priority:`` (``later`` parks it in the kernel).
 Each decision logs ``INTAKE <id> -> <decision>``.
 """
 import dataclasses
 import re
+
+from asf.kernel import actions as A
 
 #: the session kind that decides an undecided card or an inbox note with a question
 KIND = 'intake-decide'
@@ -37,13 +39,13 @@ KIND = 'intake-decide'
 HEAD = 'INTAKE-DECIDE'
 
 DECISIONS = ('need', 'nice', 'later', 'close')
-KINDS = ('feature', 'bug', 'epic')
+KINDS = ('feature', 'bug', 'epic', 'story')
 SEVERITIES = ('S1', 'S2', 'S3')
 
 #: the block an intake-decide session ends with (its brief quotes it)
 VERDICT_SCHEMA = """INTAKE-DECIDE
 decision: need | nice | later | close
-kind: feature | bug | epic
+kind: feature | bug | epic | story   # story: an inbox note under a Feature
 parent: <id or none>
 severity: S1 | S2 | S3   # bugs only
 reason: <one line>"""
@@ -215,6 +217,8 @@ def check(v, it, items):
         return ''
     if v.kind == 'epic' and it.type not in (NOTE, 'epic'):
         return 'a %s is not judged an epic — only an inbox note becomes one' % it.type
+    if v.kind == 'story' and it.type not in (NOTE, 'story'):
+        return 'a %s is not judged a story — only an inbox note becomes one' % it.type
     kind = v.kind if it.type in (NOTE, 'feature', 'bug') else it.type
     if kind == 'epic' and v.parent:
         return 'an epic has no parent (%s named)' % v.parent
@@ -229,7 +233,21 @@ def check(v, it, items):
                 ' or '.join(PARENT_TYPES.get(kind, ())) or 'nothing')
     elif it.type == NOTE and kind == 'feature':
         return 'a feature note needs a parent Epic'
+    elif it.type == NOTE and kind == 'story':
+        return 'a story note needs a parent Feature'
     return ''
+
+
+def correct(v, it, items):
+    """``(Verdict, why)``: the verdict ``v`` on ``it`` corrected by code when :func:`check`
+    refused it and the fix is determined, else ``(None, '')``. One case: a note judged a Feature
+    under an open Feature is a Story under that Feature (Epic > Feature > Story)."""
+    p = items.get(v.parent) if v.parent else None
+    if (it is not None and it.type == NOTE and v.decision != 'close' and v.kind == 'feature'
+            and p is not None and p.type == 'feature' and p.state.value != 'done'):
+        return (dataclasses.replace(v, kind='story'),
+                'a note under Feature %s is a Story under it' % v.parent)
+    return None, ''
 
 
 # ---- the groom's grammar ------------------------------------------------------------------------
@@ -255,7 +273,7 @@ def note_clauses(it, v):
     if v.decision == 'close':
         return 'close'
     clauses = ['bug %s' % (' '.join(str(it.title or '').split()) or 'untitled defect')
-               if v.kind == 'bug' else v.kind if v.kind == 'epic' else 'feature']
+               if v.kind == 'bug' else v.kind if v.kind in ('epic', 'story') else 'feature']
     if v.parent:
         clauses.append('parent %s' % v.parent)
     if v.kind == 'bug' and v.severity:
@@ -325,3 +343,50 @@ def goals(items):
             tags.append(str(e.priority))
         out.append('%s (%s) %s' % (e.id, ', '.join(tags), e.title))
     return out
+
+
+# ---- never silent -------------------------------------------------------------------------------
+
+#: the line a note whose sessions are spent is Stuck with (on the operator)
+SPENT_NOTE = ('%d intake-decide session(s) gave no valid verdict — %s; answer its ## Question '
+              '(add the line it asks for to the note)')
+
+
+def unheard(facts, config, actions):
+    """``[(key, owner, reason)]``: each inbox note this tick neither decides, launches, nor finds
+    in a live session — never silent. ``owner`` is ``operator`` for a note whose sessions are
+    spent (Stuck, the reason its question and the last rejection), '' for one that waits (on a
+    seat, a paused factory, or the launch budget)."""
+    if not config.intake:
+        return []
+    notes = getattr(facts, 'notes', None) or {}
+    tries = getattr(facts, 'intake_tries', None) or {}
+    heard = {a.item_id for a in actions if isinstance(a, A.Decide)
+             or (isinstance(a, A.Launch) and a.kind == KIND)}
+    busy = {s.item_id for s in facts.sessions if s.alive}
+    launched = sum(1 for a in actions if isinstance(a, A.Launch))
+    asked = sum(1 for a in actions if isinstance(a, A.Launch) and a.kind == KIND)
+    out = []
+    for key in sorted(notes):
+        if key in heard or key in busy:
+            continue
+        n = tries.get(key, 0)
+        q = ' '.join(str(notes[key].question or 'no question').split())
+        if n >= config.intake_max_tries:
+            out.append((key, 'operator', SPENT_NOTE % (n, q)))
+        elif facts.paused:
+            out.append((key, '', 'waits: launches are paused'))
+        elif asked >= config.intake_decide_per_tick:
+            out.append((key, '', 'waits: %d intake-decide launch(es) a tick, all taken'
+                        % config.intake_decide_per_tick))
+        else:
+            out.append((key, '', 'waits for a free seat: %d launch(es) this tick took every '
+                        'seat' % launched))
+    return out
+
+
+def unheard_line(key, owner, reason):
+    """``INTAKE STUCK <key> [operator] <reason>`` or ``INTAKE WAIT <key> <reason>``."""
+    if owner:
+        return 'INTAKE STUCK %s [%s] %s' % (key, owner, reason)
+    return 'INTAKE WAIT %s %s' % (key, reason)

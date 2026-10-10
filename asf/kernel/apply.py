@@ -326,8 +326,17 @@ class _Applier:
             v, why = None, 'no longer on the record or in the inbox'
         if v is not None:
             why = I.check(v, it, self.facts.items)
+            if why:  # a fix the code can determine is made, never a dead end
+                fixed, how = I.correct(v, it, self.facts.items)
+                if fixed is not None and not I.check(fixed, it, self.facts.items):
+                    self.log('%s %s — intake verdict corrected by code: %s (%s)'
+                             % (s.job, key, how, why))
+                    v, why = fixed, ''
         if why:
             self.log('%s %s — intake verdict rejected: %s' % (s.job, key, why))
+            keep = getattr(self.ports.record, 'intake_rejected', None)
+            if keep is not None:  # the next session reads it; a spent note is Stuck with it
+                keep(key, why)
             return
         try:
             note = self.ports.record.decide_intake(key, v)

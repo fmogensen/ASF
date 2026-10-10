@@ -242,6 +242,8 @@ def print_summary(summary, out=print):
         out(dor_line(summary['dor']))
     if intake_line(summary):
         out(intake_line(summary))
+    for key, owner, why in summary.get('unheard') or []:
+        out(intake.unheard_line(key, owner, why))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:
@@ -272,13 +274,19 @@ def plan_notes(plan, facts):
     return out
 
 
-def save_plan(state_dir, plan, facts):
-    """Write :data:`PLAN_FILE`: each judged item's state (and Stuck), and the sessions."""
+def save_plan(state_dir, plan, facts, unheard=()):
+    """Write :data:`PLAN_FILE`: each judged item's state (and Stuck), and the sessions; an
+    inbox note Stuck on its owner (``unheard``: :func:`asf.kernel.intake.unheard`) is a Stuck
+    row too."""
     from asf.kernel.ports import now_iso
-    data = {'at': now_iso(), 'states': {
-        iid: {'state': s.value, **({'reason': st.reason, 'owner': st.owner,
-                                    'blocked': st.blocked_count} if st else {})}
-        for iid, (s, st) in sorted(plan.states.items())},
+    states = {iid: {'state': s.value, **({'reason': st.reason, 'owner': st.owner,
+                                         'blocked': st.blocked_count} if st else {})}
+              for iid, (s, st) in sorted(plan.states.items())}
+    for key, owner, why in unheard:
+        if owner:
+            states[key] = {'state': State.STUCK.value, 'reason': why, 'owner': owner,
+                           'blocked': 0}
+    data = {'at': now_iso(), 'states': states,
         'sessions': [{'job': x.job, 'item': x.item_id, 'kind': x.kind, 'alive': x.alive,
                       'started': getattr(x, 'started', '')} for x in facts.sessions],
         'idle': plan.idle, 'notes': plan_notes(plan, facts),
@@ -429,6 +437,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
                 out('kernel tick (dry run): GitHub unreadable — %s' % facts.github_error)
                 return {'blind': facts.github_error, 'dry_run': True, 'failed': []}
             plan = decide(read_waits(facts, state_dir, _min_samples(product)), config)
+        unheard = intake.unheard(facts, config, plan.actions)
         for a in plan.actions:
             out('would %s' % describe(a))
         out(seat_line(facts, config, ports))
@@ -437,6 +446,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             out('intake (dry run): %d note(s) in the inbox, %d with a question — the rest are '
                 'minted on a real tick' % (count(), len(facts.notes)))
         summary = summarize(plan, facts, dry_run=True)
+        summary['unheard'] = unheard
         summary['waits'] = measure_waits(product, state_dir, plan, facts, config, write=False,
                                          out=out)
         summary['main_moves'] = measure_main_moves(product, state_dir, facts, plan, config,
@@ -457,6 +467,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             if facts.github_error:
                 return blind_tick(facts, ports, out, minted)
             plan = decide(read_waits(facts, state_dir, _min_samples(product)), config)
+            unheard = intake.unheard(facts, config, plan.actions)
             result = apply(plan, facts, ports, log=out)
             publish = getattr(ports.record, 'publish', None)
             if publish and (result.written or result.intake or minted):
@@ -465,7 +476,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
                         set(result.written) | set(result.intake) | set(minted)))
                 except Exception as e:  # a refused or failed record commit never ends the tick
                     out('publish FAILED: %s' % (str(e).splitlines() or [type(e).__name__])[0])
-            save_plan(state_dir, plan, facts)
+            save_plan(state_dir, plan, facts, unheard)
             waits_line = measure_waits(product, state_dir, plan, facts, config, out=out)
             moves_lines = measure_main_moves(product, state_dir, facts, plan, config, out=out)
     except Locked as e:
@@ -473,6 +484,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
         return {'locked': str(e)}
     summary = summarize(plan, facts, result)
     summary['minted'] = len(minted)
+    summary['unheard'] = unheard
     summary['waits'] = waits_line
     summary['main_moves'] = moves_lines
     print_summary(summary, out)
