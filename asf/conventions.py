@@ -426,7 +426,10 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                # F-0300: off opts a product out of the rule pass that waives a cosmetic or
                # already-settled dispute before any adjudicate session is spawned
                # (asf.evidence.rulepass) — default off
-               'rule_pass')
+               'rule_pass',
+               # T-0318: the secret directories asf.workers.worker_settings.deny_rules turns into
+               # one Read(<dir>/**) deny rule each, on top of FIXED_DENY — default none
+               'secret_dirs')
 
 
 
