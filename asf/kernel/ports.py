@@ -728,7 +728,8 @@ class RealSessions:
         """``'cloud'`` or ``'local'``: the seat a ``kind`` launch takes. A launch that needs the
         host (``meta['host']``: a rebase round, which the host publishes from its worktree; a
         kind :func:`asf.workers.cloud.local_only` keeps here) takes a local seat; every other one
-        a cloud seat while the lane has one (``kernel.launch.cloud_max``), its creates this tick
+        a cloud seat — if its brief kind is in ``kernel.launch.cloud_kinds`` (a review would push a
+        report commit and restart the PR's CI, so reviews stay local) — while the lane has one (``kernel.launch.cloud_max``), its creates this tick
         are under ``cloud.max_creates_per_tick`` and its fallback breaker has not tripped; else a
         local seat (``kernel.launch.local_max``). Raises :class:`PortError` when neither has one."""
         from asf.workers import cloud
@@ -737,8 +738,10 @@ class RealSessions:
         s = cloud_lane(self.product, self.cfg()) if cloud_max else None
         host = bool((meta or {}).get('host')) or (
             s is not None and cloud.local_only(_KindRow(kind), s))
-        if s is None or host:
-            why = 'the cloud lane is off' if s is None else 'the launch needs the host'
+        allowed = self.product.kernel['launch']['cloud_kinds']
+        if s is None or host or kind not in allowed:
+            why = ('the cloud lane is off' if s is None else 'the launch needs the host' if host
+                   else '%s is not in kernel.launch.cloud_kinds' % kind)
         elif in_cloud >= cloud_max:
             why = 'cloud seats %d/%d' % (in_cloud, cloud_max)
         elif s.max_creates_per_tick and self._creates >= s.max_creates_per_tick:
@@ -760,7 +763,10 @@ class RealSessions:
         lane's breaker and falls back to a local seat when there is one."""
         from asf.workers import cloud
         job = '%s-%s-%d' % (kind, item_id.lower(), int(time.time()))
-        if self.lane(kind, meta) == 'cloud':
+        bk = getattr(brief, 'kind', None)
+        bk = bk.replace('_', '-') if isinstance(bk, str) and bk else (
+            'coder' if kind == 'build' else kind)
+        if self.lane(bk, meta) == 'cloud':
             s = cloud_lane(self.product, self.cfg())
             self._creates += 1
             try:

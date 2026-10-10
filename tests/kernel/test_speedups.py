@@ -136,7 +136,7 @@ class Launch(unittest.TestCase):
 
     def test_cloud_first_then_local_then_no_seat(self):
         self.port.launch('build', 'T-0001', 'worker/T-0001', self.brief())
-        self.port.launch('review', 'T-0002', 'worker/T-0002', self.brief())
+        self.port.launch('spec', 'T-0002', 'worker/T-0002', self.brief())
         self.port.launch('build', 'T-0003', 'worker/T-0003', self.brief())
         lanes = [(acct, rt is not None) for _j, acct, rt, _m, _h in self.spawned]
         self.assertEqual(lanes, [('c1', True), ('c2', True), ('l1', False)])
@@ -145,6 +145,22 @@ class Launch(unittest.TestCase):
         self.assertEqual(self.spawned[0][3], 'claude-sonnet-5')
         with self.assertRaisesRegex(P.PortError, r'local 1/1, cloud 2/2'):
             self.port.launch('build', 'T-0004', 'worker/T-0004', self.brief())
+
+    def test_a_review_stays_local_even_with_cloud_seats_free(self):
+        self.port.launch('review', 'T-0001', 'worker/T-0001', self.brief())
+        self.assertEqual([(a, rt) for _j, a, rt, _m, _h in self.spawned], [('l1', None)])
+        with self.assertRaisesRegex(P.PortError, r'review is not in kernel.launch.cloud_kinds'):
+            self.port.launch('review', 'T-0002', 'worker/T-0002', self.brief())
+        self.port.launch('build', 'T-0003', 'worker/T-0003', self.brief())
+        self.assertIs(self.spawned[-1][2], self.runtime)
+
+    def test_cloud_kinds_is_a_list_of_kinds(self):
+        errors, _ = settings.problems({'launch': {'cloud_kinds': 'review'}})
+        self.assertEqual([k for k, _m in errors], ['kernel.launch.cloud_kinds'])
+        k = settings.read({'launch': {'cloud_kinds': ['spec']}})
+        self.assertEqual(k['launch']['cloud_kinds'], ['spec'])
+        self.assertEqual(settings.read(None)['launch']['cloud_kinds'],
+                         ['coder', 'fix-bug', 'spec', 'plan'])
 
     def test_a_launch_needing_the_host_takes_a_local_seat(self):
         self.port.launch('build', 'T-0001', 'worker/T-0001', self.brief(), {'pr': 3, 'host': True})

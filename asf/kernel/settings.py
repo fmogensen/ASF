@@ -9,6 +9,10 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    local_max: 6,              # local seats (unset: max_sessions)
                    cloud_max: 0,              # cloud-lane seats (the product's ``cloud:`` lane);
                                               # the tick launches up to local_max + cloud_max
+                   cloud_kinds: [coder, fix-bug, spec, plan],   # the brief kinds that may go to
+                                              # cloud; every other (review, light-review, correct,
+                                              # rebases) takes a local seat — a cloud review would
+                                              # push a report commit and restart the PR's CI
                    rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
       models:     {coder: claude-sonnet-5, fix-bug: claude-sonnet-5, correct: claude-sonnet-5,
@@ -44,12 +48,13 @@ MODEL_KINDS = {'coder': LIGHT_MODEL, 'fix-bug': LIGHT_MODEL, 'correct': LIGHT_MO
 
 #: every key, its default and its kind: ``int``/``float`` (non-negative), ``bool``, a tuple of
 #: allowed words, ``'time'`` (an ISO-8601 time, or unset), ``'text'`` (a non-empty string) or
-#: ``'globs'`` (a list of path globs). A default of None is "unset" (``launch.local_max``:
+#: ``'globs'`` (a list of path globs) or ``'words'`` (a list of names). A default of None is "unset" (``launch.local_max``:
 #: ``max_sessions``).
 SPEC = {
     'tick': {'interval_s': (120, int)},
     'launch': {'max_sessions': (6, int), 'rank': ('inherit', ('inherit', 'own')),
-               'local_max': (None, int), 'cloud_max': (0, int)},
+               'local_max': (None, int), 'cloud_max': (0, int),
+               'cloud_kinds': (('coder', 'fix-bug', 'spec', 'plan'), 'words')},
     'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
     'review': {'light_paths': (('docs/**', '*.md'), 'globs')},
     'briefs': {'max_appended_chars': (4000, int)},
@@ -95,6 +100,10 @@ def _bad(value, kind):
         return '' if parse_time(value) else 'must be an ISO-8601 time'
     if kind == 'text':
         return '' if isinstance(value, str) and value.strip() else 'must be a non-empty string'
+    if kind == 'words':
+        ok = isinstance(value, (list, tuple)) and all(isinstance(g, str) and g.strip()
+                                                      for g in value)
+        return '' if ok else 'must be a list of brief kinds (coder, fix-bug, spec, plan, ...)'
     if kind == 'globs':
         ok = isinstance(value, (list, tuple)) and all(isinstance(g, str) and g.strip()
                                                       for g in value)
@@ -149,9 +158,10 @@ def read(block):
             v = given.get(key)
             if v is not None and not _bad(v, kind):
                 out[section][key] = (parse_time(v) if kind == 'time' else
-                                     [str(g).strip() for g in v] if kind == 'globs' else
+                                     [str(g).strip() for g in v] if kind in ('globs', 'words') else
                                      v.strip() if kind == 'text' else v)
     out['review']['light_paths'] = list(out['review']['light_paths'])
+    out['launch']['cloud_kinds'] = list(out['launch']['cloud_kinds'])
     if out['launch']['local_max'] is None:
         out['launch']['local_max'] = out['launch']['max_sessions']
     return out
