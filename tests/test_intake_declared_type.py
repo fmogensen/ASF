@@ -178,10 +178,16 @@ class RefusalNamesTheMissingLine(unittest.TestCase):
             "# Billing checkout\ntype: task\n\nSomething new.\n",
             'task', shape.NEEDS['task'], 'feature')
 
-    def test_epic_with_fewer_than_two_features_asks_for_a_features_list(self):
-        self._run_case(
-            "# Billing checkout\ntype: epic\n\nSomething new.\n",
-            'epic', shape.NEEDS['epic'], 'feature')
+    def test_a_declared_epic_needs_no_features_list_and_is_minted_an_epic(self):
+        # 2026-10-10 (F-0346): `type: epic` is the declaration; the candidate list stays body
+        path = os.path.join(self.root, 'inbox', 'thing.md')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("# Billing overhaul\ntype: epic\n\nCandidates:\n1. a\n2. b\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(self._folders()['features'], ['F-0001.md'])
+        self.assertIn('E-0002.md', os.listdir(os.path.join(self.root, 'epics')))
 
     def test_feature_carrying_a_signature_asks_for_no_signature(self):
         self._run_case(

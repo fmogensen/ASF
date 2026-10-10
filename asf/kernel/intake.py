@@ -10,7 +10,9 @@ not true, not retired) is decided — by code where the facts already settle it,
 - **code** (:func:`shortcut`): a card whose own text names its kind and its parent — a Story or
   Task under a parent of the right type (minted by a landed spec or a plan), a Bug filed by its
   signature, a Feature whose shape was declared rather than defaulted — is decided ``need`` (its
-  parent's ``priority`` when the parent carries one); a card whose work is Done is decided too.
+  parent's ``priority`` when the parent carries one); an Epic minted with no parent (it has
+  none, and no spec or plan lane) is decided ``need`` (its own ``priority`` when it carries
+  one); a card whose work is Done is decided too.
 - **session** (:func:`plan`): the rest — a note the shape rules asked a question about, a card
   whose kind was a guess (``shape: default``) — at most ``Config.intake_decide_per_tick`` a tick,
   only on seats every finishing and building launch left free, notes first, then Bugs, oldest
@@ -21,7 +23,7 @@ not true, not retired) is decided — by code where the facts already settle it,
 
 A verdict is applied through the groom's own answer grammar (:func:`answer_words`:
 ``yes``/``close``/``parent <id>``/``S1|S2|S3`` on a card; :func:`note_clauses`:
-``close``/``feature``/``bug <signature>``/``parent <id>``/``S1|S2|S3`` on a note), and
+``close``/``feature``/``epic``/``bug <signature>``/``parent <id>``/``S1|S2|S3`` on a note), and
 ``need``/``nice``/``later`` set the card's ``priority:`` (``later`` parks it in the kernel).
 Each decision logs ``INTAKE <id> -> <decision>``.
 """
@@ -35,13 +37,13 @@ KIND = 'intake-decide'
 HEAD = 'INTAKE-DECIDE'
 
 DECISIONS = ('need', 'nice', 'later', 'close')
-KINDS = ('feature', 'bug')
+KINDS = ('feature', 'bug', 'epic')
 SEVERITIES = ('S1', 'S2', 'S3')
 
 #: the block an intake-decide session ends with (its brief quotes it)
 VERDICT_SCHEMA = """INTAKE-DECIDE
 decision: need | nice | later | close
-kind: feature | bug
+kind: feature | bug | epic
 parent: <id or none>
 severity: S1 | S2 | S3   # bugs only
 reason: <one line>"""
@@ -54,7 +56,8 @@ NOTE_PREFIX = 'inbox.'
 #: the item type a note is carried as in the facts
 NOTE = 'note'
 
-#: the types a card of each type may hang under (``parent:``)
+#: the types a card of each type may hang under (``parent:``): Epic > Feature > Story > Task, a
+#: Bug under an Epic, a Feature or a Story — an Epic under nothing
 PARENT_TYPES = {'feature': ('epic',), 'bug': ('epic', 'feature', 'story'),
                 'story': ('feature',), 'task': ('feature', 'story'), 'epic': ()}
 
@@ -126,6 +129,12 @@ def shortcut(it, items):
     if it.state.value == 'done':
         return Verdict('need', it.type, it.parent or '', '', 'its work is done')
     rule = shape_rule(it.body)
+    if it.type == 'epic':
+        if it.parent:
+            return None  # an Epic has no parent: a session judges it, and check() refuses one
+        own = str(it.priority or '').lower()
+        return Verdict(own if own in ('need', 'nice', 'later') else 'need', 'epic', '', '',
+                       'an Epic, with no parent')
     named = (it.type in ('story', 'task') or (it.type == 'bug' and bool(it.signature))
              or (it.type == 'feature' and rule not in ('', GUESSED)))
     if not named or rule == GUESSED or not it.parent or not _parent_ok(it.type, it.parent, items):
@@ -204,7 +213,11 @@ def check(v, it, items):
     be minted needs a parent unless it is a Bug (the product's default Bug Epic takes it)."""
     if v.decision == 'close':
         return ''
+    if v.kind == 'epic' and it.type not in (NOTE, 'epic'):
+        return 'a %s is not judged an epic — only an inbox note becomes one' % it.type
     kind = v.kind if it.type in (NOTE, 'feature', 'bug') else it.type
+    if kind == 'epic' and v.parent:
+        return 'an epic has no parent (%s named)' % v.parent
     if v.parent:
         if v.parent not in items:
             return 'parent %s is not on the record' % v.parent
@@ -242,7 +255,7 @@ def note_clauses(it, v):
     if v.decision == 'close':
         return 'close'
     clauses = ['bug %s' % (' '.join(str(it.title or '').split()) or 'untitled defect')
-               if v.kind == 'bug' else 'feature']
+               if v.kind == 'bug' else v.kind if v.kind == 'epic' else 'feature']
     if v.parent:
         clauses.append('parent %s' % v.parent)
     if v.kind == 'bug' and v.severity:
