@@ -64,8 +64,11 @@ item and the actions of one tick. The rules it holds, in the design's words:
   failed is an attempt :data:`API_FAILED` — relaunched, then Stuck(owner=loop). A dead pid ends
   the session and frees its worktree. No Stuck reason is ever empty, a code fence or noise
   (:func:`asf.kernel.reports.meaningful`); one recorded that way is judged afresh.
-- Documents: only a Feature with no children launches ``spec`` (``plan`` once its spec has
-  landed); a Story or Epic with no children is New and never launches.
+- Documents: only a Feature with no Task or Bug under it launches ``spec`` (``plan`` once its
+  spec has landed — on trunk, or its spec PR merged): Stories minted from its spec leave its
+  document lane its own (:func:`_derived`). A merged spec PR never closes a Feature
+  (:func:`_spec_only`). A Story or Epic with no children is New and never launches. A Story's
+  children are the Tasks under it through ``parent`` and those naming it on ``stories:``.
 - Rank: ``config.rank`` ``inherit`` (the default) walks ``parent`` for a rank; ``own`` reads
   only the item's own.
 - Idle: when ``config.idle_alarm`` is on, nothing launches, at least ``config.idle_min_free``
@@ -384,7 +387,8 @@ def _judge(it, facts, config, actions):
             if ended is not None:
                 ended_stuck, asked = ended, s
 
-    if open_pr is None and any(p.merged for p in prs) and not it.reopened:
+    spec_only = _spec_only(it, prs, config)
+    if open_pr is None and any(p.merged for p in prs) and not it.reopened and not spec_only:
         return _Judged(State.DONE)
     if open_pr is None and not live and not question:
         branch = _pr_branch(it, sessions, pushed, stuck, ended_stuck, facts, config)
@@ -427,7 +431,7 @@ def _judge(it, facts, config, actions):
                       fresh=pushed is not None)
         j.hold = j.hold or hold
         return j
-    if it.state is State.DONE and not it.reopened:
+    if it.state is State.DONE and not it.reopened and not spec_only:
         return _Judged(State.DONE)
     if it.priority == 'later' or (effective_rank(it.id, facts.items, config.rank != 'own') is None
                                   and it.type not in BUILDABLE):
@@ -948,17 +952,35 @@ def _keep(stuck):
 # ---- pass two: derived states, waits, blocked counts --------------------------------------------
 
 def _children(items):
-    """``{parent_id: [child ids]}`` from the ``parent`` link only."""
+    """``{parent_id: [child ids]}`` from the ``parent`` link, and for a Story also the Tasks that
+    declare it on their ``stories:`` line (:attr:`asf.kernel.model.Item.stories`)."""
     out = {}
     for iid in sorted(items):
         parent = items[iid].parent
         if parent in items:
             out.setdefault(parent, []).append(iid)
+        for sid in items[iid].stories:
+            if sid != parent and sid in items and items[sid].type == 'story':
+                out.setdefault(sid, []).append(iid)
     return out
 
 
 def _derived(iid, items, children):
-    return items[iid].type in CONTAINERS and bool(children.get(iid))
+    """Whether ``iid``'s state comes from its children: a container that has some — save a Feature
+    with no Task or Bug under it (only its Stories, minted from its spec): its document lane is
+    still its own, so it launches its plan."""
+    if items[iid].type not in CONTAINERS or not children.get(iid):
+        return False
+    return items[iid].type != DOCUMENTED or _has_work(iid, items, children)
+
+
+def _has_work(iid, items, children, seen=()):
+    """Whether a Task or Bug hangs anywhere under ``iid`` (through :func:`_children`)."""
+    for c in children.get(iid, ()):
+        if items[c].type in BUILDABLE or (c not in seen
+                                          and _has_work(c, items, children, seen + (iid,))):
+            return True
+    return False
 
 
 def _state_of(iid, items, judged, children, states, seen, parked):
@@ -1085,7 +1107,7 @@ def _launches(facts, config, judged, children, states, parked, blocks=None):
         if any(_overlap(items[iid].writes, w) for w in busy):
             skipped[iid] = 'overlap'
             continue
-        kind = _kind(items[iid], facts)
+        kind = _kind(items[iid], facts, config)
         out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config, items[iid]),
                             list(judged[iid].findings), judged[iid].model))
         busy.append(items[iid].writes)
@@ -1122,10 +1144,26 @@ def _idle(facts, config, judged, states, parked, skipped):
     return {'free': free, 'waiting': sum(reasons.values()), 'reasons': top}
 
 
-def _kind(it, facts):
+def _kind(it, facts, config=None):
     if it.type in BUILDABLE:
         return 'build'
-    return 'plan' if it.id in facts.specs_landed else 'spec'
+    landed = it.id in facts.specs_landed or (
+        config is not None and _spec_only(it, [p for p in facts.prs if p.item_id == it.id], config))
+    return 'plan' if landed else 'spec'
+
+
+def _lane_prefix(config, kind):
+    return next((p for p in config.doc_branches if p.strip('/') == kind), None)
+
+
+def _spec_only(it, prs, config):
+    """Whether ``it`` is a Feature whose merged pull requests are all on its spec branch: a landed
+    spec is the start of the Feature's work (its plan is next), never its end — and a Done its card
+    holds from that merge is not one either."""
+    spec = _lane_prefix(config, 'spec')
+    merged = [p for p in prs if p.merged]
+    return (it.type == DOCUMENTED and bool(spec) and bool(merged)
+            and all(p.branch.startswith(spec) for p in merged))
 
 
 def _branch(kind, iid, config, item=None):

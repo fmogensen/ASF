@@ -159,7 +159,8 @@ def item_from_card(rec):
         id=meta.get('id'), type=str(meta.get('type') or 'task'), title=str(meta.get('title') or ''),
         parent=meta.get('parent'), rank=rank if isinstance(rank, int) else None,
         priority=meta.get('priority'), after=[str(a) for a in as_list(meta.get('after'))],
-        writes=[str(w) for w in as_list(meta.get('writes'))], body=rec.get('body') or '',
+        writes=[str(w) for w in as_list(meta.get('writes'))], stories=declared_stories_of(rec),
+        body=rec.get('body') or '',
         state=state, stuck=stuck, attempts=[str(a) for a in as_list(machine.get(ATTEMPTS))],
         fix_rounds=int(machine.get(FIX_ROUNDS) or 0),
         extra_rounds=int(machine.get(EXTRA_ROUNDS) or 0),
@@ -170,6 +171,20 @@ def item_from_card(rec):
         notes=[str(n) for n in as_list(machine.get(NOTES))],
         stuck_since=(str(machine.get(STUCK_SINCE)) if stuck is not None and machine.get(STUCK_SINCE)
                      else None))
+
+
+def declared_stories_of(rec):
+    """The Story ids a Task card declares it covers: its ``stories:`` field, else the ``stories:``
+    line of its body (the plan's Task shape), in order; [] for any other card."""
+    from asf.record.plan_tasks import STORIES_LINE_RE, STORY_ID_RE
+    meta = rec['meta']
+    if meta.get('type') != 'task':
+        return []
+    named = [str(s) for s in as_list(meta.get('stories')) if s]
+    if not named:
+        m = STORIES_LINE_RE.search(rec.get('body') or '')
+        named = STORY_ID_RE.findall(m.group(1)) if m else []
+    return list(dict.fromkeys(named))
 
 
 def _jsonl(path):

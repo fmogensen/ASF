@@ -326,6 +326,7 @@ class _Applier:
         """Each judged item's state and Stuck, onto this tick's updates where the card differs.
         A container with children is derived every tick and never stored."""
         parents = {it.parent for it in self.facts.items.values()}
+        parents |= {sid for it in self.facts.items.values() for sid in it.stories}
         states = dict(self.plan.states)
         for iid, why in self.refused.items():  # decide counted on a push that did not happen
             if iid in states:

@@ -5,7 +5,9 @@ apply the plan's actions. Everything here is what the reader hands ``decide``: n
 a disk, a network or a clock, so a test builds a world by hand and asks what the kernel would do.
 
 Every Task or Bug has exactly one :class:`State`. A Feature's or a Story's state is never stored:
-it is derived from the Tasks whose ``parent`` link points at it, and only that link counts.
+it is derived from the Tasks whose ``parent`` link points at it, and — for a Story — from the Tasks
+that declare it on their ``stories:`` line (:attr:`Item.stories`); nothing a body merely mentions
+counts.
 """
 import dataclasses
 import enum
@@ -70,7 +72,9 @@ class Item:
     is unranked). ``priority == 'later'`` parks the item and every item under it
     (:attr:`State.PARKED`): nothing waits on it and its ``writes`` hold no one. ``after`` lists
     the declared wait edges.
-    ``writes`` are the path globs the item declares it will change.
+    ``writes`` are the path globs the item declares it will change. ``stories`` are the Story ids
+    a Task declares it covers (its ``stories:`` field, else its body's ``stories:`` line): each
+    such Story takes its state from that Task as from a child.
 
     ``state``/``stuck`` are what the card records now. ``attempts`` is the reason of each failed
     attempt, oldest first (a launch error, a push-less session end); ``fix_rounds`` counts the
@@ -94,6 +98,7 @@ class Item:
     priority: str = None
     after: list = dataclasses.field(default_factory=list)
     writes: list = dataclasses.field(default_factory=list)
+    stories: list = dataclasses.field(default_factory=list)
     body: str = ''
     state: State = State.NEW
     stuck: Stuck = None
