@@ -186,7 +186,7 @@ class RealPort(unittest.TestCase):
         product = env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
         port = P.RealGitHub.__new__(P.RealGitHub)
         port.product, port.slug, port._env, port._run, port._logs = product, 'o/r', None, None, 0
-        port._gh = lambda args, json=True: run(args, json=json)
+        port._gh = lambda args, json=True, retry=True: run(args, json=json)
         return port, github
 
     def test_an_existing_pr_is_recorded_not_created(self):

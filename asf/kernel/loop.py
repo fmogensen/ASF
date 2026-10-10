@@ -5,6 +5,10 @@ held and returns at once), reads :func:`asf.kernel.facts.read_facts`, runs
 :func:`asf.kernel.decide.decide` and applies the plan (:func:`asf.kernel.apply.apply`). A dry run
 takes no lock, prints the plan instead of applying it, and runs under
 :func:`asf.mutation_guard.active`, so even a mutating ``gh`` call that slipped through refuses.
+
+A tick whose GitHub read failed (``Facts.github_error``, after the port's retries) is blind
+(:func:`blind_tick`): it applies :func:`asf.kernel.decide.blind_plan` only, writes no state, keeps
+the last plan, logs one ``GitHub unreadable`` line and returns ``{'blind': why}`` — exit 0.
 """
 import collections
 import contextlib
@@ -15,7 +19,7 @@ import os
 from asf.kernel import actions as A
 from asf.kernel import ports as P
 from asf.kernel.apply import apply, describe
-from asf.kernel.decide import decide
+from asf.kernel.decide import blind_plan, decide
 from asf.kernel.facts import read_facts
 from asf.kernel.model import State
 
@@ -172,6 +176,26 @@ def write_plan_out(path, plan, summary):
         json.dump(data, f, indent=1, sort_keys=True)
 
 
+def blind_tick(facts, ports, out=print):
+    """Apply the blind plan of ``facts`` (see the module doc); the tick's summary."""
+    plan = blind_plan(facts)
+    result = apply(plan, facts, ports, log=out, judged=False)
+    publish = getattr(ports.record, 'publish', None)
+    if publish and result.written:
+        try:
+            publish('kernel: blind tick (%d card(s))' % len(result.written))
+        except Exception as e:  # a refused or failed record commit never ends the tick
+            out('publish FAILED: %s' % (str(e).splitlines() or [type(e).__name__])[0])
+    held = sum(1 for s in facts.sessions if not s.alive and s.ended)
+    out('kernel tick: GitHub unreadable — %s; PR actions and launches skipped, %d crashed '
+        'session(s) ended, %d ended session(s) held; next tick retries'
+        % (facts.github_error, len(plan.actions), held))
+    return {'blind': facts.github_error, 'actions': {}, 'launches': [], 'written':
+            list(result.written),
+            'failed': [(describe(a) if not isinstance(a, tuple) else 'write %s' % a[1], why)
+                       for a, why in result.failed]}
+
+
 def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=print,
          plan_out=None):
     """One tick of the kernel for ``product`` (a name or an :class:`asf.env.Product`). Returns the
@@ -185,6 +209,9 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
     if dry_run:
         with mutation_guard.active():
             facts = read_facts(ports)
+            if facts.github_error:
+                out('kernel tick (dry run): GitHub unreadable — %s' % facts.github_error)
+                return {'blind': facts.github_error, 'dry_run': True, 'failed': []}
             plan = decide(facts, config)
         for a in plan.actions:
             out('would %s' % describe(a))
@@ -202,6 +229,8 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
                 snapshot()
             sync_cloud(ports, out)
             facts = read_facts(ports)
+            if facts.github_error:
+                return blind_tick(facts, ports, out)
             plan = decide(facts, config)
             result = apply(plan, facts, ports, log=out)
             publish = getattr(ports.record, 'publish', None)

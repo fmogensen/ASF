@@ -16,6 +16,10 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # the PR branch, so it restarts no CI
                    rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
+      github:     {retry_delays_s: [2, 5, 10]}   # a transient GitHub read (5xx, timeout,
+                                              # secondary rate limit) is retried after each
+                                              # delay; still failing, the tick is blind: no PR
+                                              # action, crashed sessions still ended, exit 0
       models:     {coder: claude-sonnet-5, fix-bug: claude-sonnet-5, correct: claude-sonnet-5,
                    review: claude-sonnet-5, light-review: claude-sonnet-5,
                    spec: claude-opus-5, plan: claude-opus-5}   # per brief kind: a model id, or
@@ -76,7 +80,8 @@ MODEL_KINDS = {'coder': LIGHT_MODEL, 'fix-bug': LIGHT_MODEL, 'correct': LIGHT_MO
 
 #: every key, its default and its kind: ``int``/``float`` (non-negative), ``bool``, a tuple of
 #: allowed words, ``'time'`` (an ISO-8601 time, or unset), ``'text'`` (a non-empty string) or
-#: ``'globs'`` (a list of path globs) or ``'words'`` (a list of names). A default of None is "unset" (``launch.local_max``:
+#: ``'globs'`` (a list of path globs), ``'words'`` (a list of names) or ``'seconds'`` (a list of
+#: non-negative numbers). A default of None is "unset" (``launch.local_max``:
 #: ``max_sessions``).
 #: the default target of each wait class (:mod:`asf.kernel.waits`), as a duration
 WAIT_TARGETS = {'seat': '10m', 'ci': '10m', 'review': '30m', 'train': '30m', 'merge': '10m',
@@ -112,6 +117,7 @@ SPEC = {
                'local_max': (None, int), 'cloud_max': (0, int),
                'cloud_kinds': (('coder', 'fix-bug', 'spec', 'plan', 'review', 'light-review'),
                                'words')},
+    'github': {'retry_delays_s': ((2, 5, 10), 'seconds')},
     'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
     'review': {'light_paths': (('docs/**', '*.md'), 'globs')},
     'briefs': {'max_appended_chars': (4000, int)},
@@ -172,6 +178,10 @@ def _bad(value, kind):
             for k, v in value.items())
         return '' if ok else ('must map wait classes (%s) to durations like 10m'
                               % ', '.join(WAIT_CLASSES))
+    if kind == 'seconds':
+        ok = isinstance(value, (list, tuple)) and all(
+            isinstance(n, (int, float)) and not isinstance(n, bool) and n >= 0 for n in value)
+        return '' if ok else 'must be a list of non-negative seconds, like [2, 5, 10]'
     if kind == 'globs':
         ok = isinstance(value, (list, tuple)) and all(isinstance(g, str) and g.strip()
                                                       for g in value)
@@ -228,10 +238,12 @@ def read(block):
                 out[section][key] = (dict(default, **v) if kind == 'targets' else
                                      parse_time(v) if kind == 'time' else
                                      [str(g).strip() for g in v] if kind in ('globs', 'words') else
+                                     list(v) if kind == 'seconds' else
                                      v.strip() if kind == 'text' else v)
     out['waits']['targets'] = {k: parse_duration(v) for k, v in out['waits']['targets'].items()
                                if v is not None}
     out['review']['light_paths'] = list(out['review']['light_paths'])
+    out['github']['retry_delays_s'] = list(out['github']['retry_delays_s'])
     out['launch']['cloud_kinds'] = list(out['launch']['cloud_kinds'])
     out['stuck']['id_claim_prefixes'] = list(out['stuck']['id_claim_prefixes'])
     if out['launch']['local_max'] is None:

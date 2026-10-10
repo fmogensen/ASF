@@ -22,6 +22,10 @@ refused force-push left (:func:`asf.kernel.decide.stranded`) has its last ended 
 worktree read (``sessions.stranded``, when the port has it) into ``Facts.stranded``. The ids an
 id-claim question cites (:func:`claim_questions`) are looked up on the record's origin
 (``record.id_claims``, when the port has it) into ``Facts.id_claims``.
+
+A GitHub read that fails (the port has already retried a transient one) leaves no partial PR
+facts: ``prs``, GitHub's reviews and the pushed branches are empty and ``Facts.github_error``
+says why — ``decide`` then plans blind (:func:`asf.kernel.decide.blind_plan`).
 """
 import datetime
 import string
@@ -75,18 +79,31 @@ def read_id_claims(record, items, sessions):
         return {}
 
 
+def read_github(ports, items):
+    """``(prs, GitHub reviews, pushed branches, error)``: all three empty and ``error`` the reason
+    when GitHub could not be read (a rate limit too) — never a part of them."""
+    from asf import gh_limit
+    from asf.kernel.ports import PortError
+    try:
+        prs = [p for p in ports.github.prs() if p.item_id in items]
+        reviews = list(ports.github.reviews([p for p in prs if not p.merged]))
+        branches = getattr(ports.github, 'branches', None)
+        pushed = [b for b in (branches() if branches else []) if b.item_id in items]
+    except (PortError, OSError, gh_limit.RateLimited) as e:  # a blind tick, never a crash
+        return [], [], [], (str(e).splitlines() or [type(e).__name__])[0]
+    return prs, reviews, pushed, ''
+
+
 def read_facts(ports):
     """The :class:`~asf.kernel.model.Facts` the three ports describe now."""
     record = ports.record
     items = record.items()
-    prs = [p for p in ports.github.prs() if p.item_id in items]
-    reviews = list(record.reviews()) + list(ports.github.reviews([p for p in prs if not p.merged]))
+    prs, gh_reviews, pushed, github_error = read_github(ports, items)
+    reviews = list(record.reviews()) + gh_reviews
     answers = [a for a in record.answers()
                if a.item_id in items and answer_counts(a, items[a.item_id])]
     specs = {fid: text for fid, text in record.specs_landed().items()
              if fid in items and items[fid].state is not State.DONE}
-    branches = getattr(ports.github, 'branches', None)
-    pushed = [b for b in (branches() if branches else []) if b.item_id in items]
     look = getattr(ports.sessions, 'stranded', None)
     stranded = []
     for iid in sorted(items):
@@ -99,4 +116,5 @@ def read_facts(ports):
     return Facts(items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
                  stranded=stranded, id_claims=read_id_claims(record, items, sessions),
+                 github_error=github_error,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

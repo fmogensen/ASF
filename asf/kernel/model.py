@@ -260,7 +260,9 @@ class Facts:
     tick's time (ISO-8601 UTC, '' when unknown): a recorded Stuck's age is ``now`` less its
     ``Item.stuck_since``. ``id_claims`` maps each id a session's id-claim question cites
     (:mod:`asf.kernel.idclaims`) to the ``(ref, sha)`` of the claim on the record's origin that
-    covers it, or ``''`` when none does; an id it could not read is absent."""
+    covers it, or ``''`` when none does; an id it could not read is absent. ``github_error`` is
+    why GitHub's PRs could not be read this tick ('' when they were): the facts are then blind and
+    ``decide`` plans only what needs no PR fact (:func:`asf.kernel.decide.blind_plan`)."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -272,6 +274,7 @@ class Facts:
     stranded: list = dataclasses.field(default_factory=list)
     now: str = ''
     id_claims: dict = dataclasses.field(default_factory=dict)
+    github_error: str = ''
 
 
 @dataclasses.dataclass

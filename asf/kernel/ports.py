@@ -550,8 +550,33 @@ def required_from_rules(rules):
     return tuple(out)
 
 
+#: a failed ``gh`` read GitHub may answer on the next try: a 5xx, a timeout, a dropped
+#: connection, a secondary rate limit (:func:`transient`)
+TRANSIENT_RE = re.compile(
+    r'HTTP 5\d\d|\b50[0234]\b|gateway|service unavailable|timed? ?out|timeout|'
+    r'connection (reset|refused)|\bEOF\b|TLS handshake|could not resolve host|'
+    r'something went wrong|secondary rate limit|abuse detection', re.IGNORECASE)
+
+
+def transient(result):
+    """Whether a failed :class:`asf.github.Result` is a transient GitHub failure."""
+    return not result.ok and bool(TRANSIENT_RE.search('%s\n%s' % (result.reason or '',
+                                                                   result.stderr or '')))
+
+
+def _secondary(limit):
+    """Whether a :class:`asf.gh_limit.RateLimited` is GitHub's secondary (burst) limit, which a
+    short wait clears — not the hourly quota, which latches the process."""
+    return bool(re.search(r'secondary rate limit|abuse detection', str(limit), re.IGNORECASE))
+
+
 class RealGitHub:
-    """The product's repo (``repo_slug``) through :func:`asf.github.gh` with its ``auth_env``."""
+    """The product's repo (``repo_slug``) through :func:`asf.github.gh` with its ``auth_env``.
+
+    A read that fails transiently (:func:`transient`; a secondary rate limit too) is tried again
+    after each of ``kernel.github.retry_delays_s`` (default 2, 5, 10 s). Once a read has spent
+    them, GitHub counts as down for this port's tick: later reads are tried once. A write is
+    never retried here — the next tick decides it again on fresh facts."""
 
     #: merged PRs read per tick: enough to see every recent landing
     MERGED_LIMIT = 100
@@ -560,19 +585,42 @@ class RealGitHub:
     #: the compare API's file cap: a change listing this many files may be cut short
     COMPARE_FILES_CAP = 300
 
-    def __init__(self, product, run=None):
+    def __init__(self, product, run=None, sleep=None):
         from asf import ci_pool
         self.product = product
         self.slug = product.repo_slug
         self._env = ci_pool._gh_env(product)
         self._run = run
+        self._sleep = sleep or time.sleep
         self._logs = 0
+        try:
+            self._delays = tuple(product.kernel['github']['retry_delays_s'])
+        except (AttributeError, KeyError, TypeError):
+            self._delays = (2, 5, 10)
+        self._down = False
 
-    def _gh(self, args, json=True):
-        from asf import github
-        return github.gh(args, json=json, env=self._env, run=self._run)
+    def _gh(self, args, json=True, retry=True):
+        from asf import gh_limit, github
+        delays = self._delays if retry and not self._down else ()
+        for i in range(len(delays) + 1):
+            try:
+                r = github.gh(args, json=json, env=self._env, run=self._run)
+            except gh_limit.RateLimited as e:
+                if i >= len(delays) or not _secondary(e):
+                    raise
+                gh_limit.unlatch()  # a burst limit: the backoff below is the wait it asks for
+                r = None
+            if r is not None and not transient(r):
+                return r
+            if i < len(delays):
+                self._sleep(delays[i])
+        if retry:
+            self._down = True
+        return r
 
     def prs(self):
+        """The open PRs and the recently merged ones; :class:`PortError` when either listing is
+        unreadable (a missing merged PR would read as an item with none: no partial facts)."""
         r = self._gh(['pr', 'list', '-R', self.slug, '--state', 'open', '--limit', '200',
                       '--json', ','.join(PR_FIELDS)])
         if not r.ok:
@@ -584,7 +632,9 @@ class RealGitHub:
                 out.append(pr)
         r = self._gh(['pr', 'list', '-R', self.slug, '--state', 'merged', '--limit',
                       str(self.MERGED_LIMIT), '--json', 'number,headRefName,headRefOid'])
-        for d in (r.data or []) if r.ok else []:
+        if not r.ok:
+            raise PortError('merged PRs unreadable: %s' % r.reason)
+        for d in r.data or []:
             iid = item_of_branch(d.get('headRefName'))
             if iid:
                 out.append(M.PR(number=d['number'], branch=d['headRefName'], item_id=iid,
@@ -708,7 +758,7 @@ class RealGitHub:
         return out
 
     def _write(self, args, what):
-        r = self._gh(args, json=False)
+        r = self._gh(args, json=False, retry=False)
         if not r.ok:
             raise PortError('%s: %s' % (what, r.reason))
 
@@ -757,7 +807,8 @@ class RealGitHub:
         if number is not None:
             return number
         r = self._gh(['pr', 'create', '-R', self.slug, '--base', base or self.product.main,
-                      '--head', branch, '--title', title, '--body', body], json=False)
+                      '--head', branch, '--title', title, '--body', body], json=False,
+                     retry=False)
         m = re.search(r'/pull/(\d+)', '%s\n%s' % (r.stdout or '', r.stderr or ''))
         if m and (r.ok or 'already exists' in (r.stderr or '')):
             return int(m.group(1))
@@ -774,7 +825,8 @@ class RealGitHub:
             raise PortError('archive %s: no head sha' % branch)
         archive = ARCHIVE_PREFIX + branch
         r = self._gh(['api', '-X', 'POST', 'repos/%s/git/refs' % self.slug,
-                      '-f', 'ref=refs/heads/%s' % archive, '-f', 'sha=%s' % head_sha])
+                      '-f', 'ref=refs/heads/%s' % archive, '-f', 'sha=%s' % head_sha],
+                     retry=False)
         if not r.ok:
             self._write(['api', '-X', 'PATCH', 'repos/%s/git/refs/heads/%s' % (self.slug, archive),
                          '-f', 'sha=%s' % head_sha, '-F', 'force=true'], 'archive %s' % archive)

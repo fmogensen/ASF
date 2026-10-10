@@ -23,17 +23,27 @@ differs. Launch dropping to 0 while items are Ready, any other action type dropp
 :data:`DROP_MIN` or more to 0, or more items changing state than
 ``kernel.install.max_state_changes`` (default 25) refuses the switch unless ``--accept-diff``.
 
+Install keeps ASF's own footprint clean (:func:`prune_venvs`): of this venv's family (the pipx
+venvs named like it but for the trailing short sha, ``asf-factory-asf-kernel-<sha>``) it keeps
+this one and the :data:`KEEP_PREVIOUS` newest others for a rollback, and any venv a LaunchAgent,
+a product's ``install.json`` pin or the ``~/.local/bin/asf`` dispatcher still names; the rest
+are removed with their dangling ``~/.local/bin`` links.
+
 ``asf kernel watch`` (:func:`watch`) is the keep-alive that replaced a hand-written shell script:
 the tick job not loaded -> load it (install it when its plist is gone); the last plan older than
 ``kernel.watch.stale_after_s`` and no tick running (the product's kernel lock is free) ->
 ``launchctl kickstart`` it. A clock paused through ``asf scheduler pause`` is left paused. One
-line per run goes to ``logs/kernel-watch-<p>.log``.
+line per run goes to ``logs/kernel-watch-<p>.log``. Each pass also runs the worktree reaper
+(:func:`asf.workers.worktrees.reap`): a worktree under ``state/<p>/worktrees`` whose session is
+over and whose work is on origin or the trunk is removed — the ended sessions the tick could not
+free, and orphans no session names (anything holding unpushed work is kept).
 """
 import datetime
 import fcntl
 import os
 import json
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -75,6 +85,85 @@ def jobs(product, cfg=None, python=None):
                'every_s': int(every)}
         out.append(launchd.LaunchdScheduler(cfg).render(job, env.ASF_HOME, dict(env_vars)))
     return out
+
+
+#: the venvs of this one's family kept for a rollback beside the running one
+KEEP_PREVIOUS = 2
+
+#: a pipx venv name ending in a short sha: the family is everything before it
+_FAMILY_RE = re.compile(r'^(?P<family>.+-)[0-9a-f]{7,40}$')
+
+
+def _referenced(text_paths, venvs_dir):
+    """The venv names under ``venvs_dir`` any of ``text_paths`` names."""
+    names = set()
+    pattern = re.compile(re.escape(venvs_dir.rstrip('/') + '/') + r'([^/"\'<\s]+)')
+    for path in text_paths:
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                names.update(pattern.findall(f.read()))
+        except OSError:
+            continue
+    return names
+
+
+def _pins():
+    """Every file that may name a venv still in use: the LaunchAgents, each product's
+    ``install.json`` pin and the ``~/.local/bin/asf`` dispatcher."""
+    from asf import env
+    home = os.path.expanduser('~')
+    out = [os.path.join(home, '.local', 'bin', 'asf')]
+    for d, suffix in ((os.path.join(home, 'Library', 'LaunchAgents'), '.plist'),):
+        try:
+            out += [os.path.join(d, n) for n in os.listdir(d) if n.endswith(suffix)]
+        except OSError:
+            pass
+    state = os.path.join(env.ASF_HOME, 'state')
+    try:
+        out += [os.path.join(state, n, 'install.json') for n in os.listdir(state)]
+    except OSError:
+        pass
+    return out
+
+
+def prune_venvs(python=None, keep=KEEP_PREVIOUS, bin_dir=None, pins=None, out=print):
+    """Remove the old venvs of ``python``'s family (see the module doc) and the ``bin_dir``
+    links into them (``~/.local/bin``); returns the removed venv names. A ``python`` outside a
+    family venv prunes nothing."""
+    venv = os.path.dirname(os.path.dirname(python or sys.executable))
+    venvs_dir, name = os.path.dirname(venv), os.path.basename(venv)
+    m = _FAMILY_RE.match(name)
+    if not m or not os.path.isdir(venvs_dir):
+        return []
+    family = m.group('family')
+    siblings = [n for n in os.listdir(venvs_dir) if n != name and n.startswith(family)
+                and _FAMILY_RE.match(n) and _FAMILY_RE.match(n).group('family') == family
+                and os.path.isdir(os.path.join(venvs_dir, n))]
+    siblings.sort(key=lambda n: os.path.getmtime(os.path.join(venvs_dir, n)), reverse=True)
+    held = _referenced(_pins() if pins is None else pins, venvs_dir)
+    doomed = [n for n in siblings[keep:] if n not in held]
+    removed = []
+    for n in doomed:
+        try:
+            shutil.rmtree(os.path.join(venvs_dir, n))
+        except OSError as e:
+            out('kernel: venv %s kept: %s' % (n, e))
+            continue
+        removed.append(n)
+    bin_dir = bin_dir or os.path.join(os.path.expanduser('~'), '.local', 'bin')
+    gone = tuple(os.path.join(venvs_dir, n) + os.sep for n in removed)
+    try:
+        links = os.listdir(bin_dir) if gone else []
+    except OSError:
+        links = []
+    for link in links:
+        path = os.path.join(bin_dir, link)
+        if os.path.islink(path) and os.readlink(path).startswith(gone) and not os.path.exists(path):
+            os.unlink(path)
+    if removed:
+        out('kernel: pruned %d old venv(s) of %s* (kept %s + %d previous)'
+            % (len(removed), family, name, keep))
+    return removed
 
 
 def _on_disk(path):
@@ -285,6 +374,11 @@ def install(product, dry_run=False, cfg=None, python=None, out=print, accept_dif
         for line in scheduler.install(job):
             out(line)
             rc = 1 if 'failed' in line else rc
+    if not dry_run:
+        try:
+            prune_venvs(python, out=out)
+        except OSError as e:  # the jobs are installed; a prune failure is one line
+            out('kernel: venv prune failed — %s' % e)
     return rc
 
 
@@ -312,6 +406,21 @@ def _tail(path):
             return f.read().splitlines()[-TAIL:]
     except OSError:
         return []
+
+
+def reap_worktrees(product):
+    """One worktree reaper pass (see the module doc): ``worktrees_reaped=N`` when any went,
+    ``worktrees_reap_failed`` when the pass failed, else ''."""
+    from asf.workers import spawn, worktrees
+    try:
+        repo = getattr(product, 'repo_dir', '') or ''
+        if not (os.path.exists(os.path.join(repo, '.git'))
+                and os.path.isdir(spawn.worktrees_dir(product))):
+            return ''
+        got = worktrees.reap(product, out=lambda _line: None)
+    except Exception:  # noqa: BLE001 — the keep-alive never stops on a reap
+        return 'worktrees_reap_failed'
+    return 'worktrees_reaped=%d' % len(got['removed']) if got['removed'] else ''
 
 
 def watch(product, now=None, cfg=None, python=None, state_dir=None):
@@ -345,11 +454,12 @@ def watch(product, now=None, cfg=None, python=None, state_dir=None):
         msg = ('KICKED (no tick for %s)' % ('ever' if age is None else '%ds' % age) if code == 0
                else 'KICK FAILED (%s)' % (err.strip() or code))
         rc = 0 if code == 0 else 1
+    reaped = reap_worktrees(product)
     tail = _tail(tick_log(product.name))
     last = next((x for x in reversed(tail) if x.startswith(TICK_LINE)), '')
-    line = '%s %s plan_age=%s tracebacks_last%d=%d | %s' % (
-        now.strftime('%Y-%m-%dT%H:%M:%SZ'), msg, '-' if age is None else '%ds' % age, TAIL,
-        sum('Traceback' in x for x in tail), last)
+    line = '%s %s plan_age=%s%s tracebacks_last%d=%d | %s' % (
+        now.strftime('%Y-%m-%dT%H:%M:%SZ'), msg, '-' if age is None else '%ds' % age,
+        ' %s' % reaped if reaped else '', TAIL, sum('Traceback' in x for x in tail), last)
     path = watch_log(product.name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'a', encoding='utf-8') as f:

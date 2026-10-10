@@ -127,8 +127,9 @@ def describe(action):
 
 class _Applier:
 
-    def __init__(self, plan, facts, ports, now, log):
+    def __init__(self, plan, facts, ports, now, log, judged=True):
         self.plan, self.facts, self.ports, self.now, self.log = plan, facts, ports, now, log
+        self.judged = judged
         self.updates = {}   # item id -> {machine key: value}
         self.refused = {}   # item id -> why the host did not push its session's work
         self.result = Result()
@@ -318,7 +319,8 @@ class _Applier:
                 continue
             self.result.done.append((action, note or ''))
             self.log('%s%s' % (describe(action), ' — %s' % note if note else ''))
-        self.states()
+        if self.judged:
+            self.states()
         self.write()
         return self.result
 
@@ -370,7 +372,8 @@ class _Applier:
             self.result.written.append(iid)
 
 
-def apply(plan, facts, ports, now=None, log=print):
-    """Do ``plan`` (decided on ``facts``) through ``ports``; return a :class:`Result`."""
-    return _Applier(plan, facts, ports, now or P.now_iso(), log).run()
+def apply(plan, facts, ports, now=None, log=print, judged=True):
+    """Do ``plan`` (decided on ``facts``) through ``ports``; return a :class:`Result`.
+    ``judged=False`` (a blind plan, :func:`asf.kernel.decide.blind_plan`) writes no item state."""
+    return _Applier(plan, facts, ports, now or P.now_iso(), log, judged).run()
 

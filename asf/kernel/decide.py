@@ -304,6 +304,15 @@ def decide(facts, config):
     return A.Plan(states=states, actions=actions, idle=idle, notes=notes)
 
 
+def blind_plan(facts):
+    """The plan of a tick whose PRs GitHub would not give (``Facts.github_error``): only what no
+    PR fact decides — a session that died without ending is ended and its crash counted. Nothing
+    launches and no state is judged; an ended session keeps its report for the next readable
+    tick, whose facts judge it whole."""
+    return A.Plan(actions=[A.EndSession(s.job, free_worktree=True) for s in facts.sessions
+                           if not s.alive and not s.ended])
+
+
 def _merge_train(items, judged, config, blocks=None, now=''):
     """``(UpdateBranch actions, {item: [note]})`` of the merge train: the behind Landing PRs in
     :func:`train_key` order, as many as ``config.update_parallel`` less the updates in flight
