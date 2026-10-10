@@ -58,6 +58,10 @@ STUCK_REASON, STUCK_OWNER = 'kernel_stuck_reason', 'kernel_stuck_owner'
 STUCK_NEXT, STUCK_SINCE, REOPENED = 'kernel_stuck_next', 'kernel_stuck_since', 'kernel_reopened'
 NOTES, EXTRA_ROUNDS, REBUILDS = 'kernel_notes', 'kernel_extra_rounds', 'kernel_rebuilds'
 REVERTED = 'kernel_reverted'
+#: the card's declared wait edges — a human key the kernel may add to
+#: (:class:`~asf.kernel.actions.WaitOn`), written in the typed block, never the machine block
+AFTER = 'after'
+HUMAN_KEYS = (AFTER,)
 #: the machine-block keys that hold a Stuck (cleared together)
 STUCK_KEYS = (STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE)
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
@@ -445,7 +449,8 @@ class RealRecord:
                 keys.discard(k)
             else:
                 meta[k] = v
-                keys.add(k)
+                if k not in HUMAN_KEYS:
+                    keys.add(k)
         meta['updated'] = now_iso()
         keys.add('updated')
         meta.machine_keys = keys

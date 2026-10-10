@@ -36,6 +36,7 @@ class FakeRecord:
             it.findings = list(f.get(P.FINDINGS, it.findings))
             it.reverted = list(f.get(P.REVERTED, it.reverted))
             it.notes = list(f.get(P.NOTES, it.notes))
+            it.after = list(f.get(P.AFTER, it.after))
             out[iid] = it
         return out
 

@@ -150,6 +150,15 @@ class _Applier:
     def ClearStuck(self, a):
         self.attempt(a.item_id, a.attempt)
 
+    def WaitOn(self, a):
+        it = self.facts.items.get(a.item_id)
+        after = list(self.updates.get(a.item_id, {}).get(P.AFTER) or (it.after if it else []))
+        added = [i for i in a.ids if i not in after]
+        if added:
+            self.set(a.item_id, **{P.AFTER: after + added})
+        self.set(a.item_id, **{P.QUESTION: None})  # its Stuck goes with the judged state (New)
+        return 'after: %s' % ', '.join(after + added)
+
     def ArchiveAndReset(self, a):
         comment = ('Closed by the kernel: %s. The head %s is kept as `%s%s`; %s is rebuilt '
                    'fresh from the trunk.' % (a.reason, a.head_sha or '?', P.ARCHIVE_PREFIX,

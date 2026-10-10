@@ -12,8 +12,15 @@ item and the actions of one tick. The rules it holds, in the design's words:
   last — while ``config.max_sessions`` allows; while the items in Review plus Landing exceed
   ``config.max_open_prs`` (the WIP cap) no build, plan or spec launches (``Plan.wip``);
   ``facts.paused`` means no :class:`Launch` at all. An item whose own errors repeat is Stuck; the lane never is.
-- Waits: only a declared ``after:`` edge between two visible items, and "two Building items
-  with overlapping ``writes``: one at a time".
+- Waits: only a declared ``after:`` edge, and "two Building items with overlapping ``writes``:
+  one at a time". An edge holds until its dependency is Done (its PR merged) or retired
+  (:func:`edge_open`): Building, Review, Landing and Stuck never satisfy it, nor does a card in
+  LIMBO (unreadable) or an id not on the record; only a parked dependency holds no one. A New
+  item's idle reason names the first one it waits on (``waits on <id>``).
+- Blocked on unmerged work (:func:`blocked_on`): a session that stops ``partial``/``blocked`` or
+  asks a question naming an item or a ``PR #n`` not yet merged (or whose item's own ``after:``
+  edge is still open) is no question to the operator: :class:`WaitOn` adds those ids to
+  ``after:`` and clears the Stuck, and the item is New until they are Done.
 - Parked: an item whose own ``priority``, or an ancestor's (through ``parent``), is ``later`` is
   invisible everywhere: it is :attr:`State.PARKED` (Done stays Done), gets no launch, no PR upkeep
   (update, rerun, auto-merge), no answer, no mint for its landed spec, is never Stuck, and never
@@ -250,10 +257,10 @@ IDLE_REASONS = {
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
-ORDER = (A.FileInbox, A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem,
-         A.Satisfied, A.MarkStuck, A.MintStory, A.ArchiveAndReset, A.ClosePR, A.CancelRun,
-         A.RevertPR, A.FileBug, A.OpenPR, A.Rerun, A.UpdateBranch, A.EnableAutoMerge, A.MergePR,
-         A.Launch)
+ORDER = (A.FileInbox, A.ApplyAnswer, A.ClearStuck, A.WaitOn, A.EndSession, A.PushStranded,
+         A.NoteItem, A.Satisfied, A.MarkStuck, A.MintStory, A.ArchiveAndReset, A.ClosePR,
+         A.CancelRun, A.RevertPR, A.FileBug, A.OpenPR, A.Rerun, A.UpdateBranch,
+         A.EnableAutoMerge, A.MergePR, A.Launch)
 
 #: the attempt a live session ended past ``Config.max_session_age_h`` leaves on its item
 OVER_AGE = 'session ran past its max age'
@@ -262,8 +269,9 @@ OVER_AGE = 'session ran past its max age'
 ACTIVE = (State.READY, State.BUILDING, State.REVIEW, State.LANDING, State.STUCK)
 
 #: the actions that move an item (a note or a recorded Stuck moves nothing)
-PROGRESS = (A.Launch, A.ClearStuck, A.ApplyAnswer, A.ArchiveAndReset, A.OpenPR, A.PushStranded,
-            A.ClosePR, A.EndSession, A.UpdateBranch, A.EnableAutoMerge, A.Rerun, A.RevertPR, A.MergePR)
+PROGRESS = (A.Launch, A.ClearStuck, A.WaitOn, A.ApplyAnswer, A.ArchiveAndReset, A.OpenPR,
+            A.PushStranded, A.ClosePR, A.EndSession, A.UpdateBranch, A.EnableAutoMerge, A.Rerun,
+            A.RevertPR, A.MergePR)
 
 #: the most characters of a Stuck reason a LIMBO line carries
 LIMBO_REASON_MAX = 160
@@ -361,7 +369,8 @@ def decide(facts, config):
     parked = parked_all - flying(facts, config)
     judged = {iid: (_Judged(State.DONE) if iid in closing
                     else _park(items[iid], facts, config) if iid in parked
-                    else _judge(items[iid], facts, config, actions)) for iid in sorted(items)}
+                    else _judge(items[iid], facts, config, actions, parked))
+              for iid in sorted(items)}
     actions += closes
     gate_actions, gate, gate_notes = needed.judge(facts, config, judged, _Judged, done)
     shut = {a.pr for a in gate_actions if isinstance(a, A.ClosePR)}
@@ -379,7 +388,7 @@ def decide(facts, config):
     states = {}
     for iid in sorted(items):
         _state_of(iid, items, judged, children, states, (), parked)
-    _apply_waits(items, judged, children, states, parked)
+    _apply_waits(items, judged, children, states, parked, facts.unreadable or {})
     blocks = _count_blocked(items, states, parked)
     due = overdue(facts, config, states)
     stalled_ci = ci_stalls(facts, config, states)
@@ -475,9 +484,10 @@ def in_flight(pr, config):
 
 # ---- pass one: each item on its own facts -------------------------------------------------------
 
-def _judge(it, facts, config, actions):
+def _judge(it, facts, config, actions, parked=()):
     """``it``'s :class:`_Judged` from its own card, sessions, PRs, reviews and answers; appends the
-    item's own actions (answers, PR upkeep) to ``actions``."""
+    item's own actions (answers, PR upkeep) to ``actions``. ``parked`` are the parked ids (a
+    report naming one is no wait)."""
     stuck = (it.stuck if it.state is State.STUCK and not _legacy_conflict(it.stuck)
              and not _red_off(it.stuck) and not _rejudged(it.stuck, config)
              and R.meaningful(it.stuck.reason) else None)
@@ -556,6 +566,14 @@ def _judge(it, facts, config, actions):
         if branch:
             actions.append(open_pr_action(it, branch, pushed))
             return _Judged(State.REVIEW, hold=True)
+    if not answered and not live:
+        waits = (blocked_on(it, ended_stuck, _asked_text(asked), facts, parked) if ended_stuck
+                 else blocked_on(it, stuck, question or '', facts, parked) if stuck
+                 else blocked_on(it, _stuck(question, 'operator'), question, facts, parked)
+                 if question else [])
+        if waits:  # blocked on unmerged work: it waits on it, no operator involved
+            actions.append(A.WaitOn(it.id, waits))
+            return _Judged(State.NEW, hold=True)
     if stuck:
         again = (escalate_session(it, stuck) if stuck.owner == 'session' and not live
                  and _due(config.escalate_after_h, it, facts) else None)
@@ -602,6 +620,72 @@ def _judge(it, facts, config, actions):
     if it.type not in BUILDABLE and it.type != DOCUMENTED:
         return _Judged(State.NEW, hold=hold)  # only a Feature gets a spec or plan launch
     return _Judged(State.READY, hold=hold, findings=relaunch_findings(it))
+
+
+#: a Stuck reason a session's REPORT left (:func:`asf.kernel.reports.stuck_reason`)
+REPORT_STUCK_RE = re.compile(r'^(?:partial|blocked|question|done|report): ')
+
+#: an item id a report names (any type letter, four or more digits)
+ITEM_ID_RE = re.compile(r'\b[A-Z]-\d{4,}\b')
+
+#: a pull request a report names
+PR_REF_RE = re.compile(r'\b(?:PR|pull)\s*(?:#|/)\s*(\d+)\b', re.I)
+
+
+def _asked_text(s):
+    """What an ended session's REPORT says it waits for: its question and its fields."""
+    if s is None:
+        return ''
+    fields = s.fields or {}
+    return ' '.join(str(v) for v in [s.question] + [fields.get(k) for k in
+                                                    ('blocked_on', 'left out', 'needs writes')]
+                    if v)
+
+
+def _unmerged(x, facts, parked):
+    """Whether item ``x``'s change is not on the trunk yet: its card is unreadable, or it is on the
+    record, not parked (a retired card is), with no landed PR and not recorded Done."""
+    if x in (facts.unreadable or {}):
+        return True
+    dep = facts.items.get(x)
+    if dep is None or x in parked:
+        return False
+    if landed(dep, [p for p in facts.prs if p.item_id == x]):
+        return False
+    return not (dep.state is State.DONE and not dep.reopened and not dep.reverted)
+
+
+def _waits_on(x, iid, items, seen=()):
+    """Whether ``x`` already waits on ``iid`` through ``after:`` (an edge back would be a cycle)."""
+    if x == iid:
+        return True
+    if x in seen or x not in items:
+        return False
+    return any(_waits_on(a, iid, items, seen + (x,)) for a in items[x].after)
+
+
+def blocked_on(it, stuck, text, facts, parked=()):
+    """The ids ``it`` waits on when ``stuck`` is a session's stop (a ``partial``/``blocked``
+    REPORT, or a question): every Task or Bug — or unreadable card — the reason or ``text`` names,
+    directly or through a ``PR #n`` not merged, whose change is not on the trunk, plus its own
+    ``after:`` edges still open; ``[]`` for any other Stuck, or when nothing named is unmerged.
+    Never ``it`` itself, its own lineage, a parked item, or one that waits on ``it``."""
+    if stuck is None or not (REPORT_STUCK_RE.match(str(stuck.reason or '')) or text):
+        return []
+    items = facts.items
+    words = '%s %s' % (stuck.reason or '', text or '')
+    named = ITEM_ID_RE.findall(words)
+    by_pr = {p.number: p.item_id for p in facts.prs if not p.merged}
+    named += [by_pr[int(n)] for n in PR_REF_RE.findall(words) if int(n) in by_pr]
+    named = [x for x in named if x in (facts.unreadable or {})
+             or (x in items and items[x].type in BUILDABLE)]
+    out = []
+    for x in list(it.after) + named:
+        if (x in out or x == it.id or _waits_on(x, it.id, items)
+                or not (_unmerged(x, facts, parked) or (x in it.after and x not in items))):
+            continue
+        out.append(x)
+    return out
 
 
 def landed(it, prs):
@@ -1244,15 +1328,30 @@ def _visible(items, iid, parked):
     return iid in items and iid not in parked
 
 
-def _apply_waits(items, judged, children, states, parked):
-    """A Ready item with a declared ``after:`` edge to a visible item that is not Done waits (New);
+def edge_open(a, items, states, parked, unreadable=()):
+    """Whether an ``after:`` edge to ``a`` still holds: it is satisfied only once ``a`` is Done
+    (its PR merged) or retired (a retired card reads as Done) — or parked (nothing waits on a
+    parked item). A card in LIMBO (``unreadable``) or an id not on the record holds: whether its
+    change landed cannot be told."""
+    if a in unreadable or a not in items:
+        return True
+    return a not in parked and states.get(a, (State.NEW,))[0] is not State.DONE
+
+
+def open_edges(it, items, states, parked, unreadable=()):
+    """``it``'s ``after:`` ids whose edge still holds (:func:`edge_open`), in its order."""
+    return [a for a in it.after if a != it.id and edge_open(a, items, states, parked, unreadable)]
+
+
+def _apply_waits(items, judged, children, states, parked, unreadable=()):
+    """A Ready item with a declared ``after:`` edge still open (:func:`edge_open`) waits (New);
     re-derive the containers above it."""
     changed = False
     for iid in sorted(items):
         it = items[iid]
         if states[iid][0] is not State.READY or _derived(iid, items, children):
             continue
-        if any(_visible(items, a, parked) and states[a][0] is not State.DONE for a in it.after):
+        if open_edges(it, items, states, parked, unreadable):
             judged[iid].state = State.NEW
             states[iid] = (State.NEW, None)
             changed = True
@@ -1401,13 +1500,14 @@ def _idle(facts, config, judged, states, parked, skipped):
                 or state not in (State.NEW, State.READY)):
             continue
         if state is State.NEW:
-            why = ('after' if any(_visible(items, a, parked) and states[a][0] is not State.DONE
-                                  for a in it.after) else 'new')
+            waits = open_edges(it, items, states, parked, facts.unreadable or {})
+            why = 'after' if waits else 'new'
         elif facts.paused:
             why = 'paused'
         else:
             why = skipped.get(iid) or ('held' if judged[iid].hold else 'new')
-        reasons[IDLE_REASONS[why]] = reasons.get(IDLE_REASONS[why], 0) + 1
+        key = 'waits on %s' % waits[0] if state is State.NEW and waits else IDLE_REASONS[why]
+        reasons[key] = reasons.get(key, 0) + 1
     if not reasons:
         return None
     top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
@@ -1710,7 +1810,7 @@ def limbo(facts, config, judged, states, parked, children, actions, queued=None,
             out[iid] = why
     for iid, why in sorted((facts.unreadable or {}).items()):
         out[iid] = 'card unreadable, invisible to the kernel: %s' % why
-    out.update(_blocked_for_good(items, states, parked, children, out))
+    out.update(_blocked_for_good(items, states, parked, children, out, facts.unreadable or {}))
     closed = {a.pr for a in actions if isinstance(a, (A.ClosePR, A.ArchiveAndReset))}
     for p in sorted([p for p in facts.prs if not p.merged] + list(facts.orphan_prs),
                     key=lambda p: p.number):
@@ -1729,11 +1829,12 @@ def limbo(facts, config, judged, states, parked, children, actions, queued=None,
     return out
 
 
-def _blocked_for_good(items, states, parked, children, stalled):
+def _blocked_for_good(items, states, parked, children, stalled, unreadable=()):
     """``{item: why}`` for every visible New item whose ``after:`` chain ends at a blocker that
-    nothing will move: the blocker is itself in LIMBO (``stalled``), or the chain is a cycle. A
-    Done blocker (a retired card reads as Done) or a parked one never blocks; a blocker with its
-    own next action (a relaunch, a session, CI) or waiting on a console question moves."""
+    nothing will move: the blocker is itself in LIMBO (``stalled``), its card is unreadable or not
+    on the record, or the chain is a cycle. A Done blocker (a retired card reads as Done) or a
+    parked one never blocks; a blocker with its own next action (a relaunch, a session, CI) or
+    waiting on a console question moves."""
     out = {}
     for iid in sorted(items):
         if (iid in parked or states.get(iid, (None,))[0] is not State.NEW
@@ -1742,14 +1843,19 @@ def _blocked_for_good(items, states, parked, children, stalled):
         roots, cycle, seen, todo = set(), False, {iid}, list(items[iid].after)
         while todo:
             a = todo.pop()
-            if not _visible(items, a, parked) or states.get(a, (State.DONE,))[0] is State.DONE:
+            if not edge_open(a, items, states, parked, unreadable):
+                continue
+            if a not in items:
+                stalled = dict(stalled, **{a: 'card unreadable' if a in unreadable
+                                           else 'not on the record'})
+                roots.add(a)
                 continue
             if a in seen:
                 cycle = cycle or a == iid
                 continue
             seen.add(a)
-            pending = [b for b in items[a].after if _visible(items, b, parked)
-                       and states.get(b, (State.DONE,))[0] is not State.DONE]
+            pending = [b for b in items[a].after
+                       if edge_open(b, items, states, parked, unreadable)]
             if states[a][0] is State.NEW and pending:
                 todo += pending
             else:

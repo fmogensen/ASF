@@ -559,7 +559,7 @@ class IdleAlarm(unittest.TestCase):
         plan = decide(f, B.config(max_sessions=4))
         self.assertEqual(B.launched(plan), [])
         self.assertEqual(plan.idle, {'free': 3, 'waiting': 3,
-                                     'reasons': [('file overlap', 2), ('waits on after:', 1)]})
+                                     'reasons': [('file overlap', 2), ('waits on T-0001', 1)]})
 
     def test_a_launch_or_full_seats_or_the_switch_keep_it_down(self):
         self.assertIsNone(decide(B.facts([B.task('T-0001')]), B.config()).idle)

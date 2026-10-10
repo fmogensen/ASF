@@ -155,6 +155,15 @@ class ClearStuck:
 
 
 @dataclasses.dataclass
+class WaitOn:
+    """A session stopped blocked on work not yet merged (:func:`asf.kernel.decide.blocked_on`):
+    add ``ids`` to ``item_id``'s ``after:`` line (those not on it yet) and clear its Stuck — the
+    item is New and waits on them, and launches again once each is Done or retired."""
+    item_id: str
+    ids: list
+
+
+@dataclasses.dataclass
 class ArchiveAndReset:
     """Build ``item_id`` afresh: its PR ``pr`` cannot land (a conflict its rebase session could not
     resolve, or the fix-round cap after the strong round). The host pushes ``head_sha`` to
@@ -287,6 +296,8 @@ def describe(action):
         return 'file inbox card for %s: %s' % (action.item_id, action.title)
     if isinstance(action, ClearStuck):
         return 're-judge %s: %s' % (action.item_id, action.attempt)
+    if isinstance(action, WaitOn):
+        return 'wait %s on %s' % (action.item_id, ', '.join(action.ids))
     if isinstance(action, PushStranded):
         return 'publish %s rebase of %s' % (action.item_id, action.job)
     if isinstance(action, NoteItem):
