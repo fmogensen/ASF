@@ -271,8 +271,10 @@ def _slug(name):
 #: ``artifacts/`` — this cut carries none).
 REMOTE_START = """set -e
 root={root}
+mkdir -p "$root/runs"
+root=$(cd "$root" && pwd)
 rundir="$root/runs/{run_id}"
-mkdir -p "$root/runs" "$rundir"
+mkdir -p "$rundir"
 [ -d "$root/repo.git" ] || git init --bare -q "$root/repo.git"
 git -C "$root/repo.git" worktree add -q --detach "$rundir/src" "refs/asf/{run_id}"
 cmd={cmd}
@@ -323,6 +325,7 @@ fi
 #: inlined, small enough not to need its own top-level name in the spec — removes the worktree,
 #: the run directory and the pushed ref, nothing moved anywhere first (no artifacts, this cut)
 REMOTE_CLEANUP = """root={root}
+root=$(cd "$root" 2>/dev/null && pwd || echo "$root")
 rundir="$root/runs/{run_id}"
 git -C "$root/repo.git" worktree remove --force "$rundir/src" 2>/dev/null || true
 rm -rf "$rundir"
@@ -540,6 +543,8 @@ def _collect(product, out, now, run):
     """One ``REMOTE_POLL`` per host with a ``running`` row. An ``exit`` file concludes: ``passed``
     on 0, else ``failed``; its log tail is read and trimmed (C18); the run directory is removed.
     The number concluded."""
+    if mutation_guard.is_active():
+        return 0
     data = load(product)
     by_host = {}
     for sha, jobs_at in data['runs'].items():
@@ -592,6 +597,8 @@ def _supersede(product, out, now, run):
     """A ``running`` run whose branch's head has moved is cancelled (C8): ``REMOTE_CANCEL``,
     cleanup, ``state: cancelled``, ``superseded_by`` the new sha. A trunk run (``branch`` None)
     is never superseded."""
+    if mutation_guard.is_active():
+        return
     data = load(product)
     current = heads(product)
     changed = False
@@ -628,6 +635,8 @@ def _supersede(product, out, now, run):
 def _time_out(product, out, now, run):
     """A ``running`` run past its job's ``timeout_min`` on the pass's own clock (C7): the tail
     collected first, then cancelled, cleaned, ``state: timeout``. The number timed out."""
+    if mutation_guard.is_active():
+        return 0
     data = load(product)
     job_cfg = jobs(product)
     n, changed = 0, False

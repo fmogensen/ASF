@@ -308,15 +308,37 @@ class OneRun(FakeSsh):
     def test_a_green_job_runs_the_command_at_the_sha_and_concludes_passed(self):
         self.job('gate', command='printf ok > out.txt; exit 0')
         self.assertEqual(ci_vm.vm_pass(self.product, out=self.out, run=self.run), (1, 0))
-        row = self.row('gate')
-        self.assertEqual(row['state'], ci_vm.RUNNING)
-        self.wait_for_exit()
-        # the command really ran, at the sha, in its own worktree — checked before cleanup
-        self.assertEqual(self.remote_read(f"runs/{row['run_id']}/src/out.txt"), 'ok')
+        self.assertEqual(self.row('gate')['state'], ci_vm.RUNNING)
+        self.wait_for_exit()                        # the detached command's own exit file
+        self.assertEqual(self.remote_read(f"runs/{self.row('gate')['run_id']}/src/out.txt"), 'ok')
         self.assertEqual(ci_vm.vm_pass(self.product, out=self.out, run=self.run), (0, 1))
         row = self.row('gate')
         self.assertEqual((row['state'], row['exit']), (ci_vm.PASSED, 0))
-        self.assertFalse(self.remote_exists(f"runs/{row['run_id']}"))  # cleaned up (C6)
+        self.assertFalse(self.remote_exists(f"runs/{row['run_id']}"))   # cleaned up (C6)
+        self.assertEqual(sorted(os.listdir(self.host_root)), ['repo.git', 'runs'])
+        self.assertEqual(os.listdir(os.path.join(self.host_root, 'runs')), [])
+
+    def test_a_relative_root_runs_in_its_own_absolute_rundir_not_the_login_directory(self):
+        # a real ssh login starts its command with $PWD == $HOME — move both so a bare
+        # "$root" (no leading '/') behaves the same way under the fake ssh
+        login_dir = os.path.join(self.tmp, 'ssh-login-dir')
+        os.makedirs(login_dir)
+        old_cwd = os.getcwd()
+        old_home = os.environ.get('HOME')
+        os.chdir(login_dir)
+        os.environ['HOME'] = login_dir
+        self.addCleanup(os.chdir, old_cwd)
+        self.addCleanup(lambda: os.environ.update(HOME=old_home) if old_home is not None
+                        else os.environ.pop('HOME', None))
+        self.add_host('ci-2', labels=['heavy'], root='.asf-ci-rel')
+        self.job('gate', command='pwd > pwd.txt; exit 0', labels=['heavy'])
+        ci_vm.vm_pass(self.product, out=self.out, run=self.run)
+        row = self.row('gate')
+        self.assertEqual(row['host'], 'ci-2')
+        host_root = os.path.join(login_dir, '.asf-ci-rel')
+        self.wait_for_exit(host_root=host_root)
+        pwd_out = self.remote_read(f"runs/{row['run_id']}/src/pwd.txt", host_root=host_root)
+        self.assertEqual(pwd_out.strip(), os.path.join(host_root, 'runs', row['run_id'], 'src'))
 
     def test_a_non_zero_command_concludes_failed_with_a_bounded_log_tail(self):
         self.job('gate', command='i=0; while [ $i -lt 500 ]; do echo "line $i"; i=$((i+1)); '
@@ -396,6 +418,25 @@ class OneRun(FakeSsh):
         self.assertTrue(any('DRY-RUN guard: refused — would run ssh' in l for l in self.lines),
                         self.lines)
         self.assertFalse(mutation_guard.is_active())  # the guard does not leak past the pass
+
+    def test_a_dry_run_pass_never_concludes_or_leaks_cleanup_of_a_finished_run(self):
+        self.job('gate', command='printf ok > out.txt; exit 0')
+        ci_vm.vm_pass(self.product, out=self.out, run=self.run)  # a real dispatch
+        self.wait_for_exit()
+        run_id = self.row('gate')['run_id']
+        # the remote already finished, but a dry-run pass must read nothing and write nothing —
+        # neither conclude the row (C17) nor leave the run directory stranded for lack of a
+        # later real pass to find it (it never looks at a row that is no longer `running`)
+        got = ci_vm.vm_pass(self.product, out=self.out, dry_run=True, run=self.run)
+        self.assertEqual(got, (0, 0))
+        self.assertEqual(self.row('gate')['state'], ci_vm.RUNNING)
+        self.assertTrue(self.remote_exists(f'runs/{run_id}'))
+        self.assertFalse(mutation_guard.is_active())
+        # a real pass afterwards still concludes and cleans it up normally
+        ci_vm.vm_pass(self.product, out=self.out, run=self.run)
+        row = self.row('gate')
+        self.assertEqual((row['state'], row['exit']), (ci_vm.PASSED, 0))
+        self.assertFalse(self.remote_exists(f'runs/{run_id}'))
 
 
 def _row(state, **kw):
