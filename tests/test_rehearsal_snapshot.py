@@ -98,22 +98,37 @@ def _build_source(root, n_per_type=3):
     return record, repo, ids
 
 
-class BuildWritesTheSnapshot(unittest.TestCase):
-    def setUp(self):
-        self.root = tempfile.mkdtemp(prefix='rehearsal_test_')
-        self.addCleanup(shutil.rmtree, self.root, True)
-        self.record, self.repo, self.ids = _build_source(self.root)
-        self.out = os.path.join(self.root, 'snapshot')
-        self.manifest = rehearsal.build(self.record, self.repo, self.out)
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+COMMITTED_SNAPSHOT = os.path.join(REPO_ROOT, 'tests', 'rehearsal')
+
+
+class SnapshotCommittedAndComplete(unittest.TestCase):
+    """Acceptance line 1: tests/rehearsal/ is committed with manifest.json, record/ and repo/,
+    and the manifest carries its seven required keys — read off the actual committed fixture,
+    not a tempfile build."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(COMMITTED_SNAPSHOT, 'manifest.json'), encoding='utf-8') as f:
+            cls.manifest = json.load(f)
 
     def test_files_exist(self):
-        self.assertTrue(os.path.isfile(os.path.join(self.out, 'manifest.json')))
-        self.assertTrue(os.path.isdir(os.path.join(self.out, 'record')))
-        self.assertTrue(os.path.isdir(os.path.join(self.out, 'repo')))
+        self.assertTrue(os.path.isfile(os.path.join(COMMITTED_SNAPSHOT, 'manifest.json')))
+        self.assertTrue(os.path.isdir(os.path.join(COMMITTED_SNAPSHOT, 'record')))
+        self.assertTrue(os.path.isdir(os.path.join(COMMITTED_SNAPSHOT, 'repo')))
 
     def test_manifest_keys(self):
         for k in ('cards', 'widest_id', 'refs', 'intake', 'built_at', 'asf_version', 'source_sha'):
             self.assertIn(k, self.manifest, k)
+
+
+class ManifestClaimsFiveDigitIdAndAnnotatedTag(unittest.TestCase):
+    """Acceptance line 2, read off the committed fixture's own manifest.json."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(COMMITTED_SNAPSHOT, 'manifest.json'), encoding='utf-8') as f:
+            cls.manifest = json.load(f)
 
     def test_widest_id_has_a_five_digit_prefix_by_digit_run(self):
         # PD10: the spec's own `len(str(v)) >= 5` fence is weak (a four-digit id's string is
@@ -127,6 +142,66 @@ class BuildWritesTheSnapshot(unittest.TestCase):
     def test_a_prerelease_ref_is_carried(self):
         self.assertTrue(any(not r.get('annotated') for r in self.manifest['refs']),
                          self.manifest['refs'])
+
+
+class IntakeThreeStates(unittest.TestCase):
+    """Acceptance line 5, read off the committed fixture."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(COMMITTED_SNAPSHOT, 'manifest.json'), encoding='utf-8') as f:
+            cls.manifest = json.load(f)
+
+    def test_intake_three_states_present(self):
+        intake = self.manifest['intake']
+        self.assertTrue(intake['open'])
+        self.assertGreaterEqual(len(intake['done']), 2)
+        self.assertIn('mismatch', intake)
+        self.assertIn(intake['mismatch']['name'], intake['done'])
+
+    def test_intake_done_header_kept_text_cleared(self):
+        name = self.manifest['intake']['done'][0]
+        intake_dir = self.manifest.get('intake_dir', 'inbox')
+        path = os.path.join(COMMITTED_SNAPSHOT, 'record', intake_dir, 'done', name)
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        self.assertTrue(text.startswith('→ '))
+        self.assertNotIn('groomed note', text)
+
+
+class BuilderDoesNotMutateSource(unittest.TestCase):
+    """Acceptance line 4: asf.rehearsal.build reads record_dir and repo_dir and never writes to
+    either."""
+
+    def test_build_never_writes_to_the_source_record_or_repo(self):
+        root = tempfile.mkdtemp(prefix='rehearsal_test_')
+        self.addCleanup(shutil.rmtree, root, True)
+        record, repo, _ids = _build_source(root)
+        record_before = sorted(
+            os.path.join(dp, n) for dp, _d, fs in os.walk(record) for n in fs)
+        repo_before = sorted(
+            os.path.join(dp, n) for dp, _d, fs in os.walk(repo) for n in fs
+            if '.git' not in dp.split(os.sep))
+        rehearsal.build(record, repo, os.path.join(root, 'snapshot'))
+        record_after = sorted(
+            os.path.join(dp, n) for dp, _d, fs in os.walk(record) for n in fs)
+        repo_after = sorted(
+            os.path.join(dp, n) for dp, _d, fs in os.walk(repo) for n in fs
+            if '.git' not in dp.split(os.sep))
+        self.assertEqual(record_before, record_after)
+        self.assertEqual(repo_before, repo_after)
+
+
+class BuildWritesTheSnapshot(unittest.TestCase):
+    """Builder behavior not named by the card's own Acceptance list — still proved here, against
+    a synthetic tempfile build, alongside the acceptance-named classes above."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='rehearsal_test_')
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.record, self.repo, self.ids = _build_source(self.root)
+        self.out = os.path.join(self.root, 'snapshot')
+        self.manifest = rehearsal.build(self.record, self.repo, self.out)
 
     def test_ids_kept_verbatim(self):
         for folder, ids in self.ids.items():
@@ -167,41 +242,8 @@ class BuildWritesTheSnapshot(unittest.TestCase):
             text = f.read()
         self.assertIn(iid, text)
 
-    def test_intake_three_states_present(self):
-        intake = self.manifest['intake']
-        self.assertTrue(intake['open'])
-        self.assertGreaterEqual(len(intake['done']), 2)
-        self.assertIn('mismatch', intake)
-        self.assertIn(intake['mismatch']['name'], intake['done'])
-
-    def test_intake_done_header_kept_text_cleared(self):
-        name = self.manifest['intake']['done'][0]
-        path = os.path.join(self.out, 'record', 'inbox', 'done', name)
-        with open(path, encoding='utf-8') as f:
-            text = f.read()
-        self.assertTrue(text.startswith('→ '))
-        self.assertNotIn('groomed note', text)
-
     def test_manifest_holds_on_the_just_built_snapshot(self):
         self.assertEqual(rehearsal.manifest_holds(self.out), [])
-
-    def test_build_never_writes_to_the_source_record_or_repo(self):
-        record_before = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(self.record) for n in fs)
-        repo_before = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(self.repo) for n in fs
-            if '.git' not in dp.split(os.sep))
-        rehearsal.build(self.record, self.repo, os.path.join(self.root, 'snapshot-2'))
-        record_after = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(self.record) for n in fs)
-        repo_after = sorted(
-            os.path.join(dp, n) for dp, _d, fs in os.walk(self.repo) for n in fs
-            if '.git' not in dp.split(os.sep))
-        self.assertEqual(record_before, record_after)
-        self.assertEqual(repo_before, repo_after)
-
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class CommittedSnapshotIsScannedClean(unittest.TestCase):
@@ -223,7 +265,13 @@ class CommittedSnapshotIsScannedClean(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
-class ManifestHoldsCatchesBreakage(unittest.TestCase):
+class ManifestHoldsDetectsBreakage(unittest.TestCase):
+    """Acceptance line 3: manifest_holds returns [] on the committed snapshot, and one line per
+    broken claim when a card is removed, an id is narrowed, or a tag's annotated flag flips."""
+
+    def test_manifest_holds_on_the_committed_snapshot(self):
+        self.assertEqual(rehearsal.manifest_holds(COMMITTED_SNAPSHOT), [])
+
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix='rehearsal_test_')
         self.addCleanup(shutil.rmtree, self.root, True)

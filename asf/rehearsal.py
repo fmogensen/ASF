@@ -184,8 +184,10 @@ def _repo_sha(repo_dir):
 
 
 def _repo_tags(repo_dir):
-    """``[(name, annotated, message)]`` for every ``v<x.y.z>`` (optionally ``-<suffix>``) tag in
-    ``repo_dir``, oldest first; ``()`` when ``repo_dir`` is not a git checkout or carries none."""
+    """``[(name, annotated, message, date)]`` for every ``v<x.y.z>`` (optionally ``-<suffix>``)
+    tag in ``repo_dir``, oldest first; ``()`` when ``repo_dir`` is not a git checkout or carries
+    none. ``date`` is the tag's own ``%(creatordate:short)`` — not :func:`asf.record.core.today`
+    — so a rebuild of an unchanged source sha writes the same bytes on any later day."""
     names = gitops.git(['tag', '-l', 'v*'], repo_dir)
     if not names.ok:
         return []
@@ -198,7 +200,10 @@ def _repo_tags(repo_dir):
             msg = gitops.git(['for-each-ref', '--format=%(contents)', f'refs/tags/{name}'],
                               repo_dir)
             message = msg.data.rstrip('\n') if msg.ok else ''
-        out.append((name, annotated, message))
+        created = gitops.git(['for-each-ref', '--format=%(creatordate:short)',
+                               f'refs/tags/{name}'], repo_dir)
+        date = created.data.strip() if created.ok else ''
+        out.append((name, annotated, message, date))
     return out
 
 
@@ -209,23 +214,24 @@ def _build_repo_seed(repo_dir, out_repo, widest):
     ``(refs, branches, merges)`` for the manifest."""
     tags = _repo_tags(repo_dir)
     refs = []
-    for name, annotated, message in tags:
+    for name, annotated, message, date in tags:
         cleared = clear_block(message) if message else ''
         refs.append({
             'name': name,
             'annotated': annotated,
             'prerelease': '-' in name[1:],
             'message': cleared,
+            'date': date,
         })
     if not any(r['annotated'] for r in refs):
         # no real annotated tag reachable (a shallow or tag-less checkout): one synthetic entry
         # so the snapshot still meets its own In — the manifest records what it actually built
-        refs.append({'name': 'v0.0.1', 'annotated': True,
-                     'prerelease': False, 'message': clear_line('x' * 24)})
+        refs.append({'name': 'v0.0.1', 'annotated': True, 'prerelease': False,
+                     'message': clear_line('x' * 24), 'date': core.today()})
 
     changelog = []
     for ref in refs:
-        changelog.append(f"## {ref['name']} — {core.today()}\n\n{ref['message'] or clear_line('x' * 16)}\n")
+        changelog.append(f"## {ref['name']} — {ref['date']}\n\n{ref['message'] or clear_line('x' * 16)}\n")
     write_text(os.path.join(out_repo, 'CHANGELOG.md'), '\n'.join(changelog) + '\n')
     with open(os.path.join(out_repo, 'refs.json'), 'w', encoding='utf-8') as f:
         json.dump(refs, f, indent=2, sort_keys=True)
@@ -338,6 +344,7 @@ def build(record_dir, repo_dir, out, product=None):
         'branches': branches,
         'merges': merges,
         'intake': intake,
+        'intake_dir': conv.intake_dir,
         'built_at': core.now_iso(),
         'asf_version': _asf_version(),
         'source_sha': _repo_sha(repo_dir),
@@ -411,6 +418,12 @@ def manifest_holds(snapshot):
             problems.append(f"widest_id[{prefix}]: manifest claims {claimed_id!r}, "
                              f"snapshot's widest is {actual_id!r}")
 
+    # PD10: the five-digit claim is proved on the digit run, not len(str(v)) — a four-digit id's
+    # string ("T-0001") is already 6 characters long, so that fence alone would never fire.
+    runs = [_digit_run(v) for v in (manifest.get('widest_id') or {}).values()]
+    if not runs or max(runs) < 5:
+        problems.append("widest_id: no prefix claims a five-digit digit run")
+
     claimed_refs = manifest.get('refs') or []
     refs_path = os.path.join(snapshot, 'repo', 'refs.json')
     try:
@@ -424,7 +437,8 @@ def manifest_holds(snapshot):
         problems.append("refs: no annotated tag claimed")
 
     claimed_intake = manifest.get('intake') or {}
-    intake_dir = os.path.join(record_dir, 'inbox')
+    intake_dir_name = manifest.get('intake_dir') or conventions_mod.DEFAULT_INTAKE_DIR
+    intake_dir = os.path.join(record_dir, intake_dir_name)
     actual_open = sorted(n for n in os.listdir(intake_dir) if n.endswith('.md')) \
         if os.path.isdir(intake_dir) else []
     if actual_open != sorted(claimed_intake.get('open') or []):
