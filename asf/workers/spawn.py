@@ -904,7 +904,7 @@ def trunk_rebase_needed(path, main):
     cherry = git('cherry', trunk, 'HEAD')
     if cherry.returncode != 0 or any(l.startswith('-') for l in cherry.stdout.splitlines()):
         return 'copies of trunk commits above the trunk'
-    mt = git('merge-tree', '--write-tree', '--quiet', trunk, 'HEAD')
+    mt = git('merge-tree', '--write-tree', '--no-messages', trunk, 'HEAD')
     if mt.returncode != 0:
         return CONFLICT_REASON
     return ''
