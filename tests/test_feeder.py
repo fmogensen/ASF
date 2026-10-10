@@ -3826,5 +3826,51 @@ class WaivedRowsTest(unittest.TestCase):
                          {(rows.STALEMATE, 'B-0002'), (rows.STALEMATE, 'F-0003')})
 
 
+class ReplanBranchTests(unittest.TestCase):
+    """S-102505: one constant mints the replan branch name and one predicate reads it back."""
+
+    def nested(self):
+        return product(conventions={'branch_prefixes': {'plan': 'release/plan/'}})
+
+    def test_replan_branch_mints_the_plan_prefix_the_id_and_the_suffix_from_the_constant(self):
+        p = product()
+        self.assertEqual(rows.replan_branch(p, 'F-0002'),
+                         rows.branch_for(p, 'plan', 'F-0002' + rows.REPLAN_SUFFIX))
+        n = self.nested()
+        self.assertEqual(rows.replan_branch(n, 'F-0002'),
+                         rows.branch_for(n, 'plan', 'F-0002' + rows.REPLAN_SUFFIX))
+
+    def test_the_predicate_is_true_for_exactly_the_branch_the_minting_function_returns(self):
+        p = product()
+        self.assertTrue(rows.is_replan_branch(p, rows.replan_branch(p, 'F-0002')))
+
+    def test_the_predicate_is_false_for_the_features_own_plan_spec_code_branch_and_trunk(self):
+        p = product()
+        self.assertFalse(rows.is_replan_branch(p, rows.branch_for(p, 'plan', 'F-0002')))
+        self.assertFalse(rows.is_replan_branch(p, rows.branch_for(p, 'spec', 'F-0002')))
+        self.assertFalse(rows.is_replan_branch(p, rows.branch_for(p, 'code', 'F-0002')))
+        self.assertFalse(rows.is_replan_branch(p, rows.trunk_of(p)))
+
+    def test_the_predicate_is_false_for_an_empty_branch_and_for_none_and_raises_nothing(self):
+        p = product()
+        self.assertFalse(rows.is_replan_branch(p, ''))
+        self.assertFalse(rows.is_replan_branch(p, None))
+
+    def test_the_predicate_reads_the_products_own_prefixes_so_a_nested_plan_prefix_gets_the_same_two_answers(self):
+        n = self.nested()
+        self.assertTrue(rows.is_replan_branch(n, rows.replan_branch(n, 'F-0002')))
+        self.assertFalse(rows.is_replan_branch(n, rows.branch_for(n, 'plan', 'F-0002')))
+
+    def test_a_plan_branch_whose_id_merely_ends_in_the_suffix_letters_is_not_matched(self):
+        p = product()
+        self.assertFalse(rows.is_replan_branch(p, rows.branch_for(p, 'plan', 'F-0002replan')))
+
+    def test_branch_kind_is_unchanged_and_still_answers_plan_for_both_branches(self):
+        p = product()
+        conv = p.conventions
+        self.assertEqual(conv.branch_kind(rows.replan_branch(p, 'F-0002')), 'plan')
+        self.assertEqual(conv.branch_kind(rows.branch_for(p, 'plan', 'F-0002')), 'plan')
+
+
 if __name__ == '__main__':
     unittest.main()
