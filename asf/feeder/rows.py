@@ -1701,8 +1701,10 @@ def held_feature_row(items, feature, occupancy, spoken=()):
     ``correction_rows`` drops every correction whose item is busy, and this path is only ever
     reached because the Feature is busy, so its ``corrections`` key can never be the row that
     answers for it here. ``review``/``landing`` need no test either — ``docs_waiting`` subtracts
-    such a Feature from ``busy`` before :func:`feature_rows` ever calls this, and the lane's own
-    PUSHED → LAND row (:func:`lane_rows`) is what speaks for it instead."""
+    such a Feature from ``busy`` before :func:`feature_rows` ever calls this, and the Feature's
+    own PUSHED → LAND row (:func:`replan_row`, or ``_doc_row``/``direct_row``/``spec_plan_row``/
+    ``land_doc_row``) is what speaks for it instead — never ``lane_rows`` or ``pushed_rows``,
+    which draw nothing for a Feature here."""
     fid, occ = feature['id'], occupancy or {}
     if fid in set(spoken or ()):
         return None
