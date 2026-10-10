@@ -68,9 +68,15 @@ def card_link(root, relpath):
     return f'https://{m.group(1)}/{m.group(2)}/blob/HEAD/{relpath}'
 
 
-def title_and_body(item_id, item, root, branch, items=None):
+def title_and_body(item_id, item, root, branch, items=None, repo=None, trunk=None):
     """The PR's title and body. A delivery lead's (``delivers:``) title names every item the
-    branch delivers and its body lists their cards: the one PR is the whole delivery's."""
+    branch delivers and its body lists their cards: the one PR is the whole delivery's.
+
+    ``repo`` and ``trunk`` (the product's repo and its trunk branch, never the record ``root``,
+    P8) add a ``## Proves`` block: one bullet per claim :func:`asf.proves.claims_on_branch` reads
+    off ``branch`` through this module's own :func:`_git`. With either ``None`` — the default,
+    every call site that does not pass them — the block is simply absent: the same shape a
+    branch with no claim gets."""
     title = f"{item_id} — {item.get('title') or branch}" if item_id else branch
     rel = card_relpath(item) if item else None
     lines = []
@@ -81,6 +87,10 @@ def title_and_body(item_id, item, root, branch, items=None):
     accept = acceptance(root, rel)
     if accept:
         lines += ['', '## Acceptance'] + [f'- [ ] {a}' for a in accept]
+    if repo and trunk:
+        claims = proves.claims_on_branch(lambda *a: _git(repo, list(a)), trunk, branch)
+        if claims:
+            lines += ['', '## Proves'] + proves.render(claims).split('\n')
     members = [m for m in (item or {}).get('delivers') or () if m != item_id]
     if members:
         title += f" (delivers {', '.join(members)})"
