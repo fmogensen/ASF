@@ -1,11 +1,21 @@
-"""F-0280 S-73204 — the feeder speaks for a Feature the lane holds: `FEATURE_LANES`, the
+"""F-0280's three Stories, one class each: S-73204's `TheFeatureLaneRows` (`FEATURE_LANES`, the
 branch-keyed gate in `lane_rows`, `lane_speaks`, and a Feature admitted to `pushed_ids`/
-`pushed_rows` on the branch the lane recorded, never a type-derived guess."""
+`pushed_rows` on the branch the lane recorded, never a type-derived guess); S-73206's
+`TheReviewBriefOfADocumentBranch` (`reviews.EVIDENCE`, `render_table(rows, evidence=None)`, and
+the review brief's `{checklist}`/`{review_reads}` — the table and the reading order chosen per
+branch, not the code table alone)."""
+import importlib
 import unittest
 
+from asf import reviews
+from asf.briefs import preamble as preamble_mod
 from asf.env import Product
 from asf.feeder import rows, tiers
 from asf.harvest import lane
+
+# ``asf.briefs.build`` is both the package's entry function and a submodule; the function wins
+# the attribute lookup, so the module is asked for by name (as ``tests/test_briefs.py`` does).
+build_mod = importlib.import_module('asf.briefs.build')
 
 
 def product(**conv):
@@ -34,6 +44,26 @@ def kinds(rs):
 
 def by_item(rs):
     return {r.item_id: r for r in rs}
+
+
+def review_row(item_id, branch, feature_id=None, review_kinds=None):
+    """A `PUSHED → REVIEW` row (:class:`rows.Row`) for ``item_id`` on ``branch``.
+    ``review_kinds`` is `Row.review_kinds` (F-0280 S-73205, not yet a dataclass field — set here
+    as a plain attribute, which `getattr(row, 'review_kinds', ())` reads the same way)."""
+    r = rows.Row(tier=1, kind=rows.PUSHED_REVIEW, item_id=item_id,
+                feature_id=item_id if feature_id is None else feature_id,
+                action=f'{rows.LAUNCH} review', brief_kind='review', branch=branch, reason='',
+                review_round=1)
+    if review_kinds is not None:
+        r.review_kinds = review_kinds
+    return r
+
+
+def review_ctx(row, idx):
+    """`asf.briefs.build.context` for ``row`` off fixture ``idx`` — no product-level files, no
+    inflight, no repo facts; the review template reads none of those."""
+    facts = preamble_mod.collect(product(), row, idx, [], None)
+    return build_mod.context(product(), row, 'review', facts)
 
 
 def doc_occ(fid, branch, kind, state=lane.REVIEW, round_=1, pr=941, reason=''):
@@ -161,6 +191,96 @@ class TheFeatureLaneRows(unittest.TestCase):
         # and `tests.test_direct_lane` — the module that pins the direct lane's rows end to
         # end — stays green; it is not re-run here, only named as what "unmoved" means (its own
         # suite is part of this Task's Gate).
+
+
+class TheReviewBriefOfADocumentBranch(unittest.TestCase):
+    """S-73206 — the review brief asks for the checklist of the branch in front of it: a Task's
+    brief still asks the six code checks it asks today, a Feature's `spec/` branch of class
+    `code` asks eleven, and the reading order names the document the branch itself carries."""
+
+    def test_task_review_renders_six_rows_with_todays_hints(self):
+        idx = index(feature(fid='F-0280'), task('T-9001', 'F-0280'))
+        ctx = review_ctx(review_row('T-9001', 'task/T-9001', feature_id='F-0280'), idx)
+        self.assertEqual(ctx['checklist'],
+                         reviews.render_table(reviews.required('code'), reviews.EVIDENCE))
+        for hint in ('the file, or the one outside it', 'the step → the code', 'file:line',
+                     "the run's last line", "each command's last line", 'what you looked at'):
+            self.assertIn(hint, ctx['checklist'])
+        # six checks, header and separator included — no spec or plan check leaked in
+        self.assertEqual(len(ctx['checklist'].splitlines()), 8)
+        self.assertNotIn('one Task per Story', ctx['checklist'])
+
+    def test_feature_code_class_spec_branch_renders_eleven_rows(self):
+        idx = index(feature(fid='F-0280', stage='spec-review'))
+        row = review_row('F-0280', 'spec/F-0280', review_kinds=('spec', 'code'))
+        ctx = review_ctx(row, idx)
+        lines = ctx['checklist'].splitlines()
+        self.assertEqual(len(lines), 13)   # header, separator, 5 spec rows, 6 code rows
+        data_rows = lines[2:]
+        self.assertEqual(len(data_rows), 11)
+        for line in data_rows:
+            self.assertIn('<pass\\|fail>', line)
+        expected_names = list(reviews.required('spec', 'code'))
+        for name, line in zip(expected_names, data_rows):
+            self.assertTrue(line.startswith(f'| {name} |'), line)
+            self.assertIn(reviews.EVIDENCE[name], line)
+        # the five spec checks first, then the six code checks
+        self.assertTrue(all(n in reviews.required('spec') for n in expected_names[:5]))
+        self.assertTrue(all(n in reviews.required('code') for n in expected_names[5:]))
+
+    def test_review_reads_names_the_branchs_own_document(self):
+        with self.subTest('spec'):
+            idx = index(feature(fid='F-0280', stage='spec-review'))
+            ctx = review_ctx(review_row('F-0280', 'spec/F-0280'), idx)
+            self.assertIn('the spec `docs/specs/f-0280.md`', ctx['read_order'])
+            self.assertNotIn('for the Task it claims to deliver', ctx['read_order'])
+        with self.subTest('plan'):
+            idx = index(feature(fid='F-0280', stage='plan-review'))
+            ctx = review_ctx(review_row('F-0280', 'plan/F-0280'), idx)
+            self.assertIn('the plan `docs/plans/f-0280.md`', ctx['read_order'])
+            self.assertNotIn('docs/specs/f-0280.md', ctx['read_order'])
+            self.assertNotIn('for the Task it claims to deliver', ctx['read_order'])
+        with self.subTest('direct'):
+            idx = index(feature(fid='F-0280', stage='card', lane='direct'))
+            ctx = review_ctx(review_row('F-0280', 'cloud/direct-F-0280'), idx)
+            self.assertIn('docs/specs/f-0280.md', ctx['read_order'])
+            self.assertIn('docs/plans/f-0280.md', ctx['read_order'])
+        with self.subTest('unknown prefix'):
+            idx = index(feature(fid='F-0280', stage='card'))
+            ctx = review_ctx(review_row('F-0280', 'mystery/F-0280'), idx)
+            self.assertIn('for the Task it claims to deliver', ctx['read_order'])
+        with self.subTest('task'):
+            idx = index(feature(fid='F-0280'), task('T-9001', 'F-0280'))
+            ctx = review_ctx(review_row('T-9001', 'task/T-9001', feature_id='F-0280'), idx)
+            self.assertIn('for the Task it claims to deliver', ctx['read_order'])
+
+    def test_render_table_with_no_evidence_is_unchanged(self):
+        names = reviews.required('spec')
+        expected = '\n'.join(['| check | result | evidence |', '| --- | --- | --- |']
+                             + [f'| {n} | <pass\\|fail> | |' for n in names])
+        self.assertEqual(reviews.render_table(names), expected)
+        self.assertEqual(reviews.render_table(names), reviews.render_table(names, evidence=None))
+
+    def test_evidence_covers_every_checklist_name(self):
+        names = [n for kind in reviews.KINDS for tup in reviews.CHECKLIST[kind] for n in tup]
+        self.assertEqual(len(names), 21)
+        for name in names:
+            self.assertIn(reviews.normalize(name), reviews.EVIDENCE)
+        # a name with no entry renders an empty cell
+        self.assertEqual(reviews.render_table(['a name nothing covers'], reviews.EVIDENCE),
+                         '| check | result | evidence |\n| --- | --- | --- |\n'
+                         '| a name nothing covers | <pass\\|fail> | |')
+
+    def test_delivery_branch_brief_unchanged(self):
+        idx = index(feature(fid='F-0280'),
+                   task('T-9001', 'F-0280', delivers=['T-9002', 'T-9003']))
+        row = review_row('T-9001', 'task/T-9001', feature_id='F-0280')
+        ctx = review_ctx(row, idx)
+        self.assertTrue(ctx['delivery_checks'])
+        self.assertTrue(ctx['delivery_checks'].startswith('\n\n'))
+        from asf import briefs
+        brief = briefs.build(product(), row, idx, [], None)
+        self.assertIn(ctx['checklist'] + ctx['delivery_checks'], brief.text)
 
 
 if __name__ == '__main__':

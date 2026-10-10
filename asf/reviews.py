@@ -152,9 +152,60 @@ def normalize(name):
     return s.rstrip('.,;:').strip()
 
 
-def required(kind):
-    """The normalized mechanical names of `CHECKLIST[kind]`, in checklist order."""
-    return tuple(normalize(name) for name in CHECKLIST[kind][0])
+def required(*kinds):
+    """The normalized mechanical names of every `CHECKLIST[kind]`, in checklist order, each name
+    once: `required('code')` is the six code checks, `required('spec', 'code')` the five spec
+    checks then those six — what a `spec/` branch carrying code must answer (F-0280). `required()`
+    with no argument is `()`."""
+    seen = set()
+    out = []
+    for kind in kinds:
+        for name in CHECKLIST[kind][0]:
+            n = normalize(name)
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+    return tuple(out)
+
+
+#: What the evidence cell of each check asks for, by normalized check name — the hint the review
+#: brief renders beside the row (`render_table`). A check with no entry here renders an empty
+#: cell. The six code hints are the ones `briefs/templates/review.md` carried inline until now;
+#: all twenty-one names of `CHECKLIST` (both tuples, all three kinds) have an entry (F-0280 PD9).
+EVIDENCE = {normalize(name): hint for name, hint in (
+    # spec
+    ('the five sections are present, in order', 'the section headings, top to bottom'),
+    ('`## Stories` is last, and every Story line names a test',
+     'the heading order, and the test each Story line names'),
+    ('every acceptance test is a fenced block that can be run',
+     'the fence, and the command inside it'),
+    ('every id the spec mints is inside the session range',
+     'the id, and the range it must fall inside'),
+    ('no section is empty and no decision row is missing its why',
+     'the empty section, or the decision row missing its why'),
+    ('the spec is the card, no wider and no narrower', 'the card, read beside the spec'),
+    ('a plan could be cut from this without asking a question',
+     'the question a plan would still have to ask'),
+    # plan
+    ('one Task per Story, and no Story unclaimed', 'the Story, and the Task that claims it'),
+    ("every Task declares `writes:`, and no two Tasks' footprints overlap",
+     "the two `writes:` lines that overlap, or none"),
+    ("every Task's acceptance fences are byte-identical to the spec's",
+     "the fence, diffed against the spec's"),
+    ('the stated order is acyclic and every `after:` names a real Task',
+     'the `after:` line, and the Task id it names'),
+    ('each Task is one session of work', "the Task's size, read against a session's"),
+    ('the order is the order the work actually needs', 'the dependency the order follows'),
+    # code
+    ('the diff stays inside `writes:`', 'the file, or the one outside it'),
+    ('every Step of the Task is implemented', 'the step → the code'),
+    ("the acceptance tests are byte-identical to the plan's", 'file:line'),
+    ('those tests were run and are green', "the run's last line"),
+    ('the Gate commands are green', "each command's last line"),
+    ('no secret value printed, no background process, no skipped check', 'what you looked at'),
+    ('the change reads like the code around it', 'the line, beside the code around it'),
+    ('the test would fail if the change were reverted', 'the revert, and the test that would fail'),
+)}
 
 
 #: Words a check's name may add or drop without naming another check.
@@ -233,12 +284,18 @@ def faults(text, required_names):
     return out
 
 
-def render_table(rows):
+def render_table(rows, evidence=None):
     """The skeleton: `| check | result | evidence |`, the separator, and one
-    `| <name> | <pass\\|fail> | |` per row — the escaped pipe, so the skeleton re-parses as one
-    cell."""
+    `| <name> | <pass\\|fail> | <hint> |` per row — the escaped pipe, so the skeleton re-parses as
+    one cell. `evidence` maps a normalized check name (`EVIDENCE`, typically) to the hint its
+    cell carries; called with no `evidence`, or on a name it does not cover, the cell is empty —
+    what every row rendered before this had."""
+    ev = evidence or {}
     lines = ['| check | result | evidence |', '| --- | --- | --- |']
-    lines += [f'| {name} | <pass\\|fail> | |' for name in rows]
+    for name in rows:
+        hint = ev.get(normalize(name), '')
+        lines.append(f'| {name} | <pass\\|fail> | {hint} |' if hint
+                     else f'| {name} | <pass\\|fail> | |')
     return '\n'.join(lines)
 
 

@@ -5,14 +5,7 @@ Read, in this order: {read_order}
 THE VERDICT IS A TABLE. Write `{review_path}` with exactly this shape — one row per check, and no
 row without evidence; a result with no evidence counts as `fail`:
 
-| check | result | evidence |
-| --- | --- | --- |
-| the diff stays inside `writes:` | pass \| fail | the file, or the one outside it |
-| every Step of the Task is implemented | pass \| fail | the step → the code |
-| the acceptance tests are byte-identical to the plan's | pass \| fail | file:line |
-| those tests were run and are green | pass \| fail | the run's last line |
-| the Gate commands are green | pass \| fail | each command's last line |
-| no secret value printed, no background process, no skipped check | pass \| fail | what you looked at |{delivery_checks}
+{checklist}{delivery_checks}
 
 Then the C list (each one: file:line and the exact fix) and the I list (what you would change,
 but will not block on). End the review with THE VERDICT BLOCK — exactly one, fenced, these three

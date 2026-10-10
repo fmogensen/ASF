@@ -32,6 +32,7 @@ import string
 
 from asf import conventions as conventions_mod
 from asf import env
+from asf import reviews
 from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
 from asf.conventions import HEAVY, LIGHT
@@ -392,7 +393,34 @@ GATE_REMOTE = ("BEFORE THE PUSH: the Task's acceptance tests, byte-identical fro
 #: The round-1 read order (:func:`read_order`) — the tail of today's sentence, byte-identical to
 #: ``review.md``'s own lines so a round-1 brief renders unchanged.
 READ_ORDER_FIRST = ("the writer's report on `{branch}`, then the diff against `origin/{main}`,\n"
-                    "then the plan `{plan_path}` for the Task it claims to deliver.")
+                    "then {review_reads}.")
+
+#: :data:`READ_ORDER_FIRST`'s tail for a Task or a Bug — the sentence every round-1 brief has
+#: carried until now, named so a Feature's own branch can be told from it (PD11, F-0280).
+TASK_REVIEW_READS = "the plan `{plan_path}` for the Task it claims to deliver"
+#: Ditto for a Feature, by the branch kind its own branch carries (not `row.review_kinds`: a
+#: direct branch's kinds are `('code',)`, the same tuple a Task's branch carries — PD12). Keyed
+#: by the literal branch kind (``'direct'``, not ``feeder_rows.DIRECT``): `asf.feeder.rows`
+#: imports `asf.briefs` by way of `asf.amendable`, so a module-level look at its attribute here
+#: would be a circular import at load time.
+FEATURE_REVIEW_READS = {
+    'spec': "the spec `{spec_path}` the branch writes",
+    'plan': "the plan `{plan_path}` the branch writes",
+    'direct': "the spec `{spec_path}` and the plan `{plan_path}` the branch writes",
+}
+
+
+def review_reads(product, row, item_type, ctx):
+    """The document(s) the reading order names: the plan, for a Task or a Bug — today's
+    sentence, unmoved; for a Feature, the document its own branch carries
+    (:data:`FEATURE_REVIEW_READS`), from the branch kind — a branch under no known prefix, or
+    one `FEATURE_REVIEW_READS` does not name, falls to the Task wording too (F-0280 PD11)."""
+    if item_type != 'feature':
+        return TASK_REVIEW_READS.format(**ctx)
+    kind = preamble_mod.conventions(product).branch_kind(getattr(row, 'branch', '') or '')
+    wording = FEATURE_REVIEW_READS.get(kind, TASK_REVIEW_READS)
+    return wording.format(**ctx)
+
 
 #: A later round's read order: the previous round's C list, then the increment since the head
 #: that round read, then a name-only diff for the scope row — never the whole diff again.
@@ -521,6 +549,8 @@ def context(product, row, kind, facts):
         'delivers': ', '.join(facts['delivers']) or '(none)',
         'delivery_count': len(facts['delivers']),
         'delivery_checks': delivery_checks(facts),
+        'checklist': reviews.render_table(
+            reviews.required(*(getattr(row, 'review_kinds', ()) or ('code',))), reviews.EVIDENCE),
         'stories': '; '.join(facts['stories']) if facts['stories'] else '(none yet)',
         'proves': facts['proves_lines'] or '(this Task lists no Story — say so in the report)',
         'description': (sections.get('description') or item.get('title') or '—').strip(),
@@ -535,6 +565,7 @@ def context(product, row, kind, facts):
                          else ''),
         **replan_context(product, feature, facts.get('items') or {}),
     }
+    ctx['review_reads'] = review_reads(product, row, ctx['item_type'], ctx)
     ctx['read_order'] = read_order(ctx)
     return ctx
 
