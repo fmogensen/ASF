@@ -246,24 +246,23 @@ def _resolved_head(repo, sha):
 
 
 def recover(store, conv, repo, wt, branch, item, pr_head='', report='', launch_head=''):
-    """File the review :func:`take` refused — a worktree ``wt`` that is no git checkout, so
-    nothing in it can be bound to a head the usual way. Reads the review **without git**: the
-    file at ``conventions.review_path`` in ``wt`` if one is there
-    (:func:`asf.evidence.review.worktree_review`, :data:`FROM_WORKTREE`, the newest round in the
-    directory wins), or — no worktree, no directory, no file — the verdict block of the finished
-    session's ``report`` (:data:`FROM_REPORT`, :func:`asf.evidence.review.recovered_review`).
+    """File the review of a finished session whose worktree is no git checkout — what
+    :func:`take` refuses (:class:`NotACheckout`) because nothing there can be bound to a head.
 
-    The head is never read from ``wt`` — not one git question can be answered there. It is
-    resolved against ``repo`` (the product's own checkout) in one order and one order only: the
-    review text's own verdict block head, then its ``head:`` line, then ``launch_head``, then
-    ``pr_head`` — the first of the four ``repo`` can verify as a real commit. None resolvable, or
-    nothing to read in the first place, returns None having written nothing: the review's own
-    head wins so a recovery can never bind an approval to code the session did not read.
+    Returns ``(round, entry path, source)``, or None when there is nothing to file.
 
-    Files through :func:`put` exactly as :func:`take` does — the same layout, the same stamped
-    name, indistinguishable from an entry ``take`` filed. Never writes into ``wt`` and never
-    deletes from it, so a read-only worktree recovers the same way a writable one does. Returns
-    ``(round, entry path, source)``, or None.
+    The review is read without git: the newest review file of ``item`` in ``wt``
+    (:func:`asf.evidence.review.worktree_review` — ``os.walk`` and ``open``), else the verdict
+    block of ``report`` as a review text (:func:`asf.evidence.review.recovered_review`).
+
+    The head it is bound to is the first of these the repo can ``rev-parse --verify``: the head
+    the review itself names (its ``verdict`` block, then its ``head:`` line), the run's
+    ``launch_head``, ``pr_head``. None of them resolvable is None: an entry bound to a sha no
+    reader can resolve is worse than no entry (F-0313 D3).
+
+    Nothing is written to ``wt`` and nothing is removed from it: the sandbox that broke the
+    gitdir may refuse writes there too. The caller's ``review_filed`` is what keeps a later pass
+    from filing the same review twice (F-0313 D6).
     """
     from asf.evidence import review
     hit = review.worktree_review(conv, wt, item)
