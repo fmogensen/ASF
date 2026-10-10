@@ -249,6 +249,130 @@ class Gate(Repo):
         self.assertEqual(review_store.entries(self.store, 't-1', BRANCH), [])
 
 
+class Recovery(Repo):
+    """:func:`review_store.recover` — the second filing path, for a worktree that holds no git
+    checkout of its own (T-0091's refusal, unloosened): the review is read without git and bound
+    to a head of its own, never one read off ``wt``."""
+
+    def setUp(self):
+        super().setUp()
+        self.base = git(self.wt, 'rev-parse', 'HEAD~1')
+        self.ncwt = os.path.join(self.tmp, 'ncwt')
+        os.makedirs(self.ncwt)
+
+    def write_nc(self, n, text):
+        path = os.path.join(self.ncwt, self.conv.review_path('t-1', n))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as fh:
+            fh.write(text)
+        return path
+
+    @staticmethod
+    def block(head, verdict='approved', asks='none'):
+        return (
+            '# Review\n\n'
+            '| file | result |\n'
+            '|---|---|\n'
+            '| app.py | pass |\n\n'
+            '```verdict\n'
+            f'verdict: {verdict}\n'
+            f'head: {head}\n'
+            f'asks: {asks}\n'
+            '```\n'
+        )
+
+    def recover(self, wt=None, **kw):
+        return review_store.recover(self.store, self.conv, self.wt,
+                                    self.ncwt if wt is None else wt, BRANCH, 'T-1', **kw)
+
+    def test_a_non_checkout_worktree_s_review_file_is_filed_whole(self):
+        text = self.block(self.code)
+        self.write_nc(1, text)
+        got = self.recover()
+        self.assertEqual((got[0], got[2]), (1, review_store.FROM_WORKTREE))
+        stored = review_store.newest(self.store, 't-1', BRANCH)
+        self.assertEqual((stored['round'], stored['head'], stored['text']), (1, self.code, text))
+
+    def test_the_entry_is_bound_to_the_review_s_own_verdict_block_head(self):
+        self.write_nc(1, self.block(self.code))
+        self.recover(pr_head=self.base, launch_head=self.base)
+        self.assertEqual(review_store.newest(self.store, 't-1', BRANCH)['head'], self.code)
+
+    def test_a_head_line_without_a_block_is_bound_instead(self):
+        self.write_nc(1, f'# Review\n\nhead: {self.code}\nverdict: approved\n')
+        self.recover()
+        self.assertEqual(review_store.newest(self.store, 't-1', BRANCH)['head'], self.code)
+
+    def test_no_head_at_all_falls_to_the_launch_head(self):
+        self.write_nc(1, '# Review\n\nverdict: approved\n')
+        self.recover(launch_head=self.base, pr_head=self.code)
+        self.assertEqual(review_store.newest(self.store, 't-1', BRANCH)['head'], self.base)
+
+    def test_no_head_and_no_launch_head_falls_to_the_pr_head(self):
+        self.write_nc(1, '# Review\n\nverdict: approved\n')
+        self.recover(pr_head=self.base)
+        self.assertEqual(review_store.newest(self.store, 't-1', BRANCH)['head'], self.base)
+
+    def test_a_head_none_of_the_four_resolves_files_nothing(self):
+        self.write_nc(1, '# Review\n\nverdict: approved\n')
+        got = self.recover(launch_head='f' * 40, pr_head='e' * 40)
+        self.assertIsNone(got)
+        self.assertEqual(review_store.entries(self.store, 't-1', BRANCH), [])
+
+    def test_the_newest_round_in_the_directory_is_filed(self):
+        self.write_nc(1, self.block(self.code))
+        newer = self.block(self.code, verdict='changes requested')
+        self.write_nc(2, newer)
+        got = self.recover()
+        self.assertEqual(got[0], 2)
+        self.assertEqual(review_store.newest(self.store, 't-1', BRANCH)['text'], newer)
+
+    def test_no_review_file_falls_back_to_the_report(self):
+        report = self.block(self.code)
+        got = self.recover(report=report)
+        self.assertEqual(got[2], review_store.FROM_REPORT)
+        stored = review_store.newest(self.store, 't-1', BRANCH)
+        self.assertEqual(stored['head'], self.code)
+        self.assertIn(review.RECOVERED, stored['text'])
+
+    def test_a_gone_worktree_still_files_from_the_report(self):
+        report = self.block(self.code)
+        got = self.recover(wt=os.path.join(self.tmp, 'gone'), report=report)
+        self.assertEqual(got[2], review_store.FROM_REPORT)
+        self.assertEqual(review_store.newest(self.store, 't-1', BRANCH)['head'], self.code)
+
+    def test_neither_a_file_nor_a_report_block_files_nothing(self):
+        got = self.recover(report='no block here, just prose')
+        self.assertIsNone(got)
+        self.assertEqual(review_store.entries(self.store, 't-1', BRANCH), [])
+
+    def test_nothing_is_written_or_deleted_in_a_read_only_worktree(self):
+        text = self.block(self.code)
+        path = self.write_nc(1, text)
+        before = sorted(os.listdir(os.path.dirname(path)))
+        os.chmod(self.ncwt, 0o500)
+        try:
+            self.recover()
+        finally:
+            os.chmod(self.ncwt, 0o700)
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(sorted(os.listdir(os.path.dirname(path))), before)
+        with open(path) as fh:
+            self.assertEqual(fh.read(), text)
+
+    def test_the_entry_lands_in_the_same_layout_take_uses(self):
+        self.write_nc(1, self.block(self.code))
+        n, entry, _source = self.recover()
+        self.assertRegex(os.path.basename(entry), review_store.NAME_RE.pattern)
+        self.assertEqual(review_store.entries(self.store, 't-1', BRANCH),
+                         [{'round': n, 'head': self.code, 'file': entry}])
+
+    def test_take_still_refuses_the_same_worktree(self):
+        self.write_nc(1, self.block(self.code))
+        with self.assertRaises(review_store.NotACheckout):
+            review_store.take(self.store, self.conv, self.ncwt, BRANCH, 'T-1', self.code)
+
+
 class Brief(unittest.TestCase):
     """The session writes the review and commits nothing; a reader of a stored review gets its
     text in the brief, since it is not in the worktree."""
