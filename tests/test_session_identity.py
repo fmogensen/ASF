@@ -259,6 +259,26 @@ class CommitTrailerTest(Home):
         msg = _git(['log', '-1', '--format=%B'], wt, env=e).stdout
         self.assertIn('chained', msg)
 
+    def test_tracked_githooks_dir_chains_when_hookspath_was_never_configured(self):
+        # the self-hosted asf repo's own case (B-83472): nobody ever ran `asf init` on this
+        # checkout to point core.hooksPath at its tracked .githooks/, so the shim's "own" lookup
+        # would otherwise fall through to the empty default <git-common-dir>/hooks and silently
+        # skip the product's redaction gate
+        job_obj = self._spawn_job(job='j5')
+        wt = job_obj.cwd
+        marker = os.path.join(wt, 'marker')
+        _git(['config', '--unset-all', 'core.hooksPath'], wt)
+        hooks_dir = os.path.join(wt, '.githooks')
+        os.makedirs(hooks_dir, exist_ok=True)
+        pre_commit = os.path.join(hooks_dir, 'pre-commit')
+        with open(pre_commit, 'w', encoding='utf-8') as f:
+            f.write(f'#!/bin/sh\ntouch "{marker}"\n')
+        os.chmod(pre_commit, 0o755)
+        e = self._env(job_obj)
+        p = self._commit(wt, e)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(marker))
+
     def _subject(self, wt, e):
         return _git(['log', '-1', '--format=%s'], wt, env=e).stdout.strip()
 

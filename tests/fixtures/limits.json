@@ -9,5 +9,6 @@
   "pr_approved_unbatched": "10m",
   "bug_S1": "10m",
   "bug_S2": "24h",
-  "undecided_close": "14d"
+  "undecided_close": "14d",
+  "operator_hours": "2h"
 }

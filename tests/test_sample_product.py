@@ -353,8 +353,12 @@ class ReadmeRenderTests(unittest.TestCase):
         self.assertEqual((data['ok'], data['complaints']), (True, []))
 
     def test_refresh_is_a_no_op_the_second_time(self):
-        self._run(refresh=True)
-        rc, out = self._run(refresh=True)
+        # the facts carry a `generated` timestamp at second precision (B-0584): two unpinned
+        # calls landing a second apart make the file genuinely differ, so "no-op" is only true
+        # for two calls at the same instant — pin it, as test_readme.py's own idempotency case does.
+        with mock.patch.object(readme.metrics, 'now_utc', return_value=metrics.now_utc()):
+            self._run(refresh=True)
+            rc, out = self._run(refresh=True)
         self.assertEqual(rc, 0)
         self.assertIn('unchanged', out)
         self.assertNotIn('rewritten', out)
