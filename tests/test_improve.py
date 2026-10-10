@@ -96,6 +96,19 @@ class RunsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(measure.ended_runs(None, ledger=os.path.join(d, 'none.jsonl'), logs_dir=d), [])
 
+    def test_prepush_refused_defaults_to_0_for_a_record_written_before_this_change(self):
+        # S-77507: the fixture registry predates the `prepush_refused` key entirely.
+        self.assertTrue(all(r.prepush_refused == 0 for r in fixture_runs()))
+
+    def test_prepush_refused_is_read_from_the_registry(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = os.path.join(d, 'sessions.jsonl')
+            write_lines(ledger, [
+                {'job': 'a', 'started': '2026-01-01T00:00:00Z', 'pid': 1,
+                 'ended': '2026-01-01T00:10:00Z', 'prepush_refused': 3}])
+            runs = measure.ended_runs(None, ledger=ledger, logs_dir=d)
+        self.assertEqual(runs[0].prepush_refused, 3)
+
 
 class SpendTests(unittest.TestCase):
     def test_the_max_per_session_id_summed_not_the_last_line_and_not_every_line(self):

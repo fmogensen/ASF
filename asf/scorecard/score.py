@@ -283,6 +283,7 @@ def window_row(facts, start, end, rows=None):
         'facts_disagree': sum(1 for d in getattr(facts, 'disagree', None) or ()
                               if in_window(d.get('ts'), start, end)),
         'denials': denials_row(facts, start, end),
+        'first_push_green': first_push_green_row(facts, start, end),
     }
 
 
@@ -316,6 +317,80 @@ def denials_line(row):
     top = '; '.join(f'{reason} ({n})' for reason, n in d['top']) or 'none'
     return (f"Denials/session: {d['mean']:g} ({d['share_pct']:g}% of {d['sessions']} sessions "
            f"≥1) — top: {top}")
+
+
+def _pr_first_head_green(ci, branch):
+    """Is `branch`'s PR still on its first head, and that head's attempt-1 runs all green? A
+    branch with no (non-batched) CI run at all reads as green here — the sessions and the gate
+    carry it (the bullet's own rule for a branch with no PR run); a second head — even one whose
+    first head was itself green (P12: three correction rounds reading as 100 % first-pass green
+    on `throughput.first_pass`/`reds.first_pass_window`) — reads as red here, because a second
+    head is a second round, whatever its own CI said."""
+    rows = [r for r in (ci or ()) if r.get('branch') == branch and not r.get('batch')]
+    if not rows:
+        return True
+    rows = sorted(rows, key=lambda r: str(r.get('ts') or ''))
+    heads = []
+    for r in rows:
+        if r.get('sha') not in heads:
+            heads.append(r.get('sha'))
+    if len(heads) != 1:
+        return False
+    first = [r for r in rows if r.get('sha') == heads[0] and (r.get('attempt') or 1) == 1]
+    return bool(first) and all(r.get('conclusion') == 'success' for r in first)
+
+
+def first_push_green_row(facts, start, end):
+    """Per lane branch landed in [start, end): did it need no second round? Green when the
+    branch's sessions are one building session and no repair one (`repair_flags`), every `gates`
+    reading naming it concluded success, and its PR's first head at attempt 1 was green. `caught`
+    is the pre-push refusals those runs' records carry."""
+    landed = [e for e in getattr(facts, 'landings', None) or ()
+              if e.get('branch') and in_window(e.get('ts'), start, end)]
+    branches = sorted({e['branch'] for e in landed})
+    kind_of = {}
+    jobs_of = collections.defaultdict(set)
+    for e in landed:
+        kind_of.setdefault(e['branch'], e.get('kind') or 'other')
+        jobs_of[e['branch']].add(e.get('job'))
+    flags = repair_flags(facts.sessions)
+    by_kind = {}
+    worst = []
+    green_n = 0
+    for branch in branches:
+        pairs = [(s, f) for s, f in zip(facts.sessions, flags) if s.get('branch') == branch]
+        building = sum(1 for _s, f in pairs if not f)
+        repair = sum(1 for _s, f in pairs if f)
+        gate_rows = [g for g in facts.gates if branch in (g.get('branches') or ())]
+        gates_ok = all(g.get('conclusion') == 'success' for g in gate_rows)
+        head_ok = _pr_first_head_green(facts.ci, branch)
+        reasons = []
+        if repair:
+            reasons.append(f'{repair} repair session(s)')
+        if building != 1:
+            reasons.append(f'{building} building session(s)')
+        if not gates_ok:
+            reasons.append('a failing gate')
+        if not head_ok:
+            reasons.append('a red or repeated CI head')
+        ok = not reasons
+        kind = kind_of.get(branch, 'other')
+        kg, kn = by_kind.get(kind, [0, 0])
+        by_kind[kind] = [kg + (1 if ok else 0), kn + 1]
+        if ok:
+            green_n += 1
+        else:
+            worst.append((len(reasons), branch, '; '.join(reasons)))
+    n = len(branches)
+    jobs = {j for b in branches for j in jobs_of.get(b, ())}
+    caught = sum(getattr(r, 'prepush_refused', 0) or 0 for r in facts.runs if r.job in jobs)
+    worst.sort(key=lambda t: (-t[0], t[1]))
+    return {
+        'branches': n, 'green': green_n,
+        'rate_pct': round(100 * green_n / n, 1) if n else None,
+        'by_kind': by_kind, 'caught': caught,
+        'not_green': [{'branch': b, 'reason': r} for _c, b, r in worst[:3]],
+    }
 
 
 def week_start(d):
@@ -499,6 +574,10 @@ def headline_line(h, clutter=None):
              if h['usd_per_feature'] is not None else f"{_money(h['usd'])} spent, nothing landed",
              f"{'—' if h['repair_per_feature'] is None else format(h['repair_per_feature'], 'g')} "
              "repair sessions/feature"]
+    fpg = h.get('first_push_green') or {}
+    if fpg.get('branches'):
+        parts.append(f"first-push green: {fpg['rate_pct']:g} % ({fpg['green']}/{fpg['branches']}) — "
+                     f"{fpg['caught']} caught at the hook")
     if clutter and clutter.get('stale_prs'):
         parts.append(f"{clutter['stale_prs']} stale PRs")
     return ' · '.join(parts)
