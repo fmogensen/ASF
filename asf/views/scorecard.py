@@ -214,6 +214,69 @@ def render_lanes(d):
     return '\n'.join(out) + '\n'
 
 
+def compute_all(as_of=None, products=None):
+    """``asf scorecard --all``: :func:`asf.scorecard.loop.totals` — every configured product's
+    stored week, the total, and each number's change against the week before."""
+    return loop.totals(as_of=as_of, products=products)
+
+
+def _cell(row, prev, key, money=False):
+    if not row or row.get(key) is None:
+        return '—'
+    cur = _m(row[key]) if money else _n(row[key])
+    if not prev or prev.get(key) is None:
+        return f"{cur} (last —, —)"
+    last = _m(prev[key]) if money else _n(prev[key])
+    return f"{cur} (last {last}, {score.delta(row[key] - prev[key], money=money)})"
+
+
+def _lead_cell(row, prev):
+    if not row or row.get('median_lead_days') is None:
+        return '—'
+    cur = f"{format(row['median_lead_days'], 'g')} d"
+    if not prev or prev.get('median_lead_days') is None:
+        return cur
+    return f"{cur} (last {format(prev['median_lead_days'], 'g')} d)"
+
+
+def render_all(d):
+    """``asf scorecard --all``: one row per configured product plus a **total** row, each cell
+    ``<this week> (last <last week>, <Δ>)`` over :func:`compute_all`'s envelope."""
+    out = [f"**SCORECARD — ALL PRODUCTS** — week of {d['week']} (day {d['day']}/{d['days']}) "
+           f"vs {d['prev_week']}", '',
+           '| Product | Landed | On prod | $ all-in | $/feature all-in | $/feature own '
+           '| Repair sessions | Repair/feature | Median lead | Read at |',
+           '|---|---|---|---|---|---|---|---|---|---|']
+    for p in d['products']:
+        row, prev = p['row'], p['prev']
+        read_at = (row or prev or {}).get('as_of')
+        out.append(
+            f"| {p['product']} | {_cell(row, prev, 'landed')} "
+            f"| {_cell(row, prev, 'on_prod')} "
+            f"| {_cell(row, prev, 'usd', money=True)} "
+            f"| {_cell(row, prev, 'usd_per_feature', money=True)} "
+            f"| {_cell(row, prev, 'own_usd_per_feature', money=True)} "
+            f"| {_cell(row, prev, 'repair_sessions')} "
+            f"| {_cell(row, prev, 'repair_per_feature')} "
+            f"| {_lead_cell(row, prev)} "
+            f"| {read_at[:10] if read_at else 'never measured'} |")
+    t, pt = d['total'], d['prev_total']
+    out.append(
+        f"| **total** | **{_cell(t, pt, 'landed')}** "
+        f"| **{_cell(t, pt, 'on_prod')}** "
+        f"| **{_cell(t, pt, 'usd', money=True)}** "
+        f"| **{_cell(t, pt, 'usd_per_feature', money=True)}** "
+        f"| **{_cell(t, pt, 'own_usd_per_feature', money=True)}** "
+        f"| **{_cell(t, pt, 'repair_sessions')}** "
+        f"| **{_cell(t, pt, 'repair_per_feature')}** "
+        f"| **—** | |")
+    out += ['', score.total_line(d)]
+    c = t.get('clutter') or {}
+    out += ['', f"Clutter now: {_n(c.get('stale_prs'))} stale PRs of {_n(c.get('open_prs'))} open "
+                f"· {_n(c.get('branches'))} branches with no open PR"]
+    return '\n'.join(out) + '\n'
+
+
 def cmd_scorecard(args, root):
     product = env.load_product(getattr(args, 'product', None))
     if getattr(args, 'by_lane', False) is True:

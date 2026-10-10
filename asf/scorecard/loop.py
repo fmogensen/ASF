@@ -34,7 +34,7 @@ import os
 import re
 
 from asf.scorecard import diagnose, score
-from asf.scorecard.facts import iso, load, load_cards, state_file, to_dt
+from asf.scorecard.facts import iso, load, load_cards, now_iso, state_file, to_dt
 
 DEFAULTS = {'window_days': 14, 'verify_weeks': 2, 'min_move': 0.2, 'max_per_run': 3}
 MARKER = 'scorecard-cause:'
@@ -154,6 +154,35 @@ def snapshot(product, facts, clutter=None, causes=(), path=None):
 
 def snapshots(product, path=None):
     return _read_lines(path or state_file(product, SNAPSHOTS))
+
+
+def totals(as_of=None, products=None, read=snapshots):
+    """Every configured product's stored row for the ISO week containing ``as_of`` and for the
+    week before it, with the total across them and the week-over-week delta (F-0148).
+
+    Reads ``state/<product>/scorecard.jsonl`` and nothing else — no record, no repo, no forge, no
+    registry, and no clock but ``as_of`` (D2). A product with no row for a week is carried with
+    ``row: None`` and is not summed (D8); one with no rows at all still gets an entry, so
+    ``asf scorecard --all`` names the product that has never been measured.
+    """
+    as_of = as_of or now_iso()
+    monday = score.week_start(to_dt(as_of))
+    week = monday.date().isoformat()
+    prev_week = (monday - datetime.timedelta(days=7)).date().isoformat()
+    day = 1 + (to_dt(as_of).date() - monday.date()).days
+    names = products if products is not None else configured_products()
+    entries = []
+    for name in names:
+        rows = read(name)
+        row = next((r for r in rows if r.get('week') == week), None)
+        prev = next((r for r in rows if r.get('week') == prev_week), None)
+        entries.append({'product': name, 'row': row, 'prev': prev,
+                         'delta': score.delta_row(row, prev)})
+    total = score.total_row([e['row'] for e in entries if e['row']])
+    prev_total = score.total_row([e['prev'] for e in entries if e['prev']])
+    return {'as_of': as_of, 'week': week, 'prev_week': prev_week, 'day': day, 'days': 7,
+            'products': entries, 'total': total, 'prev_total': prev_total,
+            'delta': score.delta_row(total, prev_total)}
 
 
 # ------------------------------------------------------------ the queue --
