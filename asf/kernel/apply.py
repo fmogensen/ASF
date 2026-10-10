@@ -3,9 +3,10 @@
 :func:`apply` walks the plan's actions in order, then writes each item's judged state to its card.
 It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
 
-- a build launched on an open PR's branch is a fix round: ``kernel_fix_rounds`` + 1, and the
-  'changes' findings on that PR's tree, plus the launch's own (a rebase round's), go to the card
-  and the brief;
+- a build, spec or plan launched on an open PR's branch is a fix round: ``kernel_fix_rounds`` + 1,
+  and the 'changes' findings on that PR's tree, plus the launch's own (a rebase round's), go to the
+  card and the brief; a spec or plan launched with no open PR (a new document PR) resets the
+  count and the findings to zero, so the plan never inherits its spec PR's rounds;
 - a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR, or whose error says
   "merge conflict", is an attempt :func:`asf.kernel.decide.conflict_attempt` (PR and head), so
   the next tick routes the PR to its rebase session; a failed launch is an attempt ``launch: …``
@@ -70,7 +71,7 @@ from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               NO_VERDICT, OVER_AGE, READ_ONLY, RELAUNCH, answer_attempt, conflict_attempt, host_pushes, host_refuses,
+                               NO_VERDICT, NEW_WORK, OVER_AGE, READ_ONLY, RELAUNCH, answer_attempt, conflict_attempt, host_pushes, host_refuses,
                                no_report, rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
 
@@ -402,7 +403,10 @@ class _Applier:
         it = self.facts.items[a.item_id]
         pr = next((p for p in self.facts.prs
                    if p.item_id == a.item_id and not p.merged and p.branch == a.branch), None)
-        fix = a.kind == 'build' and pr is not None
+        # a build, spec or plan launched on the item's open PR is a fix round (B-82960: a plan
+        # PR's review rounds went uncounted and unbriefed, eight rounds with no cap)
+        fix = a.kind in NEW_WORK and pr is not None
+        fresh_doc = a.kind in NEW_WORK and a.kind != 'build' and pr is None
         findings = []
         groom = a.kind == D.GROOM_FILL
         if fix:
@@ -431,6 +435,8 @@ class _Applier:
         if fix:
             self.set(a.item_id, **{P.FIX_ROUNDS: self.field(a.item_id, P.FIX_ROUNDS, 0) + 1,
                                    P.FINDINGS: findings})
+        elif fresh_doc:  # a new document PR starts its own count (the plan after the spec)
+            self.set(a.item_id, **{P.FIX_ROUNDS: 0, P.FINDINGS: []})
         if groom:  # it stays New while its card is filled; the fill counts against its budget
             self.set(a.item_id, **{P.DOR_FILLS: self.field(a.item_id, P.DOR_FILLS, 0) + 1,
                                    P.DOR_FILLS_VER: P._kernel_version()})

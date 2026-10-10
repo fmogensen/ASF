@@ -33,6 +33,14 @@ LIGHT_REVIEW = 'light-review'
 
 #: the floor's brief kind of a fix round (the round answers a correction: findings or a red)
 FIX_KIND = 'correct'
+#: the document lanes' launch kinds: one launched on its open PR is a fix round (B-82960)
+DOC_KINDS = ('spec', 'plan')
+#: what a document fix round answers (the brief keeps its spec/plan kind; this heads the extra)
+DOC_ROUND = ('## This is a fix round on PR #{pr} (head `{head}`)\n\n'
+             'The document on `{branch}` is already written and its pull request is open: do not '
+             'write it again. Answer {correction}\n\n'
+             'Change only what the findings ask, keep the rest of the document as it stands, and '
+             'push the same branch; the PR stays open and is reviewed again on its new head.')
 #: the least room the operator's answers keep in a brief whose findings fill the cap.
 FINDINGS_ANSWERS_FLOOR = 500
 
@@ -458,6 +466,10 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
                             model=getattr(launch, 'model', '') or model_for(product, kind)
                             or b.model)
     extra = []
+    if launch.kind in DOC_KINDS and pr is not None:
+        extra += [DOC_ROUND.format(pr=pr.number, head=pr.head_sha or '?', branch=launch.branch,
+                                   correction='the review findings below.' if findings
+                                   else correction(findings, pr)), '']
     if findings:
         extra += ['## Review findings (every line, in full)', ''] + [
             '- %s' % f for f in findings] + ['']
