@@ -1512,6 +1512,74 @@ class PrsStepTests(StepsTestCase):
         self.assertEqual(self.lane_of('fix/B-0002')['state'], 'MERGED')
 
 
+class ProvesBlockTests(StepsTestCase):
+    """F-0040 Task 4 (S-56307): ``title_and_body``'s own ``## Proves`` block, built from the
+    branch's commits through the step's own ``_git`` — the only text a coder controls when it
+    never opens a pull request itself."""
+
+    def commit_on_branch(self, branch, message, base='main'):
+        _git(['checkout', '-q', '-b', branch, base], self.repo)
+        with open(os.path.join(self.repo, branch.replace('/', '_')), 'w') as f:
+            f.write(branch + '\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', message], self.repo)
+        _git(['push', '-q', 'origin', branch], self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+
+    def test_the_block_sits_between_acceptance_and_the_closing_line_one_bullet_per_claim(self):
+        self.commit_on_branch('worker/B-0001', 'task(B-0001): the work\n\n'
+                               'Proves: S-0077 line 1 — tests/test_a.py::test_a\n'
+                               'Proves: S-0077 line 2 — tests/test_b.py::test_b')
+        root = self.ctx().record_root()
+        title, body = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], root,
+                                               'worker/B-0001', repo=self.repo, trunk='main')
+        self.assertEqual(body, (
+            'Card: [B-0001](bugs/B-0001.md)\n'
+            '\n## Acceptance\n- [ ] the named test passes\n- [ ] no regression\n'
+            '\n## Proves\n'
+            '- S-0077 line 1 — tests/test_a.py::test_a\n'
+            '- S-0077 line 2 — tests/test_b.py::test_b\n'
+            '\nOpened by the tick from `worker/B-0001`.\n'))
+
+    def test_the_block_is_absent_with_no_stray_heading_when_the_branch_has_no_claim(self):
+        self.commit_on_branch('worker/B-0001', 'task(B-0001): the work, no claim')
+        root = self.ctx().record_root()
+        title, body = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], root,
+                                               'worker/B-0001', repo=self.repo, trunk='main')
+        self.assertNotIn('## Proves', body)
+        self.assertEqual(body, (
+            'Card: [B-0001](bugs/B-0001.md)\n'
+            '\n## Acceptance\n- [ ] the named test passes\n- [ ] no regression\n'
+            '\nOpened by the tick from `worker/B-0001`.\n'))
+
+    def test_the_block_is_absent_when_repo_is_not_passed(self):
+        self.commit_on_branch('worker/B-0001', 'task(B-0001): the work\n\n'
+                               'Proves: S-0077 line 1 — tests/test_a.py::test_a')
+        root = self.ctx().record_root()
+        title, body = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], root,
+                                               'worker/B-0001')
+        self.assertNotIn('## Proves', body)
+        title2, body2 = step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], root,
+                                                 'worker/B-0001', repo=self.repo)  # trunk missing
+        self.assertNotIn('## Proves', body2)
+
+    def test_the_git_callable_is_asked_for_exactly_the_one_log_range(self):
+        self.commit_on_branch('worker/B-0001', 'task(B-0001): the work\n\n'
+                               'Proves: S-0077 line 1 — tests/test_a.py::test_a')
+        root = self.ctx().record_root()
+        calls = []
+        real_git = step_prs._git
+
+        def spying_git(repo, args):
+            calls.append((repo, args))
+            return real_git(repo, args)
+        with mock.patch.object(step_prs, '_git', spying_git):
+            step_prs.title_and_body('B-0001', INDEX['items']['B-0001'], root,
+                                     'worker/B-0001', repo=self.repo, trunk='main')
+        self.assertEqual([c for c in calls if c[0] == self.repo],
+                          [(self.repo, ['log', '--format=%B', 'origin/main..origin/worker/B-0001'])])
+
+
 # ---- harvest ----------------------------------------------------------------------
 
 class HarvestStepTests(StepsTestCase):
