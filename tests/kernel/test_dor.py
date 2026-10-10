@@ -352,6 +352,13 @@ class RealRecordWrites(unittest.TestCase):
                          frozenset({'a.py'}))
 
 
+class StopGate(unittest.TestCase):
+
+    def test_a_groom_fill_session_is_never_held_for_a_push(self):
+        from asf.workers import lifecycle
+        self.assertFalse(lifecycle.lands({'kind': dor.GROOM_FILL, 'branch': 'groom-fill/T-1'}))
+
+
 class TickLine(unittest.TestCase):
 
     def test_the_tick_logs_the_hold_by_gap(self):

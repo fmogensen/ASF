@@ -2640,8 +2640,11 @@ def push_failure(text):
 #: rules into the state dir's answers file and is told the repository is not its work, so it
 #: never commits. An ``epic-features`` session is the same shape (F-0094): its one write is
 #: ``asf inbox`` into the record, never a commit to its branch, so a session that files its
-#: cards perfectly must not be judged on a push it was never going to make.
-NO_LANDING_KINDS = ('groom', 'groom-clerk', 'epic-features')
+#: cards perfectly must not be judged on a push it was never going to make. A kernel
+#: ``groom-fill`` session (:mod:`asf.kernel.dor`) only judges a card and ends with its verdict
+#: block, which the kernel applies to the record (2026-10-10: the stop gate refused its stop
+#: twice for a branch it was told never to push, and its final message lost the verdict).
+NO_LANDING_KINDS = ('groom', 'groom-clerk', 'epic-features', 'groom-fill')
 
 #: Kinds whose work is a file the factory takes off the branch, not a commit on it: a review
 #: session writes ``docs/reviews/<n>-<item>.md`` in its worktree and leaves it uncommitted for
