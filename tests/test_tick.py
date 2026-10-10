@@ -111,6 +111,13 @@ class TickTestCase(unittest.TestCase):
         patcher = mock.patch.object(tick, 'run_record_tail_step', lambda ctx: None)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # this fixture's product has no repo_dir, so the version check takes the release channel
+        # (D3); its own network reads are exactly what tests/test_release_channel.py covers, and
+        # every test here predates that channel, so it stays silent, as it read before the fork
+        from asf import upgrade
+        patcher = mock.patch.object(upgrade, 'release_report', lambda ctx: 'none')
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         env.ASF_HOME = self._orig_home

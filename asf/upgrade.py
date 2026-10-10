@@ -1041,8 +1041,10 @@ def release_report(ctx, out=print, now=None, run=subprocess.run):
         file_bugs.file_upgrade_bug(root, tag, old, _red_rows(doctor_out),
                                    default_bug_epic=default_bug_epic, out=out)
         try:
-            if shadow.commit_local(root, f'file-bugs: upgrade {tag} doctor RED'):
-                shadow.push(root)
+            if (shadow.commit_local(root, f'file-bugs: upgrade {tag} doctor RED')
+                    and not shadow.push(root)):
+                print('upgrade: pushing the filed Bug failed — the next RED tick bumps it',
+                      file=sys.stderr)
         except (subprocess.SubprocessError, OSError) as e:
             print(f'upgrade: pushing the filed Bug failed ({e}) — the next RED tick bumps it',
                   file=sys.stderr)
