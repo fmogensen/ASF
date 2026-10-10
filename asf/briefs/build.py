@@ -474,7 +474,8 @@ def regression_block(product, facts):
     conv = preamble_mod.conventions(product)
     if conv.flag('regression.check') != 'on':
         return ''
-    base = (facts['head'] or '').split()[0] or preamble_mod.UNKNOWN
+    head = facts['head']
+    base = head.split()[0] if head else preamble_mod.UNKNOWN
     command = (conv.flag('regression.command') or conv.test_command or '').replace('{base}', base)
     return '\n\n' + REGRESSION_CHECK_RULE.format(base=base, command=command)
 
