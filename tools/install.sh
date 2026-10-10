@@ -99,25 +99,48 @@ if [ "$MODE" != no-package ]; then
 command -v pipx >/dev/null 2>&1 || die "pipx is not installed — brew install pipx (or python3 -m pip install --user pipx)"
 
 if [ -z "$REF" ]; then
-  TAG_REFS="$(git ls-remote --tags --refs "$REPO_URL" 'v*')" ||
+  CHANNEL="${ASF_CHANNEL:-stable}"
+  REFS="$(git ls-remote "$REPO_URL" "refs/heads/releases/*" 'refs/tags/v*')" ||
     die "listing tags at $REPO_URL failed — check the ref and network"
-  REF="$(python3 - "$TAG_REFS" <<'RESOLVE_TAG'
+  RESOLVED="$(python3 - "$CHANNEL" "$REFS" <<'RESOLVE_CHANNEL'
 import re, sys
+channel, lines = sys.argv[1], sys.argv[2].splitlines()
 pattern = re.compile(r"v\d+\.\d+\.\d+")
-names = []
-for line in sys.argv[1].splitlines():
+key = lambda n: tuple(int(g) for g in re.findall(r"\d+", n))
+heads, at, tags = {}, {}, set()
+for line in lines:
     line = line.strip()
     if not line:
         continue
-    name = line.rsplit(None, 1)[-1].rsplit("refs/tags/", 1)[-1]
-    if pattern.fullmatch(name):
-        names.append(name)
-if names:
-    print(max(names, key=lambda n: tuple(int(g) for g in re.findall(r"\d+", n))))
-RESOLVE_TAG
+    sha, _tab, ref = line.partition("\t")
+    sha, ref = sha.strip(), ref.strip()
+    if not sha or not ref:
+        continue
+    if ref.startswith("refs/heads/releases/"):
+        heads[ref[len("refs/heads/releases/"):]] = sha
+    elif ref.startswith("refs/tags/"):
+        peeled = ref.endswith("^{}")
+        name = ref[len("refs/tags/"):-3] if peeled else ref[len("refs/tags/"):]
+        if pattern.fullmatch(name):
+            tags.add(name)
+            if peeled:
+                at.setdefault(sha, []).append(name)
+commit = heads.get(channel)
+chosen = sorted(at.get(commit, []), key=key)
+if chosen:
+    print(chosen[-1], "channel")
+elif tags:
+    print(max(tags, key=key), "fallback")
+RESOLVE_CHANNEL
 )"
+  REF="${RESOLVED%% *}"
+  SRC="${RESOLVED#* }"
   [ -n "$REF" ] || die "no v<major>.<minor>.<patch> tag found on $REPO_URL — pass one: install.sh $PRODUCT <ref>"
-  say "product $PRODUCT, release $REF from $REPO_URL"
+  if [ "$SRC" = channel ]; then
+    say "product $PRODUCT, release $REF (channel $CHANNEL) from $REPO_URL"
+  else
+    say "product $PRODUCT, release $REF (no $CHANNEL channel on $REPO_URL yet — the newest tag) from $REPO_URL"
+  fi
 else
   say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
 fi

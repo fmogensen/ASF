@@ -19,7 +19,12 @@ Task 4 adds the stable gate: ``StableGateTest`` (over ``channels.stable_rows``, 
 ``FakeRehearsalGh`` for its rehearsal row) and ``S1WindowTest`` (over ``channels.s1_in_window`` and
 ``release_preview.open_defects``, against the fixture record at
 ``tests/fixtures/channels/record`` — four Bug cards, the four answers D9 has to tell apart) —
-one case per checkbox line of S-81206."""
+one case per checkbox line of S-81206.
+
+Task 6 adds the two consumers: ``UpgradeTargetTest`` (``upgrade.resolve_target``'s new channel
+step) and ``BootstrapRuleTest`` (the bootstrap's own inline copy of the rule, extracted from
+``tools/install.sh`` and pinned equal to :func:`channels.channel_tag` on the same fixture remote
+— one case per checkbox line of S-81209)."""
 import contextlib
 import datetime
 import io
@@ -32,8 +37,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import channels, cli, env, mutation_guard, release_preview
+from asf import channels, cli, env, mutation_guard, release_preview, upgrade
 from asf.state import registry, store
+from tests.test_install import INSTALL_SH, _operator_tty
 
 UTC = datetime.timezone.utc
 
@@ -699,3 +705,165 @@ class S1WindowTest(unittest.TestCase):
     def test_an_s2_inside_the_window_does_not_block(self):
         self.assertNotIn('B-0004', self.windowed_ids())
         self.assertNotIn('B-0004', self.open_s1_ids())
+
+
+class UpgradeTargetTest(unittest.TestCase):
+    """S-81209 — ``upgrade.resolve_target``'s new step: a channel name resolves through
+    :func:`channels.resolve` before any of the function's existing target forms are tried, over
+    the same real-git fixture :class:`ResolveTest` already builds (PD9). ``asf.drift.factory_root``
+    is patched to ``None`` throughout: this worktree is itself a checkout, and the fixture's own
+    tag names must never be resolved against it instead of the fixture remote."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='channels_target_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.remote, self.shas = tagged_remote(self.tmp)
+        patcher = mock.patch('asf.drift.factory_root', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_published_channel_resolves_to_its_version_tag_before_the_existing_steps_run(self):
+        # 'stable' is none of resolve_target's existing forms (not hex, not a known prefix, not
+        # a ref named 'stable') — only the new channel step can resolve it at all.
+        self.assertEqual(upgrade.resolve_target('stable', None, self.remote), self.shas['v0.2.0'])
+
+    def test_the_install_record_names_the_tag_commit_never_the_channel_name(self):
+        got = upgrade.resolve_target('STABLE', None, self.remote)  # case-insensitive, stripped
+        self.assertEqual(got, self.shas['v0.2.0'])
+        self.assertTrue(upgrade.HEX40.match(got))
+        self.assertNotIn('stable', got.lower())
+
+    def test_an_unpublished_channel_refuses_the_move_like_an_unreadable_target(self):
+        self.assertIsNone(upgrade.resolve_target('edge', None, self.remote))
+        self.assertIsNone(upgrade.resolve_target('no-such-ref-at-all', None, self.remote))
+
+    def test_a_word_that_is_not_a_channel_name_is_still_treated_as_a_ref(self):
+        self.assertEqual(upgrade.resolve_target('v0.1.0', None, self.remote), self.shas['v0.1.0'])
+        self.assertEqual(upgrade.resolve_target('main', None, self.remote), self.shas['untagged'])
+        sha = 'a' * 40
+        self.assertEqual(upgrade.resolve_target(sha, None, self.remote), sha)
+
+
+def _refs_text(remote, tmp):
+    """The raw multi-line text ``git ls-remote`` prints for the two patterns the bootstrap and
+    :func:`channels.resolve` both ask for — what a shell ``REFS="$(...)"`` assignment captures."""
+    return _git(['ls-remote', remote, 'refs/heads/' + channels.PREFIX + '*', 'refs/tags/v*'], tmp)
+
+
+def _bootstrap_resolve_channel_snippet():
+    """The exact ``python3`` heredoc the bootstrap runs to resolve its default ref — read from
+    the script itself, not retyped, the way ``tests.test_install._bootstrap_resolve_tag_snippet``
+    reads its own sibling, so the two copies of the rule are pinned equal instead of merely
+    agreeing by construction."""
+    with open(INSTALL_SH, encoding='utf-8') as f:
+        text = f.read()
+    marker = "<<'RESOLVE_CHANNEL'\n"
+    start = text.index(marker) + len(marker)
+    end = text.index("\nRESOLVE_CHANNEL\n", start)
+    return text[start:end]
+
+
+def _run_channel_snippet(channel, refs_text):
+    snippet = _bootstrap_resolve_channel_snippet()
+    return subprocess.run(['python3', '-', channel, refs_text], input=snippet,
+                          capture_output=True, text=True, timeout=10)
+
+
+def _module_answer(lines, channel):
+    """The pick :func:`channels.channel_tag` plus the newest-tag fallback make, read back as the
+    same ``"<ref> channel|fallback"`` string the bootstrap's own copy prints — the one the two
+    rules must agree on byte for byte, never just by construction (PD9)."""
+    tag, _commit = channels.channel_tag(lines, channel)
+    if tag:
+        return f'{tag} channel'
+    names = set()
+    for line in lines:
+        _sha, _tab, ref = line.strip().partition('\t')
+        ref = ref.strip()
+        if ref.startswith('refs/tags/'):
+            name = ref[len('refs/tags/'):]
+            if name.endswith(channels.PEEL):
+                name = name[:-len(channels.PEEL)]
+            if cli.RELEASE_TAG.fullmatch(name):
+                names.add(name)
+    return f'{max(names, key=channels.version_key)} fallback' if names else ''
+
+
+class BootstrapRuleTest(unittest.TestCase):
+    """S-81209 — the bootstrap's own inline copy of the channel rule (``tools/install.sh``),
+    pinned equal to :func:`channels.channel_tag` on the same real-git fixture
+    :class:`ResolveTest` builds — one case per checkbox line, plus the full script end to end for
+    the environment variable and the ``[ref]`` argument's precedence over it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='channels_bootstrap_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.remote, self.shas = tagged_remote(self.tmp)
+        self.refs_text = _refs_text(self.remote, self.tmp)
+        self.lines = self.refs_text.splitlines()
+
+    def _install_env(self, channel=None):
+        bin_dir = os.path.join(self.tmp, 'bin')
+        os.makedirs(bin_dir, exist_ok=True)
+        for name in ('pipx', 'asf'):
+            path = os.path.join(bin_dir, name)
+            with open(path, 'w') as f:
+                f.write('#!/bin/sh\nexit 0\n')
+            os.chmod(path, 0o755)
+        home = os.path.join(self.tmp, 'home')
+        asf_home = os.path.join(home, '.ASF')
+        os.makedirs(asf_home)
+        env = dict(os.environ, HOME=home, ASF_HOME=asf_home, ASF_REPO_URL=self.remote,
+                   PATH=bin_dir + os.pathsep + os.environ.get('PATH', ''))
+        env.pop('ASF_CHANNEL', None)
+        if channel is not None:
+            env['ASF_CHANNEL'] = channel
+        return env
+
+    def test_a_published_channel_prints_the_same_string_as_the_module(self):
+        r = _run_channel_snippet('stable', self.refs_text)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), _module_answer(self.lines, 'stable'))
+        self.assertEqual(r.stdout.strip(), 'v0.10.0 channel')
+
+    def test_an_unpublished_channel_falls_back_to_the_newest_tag_and_says_so(self):
+        r = _run_channel_snippet('edge', self.refs_text)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), _module_answer(self.lines, 'edge'))
+        self.assertEqual(r.stdout.strip(), 'v0.10.0 fallback')
+
+    def test_an_empty_remote_prints_nothing_the_same_as_the_module(self):
+        empty = os.path.join(self.tmp, 'empty.git')
+        _git(['init', '-q', '-b', 'main', empty])
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', 'c'], empty)
+        refs_text = _refs_text(empty, self.tmp)
+        r = _run_channel_snippet('stable', refs_text)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), '')
+        self.assertEqual(_module_answer(refs_text.splitlines(), 'stable'), '')
+
+    def test_the_bootstrap_with_no_ref_installs_the_stable_channel_tag_and_prints_it(self):
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', '--package-only'], capture_output=True,
+                           text=True, env=self._install_env(), **_operator_tty(), timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f'product demo, release v0.10.0 (channel stable) from {self.remote}',
+                     r.stdout)
+
+    def test_the_bootstrap_falls_back_to_the_newest_tag_when_the_channel_is_unpublished(self):
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', '--package-only'], capture_output=True,
+                           text=True, env=self._install_env(channel='edge'), **_operator_tty(),
+                           timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(
+            f'product demo, release v0.10.0 (no edge channel on {self.remote} yet — the newest '
+            'tag) from ' + self.remote, r.stdout)
+
+    def test_the_channel_is_read_from_the_environment_and_a_ref_argument_still_wins(self):
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'v0.1.0', '--package-only'],
+                           capture_output=True, text=True,
+                           env=self._install_env(channel='edge'), **_operator_tty(), timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f'product demo, ref v0.1.0 from {self.remote}', r.stdout)
+        self.assertNotIn('(channel', r.stdout)
+        self.assertNotIn('newest tag', r.stdout)
