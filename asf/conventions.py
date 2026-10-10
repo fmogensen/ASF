@@ -422,7 +422,11 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                # F-0112/T-0431: how this product's tick takes a new ASF release — auto | notify
                # (default) | off (asf.env.Product.upgrade). A flag, not a top-level PRODUCT_FIELDS
                # key: a new one is refused by tests.test_env.PinnedReader (PR #675).
-               'upgrade')
+               'upgrade',
+               # F-0300: off opts a product out of the rule pass that waives a cosmetic or
+               # already-settled dispute before any adjudicate session is spawned
+               # (asf.evidence.rulepass) — default off
+               'rule_pass')
 
 
 
