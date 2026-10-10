@@ -406,6 +406,36 @@ class GhLogTail(unittest.TestCase):
         self.assertEqual(actions.LOG_TAIL_MAX, 64 * 1024)
 
 
+_WRITER = r"""
+import sys
+from asf.workers import cloudpid
+path, who, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+cloudpid.cache_path = lambda: path
+for i in range(n):
+    cloudpid.record(f'remote:trig_{who}_{i}', cloudpid.FINISHED, 'report commit abc on the branch')
+"""
+
+
+class StatusFileAcrossProcesses(unittest.TestCase):
+    """The cloud status file is shared by every ASF process on the host (each product's kernel
+    tick, the watch): a read-modify-write without a lock between processes lost another's entry
+    — 2026-10-10, review-f-0317 synced ``finished`` and read back ``working`` a tick later, its
+    seat held and its verdict never recorded."""
+
+    def test_writers_in_separate_processes_lose_no_entry(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, 'cloud-sessions.json')
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        envv = dict(os.environ, PYTHONPATH=root)
+        procs = [subprocess.Popen([sys.executable, '-c', _WRITER, path, str(w), '40'], env=envv)
+                 for w in range(6)]
+        self.assertEqual([p.wait(timeout=120) for p in procs], [0] * 6)
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        self.assertEqual(len(data), 6 * 40)
+        self.assertEqual({r['status'] for r in data.values()}, {cloudpid.FINISHED})
+
+
 class TokenLiveness(unittest.TestCase):
     def setUp(self):
         self._home = env.ASF_HOME

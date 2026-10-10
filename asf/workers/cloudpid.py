@@ -12,6 +12,7 @@ pass: ``{token: {status, why, updated, …}}`` with ``status`` one of ``working`
 module imports nothing of the workers, so the ledger's lowest layer (:mod:`asf.workers.lifecycle`)
 can ask it without a cycle.
 """
+import fcntl
 import json
 import os
 import tempfile
@@ -54,9 +55,19 @@ def load():
 
 
 def record(tok, status, why='', **fields):
-    """Write ``tok``'s status (atomically: a reader never sees half a file)."""
-    with _LOCK:  # a wave's cloud launches record from threads: none loses another's entry
-        return _record(tok, status, why, **fields)
+    """Write ``tok``'s status (atomically: a reader never sees half a file). The read-modify-write
+    holds a lock between threads (a wave's cloud launches) and between processes (every
+    product's kernel tick and the watch share this one file): none loses another's entry
+    (2026-10-10: a finished review read back ``working`` and held its seat)."""
+    with _LOCK:
+        path = cache_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + '.lock', 'a', encoding='utf-8') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return _record(tok, status, why, **fields)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 _LOCK = threading.Lock()
