@@ -4,9 +4,10 @@
     "worker/T-00001",
     "fix/T-00001",
     "spec/T-00001",
-    "plan/T-00001"
+    "plan/T-00001",
+    "revert/T-00001"
   ],
-  "built_at": "2026-10-10T13:46:09Z",
+  "built_at": "2026-10-10T15:45:03Z",
   "cards": {
     "bugs": 48,
     "decisions": 10,
@@ -20,16 +21,11 @@
     "done": [
       "done-note-1.md",
       "done-note-2.md",
-      "done-note-3.md",
-      "done-note-4.md",
-      "done-note-5.md",
-      "done-note-6.md",
-      "done-note-7.md",
-      "done-note-8.md"
+      "done-note-3.md"
     ],
     "mismatch": {
-      "name": "done-note-8.md",
-      "original": "id irure veniam sint nostrud id in elit aute magna \namet proident nostrud sit in adipiscing "
+      "name": "done-note-3.md",
+      "original": "lorem pariatur anim laborum sed quis velit laboris veniam ad adipiscing pariatur do velit ame\namet proident nostrud sit in adipiscing "
     },
     "open": [
       "open-note-1.md",
@@ -57,7 +53,7 @@
     {
       "annotated": true,
       "date": "2026-10-10",
-      "message": "ad nisi culpa nostrud ea des",
+      "message": "sit qui proident do cupidatat est id ex",
       "name": "v0.1.1",
       "prerelease": false
     },
@@ -71,7 +67,7 @@
   ],
   "refs_annotated": 2,
   "refs_total": 3,
-  "source_sha": "05c1504dadd18ac54778e78d28f2befa92165609",
+  "source_sha": "1faf406f2d3243d25219bde20a7b37ee22e1696f",
   "widest_id": {
     "B": "B-00001",
     "D": "D-0001",
