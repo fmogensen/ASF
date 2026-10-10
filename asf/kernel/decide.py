@@ -1280,6 +1280,9 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
     if verdict.verdict != 'approve':
         return _fix_round(it, pr, 'review: changes requested', config, extra=extra, facts=facts,
                           actions=actions)
+    if not pr.auto_merge and merge_ready(pr, config):  # GitHub refuses auto-merge on a CLEAN PR
+        actions.append(A.MergePR(pr.number, pr.head_sha))
+        return _Judged(State.LANDING)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
     elif auto_merge_idle(pr, config):  # enabled a tick ago, green and CLEAN, not merged
@@ -1310,7 +1313,14 @@ def auto_merge_idle(pr, config):
     already on when this tick read it (enabled a tick ago or more), GitHub says CLEAN, its head
     is known and every required check completed green on it — the kernel merges it directly
     (:class:`MergePR`, ``--match-head-commit``)."""
-    if not (pr.auto_merge and pr.clean and pr.head_sha and not pr.merged):
+    return pr.auto_merge and merge_ready(pr, config)
+
+
+def merge_ready(pr, config):
+    """Whether approved ``pr`` can be merged now: GitHub says CLEAN, its head is known and every
+    required check completed green on it. GitHub refuses to enable auto-merge on such a PR ("is
+    in clean status", F-0337), so the kernel merges it directly."""
+    if not (pr.clean and pr.head_sha and not pr.merged):
         return False
     req = [c for c in pr.checks if required(c.name, config)]
     names = {c.name for c in req}

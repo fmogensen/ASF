@@ -5,7 +5,7 @@ ruleset's strict flag off; GitHub merges a green PR behind its base).
   not strict, a merely BEHIND PR is never updated (that only burns CI) and nothing queues, while a
   DIRTY one still goes to its rebase session.
 - A PR green, CLEAN and approved whose enabled auto-merge has not fired is merged directly
-  (``MERGE direct #n (auto-merge idle)``, ``--match-head-commit``).
+  (``MERGE direct #n (clean and green)``, ``--match-head-commit``).
 - The main safety net: a red trunk new since its last green commit reverts its one candidate PR
   (the item back to Ready) or files a Bug for a fix session naming the candidates; an infra or
   flaky red is rerun once first. Every red tick logs ``MAIN RED <sha> -> <action>``.
@@ -138,13 +138,22 @@ class DirectMerge(unittest.TestCase):
         plan = decide(f, cfg())
         self.assertEqual(B.of(plan, A.MergePR), [A.MergePR(10, 'head-1')])
         self.assertEqual(A.describe(B.of(plan, A.MergePR)[0]),
-                         'MERGE direct #10 (auto-merge idle)')
+                         'MERGE direct #10 (clean and green)')
         gh = F.FakeGitHub(prs=f.prs)
         apply(plan, f, F.ports(F.FakeRecord(list(f.items.values())), gh), log=lambda _l: None)
         self.assertEqual(gh.merged, [(10, 'head-1')])
 
-    def test_no_direct_merge_before_auto_merge_had_a_tick_or_while_not_clean_or_green(self):
+    def test_a_clean_green_approved_pr_with_no_auto_merge_is_merged_directly(self):
+        # F-0337 (2026-10-10): GitHub refuses auto-merge on a PR already CLEAN ("Pull request is
+        # in clean status"), so #1399 and #1408 retried it every tick and never landed
         f = landing_world(False, behind=False, clean=True)
+        f.prs[0].auto_merge = False
+        plan = decide(f, cfg())
+        self.assertEqual(B.of(plan, A.MergePR), [A.MergePR(10, 'head-1')])
+        self.assertEqual(B.of(plan, A.EnableAutoMerge), [])
+
+    def test_no_direct_merge_while_not_clean_or_green(self):
+        f = landing_world(False, behind=False, clean=False)
         f.prs[0].auto_merge = False
         self.assertEqual(B.of(decide(f, cfg()), A.MergePR), [])
         self.assertEqual(B.of(decide(landing_world(False, behind=False), cfg()), A.MergePR), [])
