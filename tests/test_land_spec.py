@@ -110,10 +110,15 @@ class LandTheApprovedSpec(unittest.TestCase):
         self.assertEqual(land_spec.adopt(self.product, self.items(self.lane),
                                          out=lambda *_a: None), [])
         self.assertEqual(run['lane']['state'], 'PUSHED')
-        # and the feeder reads it as pushed and waiting, no session
+        # and the feeder reads it as pushed and waiting, no session — the lane holds the
+        # branch, so the row is :func:`asf.feeder.rows.lane_rows`' (the Feature's own document
+        # row steps aside for it: :func:`asf.feeder.rows.lane_speaks`), and `feature_rows`
+        # alone draws none
         occupancy = lifecycle.occupancy(pool_mod.sessions_path(self.product))
-        (row,) = rows.feature_rows(self.items(self.lane), self.product, set(), [],
-                                   occupancy=occupancy)
+        self.assertEqual(rows.feature_rows(self.items(self.lane), self.product, set(), [],
+                                           occupancy=occupancy), [])
+        (row,) = rows.candidates({"items": self.items(self.lane)}, self.product, [],
+                                 occupancy=occupancy)
         self.assertEqual((row.kind, row.launches), (rows.PUSHED_LAND, False))
 
     def test_a_conflicting_branch_goes_to_a_session_that_lands_it_unrewritten(self):
