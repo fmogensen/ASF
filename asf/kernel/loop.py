@@ -313,6 +313,20 @@ def _min_samples(product):
         return None
 
 
+def seat_line(facts, config, ports):
+    """The dry run's seat computation: configured seats, the host's capacity (``Facts.seats``)
+    and how the session port read it, the alive sessions and the free seats ``decide`` used."""
+    from asf.kernel.decide import _free
+    note = getattr(ports.sessions, 'seat_note', None)
+    try:
+        note = note() if note else ''
+    except Exception as e:  # noqa: BLE001 — a note never stops the dry run
+        note = 'unread: %s' % e
+    return 'seats: configured %d, capacity %s, alive %d, free %d%s' % (
+        config.max_sessions, facts.seats, sum(1 for s in facts.sessions if s.alive),
+        _free(facts, config), ' — %s' % note if note else '')
+
+
 def blind_tick(facts, ports, out=print):
     """Apply the blind plan of ``facts`` (see the module doc); the tick's summary."""
     plan = blind_plan(facts)
@@ -354,6 +368,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             plan = decide(read_waits(facts, state_dir, _min_samples(product)), config)
         for a in plan.actions:
             out('would %s' % describe(a))
+        out(seat_line(facts, config, ports))
         summary = summarize(plan, facts, dry_run=True)
         summary['waits'] = measure_waits(product, state_dir, plan, facts, config, write=False,
                                          out=out)

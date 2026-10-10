@@ -162,6 +162,21 @@ class RealSeats(unittest.TestCase):
         self.assertEqual(read_facts(F.ports(sessions=s)).seats, 7)
 
 
+    def test_a_dry_run_prints_the_seat_computation(self):
+        from asf.kernel.loop import seat_line
+        try:
+            from kernel import fakes as F
+        except ImportError:  # pragma: no cover
+            from tests.kernel import fakes as F
+        f = B.facts([], seats=3, sessions=[B.session('j1', 'T-0009')])
+        s = F.FakeSessions()
+        self.assertEqual(seat_line(f, B.config(max_sessions=10), F.ports(sessions=s)),
+                         'seats: configured 10, capacity 3, alive 1, free 2')
+        s.seat_note = lambda: 'local 1/10'
+        self.assertTrue(seat_line(f, B.config(max_sessions=10), F.ports(sessions=s))
+                        .endswith('free 2 — local 1/10'))
+
+
 class Knob(unittest.TestCase):
 
     def test_the_knob_defaults_to_30_and_0_turns_it_off(self):

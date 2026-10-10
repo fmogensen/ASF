@@ -1473,12 +1473,17 @@ class RealSessions:
                          pr=run.get('kernel_pr'), unpushed=unpushed, push_refused=refused)
 
     def _live(self):
-        """``(local live, cloud live, {account: live})`` over the ledger's live runs."""
+        """``(local live, cloud live, {account: live})`` over the ledger's runs that hold a seat:
+        no ``ended`` line yet *and* the pid answers (a cloud run: its remote status is working).
+        A dead run the tick has not ended yet holds no seat — ``decide`` counts only alive
+        sessions, so a dead row counted here lost its seat twice (2026-10-10 10:24Z: two dead
+        local rows on lane accounts read capacity 17 of 18; 10:36Z: the host lane read 10/10
+        while 8 ran)."""
         from asf.workers import cloud, lifecycle, pool
         local = in_cloud = 0
         per = {}
         for run in pool.load_sessions(self.product).values():
-            if lifecycle.is_live(run):
+            if lifecycle.is_live(run) and lifecycle.pid_alive(run.get('pid')):
                 per[run.get('account')] = per.get(run.get('account'), 0) + 1
                 if cloud.is_cloud(run):
                     in_cloud += 1
@@ -1528,6 +1533,23 @@ class RealSessions:
         if accounts:
             seats = min(seats, sum(a.cap for a in accounts))
         return seats
+
+    def seat_note(self):
+        """One line on how :meth:`capacity` came out (a dry run prints it)."""
+        from asf.workers import cloud, pool
+        local_max, cloud_max = lane_seats(self.product, self.cfg())
+        local, in_cloud, live = self._live()
+        accounts = pool.accounts_from_config(self.cfg())
+        s = cloud_lane(self.product, self.cfg()) if cloud_max else None
+        tripped = cloud.Breaker(self.product, s).tripped() if s is not None else ''
+        free = sum(max(0, a.cap - live.get(a.name, 0))
+                   for a in cloud.lane_accounts(accounts, s)) if s is not None else 0
+        return ('local %d/%d, cloud %d/%d (lane accounts free %d%s), accounts %s of cap %d '
+                '-> capacity %d' % (local, local_max, in_cloud, cloud_max, free,
+                                    '; breaker: %s' % tripped if tripped else '',
+                                    ' '.join('%s %d/%d' % (a.name, live.get(a.name, 0), a.cap)
+                                             for a in accounts),
+                                    sum(a.cap for a in accounts), self.capacity()))
 
     def lane(self, kind, meta=None):
         """``'cloud'`` or ``'local'``: the seat a ``kind`` launch takes. A launch that needs the

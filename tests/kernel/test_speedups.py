@@ -110,6 +110,7 @@ class Launch(unittest.TestCase):
     def setUp(self):
         FakeBreaker.tripped_why, FakeBreaker.failed = '', []
         self.live = {}
+        self.dead = set()   # pids (cloud tokens) that no longer answer
         self.spawned = []
         self.fail_cloud = False
         self.runtime = remote.RemoteRuntime(cloud.settings(CFG), None)
@@ -117,7 +118,9 @@ class Launch(unittest.TestCase):
                   mock.patch.object(pool, 'update_session'),
                   mock.patch.object(spawn, 'spawn', side_effect=self.spawn),
                   mock.patch.object(cloud, 'lane_runtime', return_value=self.runtime),
-                  mock.patch.object(cloud, 'Breaker', FakeBreaker)):
+                  mock.patch.object(cloud, 'Breaker', FakeBreaker),
+                  mock.patch.object(lifecycle, 'pid_alive',
+                                    side_effect=lambda pid: bool(pid) and pid not in self.dead)):
             p.start()
             self.addCleanup(p.stop)
         self.port = P.RealSessions(product({'launch': {'local_max': 1, 'cloud_max': 2}}),
@@ -228,6 +231,23 @@ class Launch(unittest.TestCase):
         with self.assertRaises(P.NoSeat):
             self.port.launch('review', 'T-0002', 'worker/T-0002', self.brief())
         self.assertEqual(FakeBreaker.failed, [])
+
+    def test_a_dead_run_with_no_ended_line_holds_no_seat(self):
+        # 2026-10-10 10:24Z: two dead local runs not yet ended counted on the lane accounts, so
+        # capacity read 17 of 18 and T-0318 waited "no free seat"; at 10:36Z two more dead local
+        # rows made the host lane read 10/10 while 8 ran
+        port = P.RealSessions(product({'launch': {'local_max': 1, 'cloud_max': 8}}), cfg=CFG,
+                              log=lambda *_: None)
+        self.live['build-t-0900-1'] = {'job': 'build-t-0900-1', 'account': 'c1', 'pid': 999}
+        for n, acct in enumerate(('c1', 'c2', 'c2')):
+            job = 'build-t-09%02d-2' % (n + 1)
+            self.live[job] = {'job': job, 'account': acct, 'pid': remote.token('trig_%d' % n)}
+        self.assertEqual(port.capacity(), 1 + 3)  # the run on c1 answers: c1 holds 2 of 2
+        self.dead.add(999)
+        self.assertEqual(port.capacity(), 1 + 4)  # dead: c1 has a free seat, local is free
+        self.assertEqual(port.lane('build', {'host': True}), 'local')
+        port.launch('build', 'T-0001', 'worker/T-0001', self.brief(), {'host': True})
+        self.assertEqual([(a, rt) for _j, a, rt, _m, _h in self.spawned], [('l1', None)])
 
     def test_capacity_is_the_seats_a_launch_can_take_now(self):
         port = P.RealSessions(product({'launch': {'local_max': 1, 'cloud_max': 8}}), cfg=CFG,
