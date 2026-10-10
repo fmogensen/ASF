@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -473,9 +475,10 @@ class RedDoctorRollsBackTests(_HomeCase):
         root = root if root is not None else self._root()
         return types.SimpleNamespace(product=product, upgrade_line=None, record_root=lambda: root)
 
-    def _run(self, ctx, push_result=True):
+    def _run(self, ctx, push_result=True, err=None):
         lines = []
-        with mock.patch.object(upgrade, 'repo_url', return_value='url'), \
+        with contextlib.redirect_stderr(err if err is not None else io.StringIO()), \
+                mock.patch.object(upgrade, 'repo_url', return_value='url'), \
                 mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.63', self.SHA)), \
                 mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', self.OLD_SHA)), \
                 mock.patch.object(upgrade, 'mid_landing', return_value=[]), \
@@ -536,12 +539,24 @@ class RedDoctorRollsBackTests(_HomeCase):
         self.assertEqual(len(self._bugs(root)), 1)
 
     def test_a_push_that_fails_does_not_raise_and_does_not_stop_the_rollback(self):
-        ctx = self._ctx()
-        result, lines, m_install, _m_commit, m_push = self._run(ctx, push_result=False)
+        # shadow.push returning False is the documented refusal (no exception), and it says so on
+        # stderr — the convention asf/tick/tick.py's commit_and_push already follows for the same
+        # call, so a filed Bug that never reached origin is never silent
+        ctx, err = self._ctx(), io.StringIO()
+        result, lines, m_install, _m_commit, m_push = self._run(ctx, push_result=False, err=err)
         self.assertEqual(result, 'rolled-back')
         m_install.assert_called_once()
         m_push.assert_called_once()
+        self.assertIn('upgrade: pushing the filed Bug failed — the next RED tick bumps it',
+                      err.getvalue())
         self.assertEqual(upgrade._read_release_state(ctx.product)['last']['result'], 'rolled-back')
+
+    def test_a_push_that_is_taken_says_nothing_on_stderr(self):
+        err = io.StringIO()
+        result, _lines, _m_install, _m_commit, m_push = self._run(self._ctx(), err=err)
+        self.assertEqual(result, 'rolled-back')
+        m_push.assert_called_once()
+        self.assertEqual(err.getvalue(), '')
 
 
 if __name__ == '__main__':
