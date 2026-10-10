@@ -71,6 +71,9 @@ class Job:
         # the heartbeat a session off this host is told to keep (asf.workers.heartbeat.Settings),
         # or None: asf.workers.cloud.cloud_brief writes its rule into the CLOUD block
         self.heartbeat = None
+        # the ledger row's kind (``review``, ``task`` …), or None: a cloud review's CLOUD block
+        # sends its verdict to its own ref, never the branch (asf.workers.cloud.cloud_brief)
+        self.kind = None
 
     @property
     def session(self):

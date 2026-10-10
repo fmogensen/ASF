@@ -38,8 +38,9 @@ The kernel reads this review's verdict from your final message, not from the rev
 the REPORT block, print exactly one line `VERDICT: approve` or `VERDICT: changes`, then one line
 `FINDINGS: <file:line — the exact fix>` per finding the author must answer (none for an approve),
 and nothing after them — this overrides "nothing after it" above. In a CLOUD SESSION your report
-commit's body is that final message: the same lines go there, after the REPORT. A review that
-ends without a `VERDICT:` line counts as no review and is run again."""
+commit's body (on its own ref, as the CLOUD block says — never the PR branch) is that final
+message: the same lines go there, after the REPORT. A review that ends without a
+`VERDICT:` line counts as no review and is run again."""
 
 #: a docs-only PR's review (:func:`light_review`): the kernel's own short brief, on the light model
 LIGHT_REVIEW_TEXT = """# Light review: {item_id} — PR #{pr} (documentation only)
@@ -56,8 +57,9 @@ Check only this, and keep it short:
 - no secret, private name or host detail;
 - it renders: headings, lists, code fences and tables are well formed.
 
-Never edit, commit or push anything here (a cloud session's one report commit excepted): you only
-read. Block only on a wrong fact, a contradiction or a leak; wording is a note, not a finding.
+Never edit, commit or push anything here (a cloud session's one report commit, on its own ref,
+excepted): you only read. Block only on a wrong fact, a contradiction or a leak; wording is a
+note, not a finding.
 
 Finish with this, and nothing after it but the verdict lines below:
 

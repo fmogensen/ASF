@@ -825,8 +825,9 @@ class RealSessions:
         """``'cloud'`` or ``'local'``: the seat a ``kind`` launch takes. A launch that needs the
         host (``meta['host']``: a rebase round, which the host publishes from its worktree; a
         kind :func:`asf.workers.cloud.local_only` keeps here) takes a local seat; every other one
-        a cloud seat — if its brief kind is in ``kernel.launch.cloud_kinds`` (a review would push a
-        report commit and restart the PR's CI, so reviews stay local) — while the lane has one (``kernel.launch.cloud_max``), its creates this tick
+        a cloud seat — if its brief kind is in ``kernel.launch.cloud_kinds`` (a cloud review
+        reports on ``refs/asf/reviews/<job>``, never the PR branch, so it restarts no CI) —
+        while the lane has one (``kernel.launch.cloud_max``), its creates this tick
         are under ``cloud.max_creates_per_tick`` and its fallback breaker has not tripped; else a
         local seat (``kernel.launch.local_max``). Raises :class:`NoSeat` when neither has one."""
         from asf.workers import cloud

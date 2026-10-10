@@ -1287,6 +1287,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None, heartbeat=T
                           branch=branch, base=product.main,
                           setup=getattr(product.conventions, 'worktree_setup', None))
     job.heartbeat = beat
+    job.kind = row.kind
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,

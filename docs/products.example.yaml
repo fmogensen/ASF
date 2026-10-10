@@ -463,9 +463,10 @@ kernel:
   launch:
     max_sessions: 6         # live sessions the tick launches up to (the local default below)
     # local_max: 6          # seats on this host (unset: max_sessions)
-    # cloud_kinds: [coder, fix-bug, spec, plan]   # brief kinds that may go to cloud; the rest
-    #                       # (review, light-review, correct, rebases) take a local seat — a cloud
-    #                       # review pushes a report commit to the PR branch and restarts its CI
+    # cloud_kinds: [coder, fix-bug, spec, plan, review, light-review]   # brief kinds that may
+    #                       # go to cloud; the rest (correct, rebases) take a local seat. A cloud
+    #                       # review reports on refs/asf/reviews/<job>, never the PR branch, so
+    #                       # it restarts no CI
     cloud_max: 0            # seats on the product's cloud lane (`cloud:` above: enabled, not
                             # mode off, runtime claude-remote or actions); the tick launches up to
                             # local_max + cloud_max. Cloud first — a launch that needs the host

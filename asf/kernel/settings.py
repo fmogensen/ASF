@@ -9,10 +9,11 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    local_max: 6,              # local seats (unset: max_sessions)
                    cloud_max: 0,              # cloud-lane seats (the product's ``cloud:`` lane);
                                               # the tick launches up to local_max + cloud_max
-                   cloud_kinds: [coder, fix-bug, spec, plan],   # the brief kinds that may go to
-                                              # cloud; every other (review, light-review, correct,
-                                              # rebases) takes a local seat — a cloud review would
-                                              # push a report commit and restart the PR's CI
+                   cloud_kinds: [coder, fix-bug, spec, plan, review, light-review],
+                                              # the brief kinds that may go to cloud; every other
+                                              # (correct, rebases) takes a local seat. A cloud
+                                              # review reports on refs/asf/reviews/<job>, never
+                                              # the PR branch, so it restarts no CI
                    rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
       models:     {coder: claude-sonnet-5, fix-bug: claude-sonnet-5, correct: claude-sonnet-5,
@@ -98,7 +99,8 @@ SPEC = {
     'tick': {'interval_s': (120, int)},
     'launch': {'max_sessions': (6, int), 'rank': ('inherit', ('inherit', 'own')),
                'local_max': (None, int), 'cloud_max': (0, int),
-               'cloud_kinds': (('coder', 'fix-bug', 'spec', 'plan'), 'words')},
+               'cloud_kinds': (('coder', 'fix-bug', 'spec', 'plan', 'review', 'light-review'),
+                               'words')},
     'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
     'review': {'light_paths': (('docs/**', '*.md'), 'globs')},
     'briefs': {'max_appended_chars': (4000, int)},

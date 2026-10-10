@@ -146,7 +146,17 @@ class Launch(unittest.TestCase):
         with self.assertRaisesRegex(P.PortError, r'local 1/1, cloud 2/2'):
             self.port.launch('build', 'T-0004', 'worker/T-0004', self.brief())
 
-    def test_a_review_stays_local_even_with_cloud_seats_free(self):
+    def test_a_review_takes_a_cloud_seat_by_default(self):
+        # a cloud review reports on refs/asf/reviews/<job>, never the PR branch: no CI restart
+        self.port.launch('review', 'T-0001', 'worker/T-0001', self.brief())
+        self.port.launch('review', 'T-0002', 'worker/T-0002', mock.Mock(
+            text='the brief', model='m', add_dirs=(), card_digest='', kind='light-review'))
+        self.assertEqual([rt for _j, _a, rt, _m, _h in self.spawned], [self.runtime] * 2)
+
+    def test_a_review_left_out_of_cloud_kinds_stays_local(self):
+        self.port = P.RealSessions(product({'launch': {'local_max': 1, 'cloud_max': 2,
+                                                       'cloud_kinds': ['coder', 'spec']}}),
+                                   cfg=CFG, log=lambda *_: None)
         self.port.launch('review', 'T-0001', 'worker/T-0001', self.brief())
         self.assertEqual([(a, rt) for _j, a, rt, _m, _h in self.spawned], [('l1', None)])
         with self.assertRaisesRegex(P.PortError, r'review is not in kernel.launch.cloud_kinds'):
@@ -160,7 +170,7 @@ class Launch(unittest.TestCase):
         k = settings.read({'launch': {'cloud_kinds': ['spec']}})
         self.assertEqual(k['launch']['cloud_kinds'], ['spec'])
         self.assertEqual(settings.read(None)['launch']['cloud_kinds'],
-                         ['coder', 'fix-bug', 'spec', 'plan'])
+                         ['coder', 'fix-bug', 'spec', 'plan', 'review', 'light-review'])
 
     def test_a_launch_needing_the_host_takes_a_local_seat(self):
         self.port.launch('build', 'T-0001', 'worker/T-0001', self.brief(), {'pr': 3, 'host': True})
@@ -352,8 +362,9 @@ class NoSeatWaits(unittest.TestCase):
         with mock.patch.object(pool, 'load_sessions', return_value={}), \
                 mock.patch.object(cloud, 'Breaker', FakeBreaker):
             with self.assertRaises(P.NoSeat):
-                port.lane('review')
+                port.lane('correct')
             self.assertEqual(port.lane('coder'), 'cloud')
+            self.assertEqual(port.lane('review'), 'cloud')
 
 
 class RebaseRoundStaysLocal(unittest.TestCase):
