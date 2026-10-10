@@ -81,12 +81,20 @@ class Checks(unittest.TestCase):
 
     def test_ii_writes_empty_or_absent_from_trunk_fail_unless_declared_new(self):
         self.assertEqual(self.gaps(ready_task(writes=[])), ['writes: empty'])
-        self.assertEqual(self.gaps(ready_task(writes=['asf/zz.py'])),
-                         ['writes not on trunk: asf/zz.py'])
-        self.assertEqual(self.gaps(ready_task(writes=['asf/zz.py'], creates=['asf/zz.py'])), [])
+        self.assertEqual(self.gaps(ready_task(writes=['zz/zz.py'])),
+                         ['writes not on trunk: zz/zz.py'])
+        self.assertEqual(self.gaps(ready_task(writes=['zz/zz.py'], creates=['zz/zz.py'])), [])
         self.assertEqual(self.gaps(ready_task(writes=['asf/pkg/**', 'asf/pkg/'])), [])
         self.assertEqual(self.gaps(ready_task(writes=['asf/zz.py']), trunk=None), [],
                          'trunk unread: only the emptiness is checked')
+
+    def test_ii_a_new_file_in_an_existing_directory_passes(self):
+        self.assertEqual(self.gaps(ready_task(writes=['asf/a.py', 'tests/test_new_one.py'])), [])
+        self.assertEqual(self.gaps(ready_task(writes=['asf/pkg/new.py'])), [])
+        self.assertEqual(self.gaps(ready_task(writes=['nodir/deep/new.py'])),
+                         ['writes not on trunk: nodir/deep/new.py'])
+        self.assertEqual(self.gaps(ready_task(writes=['nodir/deep/new.py'],
+                                              creates=['nodir/deep/new.py'])), [])
 
     def test_iii_after_ids_must_be_on_the_record_and_not_parked(self):
         it = ready_task(after=['T-0404'])
@@ -256,6 +264,34 @@ def _end(report, item=None):
     facts = world(item, sessions=[s])
     apply(decide(facts, cfg()), facts, F.ports(record=rec, sessions=sess), log=lambda *_: None)
     return rec, sess
+
+
+class Rearm(unittest.TestCase):
+
+    def _tick(self, it, answer_text='go on'):
+        rec = F.FakeRecord([B.item('F-0001', rank=1), it])
+        facts = world(it, answers=[B.answer(it.id, answer_text)])
+        apply(decide(facts, cfg()), facts, F.ports(record=rec, sessions=F.FakeSessions()),
+              log=lambda *_: None)
+        return rec
+
+    def test_an_operator_answer_on_a_dor_stuck_rearms_a_fill(self):
+        for state in (State.STUCK, State.NEW):
+            it = ready_task(writes=[], state=state, dor_fills=2,
+                            stuck=(B.M.Stuck('dor: writes: empty — 2', 'operator')
+                                   if state is State.STUCK else None))
+            rec = self._tick(it)
+            self.assertNotIn(P.DOR_FILLS, rec.fields['T-0001'],
+                             'state %s: the budget is re-armed' % state)
+
+    def test_fills_made_under_another_kernel_version_do_not_count(self):
+        from asf import __version__
+        class Meta(dict):
+            machine_keys = {'kernel_dor_fills', 'kernel_dor_fills_ver'}
+        meta = Meta(id='T-0001', type='task', kernel_dor_fills=2, kernel_dor_fills_ver='0.0.1-other')
+        self.assertEqual(P.item_from_card({'meta': meta, 'body': ''}).dor_fills, 0)
+        meta['kernel_dor_fills_ver'] = __version__
+        self.assertEqual(P.item_from_card({'meta': meta, 'body': ''}).dor_fills, 2)
 
 
 class Apply(unittest.TestCase):

@@ -153,7 +153,7 @@ class _Applier:
         if it is not None and it.state is State.STUCK:
             self.set(a.item_id, **{P.QUESTION: None, P.ATTEMPTS: [answer_attempt(a.text)]})
             if it.dor_fills:  # an answer to a Definition-of-Ready Stuck: groom-fill again
-                self.set(a.item_id, **{P.DOR_FILLS: None})
+                self.set(a.item_id, **{P.DOR_FILLS: None, P.DOR_FILLS_VER: None})
         if it is not None and a.extra_round:  # one more fix round; a spent rebase is retried
             self.set(a.item_id, **{
                 P.EXTRA_ROUNDS: self.field(a.item_id, P.EXTRA_ROUNDS, 0) + 1,
@@ -390,7 +390,8 @@ class _Applier:
             self.set(a.item_id, **{P.FIX_ROUNDS: self.field(a.item_id, P.FIX_ROUNDS, 0) + 1,
                                    P.FINDINGS: findings})
         if groom:  # it stays New while its card is filled; the fill counts against its budget
-            self.set(a.item_id, **{P.DOR_FILLS: self.field(a.item_id, P.DOR_FILLS, 0) + 1})
+            self.set(a.item_id, **{P.DOR_FILLS: self.field(a.item_id, P.DOR_FILLS, 0) + 1,
+                                   P.DOR_FILLS_VER: P._kernel_version()})
             return 'job %s' % job
         self.set(a.item_id, **{P.STATE: (State.REVIEW if a.kind == 'review'
                                          else State.BUILDING).value})

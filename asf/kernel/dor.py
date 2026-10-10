@@ -7,7 +7,7 @@ Pure: reads nothing but its arguments. A Task or Bug starts (``decide`` makes it
   test file path, or a dotted test module ``tests.test_x[.Class]``), or a line of its
   ``**Gate**`` fenced block names a test module that is on the trunk or in its ``writes:``;
 - (ii) **writes**: ``writes:`` is not empty and each path is on the trunk (a glob: some trunk
-  file matches it) or declared new (its ``creates:`` names it). With the trunk unread
+  file matches it) or sits in a directory that is (a new file in an existing directory) or declared new (its ``creates:`` names it). With the trunk unread
   (``trunk`` None) only the emptiness is checked;
 - (iii) **after**: every ``after:`` id is on the record, and none is parked (``priority:
   later`` on it or an ancestor): a parked blocker never finishes;
@@ -133,6 +133,15 @@ def on_trunk(path, trunk):
     return any(f.startswith(d) for f in trunk)
 
 
+def parent_on_trunk(path, trunk):
+    """Whether ``path``'s parent directory exists on the trunk: a new file in a directory that is
+    already there is normal; only a tree that does not exist must be declared new."""
+    p = path.strip()
+    if any(ch in p for ch in '*?[') or '/' not in p.rstrip('/'):
+        return '/' not in p.rstrip('/') and not any(ch in p for ch in '*?[')
+    return on_trunk(p.rstrip('/').rsplit('/', 1)[0], trunk)
+
+
 def _named(path, writes):
     return any(path == w or fnmatch.fnmatchcase(path, w) for w in writes)
 
@@ -152,7 +161,8 @@ def missing(it, items, trunk=None, parked=()):
     if not writes:
         out.append('writes: empty')
     elif trunk is not None:
-        absent = [w for w in writes if not on_trunk(w, trunk) and not _named(w, creates)]
+        absent = [w for w in writes if not on_trunk(w, trunk) and not parent_on_trunk(w, trunk)
+                  and not _named(w, creates)]
         if absent:
             out.append('writes not on trunk: %s' % ', '.join(absent[:3])
                        + (' (+%d)' % (len(absent) - 3) if len(absent) > 3 else ''))

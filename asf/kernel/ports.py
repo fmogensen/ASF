@@ -72,11 +72,13 @@ NOTES, EXTRA_ROUNDS, REBUILDS = 'kernel_notes', 'kernel_extra_rounds', 'kernel_r
 AFTER = 'after'
 HUMAN_KEYS = (AFTER,)
 REVERTED, DOR_FILLS = 'kernel_reverted', 'kernel_dor_fills'
+#: the kernel version that counted the fills: fills made under another version do not count
+DOR_FILLS_VER = 'kernel_dor_fills_ver'
 #: the machine-block keys that hold a Stuck (cleared together)
 STUCK_KEYS = (STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE)
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
                FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS, REBUILDS, REVERTED,
-               DOR_FILLS)
+               DOR_FILLS, DOR_FILLS_VER)
 
 #: the branch prefix a rebuilt item's old head is pushed under (:class:`ArchiveAndReset`)
 ARCHIVE_PREFIX = 'archive/'
@@ -157,6 +159,11 @@ class NoSeat(PortError):
 
 # ---- the record ---------------------------------------------------------------------------------
 
+def _kernel_version():
+    from asf import __version__
+    return str(__version__)
+
+
 def item_from_card(rec):
     """One :class:`~asf.kernel.model.Item` from a ``load_items`` record."""
     meta = rec['meta']
@@ -191,7 +198,8 @@ def item_from_card(rec):
         notes=[str(n) for n in as_list(machine.get(NOTES))],
         reverted=[int(n) for n in as_list(machine.get(REVERTED)) if str(n).isdigit()],
         creates=[str(c) for c in as_list(meta.get('creates'))],
-        dor_fills=int(machine.get(DOR_FILLS) or 0),
+        dor_fills=(int(machine.get(DOR_FILLS) or 0)
+                   if str(machine.get(DOR_FILLS_VER) or '') == _kernel_version() else 0),
         stuck_since=(str(machine.get(STUCK_SINCE)) if stuck is not None and machine.get(STUCK_SINCE)
                      else None),
         plan=_plan_link(meta), created=_created(meta, machine, rec.get('body') or ''),
