@@ -116,6 +116,25 @@ def overlaps(writes_a, writes_b, shared=()):
     return None
 
 
+def first_intersection(writes_a, writes_b, shared=()):
+    """The first ``(glob_a, glob_b)`` pair naming a common path by ``core.writes_intersect``, or
+    ``None``. Narrow where :func:`overlaps` is wide: ``globs_overlap`` errs on the side of waiting
+    because a false overlap there costs one tick, but an ``after:`` edge built on this test costs a
+    whole wave (F-0315 D-0002) — so this uses the exact ``asf check`` test and nothing more. A glob
+    naming a ``shared`` path (``conventions.shared_paths``) on **either** side is skipped, same as
+    :func:`overlaps`. An empty or absent footprint on either side falls out of the loop as
+    ``None``, with no special case."""
+    for a in writes_a or []:
+        if shared and is_shared(a, shared):
+            continue
+        for b in writes_b or []:
+            if shared and is_shared(b, shared):
+                continue
+            if writes_intersect(a, b):
+                return a, b
+    return None
+
+
 def first_conflict(writes, running, shared=()):
     """The id of the first running Task whose footprint overlaps ``writes``, or None.
 
