@@ -16,12 +16,13 @@ not have the same window, and one scalar prices a heavy spec the same on both").
 import datetime
 import json
 import os
+import tempfile
 import unittest
 
 from asf import env
 from asf.workers import headroom
 from asf.workers import pool as pool_mod
-from tests.test_quota_headroom import HomeCase, at
+from tests.test_quota_headroom import at
 
 UTC = datetime.timezone.utc
 
@@ -63,6 +64,14 @@ class WindowDollarsTests(unittest.TestCase):
     def test_the_dollar_median_prices_each_kind_s_own_window(self):
         t = self.table({'plan-small': {'five_h': 12}, 'plan-large': {'five_h': 48}})
         self.assertEqual(t.usd[('spec', 'opus')], 4.8)
+        self.assertEqual(t.share('spec', 'Opus', 'plan-small', 'five_h'), 40)
+        self.assertEqual(t.share('spec', 'Opus', 'plan-large', 'five_h'), 10)
+
+    def test_usd_medians_are_learned_with_no_pool_wide_five_h_usd(self):
+        t = self.table({'plan-small': {'five_h': 12}, 'plan-large': {'five_h': 48}},
+                       five_h_usd=None)
+        self.assertEqual(t.usd[('spec', 'opus')], 4.8)
+        self.assertEqual(t.shares, {})
         self.assertEqual(t.share('spec', 'Opus', 'plan-small', 'five_h'), 40)
         self.assertEqual(t.share('spec', 'Opus', 'plan-large', 'five_h'), 10)
 
@@ -119,7 +128,16 @@ class WindowDollarsTests(unittest.TestCase):
         self.assertEqual(headroom.five_h_usd_by_provider(samples, runs), {})
 
 
-class SampleRecordTests(HomeCase):
+class SampleRecordTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._home = env.ASF_HOME
+        env.ASF_HOME = self._tmpdir.name
+
+    def tearDown(self):
+        env.ASF_HOME = self._home
+        self._tmpdir.cleanup()
+
     def test_a_line_carries_the_provider_kind_and_every_window(self):
         headroom.record_samples(
             {'a': {'five_h_pct': 51, 'seven_d_pct': 22, 'seven_d_model_pct': None}},

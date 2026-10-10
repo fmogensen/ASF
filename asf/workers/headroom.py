@@ -309,12 +309,11 @@ class CostTable:
 def estimate(runs, window_usd=None, allowance=RUNNING_ALLOWANCE, five_h_usd=None):
     """A :class:`CostTable` from ``runs`` (dicts with ``kind``, ``model``, ``usd`` and, for the
     order, ``started``): each ``(kind, family)`` with :data:`MIN_RUNS` known costs gets the
-    median dollars of its :data:`RECENT_RUNS` newest (:attr:`CostTable.usd`) and, over
-    ``five_h_usd``, that same median as a share of the window, rounded to half a point, at least
-    1 (:attr:`CostTable.shares`). ``window_usd`` passes through to the table unchanged
-    (:meth:`CostTable.share`)."""
-    if not five_h_usd or five_h_usd <= 0:
-        return CostTable(five_h_usd=None, allowance=allowance, window_usd=window_usd)
+    median dollars of its :data:`RECENT_RUNS` newest (:attr:`CostTable.usd`), learned whether or
+    not ``five_h_usd`` is known. Only over a known ``five_h_usd`` does that same median also
+    become a share of the window, rounded to half a point, at least 1 (:attr:`CostTable.shares`).
+    ``window_usd`` passes through to the table unchanged (:meth:`CostTable.share`)."""
+    have_five_h = bool(five_h_usd) and five_h_usd > 0
     groups = {}
     for r in sorted(runs, key=lambda r: str(r.get('started') or '')):
         if r.get('usd') is None or not r.get('kind'):
@@ -327,10 +326,11 @@ def estimate(runs, window_usd=None, allowance=RUNNING_ALLOWANCE, five_h_usd=None
             continue
         dollars = statistics.median(amounts[-RECENT_RUNS:])
         usd[key] = dollars
-        pct = dollars * 100.0 / five_h_usd
-        shares[key] = max(1, _num(round(pct * 2) / 2))
-    return CostTable(shares, five_h_usd=five_h_usd, allowance=allowance, window_usd=window_usd,
-                     usd=usd)
+        if have_five_h:
+            pct = dollars * 100.0 / five_h_usd
+            shares[key] = max(1, _num(round(pct * 2) / 2))
+    return CostTable(shares, five_h_usd=five_h_usd if have_five_h else None, allowance=allowance,
+                     window_usd=window_usd, usd=usd)
 
 
 def five_h_usd_by_provider(samples, runs):
