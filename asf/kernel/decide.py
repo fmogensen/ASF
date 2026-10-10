@@ -821,7 +821,8 @@ def _main_green(c, config):
 def hold_risky(items, judged, facts, config, actions):
     """``{item: why}``: the high-risk Landing PRs (:func:`high_risk`) held back this tick — no
     auto-merge, no direct merge, no merge-train update — while (a) the newest high merge on the
-    trunk (``Facts.main``) has not gone green on its required checks, or (b) another high PR with
+    trunk (``Facts.main``) has not gone green on its required checks (nor has any newer trunk
+    commit, which carries it), or (b) another high PR with
     overlapping ``writes`` (or files) holds the landing lane: the one with auto-merge already on,
     else the lowest PR number. ``judged`` and ``actions`` are updated in place."""
     if not config.risk_high and not config.risk_large_lines:
@@ -835,8 +836,12 @@ def hold_risky(items, judged, facts, config, actions):
     if not high:
         return {}
     out = {}
-    last = next((c for c in facts.main or () if _merge_high(c, items, config)), None)
-    if last is not None and not _main_green(last, config):
+    main = list(facts.main or ())  # newest first
+    at = next((i for i, c in enumerate(main) if _merge_high(c, items, config)), None)
+    last = main[at] if at is not None else None
+    # a newer trunk commit carries the high merge: its green proves it (F-0337: the merge's own
+    # run was superseded and never reported, which held every high PR for good)
+    if last is not None and not any(_main_green(c, config) for c in main[:at + 1]):
         why = RISK + 'after high merge %s (#%s) the trunk is not green yet' % (last.sha[:9],
                                                                                last.pr)
         out = {iid: why for iid in high if not high[iid].merged}
@@ -1768,6 +1773,12 @@ def _lane_prefix(config, kind):
     return next((p for p in config.doc_branches if p.strip('/') == kind), None)
 
 
+def pr_lane(pr, config):
+    """The document lane ``pr``'s branch is on (a ``config.doc_branches`` prefix), '' for any
+    other branch: an item's PRs on different lanes (a Feature's spec and its plan) coexist."""
+    return next((p for p in (config.doc_branches or ()) if pr.branch.startswith(p)), '')
+
+
 def _is_spec_pr(pr, config):
     """Whether open ``pr`` is on the spec lane."""
     spec = _lane_prefix(config, 'spec')
@@ -2221,8 +2232,9 @@ def limbo(facts, config, judged, states, parked, children, actions, queued=None,
         if it is None:
             out['PR #%d' % p.number] = 'its item %s is not on the record' % p.item_id
             continue
-        mine = max((q.number for q in facts.prs if q.item_id == p.item_id and not q.merged),
-                   default=None)
+        lane = pr_lane(p, config)  # F-0337: a spec PR and a plan PR of one Feature coexist
+        mine = max((q.number for q in facts.prs if q.item_id == p.item_id and not q.merged
+                    and pr_lane(q, config) == lane), default=None)
         if mine != p.number:
             out['PR #%d' % p.number] = '%s has a newer open PR #%d' % (p.item_id, mine)
     return out

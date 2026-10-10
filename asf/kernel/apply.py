@@ -89,6 +89,15 @@ def _other_doc_lane(live_kind, kind):
     return live_kind != kind and {live_kind, kind} == {'spec', 'plan'}
 
 
+def _session_pr(s, facts):
+    """The open PR review session ``s`` read: its recorded ``pr``, else the open PR on its own
+    branch (a Feature's spec and plan PRs coexist, F-0337), else its item's first open PR."""
+    prs = [p for p in facts.prs if p.item_id == s.item_id and not p.merged]
+    if s.pr is not None:
+        return next((p for p in prs if p.number == s.pr), None)
+    return next((p for p in prs if s.branch and p.branch == s.branch), prs[0] if prs else None)
+
+
 def rebased_sha(s):
     """The sha an ended, non-review session reported as ``pushed: rebased <sha>`` and left
     to the factory, else '' (the port skips a sha its push log already holds)."""
@@ -260,8 +269,7 @@ class _Applier:
         """Record an ended review session's verdict on the ledger, keyed by the tree and the PR
         change it read."""
         got = parse_verdict(s.report)
-        pr = next((p for p in self.facts.prs if p.item_id == s.item_id and not p.merged
-                   and (s.pr is None or p.number == s.pr)), None)
+        pr = _session_pr(s, self.facts)
         tree = s.tree_sha or (pr.tree_sha if pr else '')
         # the change read with the tree the session was launched on; a session launched before
         # the change was kept takes the PR's only while its tree is still the one reviewed
