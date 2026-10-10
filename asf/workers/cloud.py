@@ -135,12 +135,18 @@ DEFAULT_WORKFLOW = 'asf-worker.yml'
 LOST_AFTER_MIN = 15
 REPORT_TRAILER = 'ASF-Report'
 SESSION_TRAILER = 'ASF-Session'
-#: the run kinds whose session is a review: it reports on its own ref (:func:`review_ref`), never
-#: on the branch under review — a push there moves the PR head and restarts the PR's CI
+#: the run kinds whose session is a review: it reports on its own branch (:func:`review_ref`),
+#: never on the branch under review — a push there moves the PR head and restarts the PR's CI
 REVIEW_KINDS = ('review', 'light-review')
-#: where a cloud review pushes its report commit: ``refs/asf/reviews/<job>``, read by
-#: :func:`review_report` when the run ends and deleted after reading (:func:`delete_review`)
-REVIEW_REF_PREFIX = 'refs/asf/reviews/'
+#: where a cloud review pushes its report commit: its own branch ``asf-reviews/<job>``, read by
+#: :func:`review_report` when the run ends and deleted after reading (:func:`delete_review`). A
+#: branch, never a ``refs/asf/*`` ref: the cloud session's git proxy answers 403 to any push
+#: outside ``refs/heads/`` (2026-10-10: review-f-0329 approved, then failed four pushes to
+#: ``refs/asf/reviews/…`` and its run ended "without the report commit"). No workflow runs on a
+#: push to it — the product's CI runs on its trunk and on pull requests — and no PR is opened
+#: for it.
+REVIEW_BRANCH_PREFIX = 'asf-reviews/'
+REVIEW_REF_PREFIX = 'refs/heads/' + REVIEW_BRANCH_PREFIX
 #: a review report's verdict line (the kernel's :data:`asf.kernel.briefs.VERDICT_RE`)
 VERDICT_LINE_RE = re.compile(r'^\s*VERDICT:\s*(approve|changes)\s*$', re.M | re.I)
 SECRET_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
@@ -469,25 +475,31 @@ def is_review(kind):
 
 
 def review_ref(job_name):
+    """``refs/heads/asf-reviews/<job>``: the branch a cloud review reports on."""
     return f'{REVIEW_REF_PREFIX}{job_name}'
 
 
 def _review_lines(job, sid, subject):
-    """A cloud review's end: its verdict on its own ref (:func:`review_ref`), never the branch
+    """A cloud review's end: its verdict on its own branch (:func:`review_ref`), never the branch
     under review — a push there moves the PR head and restarts the PR's whole CI."""
     ref = review_ref(job.name)
     return [
         f'- THIS IS A REVIEW: never commit to, push or force-push `{job.branch}` or any other '
-        'branch — not the review, not anything else. This overrides every push rule above, the '
+        f'branch but `{ref[len("refs/heads/"):]}` below — not the review, not anything else. '
+        'This overrides every push rule above, the '
         "REPORT's `pushed:` line included (`pushed: n/a — review reported on its ref`).",
-        f'- Your last act publishes the verdict on its own ref, `{ref}`: write the review file '
-        'the brief names, then `git checkout --detach`, `git add -f <that file>`, and make one '
-        'commit (`git commit --cleanup=whitespace -F <message file>`) whose message is the '
-        f'subject `{subject}`, then your REPORT block, then the `VERDICT:` line and the '
-        '`FINDINGS:` lines exactly as the brief says, then the trailers '
+        '- Run every command in the foreground and wait for it — never in the background: the '
+        'session ends when your turn ends, and a review whose turn ended before its push is '
+        'lost. A gate that does not finish in time is a row of the review, not a reason to wait.',
+        f'- Your last act publishes the verdict on its own report branch, `{ref}`: write the '
+        'review file the brief names, then `git checkout --detach`, `git add -f <that file>`, '
+        'and make one commit (`git commit --cleanup=whitespace -F <message file>`) whose '
+        f'message is the subject `{subject}`, then your REPORT block, then the `VERDICT:` line '
+        'and the `FINDINGS:` lines exactly as the brief says, then the trailers '
         f'`{SESSION_TRAILER}: {sid}` and `{REPORT_TRAILER}: {job.name}`. Push only that commit, '
-        f'only to that ref: `git push origin HEAD:{ref}`. The factory reads the verdict off '
-        'that ref when the session ends and deletes it; without it the review counts as failed.',
+        f'only there: `git push origin HEAD:{ref}`, and see it succeed. The factory reads the '
+        'verdict off that branch when the session ends and deletes it; without it the review '
+        'counts as failed.',
     ]
 
 
@@ -581,7 +593,7 @@ def report_commit(worktree, branch, session, fetch=True):
 
 def review_report(worktree, job_name):
     """``{sha, body, ref}`` of a cloud review's report commit on origin's
-    ``refs/asf/reviews/<job>`` (:func:`review_ref`), else None while the ref is absent. ``body``
+    ``asf-reviews/<job>`` branch (:func:`review_ref`), else None while it is absent. ``body``
     is the commit message; when it holds no ``VERDICT:`` line, the text of the files the commit
     adds (the review file) follows it. Raises :class:`ReportUnreadable` when origin cannot be
     read: an unread answer is never "no report yet"."""
@@ -594,7 +606,7 @@ def review_report(worktree, job_name):
     sha = next((ln.split()[0] for ln in ls.stdout.splitlines() if ln.split()[1:] == [ref]), '')
     if not sha:
         return None
-    fetched = _git(['fetch', '-q', 'origin', f'+{ref}:{ref}'], worktree)
+    fetched = _git(['fetch', '-q', 'origin', ref], worktree)
     if fetched.returncode != 0:
         raise ReportUnreadable((fetched.stderr or fetched.stdout or 'git fetch failed').strip())
     msg = _git(['log', '-1', '--format=%B', sha], worktree)
@@ -612,20 +624,21 @@ def review_report(worktree, job_name):
 
 
 def delete_review(worktree, job_name):
-    """Delete a read review's ref, on origin and here: nothing of a review outlives its reading."""
+    """Delete a read review's branch, on origin and here (the remote-tracking ref a fetch of it
+    left): nothing of a review outlives its reading."""
     if not worktree or not os.path.isdir(worktree) or not job_name:
         return False
     from asf import gitpush, refguard
     ref = review_ref(job_name)
     p = gitpush.push(['-q', 'origin', f':{ref}'], worktree, refs_only=True,
                      guard=refguard.Guard())
-    _git(['update-ref', '-d', ref], worktree)
+    _git(['update-ref', '-d', f'refs/remotes/origin/{ref[len("refs/heads/"):]}'], worktree)
     return p.returncode == 0
 
 
 def run_report(run, job=None):
     """The report commit that ends ``run`` (a ledger row; ``job`` its name): a review's on its
-    own ref (:func:`review_report`), any other run's on its branch (:func:`report_commit`)."""
+    own report branch (:func:`review_report`), any other run's on its branch (:func:`report_commit`)."""
     if is_review(run.get('kind')):
         return review_report(run.get('worktree'), job or run.get('job'))
     return report_commit(run.get('worktree'), run.get('branch'), run.get('session'))

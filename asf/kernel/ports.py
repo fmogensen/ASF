@@ -882,7 +882,7 @@ class RealSessions:
         host (``meta['host']``: a rebase round, which the host publishes from its worktree; a
         kind :func:`asf.workers.cloud.local_only` keeps here) takes a local seat; every other one
         a cloud seat — if its brief kind is in ``kernel.launch.cloud_kinds`` (a cloud review
-        reports on ``refs/asf/reviews/<job>``, never the PR branch, so it restarts no CI) —
+        reports on its own ``asf-reviews/<job>`` branch, never the PR's, so it restarts no CI) —
         while the lane has one (``kernel.launch.cloud_max``), its creates this tick
         are under ``cloud.max_creates_per_tick`` and its fallback breaker has not tripped; else a
         local seat (``kernel.launch.local_max``). Raises :class:`NoSeat` when neither has one."""
@@ -920,6 +920,9 @@ class RealSessions:
         bk = getattr(brief, 'kind', None)
         bk = bk.replace('_', '-') if isinstance(bk, str) and bk else (
             'coder' if kind == 'build' else kind)
+        if kind == 'review' and self._cloud_review_lost(item_id):
+            # its last cloud review ended without a verdict: this one runs on the host
+            meta = dict(meta or {}, host=True)
         if self.lane(bk, meta) == 'cloud':
             s = cloud_lane(self.product, self.cfg())
             self._creates += 1
@@ -947,6 +950,22 @@ class RealSessions:
             pool.update_session(self.product, job, kernel_pr=meta.get('pr'),
                                 kernel_tree=meta.get('tree'), kernel_change=meta.get('change'))
         return job
+
+    def _cloud_review_lost(self, item_id):
+        """True when ``item_id``'s last ended review was a cloud run that ended without its
+        verdict (its ``cloud_why`` is not :func:`asf.workers.cloud.classify`'s finished line):
+        the next review takes a local seat, so one lost cloud review is run again once on the
+        host instead of dying the same way again and again (2026-10-10: 23 items sat in Review
+        behind cloud reviews whose report never arrived)."""
+        from asf.workers import pool
+        last = None
+        for run in pool.load_sessions(self.product).values():
+            if (run.get('item') == item_id and _kernel_kind(run.get('kind')) == 'review'
+                    and run.get('ended')):
+                last = run
+        if last is None or not cloudpid.is_token(last.get('pid')):
+            return False
+        return not str(last.get('cloud_why') or '').startswith('report commit')
 
     def _spawn(self, kind, item_id, branch, brief, job, acct, runtime=None):
         from asf.workers import pool, spawn

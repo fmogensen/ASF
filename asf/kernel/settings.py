@@ -12,7 +12,7 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    cloud_kinds: [coder, fix-bug, spec, plan, review, light-review],
                                               # the brief kinds that may go to cloud; every other
                                               # (correct, rebases) takes a local seat. A cloud
-                                              # review reports on refs/asf/reviews/<job>, never
+                                              # review reports on asf-reviews/<job>, never
                                               # the PR branch, so it restarts no CI
                    rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it

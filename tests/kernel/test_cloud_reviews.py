@@ -1,9 +1,12 @@
-"""Cloud reviews report on ``refs/asf/reviews/<job>``, never on the PR branch: a push there moves
-the PR head and restarts its whole CI, which is why reviews were local-only. The CLOUD block of a
-review brief sends the verdict commit to its own ref; the host reads it when the run ends (the
-verdict lands on the run's log as its result), deletes the ref, and the kernel records the
-verdict in the review ledger as for a local review — an approve goes to Landing. Local reviews
-keep the log path unchanged, and reviews are in the default ``kernel.launch.cloud_kinds``."""
+"""Cloud reviews report on their own branch ``asf-reviews/<job>``, never on the PR branch: a push
+there moves the PR head and restarts its whole CI, which is why reviews were local-only. The CLOUD
+block of a review brief sends the verdict commit to that branch — never ``refs/asf/reviews/*``:
+the cloud session's git proxy answers 403 to any push outside ``refs/heads/`` (2026-10-10,
+review-f-0329). The host reads it when the run ends (the verdict lands on the run's log as its
+result), deletes the branch, and the kernel records the verdict in the review ledger as for a
+local review — an approve goes to Landing. A cloud review that ends without a verdict is run
+again on a local seat. Local reviews keep the log path unchanged, and reviews are in the default
+``kernel.launch.cloud_kinds``."""
 import os
 import tempfile
 import unittest
@@ -46,20 +49,22 @@ class ReviewBrief(unittest.TestCase):
     def test_a_cloud_review_pushes_its_verdict_to_its_own_ref_never_the_branch(self):
         j = make_job(name='review-t-0001-1', kind='review')
         text = cloud.cloud_brief('the brief', j, setting=remote.setting_lines(j))
-        self.assertIn('git push origin HEAD:refs/asf/reviews/review-t-0001-1', text)
+        self.assertIn('git push origin HEAD:refs/heads/asf-reviews/review-t-0001-1', text)
         self.assertIn('never commit to, push or force-push `task/t-0001`', text)
         self.assertNotIn('Commit and push on `task/t-0001` only', text)
         self.assertNotIn('push `task/t-0001`. The factory', text)
         self.assertIn('VERDICT:', text)
+        self.assertNotIn('refs/asf/reviews', text)  # the cloud proxy refuses a non-branch ref
+        self.assertIn('in the foreground', text)  # the turn's end is the run's end
 
     def test_a_light_review_too_and_a_build_keeps_its_branch_push(self):
         j = make_job(name='review-t-0001-2', kind='light-review')
-        self.assertIn('HEAD:refs/asf/reviews/review-t-0001-2', cloud.cloud_brief('b', j))
+        self.assertIn('HEAD:refs/heads/asf-reviews/review-t-0001-2', cloud.cloud_brief('b', j))
         build = cloud.cloud_brief('b', make_job(kind='task'), setting=remote.setting_lines(
             make_job()))
         self.assertIn('Commit and push on `task/t-0001` only', build)
         self.assertIn('push `task/t-0001`. The factory', build)
-        self.assertNotIn('refs/asf/reviews', build)
+        self.assertNotIn('asf-reviews/', build)
 
     def test_reviews_are_in_the_default_cloud_kinds(self):
         kinds = settings.read(None)['launch']['cloud_kinds']
@@ -117,7 +122,7 @@ class CloudReviewRef(Home):
         git('commit', '-q', '--allow-empty', '--cleanup=whitespace', '-m', message,
             '--trailer', f"ASF-Session: {rec['session']}", '--trailer', 'ASF-Report: spec-1',
             cwd=other)
-        git('push', '-q', 'origin', 'HEAD:refs/asf/reviews/spec-1', cwd=other)
+        git('push', '-q', 'origin', 'HEAD:refs/heads/asf-reviews/spec-1', cwd=other)
 
     def branch_head(self, rec):
         return git('rev-parse', f"refs/heads/{rec['branch']}", cwd=self.origin)
@@ -131,7 +136,9 @@ class CloudReviewRef(Home):
         self.assertEqual(status, cloud.FINISHED, why)
         # read, then deleted: no review (or brief) ref outlives the run
         self.assertEqual(git('for-each-ref', 'refs/asf/', cwd=self.origin), '')
-        self.assertEqual(git('for-each-ref', 'refs/asf/', cwd=rec['worktree']), '')
+        self.assertEqual(git('for-each-ref', 'refs/heads/asf-reviews/', cwd=self.origin), '')
+        self.assertEqual(git('for-each-ref', 'refs/asf/', 'refs/heads/asf-reviews/',
+                             'refs/remotes/origin/asf-reviews/', cwd=rec['worktree']), '')
         # the PR branch was never pushed by the review
         self.assertEqual(self.branch_head(rec), before)
         self.assertIn('VERDICT: approve', runtime_mod.read_result(rec['log'])['result'])
@@ -164,7 +171,7 @@ class CloudReviewRef(Home):
         result = runtime_mod.read_result(rec['log'])['result']
         from asf.kernel.briefs import parse_verdict
         self.assertEqual(parse_verdict(result), ('changes', ['a.py:3 — fix it']))
-        self.assertEqual(git('for-each-ref', 'refs/asf/', cwd=self.origin), '')
+        self.assertEqual(git('for-each-ref', 'refs/heads/asf-reviews/', cwd=self.origin), '')
 
     def test_a_review_pushed_to_the_branch_does_not_count(self):
         rec = self.launch()

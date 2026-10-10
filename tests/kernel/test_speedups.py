@@ -147,11 +147,32 @@ class Launch(unittest.TestCase):
             self.port.launch('build', 'T-0004', 'worker/T-0004', self.brief())
 
     def test_a_review_takes_a_cloud_seat_by_default(self):
-        # a cloud review reports on refs/asf/reviews/<job>, never the PR branch: no CI restart
+        # a cloud review reports on its own asf-reviews/<job> branch, never the PR's: no CI restart
         self.port.launch('review', 'T-0001', 'worker/T-0001', self.brief())
         self.port.launch('review', 'T-0002', 'worker/T-0002', mock.Mock(
             text='the brief', model='m', add_dirs=(), card_digest='', kind='light-review'))
         self.assertEqual([rt for _j, _a, rt, _m, _h in self.spawned], [self.runtime] * 2)
+
+    def test_a_cloud_review_that_ended_without_a_verdict_is_run_again_on_a_local_seat(self):
+        self.live['review-t-0001-1'] = {
+            'job': 'review-t-0001-1', 'item': 'T-0001', 'kind': 'review', 'account': 'c1',
+            'pid': remote.token('trig_dead'), 'ended': '2026-10-10T06:03:52Z',
+            'end_reason': 'finished',
+            'cloud_why': 'run trig_dead ended succeeded without the report commit'}
+        self.port.launch('review', 'T-0001', 'worker/T-0001', self.brief())
+        self.assertEqual([(a, rt) for _j, a, rt, _m, _h in self.spawned], [('l1', None)])
+        # another item's review, and a build of the same item, still take a cloud seat
+        self.port.launch('review', 'T-0002', 'worker/T-0002', self.brief())
+        self.port.launch('build', 'T-0001', 'worker/T-0001', self.brief())
+        self.assertEqual([rt for _j, _a, rt, _m, _h in self.spawned[1:]], [self.runtime] * 2)
+
+    def test_a_cloud_review_that_finished_leaves_the_next_one_in_the_cloud(self):
+        self.live['review-t-0001-1'] = {
+            'job': 'review-t-0001-1', 'item': 'T-0001', 'kind': 'review', 'account': 'c1',
+            'pid': remote.token('trig_ok'), 'ended': '2026-10-10T06:03:52Z',
+            'end_reason': 'finished', 'cloud_why': 'report commit 0f8a07440 on the branch'}
+        self.port.launch('review', 'T-0001', 'worker/T-0001', self.brief())
+        self.assertEqual([rt for _j, _a, rt, _m, _h in self.spawned], [self.runtime])
 
     def test_a_review_left_out_of_cloud_kinds_stays_local(self):
         self.port = P.RealSessions(product({'launch': {'local_max': 1, 'cloud_max': 2,

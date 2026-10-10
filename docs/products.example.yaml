@@ -465,7 +465,7 @@ kernel:
     # local_max: 6          # seats on this host (unset: max_sessions)
     # cloud_kinds: [coder, fix-bug, spec, plan, review, light-review]   # brief kinds that may
     #                       # go to cloud; the rest (correct, rebases) take a local seat. A cloud
-    #                       # review reports on refs/asf/reviews/<job>, never the PR branch, so
+    #                       # review reports on asf-reviews/<job>, never the PR branch, so
     #                       # it restarts no CI
     cloud_max: 0            # seats on the product's cloud lane (`cloud:` above: enabled, not
                             # mode off, runtime claude-remote or actions); the tick launches up to
