@@ -37,7 +37,6 @@ import time
 from asf import ci_flight
 from asf import env, refguard
 from asf import hooks
-from asf import prepush
 from asf import progress
 from asf.workers import githooks
 from asf.workers import heartbeat
@@ -1205,6 +1204,8 @@ def _preflight_push_auth(product, account, product_auth_env):
 
 def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     """Launch one row on ``account``. Returns the session record written to the ledger."""
+    from asf import prepush  # local: prepush pulls in asf.feeder, which reaches back to
+                              # asf.workers.health/stall (circular at module scope)
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
     passthrough = env.env_passthrough(cfg)
