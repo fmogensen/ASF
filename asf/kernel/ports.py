@@ -346,9 +346,88 @@ class RealRecord:
         rec = self._load().get(item_id)
         return {k: rec['meta'].get(k) for k in KERNEL_KEYS if k in rec['meta']} if rec else {}
 
-    def specs_landed(self):
-        """Every Feature spec on the trunk checkout: ``<specs_dir>/f-<n>.md`` -> ``F-<n>``."""
+    def _trunk(self):
+        return 'origin/%s' % (getattr(self.product, 'main', None) or 'main')
+
+    def refresh_trunk(self):
+        """Fetch ``origin/<main>`` into the product's repo, once a tick, so every trunk read this
+        tick (landed specs and plans, :meth:`trunk_files`) sees what has landed — the checkout's
+        working tree is never read for them, nor touched (a checkout 131 commits behind
+        hid every recent spec and plan). A dry run fetches nothing; a failed fetch is a note, and
+        the last fetched ``origin/<main>`` is read."""
+        from asf import gitops, mutation_guard
+        repo = getattr(self.product, 'repo_dir', None)
+        if not repo or not os.path.isdir(repo) or mutation_guard.is_active():
+            return None
+        main = getattr(self.product, 'main', None) or 'main'
+        r = gitops.git(['fetch', '-q', '--no-tags', 'origin',
+                        '+refs/heads/%s:refs/remotes/origin/%s' % (main, main)], repo, timeout=120)
+        return None if r.ok else 'fetch origin/%s failed: %s' % (
+            main, (r.reason or r.data or '').strip()[:160])
+
+    def _trunk_docs(self, folder):
+        """``{Feature id: (path, text)}``: every ``<folder>/f-<n>.md`` on ``origin/<main>`` whose
+        id is a Feature on the record; None when ``origin/<main>`` cannot be read (no repo, no
+        origin) — the caller then reads the checkout."""
+        from asf import gitops
+        from asf.evidence import evidence
+        repo = getattr(self.product, 'repo_dir', None)
+        if not repo or not os.path.isdir(repo):
+            return None
+        rev = self._trunk()
+        if not gitops.git(['rev-parse', '--verify', '-q', rev + '^{commit}'], repo,
+                          timeout=60).ok:
+            return None
+        r = gitops.git(['ls-tree', '--name-only', '%s:%s' % (rev, folder)], repo, timeout=60)
+        if not r.ok:
+            return {}
+        paths = {}
+        for name in sorted((r.data or '').splitlines()):
+            iid = item_of_branch(name[:-3]) if name.endswith('.md') else None
+            if iid and self._is_feature(iid) and iid not in paths:
+                paths[iid] = '%s/%s' % (folder.rstrip('/'), name)
+        texts = evidence.read_refs(['%s:%s' % (rev, p) for p in paths.values()],
+                                   product=self.product)
+        return {iid: (p, texts.get('%s:%s' % (rev, p))) for iid, p in paths.items()
+                if texts.get('%s:%s' % (rev, p)) is not None}
+
+    def mint_plan_tasks(self, out=print):
+        """The Task cards of every plan landed on ``origin/<main>`` (``<plans_dir>/f-<n>.md``)
+        whose Feature has none yet, through the record's own minter
+        (:func:`asf.record.plan_tasks.mint_plan_tasks`: parent, writes, stories and the plan's
+        order; its guards — decisions, id claims, duplicates, already on the trunk — included).
+        Idempotent: a Feature with a Task child is left alone. Returns the new ids."""
+        from asf.record import plan_tasks
         conv = self.product.conventions
+        plans = self._trunk_docs(conv.plans_dir) or {}
+        if not plans:
+            return []
+        specs = self._trunk_docs(conv.specs_dir) or {}
+        rev = self._trunk()
+        features, lane, texts = {}, {}, {}
+        for fid, (path, text) in plans.items():
+            f = {'alias': None, 'plan': '%s:%s' % (rev, path), 'plan_on_main': True,
+                 'spec': None, 'spec_on_main': False, 'prs': [], 'tasks': {}}
+            texts[f['plan']] = text
+            if fid in specs:
+                spath, stext = specs[fid]
+                f['spec'], f['spec_on_main'] = '%s:%s' % (rev, spath), True
+                texts[f['spec']] = stext
+            features[fid.lower()] = f
+            lane[fid.upper()] = {'plan': [path]}
+        made = plan_tasks.mint_plan_tasks(self.root, self.product,
+                                          {'features': features, 'lane_docs': lane},
+                                          out=out, read_ref=texts.get)
+        self._cards = None
+        return list(made or [])
+
+    def specs_landed(self):
+        """Every Feature spec on ``origin/<main>``: ``<specs_dir>/f-<n>.md`` -> ``F-<n>`` (the
+        checkout's working tree only for a repo with no ``origin/<main>``)."""
+        conv = self.product.conventions
+        got = self._trunk_docs(conv.specs_dir)
+        if got is not None:
+            return {iid: text for iid, (_path, text) in got.items()}
         d = os.path.join(self.product.repo_dir or '', conv.specs_dir)
         out = {}
         try:

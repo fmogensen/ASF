@@ -595,6 +595,8 @@ def _judge(it, facts, config, actions, parked=()):
 
     spec_only = _spec_only(it, prs, config)
     if open_pr is None and landed(it, prs) and not it.reopened and not spec_only:
+        if _plan_unbuilt(it, prs, facts, config):  # its Tasks are minted from the plan, then built
+            return _Judged(State.NEW, hold=True)
         return _Judged(State.DONE)
     if ended_stuck is not None and asked is not None and not answered and not live:
         nw = _needs_writes(it, (asked.fields or {}).get('needs writes'), facts, config, parked)
@@ -1823,6 +1825,21 @@ def _spec_only(it, prs, config):
     merged = [p for p in prs if p.merged]
     return (it.type == DOCUMENTED and bool(spec) and bool(merged)
             and all(p.branch.startswith(spec) for p in merged))
+
+
+def _plan_unbuilt(it, prs, facts, config):
+    """Whether ``it`` is a Feature whose merged pull requests are all on its document lanes, one
+    of them its plan, and no Task or Bug hangs under it yet: a landed plan is the start of the
+    build (the tick mints its Tasks, :meth:`asf.kernel.ports.RealRecord.mint_plan_tasks`), never
+    the Feature's end — it is Done once the Tasks under it are."""
+    plan, spec = _lane_prefix(config, 'plan'), _lane_prefix(config, 'spec')
+    merged = [p for p in prs if p.merged]
+    if it.type != DOCUMENTED or not plan or not any(p.branch.startswith(plan) for p in merged):
+        return False
+    if not all(p.branch.startswith(plan) or (spec and p.branch.startswith(spec)) for p in merged):
+        return False
+    items = facts.items
+    return not _has_work(it.id, items, _children(items))
 
 
 def _branch(kind, iid, config, item=None):

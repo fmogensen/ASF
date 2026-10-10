@@ -178,6 +178,26 @@ def mint_inbox(ports, out=print):
     return created
 
 
+def mint_plans(ports, out=print):
+    """A landed plan's Tasks, before the tick reads its facts: the trunk is fetched
+    (``record.refresh_trunk``) and every plan on it whose Feature has no Task yet becomes Task
+    cards (``record.mint_plan_tasks``) — decided on this very tick. The new ids, one line when
+    there are any; a failure is one line, never the tick's end."""
+    refresh = getattr(ports.record, 'refresh_trunk', None)
+    mint = getattr(ports.record, 'mint_plan_tasks', None)
+    try:
+        why = refresh() if refresh is not None else None
+        if why:
+            out('kernel tick: %s' % why)
+        created = list(mint(out=out) or []) if mint is not None else []
+    except Exception as e:  # noqa: BLE001 — minting never stops the tick
+        out('kernel tick: plan-tasks failed — %s' % (str(e) or type(e).__name__))
+        return []
+    if created:
+        out('plan-tasks: minted %s' % ', '.join(created))
+    return created
+
+
 def breach_line(b):
     """``BREACH <item> <class> <age> -> <action>`` of one :attr:`Plan.breaches` record."""
     from asf.kernel.waits import dur
@@ -424,6 +444,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
                 snapshot()
             sync_cloud(ports, out)
             minted = mint_inbox(ports, out) if config.intake else []
+            minted = minted + mint_plans(ports, out)
             facts = read_facts(ports)
             if facts.github_error:
                 return blind_tick(facts, ports, out, minted)
