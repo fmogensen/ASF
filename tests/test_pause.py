@@ -567,3 +567,23 @@ class ThePreviewAgrees(unittest.TestCase):
             self.assertEqual(s.kind, step_wave.PAUSED, (s.row.item_id, s.kind, s.why))
             self.assertFalse(s.starts)
             self.assertIn('held: launches paused: release freeze', s.why)
+
+    def test_the_same_preview_unpaused_starts_every_row(self):
+        rows = _sample_rows()
+        resolved = capacity.Resolved(sessions=5, sessions_bound='product', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={})
+        cloud = types.SimpleNamespace(on=False, max_inflight=0)
+        with mock.patch.object(step_wave, 'inflight', lambda product: []), \
+                mock.patch.object(step_wave.capacity_mod, 'resolve',
+                                  lambda product, *a, **k: resolved), \
+                mock.patch.object(step_wave, 'cloud_settings', lambda product: cloud), \
+                mock.patch.object(step_wave, 'cloud_readiness',
+                                  lambda product, cl: (False, 'cloud lane off')), \
+                mock.patch.object(step_wave, 'plan_inputs', lambda product, root, items: {}), \
+                mock.patch.object(step_wave, 'gated_plan',
+                                  lambda items, product, running, seats, inputs, out=print:
+                                  (list(rows), set())), \
+                mock.patch.object(step_wave, 'host_hold', lambda planned: (False, '', {})):
+            screened, seats, running = step_wave.would_start(self.product, self.tmp, items={})
+        self.assertEqual([s.row.item_id for s in screened if s.starts],
+                         [r.item_id for r in rows])

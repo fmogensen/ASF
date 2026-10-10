@@ -879,9 +879,10 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
 
 def would_start(product, root, items=None):
     """``(screened, seats, running)`` — the wave this tick would run, previewed: the plan the
-    wave cuts (the same ceiling, cloud seats, gate and holds) through :func:`screen` with
-    nothing acted on. What ``asf status`` counts as Ready to launch, and what the dwell
-    watchdog (:mod:`asf.dwell`) asks why a free seat stays free."""
+    wave cuts (the same ceiling, cloud seats, gate and holds, the operator's own pause among
+    them — B-84836) through :func:`screen` with nothing acted on. What ``asf status`` counts as
+    Ready to launch, and what the dwell watchdog (:mod:`asf.dwell`) asks why a free seat stays
+    free."""
     from asf.views import index_reader
     if items is None:
         items, _generated = index_reader.load(root)

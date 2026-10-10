@@ -98,13 +98,26 @@ class RunNoOpTests(StepsTestCase):
         self.assertEqual(rc, 0)
         launch.assert_not_called()
 
-    def test_a_failure_is_caught_the_marker_still_notes_the_run(self):
+    def test_a_failure_is_caught_but_leaves_no_marker(self):
+        """B-84831: a run that raises never notes itself as having run — a persistently
+        failing dedicated clock would otherwise mark itself "recent" forever (the exception is
+        caught before :func:`note_ran`), and the product's own tick (:func:`asf.tick.tick.
+        wave_job_recent`) would skip its own wave step forever too, leaving a launchable row
+        idle with a free seat past every watchdog limit. A transient failure instead falls back
+        to the tick's own wave step as soon as this marker goes stale."""
         with mock.patch.object(step_wave, 'launch_now', side_effect=RuntimeError('boom')):
             lines = []
             rc = wave_clock.run(self.product, out=lines.append)
         self.assertEqual(rc, 1)
         self.assertTrue(any('FAILED' in l for l in lines))
-        self.assertIsNotNone(wave_clock.last_ran_at(self.product))
+        self.assertIsNone(wave_clock.last_ran_at(self.product))
+
+    def test_a_failure_lets_the_ticks_own_wave_step_take_over(self):
+        """B-84831: :func:`asf.tick.tick.wave_job_recent` stops treating the dedicated clock as
+        alive once it has stopped succeeding — so the product's own tick resumes launching."""
+        with mock.patch.object(step_wave, 'launch_now', side_effect=RuntimeError('boom')):
+            wave_clock.run(self.product, out=lambda _l: None)
+        self.assertFalse(tick.wave_job_recent(self.product))
 
 
 class OwnCloneTests(StepsTestCase):

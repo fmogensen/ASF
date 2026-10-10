@@ -1560,6 +1560,38 @@ class AnInfraRedIsReRunNotRed(QueueRepo):
         self.assertTrue(any('infra red (phantom): re-run queued' in l for l in self.lines),
                         self.lines)
 
+    def test_a_phantom_run_under_an_in_progress_check_is_re_run(self):
+        self.gh.checks[self.head] = [self.link('gate', jid='4'),
+                                     dict(self.link('gate-tests'), status='in_progress',
+                                          conclusion=None)]
+        self.gh.wf_runs['77'] = {'status': 'completed', 'conclusion': 'failure',
+                                 'run_attempt': 1}
+        self.gh.wf_jobs['77'] = [{'id': 4, 'name': 'gate', 'status': 'completed',
+                                  'conclusion': 'success', 'runner_name': 'r1', 'steps': []},
+                                 {'id': 5, 'name': 'gate-tests', 'status': 'in_progress',
+                                  'conclusion': None, 'runner_name': '', 'steps': []}]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.reruns()), 1)
+        self.assertTrue(any('infra red (phantom): re-run queued' in l for l in self.lines),
+                        self.lines)
+
+    def test_a_phantom_beside_a_second_workflow_s_queued_check_is_re_run(self):
+        self.gh.checks[self.head] = [self.link('gate', jid='4'),
+                                     dict(self.link('gate-tests'), status='in_progress',
+                                          conclusion=None),
+                                     dict(self.link('other', rid='78', jid='6'),
+                                          status='queued', conclusion=None)]
+        self.gh.wf_runs['77'] = {'status': 'completed', 'conclusion': 'failure',
+                                 'run_attempt': 1}
+        self.gh.wf_jobs['77'] = [{'id': 4, 'name': 'gate', 'status': 'completed',
+                                  'conclusion': 'success', 'runner_name': 'r1', 'steps': []},
+                                 {'id': 5, 'name': 'gate-tests', 'status': 'in_progress',
+                                  'conclusion': None, 'runner_name': '', 'steps': []}]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.reruns()), 1)
+        self.assertTrue(any('infra red (phantom): re-run queued' in l for l in self.lines),
+                        self.lines)
+
     def test_a_queued_run_is_waited_on_as_before(self):
         self.gh.checks[self.head] = [self.link('gate', jid='4'),
                                      dict(self.link('gate-tests'), status='queued',
