@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import budget, capacity, env
+from asf import budget, capacity, env, upgrade
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
@@ -73,6 +73,12 @@ class StepsTestCase(TickTestCase):
         self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}')
         self.product = env.load_product('sample')
         self.lines = []
+        # this fixture's `repo_dir` has no `pyproject.toml`, so `drift.is_factory_source` is
+        # false and `_run_steps` takes the release channel: unmocked, every test built on this
+        # case reads the live factory repo (and the install under it) over the network
+        patcher = mock.patch.object(upgrade, 'release_report', return_value='none')
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def push_branch(self, branch):
         _git(['checkout', '-q', '-b', branch, 'main'], self.repo)
