@@ -139,6 +139,9 @@ WAITS_LANDING = 'WAITS ON landing'
 #: a correction already adjudicated at this same hold (B-0128): no session, no round, until the
 #: PR merges or closes, or a new push moves the head
 WAITS_MERGE = 'WAITS ON merge'
+#: a correction a rule pass ruled on this same finding (F-0300): no session, no round — the
+#: lane's merge gate runs on the head as it stands and the ruling is what answers the review
+WAITS_GATE = 'WAITS ON gate'
 #: a pushed item sent BACK with no correction pending (:func:`pushed_rows`)
 WAITS_LANE = 'WAITS ON lane'
 #: an Epic past its typed budget (F-0052): this module owns the action word, asf.budget the money
@@ -1007,7 +1010,7 @@ def correction_amend(product, item, c):
     return None if c.get('kind') == FOOTPRINT else hit
 
 
-def correction_rows(items, product, busy, corrections):
+def correction_rows(items, product, busy, corrections, waived=None):
     """``corrections`` is ``{item: {kind, text, rounds, same, at, branch, ruled}}`` — a branch
     the harvest held (the row runs on that branch when it is given). ``same`` is how many holds in
     a row name this one finding (:func:`asf.workers.lifecycle.repeats`; a caller that passes none
@@ -1091,6 +1094,13 @@ def correction_rows(items, product, busy, corrections):
                                action=action, brief_kind='correct', branch=branch,
                                reason=f"adjudicated ({c.get('kind')}): waits on the PR to merge "
                                       f"or close, or a new push", waits_on='merge'))
+                continue
+            if iid in (waived or {}):  # F-0300: a rule pass ruled this finding — no adjudicate
+                out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
+                               action=WAITS_GATE, brief_kind='correct', branch=branch,
+                               reason=f"ruled by the rule pass ({c.get('kind')}) on this same "
+                                      f"finding: the gate runs on the head as it stands",
+                               waits_on='gate'))
                 continue
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch, correction=c['text'],
@@ -1523,7 +1533,7 @@ def console_member_row(items, product, mid, fid, landed_shas=None):
     return row
 
 
-def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None):
+def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None, waived=None):
     """Every Feature's rows, in Feature order (:func:`feature_order`: Epic rank, rank, id).
     ``running`` grows as PLAN → CODE rows are handed out, so two ready Tasks sharing a file never
     both launch. ``occupancy`` (:func:`asf.workers.lifecycle.occupancy`): a spec or plan whose
@@ -1536,10 +1546,11 @@ def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None
              and not (f.get('delivers') or f.get('delivered_by'))]
     for f in sorted(feats, key=lambda v: feature_order(items, v)):
         if not f.get('blocked'):
-            out.extend(_one_feature_rows(items, product, f, busy, running, landed_shas, occupancy))
+            out.extend(_one_feature_rows(items, product, f, busy, running, landed_shas, occupancy,
+                                         waived))
             continue
         mine = _one_feature_rows(items, product, f, busy, copy.copy(running), landed_shas,
-                                 occupancy)
+                                 occupancy, waived)
         out.extend(blocked_row(r, f) if r.launches else r for r in mine)
     return out
 
@@ -1552,7 +1563,7 @@ def blocked_row(row, item):
                                reason='blocked by ' + (', '.join(blockers) or 'an open item'))
 
 
-def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
+def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy, waived=None):
     """One decided, open Feature's rows (:func:`feature_rows`)."""
     out = []
     limit = stalemate_round(product)
@@ -1565,7 +1576,7 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
             out.append(row)
             return out
     doc, rnd = review_round(f)
-    if doc and rnd >= limit:
+    if doc and rnd >= limit and fid not in (waived or {}):
         if fid not in busy:
             out.append(Row(tier=2, kind=STALEMATE, item_id=fid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch_for(product, doc, fid),
@@ -2561,7 +2572,7 @@ def doc_lane_landed(product, occupancy):
 
 def candidates(index, product, inflight, attempts=None, occupancy=None, groom_state=None,
                landed_shas=None, decision_limit=None, adjudicated=None, unverified_landed=None,
-               unverified_on_trunk=None, now=None):
+               unverified_on_trunk=None, now=None, waived=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's order (:func:`feature_order`: Epic rank, Feature rank, id), then within a Feature
     the stalemate, branch housekeeping, new work.
@@ -2596,7 +2607,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     items.trunk_unverified = set(unverified_on_trunk or ()) if roots else set()
     items.console_aside = set()
     args = (index, items, product, inflight, attempts, occupancy, groom_state, landed_shas,
-            decision_limit, adjudicated, unverified_landed, now, roots)
+            decision_limit, adjudicated, unverified_landed, now, roots, waived)
     ordered = _candidates(*args)
     if console_wait(product) == CONSOLE_WAIT_ASIDE:
         for _ in range(CONSOLE_PASSES):
@@ -2616,7 +2627,7 @@ CONSOLE_PASSES = 4
 
 
 def _candidates(index, items, product, inflight, attempts, occupancy, groom_state, landed_shas,
-                decision_limit, adjudicated, unverified_landed, now, roots):
+                decision_limit, adjudicated, unverified_landed, now, roots, waived=None):
     """:func:`candidates`' one pass over a prepared map."""
     occ = occupancy or {}
     corrections = occ.get('corrections') or {}
@@ -2626,7 +2637,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     limit = stalemate_round(product)
     stalled = {f['id'] for f in ix.of_type(items, 'feature') if review_round(f)[1] >= limit}
     running = running_footprints(items, busy)
-    corrected, spoken = correction_rows(items, product, busy, corrections)
+    corrected, spoken = correction_rows(items, product, busy, corrections, waived)
     rows = corrected + lane_rows(items, product, live | spoken, occ)
     held_by = {**{i: 'session running' for i in inflight_ids(inflight)},
                **dict(occ.get('waiting_landing') or {}), **dict(occ.get('busy') or {})}
@@ -2652,7 +2663,7 @@ def _candidates(index, items, product, inflight, attempts, occupancy, groom_stat
     # a lead a correction row speaks for gets no delivery row too: one session per branch
     rows += delivery_rows(items, product, busy | spoken, running, landed_shas)
     rows += feature_rows(items, product, (busy - docs_waiting) | tasks_spoken, running,
-                         landed_shas, occ)
+                         landed_shas, occ, waived)
     rows += undecided_rows(items, product, busy, decision_limit)
     rows += epic_rows(items, product, busy)
     # a skipped S1/S2 Bug's WAITS row only where no other row already speaks for it
@@ -3100,7 +3111,7 @@ def failing_to_spawn(rows, failing):
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
               groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
               s1_first=True, gate=None, bandwidth=None, adjudicated=None,
-              unverified_landed=None, failing=None, unverified_on_trunk=None):
+              unverified_landed=None, failing=None, unverified_on_trunk=None, waived=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
     ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
@@ -3116,7 +3127,7 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
                       groom_state=groom_state, landed_shas=landed_shas,
                       decision_limit=decision_limit, adjudicated=adjudicated,
                       unverified_landed=unverified_landed,
-                      unverified_on_trunk=unverified_on_trunk)
+                      unverified_on_trunk=unverified_on_trunk, waived=waived)
     if exclude:
         from asf.invariants import row_key
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]

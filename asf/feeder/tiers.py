@@ -30,8 +30,10 @@ NO_SLOT = 'WAITS ON a free slot'
 DOWNGRADE = 'asf set {item_id} severity=S2 --why "<why this is not S1>" --product {name}'
 
 #: a tier-0 WAITS row whose ``waits_on`` is one of these is being worked — a live session, a
-#: branch, a landing, a merge. Every other reason is a person's (F-0113, D5).
-WORKED = ('session', 'landing', 'branch', 'merge')
+#: branch, a landing, a merge, or the lane's own gate (F-0300: a rule pass ruled the finding,
+#: and the gate running on the head as it stands is what answers it). Every other reason is a
+#: person's (F-0113, D5).
+WORKED = ('session', 'landing', 'branch', 'merge', 'gate')
 
 Gate = collections.namedtuple('Gate', 'holders held behind by_kind unworked')
 #: holders  [item id]   the S1 rows that took the floor: tier 0, launching, unparked, no seat

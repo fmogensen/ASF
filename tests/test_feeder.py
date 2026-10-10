@@ -636,6 +636,17 @@ class RowsTest(unittest.TestCase):
     def test_takes_a_bare_item_map(self):
         self.assertEqual(kinds(rows.candidates(self.index['items'], self.p, [])), kinds(self.cand()))
 
+    def test_a_waived_feature_at_the_review_ceiling_gets_the_ordinary_starved_row_not_stalemate(self):
+        f3 = [r for r in rows.candidates(self.index, self.p, [], waived={'F-0003'})
+              if r.feature_id == 'F-0003']
+        self.assertEqual(kinds(f3), [('STARVED → PLAN', 'F-0003')])
+
+    def test_a_busy_waived_feature_at_the_review_ceiling_still_gets_the_held_row(self):
+        f3 = [r for r in rows.candidates(self.index, self.p, [{'item': 'F-0003'}],
+                                         waived={'F-0003'})
+              if r.feature_id == 'F-0003']
+        self.assertEqual(kinds(f3), [(rows.FEATURE_HELD, 'F-0003')])
+
 
 class WaitsOnTargetHasARowOrIsDoneTest(unittest.TestCase):
     """B-0043: every ``WAITS ON <id>`` row's target must itself have a row, or be done (removed
@@ -3758,6 +3769,60 @@ class WaveReadsTheBlockersOriginHolds(unittest.TestCase):
         from asf.tick import step_wave
         stale = rows.items_of(self.index)
         self.assertIs(step_wave.overlay_blockers(stale, None), stale)
+
+
+class CorrectionRowTest(unittest.TestCase):
+    """S-78056: a rule pass ruled finding (F-0300) stands a correction's adjudicate row down —
+    the registry fixture shape is tests/test_ruled_correction.py's."""
+
+    def items(self):
+        return {'B-0010': {'id': 'B-0010', 'type': 'bug', 'state': 'Active', 'severity': 'S2'}}
+
+    def correction(self, same=3):
+        return {'B-0010': {'kind': 'review', 'text': 'fix it', 'rounds': same, 'same': same,
+                           'branch': 'fix/B-0010'}}
+
+    def test_a_waived_finding_at_the_round_cap_waits_on_gate_not_adjudicate(self):
+        got, ids = rows.correction_rows(self.items(), None, set(), self.correction(),
+                                        waived={'B-0010'})
+        self.assertEqual(ids, {'B-0010'})
+        self.assertEqual(len(got), 1)
+        r = got[0]
+        self.assertEqual((r.kind, r.action, r.waits_on), (rows.FIX_CORRECT, rows.WAITS_GATE, 'gate'))
+        self.assertIn('rule pass', r.reason)
+        self.assertEqual(r.correction, '')   # no session to brief, like WAITS_MERGE
+
+    def test_an_unwaived_item_at_the_round_cap_still_adjudicates_with_waived_passed(self):
+        got, ids = rows.correction_rows(self.items(), None, set(), self.correction(),
+                                        waived={'B-9999'})
+        self.assertEqual(ids, {'B-0010'})
+        self.assertEqual([r.kind for r in got], [rows.STALEMATE])
+
+
+class WaivedRowsTest(unittest.TestCase):
+    """S-78056: ``plan_rows`` threads one ``waived`` argument to both ``correction_rows`` and
+    ``feature_rows`` — the plan-harness shape is this module's own
+    ``rows.plan_rows(idx, product(), [], n)``."""
+
+    def setUp(self):
+        self.index = fixture_index()
+        self.p = product()
+        self.occ = {'corrections': {'B-0002': {'kind': 'review', 'text': 'fix it', 'rounds': 3,
+                                               'same': 3, 'branch': 'fix/B-0002'}}}
+
+    def by_feature(self, out):
+        return {(r.kind, r.item_id) for r in out if r.item_id in ('B-0002', 'F-0003')}
+
+    def test_plan_rows_threads_waived_to_both_correction_rows_and_feature_rows(self):
+        out = rows.plan_rows(self.index, self.p, [], 20, occupancy=self.occ,
+                             waived={'B-0002', 'F-0003'})
+        self.assertEqual(self.by_feature(out),
+                         {(rows.FIX_CORRECT, 'B-0002'), ('STARVED → PLAN', 'F-0003')})
+
+    def test_plan_rows_with_no_waived_plans_exactly_the_rows_it_plans_today(self):
+        out = rows.plan_rows(self.index, self.p, [], 20, occupancy=self.occ)
+        self.assertEqual(self.by_feature(out),
+                         {(rows.STALEMATE, 'B-0002'), (rows.STALEMATE, 'F-0003')})
 
 
 if __name__ == '__main__':
