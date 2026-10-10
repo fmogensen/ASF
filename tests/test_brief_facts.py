@@ -5,6 +5,7 @@ preamble itself is code (no model, no network, no git in the renderer).
 Git is real: a bare origin and a clone, built once and copied per test (``tests/gitfixture.py``).
 """
 import ast
+import importlib
 import json
 import os
 import shutil
@@ -18,12 +19,17 @@ from asf import reservations as reservations_mod
 from asf.briefs import facts
 from asf.briefs import preamble as preamble_mod
 from asf.env import Product
+from asf.evidence import review_store
 from asf.feeder.rows import Row
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
     from gitfixture import Template
 except ImportError:  # pragma: no cover - import shape only
     from tests.gitfixture import Template
+
+# ``asf.briefs.build`` is both the package's entry function and a submodule; the function wins
+# the attribute lookup, so the module is asked for by name.
+build_mod = importlib.import_module('asf.briefs.build')
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
@@ -543,6 +549,53 @@ class PreambleIsCodeTests(unittest.TestCase):
         self.assertEqual(first, preamble_mod.build(product, row, index, [], given))
         preamble_mod.collect(product, row, index, [], given)
         self.assertEqual(first, preamble_mod.build(product, row, index, [], given))
+
+
+class PriorHeadTests(FactsCase):
+    """`collect`'s `prior_head` (preamble.py) mirrors `stored_review_section`'s guards
+    (build.py) exactly, on the same slug, branch and store — the head it names is the head of
+    the entry the brief's quoted-review section already prints (PD11)."""
+
+    def put(self, product, item_id, branch, round_n, head):
+        return review_store.put(review_store.root(product), str(item_id).lower(), branch,
+                                round_n, head, 'verdict: approved')
+
+    def test_prior_head_is_the_head_stored_review_section_quotes(self):
+        product = self.product()
+        branch = 'fix/B-0001'
+        head = 'a' * 40
+        self.put(product, 'T-0001', branch, 1, head)
+        collected = preamble_mod.collect(product, make_row(branch=branch), make_index(), [], {})
+        self.assertEqual(collected['prior_head'], head)
+        quoted = build_mod.stored_review_section(product, 'review', branch, 'T-0001')
+        self.assertIn(head[:12], quoted)
+
+    def test_empty_when_the_store_holds_nothing_for_the_branch(self):
+        product = self.product()
+        collected = preamble_mod.collect(product, make_row(), make_index(), [], {})
+        self.assertEqual(collected['prior_head'], '')
+
+    def test_empty_when_the_row_has_no_branch(self):
+        product = self.product()
+        self.put(product, 'T-0001', 'fix/B-0001', 1, 'a' * 40)
+        collected = preamble_mod.collect(product, make_row(branch=''), make_index(), [], {})
+        self.assertEqual(collected['prior_head'], '')
+
+    def test_empty_when_item_id_is_empty_or_none(self):
+        product = self.product()
+        self.put(product, 'T-0001', 'fix/B-0001', 1, 'a' * 40)
+        for item_id in ('', 'none'):
+            with self.subTest(item_id=item_id):
+                row = Row(tier=2, kind='PLAN → CODE', item_id=item_id, feature_id='F-0001',
+                          action='would launch', brief_kind='task', branch='fix/B-0001',
+                          reason='r')
+                collected = preamble_mod.collect(product, row, make_index(), [], {})
+                self.assertEqual(collected['prior_head'], '')
+
+    def test_empty_when_product_is_none(self):
+        self.put(self.product(), 'T-0001', 'fix/B-0001', 1, 'a' * 40)
+        collected = preamble_mod.collect(None, make_row(), make_index(), [], {})
+        self.assertEqual(collected['prior_head'], '')
 
 
 if __name__ == '__main__':
