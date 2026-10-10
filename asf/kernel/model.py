@@ -97,7 +97,9 @@ class Item:
     the item's baseline by them. ``signature`` is a Bug card's ``signature:`` ('' when none).
     ``creates`` are the ``writes`` paths the card declares new (not on the trunk yet: the
     Definition of Ready, :mod:`asf.kernel.dor`); ``dor_fills`` counts the groom-fill sessions
-    launched for it.
+    launched for it. ``decided`` is False while the card waits on its intake decision
+    (:mod:`asf.kernel.intake`: ``decided:`` not true and not retired); ``severity`` is a Bug's
+    ``severity:`` ('' when none).
     """
     id: str
     type: str = 'task'
@@ -128,6 +130,8 @@ class Item:
     signature: str = ''
     creates: list = dataclasses.field(default_factory=list)
     dor_fills: int = 0
+    decided: bool = True
+    severity: str = ''
 
 
 @dataclasses.dataclass
@@ -345,7 +349,10 @@ class Facts:
     ``open_heads`` every open PR's number -> head sha (None when unread): a run whose PRs are all
     closed, or whose head is no longer its PR's head, is cancelled.
     ``trunk_files`` are the paths on origin's trunk (None when unread): the Definition of Ready
-    (:mod:`asf.kernel.dor`) checks a card's ``writes`` against them."""
+    (:mod:`asf.kernel.dor`) checks a card's ``writes`` against them.
+    ``notes`` are the inbox notes intake asked a question about (:mod:`asf.kernel.intake`: key
+    -> an Item of type ``note``, its title, body and question), ``intake_tries`` the
+    intake-decide sessions launched per key."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -371,6 +378,8 @@ class Facts:
     ci_runs: list = dataclasses.field(default_factory=list)
     open_heads: dict = None
     trunk_files: frozenset = None
+    notes: dict = dataclasses.field(default_factory=dict)
+    intake_tries: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -428,6 +437,10 @@ class Config:
     card names a test, its writes, its ``after:`` and its parent (off — the bare model's
     default); ``dor_fill_per_tick`` groom-fill sessions launch a tick for the cards it holds, at
     most ``dor_max_fills`` per card (then Stuck on the operator), on ``groom_branch`` + the id.
+    ``intake`` (:mod:`asf.kernel.intake`): every undecided card and inbox note is decided — by
+    code where its text settles it, else by an ``intake-decide`` session on ``intake_branch`` +
+    the key, at most ``intake_decide_per_tick`` a tick on seats left idle, at most
+    ``intake_max_tries`` a key (off — the bare model's default).
     ``risk_high`` (path globs) and ``risk_large_lines``: an item is high-risk when its ``writes``
     (or its PR's files) hit a glob, or its PR's diff is over that many lines
     (:func:`asf.kernel.decide.high_risk`): its review runs on ``strong_model``, no second high PR
@@ -472,5 +485,9 @@ class Config:
     dor_max_fills: int = 2
     dor_max_concurrent: int = 2
     groom_branch: str = 'groom-fill/'
+    intake: bool = False
+    intake_decide_per_tick: int = 3
+    intake_max_tries: int = 2
+    intake_branch: str = 'intake-decide/'
     risk_high: tuple = ()
     risk_large_lines: int = 0

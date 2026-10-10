@@ -64,6 +64,7 @@ import re
 
 from asf.kernel import actions as A
 from asf.kernel import dor as D
+from asf.kernel import intake as I
 from asf.kernel.actions import describe  # noqa: F401 — the applier's log line, re-exported
 from asf.kernel import ports as P
 from asf.kernel import reports as R
@@ -100,10 +101,11 @@ def host_push_sha(s):
 @dataclasses.dataclass
 class Result:
     """What one apply did: ``done`` and ``failed`` hold ``(action, note)`` pairs; ``written`` the
-    item ids whose card changed."""
+    item ids whose card changed; ``intake`` the keys an intake decision was applied to."""
     done: list = dataclasses.field(default_factory=list)
     failed: list = dataclasses.field(default_factory=list)
     written: list = dataclasses.field(default_factory=list)
+    intake: list = dataclasses.field(default_factory=list)
 
 
 class _Applier:
@@ -198,6 +200,11 @@ class _Applier:
         s = next((s for s in self.facts.sessions if s.job == a.job), None)
         if s is None:
             return 'not in the facts'
+        if s.kind == I.KIND:  # it only judged: its verdict, never an attempt on the item
+            if s.ended and not s.alive:
+                self.intake_verdict(s)
+            self.ports.sessions.end(s, a.free_worktree)
+            return None
         published = host_pushes(s) or host_refuses(s)  # the host's push judges this end
         if s.alive:  # past its max age: the host stops it, the item is relaunched
             self.attempt(s.item_id, OVER_AGE)
@@ -287,6 +294,35 @@ class _Applier:
         self.log('%s %s — groom-fill %s' % (s.job, s.item_id, note or '%s: %s' % (
             v.verdict, v.reason)))
 
+    def Decide(self, a):
+        note = self.ports.record.decide_intake(a.item_id, a.verdict())
+        self.result.intake.append(a.item_id)
+        return note
+
+    def intake_verdict(self, s):
+        """Apply an ended intake-decide session's verdict (:func:`asf.kernel.intake.parse_verdict`,
+        validated by :func:`asf.kernel.intake.check`); a rejected one applies nothing and is one
+        log line (the key is asked again while it has tries left)."""
+        key = s.item_id
+        it = self.facts.items.get(key) or (getattr(self.facts, 'notes', None) or {}).get(key)
+        v, why = I.parse_verdict(s.report, by=s.job)
+        if v is not None and it is None:
+            v, why = None, 'no longer on the record or in the inbox'
+        if v is not None:
+            why = I.check(v, it, self.facts.items)
+        if why:
+            self.log('%s %s — intake verdict rejected: %s' % (s.job, key, why))
+            return
+        try:
+            note = self.ports.record.decide_intake(key, v)
+        except Exception as e:  # the key stays undecided; asked again while it has tries
+            self.log('%s %s — intake verdict not written: %s' % (s.job, key, e))
+            return
+        self.result.intake.append(key)
+        self.log(I.line(key, v))
+        if note:
+            self.log('  %s' % note)
+
     def _note(self, iid, text):
         notes = self.field(iid, P.NOTES, [])
         if text not in notes:
@@ -359,8 +395,10 @@ class _Applier:
 
     def Launch(self, a):
         if any(s.item_id == a.item_id and s.alive and (s.kind == 'review') == (a.kind == 'review')
-               for s in self.facts.sessions):
+               and (s.kind == I.KIND) == (a.kind == I.KIND) for s in self.facts.sessions):
             return 'skipped: a live session holds it'
+        if a.kind == I.KIND:
+            return self.intake_launch(a)
         it = self.facts.items[a.item_id]
         pr = next((p for p in self.facts.prs
                    if p.item_id == a.item_id and not p.merged and p.branch == a.branch), None)
@@ -399,6 +437,23 @@ class _Applier:
             return 'job %s' % job
         self.set(a.item_id, **{P.STATE: (State.REVIEW if a.kind == 'review'
                                          else State.BUILDING).value})
+        return 'job %s' % job
+
+    def intake_launch(self, a):
+        """An intake-decide session for the undecided card or inbox note ``a.item_id``: one try
+        counted, the item's state untouched."""
+        it = self.facts.items.get(a.item_id) or (getattr(self.facts, 'notes', None) or {}).get(
+            a.item_id)
+        if it is None:
+            return 'skipped: not on the record or in the inbox'
+        try:
+            if self.ports.brief is None:
+                raise P.PortError('no brief maker on the ports')
+            job = self.ports.sessions.launch(a.kind, a.item_id, a.branch,
+                                             self.ports.brief(it, a, list(a.findings), None), {})
+        except P.NoSeat as e:
+            return 'waits for a seat: %s' % e
+        self.ports.record.count_intake(a.item_id)
         return 'job %s' % job
 
     # ---- a write invalidates the view it was decided on --------------------------------------

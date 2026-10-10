@@ -127,6 +127,15 @@ What used to live in a hand-written script, two hand-written plists and a note i
                    fill_per_tick: 3,          # groom-fills a tick (after fixes, reviews, builds)
                    max_concurrent: 2,         # groom-fill seats held at any time
                    max_fills: 2}              # groom-fill sessions per card, then Stuck
+      intake:     {enabled: true,             # every tick: the inbox is minted (the groom's own
+                                              # path) and every undecided card or inbox note is
+                                              # decided — by code when its text names its kind
+                                              # and parent (or it is Done or parked), else by an
+                                              # intake-decide session (models.intake-decide)
+                                              # whose verdict code validates and applies
+                   decide_per_tick: 3,        # intake-decide launches a tick, on seats every
+                                              # finishing and building launch left idle
+                   max_tries: 2}              # sessions per key; a card then parks (later)
       risk:       {high: [],                  # path globs: an item whose writes (or PR files)
                                               # hit one is high-risk — its review runs on
                                               # stuck.strong_model, no second high PR with
@@ -160,6 +169,7 @@ import datetime
 LIGHT_MODEL, HEAVY_MODEL = 'claude-sonnet-5', 'claude-opus-5'
 MODEL_KINDS = {'coder': LIGHT_MODEL, 'fix-bug': LIGHT_MODEL, 'correct': LIGHT_MODEL,
                'review': LIGHT_MODEL, 'light-review': LIGHT_MODEL, 'groom-fill': LIGHT_MODEL,
+               'intake-decide': LIGHT_MODEL,
                'spec': HEAVY_MODEL, 'plan': HEAVY_MODEL}
 
 #: every key, its default and its kind: ``int``/``float`` (non-negative), ``bool``, a tuple of
@@ -226,6 +236,7 @@ SPEC = {
     'main_move': {'alarm_minutes': (5, float), 'window_ticks': (15, int)},
     'dor': {'enabled': (False, bool), 'fill_per_tick': (3, int), 'max_fills': (2, int),
             'max_concurrent': (2, int)},
+    'intake': {'enabled': (True, bool), 'decide_per_tick': (3, int), 'max_tries': (2, int)},
     'risk': {'high': ((), 'globs'), 'large_lines': (800, int)},
     'floor': {'close_orphan_prs': (True, bool), 'cancel_stale_ci': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int),

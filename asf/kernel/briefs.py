@@ -24,6 +24,7 @@ import importlib
 import re
 
 from asf.kernel import dor as D
+from asf.kernel import intake as I
 from asf.kernel import settings as kernel_settings
 from asf.kernel.model import RED_CONCLUSIONS
 
@@ -131,6 +132,42 @@ when the change touches the record, CI, the kernel or the release tooling.
 {body}
 
 End with exactly this block (lists as JSON), and nothing after it:
+
+```
+{schema}
+```
+"""
+
+#: an intake-decide session's brief (:func:`_intake_brief`): the kernel's own, short, light model
+INTAKE_TEXT = """# Intake decision: {item_id} — {title}
+
+{what} waits on a decision before the factory treats it as work. Decide it.
+
+You only read and judge — never edit, commit or push anything, and run no `asf` command.
+Read the {noun} below; read the repository at `origin/{main}` only when the text alone does not
+settle it.
+
+- `decision`: `need` (build it soon), `nice` (worth building, not urgent), `later` (park it), or
+  `close` (not worth building: a duplicate, already done, or obsolete).
+- The rule: work made obsolete under the 0.2 kernel (it fixes or extends the old floor's tick,
+  harvest, lanes, feeder rows or groom file, which the kernel replaced) ⇒ `close` or `later`.
+- `kind`: `bug` when it reports a defect in what exists, `feature` when it asks for new work.
+- `parent`: the id it hangs under — a feature under an Epic, a bug under an Epic, a Feature or a
+  Story — chosen from the goals below or the card's own; `none` keeps the card's.
+- `severity` (bugs only): `S1` the factory stops or loses work, `S2` a wrong result with a
+  workaround, `S3` cosmetic.
+
+## The product's goals (its open Epics, by rank)
+
+{goals}
+
+## The {noun}
+
+- type: {type}; parent: {parent}; priority: {priority}{question}
+
+{body}
+
+End with exactly this block, and nothing after it:
 
 ```
 {schema}
@@ -342,6 +379,28 @@ def _groom_brief(product, launch, item, findings, model):
                        id_ranges_needed=False)
 
 
+def _intake_brief(product, launch, item, findings, model):
+    """The :class:`asf.briefs.build.Brief` of an intake-decide session (:data:`INTAKE_TEXT`):
+    the card (or the inbox note and the question intake asked about it), the product's goals
+    (``findings``: :func:`asf.kernel.intake.goals`), the rule and the verdict block."""
+    floor = importlib.import_module('asf.briefs.build')
+    note = item.type == I.NOTE
+    body = str(item.body or '').strip()
+    if len(body) > GROOM_BODY_MAX:
+        body = body[:GROOM_BODY_MAX] + '\n…'
+    text = INTAKE_TEXT.format(
+        item_id=item.id, title=item.title or '',
+        what=('The inbox note %s' % I.note_name(item.id)) if note else 'The card %s' % item.id,
+        noun='inbox note' if note else 'card', main=getattr(product, 'main', 'main') or 'main',
+        goals='\n'.join('- %s' % g for g in findings) or '- (no open Epic)',
+        type='not minted yet' if note else item.type, parent=item.parent or 'none',
+        priority=item.priority or 'none',
+        question=('\n- intake asked: %s' % item.question) if note and item.question else '',
+        body=body, schema=I.VERDICT_SCHEMA)
+    return floor.Brief(kind=I.KIND, item_id=item.id, text=text, model=model, add_dirs=[],
+                       id_ranges_needed=False)
+
+
 def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=None, log=None):
     """The :class:`asf.briefs.build.Brief` for ``launch`` of ``item`` (a kernel Item). ``index``
     is the record's ``index.json`` (``{'items': {...}}``); ``repo_facts`` a callable
@@ -351,6 +410,9 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
     floor = importlib.import_module('asf.briefs.build')
     fix = launch.kind == 'build' and pr is not None
     kind = brief_kind(launch, item, fix)
+    if kind == I.KIND:
+        return _intake_brief(product, launch, item, findings,
+                             getattr(launch, 'model', '') or model_for(product, I.KIND))
     if kind == D.GROOM_FILL:
         return _groom_brief(product, launch, item, findings,
                             getattr(launch, 'model', '') or model_for(product, D.GROOM_FILL))

@@ -81,6 +81,26 @@ class MintStory:
 
 
 @dataclasses.dataclass
+class Decide:
+    """Apply the intake decision the code made on the undecided card (or inbox note)
+    ``item_id`` (:mod:`asf.kernel.intake`): ``decision`` (need, nice, later, close) and the
+    rest of an :class:`asf.kernel.intake.Verdict`."""
+    item_id: str
+    decision: str
+    kind: str = ''
+    parent: str = ''
+    severity: str = ''
+    reason: str = ''
+    by: str = 'code'
+    set_priority: bool = False
+
+    def verdict(self):
+        from asf.kernel.intake import Verdict
+        return Verdict(self.decision, self.kind, self.parent, self.severity, self.reason,
+                       self.by, self.set_priority)
+
+
+@dataclasses.dataclass
 class MarkStuck:
     """Record ``item_id`` as Stuck with ``reason`` and ``owner`` (one of
     :data:`asf.kernel.model.OWNERS`)."""
@@ -286,6 +306,9 @@ def describe(action):
     if isinstance(action, Rerun):
         return ('cancel stalled run %s (rerun next tick)' if action.cancel
                 else 'rerun run %s') % action.run_id
+    if isinstance(action, Decide):
+        from asf.kernel.intake import line
+        return line(action.item_id, action.verdict())
     if isinstance(action, MintStory):
         return 'mint %s under %s: %s' % (action.story_id, action.feature_id, action.title)
     if isinstance(action, MarkStuck):

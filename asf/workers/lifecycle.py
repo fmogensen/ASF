@@ -2706,7 +2706,9 @@ def push_failure(text):
 #: ``groom-fill`` session (:mod:`asf.kernel.dor`) only judges a card and ends with its verdict
 #: block, which the kernel applies to the record (2026-10-10: the stop gate refused its stop
 #: twice for a branch it was told never to push, and its final message lost the verdict).
-NO_LANDING_KINDS = ('groom', 'groom-clerk', 'epic-features', 'groom-fill')
+#: An ``intake-decide`` session (:mod:`asf.kernel.intake`) is the same shape: it ends with its
+#: verdict block, which the kernel applies to the record.
+NO_LANDING_KINDS = ('groom', 'groom-clerk', 'epic-features', 'groom-fill', 'intake-decide')
 
 #: Kinds whose work is a file the factory takes off the branch, not a commit on it: a review
 #: session writes ``docs/reviews/<n>-<item>.md`` in its worktree and leaves it uncommitted for
