@@ -7,7 +7,7 @@
     "plan/T-00001",
     "revert/T-00001"
   ],
-  "built_at": "2026-10-10T16:40:49Z",
+  "built_at": "2026-10-10T17:23:47Z",
   "cards": {
     "bugs": 48,
     "decisions": 10,
@@ -68,7 +68,7 @@
   ],
   "refs_annotated": 2,
   "refs_total": 3,
-  "source_sha": "cf100fd50662ea207b92caff7723f0a990f8c4f8",
+  "source_sha": "79a05b13d315a567c1a8599b02cbe79d619259b4",
   "widest_id": {
     "B": "B-00001",
     "D": "D-0001",

@@ -130,10 +130,10 @@ def _write_card(record, folder, iid, type_, title, body, typed='', machine='', s
 
 def _card_fields(folder, index):
     """``(typed, machine)`` frontmatter lines for one card — a mix of the structural fields the
-    snapshot keeps verbatim (``parent``, ``rank``, ``writes``, ``after``, ``priority``,
-    ``severity``, ``lane``, ``size``, a Decision's ISO ``date``) and the prose fields it has to
-    clear (``reshape``, ``decided_by``, a Rule's ``reason``/``check``, ``area``, ``links``,
-    and ``removed``, whose id must survive its prose)."""
+    snapshot keeps verbatim (``parent``, ``rank``, ``writes``, ``after``, ``stories``,
+    ``priority``, ``severity``, ``lane``, ``size``, a Decision's ISO ``date``) and the prose
+    fields it has to clear (``reshape``, ``decided_by``, a Rule's ``reason``/``check``,
+    ``area``, ``links``, and ``removed``, whose id must survive its prose)."""
     typed = []
     machine = []
     if folder in _PARENTS:
@@ -143,6 +143,9 @@ def _card_fields(folder, index):
     if folder == 'tasks':
         typed.append('writes: [asf/rehearsal.py, tests/test_rehearsal_snapshot.py]\n')
         typed.append('after: [T-00002]\n')
+        # the Task→Story edge `asf check` resolves and `ingest` reads back: structural, so it
+        # is kept verbatim and not cleared to filler
+        typed.append('stories: [S-00001, S-00002]\n')
         if index == 1:
             typed.append(f'reshape: {RESHAPE}\n')
             machine.append(f'removed: {REMOVED_REASON}\n')
@@ -514,6 +517,7 @@ class BuildWritesTheSnapshot(unittest.TestCase):
         self.assertEqual(task['priority'], 'P2')
         self.assertEqual(task['writes'], ['asf/rehearsal.py', 'tests/test_rehearsal_snapshot.py'])
         self.assertEqual(task['after'], ['T-00002'])
+        self.assertEqual(task['stories'], ['S-00001', 'S-00002'])
         self.assertEqual(task['state'], 'Active')
         self.assertEqual(task['stage_since'], '2026-01-01T09:00:00Z')
         self.assertEqual(self._card('decisions')[0]['date'], '2026-01-05')   # a date is kept
@@ -573,6 +577,13 @@ class BuildWritesTheSnapshot(unittest.TestCase):
         self.assertTrue(hand[0].startswith('## '), hand[0])
         self.assertEqual(len(hand[0]), len(HAND_HEADING))
         self.assertEqual(_uncleared(hand[0]), [], hand[0])
+
+    def test_an_epics_features_heading_is_kept_verbatim(self):
+        # `asf check` reads an Epic's Features list by this heading (asf/record/check.py:394)
+        # and asf.groom.shape names it as an Epic's shape, so it is structure like the
+        # template's own: cleared, the snapshot's own check reports every Epic as spanning
+        # fewer than two Features. The list under it stays prose and is cleared.
+        self.assertEqual(rehearsal._clear_heading('## Features'), '## Features')
 
     def test_the_mismatch_done_copy_pairs_by_name_and_is_a_truncation(self):
         intake = self.manifest['intake']

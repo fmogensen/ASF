@@ -146,10 +146,17 @@ def clear_history_line(line):
 #: and is cleared (C4) — so a Task's ``reshape:``, a Decision's ``decided_by:`` and a Rule's
 #: ``reason:``/``check:`` can never reach the snapshot as written. An allowlist, not a denylist:
 #: a typed field this product grows later is cleared by default rather than copied by default.
+#: Every *edge* a card carries belongs here, named one by one: a Task's ``stories:`` is the
+#: Task→Story edge :func:`asf.record.check.cmd_check` resolves (``stories references missing
+#: item``) and :mod:`asf.record.ingest` reads back on the operator's refresh, and
+#: ``delivered_by:``/``split_from:`` are the slice and reshape edges
+#: (:mod:`asf.record.slice`, :mod:`asf.groom.shape`) — an edge cleared to filler is a dangling
+#: reference the snapshot's own ``asf check`` would refuse.
 _STRUCTURAL_KEYS = frozenset((
     'id', 'type', 'state', 'stage', 'stage_since', 'updated', 'parent', 'schema_version',
     'dates', 'rank', 'priority', 'severity', 'lane', 'size', 'writes', 'after', 'delivers',
-    'blockedBy', 'supersedes', 'superseded_by', 'legacy_id',
+    'delivered_by', 'split_from', 'stories', 'blockedBy', 'supersedes', 'superseded_by',
+    'legacy_id',
 ))
 
 #: The keys cleared with :func:`clear_ids_kept` rather than :func:`clear_line`. ``removed``'s
@@ -185,9 +192,14 @@ def _clear_meta_value(value, ids_kept=False):
 #: section headings that name a date, a pull request number and a product by name, and a heading
 #: copied through because it opens with ``## `` is a leak like any other (C4). The heading's own
 #: shape survives — ``'## '`` and the line's length — and nothing it said does.
+#: ``## Features`` is here beside them: the record's own template does not write it, but
+#: :func:`asf.record.check.cmd_check` reads an Epic's Features list *by that heading*
+#: (``asf/record/check.py:394``) and :mod:`asf.groom.shape` names it as an Epic's shape, so the
+#: heading is structure. Cleared, the snapshot's own ``asf check`` reports every Epic as
+#: spanning fewer than two Features; the list under it is prose and is cleared either way.
 _TEMPLATE_HEADINGS = frozenset((
     '## Description', '## Acceptance', '## Non-goals', '## History', '## Children',
-    '## Backlinks',
+    '## Backlinks', '## Features',
 ))
 
 
