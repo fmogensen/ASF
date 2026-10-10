@@ -2567,7 +2567,11 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     ``flags.console_wait: aside`` (W8-PR1): an item whose only row is CONSOLE → AMEND
     (:func:`console_only`) is set on the map as ``console_aside`` and the rows are drawn again —
     it orders nothing (:func:`after_of`), its own row ranks behind the live rows of its tier. A
-    Task released that way may itself be console work: the passes run to a fixed point."""
+    Task released that way may itself be console work: the passes run to a fixed point.
+
+    An item typed ``in_progress_by`` (B-0070, ``asf new --in-progress``) gets no row at all,
+    whatever kind would otherwise launch or wait for it: the operator or a session is already
+    carrying its fix by hand, so the lane must not duplicate it."""
     items = items_of(index)
     roots = roots_on(product)
     items.trunk_unverified = set(unverified_on_trunk or ()) if roots else set()
@@ -2582,7 +2586,9 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
                 break
             items.console_aside |= more
             ordered = _candidates(*args)
-    return ordered
+    # B-0070: a card `in_progress_by` gets no row — the operator (or a session) is already
+    # carrying the fix by hand, so the lane must not spin up a session to duplicate it.
+    return [r for r in ordered if not (items.get(r.item_id) or {}).get('in_progress_by')]
 
 
 #: the most times :func:`candidates` draws the rows again for ``console_wait: aside`` — each
