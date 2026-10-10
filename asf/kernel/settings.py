@@ -85,9 +85,15 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # head; answered with its last line and the sha
                    inbox_bugs: true,          # a Bug card the session could not mint is filed
                                               # through the inbox; answered with its path
-                   needs_writes: true}        # a REPORT's `needs writes:` paths: held behind
+                   needs_writes: true,        # a REPORT's `needs writes:` paths: held behind
                                               # an unfinished after: item that writes one, else
                                               # granted (the card's writes: widened)
+                   plan_ids: true,            # a merged plan the record refuses only for cited
+                                              # ids no claim covers, on no card and in no claim:
+                                              # the kernel claims them (blocks of one), mints
+                   replan: true}              # any other refused merged plan: a plan session on
+                                              # a fresh plan branch carrying the refusal, one
+                                              # fix round each (max_fix_rounds), then Stuck
       gate:       {window_h: 24, first_push_green_min: 0.7, landed_min: 5,
                    silent_stuck_max: 0, since: 2026-10-09T14:00:00Z,   # asf kernel gate
                    satisfied: true}           # before a fresh Task/Bug launches: the tests it
@@ -95,8 +101,8 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # a fresh worktree of the trunk -> Done ("satisfied
                                               # on main at <sha>"), nothing launched
                                               # (asf.kernel.needed; code, never an LLM)
-      waits:      {targets: {seat: 10m, ci: 10m, review: 30m, train: 30m, merge: 10m,
-                             conflict: 0m, stuck: 0m}}   # per wait class (asf.kernel.waits):
+      waits:      {targets: {seat: 10m, replan: 10m, ci: 10m, review: 30m, train: 30m,
+                             merge: 10m, conflict: 0m, stuck: 0m}}   # per wait class (asf.kernel.waits):
                                               # a wait older than its class's target is ⚠ in
                                               # ``asf kernel waits`` and counted on the tick line;
                                               # after and parked have none unless set. A duration
@@ -182,11 +188,12 @@ MODEL_KINDS = {'coder': LIGHT_MODEL, 'fix-bug': LIGHT_MODEL, 'correct': LIGHT_MO
 #: non-negative numbers). A default of None is "unset" (``launch.local_max``:
 #: ``max_sessions``).
 #: the default target of each wait class (:mod:`asf.kernel.waits`), as a duration
-WAIT_TARGETS = {'seat': '10m', 'ci': '10m', 'review': '30m', 'train': '30m', 'merge': '10m',
-                'conflict': '0m', 'stuck': '0m'}
+WAIT_TARGETS = {'seat': '10m', 'replan': '10m', 'ci': '10m', 'review': '30m', 'train': '30m',
+                'merge': '10m', 'conflict': '0m', 'stuck': '0m'}
 
 #: the wait classes a target may name (``stuck`` covers every ``stuck:<owner>``)
-WAIT_CLASSES = ('seat', 'ci', 'review', 'train', 'merge', 'conflict', 'stuck', 'after', 'parked')
+WAIT_CLASSES = ('seat', 'replan', 'ci', 'review', 'train', 'merge', 'conflict', 'stuck', 'after',
+                'parked')
 
 _UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
 
@@ -230,7 +237,8 @@ SPEC = {
     'resolve': {'trunk_tests': (True, bool), 'symbols': (True, bool),
                 'test_timeout_s': (600, int), 'python': ('python3', 'text'),
                 'test_runs_per_tick': (1, int), 'gates': (True, bool),
-                'inbox_bugs': (True, bool), 'needs_writes': (True, bool)},
+                'inbox_bugs': (True, bool), 'needs_writes': (True, bool),
+                'plan_ids': (True, bool), 'replan': (True, bool)},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time'), 'satisfied': (True, bool)},
     'waits': {'targets': (WAIT_TARGETS, 'targets'), 'breach': (True, bool),

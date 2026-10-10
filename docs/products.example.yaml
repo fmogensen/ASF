@@ -594,6 +594,16 @@ kernel:
                             # "granted <paths>; nothing else outside writes" (a Building/Review
                             # writer of a path is named: the overlap rule serialises them; a path
                             # on kernel.risk.high makes the item high-risk)
+    plan_ids: true          # a merged plan the record refuses to mint ("mints id(s) no claim
+                            # covers") only for ids it cites that no record item and no claim
+                            # holds (an old card's id, an example): each id is claimed on the
+                            # record's origin as a block of one, claimant naming the citing
+                            # Features, and the plan is minted on the same tick
+    replan: true            # any other refused merged plan: the Feature's note says why, its wait
+                            # class is `replan`, and a plan session on a fresh plan branch
+                            # (plan/<F>-replan-<n>) carries the refusal as its finding; each
+                            # replan is one fix round (max_fix_rounds, then Stuck on the
+                            # operator); when its PR merges the Tasks are minted again
   gate:
     window_h: 24            # first-push-green is measured over PRs opened in the last window_h
     first_push_green_min: 0.7
@@ -613,6 +623,7 @@ kernel:
   waits:
     targets:                # per wait class (`asf kernel waits`): a wait older than its target is
       seat: 10m             # flagged ⚠ there and counted on the tick line ("over-target waits");
+      replan: 10m           # replan (a Feature whose merged plan the record refused),
       ci: 10m               # classes: seat (Ready, no seat), ci (checks running), review (awaiting
       review: 30m           # a verdict), train (queued for update), merge (green, waiting on
       train: 30m            # GitHub), conflict, stuck (every stuck:<owner>), after (a dependency),

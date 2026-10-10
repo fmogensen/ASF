@@ -353,7 +353,9 @@ class Facts:
     ``notes`` are the inbox notes intake asked a question about (:mod:`asf.kernel.intake`: key
     -> an Item of type ``note``, its title, body and question), ``intake_tries`` the
     intake-decide sessions launched per key. ``last_jobs`` maps an item to its last session's
-    job id (launch order, ended runs too; a job id starts with its kind)."""
+    job id (launch order, ended runs too; a job id starts with its kind). ``plan_refusals`` maps
+    a Feature to why the record refused to mint the Tasks of its merged plan this tick
+    (:meth:`asf.kernel.ports.RealRecord.plan_refusals`): it is re-planned, never left New."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -378,6 +380,7 @@ class Facts:
     landed_shas: dict = dataclasses.field(default_factory=dict)
     ci_runs: list = dataclasses.field(default_factory=list)
     open_heads: dict = None
+    plan_refusals: dict = dataclasses.field(default_factory=dict)
     trunk_files: frozenset = None
     notes: dict = dataclasses.field(default_factory=dict)
     intake_tries: dict = dataclasses.field(default_factory=dict)
@@ -412,7 +415,11 @@ class Config:
     ``Facts.resolved`` (:mod:`asf.kernel.resolvers`). ``resolve_gates``: a repo gate script a
     session could not run is answered from its run on the branch head; ``resolve_inbox_bugs``: a
     Bug card a session could not mint is filed through the inbox, then answered. ``resolve_needs_writes``: a session's ``needs writes:`` request is held behind
-    an unfinished ``after:`` item that owns a path, else granted (the card's ``writes:`` widened). The product file's ``kernel:`` block sets
+    an unfinished ``after:`` item that owns a path, else granted (the card's ``writes:`` widened).
+    ``resolve_plan_ids``: a merged plan the record refuses only for cited ids no claim covers
+    and nothing holds has those ids claimed in code, then is minted; ``replan_refused``: any other
+    refused plan (``Facts.plan_refusals``) gets a plan session on a fresh plan branch carrying the
+    refusal (:func:`asf.kernel.decide.replan_finding`). The product file's ``kernel:`` block sets
     them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0).
     ``wait_targets`` maps a wait class (``kernel.waits.targets``: ``seat``, ``review``, ``train``,
     ``stuck``, …) to seconds: an item whose current wait (``Facts.waits``) is older is a breach
@@ -474,6 +481,8 @@ class Config:
     resolve_gates: bool = True
     resolve_inbox_bugs: bool = True
     resolve_needs_writes: bool = True
+    resolve_plan_ids: bool = True
+    replan_refused: bool = True
     wait_targets: dict = dataclasses.field(default_factory=dict)
     max_session_age_h: float = None
     max_review_age_h: float = None

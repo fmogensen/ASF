@@ -596,7 +596,9 @@ def _judge(it, facts, config, actions, parked=()):
     spec_only = _spec_only(it, prs, config)
     if open_pr is None and landed(it, prs) and not it.reopened and not spec_only:
         if _plan_unbuilt(it, prs, facts, config):  # its Tasks are minted from the plan, then built
-            return _Judged(State.NEW, hold=True)
+            return (_replan(it, sessions, pushed, ended_stuck, stuck, attempts, hold, extra,
+                            facts, config, actions)
+                    or _Judged(State.NEW, hold=True))
         return _Judged(State.DONE)
     if ended_stuck is not None and asked is not None and not answered and not live:
         nw = _needs_writes(it, (asked.fields or {}).get('needs writes'), facts, config, parked)
@@ -1753,6 +1755,10 @@ def _idle(facts, config, judged, states, parked, skipped):
 def _kind(it, facts, config=None):
     if it.type in BUILDABLE:
         return 'build'
+    plan = _lane_prefix(config, 'plan') if config is not None else None
+    if plan and any(p.item_id == it.id and p.merged and p.branch.startswith(plan)
+                    for p in facts.prs):
+        return 'plan'  # its plan landed: a document launch now is its re-plan
     landed = it.id in facts.specs_landed or (
         config is not None and _spec_only(it, [p for p in facts.prs if p.item_id == it.id], config))
     return 'plan' if landed else 'spec'
@@ -1840,6 +1846,83 @@ def _plan_unbuilt(it, prs, facts, config):
         return False
     items = facts.items
     return not _has_work(it.id, items, _children(items))
+
+
+#: the head of a re-plan's finding (:func:`replan_finding`)
+REPLAN = 'replan: the record refused to mint the merged plan'
+
+#: what a re-plan session is asked to do
+REPLAN_ASK = ('Re-plan on this branch: the plan is on the trunk already — edit that plan document '
+              'in place so the record can mint its Tasks, and change nothing else. Every id it '
+              'declares or mints comes from your BACKLOG_ID_RANGE (re-mint any that is not); an '
+              'id it only cites that the record does not hold goes in a code span or is dropped; '
+              'a decision it cites is on the register or dropped; every `### Task N:` heading '
+              'parses. When this PR merges the record mints the Tasks again.')
+
+#: the infix of a re-plan branch: ``<plan lane><F>-replan-<n>``
+REPLAN_INFIX = '-replan-'
+
+
+def replan_finding(reason):
+    """The finding a re-plan session carries: why the record refused the merged plan."""
+    return '%s — %s. %s' % (REPLAN, ' '.join(str(reason or '').split()), REPLAN_ASK)
+
+
+def replans(iid, facts, config):
+    """The re-plan branches of Feature ``iid`` the facts know (its PRs, open or merged, its
+    sessions, its pushed branches): each one is a fix round spent on its refused plan."""
+    plan = _lane_prefix(config, 'plan')
+    if not plan:
+        return set()
+    head = (plan + iid + REPLAN_INFIX).lower()
+    names = ([p.branch for p in facts.prs if p.item_id == iid]
+             + [s.branch for s in facts.sessions if s.item_id == iid]
+             + [b.name for b in facts.branches if b.item_id == iid])
+    return {n for n in names if n and n.lower().startswith(head)}
+
+
+def replan_branch(iid, n, config):
+    """Feature ``iid``'s ``n``-th re-plan branch (``plan/F-0001-replan-1``)."""
+    return '%s%s%s%d' % (_lane_prefix(config, 'plan') or '', iid, REPLAN_INFIX, n)
+
+
+def _replan(it, sessions, pushed, ended_stuck, stuck, attempts, hold, extra, facts, config,
+            actions):
+    """A Feature whose merged plan the record refused to mint (``Facts.plan_refusals``) is never
+    left New in silence: its note says why, and a plan session on a fresh plan branch
+    (:func:`replan_branch`) carries the refusal as its finding (:func:`replan_finding`). Each
+    re-plan is one fix round: past ``config.max_fix_rounds`` plus the rounds answers granted it
+    is Stuck on the operator ("… after N fix rounds", so an answer grants one more). A live
+    re-plan session holds it Building; one that ended ``done`` and pushed gets its PR (then the
+    usual review and landing; once it merges the tick mints the Tasks again). None when nothing
+    was refused and no re-plan session is in flight: the caller holds it New."""
+    reason = (facts.plan_refusals or {}).get(it.id) if config.replan_refused else None
+    branches = replans(it.id, facts, config)
+    mine = [s for s in sessions if s.branch in branches]
+    if not reason and not mine:
+        return None
+    if reason:
+        _note(it, 'plan refused by the record: %s' % ' '.join(reason.split()), actions)
+    if any(s.alive for s in mine):
+        return _Judged(State.BUILDING, hold=True)
+    if pushed is not None and pushed in mine:
+        actions.append(open_pr_action(it, pushed.branch, pushed))
+        return _Judged(State.REVIEW, hold=True)
+    if ended_stuck is not None and any(not s.alive for s in mine):
+        return _Judged(State.STUCK, ended_stuck)
+    if not reason:
+        return _Judged(State.NEW, hold=True)
+    repeated = _repeated(attempts, config.max_attempts)
+    if repeated:
+        return _Judged(State.STUCK, _stuck(repeated, 'loop'))
+    spent = len(branches)
+    if spent >= config.max_fix_rounds + extra:
+        why = 'plan refused by the record: %s after %d fix rounds' % (
+            ' '.join(reason.split()), spent)
+        return _Judged(State.STUCK, _keep(stuck) if stuck is not None and stuck.reason == why
+                       else _stuck(why, 'operator'))
+    return _Judged(State.READY, hold=hold, branch=replan_branch(it.id, spent + 1, config),
+                   findings=[replan_finding(reason)] + relaunch_findings(it))
 
 
 def _branch(kind, iid, config, item=None):
@@ -1992,7 +2075,8 @@ def ci_stalls(facts, config, states):
 
 
 def overdue(facts, config, states, same_class=True):
-    """``{item: (wait class, age in seconds)}``: every Task or Bug whose ledger spell
+    """``{item: (wait class, age in seconds)}``: every Task or Bug (or Feature whose merged plan
+    was refused) whose ledger spell
     (``Facts.waits``) is older than its class's target (``config.wait_targets``) — and, with
     ``same_class``, whose wait class now (:func:`asf.kernel.waits.classify` of its state this
     tick) is still that one."""
@@ -2000,7 +2084,8 @@ def overdue(facts, config, states, same_class=True):
     out = {}
     for iid, (cls_then, since) in sorted((facts.waits or {}).items()):
         it = facts.items.get(iid)
-        if it is None or it.type not in W.FOLLOWED or iid not in states:
+        if it is None or iid not in states or (
+                it.type not in W.FOLLOWED and iid not in (facts.plan_refusals or {})):
             continue
         target = targets.get(W.target_key(cls_then))
         if target is None or not W.is_wait(cls_then):
