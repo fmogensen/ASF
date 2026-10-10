@@ -1,0 +1,78 @@
+{
+  "asf_version": "0.1.318.post2+gdbf0c4c7c",
+  "branches": [
+    "worker/T-00001",
+    "fix/T-00001",
+    "spec/T-00001",
+    "plan/T-00001"
+  ],
+  "built_at": "2026-10-10T12:21:37Z",
+  "cards": {
+    "bugs": 48,
+    "decisions": 10,
+    "epics": 6,
+    "features": 24,
+    "rules": 11,
+    "stories": 22,
+    "tasks": 64
+  },
+  "intake": {
+    "done": [
+      "done-note-1.md",
+      "done-note-2.md",
+      "done-note-3.md",
+      "done-note-4.md",
+      "done-note-5.md",
+      "done-note-6.md",
+      "done-note-7.md",
+      "done-note-8.md"
+    ],
+    "mismatch": {
+      "name": "done-note-8.md",
+      "original": "id irure veniam sint nostrud id in elit aute magna \namet proident nostrud sit in adipiscing "
+    },
+    "open": [
+      "open-note-1.md",
+      "open-note-2.md"
+    ]
+  },
+  "merges": [
+    "B-00001 \u2014 ullamco duis cillum proident ali (#1201)",
+    "D-0001 \u2014 ullamco duis cillum proident ali (#1202)",
+    "E-0001 \u2014 ullamco duis cillum proident ali (#1203)",
+    "F-0001 \u2014 ullamco duis cillum proident ali (#1204)",
+    "R-0001 \u2014 ullamco duis cillum proident ali (#1205)",
+    "S-00001 \u2014 ullamco duis cillum proident ali (#1206)",
+    "T-00001 \u2014 ullamco duis cillum proident ali (#1207)"
+  ],
+  "refs": [
+    {
+      "annotated": true,
+      "message": "ad nisi culpa nostrud ea des",
+      "name": "v0.1.0",
+      "prerelease": false
+    },
+    {
+      "annotated": true,
+      "message": "ad nisi culpa nostrud ea des",
+      "name": "v0.1.1",
+      "prerelease": false
+    },
+    {
+      "annotated": false,
+      "message": "",
+      "name": "v0.1.2-rc1",
+      "prerelease": true
+    }
+  ],
+  "source_sha": "27beda4b23652ea531e5e08b39feea07d101b44f",
+  "widest_id": {
+    "B": "B-00001",
+    "D": "D-0001",
+    "E": "E-0001",
+    "F": "F-0001",
+    "R": "R-0001",
+    "S": "S-00001",
+    "T": "T-00001"
+  }
+}

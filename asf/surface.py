@@ -83,6 +83,8 @@ COMMANDS = {
     'net-probe':            ('probe how this host reaches the forge and log which layer fails', HOST, None),
     'cloud':                ("install or check the cloud lane's CI workflow", REPO, 'install'),
     'deploy':               ('record the sha a deploy target now runs', RECORD, None),
+    'rehearse':             ('run the CLI and the hooks end to end on a record-shaped '
+                              'snapshot before a version is offered', REPO, '--build'),
 }
 
 #: A name that was retired, and the name that replaced it (F-0084).
