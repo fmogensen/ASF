@@ -932,6 +932,28 @@ class BoardCollapsingTests(ViewsTestCase):
         self.assertNotIn('F-0006', text)
         self.assertNotIn('E-0002', text)
 
+    def test_closed_counts_as_done_even_when_groom_never_decided_it(self):
+        """B-0088 review round 1, C1: ``'done'`` is tested before ``decided``. A Feature that
+        shipped or was closed before groom ever marked it (``F-0009``, ``F-0011``, ``F-0012`` on
+        the live record: ``Closed``, ``landed``, ``decided: false``) needs no look either, so it
+        belongs in the ``Closed / on-prod`` line, not in the ``Undecided`` one an operator does
+        still scan."""
+        items = dict(self.ITEMS)
+        items['F-0007'] = {'id': 'F-0007', 'type': 'feature', 'title': 'closed, never decided',
+                            'folder': 'features', 'parent': 'E-0001', 'state': 'Closed',
+                            'decided': False, 'rank': 6, 'stage': 'landed'}
+        items['F-0008'] = {'id': 'F-0008', 'type': 'feature', 'title': 'on prod, no decided key',
+                            'folder': 'features', 'parent': 'E-0001', 'state': 'Active',
+                            'rank': 7, 'stage': 'on-prod'}
+        self.write(items)
+        self.assertEqual(board.feature_status(items['F-0007']), 'done')
+        self.assertEqual(board.feature_status(items['F-0008']), 'done')
+        text = board.render(self.root)
+        self.assertIn('**Closed / on-prod** — 4 Features (`--all` to list)', text)
+        self.assertIn('**Undecided** — 1 Feature (`--all` to list)', text)
+        self.assertNotIn('F-0007', text)
+        self.assertNotIn('F-0008', text)
+
 
 if __name__ == '__main__':
     unittest.main()

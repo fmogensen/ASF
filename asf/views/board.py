@@ -39,15 +39,21 @@ def epic_title(e):
 
 
 def feature_status(f):
-    """A Feature's bucket for the default collapsing (B-0088): ``'undecided'`` (groom has not
-    set ``decided: true`` on it yet — :func:`asf.groom.policy._undecided`'s rule, read again
-    here since this module stays index-only), ``'done'`` (``state: Closed`` or stage ``on-prod``
-    — shipped or dead, nothing to act on), else ``'moving'`` (decided and still in the pipeline,
-    ``landed`` included — the stage right before ``on-prod``)."""
-    if f.get('decided') is not True:
-        return 'undecided'
+    """A Feature's bucket for the default collapsing (B-0088): ``'done'`` (``state: Closed`` or
+    stage ``on-prod`` — shipped or dead, nothing to act on), ``'undecided'`` (groom has not set
+    ``decided: true`` on it yet — :func:`asf.groom.policy._undecided`'s rule, read again here
+    since this module stays index-only), else ``'moving'`` (decided and still in the pipeline,
+    ``landed`` included — the stage right before ``on-prod``).
+
+    ``'done'`` is tested first, independent of ``decided``: a Feature that shipped or was closed
+    before groom ever marked it needs no look either, and reading it as ``'undecided'`` would put
+    it in the one summary line an operator does still scan. On the live record three Features
+    (``F-0009``, ``F-0011``, ``F-0012``: ``Closed``, ``landed``, ``decided: false``) are exactly
+    that shape."""
     word = (f.get('stage') or '').split(' ')[0]
-    return 'done' if f.get('state') == 'Closed' or word == 'on-prod' else 'moving'
+    if f.get('state') == 'Closed' or word == 'on-prod':
+        return 'done'
+    return 'moving' if f.get('decided') is True else 'undecided'
 
 
 def render(root, product=None, epic=None, show_all=False):
