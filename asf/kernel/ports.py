@@ -54,6 +54,7 @@ import re
 import time
 import typing
 
+from asf.kernel import dor as dor_mod
 from asf.kernel import model as M
 from asf.kernel import reports
 from asf.kernel.decide import READ_ONLY
@@ -1440,7 +1441,9 @@ class RealSessions:
                 continue
             kind = _kernel_kind(run.get('kind'))
             alive = lifecycle.pid_alive(run.get('pid'))  # a cloud token: the remote run's status
-            result = None if alive else report_result(run.get('log'))
+            result = None if alive else report_result(
+                run.get('log'), (lambda t: dor_mod.block(t) is not None)
+                if kind == dor_mod.GROOM_FILL else None)
             in_cloud = cloudpid.is_token(run.get('pid'))
             pushed = not alive and pushlog.count(self.product, run['job']) > 0
             said = reports.read(result)
@@ -1798,15 +1801,18 @@ def refguard_listed(product):
     return refguard.listed(getattr(product, 'conventions', None))
 
 
-def report_result(log_path):
+def report_result(log_path, holds=None):
     """The result record an ended session's REPORT is read off: the last run's ``result`` line
     (:func:`asf.workers.runtime.read_result`), unless it holds no REPORT and an earlier result of
     that same run does — a session that printed its REPORT and then answered a stale background
     notification (T-0432: "That monitor has served its purpose…") reported all the same. None
-    while the run has not ended."""
+    while the run has not ended. ``holds``: what a result must hold instead of a REPORT (a
+    callable on its text; a groom-fill's verdict block: its stop may have been refused and its
+    last word be about that, live 2026-10-10)."""
     from asf.workers import report, runtime
+    holds = holds or (lambda text: bool(report.parse(text)))
     last = runtime.read_result(log_path)
-    if last is None or report.parse(str(last.get('result') or '')):
+    if last is None or holds(str(last.get('result') or '')):
         return last
     found = None
     with open(log_path, encoding='utf-8', errors='replace') as f:
@@ -1819,7 +1825,7 @@ def report_result(log_path):
                 continue
             if runtime.launch_boundary(rec):
                 found = None
-            elif rec.get('type') == 'result' and report.parse(str(rec.get('result') or '')):
+            elif rec.get('type') == 'result' and holds(str(rec.get('result') or '')):
                 found = rec
     return found or last
 

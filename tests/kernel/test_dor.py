@@ -359,6 +359,18 @@ class StopGate(unittest.TestCase):
         self.assertFalse(lifecycle.lands({'kind': dor.GROOM_FILL, 'branch': 'groom-fill/T-1'}))
 
 
+class VerdictOffTheLog(unittest.TestCase):
+
+    def test_the_verdict_is_read_off_the_last_result_that_holds_it(self):
+        import json
+        log = os.path.join(tempfile.mkdtemp(), 'run.jsonl')
+        with open(log, 'w') as f:
+            for text in (FILL, 'The stop hook refused; I will not fabricate a commit.'):
+                f.write(json.dumps({'type': 'result', 'result': text}) + '\n')
+        got = P.report_result(log, lambda t: dor.block(t) is not None)
+        self.assertEqual(dor.parse_verdict(got['result'])[0].verdict, 'fill')
+
+
 class TickLine(unittest.TestCase):
 
     def test_the_tick_logs_the_hold_by_gap(self):
