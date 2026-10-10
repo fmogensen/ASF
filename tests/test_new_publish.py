@@ -11,7 +11,7 @@ import unittest
 from asf.groom.inbox import cmd_inbox
 from asf.record import frontmatter
 from asf.record.ids import write_new_item
-from asf.record.new import cmd_new
+from asf.record.new import _parse_sets, cmd_new
 
 
 def git(cwd, *a):
@@ -108,6 +108,45 @@ class NewPublishesTests(unittest.TestCase):
         with open(os.path.join(self.root, 'features', 'F-0001.md'), encoding='utf-8') as f:
             meta, _body = frontmatter.parse(f.read())
         self.assertEqual(meta['state'], 'New')
+
+
+class StabilityIsSettableOnFeatureAndEpic(unittest.TestCase):
+    """S-80305's last bullet, Task 1's own: `stability` is settable on a Feature and an Epic,
+    parses `true`/`false` as a boolean, and a bad value is refused before any card is written.
+
+    `cmd_new` refuses type feature/epic/bug outright — "it enters through the inbox" — before
+    `_parse_sets` ever runs (that guard predates this Task and is unrelated to stability), so
+    `asf new --set stability=yes` can never reach a Feature or an Epic card to prove the
+    refusal there. The refusal is proven instead at `_parse_sets`, the function `cmd_new` calls
+    before writing any card for the types it does reach, and the one `asf set` already drives
+    for an existing Feature/Epic card (tests/test_backlog.py)."""
+
+    def test_stability_true_and_false_parse_as_a_boolean_on_both_types(self):
+        for type_ in ('feature', 'epic'):
+            self.assertEqual(_parse_sets(type_, ['stability=true']), [('stability', None, True)])
+            self.assertEqual(_parse_sets(type_, ['stability=false']), [('stability', None, False)])
+
+    def test_stability_yes_is_refused_before_any_card_is_touched(self):
+        for type_ in ('feature', 'epic'):
+            with self.assertRaises(ValueError) as cm:
+                _parse_sets(type_, ['stability=yes'])
+            self.assertIn('one of true, false', str(cm.exception))
+
+    def test_asf_new_cannot_reach_a_feature_or_epic_card_at_all(self):
+        # the pre-existing inbox guard, not this Task's: cmd_new returns before _parse_sets
+        # runs or any folder is touched, for stability's good value as much as its bad one
+        root = tempfile.mkdtemp(prefix='newpub_stability_')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for type_ in ('feature', 'epic'):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = cmd_new(argparse.Namespace(
+                    type=type_, title='X', parent=None, priority=None, area=None,
+                    legacy_id=None, body_file=None, force=False, set=['stability=true'],
+                    in_progress=None, acceptance=None, writes=None), root)
+            self.assertEqual(rc, 2)
+            self.assertIn('enters through the inbox', out.getvalue())
+            self.assertEqual(os.listdir(root), [])
 
 
 if __name__ == '__main__':
