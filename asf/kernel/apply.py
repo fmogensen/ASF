@@ -267,6 +267,8 @@ class _Applier:
             findings = list(a.findings)
         meta = ({'pr': pr.number, 'tree': pr.tree_sha, 'change': pr.change_id}
                 if pr is not None else {})
+        if any(rebase_finding(f) for f in findings):
+            meta['host'] = True  # a rebase round: the host publishes it from the worktree
         try:
             if self.ports.brief is None:
                 raise P.PortError('no brief maker on the ports')

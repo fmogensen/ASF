@@ -19,10 +19,15 @@ no notes file (B-0098: a sandbox refused the loop's write under the shared .git,
 stopped on it).
 """
 import dataclasses
+import fnmatch
 import importlib
 import re
 
+from asf.kernel import settings as kernel_settings
 from asf.kernel.model import RED_CONCLUSIONS
+
+#: the brief kind of a docs-only PR's review (:func:`light_review`): a short checklist
+LIGHT_REVIEW = 'light-review'
 
 #: the floor's brief kind of a fix round (the round answers a correction: findings or a red)
 FIX_KIND = 'correct'
@@ -32,8 +37,42 @@ VERDICT_RULE = """## The kernel's verdict lines
 The kernel reads this review's verdict from your final message, not from the review file. After
 the REPORT block, print exactly one line `VERDICT: approve` or `VERDICT: changes`, then one line
 `FINDINGS: <file:line — the exact fix>` per finding the author must answer (none for an approve),
-and nothing after them — this overrides "nothing after it" above. A review that ends without a
-`VERDICT:` line counts as no review and is run again."""
+and nothing after them — this overrides "nothing after it" above. In a CLOUD SESSION your report
+commit's body is that final message: the same lines go there, after the REPORT. A review that
+ends without a `VERDICT:` line counts as no review and is run again."""
+
+#: a docs-only PR's review (:func:`light_review`): the kernel's own short brief, on the light model
+LIGHT_REVIEW_TEXT = """# Light review: {item_id} — PR #{pr} (documentation only)
+
+{title_line}You review PR #{pr} on branch `{branch}` (head `{head}`). Every file it changes is
+documentation:
+{files}
+
+Read the diff: `git fetch origin {branch} {main} && git diff origin/{main}...origin/{branch}`.
+Check only this, and keep it short:
+- it does what the card asks, and nothing the card does not;
+- every fact it states — a name, command, path, key, link or number — is true in this repository;
+- it contradicts no document beside it;
+- no secret, private name or host detail;
+- it renders: headings, lists, code fences and tables are well formed.
+
+Never edit, commit or push anything here (a cloud session's one report commit excepted): you only
+read. Block only on a wrong fact, a contradiction or a leak; wording is a note, not a finding.
+
+Finish with this, and nothing after it but the verdict lines below:
+
+```
+REPORT
+item: {item_id}
+kind: review
+status: done
+branch: {branch}
+pushed: n/a — a light review
+commits: none
+tests: none — documentation
+left out: none
+```
+"""
 
 #: what a kernel session does with a rebase: its sandbox refuses a force-push, so the host
 #: publishes it (``--force-with-lease`` over origin's tip, only when that tip is in the branch's
@@ -131,7 +170,77 @@ def _entry(item):
             'writes': list(item.writes), 'after': list(item.after), 'state': 'New'}
 
 
-def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=None):
+def kernel_block(product):
+    """``product``'s ``kernel:`` block, every default filled in (the defaults for a stand-in)."""
+    k = getattr(product, 'kernel', None)
+    return k if isinstance(k, dict) else kernel_settings.read(None)
+
+
+def model_for(product, kind):
+    """``kernel.models.<kind>`` (:data:`asf.kernel.settings.MODEL_KINDS`): a model id, or a
+    ``worker_pool.models`` label; '' for a kind it does not name (the floor's label stands)."""
+    return str((kernel_block(product).get('models') or {}).get(kind) or '')
+
+
+def light_review(product, pr):
+    """Whether ``pr`` (a :class:`~asf.kernel.model.PR`) changes documentation only: every file
+    under ``kernel.review.light_paths`` or the product's document trees
+    (:func:`asf.kernel.ports.doc_globs`). A PR whose files are unread is not."""
+    files = list(getattr(pr, 'files', None) or ())
+    if not files:
+        return False
+    from asf.kernel.ports import doc_globs
+    try:
+        docs = list(doc_globs(product))
+    except AttributeError:  # a stand-in product with no conventions
+        docs = []
+    globs = list(kernel_block(product)['review']['light_paths']) + docs
+    return all(any(fnmatch.fnmatchcase(f, g) for g in globs) for f in files)
+
+
+def cap_sections(sections, limit):
+    """``(kept, dropped)``: ``sections`` (``[[entry, …], …]``, each list oldest first) cut to at
+    most ``limit`` characters in all, keeping the newest entries — the last of every section
+    first, then the one before it, and so on; one entry longer than what is left is cut short.
+    ``kept`` has the shape of ``sections``; ``dropped`` counts the entries left out or cut.
+    ``limit`` 0 keeps everything."""
+    sections = [list(sec) for sec in sections]
+    if not limit or sum(len(str(e)) for sec in sections for e in sec) <= limit:
+        return sections, 0
+    keep = [[] for _ in sections]
+    left, dropped = limit, 0
+    for depth in range(max(len(sec) for sec in sections)):
+        for n, sec in enumerate(sections):
+            if depth >= len(sec):
+                continue
+            entry = str(sec[-1 - depth])
+            if len(entry) <= left:
+                keep[n].insert(0, entry)
+                left -= len(entry)
+            elif left > 200 and not keep[n]:  # the newest of a section is never lost whole
+                keep[n].insert(0, entry[:left - 1] + '…')
+                left, dropped = 0, dropped + 1
+            else:
+                dropped += 1
+    return keep, dropped
+
+
+def _light_brief(product, launch, item, pr, model):
+    """The :class:`asf.briefs.build.Brief` of a docs-only PR's review: :data:`LIGHT_REVIEW_TEXT`,
+    the operator's answers and :data:`VERDICT_RULE`."""
+    floor = importlib.import_module('asf.briefs.build')
+    files = list(pr.files)
+    shown = ['- `%s`' % f for f in files[:30]] + (
+        ['- … and %d more' % (len(files) - 30)] if len(files) > 30 else [])
+    text = LIGHT_REVIEW_TEXT.format(
+        item_id=item.id, pr=pr.number, branch=launch.branch, head=pr.head_sha or '?',
+        main=getattr(product, 'main', 'main') or 'main', files='\n'.join(shown),
+        title_line=('The card: %s\n\n' % item.title) if item.title else '')
+    return floor.Brief(kind=LIGHT_REVIEW, item_id=item.id, text=text, model=model, add_dirs=[],
+                       id_ranges_needed=False)
+
+
+def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=None, log=None):
     """The :class:`asf.briefs.build.Brief` for ``launch`` of ``item`` (a kernel Item). ``index``
     is the record's ``index.json`` (``{'items': {...}}``); ``repo_facts`` a callable
     ``(product, row, index) -> dict`` (the floor's :func:`asf.briefs.facts.repo_facts` when
@@ -140,6 +249,18 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
     floor = importlib.import_module('asf.briefs.build')
     fix = launch.kind == 'build' and pr is not None
     kind = brief_kind(launch, item, fix)
+    limit = kernel_block(product)['briefs']['max_appended_chars']
+    (findings, answers), dropped = cap_sections([list(findings), list(item.answers)], limit)
+    if dropped:
+        (log or print)('brief %s %s: findings and answers capped at %d chars — %d older '
+                       'entr%s left out' % (kind, item.id, limit, dropped,
+                                            'y' if dropped == 1 else 'ies'))
+    if launch.kind == 'review' and pr is not None and light_review(product, pr):
+        b = _light_brief(product, launch, item, pr, model_for(product, LIGHT_REVIEW))
+        extra = (['## Operator answers', ''] + ['- %s' % a for a in answers] + ['']
+                 if answers else []) + [VERDICT_RULE]
+        return dataclasses.replace(b, text=b.text.rstrip('\n') + '\n\n'
+                                   + '\n'.join(extra).strip() + '\n')
     items = dict((index or {}).get('items') or {})
     items.setdefault(item.id, _entry(item))
     index = dict(index or {}, items=items)
@@ -156,12 +277,13 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
         rf = None
     b = floor.build(product, row, index, [], rf)
     b = dataclasses.replace(b, text=kernel_push_text(b.text, launch.branch,
-                                                     getattr(product, 'main', 'main') or 'main'))
+                                                     getattr(product, 'main', 'main') or 'main'),
+                            model=model_for(product, kind) or b.model)
     extra = []
     if findings and not fix:
         extra += ['## Findings', ''] + ['- %s' % f for f in findings] + ['']
-    if item.answers:
-        extra += ['## Operator answers', ''] + ['- %s' % a for a in item.answers]
+    if answers:
+        extra += ['## Operator answers', ''] + ['- %s' % a for a in answers]
     if launch.kind == 'review':
         if pr is not None:
             extra += ['', 'The PR under review: #%d, head `%s`.' % (pr.number, pr.head_sha)]
@@ -190,9 +312,10 @@ def parse_verdict(text):
 class Briefer:
     """The real ports' brief maker: :func:`build` for one product, its index read once."""
 
-    def __init__(self, product):
+    def __init__(self, product, log=None):
         self.product = product
         self._index = None
+        self.log = log
 
     def index(self):
         if self._index is None:
@@ -207,4 +330,4 @@ class Briefer:
         return self._index
 
     def __call__(self, item, launch, findings=(), pr=None):
-        return build(self.product, launch, item, findings, pr, index=self.index())
+        return build(self.product, launch, item, findings, pr, index=self.index(), log=self.log)

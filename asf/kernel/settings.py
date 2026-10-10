@@ -6,8 +6,19 @@ What used to live in a hand-written script, two hand-written plists and a note i
     kernel:
       tick:       {interval_s: 120}           # the tick job's StartInterval
       launch:     {max_sessions: 6,           # live sessions the tick launches up to
+                   local_max: 6,              # local seats (unset: max_sessions)
+                   cloud_max: 0,              # cloud-lane seats (the product's ``cloud:`` lane);
+                                              # the tick launches up to local_max + cloud_max
                    rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
+      models:     {coder: claude-sonnet-5, fix-bug: claude-sonnet-5, correct: claude-sonnet-5,
+                   review: claude-sonnet-5, light-review: claude-sonnet-5,
+                   spec: claude-opus-5, plan: claude-opus-5}   # per brief kind: a model id, or
+                                              # a worker_pool.models label (heavy, light, cheap)
+      review:     {light_paths: ['docs/**', '*.md']}   # a PR changing only these (or the
+                                              # product's document dirs) gets a light review
+      briefs:     {max_appended_chars: 4000}  # the kernel's findings + answers in a brief,
+                                              # newest kept (0: no cap)
       landing:    {update_parallel: 2}        # the merge train: Landing PRs updated at once
       watch:      {interval_s: 600,           # the keep-alive job's StartInterval
                    stale_after_s: 900}        # a plan older than this, and no tick running: kick
@@ -23,11 +34,25 @@ default filled in. Pure stdlib: :mod:`asf.env` imports it.
 import copy
 import datetime
 
+#: the default model of each brief kind a kernel launch writes (:func:`asf.kernel.briefs.brief_kind`;
+#: ``light-review`` is a docs-only PR's review): judgement over a change runs on the faster model,
+#: a spec and a plan on the deeper one
+LIGHT_MODEL, HEAVY_MODEL = 'claude-sonnet-5', 'claude-opus-5'
+MODEL_KINDS = {'coder': LIGHT_MODEL, 'fix-bug': LIGHT_MODEL, 'correct': LIGHT_MODEL,
+               'review': LIGHT_MODEL, 'light-review': LIGHT_MODEL,
+               'spec': HEAVY_MODEL, 'plan': HEAVY_MODEL}
+
 #: every key, its default and its kind: ``int``/``float`` (non-negative), ``bool``, a tuple of
-#: allowed words, or ``'time'`` (an ISO-8601 time, or unset)
+#: allowed words, ``'time'`` (an ISO-8601 time, or unset), ``'text'`` (a non-empty string) or
+#: ``'globs'`` (a list of path globs). A default of None is "unset" (``launch.local_max``:
+#: ``max_sessions``).
 SPEC = {
     'tick': {'interval_s': (120, int)},
-    'launch': {'max_sessions': (6, int), 'rank': ('inherit', ('inherit', 'own'))},
+    'launch': {'max_sessions': (6, int), 'rank': ('inherit', ('inherit', 'own')),
+               'local_max': (None, int), 'cloud_max': (0, int)},
+    'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
+    'review': {'light_paths': (('docs/**', '*.md'), 'globs')},
+    'briefs': {'max_appended_chars': (4000, int)},
     'landing': {'update_parallel': (2, int)},
     'watch': {'interval_s': (600, int), 'stale_after_s': (900, int)},
     'idle_alarm': {'enabled': (True, bool), 'min_free_seats': (1, int)},
@@ -68,6 +93,12 @@ def _bad(value, kind):
             'number' if kind is float else 'whole number')
     if kind == 'time':
         return '' if parse_time(value) else 'must be an ISO-8601 time'
+    if kind == 'text':
+        return '' if isinstance(value, str) and value.strip() else 'must be a non-empty string'
+    if kind == 'globs':
+        ok = isinstance(value, (list, tuple)) and all(isinstance(g, str) and g.strip()
+                                                      for g in value)
+        return '' if ok else 'must be a list of path globs'
     return '' if str(value) in kind else 'must be one of %s' % ' | '.join(kind)
 
 
@@ -117,8 +148,20 @@ def read(block):
         for key, (_d, kind) in keys.items():
             v = given.get(key)
             if v is not None and not _bad(v, kind):
-                out[section][key] = parse_time(v) if kind == 'time' else v
+                out[section][key] = (parse_time(v) if kind == 'time' else
+                                     [str(g).strip() for g in v] if kind == 'globs' else
+                                     v.strip() if kind == 'text' else v)
+    out['review']['light_paths'] = list(out['review']['light_paths'])
+    if out['launch']['local_max'] is None:
+        out['launch']['local_max'] = out['launch']['max_sessions']
     return out
+
+
+def seats(block):
+    """``(local_max, cloud_max)`` of a :func:`read` block."""
+    launch = block['launch']
+    local = launch['local_max']
+    return (launch['max_sessions'] if local is None else local), launch['cloud_max']
 
 
 def for_product(product):

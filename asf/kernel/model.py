@@ -178,7 +178,10 @@ class Session:
     origin's tip may be overwritten (an ancestor of HEAD or of an entry of the branch's reflog —
     its pre-rebase history — or every one of its commits patch-equivalent to one here), so the
     host pushes it with a lease; ``push_refused`` is why such a HEAD is not pushed (origin holds
-    a commit the local history never had), or ''."""
+    a commit the local history never had), or ''.
+    ``cloud``: the session runs in the cloud lane — ``alive`` is the remote run's status and
+    ``ended`` is set once that status is over (never a dead pid); its REPORT is the report commit
+    it pushed (:func:`asf.workers.cloud.sync`)."""
     job: str
     item_id: str
     kind: str = 'build'
@@ -199,6 +202,7 @@ class Session:
     branch: str = ''
     unpushed: str = ''
     push_refused: str = ''
+    cloud: bool = False
 
 
 @dataclasses.dataclass

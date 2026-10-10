@@ -461,8 +461,31 @@ kernel:
   tick:
     interval_s: 120         # the tick job runs every this many seconds
   launch:
-    max_sessions: 6         # live sessions the tick launches up to
+    max_sessions: 6         # live sessions the tick launches up to (the local default below)
+    # local_max: 6          # seats on this host (unset: max_sessions)
+    cloud_max: 0            # seats on the product's cloud lane (`cloud:` above: enabled, not
+                            # mode off, runtime claude-remote or actions); the tick launches up to
+                            # local_max + cloud_max. Cloud first — a launch that needs the host
+                            # (a rebase round, a cloud.local_only kind) takes a local seat — then
+                            # local. A cloud session's liveness is its remote run's status, its
+                            # REPORT the report commit it pushes; a failed create falls back local
+                            # and counts on the lane's breaker (cloud.fallback_*).
     rank: inherit           # inherit: a Task takes its nearest ancestor's rank; own: only its own
+  models:                   # the model each brief kind launches on: a model id, or a
+                            # worker_pool.models label (heavy, light, cheap)
+    coder: claude-sonnet-5
+    fix-bug: claude-sonnet-5
+    correct: claude-sonnet-5        # a fix round on an open PR
+    review: claude-sonnet-5
+    light-review: claude-sonnet-5   # a docs-only PR's review (review.light_paths)
+    spec: claude-opus-5
+    plan: claude-opus-5
+  review:
+    light_paths: ['docs/**', '*.md']   # a PR whose every file matches these (or the product's
+                            # specs/plans/reviews dirs) gets a light review: a short checklist
+  briefs:
+    max_appended_chars: 4000  # the kernel's findings + operator answers appended to a brief,
+                            # newest kept; the tick logs each cut (0: no cap)
   landing:
     update_parallel: 2      # the merge train: at most this many behind Landing PRs are updated
                             # (and re-run CI) at once, by rank then oldest PR; the rest wait

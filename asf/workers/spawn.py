@@ -1016,17 +1016,23 @@ def write_brief(product, job, text):
 #: configured before it has no entry; falling back to ``light`` keeps that pool running at the
 #: price it already paid, where refusing would stop the factory over a saving.
 MODEL_FALLBACK = {'cheap': 'light'}
+#: a model id rather than a label: a label is one plain word, an id carries a digit, a dash or a dot
+MODEL_ID_RE = re.compile(r'[0-9.-]')
 
 
 def model_arg(model, cfg=None):
     """``worker_pool.models: {heavy: <id>, light: <id>, cheap: <id>}`` maps a row's model label.
     A label with no entry falls back per :data:`MODEL_FALLBACK`; a label with neither is refused —
-    the literal label is not a model id the runtime knows, and the session dies at once."""
+    the literal label is not a model id the runtime knows, and the session dies at once. A model
+    id itself (one of the table's values, or a name no label is spelled like: :data:`MODEL_ID_RE`
+    — the 0.2 kernel's ``kernel.models``) passes through as it is."""
     if not model:
         return None
     table = (((cfg or {}).get('worker_pool') or {}).get('models')) or {}
     if not isinstance(table, dict):  # a misshapen value is no entry, never a TypeError
         table = {}
+    if model not in table and (model in table.values() or MODEL_ID_RE.search(str(model))):
+        return model
     if model not in table:
         alt = tunable('MODEL_FALLBACK').get(model)
         if alt and alt in table:

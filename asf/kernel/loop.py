@@ -130,6 +130,22 @@ def save_plan(state_dir, plan, facts):
     os.replace(path + '.tmp', path)
 
 
+def sync_cloud(ports, out=print):
+    """Before the facts are read: the session port's cloud runs brought up to date (a port with
+    ``sync``: :meth:`asf.kernel.ports.RealSessions.sync`), and its launch log pointed at ``out``.
+    A failed sync is one line; the tick reads the sessions as the last sync left them."""
+    for port in (ports.sessions, ports.brief):
+        if hasattr(port, 'log'):
+            port.log = out
+    sync = getattr(ports.sessions, 'sync', None)
+    if sync is None:
+        return
+    try:
+        sync(out)
+    except Exception as e:  # noqa: BLE001 — a cloud read never stops the tick
+        out('kernel tick: cloud sync failed — %s' % (str(e) or type(e).__name__))
+
+
 def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=print):
     """One tick of the kernel for ``product`` (a name or an :class:`asf.env.Product`). Returns the
     :func:`summarize` dict; ``{'locked': path}`` when another tick holds the lock."""
@@ -152,6 +168,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             snapshot = getattr(ports.record, 'snapshot', None)
             if snapshot:
                 snapshot()
+            sync_cloud(ports, out)
             facts = read_facts(ports)
             plan = decide(facts, config)
             result = apply(plan, facts, ports, log=out)

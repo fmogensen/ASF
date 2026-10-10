@@ -45,6 +45,7 @@ import typing
 from asf.kernel import model as M
 from asf.kernel import reports
 from asf.record.core import ID_TOKEN_RE, as_list, canonicalize, is_retired, load_items
+from asf.workers import cloudpid
 
 #: the machine-block keys the kernel owns (see the module docstring)
 STATE, ATTEMPTS, FIX_ROUNDS = 'kernel_state', 'kernel_attempts', 'kernel_fix_rounds'
@@ -623,9 +624,11 @@ def _kernel_kind(kind):
 class RealSessions:
     """The product's session ledger (``state/<product>/sessions.jsonl``) and the launch."""
 
-    def __init__(self, product, cfg=None):
+    def __init__(self, product, cfg=None, log=None):
         self.product = product
         self._cfg = cfg
+        self.log = log or _quiet
+        self._creates = 0   # cloud launches tried by this port (one tick)
 
     def cfg(self):
         if self._cfg is None:
@@ -640,8 +643,9 @@ class RealSessions:
             if not lifecycle.is_live(run) or not run.get('item'):
                 continue
             kind = _kernel_kind(run.get('kind'))
-            alive = lifecycle.pid_alive(run.get('pid'))
+            alive = lifecycle.pid_alive(run.get('pid'))  # a cloud token: the remote run's status
             result = None if alive else report_result(run.get('log'))
+            in_cloud = cloudpid.is_token(run.get('pid'))
             pushed = not alive and pushlog.count(self.product, run['job']) > 0
             said = reports.read(result)
             unpushed, refused = '', ''
@@ -652,7 +656,9 @@ class RealSessions:
                     refguard_listed(self.product))
             out.append(M.Session(
                 job=run['job'], item_id=run['item'], kind=kind, pid=run.get('pid'), alive=alive,
-                ended=result is not None, result=session_result(kind, pushed, said),
+                # a cloud run the remote status calls over has ended: it never reads as a dead pid
+                ended=result is not None or (in_cloud and not alive),
+                result=session_result(kind, pushed, said), cloud=in_cloud,
                 question=said['question'] or None, last_line=said['last_line'],
                 report=str((result or {}).get('result') or ''),
                 pr=run.get('kernel_pr'), tree_sha=run.get('kernel_tree') or '',
@@ -685,43 +691,128 @@ class RealSessions:
                          worktree=run['worktree'], branch=run.get('branch') or '',
                          pr=run.get('kernel_pr'), unpushed=unpushed, push_refused=refused)
 
-    def _account(self):
-        from asf.workers import lifecycle, pool
-        accounts = pool.accounts_from_config(self.cfg())
-        live = {}
+    def _live(self):
+        """``(local live, cloud live, {account: live})`` over the ledger's live runs."""
+        from asf.workers import cloud, lifecycle, pool
+        local = in_cloud = 0
+        per = {}
         for run in pool.load_sessions(self.product).values():
             if lifecycle.is_live(run):
-                live[run.get('account')] = live.get(run.get('account'), 0) + 1
+                per[run.get('account')] = per.get(run.get('account'), 0) + 1
+                if cloud.is_cloud(run):
+                    in_cloud += 1
+                else:
+                    local += 1
+        return local, in_cloud, per
+
+    def _account(self, lane_settings=None):
+        """A local account with a free seat; with ``lane_settings``, the cloud lane's account
+        (:func:`asf.workers.cloud.lane_accounts`) with the most free seats — a routine runs on
+        its account and counts in that account's cap like any session."""
+        from asf.workers import cloud, pool
+        accounts = pool.accounts_from_config(self.cfg())
+        live = self._live()[2]
+        if lane_settings is not None:
+            free = [(a.cap - live.get(a.name, 0), -i, a)
+                    for i, a in enumerate(cloud.lane_accounts(accounts, lane_settings))
+                    if live.get(a.name, 0) < a.cap]
+            if not free:
+                raise PortError('no cloud account with a free seat')
+            return max(free, key=lambda t: t[:2])[2]
         for acct in accounts:
             if live.get(acct.name, 0) < acct.cap:
                 return acct
         raise PortError('no account with a free seat')
 
+    def lane(self, kind, meta=None):
+        """``'cloud'`` or ``'local'``: the seat a ``kind`` launch takes. A launch that needs the
+        host (``meta['host']``: a rebase round, which the host publishes from its worktree; a
+        kind :func:`asf.workers.cloud.local_only` keeps here) takes a local seat; every other one
+        a cloud seat while the lane has one (``kernel.launch.cloud_max``), its creates this tick
+        are under ``cloud.max_creates_per_tick`` and its fallback breaker has not tripped; else a
+        local seat (``kernel.launch.local_max``). Raises :class:`PortError` when neither has one."""
+        from asf.workers import cloud
+        local_max, cloud_max = lane_seats(self.product, self.cfg())
+        local, in_cloud, _ = self._live()
+        s = cloud_lane(self.product, self.cfg()) if cloud_max else None
+        host = bool((meta or {}).get('host')) or (
+            s is not None and cloud.local_only(_KindRow(kind), s))
+        if s is None or host:
+            why = 'the cloud lane is off' if s is None else 'the launch needs the host'
+        elif in_cloud >= cloud_max:
+            why = 'cloud seats %d/%d' % (in_cloud, cloud_max)
+        elif s.max_creates_per_tick and self._creates >= s.max_creates_per_tick:
+            why = 'cloud creates this tick %d/%d' % (self._creates, s.max_creates_per_tick)
+        else:
+            why = cloud.Breaker(self.product, s).tripped()
+        if not why:
+            return 'cloud'
+        if local < local_max:
+            return 'local'
+        raise PortError('no free seat: local %d/%d, cloud %d/%d (%s)'
+                        % (local, local_max, in_cloud, cloud_max, why))
+
     def launch(self, kind, item_id, branch, brief, meta=None):
         """Spawn one session with ``brief`` (an :class:`asf.briefs.build.Brief`: its text, model
-        and grants); ``meta`` (``pr``, ``tree``) goes on the session's ledger row."""
-        from asf.workers import pool, spawn
-        acct = self._account()
+        and grants) on the seat :meth:`lane` picks; ``meta`` (``pr``, ``tree``, ``change``) goes on
+        the session's ledger row. A cloud launch goes through the lane's runtime (the old floor's
+        remote trigger: :class:`asf.workers.remote.RemoteRuntime`); one that fails counts on the
+        lane's breaker and falls back to a local seat when there is one."""
+        from asf.workers import cloud
         job = '%s-%s-%d' % (kind, item_id.lower(), int(time.time()))
+        if self.lane(kind, meta) == 'cloud':
+            s = cloud_lane(self.product, self.cfg())
+            self._creates += 1
+            try:
+                self._spawn(kind, item_id, branch, brief, job, self._account(s),
+                            cloud.lane_runtime(s, self.product))
+                cloud.Breaker(self.product, s).ok()
+            except PortError as e:
+                cloud.Breaker(self.product, s).fail(str(e))
+                if self._live()[0] >= lane_seats(self.product, self.cfg())[0]:
+                    raise
+                self.log('%s %s — cloud launch failed (%s): a local seat instead'
+                         % (job, item_id, e))
+                job += '-local'
+                self._spawn(kind, item_id, branch, brief, job, self._account())
+        else:
+            acct = self._account()
+            runtime = None
+            if acct.role == 'cloud':  # the old floor's lane account: its runtime is the cloud one
+                runtime = cloud.lane_runtime(cloud.settings(self.cfg(), self.product),
+                                             self.product)
+            self._spawn(kind, item_id, branch, brief, job, acct, runtime)
+        if meta and any(meta.get(k) is not None for k in ('pr', 'tree', 'change')):
+            from asf.workers import pool
+            pool.update_session(self.product, job, kernel_pr=meta.get('pr'),
+                                kernel_tree=meta.get('tree'), kernel_change=meta.get('change'))
+        return job
+
+    def _spawn(self, kind, item_id, branch, brief, job, acct, runtime=None):
+        from asf.workers import pool, spawn
         row = pool.Row(job, item_id, kind='task' if kind == 'build' else kind, branch=branch,
                        title=item_id, model=getattr(brief, 'model', '') or '',
                        add_dirs=getattr(brief, 'add_dirs', ()) or (),
                        card_digest=getattr(brief, 'card_digest', '') or '')
-        runtime = None
-        if acct.role == 'cloud':
-            from asf.workers import cloud  # the cloud runtime: remote.RemoteRuntime or actions
-            runtime = cloud.lane_runtime(cloud.settings(self.cfg(), self.product), self.product)
         try:
-            # no heartbeat: the kernel judges liveness by pid and REPORT, and the beat loop's
-            # writes under the shared .git are what a sandboxed session is refused (B-0098)
+            # no heartbeat: the kernel judges liveness by pid (a cloud run: its remote status) and
+            # REPORT, and the beat loop's writes under the shared .git are what a sandboxed
+            # session is refused (B-0098)
             spawn.spawn(self.product, row, acct, getattr(brief, 'text', brief), runtime=runtime,
                         cfg=self.cfg(), heartbeat=False)
         except spawn.SpawnError as e:
             raise PortError('launch: %s' % e) from None
-        if meta:
-            pool.update_session(self.product, job, kernel_pr=meta.get('pr'),
-                                kernel_tree=meta.get('tree'), kernel_change=meta.get('change'))
-        return job
+
+    def sync(self, out=None):
+        """Bring the product's live cloud runs up to date (:func:`asf.workers.cloud.sync`: the
+        remote run's status, its report commit on the branch) before the tick reads them — a
+        cloud session's liveness and REPORT come from there. Nothing is read while the ledger
+        holds no live cloud run."""
+        from asf.workers import cloud, lifecycle, pool
+        if not any(lifecycle.is_live(r) and cloud.is_cloud(r)
+                   for r in pool.load_sessions(self.product).values()):
+            return []
+        return cloud.sync(self.product, self.cfg(), out=out or self.log)
 
     def push_rebase(self, session, sha):
         """The safety net for a session that reported ``pushed: rebased <sha>``, or ended
@@ -774,7 +865,12 @@ class RealSessions:
         from asf.workers import lifecycle, pool, trash
         reason = (lifecycle.FINISHED if session.result in ('pushed', 'report')
                   else lifecycle.DEAD_PID if not session.ended else lifecycle.NOT_PUSHED)
-        pool.update_session(self.product, session.job, ended=now_iso(), end_reason=reason)
+        extra = {}
+        if cloudpid.is_token(session.pid):  # never a dead pid: the remote status ended it
+            if reason == lifecycle.DEAD_PID:
+                reason = lifecycle.NOT_PUSHED
+            extra['cloud_why'] = cloudpid.why(session.pid) or None
+        pool.update_session(self.product, session.job, ended=now_iso(), end_reason=reason, **extra)
         wt = session.worktree
         state = env.state_dir(self.product)
         if free_worktree and wt and os.path.isdir(wt) and _under(wt, state):
@@ -785,6 +881,13 @@ class RealSessions:
             ok, why = trash.discard(self.product.repo_dir, state, wt, check_clean=clean)
             if not ok:
                 raise PortError('worktree kept: %s' % why)
+
+
+class _KindRow:
+    """The one field :func:`asf.workers.cloud.local_only` reads off a launch: its kind."""
+
+    def __init__(self, kind):
+        self.kind = 'task' if kind == 'build' else kind
 
 
 def _quiet(_line):
@@ -988,10 +1091,17 @@ def required_checks_for(product, github=None):
         return ()
 
 
+def doc_globs(product):
+    """The path globs of ``product``'s document trees (specs, plans, reviews)."""
+    conv = product.conventions
+    return tuple('%s/**' % d.rstrip('/') for d in (conv.specs_dir, conv.plans_dir,
+                                                   conv.reviews_dir))
+
+
 def config_for(product, cfg=None, github=None):
     """The :class:`~asf.kernel.model.Config` of ``product``: branch prefixes, document roots and
     the required checks (:func:`required_checks_for`, asking ``github`` when the conventions name
-    none) from its conventions; ``max_sessions``, ``rank``, the idle alarm and the merge train's
+    none) from its conventions; ``max_sessions`` (:func:`lane_seats`: local + cloud), ``rank``, the idle alarm and the merge train's
     ``update_parallel`` from its ``kernel:``
     block (:mod:`asf.kernel.settings`, each with its documented default)."""
     conv = product.conventions
@@ -999,11 +1109,31 @@ def config_for(product, cfg=None, github=None):
     return M.Config(
         required_checks=required_checks_for(product, github),
         doc_branches=(conv.prefix('spec'), conv.prefix('plan')),
-        doc_paths=tuple('%s/**' % d.rstrip('/') for d in (conv.specs_dir, conv.plans_dir,
-                                                          conv.reviews_dir)),
+        doc_paths=doc_globs(product),
         work_branch=conv.prefix('code'), fix_branch=conv.prefix('fix'),
-        max_sessions=int(k['launch']['max_sessions']), rank=k['launch']['rank'],
+        max_sessions=sum(lane_seats(product, cfg)), rank=k['launch']['rank'],
         idle_alarm=bool(k['idle_alarm']['enabled']),
         idle_min_free=int(k['idle_alarm']['min_free_seats']),
         update_parallel=int(k['landing']['update_parallel']))
 
+
+
+def cloud_lane(product, cfg=None):
+    """The product's cloud lane (:func:`asf.workers.cloud.settings`) when the kernel may launch on
+    it: ``kernel.launch.cloud_max`` above 0, ``cloud.enabled``, not ``cloud.mode: off``, and a
+    runtime the lane runs; else None. ``cfg`` is ``config.yaml`` (read when None)."""
+    if not product.kernel['launch']['cloud_max']:
+        return None
+    from asf.workers import cloud, spawn
+    s = cloud.settings(spawn.load_cfg() if cfg is None else cfg, product)
+    if not s.enabled or s.mode == cloud.MODE_OFF or s.runtime not in cloud.RUNTIMES:
+        return None
+    return s
+
+
+def lane_seats(product, cfg=None):
+    """``(local seats, cloud seats)``: ``kernel.launch.local_max`` (default ``max_sessions``) and
+    ``kernel.launch.cloud_max`` — 0 while the cloud lane is off (:func:`cloud_lane`)."""
+    from asf.kernel import settings
+    local, cloud_max = settings.seats(product.kernel)
+    return int(local), (int(cloud_max) if cloud_lane(product, cfg) is not None else 0)
