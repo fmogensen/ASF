@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest import mock
 
+from asf import pause
 from asf.feeder import rows as feeder_rows
 from asf.tick import step_wave, tick, wave_clock
 from asf.workers import pool as pool_mod
@@ -210,6 +211,17 @@ class WaveJobLaunchTests(StepsTestCase):
         self.assertEqual(rc2, 0)
         self.assertEqual(self.launches, ['fix-bug-b-0001'])  # not launched again
         self.assertIn('wave: nothing to launch', lines2)
+
+    def test_a_paused_product_launches_nothing_on_the_wave_clock_s_own_path(self):
+        """B-84833: the wave clock's :func:`step_wave.launch_now` reads the operator's own
+        pause (F-0137) the same as :func:`step_wave.launch` — a seat free past the clock's
+        tick is never a reason to launch a paused product's row."""
+        pause.pause(self.product.name, 'release freeze', 'op1')
+        rc, lines = self._run_once()
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.launches, [])
+        self.assertTrue(any(ln.startswith('wave:') and 'release freeze' in ln
+                            for ln in lines), lines)
 
     def test_via_wave_clock_run_end_to_end(self):
         """The CLI's own path (``asf wave``): lock, launch, note the run."""
