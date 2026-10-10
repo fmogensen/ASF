@@ -904,8 +904,9 @@ def would_start(product, root, items=None):
                                                    host_mod.guards_from_config(env.load_config()))
                        and not s1_bypass_live())
     held = approvals.parked(product)
+    paused = pause_mod.held(product)            # F-0137: the operator's own hold, durable
     return (screen(product, planned, items, running, held, seats, (host_held, host_why),
-                   bypass_open, act=False), seats, running)
+                   bypass_open, act=False, paused=paused), seats, running)
 
 
 def trunk_preflight(ctx, planned, items, out=print):
