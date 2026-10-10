@@ -507,6 +507,7 @@ capacity:
 #     factor: 2               # a job's max is its measured p95 times this
 #     default_max_s: 3600     # the max of a job kind with too few readings
 #     cpu_floor: 0.05         # cores: a job using at least this much CPU is never a stall
+#     pass_stale_s: 900       # no stall-watch pass this long with a pool is nobody watching
 #   job_timeout_min: 360      # a job with no timeout-minutes of its own (the host's default)
 #   measure:                  # runner scores (asf.ci_measure)
 #     window_days: 14

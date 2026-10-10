@@ -567,6 +567,48 @@ class LegacySchedulerJobTests(unittest.TestCase):
         self.assertTrue(doctor.is_red(rows))
 
 
+class CheckCiStallTests(unittest.TestCase):
+    """S-76005: ``asf doctor``'s ``ci stall`` row, immediately after ``ci heartbeat``."""
+
+    def test_an_unreadable_ci_stall_file_is_one_unknown_row_and_never_raises(self):
+        from asf import ci_stall
+        product = env.Product('x', {})
+        old = env.ASF_HOME
+        with tempfile.TemporaryDirectory() as home:
+            env.ASF_HOME = home
+            try:
+                path = os.path.join(env.state_dir(product.name), ci_stall.STATE_FILE)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write('{not json')
+                rows = doctor.check_ci_stall(product)
+            finally:
+                env.ASF_HOME = old
+        self.assertEqual(len(rows), 1, rows)
+        required, ok, detail = rows[0]
+        self.assertFalse(required)
+        self.assertIsNone(ok)
+        self.assertTrue(detail.startswith('cannot read the ci stall file'), detail)
+
+    def test_the_ci_stall_label_is_immediately_after_ci_heartbeat(self):
+        with open(os.path.join(PROJECT_ROOT, 'asf', 'doctor.py'), encoding='utf-8') as f:
+            text = f.read()
+        import re
+        labels = re.findall(r"rows\.append\(\('([^']+)'", text)
+        self.assertEqual(labels[labels.index('ci heartbeat') + 1], 'ci stall')
+
+    def test_a_product_with_no_ci_pool_draws_no_row(self):
+        # doctor_rows is [] for a product with no ci.pool and no pass block: the row count a
+        # product with no CI pool sees is unchanged by this feature
+        old = env.ASF_HOME
+        with tempfile.TemporaryDirectory() as home:
+            env.ASF_HOME = home
+            try:
+                self.assertEqual(doctor.check_ci_stall(env.Product('x', {})), [])
+            finally:
+                env.ASF_HOME = old
+
+
 class TestNoPrHost(unittest.TestCase):
     """``ci: {provider: none}``: no repo_slug to demand, and gh is optional."""
 

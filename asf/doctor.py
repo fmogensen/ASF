@@ -1724,6 +1724,8 @@ def run(product_name):
         rows.append(('ci runners', required, ok, detail))
     for required, ok, detail in check_ci_heartbeat(product):
         rows.append(('ci heartbeat', required, ok, detail))
+    for required, ok, detail in check_ci_stall(product):
+        rows.append(('ci stall', required, ok, detail))
     for required, ok, detail in check_queue_bypass(product):
         rows.append(('queue bypass', required, ok, detail))
     for required, ok, detail in check_queue_cancels(product):
@@ -1970,6 +1972,17 @@ def check_ci_heartbeat(product, now=None):
         return ci_heartbeat.doctor_rows(product, now=now)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(False, None, f'cannot read the ci heartbeat file — {e}')]
+
+
+def check_ci_stall(product, now=None):
+    """[(required, ok, detail)] — which watcher acts on a CI stall, when the last pass ran, and
+    every cancel of this watch's that was not re-run (:func:`asf.ci_stall.doctor_rows`, off
+    ``ci-stall.json``: no ssh, no ``gh``). No rows for a product with no pool and no pass."""
+    from asf import ci_stall
+    try:
+        return ci_stall.doctor_rows(product, now=now)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(False, None, f'cannot read the ci stall file — {e}')]
 
 
 def check_ci_runners(product, now=None):
