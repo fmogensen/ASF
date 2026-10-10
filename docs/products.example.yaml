@@ -559,6 +559,13 @@ kernel:
                             # item relaunched; the attempt counts like a crash
     max_review_session_age: 90m   # the same for a review session (a review running this long
                             # has hung — p99 is ~77m): its review is relaunched, local seat first
+    max_ci_age: 1h          # a PR's required CI running this long is cancelled; the cancelled
+                            # check is rerun next tick (a cancelled required check always is)
+    bound_min_samples: 20   # the three ages above are fallbacks only: once the wait ledger holds
+                            # this many finished spells of a class (last 24 h), its p90 is the
+                            # bound — a session past the building (or review) p90 with no push,
+                            # twice it with one; CI past twice the ci p90. Passing it is a stall,
+                            # handled that tick (end + relaunch, or cancel + rerun)
   floor:
     close_orphan_prs: true  # an open PR on a kernel branch (code/fix/spec/plan prefix) whose item
                             # is not on the record, Done or retired is closed with a comment

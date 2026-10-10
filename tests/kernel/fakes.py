@@ -98,8 +98,8 @@ class FakeGitHub:
     def update_branch(self, pr):
         self._do('update_branch', pr)
 
-    def rerun(self, run_id):
-        self._do('rerun', run_id)
+    def rerun(self, run_id, cancel=False):
+        self._do('cancel' if cancel else 'rerun', run_id)
 
     def branches(self):
         return copy.deepcopy(self._branches)

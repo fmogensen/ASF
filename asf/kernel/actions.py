@@ -52,8 +52,10 @@ class OpenPR:
 @dataclasses.dataclass
 class Rerun:
     """Rerun the failed jobs of check run ``run_id`` (a red touching none of the PR's files, not
-    yet rerun)."""
+    yet rerun, or a required check cancelled on the head). ``cancel``: the run is stalled past
+    its bound — cancel it now; the next tick reruns the cancelled check."""
     run_id: int
+    cancel: bool = False
 
 
 @dataclasses.dataclass
@@ -185,7 +187,8 @@ def describe(action):
     if isinstance(action, OpenPR):
         return 'open PR %s for %s: %s' % (action.branch, action.item_id, action.title)
     if isinstance(action, Rerun):
-        return 'rerun run %s' % action.run_id
+        return ('cancel stalled run %s (rerun next tick)' if action.cancel
+                else 'rerun run %s') % action.run_id
     if isinstance(action, MintStory):
         return 'mint %s under %s: %s' % (action.story_id, action.feature_id, action.title)
     if isinstance(action, MarkStuck):

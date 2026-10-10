@@ -272,7 +272,10 @@ class Facts:
     Bug to ``(wait class, since)``: its current spell on the wait ledger
     (:mod:`asf.kernel.waits`), read before ``decide`` so a wait over its target is a breach.
     ``unreadable`` maps the id of a card the record could not parse to why: it is on the record
-    though not in ``items`` (its PRs are never closed as orphans; it is in LIMBO)."""
+    though not in ``items`` (its PRs are never closed as orphans; it is in LIMBO). ``bounds``
+    maps a wait class (``building``, ``review``, ``ci``) to the p90 seconds of its finished
+    spells on the wait ledger (:func:`asf.kernel.waits.bounds`; absent with too few spells): a
+    live process past its bound is a stall (:func:`asf.kernel.decide.stalls`)."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -288,6 +291,7 @@ class Facts:
     orphan_prs: list = dataclasses.field(default_factory=list)
     waits: dict = dataclasses.field(default_factory=dict)
     unreadable: dict = dataclasses.field(default_factory=dict)
+    bounds: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -319,7 +323,10 @@ class Config:
     and takes a breach action (:func:`asf.kernel.decide.breaches`; empty: none).
     ``max_session_age_h``: a live session older than this is ended so its item is relaunched
     (None: never); ``max_review_age_h`` the same for a review session (a review that runs this
-    long has hung: it is ended and relaunched on a local seat first). ``close_floor``: an open kernel PR whose item is not on the record, Done or
+    long has hung: it is ended and relaunched on a local seat first); ``max_ci_age_h`` a PR's
+    required CI running this long is cancelled and rerun. Each is only the fallback of a bound
+    measured on the wait ledger (``Facts.bounds``): a session past its class's p90 with no push
+    (twice it with one), CI past twice its p90. ``close_floor``: an open kernel PR whose item is not on the record, Done or
     retired is closed with a comment (:class:`asf.kernel.actions.ClosePR`)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
@@ -343,4 +350,5 @@ class Config:
     wait_targets: dict = dataclasses.field(default_factory=dict)
     max_session_age_h: float = None
     max_review_age_h: float = None
+    max_ci_age_h: float = None
     close_floor: bool = False

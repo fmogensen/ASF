@@ -113,7 +113,7 @@ class GitHubPort(typing.Protocol):
     def reviews(self, prs) -> list: ...                 # [Review] GitHub holds on PR heads
     def enable_auto_merge(self, pr) -> None: ...
     def update_branch(self, pr) -> None: ...
-    def rerun(self, run_id) -> None: ...
+    def rerun(self, run_id, cancel=False) -> None: ...
     def branches(self) -> list: ...                     # [Branch] under the work prefixes
     def open_pr(self, branch, base, title, body) -> int: ...  # the PR number (new or existing)
     def archive_and_reset(self, pr, branch, head_sha, comment) -> str: ...  # the archive branch
@@ -944,7 +944,10 @@ class RealGitHub:
         self._write(['api', '-X', 'PUT', 'repos/%s/pulls/%d/update-branch' % (self.slug, pr)],
                     'update-branch #%d' % pr)
 
-    def rerun(self, run_id):
+    def rerun(self, run_id, cancel=False):
+        if cancel:  # stalled past its bound: cancel now, the cancelled check is rerun next tick
+            self._write(['run', 'cancel', str(run_id), '-R', self.slug], 'cancel %d' % run_id)
+            return
         self._write(['run', 'rerun', str(run_id), '-R', self.slug, '--failed'],
                     'rerun %d' % run_id)
 
@@ -1597,6 +1600,8 @@ def config_for(product, cfg=None, github=None):
                            and k['waits']['max_session_age'] else None),
         max_review_age_h=(k['waits']['max_review_session_age'] / 3600 if k['waits']['breach']
                           and k['waits']['max_review_session_age'] else None),
+        max_ci_age_h=(k['waits']['max_ci_age'] / 3600 if k['waits']['breach']
+                      and k['waits']['max_ci_age'] else None),
         close_floor=bool(k['floor']['close_orphan_prs']))
 
 

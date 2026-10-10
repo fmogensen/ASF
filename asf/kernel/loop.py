@@ -198,16 +198,28 @@ def write_plan_out(path, plan, summary):
         json.dump(data, f, indent=1, sort_keys=True)
 
 
-def read_waits(facts, state_dir):
+def read_waits(facts, state_dir, min_samples=None):
     """Fill ``facts.waits`` with each item's current spell on the wait ledger
-    (``{item: (class, since)}``); an unreadable ledger leaves it empty (no breach this tick)."""
+    (``{item: (class, since)}``) and ``facts.bounds`` with the measured p90s that bound live
+    processes (:func:`asf.kernel.waits.bounds`, ``min_samples`` finished spells a class needs);
+    an unreadable ledger leaves both empty (no breach, the fallback bounds)."""
     from asf.kernel import waits
     try:
+        records = waits.read_ledger(state_dir)
         facts.waits = {iid: (r.get('reason') or '', r.get('at') or '')
-                       for iid, r in waits.fold(waits.read_ledger(state_dir)).items()}
+                       for iid, r in waits.fold(records).items()}
+        facts.bounds = waits.bounds(records, min_samples=waits.MIN_SAMPLES
+                                    if min_samples is None else min_samples)
     except Exception:  # noqa: BLE001 — the measure never stops the tick
-        facts.waits = {}
+        facts.waits, facts.bounds = {}, {}
     return facts
+
+
+def _min_samples(product):
+    try:
+        return int(product.kernel['waits']['bound_min_samples'])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
 def blind_tick(facts, ports, out=print):
@@ -248,7 +260,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             if facts.github_error:
                 out('kernel tick (dry run): GitHub unreadable — %s' % facts.github_error)
                 return {'blind': facts.github_error, 'dry_run': True, 'failed': []}
-            plan = decide(read_waits(facts, state_dir), config)
+            plan = decide(read_waits(facts, state_dir, _min_samples(product)), config)
         for a in plan.actions:
             out('would %s' % describe(a))
         summary = summarize(plan, facts, dry_run=True)
@@ -267,7 +279,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             facts = read_facts(ports)
             if facts.github_error:
                 return blind_tick(facts, ports, out)
-            plan = decide(read_waits(facts, state_dir), config)
+            plan = decide(read_waits(facts, state_dir, _min_samples(product)), config)
             result = apply(plan, facts, ports, log=out)
             publish = getattr(ports.record, 'publish', None)
             if publish and result.written:

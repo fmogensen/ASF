@@ -222,6 +222,27 @@ def spells(records, now):
     return sorted(out, key=lambda s: (s[2], s[0]))
 
 
+#: the wait classes a live process is bounded by (:func:`bounds`)
+BOUNDED = ('building', 'review', 'ci')
+
+#: the finished spells a class needs before its p90 bounds a live process (else the fallback knob)
+MIN_SAMPLES = 20
+
+
+def bounds(records, now=None, since=None, min_samples=MIN_SAMPLES):
+    """``{class: p90 seconds}`` of the finished spells (:func:`spells`) of each class in
+    :data:`BOUNDED` that ended in the window (``since``, default the last 24 h) — only a class
+    with at least ``min_samples`` of them: a live process past its bound is a stall
+    (``Facts.bounds``)."""
+    now = _now(now)
+    since = since or now - DEFAULT_WINDOW
+    got = collections.defaultdict(list)
+    for _iid, cls, start, end in spells(records, now):
+        if cls in BOUNDED and end is not None and end >= since:
+            got[cls].append((end - start).total_seconds())
+    return {cls: percentile(v, 90) for cls, v in got.items() if len(v) >= max(1, min_samples)}
+
+
 def percentile(values, p):
     """The nearest-rank ``p``-th percentile of ``values`` (None when empty)."""
     if not values:

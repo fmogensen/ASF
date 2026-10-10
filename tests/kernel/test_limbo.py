@@ -66,13 +66,18 @@ class Limbo(unittest.TestCase):
         plan = D.decide(facts(items, sessions=[B.session('j1', 'T-1')]), config())
         self.assertEqual(plan.limbo, {})
 
-    def test_an_operator_stuck_with_no_action_is_in_limbo_with_its_reason(self):
-        st = M.Stuck('NEEDS OPERATOR: which schema?', 'operator')
+    def test_a_loop_stuck_with_no_action_is_in_limbo_with_its_reason(self):
+        st = M.Stuck('launch: no account', 'loop')
         items = [B.task('T-1', state=State.STUCK, stuck=st)]
         plan = D.decide(facts(items), config())
         self.assertEqual(list(plan.limbo), ['T-1'])
-        self.assertIn('operator', plan.limbo['T-1'])
-        self.assertIn('which schema', plan.limbo['T-1'])
+        self.assertIn('loop', plan.limbo['T-1'])
+        self.assertIn('no account', plan.limbo['T-1'])
+
+    def test_an_operator_stuck_waits_on_a_console_question_not_limbo(self):
+        st = M.Stuck('NEEDS OPERATOR: which schema?', 'operator')
+        plan = D.decide(facts([B.task('T-1', state=State.STUCK, stuck=st)]), config())
+        self.assertEqual(plan.limbo, {})
 
     def test_a_stuck_the_kernel_escalates_this_tick_is_not_in_limbo(self):
         st = M.Stuck('partial: ran out of turns', 'session')
@@ -197,6 +202,67 @@ class Breach(unittest.TestCase):
         self.assertEqual(plan.breaches[0]['action'], 'none: waits on the operator')
 
 
+class MeasuredBounds(unittest.TestCase):
+    """Live processes are bounded by the wait ledger's p90s, the knobs only a fallback."""
+
+    def test_a_session_past_the_measured_p90_with_no_push_is_ended(self):
+        f = facts([B.task('T-1', state=State.BUILDING)], bounds={'building': 40 * 60},
+                  sessions=[B.session('j1', 'T-1', started=ago(50))])
+        plan = D.decide(f, config(max_session_age_h=3))
+        self.assertEqual(B.of(plan, A.EndSession), [A.EndSession('j1', free_worktree=False)])
+
+    def test_a_session_that_pushed_gets_twice_the_p90(self):
+        f = facts([B.task('T-1', state=State.BUILDING)], bounds={'building': 40 * 60},
+                  sessions=[B.session('j1', 'T-1', started=ago(50))],
+                  branches=[M.Branch('worker/T-1', 'T-1', 'abc')])
+        self.assertEqual(B.of(D.decide(f, config(max_session_age_h=3)), A.EndSession), [])
+        f.sessions = [B.session('j1', 'T-1', started=ago(81))]
+        self.assertEqual(len(B.of(D.decide(f, config(max_session_age_h=3)), A.EndSession)), 1)
+
+    def test_without_a_measure_the_fallback_knob_bounds_it(self):
+        f = facts([B.task('T-1', state=State.BUILDING)],
+                  sessions=[B.session('j1', 'T-1', started=ago(50))])
+        self.assertEqual(B.of(D.decide(f, config(max_session_age_h=3)), A.EndSession), [])
+
+    def test_ci_past_twice_its_p90_is_cancelled_then_rerun(self):
+        pr, rv = approved('T-1', 7, auto_merge=True,
+                          checks=[B.check('gate', status='in_progress', run_id=55)])
+        f = facts([B.task('T-1', state=State.LANDING)], prs=[pr], reviews=[rv],
+                  waits={'T-1': ('ci', ago(45))}, bounds={'ci': 20 * 60})
+        plan = D.decide(f, config(required_checks=('gate',)))
+        self.assertEqual(B.of(plan, A.Rerun), [A.Rerun(55, cancel=True)])
+        self.assertEqual([(b['item'], b['class']) for b in plan.breaches], [('T-1', 'ci')])
+        self.assertEqual(plan.limbo, {})
+        f.prs = [B.pr(7, 'T-1', auto_merge=True,
+                      checks=[B.check('gate', conclusion='cancelled', run_id=55)])]
+        f.waits = {'T-1': ('merge', ago(1))}
+        f.bounds = {}  # the fallback knob alone turns the rerun on too
+        self.assertEqual(B.of(D.decide(f, config(required_checks=('gate',), max_ci_age_h=1)),
+                              A.Rerun),
+                         [A.Rerun(55)])
+
+    def test_ci_within_its_bound_is_left_alone(self):
+        pr, rv = approved('T-1', 7, auto_merge=True,
+                          checks=[B.check('gate', status='in_progress', run_id=55)])
+        f = facts([B.task('T-1', state=State.LANDING)], prs=[pr], reviews=[rv],
+                  waits={'T-1': ('ci', ago(30))}, bounds={'ci': 20 * 60})
+        self.assertEqual(B.of(D.decide(f, config(required_checks=('gate',))), A.Rerun), [])
+
+    def test_the_ledger_measures_p90_only_with_enough_spells(self):
+        from asf.kernel import waits
+        recs = []
+        for n in range(10):
+            recs += [{'item': 'T-%d' % n, 'reason': 'building', 'to_state': 'building',
+                      'at': ago(200 - n)},
+                     {'item': 'T-%d' % n, 'reason': 'review', 'to_state': 'review',
+                      'at': ago(200 - n - 10 * (n + 1))}]
+        import datetime
+        now = datetime.datetime(2026, 10, 10, 10, 0, tzinfo=datetime.timezone.utc)
+        got = waits.bounds(recs, now=now, min_samples=10)
+        self.assertEqual(got['building'], 90 * 60)
+        self.assertEqual(waits.bounds(recs, now=now, min_samples=11), {})
+
+
 class CloseFloor(unittest.TestCase):
 
     def test_an_open_kernel_pr_with_no_item_is_closed(self):
@@ -266,7 +332,7 @@ class Tick(unittest.TestCase):
         return next(l for l in self.lines if l.startswith('kernel tick'))
 
     def test_the_tick_line_says_limbo_and_lists_it(self):
-        st = M.Stuck('which?', 'operator')
+        st = M.Stuck('launch: no account', 'loop')
         rec = F.FakeRecord([B.task('T-1', state=State.STUCK, stuck=st)])
         summary = self.tick(F.ports(record=rec))
         self.assertIn('LIMBO 1', self._tick_line())

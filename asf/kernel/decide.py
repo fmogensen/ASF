@@ -125,7 +125,12 @@ item and the actions of one tick. The rules it holds, in the design's words:
   first, on a local seat first; a behind Landing PR goes to the front of the merge train (a
   conflicting or red one is already a fix round); a Stuck takes its escalation. A live session
   older than ``config.max_session_age_h`` is ended (:class:`EndSession`, worktree kept, attempt
-  :data:`OVER_AGE`) so its item is relaunched.
+  :data:`OVER_AGE`) so its item is relaunched. Live processes are bounded by measured p90s
+  (``Facts.bounds``, from the wait ledger; the ``config.max_*_age_h`` knobs only when too few
+  spells are measured): a session past its class's p90 with no push (twice it with one) is
+  ended and relaunched; a PR's required CI past twice the ``ci`` p90 is cancelled
+  (:class:`Rerun` ``cancel``) and its cancelled check rerun next tick. A Stuck on the operator
+  waits on a console question and is not LIMBO.
 - A clean floor (``config.close_floor``): an open PR on a kernel branch prefix whose item is not
   on the record (``Facts.orphan_prs``), or is Done or retired (not reopened, not a Feature whose
   spec only landed) and held by no live session, is closed with a comment (:class:`ClosePR`);
@@ -336,6 +341,11 @@ def decide(facts, config):
     _apply_waits(items, judged, children, states, parked)
     blocks = _count_blocked(items, states, parked)
     due = overdue(facts, config, states)
+    stalled_ci = ci_stalls(facts, config, states)
+    have = {a.run_id for a in actions if isinstance(a, A.Rerun)}
+    for iid, (_age, runs) in stalled_ci.items():
+        actions += [A.Rerun(r, cancel=True) for r in runs if r not in have]
+        have.update(runs)
 
     train, notes = _merge_train(items, judged, config, blocks, facts.now,
                                 first={i for i, (c, _a) in due.items() if c == 'train'})
@@ -348,7 +358,7 @@ def decide(facts, config):
     actions += launches
     actions.sort(key=lambda a: ORDER.index(type(a)))
     idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
-    found = breaches(due, over_age, actions, facts, config, states, judged, queued)
+    found = breaches(due, over_age, actions, facts, config, states, judged, queued, stalled_ci)
     stalled = {b['item']: b for b in found if b['action'].startswith(NO_BREACH_ACTION)}
     return A.Plan(states=states, actions=actions, idle=idle, notes=notes,
                   limbo=limbo(facts, config, judged, states, parked, children, actions, queued,
@@ -879,6 +889,13 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
             return _Judged(State.STUCK, _stuck('%s%d rerun(s): %s'
                                                % (RED_OFF, c.attempt - 1, c.name), 'ci'))
 
+    bounded = ci_bound(facts, config) is not None  # stalls handled: a cancel is rerun
+    for c in pr.checks:  # a required check cancelled on the head: nothing else will run it
+        if (bounded and c.status == 'completed' and c.conclusion == 'cancelled' and c.run_id
+                and required(c.name, config) and c.attempt - 1 <= config.max_reruns
+                and not any(isinstance(a, A.Rerun) and a.run_id == c.run_id for a in actions)):
+            actions.append(A.Rerun(c.run_id))
+
     verdict = None
     for r in facts.reviews:
         if r.item_id == it.id and verdict_holds(r, pr):
@@ -1355,19 +1372,67 @@ def floor_closes(facts, config):
     return out
 
 
+def session_bound(s, facts, config):
+    """Seconds live session ``s`` may run before it is a stall: its class's p90 on the wait ledger
+    (``Facts.bounds``: ``review`` for a reviewer, ``building`` for any other) — twice it once the
+    item's branch is on origin (it pushed) — else the fallback knob (``config.max_review_age_h``
+    / ``config.max_session_age_h``), else None (unbounded)."""
+    bounds = facts.bounds or {}
+    if s.kind == 'review':
+        p = bounds.get('review')
+        fallback = config.max_review_age_h if config.max_review_age_h is not None \
+            else config.max_session_age_h
+    else:
+        p = bounds.get('building')
+        fallback = config.max_session_age_h
+        if p and any(b.item_id == s.item_id for b in facts.branches):
+            p *= 2
+    if p:
+        return p
+    return fallback * 3600 if fallback is not None else None
+
+
 def _over_age(facts, config):
-    """``[(session, age in seconds)]``: every live session older than
-    ``config.max_session_age_h`` — a review session than ``config.max_review_age_h`` when that is
-    lower — (``Session.started`` against ``Facts.now``)."""
+    """``[(session, age in seconds)]``: every live session past its bound
+    (:func:`session_bound`; ``Session.started`` against ``Facts.now``)."""
     out = []
     for s in facts.sessions:
-        limit = config.max_session_age_h
-        if s.kind == 'review' and config.max_review_age_h is not None:
-            limit = config.max_review_age_h if limit is None else min(limit,
-                                                                       config.max_review_age_h)
+        limit = session_bound(s, facts, config)
         age = stuck_age_h(s.started, facts.now) if s.alive and s.started else None
-        if limit is not None and age is not None and age > limit:
+        if limit is not None and age is not None and age * 3600 > limit:
             out.append((s, age * 3600))
+    return out
+
+
+def ci_bound(facts, config):
+    """Seconds a PR's required CI may run before it is a stall: twice the ``ci`` class's p90 on
+    the wait ledger, else ``config.max_ci_age_h``, else None."""
+    p = (facts.bounds or {}).get('ci')
+    if p:
+        return 2 * p
+    return config.max_ci_age_h * 3600 if config.max_ci_age_h is not None else None
+
+
+def ci_stalls(facts, config, states):
+    """``{item: (age in seconds, [run ids])}``: every Landing item whose required CI has run
+    (its ``ci`` spell on the wait ledger) past :func:`ci_bound` — its running required checks'
+    runs are cancelled and rerun."""
+    bound = ci_bound(facts, config)
+    out = {}
+    if bound is None:
+        return out
+    for iid, (cls, since) in sorted((facts.waits or {}).items()):
+        if cls != 'ci' or iid not in states or states[iid][0] is not State.LANDING:
+            continue
+        age = stuck_age_h(since, facts.now)
+        if age is None or age * 3600 <= bound:
+            continue
+        pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
+                 key=lambda p: p.number, default=None)
+        runs = sorted({c.run_id for c in (pr.checks if pr else [])
+                       if c.status != 'completed' and required(c.name, config) and c.run_id})
+        if runs:
+            out[iid] = (age * 3600, runs)
     return out
 
 
@@ -1408,7 +1473,7 @@ def _item_of(action, facts):
     return getattr(action, 'item_id', None)
 
 
-def breaches(due, over_age, actions, facts, config, states, judged, queued):
+def breaches(due, over_age, actions, facts, config, states, judged, queued, stalled_ci=None):
     """``Plan.breaches``: one record per overdue wait (:func:`overdue`) and per session ended
     past its max age — ``{'item', 'class', 'age_s', 'action'}``, ``action`` the line
     (:func:`asf.kernel.actions.describe`) of what this tick does about it, or
@@ -1424,7 +1489,11 @@ def breaches(due, over_age, actions, facts, config, states, judged, queued):
         out.append({'item': s.item_id, 'class': 'building' if s.kind == 'build'
                     else 'session:%s' % s.kind, 'age_s': age,
                     'action': A.describe(A.EndSession(s.job, free_worktree=False))})
-    ended = {s.item_id for s, _age in over_age}
+    for iid, (age, runs) in sorted((stalled_ci or {}).items()):
+        out.append({'item': iid, 'class': 'ci', 'age_s': age,
+                    'action': A.describe(A.Rerun(runs[0], cancel=True))
+                    + (' (+%d run(s))' % (len(runs) - 1) if len(runs) > 1 else '')})
+    ended = {s.item_id for s, _age in over_age} | set(stalled_ci or {})
     moved_on = {iid: v for iid, v in overdue(facts, config, states, same_class=False).items()
                 if iid not in due and iid in moves
                 and v[0].startswith('stuck')}  # its escalation this tick ended the Stuck
@@ -1512,8 +1581,9 @@ def limbo(facts, config, judged, states, parked, children, actions, queued=None,
 def _stalled(iid, state, stuck, facts, config, j, queued, stalled):
     """Why item ``iid`` in ``state`` waits with nothing in flight, or '' when something is."""
     live = [s for s in facts.sessions if s.item_id == iid and s.alive]
-    if state is State.STUCK:
-        return limbo_reason_stuck(stuck)
+    if state is State.STUCK:  # one on the operator waits on a console question: not LIMBO
+        return '' if stuck is not None and stuck.owner == 'operator' else \
+            limbo_reason_stuck(stuck)
     if state is State.BUILDING:
         return '' if live else 'Building with no live session'
     if live or j.hold or queued.get(iid) in ('seat', 'overlap'):

@@ -67,9 +67,16 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # BREACH <item> <class> <age> -> <action>
                    max_session_age: 3h,       # a live session older than this is stopped and its
                                               # item relaunched (worktree kept)
-                   max_review_session_age: 90m}   # the same for a review session (a review
+                   max_review_session_age: 90m,   # the same for a review session (a review
                                               # that runs this long has hung): relaunched on a
                                               # local seat first
+                   max_ci_age: 1h,            # a PR's required CI running this long is
+                                              # cancelled and rerun. The three ages are only
+                                              # fallbacks: with bound_min_samples finished spells
+                                              # on the wait ledger the bound is measured — a
+                                              # session past its class's p90 with no push (2x
+                                              # with one), CI past 2x the ci p90
+                   bound_min_samples: 20}
       floor:      {close_orphan_prs: true}    # an open PR on a kernel branch whose item is not on
                                               # the record, Done or retired is closed (comment)
       install:    {shadow: true,              # asf kernel install dry-runs the new venv's tick on
@@ -145,7 +152,8 @@ SPEC = {
              'silent_stuck_max': (0, int), 'since': (None, 'time')},
     'waits': {'targets': (WAIT_TARGETS, 'targets'), 'breach': (True, bool),
               'max_session_age': ('3h', 'duration'),
-              'max_review_session_age': ('90m', 'duration')},
+              'max_review_session_age': ('90m', 'duration'),
+              'max_ci_age': ('1h', 'duration'), 'bound_min_samples': (20, int)},
     'floor': {'close_orphan_prs': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int)},
 }
@@ -261,7 +269,7 @@ def read(block):
                                      v.strip() if kind == 'text' else v)
     out['waits']['targets'] = {k: parse_duration(v) for k, v in out['waits']['targets'].items()
                                if v is not None}
-    for key in ('max_session_age', 'max_review_session_age'):
+    for key in ('max_session_age', 'max_review_session_age', 'max_ci_age'):
         out['waits'][key] = parse_duration(out['waits'][key])
     out['review']['light_paths'] = list(out['review']['light_paths'])
     out['github']['retry_delays_s'] = list(out['github']['retry_delays_s'])

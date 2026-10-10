@@ -232,7 +232,10 @@ class _Applier:
         self.ports.github.close_pr(a.pr, comment)
 
     def Rerun(self, a):
-        self.ports.github.rerun(a.run_id)
+        if a.cancel:
+            self.ports.github.rerun(a.run_id, cancel=True)
+        else:
+            self.ports.github.rerun(a.run_id)
 
     def UpdateBranch(self, a):
         pr = next((p for p in self.facts.prs if p.number == a.pr and not p.merged), None)
