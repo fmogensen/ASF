@@ -772,6 +772,7 @@ _PLANNED_FLAG_VALUES = {
     'health_opens_pr': 'true', 'push_auth_preflight': 'true',
     'operator_readonly_verbs': '[terraform plan]', 'upgrade': 'notify',
     'rule_pass': 'on',
+    'console_status_every': '5m',
 }
 PLANNED_PRODUCT = _dedent("""
     product: sample
