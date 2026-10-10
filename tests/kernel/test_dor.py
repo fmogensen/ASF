@@ -223,6 +223,16 @@ class Verdict(unittest.TestCase):
             self.assertIn(why, got, line)
         self.assertEqual(dor.parse_verdict('REPORT\nstatus: done\n'), (None, 'no GROOM-FILL block'))
 
+    def test_a_list_may_run_over_several_lines(self):
+        v, why = dor.parse_verdict('GROOM-FILL\nverdict: fill\nacceptance: [\n'
+                                   '  "a holds — tests/test_a.py::A::test_x",\n'
+                                   '  "b holds — tests/test_a.py::B"\n]\n'
+                                   'writes: ["asf/a.py",\n  "tests/test_a.py"]\n'
+                                   'risk_raise: none\nreason: x\n')
+        self.assertEqual(why, '')
+        self.assertEqual(len(v.acceptance), 2)
+        self.assertEqual(v.writes, ['asf/a.py', 'tests/test_a.py'])
+
     def test_superseded_needs_an_id_or_sha(self):
         base = 'GROOM-FILL\nverdict: superseded\nrisk_raise: none\nreason: landed in #12\n'
         self.assertIn('superseded_by', dor.parse_verdict(base)[1])

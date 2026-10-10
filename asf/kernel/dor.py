@@ -47,6 +47,9 @@ writes: [paths]   # required for fill/reshape; a path that does not exist yet en
 risk_raise: none | high
 reason: <one line>"""
 
+#: the keys a verdict block carries
+KEYS = ('verdict', 'superseded_by', 'acceptance', 'writes', 'risk_raise', 'reason')
+
 #: a path a writes entry declares new
 NEW_SUFFIX = ' (new)'
 
@@ -222,15 +225,24 @@ def block(text):
     starts = [i for i, ln in enumerate(lines) if ln.strip().strip('`') == HEAD]
     if not starts:
         return None
-    out = {}
+    out, key = {}, None
     for ln in lines[starts[-1] + 1:]:
         s = ln.strip()
         if s.startswith('```'):
             break
         m = re.match(r'^([a-z_]+)\s*:\s*(.*)$', s)
-        if m:
-            out[m.group(1)] = m.group(2).strip()
+        if m and m.group(1) in KEYS:
+            key = m.group(1)
+            out[key] = m.group(2).strip()
+        elif key and s and _open_list(out[key]):  # a list written over several lines
+            out[key] += ' ' + s
     return out
+
+
+def _open_list(value):
+    """Whether ``value`` opens a ``[`` list it has not closed yet."""
+    v = _uncomment(value)
+    return v.startswith('[') and v.count('[') > v.count(']')
 
 
 def parse_verdict(text):
