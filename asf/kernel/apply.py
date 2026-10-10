@@ -82,6 +82,13 @@ UNWIDENED = 'the record refused to widen writes: '
 REBASED_RE = re.compile(r'^\s*rebased\s+([0-9a-fA-F]{7,40})\b')
 
 
+def _other_doc_lane(live_kind, kind):
+    """Whether a live session of ``live_kind`` and a launch of ``kind`` are the two different
+    document lanes (spec and plan) of one Feature: a plan started on the approved spec
+    (``Config.plan_on_approve``) never holds the spec PR's fix round, nor the reverse."""
+    return live_kind != kind and {live_kind, kind} == {'spec', 'plan'}
+
+
 def rebased_sha(s):
     """The sha an ended, non-review session reported as ``pushed: rebased <sha>`` and left
     to the factory, else '' (the port skips a sha its push log already holds)."""
@@ -396,7 +403,8 @@ class _Applier:
 
     def Launch(self, a):
         if any(s.item_id == a.item_id and s.alive and (s.kind == 'review') == (a.kind == 'review')
-               and (s.kind == I.KIND) == (a.kind == I.KIND) for s in self.facts.sessions):
+               and (s.kind == I.KIND) == (a.kind == I.KIND)
+               and not _other_doc_lane(s.kind, a.kind) for s in self.facts.sessions):
             return 'skipped: a live session holds it'
         if a.kind == I.KIND:
             return self.intake_launch(a)
@@ -406,7 +414,10 @@ class _Applier:
         # a build, spec or plan launched on the item's open PR is a fix round (B-82960: a plan
         # PR's review rounds went uncounted and unbriefed, eight rounds with no cap)
         fix = a.kind in NEW_WORK and pr is not None
-        fresh_doc = a.kind in NEW_WORK and a.kind != 'build' and pr is None
+        # a plan on an approved, unmerged spec (Launch.spec_head) leaves the spec PR's state and
+        # round count alone: the Feature is still judged on its spec PR
+        early = bool(getattr(a, 'spec_head', ''))
+        fresh_doc = a.kind in NEW_WORK and a.kind != 'build' and pr is None and not early
         findings = []
         groom = a.kind == D.GROOM_FILL
         if fix:
@@ -437,6 +448,8 @@ class _Applier:
                                    P.FINDINGS: findings})
         elif fresh_doc:  # a new document PR starts its own count (the plan after the spec)
             self.set(a.item_id, **{P.FIX_ROUNDS: 0, P.FINDINGS: []})
+        if early:
+            return 'job %s' % job
         if groom:  # it stays New while its card is filled; the fill counts against its budget
             self.set(a.item_id, **{P.DOR_FILLS: self.field(a.item_id, P.DOR_FILLS, 0) + 1,
                                    P.DOR_FILLS_VER: P._kernel_version()})

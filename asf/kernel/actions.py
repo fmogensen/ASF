@@ -18,13 +18,15 @@ class Launch:
     ``model``: the model this one launch runs on instead of its kind's ('' keeps the kind's) —
     the one extra fix round past the cap runs on ``Config.strong_model``. ``local``: take a
     seat on this host first (a review relaunched past its wait target), the cloud lane only
-    when the host has none."""
+    when the host has none. ``spec_head``: a plan launched on its Feature's approved, unmerged
+    spec PR (``Config.plan_on_approve``) — the spec branch head it reads the spec off."""
     kind: str
     item_id: str
     branch: str
     findings: list = dataclasses.field(default_factory=list)
     model: str = ''
     local: bool = False
+    spec_head: str = ''
 
 
 @dataclasses.dataclass
@@ -293,8 +295,11 @@ class Plan:
 def describe(action):
     """One line naming ``action``."""
     if isinstance(action, Launch):
-        return 'launch %s %s on %s%s' % (action.kind, action.item_id, action.branch,
-                                         ' (local first)' if action.local else '')
+        return 'launch %s %s on %s%s%s' % (
+            action.kind, action.item_id, action.branch,
+            ' (local first)' if action.local else '',
+            ' (spec approved at %s, not merged)' % action.spec_head[:12]
+            if action.spec_head else '')
     if isinstance(action, EnableAutoMerge):
         return 'auto-merge #%d' % action.pr
     if isinstance(action, MergePR):

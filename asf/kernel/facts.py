@@ -268,4 +268,5 @@ def read_facts(ports):
                  trunk_files=trunk_files,
                  notes=dict(look_notes() or {}) if look_notes else {},
                  intake_tries=dict(look_tries() or {}) if look_tries else {},
+                 last_jobs=last,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

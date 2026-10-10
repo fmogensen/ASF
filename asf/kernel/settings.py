@@ -16,11 +16,15 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # the PR branch, so it restarts no CI
                    rank: inherit,             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
-                   max_open_prs: 30}          # the WIP cap: while items in Review + Landing
+                   max_open_prs: 30,          # the WIP cap: while items in Review + Landing
                                               # exceed it, no new build, plan or spec launches;
                                               # their seats go to fix rounds and reviews (0: off).
                                               # Seats always fill finish-first: fix rounds and
                                               # rebases, reviews, builds, plans, specs
+                   plan_on_approve: true}     # a Feature's plan launches once its spec PR is
+                                              # approved on its head, reading the spec off the
+                                              # spec branch; its PR is reviewed once the spec
+                                              # landed (false: the plan waits for the merge)
       github:     {retry_delays_s: [2, 5, 10],   # a transient GitHub read (5xx, timeout,
                                               # secondary rate limit) is retried after each
                                               # delay; still failing, the tick is blind: no PR
@@ -211,7 +215,7 @@ SPEC = {
                'local_max': (None, int), 'cloud_max': (0, int),
                'cloud_kinds': (('coder', 'fix-bug', 'spec', 'plan', 'review', 'light-review'),
                                'words'),
-               'max_open_prs': (30, int)},
+               'max_open_prs': (30, int), 'plan_on_approve': (True, bool)},
     'github': {'retry_delays_s': ((2, 5, 10), 'seconds'), 'slow_below': (0.15, float)},
     'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
     'review': {'light_paths': (('docs/**', '*.md'), 'globs')},

@@ -2307,7 +2307,8 @@ def config_for(product, cfg=None, github=None):
         intake_decide_per_tick=int(k['intake']['decide_per_tick']),
         intake_max_tries=int(k['intake']['max_tries']),
         intake_branch=conv.prefix(intake_mod.KIND),
-        risk_high=tuple(k['risk']['high']), risk_large_lines=int(k['risk']['large_lines']))
+        risk_high=tuple(k['risk']['high']), risk_large_lines=int(k['risk']['large_lines']),
+        plan_on_approve=bool(k['launch']['plan_on_approve']))
 
 
 
