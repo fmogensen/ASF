@@ -137,10 +137,13 @@ class TheFeatureLaneRows(unittest.TestCase):
     def test_a_feature_no_occupancy_entry_names_gets_no_pushed_rows_row(self):
         occ = {'corrections': {'F-0280': {'kind': 'gate'}}}
         items = index(feature(stage='spec-draft'))['items']
+        # a correction names no branch, so the pushed set does not owe the Feature a row
+        # `pushed_rows` would have to refuse: its FIX → CORRECT row is what speaks for it
         pushed = rows.pushed_ids(items, occ)
-        self.assertIn('F-0280', pushed)
-        out = rows.pushed_rows(items, product(), pushed, occ, set())
-        self.assertEqual(out, [])
+        self.assertNotIn('F-0280', pushed)
+        self.assertEqual(rows.pushed_rows(items, product(), pushed, occ, set()), [])
+        # and the refusal holds on its own, for a caller that names the id anyway
+        self.assertEqual(rows.pushed_rows(items, product(), {'F-0280'}, occ, set()), [])
 
     def test_direct_lane_rows_are_unmoved(self):
         # the direct branch was already in the gate before this card (FEATURE_LANES keeps

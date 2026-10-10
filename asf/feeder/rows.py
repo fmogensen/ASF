@@ -2781,22 +2781,31 @@ def pushed_ids(items, occupancy):
     """The open Tasks, Bugs and Features whose work is pushed: the lifecycle holds them in a lane
     state, a wait on the lane or a correction (:data:`PUSHED_KEYS`), or — a Task/Bug only — the
     record names an open PR on them (a Feature's evidence never carries one: C4). Each one is
-    owed a row in every plan (:func:`pushed_rows`, :func:`orphaned_pushed`)."""
+    owed a row in every plan (:func:`pushed_rows`, :func:`orphaned_pushed`).
+
+    A Feature is in the set only while an occupancy entry names a *branch* for it
+    (:func:`_lane_branch`) — the one fact :func:`pushed_rows` draws its row from, so the set
+    never owes a row that function must then refuse. A correction on its own names no branch,
+    and on a Feature it need not mean anything was pushed: a document session that ends with
+    nothing to land is held with one while the lane reaps its branch empty. Its FIX → CORRECT
+    row (:func:`correction_rows`) is what speaks for it, and calling that pushed work would put
+    every row of its Feature — its correction and its next document session alike — ahead of a
+    Feature whose branch the lane really holds (:func:`_candidates`' order: finish before you
+    start)."""
     occ = occupancy or {}
     named = set()
     for key in PUSHED_KEYS:
         named |= set(occ.get(key) or ())
     return {iid for iid, v in (items or {}).items()
             if isinstance(v, dict) and is_open(v)
-            and (v.get('type') == 'feature' and iid in named
+            and (v.get('type') == 'feature' and iid in named and _lane_branch(occ, iid)
                  or v.get('type') in ('task', 'bug') and (iid in named or open_pr_of(v)))}
 
 
-def _pushed_branch(items, product, occupancy, iid):
-    """The branch ``iid``'s pushed work sits on: the one the occupancy entry that named it
-    carries (``review``, ``landing``, ``back``, or the lane's own ``lanes`` map), else the
-    item's lane branch by its type (:func:`_branch_of`). A Feature's branch is only ever the
-    lane's: nothing derives `spec/`/`plan/`/`direct` from the type alone (C5)."""
+def _lane_branch(occupancy, iid):
+    """The branch an occupancy entry names for ``iid``: the one its ``review``, ``landing`` or
+    ``back`` record carries, else the lane's own ``lanes`` map, else ``''``. A correction names
+    none — it says a session must run again, not where its work sits."""
     occ = occupancy or {}
     for key in ('review', 'landing', 'back'):
         h = (occ.get(key) or {}).get(iid)
@@ -2805,6 +2814,17 @@ def _pushed_branch(items, product, occupancy, iid):
     for branch, rec in (occ.get('lanes') or {}).items():
         if rec.get('item') == iid:
             return branch
+    return ''
+
+
+def _pushed_branch(items, product, occupancy, iid):
+    """The branch ``iid``'s pushed work sits on: the one an occupancy entry names for it
+    (:func:`_lane_branch` — ``review``, ``landing``, ``back``, or the lane's own ``lanes``
+    map), else the item's lane branch by its type (:func:`_branch_of`). A Feature's branch is
+    only ever the lane's: nothing derives `spec/`/`plan/`/`direct` from the type alone (C5)."""
+    branch = _lane_branch(occupancy, iid)
+    if branch:
+        return branch
     item = items.get(iid) or {}
     if item.get('type') == 'feature':
         return ''
