@@ -4,7 +4,7 @@ A cloud spec or plan session cannot read the record repo's ``refs/asf/ids/*`` cl
 (:mod:`asf.record.idclaim`), so a session that kept ids an earlier session minted sometimes ends
 on a ``NEEDS OPERATOR:`` question whether the claim still covers them. That fact is code's to
 check, not a person's: :func:`is_claim_question` recognises such a question (narrowly — it names an
-id claim *and* offers a re-mint, or names a claim ref), :func:`cited` lists the ids it asks about,
+id claim *and* offers a re-mint, or names a claim ref or a claimed block), :func:`cited` lists the ids it asks about,
 the facts reader looks each up on the record's origin (``Facts.id_claims``: id -> ``(ref, sha)``
 of the claim covering it, ``''`` when none does; an id it could not read is absent), and
 :func:`answer` writes the kernel's answer, or None when it is unsure — then the question stays an
@@ -15,8 +15,9 @@ import re
 #: a question about an id claim: it names a claim (``id claim``, ``idclaim``, ``the claim``) …
 CLAIM_RE = re.compile(r'\b(?:id[ -]?)?claim(?:s|ed)?\b', re.I)
 
-#: … and offers a re-mint, or names a claim ref
-REMINT_RE = re.compile(r'\bre-?mint|refs/asf/ids/', re.I)
+#: … and offers a re-mint, names a claim ref, or names a claimed block (``S:99305-99354``: a
+#: recorded Stuck reason is cut at 200 characters, often before the re-mint)
+REMINT_RE = re.compile(r'\bre-?mint|refs/asf/ids/|\b[A-Z]:\d{4,}-\d{4,}\b', re.I)
 
 #: one id (``S-99255``), or a run of them (``S-91805..S-91808``, ``S-91805–S-91808``); a block in
 #: the claim notation (``S:99255-99304``) is not an id
@@ -36,7 +37,7 @@ REMINT = ('id claim checked by the kernel: %s — re-mint from your current bloc
 
 def is_claim_question(text):
     """Whether ``text`` asks only whether an id claim covers ids: it names a claim and offers a
-    re-mint (or names a ``refs/asf/ids/`` ref)."""
+    re-mint (or names a ``refs/asf/ids/`` ref, or a claimed block)."""
     text = str(text or '')
     return bool(CLAIM_RE.search(text) and REMINT_RE.search(text))
 

@@ -139,6 +139,18 @@ class Decide(unittest.TestCase):
         self.assertEqual(B.of(plan, A.ClearStuck), [], 'the applier resets a Stuck card')
         self.assertNotEqual(B.state(plan, 'F-0316'), State.STUCK)
 
+    def test_a_recorded_reason_cut_before_the_re_mint_is_still_read(self):
+        reason = ("done: NEEDS OPERATOR: the four Story ids S-99305..S-99308 come from the PRIOR "
+                  "session's claimed block (S:99305-99354, session spec-f-0317-1791607356), not "
+                  "this session's (S:101405-101454). They are a…")
+        self.assertTrue(I.is_claim_question(reason))
+        it = B.task('F-0317', type='feature', state=State.STUCK,
+                    stuck=B.M.Stuck(reason, 'operator'))
+        ids = {'S-%d' % n: ('refs/asf/ids/S-99305', SHA) for n in range(99305, 99309)}
+        plan = D.decide(B.facts([it], id_claims=ids), B.config())
+        self.assertIn('S-99305, S-99306, S-99307, S-99308 by refs/asf/ids/S-99305',
+                      B.of(plan, A.ApplyAnswer)[0].text)
+
     def test_an_answer_already_on_the_card_is_not_given_twice(self):
         text = B.of(self.plan(), A.ApplyAnswer)[0].text
         it = B.task('F-0316', type='feature', state=State.STUCK, question=Q_0316, answers=[text],
