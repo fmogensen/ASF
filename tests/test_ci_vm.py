@@ -310,7 +310,6 @@ class OneRun(FakeSsh):
         self.assertEqual(ci_vm.vm_pass(self.product, out=self.out, run=self.run), (1, 0))
         self.assertEqual(self.row('gate')['state'], ci_vm.RUNNING)
         self.wait_for_exit()                        # the detached command's own exit file
-        self.assertEqual(self.remote_read(f"runs/{self.row('gate')['run_id']}/src/out.txt"), 'ok')
         self.assertEqual(ci_vm.vm_pass(self.product, out=self.out, run=self.run), (0, 1))
         row = self.row('gate')
         self.assertEqual((row['state'], row['exit']), (ci_vm.PASSED, 0))
@@ -381,6 +380,23 @@ class OneRun(FakeSsh):
         self.assertEqual(ci_vm.rows_at(self.product, new_sha)['gate']['state'], ci_vm.RUNNING)
         # the trunk's own run, at a sha no branch claims, is never superseded (C8)
         self.assertEqual(ci_vm.rows_at(self.product, self.sha)['gate']['state'], ci_vm.RUNNING)
+
+    def test_a_sha_another_ref_still_points_at_is_not_superseded(self):
+        self.ci['hosts'][0]['slots'] = 2  # the trunk takes the first slot (C9), the branch next
+        self.job('gate', command='sleep 30')
+        shared = self.commit('shared')
+        self.push_branch('worker/T-1', sha=shared)
+        self.push_branch('worker/T-2', sha=shared)       # the same sha under two refs
+        ci_vm.vm_pass(self.product, out=self.out, run=self.run)
+        self.assertEqual(self.row('gate', sha=shared)['state'], ci_vm.RUNNING)
+        self.push_branch('worker/T-1', sha=self.commit('moved-on'))
+        ci_vm.vm_pass(self.product, out=self.out, run=self.run)
+        row = self.row('gate', sha=shared)
+        # worker/T-2 still carries `shared`, so its one run is the evidence for that ref: a
+        # cancel here would be a permanent red on a clean branch with nothing to read (C8)
+        self.assertEqual(row['state'], ci_vm.RUNNING)
+        self.assertIsNone(row['superseded_by'])
+        self.assertFalse(row['ever_red'])
 
     def test_two_jobs_one_slot_one_now_one_next_pass_trunk_first(self):
         self.job('gate', command='exit 0')

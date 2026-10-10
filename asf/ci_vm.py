@@ -31,6 +31,10 @@ DEFAULT_ROOT = '.asf-ci'        #: relative to the ssh user's home — never an 
 DEFAULT_SLOTS = 1
 DEFAULT_TIMEOUT_MIN = 45
 CONNECT_TIMEOUT_S = 15
+#: ``REMOTE_START``'s own bound: it clones a worktree and writes the run directory before it
+#: returns, which is work, not a connect — the same margin over the connect timeout that
+#: :func:`push_sha` gives its ``git push``
+START_TIMEOUT_S = CONNECT_TIMEOUT_S + 30
 RED_LOG_TAIL_BYTES = 262144     #: how much of a log is read off the remote before trimming (C18)
 
 
@@ -268,12 +272,16 @@ def _slug(name):
 #: the three scripts (§2), each a ``sh`` program with ``{}`` slots filled by :func:`_fill`
 #: (``shlex.quote``). No ``timeout(1)`` anywhere (C7) — the pass owns the clock. Nothing is
 #: written outside ``<root>``, which holds exactly ``repo.git`` and ``runs/`` (no
-#: ``artifacts/`` — this cut carries none).
+#: ``artifacts/`` — this cut carries none). ``REMOTE_START`` is idempotent: it removes any
+#: ``runs/<run_id>`` left by a start that timed out after the worktree existed, so a (sha, job)
+#: is never wedged for ever on a run directory no step can reach.
 REMOTE_START = """set -e
 root={root}
 mkdir -p "$root/runs"
 root=$(cd "$root" && pwd)
 rundir="$root/runs/{run_id}"
+git -C "$root/repo.git" worktree remove --force "$rundir/src" 2>/dev/null || true
+rm -rf "$rundir"
 mkdir -p "$rundir"
 [ -d "$root/repo.git" ] || git init --bare -q "$root/repo.git"
 git -C "$root/repo.git" worktree add -q --detach "$rundir/src" "refs/asf/{run_id}"
@@ -494,21 +502,30 @@ def trunk_shas(product, limit=GREEN_TRUNK_LIMIT):
     return [s for s in r.stdout.split() if s]
 
 
+def trunk_sha(product):
+    """The trunk's own head sha (``origin/<main>``) from the product's own checkout, ``''`` when
+    it cannot be read — the one reader both :func:`dispatch_targets` (C9) and :func:`_supersede`
+    (C8) ask, so "a sha some ref still points at" means the same thing in both."""
+    from asf import gitops
+    if not product.repo_dir:
+        return ''
+    r = gitops.git(['rev-parse', f'origin/{product.conventions.main}'], product.repo_dir,
+                   timeout=30)
+    return r.data if r.ok else ''
+
+
 def dispatch_targets(product):
     """``[(sha, branch_or_None)]`` in C9's order: the trunk's own head first (branch ``None`` —
     never superseded, C8), then every lane branch by name with its head (PD10, mirroring
     :meth:`asf.harvest.lane.Lane.remote_heads`'s filter, P16, with no ``Lane``). ``[]`` when the
     trunk's own sha cannot be read."""
-    from asf import gitops
-    repo_dir = product.repo_dir
     out = []
-    if not repo_dir:
+    if not product.repo_dir:
         return out
     conv = product.conventions
-    r = gitops.git(['rev-parse', f'origin/{conv.main}'], repo_dir, timeout=30)
-    trunk_sha = r.data if r.ok else ''
-    if trunk_sha:
-        out.append((trunk_sha, None))
+    head = trunk_sha(product)
+    if head:
+        out.append((head, None))
     h = heads(product)
     for branch in sorted(h):
         if branch == conv.main or not conv.branch_kind(branch):
@@ -594,13 +611,18 @@ def _collect(product, out, now, run):
 
 
 def _supersede(product, out, now, run):
-    """A ``running`` run whose branch's head has moved is cancelled (C8): ``REMOTE_CANCEL``,
-    cleanup, ``state: cancelled``, ``superseded_by`` the new sha. A trunk run (``branch`` None)
-    is never superseded."""
+    """A ``running`` run whose branch's head has moved *and whose own sha no ref still points
+    at* is cancelled (C8): ``REMOTE_CANCEL``, cleanup, ``state: cancelled``, ``superseded_by``
+    the new sha. A trunk run (``branch`` None) is never superseded, and neither is a run at a
+    sha that is still some other branch's head or the trunk's own: that run's verdict is the
+    evidence for the ref that still carries the sha, and cancelling it would leave a permanent
+    ``red``/``ever_red`` (PD4/C10) that sends a clean branch back with nothing to read."""
     if mutation_guard.is_active():
         return
     data = load(product)
     current = heads(product)
+    # every sha a ref still points at: each branch head, and the trunk's own
+    live = {s for s in (*current.values(), trunk_sha(product)) if s}
     changed = False
     for sha, jobs_at in data['runs'].items():
         if not isinstance(jobs_at, dict):
@@ -612,7 +634,7 @@ def _supersede(product, out, now, run):
             if not branch:
                 continue
             new_sha = current.get(branch)
-            if not new_sha or new_sha == sha:
+            if not new_sha or sha in live:
                 continue
             host = _host_by_name(product, row.get('host'))
             if host is not None and row.get('run_id'):
@@ -712,7 +734,8 @@ def _dispatch(product, out, now, run):
                 out(f"ci vm: dispatch {label} {sha[:9]} {job_name} — push failed: {why}")
                 continue
             rc, stdout, err = run_ssh(host, _fill(REMOTE_START, root=host.root, run_id=run_id,
-                                                  cmd=job.command), kind='start', run=run)
+                                                  cmd=job.command), kind='start',
+                                      timeout_s=START_TIMEOUT_S, run=run)
             if rc != 0:
                 out(f"ci vm: dispatch {label} {sha[:9]} {job_name} — start failed on "
                     f"{host.name}: {(err or stdout or '').strip().splitlines()[-1:] or rc}")
