@@ -27,7 +27,7 @@ import json
 import os
 import subprocess
 
-from asf import env, hermetic
+from asf import env, gitops, hermetic
 from asf.feeder import footprint, widen
 from asf import customer_content
 
@@ -81,14 +81,10 @@ def outside(paths, boundary):
 def added_paths(repo, sha, base):
     """``git diff --name-only <base>...<sha>`` in ``repo`` — the paths the push adds over the
     trunk; ``None`` when git cannot resolve the diff (an unreadable base), never raising."""
-    try:
-        p = subprocess.run(['git', 'diff', '--name-only', f'{base}...{sha}'], cwd=repo,
-                           capture_output=True, text=True, env=hermetic.git_env())
-    except OSError:
+    r = gitops.git(['diff', '--name-only', f'{base}...{sha}'], repo)
+    if not r.ok:
         return None
-    if p.returncode != 0:
-        return None
-    return [line.strip() for line in p.stdout.splitlines() if line.strip()]
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 
 def run_rule(rule, cwd, timeout=None):
