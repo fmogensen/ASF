@@ -243,10 +243,12 @@ def verdict_holds(review, pr):
 @dataclasses.dataclass
 class Answer:
     """An operator's answer to the question an item is Stuck on, not yet written to its card.
-    ``at`` is when it was given (ISO-8601 UTC, '' when the ledger row has none)."""
+    ``at`` is when it was given (ISO-8601 UTC, '' when the ledger row has none); ``job`` the
+    session it answers (the item's last job when given, '' when the row names none)."""
     item_id: str
     text: str
     at: str = ''
+    job: str = ''
 
 
 @dataclasses.dataclass

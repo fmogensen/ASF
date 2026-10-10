@@ -298,7 +298,8 @@ class RealRecord:
         return rec is not None and rec['meta'].get('type') == 'feature'
 
     def answers(self):
-        return [M.Answer(str(r['item']), str(r['text']), str(r.get('at') or ''))
+        return [M.Answer(str(r['item']), str(r['text']), str(r.get('at') or ''),
+                         str(r.get('job') or ''))
                 for r in _jsonl(os.path.join(self.state_dir, ANSWERS_FILE))
                 if r.get('item') and r.get('text')]
 
@@ -892,6 +893,12 @@ class RealSessions:
                 unpushed=unpushed, push_refused=refused))
             out[-1].started = run.get('started') or ''
         return out
+
+    def last_jobs(self):
+        """``{item id: its last job}`` over the session ledger (launch order, ended runs too)."""
+        from asf.workers import pool
+        return {r['item']: r['job'] for r in pool.load_sessions(self.product).values()
+                if r.get('item') and r.get('job')}
 
     def stranded(self, item_id):
         """The last ended (non-review) session of ``item_id`` whose kept worktree still holds a

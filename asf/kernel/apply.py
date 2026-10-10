@@ -56,12 +56,9 @@ from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               answer_attempt, conflict_attempt, host_pushes, host_refuses,
+                               NO_VERDICT, answer_attempt, conflict_attempt, host_pushes, host_refuses,
                                no_report, rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
-
-#: the attempt a review session that ended without a ``VERDICT:`` line records
-NO_VERDICT = 'review: no VERDICT line'
 
 #: a REPORT's ``pushed: rebased <sha> …`` — the floor's "the factory publishes" line
 REBASED_RE = re.compile(r'^\s*rebased\s+([0-9a-fA-F]{7,40})\b')

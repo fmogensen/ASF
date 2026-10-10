@@ -123,14 +123,20 @@ class FakeGitHub:
 
 class FakeSessions:
 
-    def __init__(self, sessions=(), fail=(), stranded=()):
+    def __init__(self, sessions=(), fail=(), stranded=(), last_jobs=None):
         self._sessions = list(sessions)
+        self._last_jobs = dict(last_jobs or {})
         self.fail = set(fail)
         self._stranded = {s.item_id: s for s in stranded}
         self.launched, self.ended, self.meta, self.pushed = [], [], [], []
 
     def sessions(self):
         return copy.deepcopy(self._sessions)
+
+    def last_jobs(self):
+        out = dict(self._last_jobs)
+        out.update({s.item_id: s.job for s in self._sessions})
+        return out
 
     def stranded(self, item_id):
         return copy.deepcopy(self._stranded.get(item_id))

@@ -242,3 +242,70 @@ class CappedAnswer(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+T0197_SINCE = '2026-10-10T07:03:27Z'
+T0197_JOB = 'review-t-0197-1791613620'
+
+
+def t0197(**kw):
+    """T-0197 as the live record held it: its two reviews ended with no VERDICT line, the Stuck
+    recorded at 07:03 though the operator answered it — naming the dead review's job — at 06:56."""
+    kw.setdefault('attempts', ['review: no VERDICT line', 'review: no VERDICT line'])
+    return B.task('T-0197', state=State.STUCK, stuck_since=T0197_SINCE,
+                  stuck=B.M.Stuck('review: no VERDICT line', 'loop'), **kw)
+
+
+def rerun(at='2026-10-10T06:56:25Z', job=T0197_JOB):
+    return B.M.Answer('T-0197', 'Rerun the review; the code is unchanged.', at, job)
+
+
+class AnsweredBeforeRecorded(unittest.TestCase):
+    """An answer naming the job the item's Stuck came from clears it though the kernel recorded the
+    Stuck after the answer was given; an answer already on the card, or naming an older job, never
+    does."""
+
+    def test_an_answer_naming_the_items_last_job_counts_though_older_than_the_record(self):
+        self.assertTrue(K.answer_counts(rerun(), t0197(), last_job=T0197_JOB))
+        self.assertFalse(K.answer_counts(rerun(), t0197(), last_job='review-t-0197-1791699999'),
+                         'a later job ran since: the answer is history')
+        self.assertFalse(K.answer_counts(rerun(), t0197()), 'no job known')
+        self.assertFalse(K.answer_counts(rerun(), t0197(answers=[rerun().text]),
+                                         last_job=T0197_JOB), 'already applied')
+
+    def test_the_ledger_keeps_the_job(self):
+        state = tempfile.mkdtemp()
+        with open(os.path.join(state, P.ANSWERS_FILE), 'w') as f:
+            f.write('{"item": "T-0197", "job": "%s", "text": "go", "at": "x"}\n' % T0197_JOB)
+        rec = P.RealRecord(env.Product('sample', {'backlog_dir': state}), state_dir=state)
+        self.assertEqual(rec.answers()[0].job, T0197_JOB)
+
+    def test_the_tick_clears_and_the_next_relaunches_the_review(self):
+        rec = F.FakeRecord([t0197()], answers=[rerun()])
+        gh = F.FakeGitHub(prs=[B.pr(1329, 'T-0197')])
+        sess = F.FakeSessions(last_jobs={'T-0197': T0197_JOB})
+        ports = F.ports(record=rec, github=gh, sessions=sess)
+        tick = lambda: loop.tick(env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'}),
+                                 ports=ports, config=B.config(), state_dir=tempfile.mkdtemp(),
+                                 out=lambda *_: None)
+        tick()
+        self.assertNotEqual(rec.fields['T-0197'][P.STATE], 'stuck')
+        self.assertNotIn(P.STUCK_REASON, rec.fields['T-0197'])
+        tick()
+        self.assertEqual([(k, i) for k, i, _b, _t in sess.launched], [('review', 'T-0197')])
+
+
+class NoVerdictRelaunch(unittest.TestCase):
+    """A review that printed no VERDICT line is an infrastructure failure: it is relaunched once
+    before the item is ever Stuck, whatever ``max_attempts`` says."""
+
+    def test_one_no_verdict_relaunches_even_at_one_attempt(self):
+        it = B.task('T-0001', state=State.REVIEW, attempts=['review: no VERDICT line'])
+        plan = D.decide(B.facts([it], prs=[B.pr(7, 'T-0001')]), B.config(max_attempts=1))
+        self.assertNotEqual(B.state(plan, 'T-0001'), State.STUCK)
+        self.assertEqual(B.launched(plan, 'review'), ['T-0001'])
+
+    def test_the_second_no_verdict_is_stuck(self):
+        it = B.task('T-0001', state=State.REVIEW, attempts=['review: no VERDICT line'] * 2)
+        plan = D.decide(B.facts([it], prs=[B.pr(7, 'T-0001')]), B.config(max_attempts=1))
+        self.assertEqual(B.state(plan, 'T-0001'), State.STUCK)

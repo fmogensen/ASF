@@ -7,7 +7,8 @@ what ``decide`` should act on:
   item of any owner when it was given after the Stuck was recorded (``Answer.at`` later than
   ``Item.stuck_since``); with either time unknown it counts only for a Stuck with ``owner:
   operator``. The answers ledger also holds the old floor's answers, already acted on, and an
-  answer older than the Stuck never clears it (:func:`answer_counts`);
+  answer older than the Stuck never clears it — save one naming the item's last session
+  (``sessions.last_jobs``) not yet on its card (:func:`answer_counts`);
 - a PR whose item is not on the record is dropped (a branch naming a retired or foreign id);
 - a landed spec counts only while its Feature's card is not Done: a finished Feature's Stories
   are history, never minted afresh (the old record never minted the Stories of its early specs).
@@ -36,13 +37,17 @@ from asf.kernel.decide import stranded as decide_stranded
 from asf.kernel.model import Facts, State
 
 
-def answer_counts(answer, it):
+def answer_counts(answer, it, last_job=None):
     """Whether operator ``answer`` is one ``it`` waits on: ``it`` has an open question, or is Stuck
-    and the answer is newer than its Stuck (with a time unknown: only a Stuck on the operator)."""
+    and the answer is newer than its Stuck (with a time unknown: only a Stuck on the operator) —
+    or names ``last_job``, the item's last session, and is not on the card yet: the Stuck that
+    session's end led to may be recorded ticks after the operator answered it."""
     if it.question:
         return True
     if it.state is not State.STUCK or it.stuck is None:
         return False
+    if answer.job and answer.job == last_job and answer.text not in it.answers:
+        return True
     if answer.at and it.stuck_since:
         return str(answer.at) > str(it.stuck_since)
     return it.stuck.owner == 'operator'
@@ -100,8 +105,10 @@ def read_facts(ports):
     items = record.items()
     prs, gh_reviews, pushed, github_error = read_github(ports, items)
     reviews = list(record.reviews()) + gh_reviews
+    last_jobs = getattr(ports.sessions, 'last_jobs', None)
+    last = dict(last_jobs() or {}) if last_jobs else {}
     answers = [a for a in record.answers()
-               if a.item_id in items and answer_counts(a, items[a.item_id])]
+               if a.item_id in items and answer_counts(a, items[a.item_id], last.get(a.item_id))]
     specs = {fid: text for fid, text in record.specs_landed().items()
              if fid in items and items[fid].state is not State.DONE}
     look = getattr(ports.sessions, 'stranded', None)

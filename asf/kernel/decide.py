@@ -170,6 +170,12 @@ API_FAILED = 'the session API failed'
 NO_REPORT = 'ended without a REPORT'
 NO_REPORT_LIMIT = 2
 
+#: the attempt a review session that ended without a ``VERDICT:`` line records: an
+#: infrastructure failure, not a judgement — at least :data:`NO_VERDICT_LIMIT` of them (else
+#: ``config.max_attempts``) before the item is Stuck(owner=loop), so one is always relaunched
+NO_VERDICT = 'review: no VERDICT line'
+NO_VERDICT_LIMIT = 2
+
 #: the prefix of the Stuck reason of a done session whose unpushed work the host will not push
 NOT_PUSHED = 'not pushed: '
 
@@ -968,9 +974,11 @@ def _legacy_conflict(stuck):
 
 
 def _repeated(attempts, limit):
-    """The first reason that ``attempts`` holds at least ``limit`` times, else ``None``."""
+    """The first reason that ``attempts`` holds at least ``limit`` times (a :data:`NO_VERDICT` at
+    least :data:`NO_VERDICT_LIMIT` times), else ``None``."""
     for reason in attempts:
-        if attempts.count(reason) >= limit:
+        if attempts.count(reason) >= (max(limit, NO_VERDICT_LIMIT) if reason == NO_VERDICT
+                                      else limit):
             return reason
     return None
 
