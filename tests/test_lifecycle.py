@@ -23,7 +23,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import env, redact
+from asf import env, gitpush, redact
 from asf.scorecard import score
 from asf.workers import lifecycle as lc
 from asf.workers import observe
@@ -2024,6 +2024,66 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         ok, line = lc.publish(self.repo, 'fix/B-9998', '', main='main')
         self.assertTrue(ok, line)
         self.assertEqual(line, 'published fix/B-9998 at ' + self.sh(['rev-parse', '--short', 'HEAD'], self.repo))
+
+    def test_b0097_a_network_blip_is_retried_in_place_with_backoff_and_then_succeeds(self):
+        # B-0097: a DNS blip on the branch's own push is retried right here, with backoff,
+        # rather than failing the tick on the first attempt
+        self.sh(['checkout', '-q', '-b', 'fix/B-9997'], self.repo)
+        self.commit('new', 'new work')
+        blip = subprocess.CompletedProcess([], 1, '',
+            "fatal: unable to access 'url': Could not resolve host: github.com\n")
+        calls, slept = [], []
+        real_push = gitpush.push
+
+        def flaky(args, wt, **kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                return blip
+            return real_push(args, wt, **kwargs)
+
+        with mock.patch('asf.gitpush.push', side_effect=flaky):
+            ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main', sleep=slept.append)
+        self.assertTrue(ok, line)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(slept, list(lc.PUBLISH_RETRY_BACKOFF_S))
+
+    def test_b0097_a_hook_refusal_is_never_retried(self):
+        # a non-network refusal (the hook, here) returns on its first try: retrying it would
+        # just ask the hook the same question again
+        self.sh(['checkout', '-q', '-b', 'fix/B-9996'], self.repo)
+        self.commit('new', 'new work')
+        refused = subprocess.CompletedProcess([], 1, '', 'remote rejected (pre-push hook declined)\n')
+        calls, slept = [], []
+
+        def hooked(args, wt, **kwargs):
+            calls.append(1)
+            return refused
+
+        with mock.patch('asf.gitpush.push', side_effect=hooked):
+            ok, line = lc.publish(self.repo, 'fix/B-9996', '', main='main', sleep=slept.append)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(slept, [])
+
+    def test_b0097_a_network_blip_that_outlasts_the_backoff_falls_through(self):
+        # exhausted, the refusal is returned as any other — the next tick's health pass
+        # (health.push_retry) is what retries it from here
+        self.sh(['checkout', '-q', '-b', 'fix/B-9995'], self.repo)
+        self.commit('new', 'new work')
+        blip = subprocess.CompletedProcess([], 1, '',
+            "fatal: unable to access 'url': Could not resolve host: github.com\n")
+        calls, slept = [], []
+
+        def always_blips(args, wt, **kwargs):
+            calls.append(1)
+            return blip
+
+        with mock.patch('asf.gitpush.push', side_effect=always_blips):
+            ok, line = lc.publish(self.repo, 'fix/B-9995', '', main='main', sleep=slept.append)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1 + len(lc.PUBLISH_RETRY_BACKOFF_S))
+        self.assertEqual(slept, list(lc.PUBLISH_RETRY_BACKOFF_S))
+        self.assertEqual(lc.push_failure(line.split('refused: ', 1)[1]), lc.NETWORK_ERROR)
 
     def _push_from_elsewhere(self, subject):
         """A person pushes ``subject`` onto ``origin/fix/B-9999`` from another clone; this repo
