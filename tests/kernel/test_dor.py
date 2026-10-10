@@ -370,6 +370,23 @@ class VerdictOffTheLog(unittest.TestCase):
         got = P.report_result(log, lambda t: dor.block(t) is not None)
         self.assertEqual(dor.parse_verdict(got['result'])[0].verdict, 'fill')
 
+    def test_the_verdict_in_an_earlier_message_is_read_too(self):
+        import json
+        log = os.path.join(tempfile.mkdtemp(), 'run.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'assistant', 'message': {'content': [
+                {'type': 'text', 'text': FILL}]}}) + '\n')
+            f.write(json.dumps({'type': 'result', 'result': 'My verdict above stands.'}) + '\n')
+        self.assertEqual(dor.parse_verdict(P.run_text(log))[0].verdict, 'fill')
+        self.assertEqual(P.run_text('/nonexistent/x.jsonl'), '')
+
+    def test_a_reason_keeps_its_pr_number_and_a_schema_comment_goes(self):
+        v, _ = dor.parse_verdict('GROOM-FILL\nverdict: superseded\nsuperseded_by: 12f28448f   '
+                                 '# required for superseded\nrisk_raise: none  # or high\n'
+                                 'reason: PR #1184 merged as 12f28448f\n')
+        self.assertEqual((v.superseded_by, v.risk_raise, v.reason),
+                         ('12f28448f', 'none', 'PR #1184 merged as 12f28448f'))
+
 
 class TickLine(unittest.TestCase):
 

@@ -204,8 +204,14 @@ def _list(value):
     return [g.strip() for g in got if g.strip()]
 
 
+def _uncomment(value):
+    """``value`` without a trailing schema comment (`` # required for …``): a ``#`` after
+    whitespace and before whitespace — a ``PR #12`` in a reason stays."""
+    return re.split(r'\s+#\s', ' ' + str(value or ''), maxsplit=1)[0].strip()
+
+
 def _plain(value):
-    text = str(value or '').split('#', 1)[0].strip().strip('`"\'')
+    text = _uncomment(value).strip('`"\'')
     return '' if text.lower() in ('', 'none', 'n/a', '-', '—') else text
 
 
@@ -237,7 +243,7 @@ def parse_verdict(text):
     verdict = _plain(got.get('verdict')).lower()
     if verdict not in VERDICTS:
         return None, 'verdict %r is not one of %s' % (verdict, ' | '.join(VERDICTS))
-    risk = str(got.get('risk_raise') or '').split('#', 1)[0].strip().strip('`"\'').lower()
+    risk = _uncomment(got.get('risk_raise')).strip('`"\'').lower()
     if risk not in RISKS:
         return None, 'risk_raise %r is not one of %s' % (risk, ' | '.join(RISKS))
     why = _plain(got.get('reason'))

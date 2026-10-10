@@ -1441,9 +1441,9 @@ class RealSessions:
                 continue
             kind = _kernel_kind(run.get('kind'))
             alive = lifecycle.pid_alive(run.get('pid'))  # a cloud token: the remote run's status
-            result = None if alive else report_result(
-                run.get('log'), (lambda t: dor_mod.block(t) is not None)
-                if kind == dor_mod.GROOM_FILL else None)
+            result = None if alive else report_result(run.get('log'))
+            if result is not None and kind == dor_mod.GROOM_FILL:
+                result = dict(result, result=run_text(run.get('log')))
             in_cloud = cloudpid.is_token(run.get('pid'))
             pushed = not alive and pushlog.count(self.product, run['job']) > 0
             said = reports.read(result)
@@ -1828,6 +1828,35 @@ def report_result(log_path, holds=None):
             elif rec.get('type') == 'result' and holds(str(rec.get('result') or '')):
                 found = rec
     return found or last
+
+
+def run_text(log_path):
+    """Every text the last run of a session's log said — its assistant messages and results, in
+    order — as one string: a groom-fill's verdict block is read off the last one it printed,
+    wherever it printed it (live 2026-10-10: the pinned venv's stop gate refused the stop and
+    the session's later messages were about that; its block sat in an earlier message)."""
+    from asf.workers import runtime
+    texts = []
+    try:
+        with open(log_path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                try:
+                    rec = json.loads(line) if line.strip() else None
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if runtime.launch_boundary(rec):
+                    texts = []
+                elif rec.get('type') == 'result':
+                    texts.append(str(rec.get('result') or ''))
+                elif rec.get('type') == 'assistant':
+                    for c in ((rec.get('message') or {}).get('content') or []):
+                        if isinstance(c, dict) and c.get('type') == 'text':
+                            texts.append(str(c.get('text') or ''))
+    except (OSError, TypeError):
+        return ''
+    return '\n'.join(texts)
 
 
 #: how many entries of a branch's reflog :func:`overwritable` reads for its pre-rebase history
