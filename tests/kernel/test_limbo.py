@@ -190,6 +190,20 @@ class Breach(unittest.TestCase):
         again = D.decide(f, config(max_session_age_h=3, max_review_age_h=1.5))
         self.assertEqual([(a.kind, a.local) for a in B.of(again, A.Launch)], [('review', True)])
 
+    def test_a_review_that_ended_this_tick_names_its_next_step(self):
+        # live 2026-10-10 12:02Z: T-79565's reviewer approved and exited; the breach line read
+        # "none: held this tick" — a hold with no next action. Its verdict is applied with the
+        # EndSession this tick and the PR lands on the next one: the line says so.
+        items = [B.task('T-1', state=State.REVIEW)]
+        f = facts(items, prs=[B.pr(7, 'T-1')], waits={'T-1': ('review', ago(95))},
+                  sessions=[B.session('r1', 'T-1', kind='review', alive=False, ended=True,
+                                      started=ago(90))])
+        plan = D.decide(f, config())
+        self.assertEqual(B.of(plan, A.EndSession), [A.EndSession('r1', free_worktree=True)])
+        self.assertEqual([(b['item'], b['action']) for b in plan.breaches],
+                         [('T-1', 'none: review r1 ended — its verdict is recorded this tick, '
+                                  'the PR is judged for landing next tick')])
+
     def test_a_young_session_is_left_alone(self):
         f = facts([B.task('T-1', state=State.BUILDING)],
                   sessions=[B.session('j1', 'T-1', started=ago(30))])

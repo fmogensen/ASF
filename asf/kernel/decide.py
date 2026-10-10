@@ -1960,6 +1960,13 @@ def _why_no_breach_action(iid, cls, facts, states, judged, queued):
         return 'WIP cap: open PRs over kernel.launch.max_open_prs'
     if queued.get(iid) == 'risk':
         return 'high risk: lands one at a time, after a green trunk'
+    ended = [s for s in facts.sessions if s.item_id == iid and not s.alive]
+    if ended and ended[0].kind == 'review':
+        return ('%s %s ended — its verdict is recorded this tick, the PR is judged for landing '
+                'next tick' % (ended[0].kind, ended[0].job))
+    if ended:
+        return ('session %s ended — its report is applied this tick, the item is judged next tick'
+                % ended[0].job)
     if judged[iid].hold:
         return 'held this tick'
     return {'ci': 'CI in flight', 'merge': 'waits on GitHub auto-merge',
