@@ -557,9 +557,11 @@ def replan_context(product, feature, items):
         after = ', '.join(t.get('after') or ()) or 'none'
         lead = (f"; delivers {', '.join(t['delivers'])}" if t.get('delivers') else
                 f"; delivered by {t['delivered_by']}" if t.get('delivered_by') else '')
+        stories = ', '.join(t.get('stories') or ()) or 'none'
         lines.append(f"- {t['id']} [{'landed — keep' if done else t.get('state') or 'New'}] "
-                     f"{' '.join(str(t.get('title') or '').split())}; writes: "
-                     f"{', '.join(t.get('writes') or ()) or '(none)'}; after: {after}{lead}")
+                     f"{' '.join(str(t.get('title') or '').split())}; stories: {stories}; "
+                     f"writes: {', '.join(t.get('writes') or ()) or '(none)'}; after: {after}"
+                     f"{lead}")
     return {
         'reshape': how or '(none)',
         'reshape_digest': d or '(none)',
