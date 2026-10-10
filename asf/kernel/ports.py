@@ -94,6 +94,9 @@ CLOSED_STATES = ('Closed', 'Resolved')
 #: the state file of the intake-decide sessions launched per key (``state/<product>/``)
 INTAKE_TRIES_FILE = 'kernel-intake-tries.json'
 
+#: the state file of each key's last rejected intake verdict (``state/<product>/``)
+INTAKE_REJECTIONS_FILE = 'kernel-intake-rejections.json'
+
 BUILD_KINDS = ('task', 'fix-bug', 'correct', 'adjudicate', 'build')
 
 #: the review ledger a kernel review session appends its verdict to (``state/<product>/``)
@@ -799,6 +802,7 @@ class RealRecord:
         from asf.kernel import intake
         d = os.path.join(self.root or '', self._intake())
         out = {}
+        rejected = self.intake_rejections()
         try:
             names = sorted(os.listdir(d))
         except OSError:
@@ -817,9 +821,33 @@ class RealRecord:
             body, question = inbox._split_question(text)
             title = inbox.parse_inbox_file(body).title or name[:-3]
             key = intake.note_key(name)
+            question = ' '.join(str(question or '').split())
+            if rejected.get(key):  # the next session reads it as a finding (the brief's question)
+                question = '%s (the last intake verdict was rejected: %s)' % (
+                    question or 'no question', rejected[key])
             out[key] = M.Item(id=key, type=intake.NOTE, title=title, body=body.strip(),
-                              question=' '.join(str(question or '').split()) or None)
+                              question=question or None)
         return out
+
+    def intake_rejections(self):
+        """``{key: why}``: each key's last rejected intake verdict."""
+        try:
+            with open(os.path.join(self.state_dir, INTAKE_REJECTIONS_FILE),
+                      encoding='utf-8') as f:
+                got = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return {str(k): str(v) for k, v in got.items()} if isinstance(got, dict) else {}
+
+    def intake_rejected(self, key, why):
+        """Keep ``why`` as ``key``'s last rejected intake verdict."""
+        got = self.intake_rejections()
+        got[key] = str(why)
+        os.makedirs(self.state_dir, exist_ok=True)
+        path = os.path.join(self.state_dir, INTAKE_REJECTIONS_FILE)
+        with open(path + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump(got, f, indent=1, sort_keys=True)
+        os.replace(path + '.tmp', path)
 
     def _tries_path(self):
         return os.path.join(self.state_dir, INTAKE_TRIES_FILE)

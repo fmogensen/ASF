@@ -78,7 +78,7 @@ class Verdicts(unittest.TestCase):
         self.assertTrue(v.set_priority)
 
     def test_a_block_outside_its_words_is_rejected_whole(self):
-        for bad, why in (('decision: maybe', 'decision'), ('kind: story', 'kind'),
+        for bad, why in (('decision: maybe', 'decision'), ('kind: task', 'kind'),
                          ('parent: the big one', 'parent'), ('reason: ', 'reason')):
             text = '\n'.join(bad if ln.split(':')[0] == bad.split(':')[0] else ln
                              for ln in GOOD.splitlines())

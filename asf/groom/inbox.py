@@ -85,10 +85,10 @@ def _lift_section(lines, heading):
         s = l.strip()
         if not s.startswith('- '):
             continue
-        if heading == 'Acceptance':
-            m = re.match(r'^-\s*\[[xX ]\]\s*(.*)$', s)
-            if m and m.group(1):
-                items.append(m.group(1))
+        if heading == 'Acceptance':  # a checkbox or a plain bullet: both are a line of it
+            m = re.match(r'^-\s*(?:\[[xX ]\]\s*)?(.*)$', s)
+            if m and m.group(1).strip():
+                items.append(m.group(1).strip())
         else:
             items.append(s[2:])
     return items, lines[:start] + lines[end:]
@@ -660,6 +660,7 @@ def stuck_s1_lines(root, intake_dir=None, groom_file=None, product=None):
 _CLAUSES = (
     (re.compile(r'^feature$', re.IGNORECASE), lambda m: ('type', 'feature'), 'feature'),
     (re.compile(r'^epic$', re.IGNORECASE), lambda m: ('type', 'epic'), 'epic'),
+    (re.compile(r'^story$', re.IGNORECASE), lambda m: ('type', 'story'), 'story'),
     (re.compile(r'^bug\s+(.+)$', re.IGNORECASE), lambda m: ('signature', m.group(1).strip()), 'bug <signature>'),
     (re.compile(rf'^parent\s+([A-Z]-{ID_DIGITS})$', re.IGNORECASE), lambda m: ('parent', m.group(1).upper()), 'parent <id>'),
     (re.compile(r'^(S[123])$', re.IGNORECASE), lambda m: ('severity', m.group(1).upper()), 'S1|S2|S3'),
@@ -674,7 +675,8 @@ _CLAUSE_FORMS = ('close',) + tuple(form for _rx, _make, form in _CLAUSES)
 
 def parse_answer(answer):
     """An inbox answer: ``('close', None)``, ``({header: value}, None)`` from ``;``-separated
-    clauses — ``feature``, ``epic``, ``bug <signature>``, ``parent <id>``, ``S1|S2|S3`` — or
+    clauses — ``feature``, ``epic``, ``story``, ``bug <signature>``, ``parent <id>``,
+    ``S1|S2|S3`` — or
     ``(None, reason)`` when a clause is outside that grammar (the line then changes nothing).
     ``reason`` names the first clause that failed and the grammar it did not match; a clause
     carrying an em dash (or its ASCII stand-in, ``' - '``) gets the words that make the mistake

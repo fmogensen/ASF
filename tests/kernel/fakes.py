@@ -13,6 +13,7 @@ class FakeRecord:
         self._items = {i.id: i for i in items}
         self._notes = {n.id: n for n in notes}
         self.tries = dict(tries or {})
+        self.rejections = {}
         self.decided = []
         self.fields = {i.id: {} for i in items}
         self._specs = dict(specs or {})
@@ -113,6 +114,9 @@ class FakeRecord:
 
     def intake_tries(self):
         return dict(self.tries)
+
+    def intake_rejected(self, key, why):
+        self.rejections[key] = why
 
     def count_intake(self, key):
         self.tries[key] = self.tries.get(key, 0) + 1
