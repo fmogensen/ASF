@@ -14,12 +14,15 @@ class Launch:
     ``branch``. The session gets the branch and a brief only; the host mints ids and writes cards.
     ``findings`` are what a fix round answers beyond the review's (a rebase round's ask).
     ``model``: the model this one launch runs on instead of its kind's ('' keeps the kind's) —
-    the one extra fix round past the cap runs on ``Config.strong_model``."""
+    the one extra fix round past the cap runs on ``Config.strong_model``. ``local``: take a
+    seat on this host first (a review relaunched past its wait target), the cloud lane only
+    when the host has none."""
     kind: str
     item_id: str
     branch: str
     findings: list = dataclasses.field(default_factory=list)
     model: str = ''
+    local: bool = False
 
 
 @dataclasses.dataclass
@@ -139,6 +142,17 @@ class ArchiveAndReset:
 
 
 @dataclasses.dataclass
+class ClosePR:
+    """Close the open kernel PR number ``pr`` (on ``branch``, naming ``item_id``) with a comment
+    naming ``reason``: its item is not on the record, Done or retired, so nothing would ever move
+    it. The branch is kept."""
+    pr: int
+    branch: str
+    item_id: str
+    reason: str
+
+
+@dataclasses.dataclass
 class Plan:
     """The whole decision of one tick. ``states`` maps every item id the kernel judged (Tasks and
     Bugs, plus the derived state of every Feature and Story) to ``(State, Stuck or None)`` — the
@@ -146,8 +160,49 @@ class Plan:
     the action values above. ``idle`` is the idle alarm (None when not raised): ``{'free': seats
     free, 'waiting': Tasks/Bugs not launched, 'reasons': [(reason, count)], the top three}``.
     ``notes`` maps an item id to this tick's notes that are never written to its card (a behind
-    PR the merge train holds back: :data:`asf.kernel.decide.TRAIN_NOTE`)."""
+    PR the merge train holds back: :data:`asf.kernel.decide.TRAIN_NOTE`). ``limbo`` maps each
+    non-terminal item (or ``PR #n``) with no action this tick and nothing in flight to why
+    (:func:`asf.kernel.decide.limbo`; the target is none). ``breaches`` are the waits over their
+    class's target: ``{'item', 'class', 'age_s', 'action'}`` each, ``action`` the one line of
+    what this tick does about it (:func:`asf.kernel.decide.breaches`)."""
     states: dict = dataclasses.field(default_factory=dict)
     actions: list = dataclasses.field(default_factory=list)
     idle: dict = None
     notes: dict = dataclasses.field(default_factory=dict)
+    limbo: dict = dataclasses.field(default_factory=dict)
+    breaches: list = dataclasses.field(default_factory=list)
+
+
+def describe(action):
+    """One line naming ``action``."""
+    if isinstance(action, Launch):
+        return 'launch %s %s on %s%s' % (action.kind, action.item_id, action.branch,
+                                         ' (local first)' if action.local else '')
+    if isinstance(action, EnableAutoMerge):
+        return 'auto-merge #%d' % action.pr
+    if isinstance(action, UpdateBranch):
+        return 'update-branch #%d' % action.pr
+    if isinstance(action, OpenPR):
+        return 'open PR %s for %s: %s' % (action.branch, action.item_id, action.title)
+    if isinstance(action, Rerun):
+        return 'rerun run %s' % action.run_id
+    if isinstance(action, MintStory):
+        return 'mint %s under %s: %s' % (action.story_id, action.feature_id, action.title)
+    if isinstance(action, MarkStuck):
+        return 'stuck %s (%s): %s' % (action.item_id, action.owner, action.reason)
+    if isinstance(action, EndSession):
+        return 'end session %s%s' % (action.job, ' + free worktree' if action.free_worktree else '')
+    if isinstance(action, ApplyAnswer):
+        return 'answer %s' % action.item_id
+    if isinstance(action, ClearStuck):
+        return 're-judge %s: %s' % (action.item_id, action.attempt)
+    if isinstance(action, PushStranded):
+        return 'publish %s rebase of %s' % (action.item_id, action.job)
+    if isinstance(action, NoteItem):
+        return 'note %s: %s' % (action.item_id, action.text)
+    if isinstance(action, ClosePR):
+        return 'close #%d (%s): %s' % (action.pr, action.branch, action.reason)
+    if isinstance(action, ArchiveAndReset):
+        return 'rebuild %s: archive %s, close #%d (%s)' % (action.item_id, action.branch,
+                                                           action.pr, action.reason)
+    return repr(action)

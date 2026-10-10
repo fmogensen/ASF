@@ -111,6 +111,11 @@ class FakeGitHub:
         self._branches = [b for b in self._branches if b.name != branch]
         return P.ARCHIVE_PREFIX + branch
 
+    def close_pr(self, pr, comment):
+        self._do('close_pr', pr)
+        self.closed = getattr(self, 'closed', []) + [(pr, comment)]
+        self._prs = [p for p in self._prs if p.number != pr]
+
     def open_pr(self, branch, base, title, body):
         self._do('open_pr', branch)
         self.opened.append((branch, base, title, body))

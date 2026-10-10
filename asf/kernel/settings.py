@@ -61,6 +61,17 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # ``asf kernel waits`` and counted on the tick line;
                                               # after and parked have none unless set. A duration
                                               # is 30s, 10m, 2h, 1d or whole seconds
+                   breach: true,              # a wait over its target takes a breach action
+                                              # (launch first, review local first, front of the
+                                              # train, the Stuck's escalation); the tick logs
+                                              # BREACH <item> <class> <age> -> <action>
+                   max_session_age: 3h,       # a live session older than this is stopped and its
+                                              # item relaunched (worktree kept)
+                   max_review_session_age: 90m}   # the same for a review session (a review
+                                              # that runs this long has hung): relaunched on a
+                                              # local seat first
+      floor:      {close_orphan_prs: true}    # an open PR on a kernel branch whose item is not on
+                                              # the record, Done or retired is closed (comment)
       install:    {shadow: true,              # asf kernel install dry-runs the new venv's tick on
                                               # live facts first: a crash keeps the old plists
                    max_state_changes: 25}     # more items changing state than this (or Launch
@@ -132,7 +143,10 @@ SPEC = {
               'id_claim_prefixes': (('S', 'T'), 'words')},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time')},
-    'waits': {'targets': (WAIT_TARGETS, 'targets')},
+    'waits': {'targets': (WAIT_TARGETS, 'targets'), 'breach': (True, bool),
+              'max_session_age': ('3h', 'duration'),
+              'max_review_session_age': ('90m', 'duration')},
+    'floor': {'close_orphan_prs': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int)},
 }
 
@@ -181,6 +195,8 @@ def _bad(value, kind):
             for k, v in value.items())
         return '' if ok else ('must map wait classes (%s) to durations like 10m'
                               % ', '.join(WAIT_CLASSES))
+    if kind == 'duration':
+        return '' if parse_duration(value) is not None else 'must be a duration like 3h or 90m'
     if kind == 'seconds':
         ok = isinstance(value, (list, tuple)) and all(
             isinstance(n, (int, float)) and not isinstance(n, bool) and n >= 0 for n in value)
@@ -245,6 +261,8 @@ def read(block):
                                      v.strip() if kind == 'text' else v)
     out['waits']['targets'] = {k: parse_duration(v) for k, v in out['waits']['targets'].items()
                                if v is not None}
+    for key in ('max_session_age', 'max_review_session_age'):
+        out['waits'][key] = parse_duration(out['waits'][key])
     out['review']['light_paths'] = list(out['review']['light_paths'])
     out['github']['retry_delays_s'] = list(out['github']['retry_delays_s'])
     out['launch']['cloud_kinds'] = list(out['launch']['cloud_kinds'])

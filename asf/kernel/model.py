@@ -194,7 +194,8 @@ class Session:
     a commit the local history never had), or ''.
     ``cloud``: the session runs in the cloud lane — ``alive`` is the remote run's status and
     ``ended`` is set once that status is over (never a dead pid); its REPORT is the report commit
-    it pushed (:func:`asf.workers.cloud.sync`)."""
+    it pushed (:func:`asf.workers.cloud.sync`). ``started`` is when it was launched (ISO-8601
+    UTC, '' when unknown): a live session older than ``Config.max_session_age_h`` is ended."""
     job: str
     item_id: str
     kind: str = 'build'
@@ -216,6 +217,7 @@ class Session:
     unpushed: str = ''
     push_refused: str = ''
     cloud: bool = False
+    started: str = ''
 
 
 @dataclasses.dataclass
@@ -264,7 +266,13 @@ class Facts:
     (:mod:`asf.kernel.idclaims`) to the ``(ref, sha)`` of the claim on the record's origin that
     covers it, or ``''`` when none does; an id it could not read is absent. ``github_error`` is
     why GitHub's PRs could not be read this tick ('' when they were): the facts are then blind and
-    ``decide`` plans only what needs no PR fact (:func:`asf.kernel.decide.blind_plan`)."""
+    ``decide`` plans only what needs no PR fact (:func:`asf.kernel.decide.blind_plan`).
+    ``orphan_prs`` are the open PRs whose branch names an item that is not on the record (closed
+    by :class:`asf.kernel.actions.ClosePR` when they are the kernel's). ``waits`` maps a Task or
+    Bug to ``(wait class, since)``: its current spell on the wait ledger
+    (:mod:`asf.kernel.waits`), read before ``decide`` so a wait over its target is a breach.
+    ``unreadable`` maps the id of a card the record could not parse to why: it is on the record
+    though not in ``items`` (its PRs are never closed as orphans; it is in LIMBO)."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -277,6 +285,9 @@ class Facts:
     now: str = ''
     id_claims: dict = dataclasses.field(default_factory=dict)
     github_error: str = ''
+    orphan_prs: list = dataclasses.field(default_factory=list)
+    waits: dict = dataclasses.field(default_factory=dict)
+    unreadable: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -302,7 +313,14 @@ class Config:
     extra fix round past the cap runs on. ``id_claim_answer``: a session question that only asks
     whether an id claim covers ids it cites (prefixes ``id_claim_prefixes``) is answered by the
     kernel from ``Facts.id_claims`` (:mod:`asf.kernel.idclaims`). The product file's ``kernel:`` block sets
-    them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0)."""
+    them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0).
+    ``wait_targets`` maps a wait class (``kernel.waits.targets``: ``seat``, ``review``, ``train``,
+    ``stuck``, …) to seconds: an item whose current wait (``Facts.waits``) is older is a breach
+    and takes a breach action (:func:`asf.kernel.decide.breaches`; empty: none).
+    ``max_session_age_h``: a live session older than this is ended so its item is relaunched
+    (None: never); ``max_review_age_h`` the same for a review session (a review that runs this
+    long has hung: it is ended and relaunched on a local seat first). ``close_floor``: an open kernel PR whose item is not on the record, Done or
+    retired is closed with a comment (:class:`asf.kernel.actions.ClosePR`)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -322,3 +340,7 @@ class Config:
     strong_model: str = ''
     id_claim_answer: bool = True
     id_claim_prefixes: tuple = ('S', 'T')
+    wait_targets: dict = dataclasses.field(default_factory=dict)
+    max_session_age_h: float = None
+    max_review_age_h: float = None
+    close_floor: bool = False

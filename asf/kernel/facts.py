@@ -9,7 +9,9 @@ what ``decide`` should act on:
   operator``. The answers ledger also holds the old floor's answers, already acted on, and an
   answer older than the Stuck never clears it — save one naming the item's last session
   (``sessions.last_jobs``) not yet on its card (:func:`answer_counts`);
-- a PR whose item is not on the record is dropped (a branch naming a retired or foreign id);
+- a PR whose item is not on the record is dropped (a branch naming a foreign id, or a card gone
+  from the record); the open ones are kept apart as ``Facts.orphan_prs``, for ``decide`` to close
+  those on a kernel branch;
 - a landed spec counts only while its Feature's card is not Done: a finished Feature's Stories
   are history, never minted afresh (the old record never minted the Stories of its early specs).
 
@@ -84,18 +86,22 @@ def read_id_claims(record, items, sessions):
         return {}
 
 
-def read_github(ports, items):
+def read_github(ports, items, orphans=None):
     """``(prs, GitHub reviews, pushed branches, error)``: all three empty and ``error`` the reason
-    when GitHub could not be read (a rate limit too) — never a part of them."""
+    when GitHub could not be read (a rate limit too) — never a part of them. ``orphans`` (a list,
+    when given) receives the open PRs whose item is not on the record."""
     from asf import gh_limit
     from asf.kernel.ports import PortError
     try:
-        prs = [p for p in ports.github.prs() if p.item_id in items]
+        every = list(ports.github.prs())
+        prs = [p for p in every if p.item_id in items]
         reviews = list(ports.github.reviews([p for p in prs if not p.merged]))
         branches = getattr(ports.github, 'branches', None)
         pushed = [b for b in (branches() if branches else []) if b.item_id in items]
     except (PortError, OSError, gh_limit.RateLimited) as e:  # a blind tick, never a crash
         return [], [], [], (str(e).splitlines() or [type(e).__name__])[0]
+    if orphans is not None:
+        orphans += [p for p in every if p.item_id not in items and not p.merged]
     return prs, reviews, pushed, ''
 
 
@@ -103,7 +109,8 @@ def read_facts(ports):
     """The :class:`~asf.kernel.model.Facts` the three ports describe now."""
     record = ports.record
     items = record.items()
-    prs, gh_reviews, pushed, github_error = read_github(ports, items)
+    orphans = []
+    prs, gh_reviews, pushed, github_error = read_github(ports, items, orphans)
     reviews = list(record.reviews()) + gh_reviews
     last_jobs = getattr(ports.sessions, 'last_jobs', None)
     last = dict(last_jobs() or {}) if last_jobs else {}
@@ -120,8 +127,10 @@ def read_facts(ports):
             if s is not None:
                 stranded.append(s)
     sessions = list(ports.sessions.sessions())
-    return Facts(items=items, prs=prs, sessions=sessions, reviews=reviews,
+    look_bad = getattr(record, 'unreadable', None)
+    return Facts(unreadable=dict(look_bad() or {}) if look_bad else {},
+                 items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
                  stranded=stranded, id_claims=read_id_claims(record, items, sessions),
-                 github_error=github_error,
+                 github_error=github_error, orphan_prs=orphans,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

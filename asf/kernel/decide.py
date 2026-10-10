@@ -115,6 +115,22 @@ item and the actions of one tick. The rules it holds, in the design's words:
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
+- Nothing waits without an action (the operator's rule: waiting for hours without acting is a
+  bug). Every non-terminal item — Ready, Building, Review, Landing, Stuck — and every open kernel
+  PR has an action this tick or a session / CI run in flight that will produce one; one with
+  neither is in LIMBO (:func:`limbo`, ``Plan.limbo``: the id and why; the target is none). A wait
+  over its class's target (``config.wait_targets`` against ``Facts.waits``, the wait ledger's
+  current spell) is a breach (:func:`breaches`, ``Plan.breaches``) and takes the breach action
+  the kernel has: a Ready item launches first while a seat is free; a Review gets its reviewer
+  first, on a local seat first; a behind Landing PR goes to the front of the merge train (a
+  conflicting or red one is already a fix round); a Stuck takes its escalation. A live session
+  older than ``config.max_session_age_h`` is ended (:class:`EndSession`, worktree kept, attempt
+  :data:`OVER_AGE`) so its item is relaunched.
+- A clean floor (``config.close_floor``): an open PR on a kernel branch prefix whose item is not
+  on the record (``Facts.orphan_prs``), or is Done or retired (not reopened, not a Feature whose
+  spec only landed) and held by no live session, is closed with a comment (:class:`ClosePR`);
+  the item stays Done.
+
 How the record keeps up (the applier's side of the contract): ``Item.fix_rounds`` counts the fix
 rounds already launched; a failed ``UpdateBranch`` whose error says "merge conflict" (or on a
 PR already conflicting) is recorded as an attempt :func:`conflict_attempt` (its reason starts
@@ -131,6 +147,7 @@ from asf.kernel import actions as A
 from asf.kernel import idclaims
 from asf.kernel import model as M
 from asf.kernel import reports as R
+from asf.kernel import waits as W
 from asf.kernel.model import OWNERS, RED_CONCLUSIONS, State, Stuck, verdict_holds
 from asf.kernel.stories import declared_stories
 
@@ -194,12 +211,26 @@ IDLE_REASONS = {
     'held': 'held this tick',
     'paused': 'launches paused',
     'new': 'not ready (new)',
+    'seat': 'no free seat',
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
 ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem, A.MarkStuck,
-         A.MintStory, A.ArchiveAndReset, A.OpenPR, A.Rerun, A.UpdateBranch, A.EnableAutoMerge,
-         A.Launch)
+         A.MintStory, A.ArchiveAndReset, A.ClosePR, A.OpenPR, A.Rerun, A.UpdateBranch,
+         A.EnableAutoMerge, A.Launch)
+
+#: the attempt a live session ended past ``Config.max_session_age_h`` leaves on its item
+OVER_AGE = 'session ran past its max age'
+
+#: the states an item must have an action or something in flight for (else it is in LIMBO)
+ACTIVE = (State.READY, State.BUILDING, State.REVIEW, State.LANDING, State.STUCK)
+
+#: the actions that move an item (a note or a recorded Stuck moves nothing)
+PROGRESS = (A.Launch, A.ClearStuck, A.ApplyAnswer, A.ArchiveAndReset, A.OpenPR, A.PushStranded,
+            A.ClosePR, A.EndSession, A.UpdateBranch, A.EnableAutoMerge, A.Rerun)
+
+#: the most characters of a Stuck reason a LIMBO line carries
+LIMBO_REASON_MAX = 160
 
 #: the prefix of a Stuck reason a ``done`` REPORT left (its ``NEEDS OPERATOR:`` question, before
 #: a done-and-pushed session moved on): with its branch pushed it is re-judged to an OpenPR
@@ -283,10 +314,16 @@ def decide(facts, config):
     for s in facts.sessions:
         if not s.alive:
             actions.append(A.EndSession(s.job, free_worktree=True))
+    over_age = _over_age(facts, config)
+    actions += [A.EndSession(s.job, free_worktree=False) for s, _age in over_age]
+    closes = floor_closes(facts, config)
+    closing = {a.item_id for a in closes if a.item_id in items}
 
     parked = _parked(items)
-    judged = {iid: (_park(items[iid], facts, config) if iid in parked
+    judged = {iid: (_Judged(State.DONE) if iid in closing
+                    else _park(items[iid], facts, config) if iid in parked
                     else _judge(items[iid], facts, config, actions)) for iid in sorted(items)}
+    actions += closes
     for iid, j in judged.items():
         old = items[iid]
         if j.state is State.STUCK and (old.state is not State.STUCK or old.stuck != j.stuck):
@@ -298,16 +335,25 @@ def decide(facts, config):
         _state_of(iid, items, judged, children, states, (), parked)
     _apply_waits(items, judged, children, states, parked)
     blocks = _count_blocked(items, states, parked)
+    due = overdue(facts, config, states)
 
-    train, notes = _merge_train(items, judged, config, blocks, facts.now)
+    train, notes = _merge_train(items, judged, config, blocks, facts.now,
+                                first={i for i, (c, _a) in due.items() if c == 'train'})
     actions += train
     actions += _mint(facts, parked)
+    queued = {}
     launches, skipped = (([], {}) if facts.paused
-                         else _launches(facts, config, judged, children, states, parked, blocks))
+                         else _launches(facts, config, judged, children, states, parked, blocks,
+                                        due, queued))
     actions += launches
     actions.sort(key=lambda a: ORDER.index(type(a)))
     idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
-    return A.Plan(states=states, actions=actions, idle=idle, notes=notes)
+    found = breaches(due, over_age, actions, facts, config, states, judged, queued)
+    stalled = {b['item']: b for b in found if b['action'].startswith(NO_BREACH_ACTION)}
+    return A.Plan(states=states, actions=actions, idle=idle, notes=notes,
+                  limbo=limbo(facts, config, judged, states, parked, children, actions, queued,
+                              stalled),
+                  breaches=found)
 
 
 def blind_plan(facts):
@@ -319,14 +365,15 @@ def blind_plan(facts):
                            if not s.alive and not s.ended])
 
 
-def _merge_train(items, judged, config, blocks=None, now=''):
+def _merge_train(items, judged, config, blocks=None, now='', first=()):
     """``(UpdateBranch actions, {item: [note]})`` of the merge train: the behind Landing PRs in
-    :func:`train_key` order, as many as ``config.update_parallel`` less the updates in flight
-    allows; the rest get :data:`TRAIN_NOTE`."""
+    :func:`train_key` order — ``first`` (the items whose train wait is over its target) ahead of
+    every other — as many as ``config.update_parallel`` less the updates in flight allows; the
+    rest get :data:`TRAIN_NOTE`."""
     blocks = blocks or {}
     behind = sorted((iid for iid, j in judged.items() if j.behind_pr is not None),
-                    key=lambda iid: train_key(iid, judged[iid].behind_pr, items, config,
-                                              blocks, now))
+                    key=lambda iid: (iid not in first,) + train_key(
+                        iid, judged[iid].behind_pr, items, config, blocks, now))
     running = sum(1 for j in judged.values() if j.updating)
     free = max(0, config.update_parallel - running)
     actions = [A.UpdateBranch(judged[iid].behind_pr.number) for iid in behind[:free]]
@@ -1124,19 +1171,26 @@ def _mint(facts, parked):
     return out
 
 
-def _launches(facts, config, judged, children, states, parked, blocks=None):
+def _launches(facts, config, judged, children, states, parked, blocks=None, due=None,
+              queued=None):
     """``(launches, skipped)``: reviews first, then Ready items, each in launch order
-    (:func:`launch_order`) — a relaunch (:func:`relaunch`) before the rest, the one holding the
-    most others (``blocks``) first — while sessions are free; a Ready item whose ``writes`` overlap a
-    Building (or just launched) visible item waits its turn (``skipped[iid] = 'overlap'``)."""
+    (:func:`launch_order`) — an item whose wait is over its target (``due``) before the rest, then
+    a relaunch (:func:`relaunch`), the one holding the most others (``blocks``) first — while
+    sessions are free; a Ready item whose ``writes`` overlap a Building (or just launched) visible
+    item waits its turn (``skipped[iid] = 'overlap'``). A review over its target asks for a local
+    seat first (``Launch.local``). ``queued`` (filled when given) maps every review or Ready item
+    left for want of a seat to ``'seat'``, and every overlap to ``'overlap'``."""
     items = facts.items
     free = _free(facts, config)
     inherit = config.rank != 'own'
     blocks = blocks or {}
+    due = due or {}
+    queued = {} if queued is None else queued
     rank = lambda iid: launch_order(iid, items, inherit)  # noqa: E731
-    first = lambda iid: ((0, -blocks.get(iid, 0)) if relaunch(items[iid]) else (1, 0),  # noqa: E731
-                         rank(iid))
-    reviews = sorted((i for i, j in judged.items() if j.review_branch and not j.hold), key=rank)
+    first = lambda iid: ((iid not in due,),  # noqa: E731
+                         (0, -blocks.get(iid, 0)) if relaunch(items[iid]) else (1, 0), rank(iid))
+    reviews = sorted((i for i, j in judged.items() if j.review_branch and not j.hold),
+                     key=lambda iid: (iid not in due, rank(iid)))
     ready = sorted((i for i, j in judged.items()
                     if states[i][0] is State.READY and not j.hold and _visible(items, i, parked)
                     and not _derived(i, items, children)), key=first)
@@ -1145,14 +1199,16 @@ def _launches(facts, config, judged, children, states, parked, blocks=None):
     out, skipped = [], {}
     for iid in reviews:
         if free <= 0:
-            return out, skipped
-        out.append(A.Launch('review', iid, judged[iid].review_branch))
+            queued[iid] = 'seat'
+            continue
+        out.append(A.Launch('review', iid, judged[iid].review_branch, local=iid in due))
         free -= 1
     for iid in ready:
         if free <= 0:
-            break
+            queued[iid] = 'seat'
+            continue
         if any(_overlap(items[iid].writes, w) for w in busy):
-            skipped[iid] = 'overlap'
+            skipped[iid] = queued[iid] = 'overlap'
             continue
         kind = _kind(items[iid], facts, config)
         out.append(A.Launch(kind, iid, judged[iid].branch or _branch(kind, iid, config, items[iid]),
@@ -1243,3 +1299,242 @@ def _prefix(glob):
     """The literal directory part of ``glob`` before its first wildcard (``''`` at the root)."""
     head = glob[:min(glob.find(ch) for ch in '*?[' if ch in glob)]
     return head.rpartition('/')[0] + '/' if '/' in head else ''
+
+
+# ---- nothing waits without an action: the clean floor, breaches, LIMBO --------------------------
+
+#: how a breach line starts when the kernel has no action for it this tick
+NO_BREACH_ACTION = 'none: '
+
+
+def kernel_owned(branch, config, item_id=None):
+    """Whether ``branch`` is one the kernel launches on: one of its prefixes (``work_branch``,
+    ``fix_branch``, ``doc_branches``) followed by the item id (``item_id``, else any id) and
+    nothing else — a hand-made branch that only names an item (``fix/B-1-kernel-0.2``) is never
+    the kernel's to close."""
+    prefixes = [p for p in (config.work_branch, config.fix_branch) + tuple(config.doc_branches)
+                if p]
+    b = str(branch or '')
+    for p in prefixes:
+        if b.startswith(p):
+            rest = b[len(p):]
+            if item_id is not None:
+                if rest.upper() == str(item_id).upper():
+                    return True
+            elif re.fullmatch(r'[A-Za-z]+-\d+', rest):
+                return True
+    return False
+
+
+def floor_closes(facts, config):
+    """The :class:`ClosePR` of every open kernel PR nothing will ever move (``config.close_floor``):
+    its item is not on the record (``Facts.orphan_prs``), or its card is Done (a retired card
+    reads as Done) — not reopened, not a Feature whose spec only landed, held by no live
+    session."""
+    if not config.close_floor:
+        return []
+    out = []
+    for p in sorted(facts.orphan_prs, key=lambda p: p.number):
+        if (not p.merged and kernel_owned(p.branch, config, p.item_id)
+                and p.item_id not in facts.items
+                and p.item_id not in facts.unreadable):  # an unreadable card is still there
+            out.append(A.ClosePR(p.number, p.branch, p.item_id,
+                                 'its item %s is not on the record' % p.item_id))
+    for iid in sorted(facts.items):
+        it = facts.items[iid]
+        if it.state is not State.DONE or it.reopened:
+            continue
+        prs = [p for p in facts.prs if p.item_id == iid]
+        if _spec_only(it, prs, config) or any(s.item_id == iid and s.alive
+                                              for s in facts.sessions):
+            continue
+        why = 'its item %s is %s' % (iid, 'Done or retired' if it.priority == 'later' else 'Done')
+        out += [A.ClosePR(p.number, p.branch, iid, why)
+                for p in sorted(prs, key=lambda p: p.number)
+                if not p.merged and kernel_owned(p.branch, config, iid)]
+    return out
+
+
+def _over_age(facts, config):
+    """``[(session, age in seconds)]``: every live session older than
+    ``config.max_session_age_h`` — a review session than ``config.max_review_age_h`` when that is
+    lower — (``Session.started`` against ``Facts.now``)."""
+    out = []
+    for s in facts.sessions:
+        limit = config.max_session_age_h
+        if s.kind == 'review' and config.max_review_age_h is not None:
+            limit = config.max_review_age_h if limit is None else min(limit,
+                                                                       config.max_review_age_h)
+        age = stuck_age_h(s.started, facts.now) if s.alive and s.started else None
+        if limit is not None and age is not None and age > limit:
+            out.append((s, age * 3600))
+    return out
+
+
+def overdue(facts, config, states, same_class=True):
+    """``{item: (wait class, age in seconds)}``: every Task or Bug whose ledger spell
+    (``Facts.waits``) is older than its class's target (``config.wait_targets``) — and, with
+    ``same_class``, whose wait class now (:func:`asf.kernel.waits.classify` of its state this
+    tick) is still that one."""
+    targets = config.wait_targets or {}
+    out = {}
+    for iid, (cls_then, since) in sorted((facts.waits or {}).items()):
+        it = facts.items.get(iid)
+        if it is None or it.type not in W.FOLLOWED or iid not in states:
+            continue
+        target = targets.get(W.target_key(cls_then))
+        if target is None or not W.is_wait(cls_then):
+            continue
+        age = stuck_age_h(since, facts.now)
+        if age is None or age * 3600 <= target:
+            continue
+        if same_class:
+            state, stuck = states[iid]
+            if W.classify(iid, state, stuck, facts, config)[0] != cls_then:
+                continue
+        out[iid] = (cls_then, age * 3600)
+    return out
+
+
+def _item_of(action, facts):
+    """The item id ``action`` moves (a PR's or a run's item for a PR action), else None."""
+    if isinstance(action, (A.UpdateBranch, A.EnableAutoMerge)):
+        return next((p.item_id for p in facts.prs if p.number == action.pr), None)
+    if isinstance(action, A.Rerun):
+        return next((p.item_id for p in facts.prs for c in p.checks
+                     if c.run_id == action.run_id), None)
+    if isinstance(action, A.EndSession):
+        return next((s.item_id for s in facts.sessions if s.job == action.job), None)
+    return getattr(action, 'item_id', None)
+
+
+def breaches(due, over_age, actions, facts, config, states, judged, queued):
+    """``Plan.breaches``: one record per overdue wait (:func:`overdue`) and per session ended
+    past its max age — ``{'item', 'class', 'age_s', 'action'}``, ``action`` the line
+    (:func:`asf.kernel.actions.describe`) of what this tick does about it, or
+    :data:`NO_BREACH_ACTION` and why the kernel has none."""
+    moves = {}
+    for a in actions:
+        if isinstance(a, PROGRESS) and not (isinstance(a, A.EndSession) and a.free_worktree):
+            iid = _item_of(a, facts)
+            if iid is not None:
+                moves.setdefault(iid, a)
+    out = []
+    for s, age in over_age:
+        out.append({'item': s.item_id, 'class': 'building' if s.kind == 'build'
+                    else 'session:%s' % s.kind, 'age_s': age,
+                    'action': A.describe(A.EndSession(s.job, free_worktree=False))})
+    ended = {s.item_id for s, _age in over_age}
+    moved_on = {iid: v for iid, v in overdue(facts, config, states, same_class=False).items()
+                if iid not in due and iid in moves
+                and v[0].startswith('stuck')}  # its escalation this tick ended the Stuck
+    for iid, (cls, age) in sorted(dict(due, **moved_on).items()):
+        if iid in ended:
+            continue
+        a = moves.get(iid)
+        if a is not None:
+            action = A.describe(a)
+        else:
+            action = NO_BREACH_ACTION + _why_no_breach_action(iid, cls, facts, states, judged,
+                                                              queued)
+        out.append({'item': iid, 'class': cls, 'age_s': age, 'action': action})
+    return out
+
+
+def _why_no_breach_action(iid, cls, facts, states, judged, queued):
+    """Why an overdue wait of class ``cls`` gets no action this tick (one short phrase)."""
+    _state, stuck = states[iid]
+    if cls.startswith('stuck'):
+        return 'waits on the %s' % ((stuck.owner if stuck else '') or 'operator')
+    if facts.paused and cls in ('seat', 'review'):
+        return 'launches paused'
+    live = [s for s in facts.sessions if s.item_id == iid and s.alive]
+    if live:
+        return 'session %s in flight' % live[0].job
+    if queued.get(iid) == 'seat':
+        return 'no free seat'
+    if queued.get(iid) == 'overlap':
+        return 'file overlap with a Building item'
+    if judged[iid].hold:
+        return 'held this tick'
+    return {'ci': 'CI in flight', 'merge': 'waits on GitHub auto-merge',
+            'train': 'merge train full of updates in flight'}.get(cls, 'no action exists')
+
+
+def limbo_reason_stuck(stuck):
+    """The LIMBO reason of a Stuck item no action moves this tick."""
+    return 'stuck on the %s: %s' % ((stuck.owner if stuck else '') or 'operator',
+                                    R.cap(stuck.reason if stuck else '', LIMBO_REASON_MAX))
+
+
+def limbo(facts, config, judged, states, parked, children, actions, queued=None, stalled=None):
+    """``Plan.limbo``: ``{item id or 'PR #n': why}`` for every visible, non-derived item in
+    :data:`ACTIVE` that no action this tick moves (:data:`PROGRESS`) and that nothing in flight
+    will move — no live session, no CI run, no seat queue, no merge train, no GitHub auto-merge
+    still within its target (``stalled``: the overdue waits the kernel had no action for) — and
+    for every open kernel PR that is not its live item's PR."""
+    items = facts.items
+    queued = queued or {}
+    stalled = stalled or {}
+    moved = {_item_of(a, facts) for a in actions if isinstance(a, PROGRESS)}
+    out = {}
+    for iid in sorted(judged):
+        if iid in parked or iid in moved or _derived(iid, items, children):
+            continue
+        state, stuck = states[iid]
+        if state not in ACTIVE:
+            continue
+        why = _stalled(iid, state, stuck, facts, config, judged[iid], queued, stalled)
+        if why:
+            out[iid] = why
+    for iid, why in sorted((facts.unreadable or {}).items()):
+        out[iid] = 'card unreadable, invisible to the kernel: %s' % why
+    closed = {a.pr for a in actions if isinstance(a, (A.ClosePR, A.ArchiveAndReset))}
+    for p in sorted([p for p in facts.prs if not p.merged] + list(facts.orphan_prs),
+                    key=lambda p: p.number):
+        if p.merged or p.number in closed or not kernel_owned(p.branch, config, p.item_id):
+            continue
+        it = items.get(p.item_id)
+        if it is None and p.item_id in (facts.unreadable or {}):
+            continue  # its card's own LIMBO line says why
+        if it is None:
+            out['PR #%d' % p.number] = 'its item %s is not on the record' % p.item_id
+            continue
+        mine = max((q.number for q in facts.prs if q.item_id == p.item_id and not q.merged),
+                   default=None)
+        if mine != p.number:
+            out['PR #%d' % p.number] = '%s has a newer open PR #%d' % (p.item_id, mine)
+        elif p.item_id in parked and states.get(p.item_id, (None,))[0] is not State.DONE:
+            out['PR #%d' % p.number] = 'its item %s is parked (priority: later)' % p.item_id
+    return out
+
+
+def _stalled(iid, state, stuck, facts, config, j, queued, stalled):
+    """Why item ``iid`` in ``state`` waits with nothing in flight, or '' when something is."""
+    live = [s for s in facts.sessions if s.item_id == iid and s.alive]
+    if state is State.STUCK:
+        return limbo_reason_stuck(stuck)
+    if state is State.BUILDING:
+        return '' if live else 'Building with no live session'
+    if live or j.hold or queued.get(iid) in ('seat', 'overlap'):
+        return ''
+    if state is State.READY:
+        return 'Ready, launches paused' if facts.paused else 'Ready, not launched'
+    if state is State.REVIEW:
+        if j.review_branch is None:
+            return ''  # a fresh head or a PR opened this tick: judged on the next tick's facts
+        return 'Review, launches paused' if facts.paused else 'Review, no reviewer launched'
+    pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
+             key=lambda p: p.number, default=None)
+    if pr is None:
+        return 'Landing with no open PR'
+    if j.updating or j.behind_pr is not None or any(c.status != 'completed' for c in pr.checks):
+        return ''  # CI runs, or the merge train holds its update
+    names = {c.name for c in pr.checks}
+    missing = [n for n in config.required_checks if n not in names]
+    if missing:
+        return 'required check(s) never reported on PR #%d: %s' % (pr.number, ', '.join(missing))
+    if iid in stalled:
+        return 'PR #%d green with auto-merge on, not merged after %s' % (
+            pr.number, W.dur(stalled[iid]['age_s']))
+    return ''

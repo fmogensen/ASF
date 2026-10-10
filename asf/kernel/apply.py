@@ -10,7 +10,11 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   "merge conflict", is an attempt :func:`asf.kernel.decide.conflict_attempt` (PR and head), so
   the next tick routes the PR to its rebase session; a failed launch is an attempt ``launch: …``
   — but one with no seat on its lane (:class:`asf.kernel.ports.NoSeat`) only waits a tick;
-- a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; one whose
+- a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; a live
+  one ended past its max age is stopped by the host and is an attempt
+  :data:`asf.kernel.decide.OVER_AGE` (its worktree kept);
+- a :class:`~asf.kernel.actions.ClosePR` closes the PR with a comment naming why (the branch is
+  kept); one whose
   API failed before it reported is an attempt :data:`asf.kernel.decide.API_FAILED`;
 - an ended session that reported ``pushed: rebased <sha>`` (the floor's wording: "the factory
   publishes") and pushed nothing, or a ``done`` one whose worktree holds commits origin lacks
@@ -52,11 +56,12 @@ import dataclasses
 import re
 
 from asf.kernel import actions as A
+from asf.kernel.actions import describe  # noqa: F401 — the applier's log line, re-exported
 from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               NO_VERDICT, answer_attempt, conflict_attempt, host_pushes, host_refuses,
+                               NO_VERDICT, OVER_AGE, answer_attempt, conflict_attempt, host_pushes, host_refuses,
                                no_report, rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
 
@@ -88,38 +93,6 @@ class Result:
     done: list = dataclasses.field(default_factory=list)
     failed: list = dataclasses.field(default_factory=list)
     written: list = dataclasses.field(default_factory=list)
-
-
-def describe(action):
-    """One line naming ``action``."""
-    if isinstance(action, A.Launch):
-        return 'launch %s %s on %s' % (action.kind, action.item_id, action.branch)
-    if isinstance(action, A.EnableAutoMerge):
-        return 'auto-merge #%d' % action.pr
-    if isinstance(action, A.UpdateBranch):
-        return 'update-branch #%d' % action.pr
-    if isinstance(action, A.OpenPR):
-        return 'open PR %s for %s: %s' % (action.branch, action.item_id, action.title)
-    if isinstance(action, A.Rerun):
-        return 'rerun run %s' % action.run_id
-    if isinstance(action, A.MintStory):
-        return 'mint %s under %s: %s' % (action.story_id, action.feature_id, action.title)
-    if isinstance(action, A.MarkStuck):
-        return 'stuck %s (%s): %s' % (action.item_id, action.owner, action.reason)
-    if isinstance(action, A.EndSession):
-        return 'end session %s%s' % (action.job, ' + free worktree' if action.free_worktree else '')
-    if isinstance(action, A.ApplyAnswer):
-        return 'answer %s' % action.item_id
-    if isinstance(action, A.ClearStuck):
-        return 're-judge %s: %s' % (action.item_id, action.attempt)
-    if isinstance(action, A.PushStranded):
-        return 'publish %s rebase of %s' % (action.item_id, action.job)
-    if isinstance(action, A.NoteItem):
-        return 'note %s: %s' % (action.item_id, action.text)
-    if isinstance(action, A.ArchiveAndReset):
-        return 'rebuild %s: archive %s, close #%d (%s)' % (action.item_id, action.branch,
-                                                           action.pr, action.reason)
-    return repr(action)
 
 
 class _Applier:
@@ -187,7 +160,9 @@ class _Applier:
         if s is None:
             return 'not in the facts'
         published = host_pushes(s) or host_refuses(s)  # the host's push judges this end
-        if not s.ended:
+        if s.alive:  # past its max age: the host stops it, the item is relaunched
+            self.attempt(s.item_id, OVER_AGE)
+        elif not s.ended:
             self.attempt(s.item_id, CRASH)
         elif s.kind == 'review':
             self.verdict(s)
@@ -251,6 +226,11 @@ class _Applier:
             return 'skipped: the host push failed'
         return 'PR #%s' % self.ports.github.open_pr(a.branch, a.base, a.title, a.body)
 
+    def ClosePR(self, a):
+        comment = ('Closed by the kernel: %s, so nothing would ever move this PR. The branch '
+                   '`%s` is kept.' % (a.reason, a.branch))
+        self.ports.github.close_pr(a.pr, comment)
+
     def Rerun(self, a):
         self.ports.github.rerun(a.run_id)
 
@@ -286,6 +266,8 @@ class _Applier:
                 if pr is not None else {})
         if any(rebase_finding(f) for f in findings):
             meta['host'] = True  # a rebase round: the host publishes it from the worktree
+        if a.local:
+            meta['local_first'] = True  # a breach: a seat on this host first
         try:
             if self.ports.brief is None:
                 raise P.PortError('no brief maker on the ports')

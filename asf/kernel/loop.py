@@ -6,6 +6,11 @@ held and returns at once), reads :func:`asf.kernel.facts.read_facts`, runs
 takes no lock, prints the plan instead of applying it, and runs under
 :func:`asf.mutation_guard.active`, so even a mutating ``gh`` call that slipped through refuses.
 
+Before ``decide`` the wait ledger's current spells are read into ``Facts.waits`` (a wait over its
+class's target is a breach). Every tick line says ``LIMBO n`` (the items and PRs with no action
+and nothing in flight, listed one per line: ``limbo <id>: <why>``) and logs one
+``BREACH <item> <class> <age> -> <action>`` line per breach (:func:`asf.kernel.decide.breaches`).
+
 A tick whose GitHub read failed (``Facts.github_error``, after the port's retries) is blind
 (:func:`blind_tick`): it applies :func:`asf.kernel.decide.blind_plan` only, writes no state, keeps
 the last plan, logs one ``GitHub unreadable`` line and returns ``{'blind': why}`` — exit 0.
@@ -75,6 +80,8 @@ def summarize(plan, facts, result=None, dry_run=False):
                    for a, why in (result.failed if result else [])],
         'written': list(result.written) if result else [],
         'idle': plan.idle,
+        'limbo': dict(getattr(plan, 'limbo', None) or {}),
+        'breaches': list(getattr(plan, 'breaches', None) or []),
     }
 
 
@@ -87,9 +94,21 @@ def idle_line(idle):
         idle['free'], idle['waiting'], ', '.join('%s %d' % (r, n) for r, n in idle['reasons']))
 
 
+def breach_line(b):
+    """``BREACH <item> <class> <age> -> <action>`` of one :attr:`Plan.breaches` record."""
+    from asf.kernel.waits import dur
+    return 'BREACH %s %s %s -> %s' % (b['item'], b['class'], dur(b['age_s']), b['action'])
+
+
 def print_summary(summary, out=print):
-    out('kernel tick%s: %s' % (' (dry run)' if summary['dry_run'] else '',
-                              ', '.join('%s %d' % kv for kv in summary['states'].items()) or 'no items'))
+    limbo = summary.get('limbo') or {}
+    out('kernel tick%s: %s, LIMBO %d' % (
+        ' (dry run)' if summary['dry_run'] else '',
+        ', '.join('%s %d' % kv for kv in summary['states'].items()) or 'no items', len(limbo)))
+    for key, why in sorted(limbo.items()):
+        out('  limbo %s: %s' % (key, why))
+    for b in summary.get('breaches') or []:
+        out(breach_line(b))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:
@@ -129,7 +148,9 @@ def save_plan(state_dir, plan, facts):
         for iid, (s, st) in sorted(plan.states.items())},
         'sessions': [{'job': x.job, 'item': x.item_id, 'kind': x.kind, 'alive': x.alive,
                       'started': getattr(x, 'started', '')} for x in facts.sessions],
-        'idle': plan.idle, 'notes': plan_notes(plan, facts)}
+        'idle': plan.idle, 'notes': plan_notes(plan, facts),
+        'limbo': dict(getattr(plan, 'limbo', None) or {}),
+        'breaches': list(getattr(plan, 'breaches', None) or [])}
     path = os.path.join(state_dir, PLAN_FILE)
     with open(path + '.tmp', 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=1, sort_keys=True)
@@ -171,9 +192,22 @@ def write_plan_out(path, plan, summary):
     the state counts and the planned actions by type. ``path`` is the caller's file, never the
     product's state."""
     data = {'states': {iid: s.value for iid, (s, _st) in sorted(plan.states.items())},
-            'counts': summary['states'], 'actions': summary['actions']}
+            'counts': summary['states'], 'actions': summary['actions'],
+            'limbo': summary.get('limbo') or {}, 'breaches': summary.get('breaches') or []}
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=1, sort_keys=True)
+
+
+def read_waits(facts, state_dir):
+    """Fill ``facts.waits`` with each item's current spell on the wait ledger
+    (``{item: (class, since)}``); an unreadable ledger leaves it empty (no breach this tick)."""
+    from asf.kernel import waits
+    try:
+        facts.waits = {iid: (r.get('reason') or '', r.get('at') or '')
+                       for iid, r in waits.fold(waits.read_ledger(state_dir)).items()}
+    except Exception:  # noqa: BLE001 — the measure never stops the tick
+        facts.waits = {}
+    return facts
 
 
 def blind_tick(facts, ports, out=print):
@@ -214,7 +248,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             if facts.github_error:
                 out('kernel tick (dry run): GitHub unreadable — %s' % facts.github_error)
                 return {'blind': facts.github_error, 'dry_run': True, 'failed': []}
-            plan = decide(facts, config)
+            plan = decide(read_waits(facts, state_dir), config)
         for a in plan.actions:
             out('would %s' % describe(a))
         summary = summarize(plan, facts, dry_run=True)
@@ -233,7 +267,7 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
             facts = read_facts(ports)
             if facts.github_error:
                 return blind_tick(facts, ports, out)
-            plan = decide(facts, config)
+            plan = decide(read_waits(facts, state_dir), config)
             result = apply(plan, facts, ports, log=out)
             publish = getattr(ports.record, 'publish', None)
             if publish and result.written:

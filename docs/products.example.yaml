@@ -547,6 +547,22 @@ kernel:
       merge: 10m            # parked. after and parked have no target unless set. A duration is
       conflict: 0m          # 30s, 10m, 2h, 1d or whole seconds
       stuck: 0m
+    breach: true            # waiting without acting is a bug: a wait over its target takes a
+                            # breach action this tick — Ready launches first (a seat free), a
+                            # Review gets its reviewer first on a local seat first, a behind
+                            # Landing PR goes to the front of the merge train (a conflicting or
+                            # red one is already a fix round), a Stuck its escalation. The tick
+                            # logs `BREACH <item> <class> <age> -> <action>` and says `LIMBO n`:
+                            # the items and kernel PRs with no action and nothing in flight
+                            # (listed with why; the target is 0). false: no breach actions
+    max_session_age: 3h     # a live session older than this is stopped (worktree kept) and its
+                            # item relaunched; the attempt counts like a crash
+    max_review_session_age: 90m   # the same for a review session (a review running this long
+                            # has hung — p99 is ~77m): its review is relaunched, local seat first
+  floor:
+    close_orphan_prs: true  # an open PR on a kernel branch (code/fix/spec/plan prefix) whose item
+                            # is not on the record, Done or retired is closed with a comment
+                            # naming why (the branch is kept); a reopened item keeps its PR
   install:                  # `asf kernel install`'s shadow preflight
     shadow: true            # before the plists move to another venv, that venv's
                             # `asf kernel tick --dry-run` runs on the live facts (read-only); a

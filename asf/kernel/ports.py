@@ -117,6 +117,7 @@ class GitHubPort(typing.Protocol):
     def branches(self) -> list: ...                     # [Branch] under the work prefixes
     def open_pr(self, branch, base, title, body) -> int: ...  # the PR number (new or existing)
     def archive_and_reset(self, pr, branch, head_sha, comment) -> str: ...  # the archive branch
+    def close_pr(self, pr, comment) -> None: ...
 
 
 class SessionPort(typing.Protocol):
@@ -240,6 +241,7 @@ class RealRecord:
         self.root = product.backlog_dir
         self.state_dir = state_dir or os.path.join(env.ASF_HOME, 'state', product.name)
         self._cards = None
+        self._errors = []
 
     def _scrub(self, value):
         """``value`` with every string in it passed through :func:`asf.redact.scrub_roles` — the
@@ -252,9 +254,22 @@ class RealRecord:
 
     def _load(self):
         if self._cards is None:
-            by_id, _errors = load_items(self.root)
+            by_id, self._errors = load_items(self.root)
             self._cards, _dupes = canonicalize(by_id)
         return self._cards
+
+    def unreadable(self):
+        """``{item id: why}``: every card on the record the parser refused (its id read off the
+        file name) — on the record, yet absent from :meth:`items`."""
+        self._load()
+        out = {}
+        for err in self._errors or []:
+            path = str(err[0] if isinstance(err, (list, tuple)) and err else err)
+            iid = item_of_branch(os.path.basename(path).rsplit('.', 1)[0])
+            if iid and iid not in out:
+                why = ' '.join(str(err[-1] if isinstance(err, (list, tuple)) else err).split())
+                out[iid] = '%s: %s' % (path, why[:120])
+        return out
 
     def items(self):
         out = {}
@@ -1019,6 +1034,11 @@ class RealGitHub:
                     'delete %s' % branch)
         return archive
 
+    def close_pr(self, pr, comment):
+        """Close PR ``pr`` with ``comment`` (its branch is kept)."""
+        self._write(['pr', 'close', str(pr), '-R', self.slug, '--comment', comment],
+                    'close #%d' % pr)
+
 
 # ---- sessions -----------------------------------------------------------------------------------
 
@@ -1149,6 +1169,8 @@ class RealSessions:
         local_max, cloud_max = lane_seats(self.product, self.cfg())
         local, in_cloud, _ = self._live()
         s = cloud_lane(self.product, self.cfg()) if cloud_max else None
+        if (meta or {}).get('local_first') and local < local_max:
+            return 'local'  # a breach relaunch: this host first, then the cloud lane
         host = bool((meta or {}).get('host')) or (
             s is not None and cloud.local_only(_KindRow(kind), s))
         allowed = self.product.kernel['launch']['cloud_kinds']
@@ -1299,8 +1321,16 @@ class RealSessions:
         return 'pushed rebased %s to %s (--force-with-lease)' % (full[:12], branch)
 
     def end(self, session, free_worktree):
+        """End ``session`` on the ledger; a live one (past its max age) is stopped first —
+        its process group, or its cloud run — and a stop that fails leaves it running."""
         from asf import env
         from asf.workers import lifecycle, pool, trash
+        if session.alive:
+            run = pool.load_sessions(self.product).get(session.job)
+            if run is not None:
+                ok, why = lifecycle.stop(pool.sessions_path(self.product), run)
+                if not ok:
+                    raise PortError('session %s not stopped: %s' % (session.job, why))
         reason = (lifecycle.FINISHED if session.result in ('pushed', 'report')
                   else lifecycle.DEAD_PID if not session.ended else lifecycle.NOT_PUSHED)
         extra = {}
@@ -1561,7 +1591,13 @@ def config_for(product, cfg=None, github=None):
         rebuild_after_h=float(k['stuck']['rebuild_after_h']),
         strong_model=str(k['stuck']['strong_model']),
         id_claim_answer=bool(k['stuck']['id_claim_answer']),
-        id_claim_prefixes=tuple(str(p) for p in k['stuck']['id_claim_prefixes']))
+        id_claim_prefixes=tuple(str(p) for p in k['stuck']['id_claim_prefixes']),
+        wait_targets=dict(k['waits']['targets']) if k['waits']['breach'] else {},
+        max_session_age_h=(k['waits']['max_session_age'] / 3600 if k['waits']['breach']
+                           and k['waits']['max_session_age'] else None),
+        max_review_age_h=(k['waits']['max_review_session_age'] / 3600 if k['waits']['breach']
+                          and k['waits']['max_review_session_age'] else None),
+        close_floor=bool(k['floor']['close_orphan_prs']))
 
 
 
