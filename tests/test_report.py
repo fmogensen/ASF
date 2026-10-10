@@ -136,6 +136,34 @@ class NeedsInputTests(unittest.TestCase):
         self.assertEqual(report.UNFINISHED, ('partial', 'blocked'))
 
 
+class HookRetriedTests(unittest.TestCase):
+    """F-0235: a session whose own report says the hook refused the identical push twice in-run
+    has already spent the retry a second hold would otherwise be launched to make."""
+
+    def report(self, pushed_line):
+        return ('REPORT\nitem: T-0532\nkind: fix-bug\nstatus: done\nbranch: fix/T-0532\n'
+                + pushed_line + '\n```\n')
+
+    def test_true_for_hook_refused_twice(self):
+        rep = report.parse(self.report(
+            'pushed: no — hook refused twice: pre-push lint x.py:12'))
+        self.assertTrue(report.hook_retried(rep))
+
+    def test_false_for_a_plain_hook_refused(self):
+        rep = report.parse(self.report('pushed: no — hook refused'))
+        self.assertFalse(report.hook_retried(rep))
+
+    def test_false_for_pushed_yes(self):
+        rep = report.parse(self.report('pushed: yes abc1234'))
+        self.assertFalse(report.hook_retried(rep))
+
+    def test_false_for_no_pushed_line_at_all(self):
+        rep = report.parse('REPORT\nitem: T-0532\nkind: fix-bug\nstatus: done\n'
+                           'branch: fix/T-0532\n```\n')
+        self.assertNotIn('pushed', rep)
+        self.assertFalse(report.hook_retried(rep))
+
+
 if __name__ == '__main__':
     unittest.main()
 

@@ -1313,12 +1313,13 @@ class HookRefusalEscalation(unittest.TestCase):
             for ln in lines:
                 f.write(json.dumps(ln) + '\n')
 
-    def hold(self, text):
+    def hold(self, text, retried=False):
         self.n += 1
         run = {'job': f'fix-{self.n}', 'item': 'B-0140', 'branch': 'fix/B-0140',
                'pid': self.n, 'started': f't{self.n:02d}a', 'kind': 'fix-bug'}
         self.write(run)
-        fields, line = lc.hook_refusal_hold(self.path, run, text, f't{self.n:02d}b')
+        fields, line = lc.hook_refusal_hold(self.path, run, text, f't{self.n:02d}b',
+                                            retried=retried)
         self.write(dict(fields, job=run['job']))
         return fields, line
 
@@ -1332,7 +1333,7 @@ class HookRefusalEscalation(unittest.TestCase):
         self.assertEqual(fields['correction']['same'], 1)
         self.assertNotIn('at_cap', fields['correction'])
         self.assertNotIn('parked', fields['correction'])
-        self.assertIn('(no round spent)', line)
+        self.assertIn('(no round spent, gate)', line)
 
     def test_the_correction_carries_the_hooks_own_tail(self):
         fields, _ = self.hold(self.LINT)
@@ -1372,6 +1373,58 @@ class HookRefusalEscalation(unittest.TestCase):
         fields, _ = self.hold(self.REDACT)
         self.assertEqual(fields['correction']['same'], 1)
         self.assertNotIn('at_cap', fields['correction'])
+
+    def test_a_retried_first_lint_hold_goes_straight_to_adjudicate(self):
+        # F-0235: the session already said it retried in-run, so the first hold is the cap
+        fields, line = self.hold(self.LINT, retried=True)
+        self.assertEqual(fields['correction']['same'], 1)
+        self.assertTrue(fields['correction']['at_cap'])
+        self.assertIn('adjudicate pending', line)
+        self.assertIs(fields['correction']['retried'], True)
+
+    def test_a_retried_first_redaction_hold_is_still_a_security_hold(self):
+        fields, line = self.hold(self.REDACT, retried=True)
+        self.assertTrue(fields['correction']['parked'])
+        self.assertEqual(fields.get('operator_flagged'), 1)
+        self.assertIn('security hold', line)
+        self.assertIs(fields['correction']['retried'], True)
+
+    def test_an_unretried_correction_carries_no_retried_key_at_all(self):
+        fields, _ = self.hold(self.LINT)
+        self.assertNotIn('retried', fields['correction'])
+
+    def test_the_cap_is_still_two_and_the_unretried_free_relaunch_stands(self):
+        # D5: the `published` population's free first relaunch is not touched by F-0235
+        self.assertEqual(lc.HOOK_REFUSAL_CAP, 2)
+        fields, line = self.hold(self.LINT)
+        self.assertNotIn('at_cap', fields['correction'])
+        self.assertIn('(no round spent', line)
+
+    def test_refusal_class_is_redaction_for_a_redact_text(self):
+        fields, _ = self.hold(self.REDACT)
+        self.assertEqual(fields['correction']['refusal'], 'redaction')
+
+    def test_refusal_class_is_gate_for_a_lint_text(self):
+        fields, _ = self.hold(self.LINT)
+        self.assertEqual(fields['correction']['refusal'], 'gate')
+
+    def test_refusal_class_holds_on_the_second_identical_redaction_refusal_too(self):
+        self.hold(self.REDACT)
+        fields, _ = self.hold(self.REDACT)
+        self.assertEqual(fields['correction']['refusal'], 'redaction')
+
+    def test_refusal_class_holds_on_the_second_identical_lint_refusal_too(self):
+        self.hold(self.LINT)
+        fields, _ = self.hold(self.LINT)
+        self.assertEqual(fields['correction']['refusal'], 'gate')
+
+    def test_the_three_refusal_classes_are_disjoint(self):
+        fields, _ = self.hold(self.REDACT)
+        self.assertNotEqual(fields['correction']['refusal'], 'gate')
+        self.assertNotEqual(fields['correction']['refusal'], 'footprint')
+        fields, _ = self.hold(self.LINT)
+        self.assertNotEqual(fields['correction']['refusal'], 'redaction')
+        self.assertNotEqual(fields['correction']['refusal'], 'footprint')
 
 
 class EmptyEndsTests(unittest.TestCase):

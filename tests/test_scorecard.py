@@ -181,6 +181,17 @@ class ScoreTests(unittest.TestCase):
         self.assertFalse(score.is_dead(run('j', '2026-09-01T00:00:00Z', 'finished')))
         self.assertFalse(score.is_dead(run('j', '2026-09-01T00:00:00Z', 'failed', landed=True)))
 
+    def test_f0235_the_hook_refused_cause_key_and_threshold_hold(self):
+        # P5, D6: F-0235's own two-week verify reads `failure:failed: hook refused` against the
+        # 5 runs/week threshold — this is that key made into a test, so a later change that
+        # regroups or renames it is caught here rather than making the card unverifiable
+        for text in ('failed: hook refused',
+                     'failed: hook refused: pre-push: red',
+                     'failed: hook refused: redact: docs/x.md:3 names a worker account'):
+            with self.subTest(text=text):
+                self.assertEqual(score.failure_class(text), 'failed: hook refused')
+        self.assertEqual(diagnose.THRESHOLDS['failure_per_week'], 5.0)
+
 
 class RepairPrefixTests(unittest.TestCase):
     """score.REPAIR_PREFIXES carries 'precheck' (F-0224 S-36505): a precheck session is repair
