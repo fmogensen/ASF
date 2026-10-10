@@ -436,6 +436,29 @@ class BudgetConventionTests(unittest.TestCase):
             self.assertEqual(rel, os.path.join('asf', 'conventions.py'), (rel, pattern))
 
 
+class LegacyBackfillKeys(unittest.TestCase):
+    def test_legacy_branch_is_a_declared_field(self):
+        c = Conventions.from_mapping({'legacy_branch': r'(?P<slug>[a-z-]+)-t(?P<task>\d+)'})
+        self.assertEqual(c.legacy_branch, r'(?P<slug>[a-z-]+)-t(?P<task>\d+)')
+        self.assertIn('legacy_branch', Conventions.field_names())
+        self.assertEqual(conv_mod.validate_mapping(
+            {'legacy_branch': r'(?P<slug>[a-z-]+)-t(?P<task>\d+)'}), [])
+
+    def test_a_misshapen_legacy_branch_is_exactly_one_problem(self):
+        for data in ({'legacy_branch': 12}, {'legacy_branch': ''}, {'legacy_branch': '('},
+                     {'legacy_branch': r'(?P<other>[a-z-]+)'}):
+            problems = conv_mod.validate_mapping(data)
+            self.assertEqual(len(problems), 1, data)
+            self.assertEqual(problems[0][0], 'legacy_branch', data)
+
+    def test_legacy_review_is_not_declared_and_is_kept_verbatim(self):
+        self.assertNotIn('legacy_review', Conventions.field_names())
+        self.assertEqual(conv_mod.validate_mapping({'legacy_review': 'x'}), [])
+        c = Conventions.from_mapping({'legacy_review': 'x'})
+        self.assertEqual(c.extra, {'legacy_review': 'x'})
+        self.assertEqual(c.get('legacy_review'), 'x')
+
+
 class SelfBugThresholdTests(unittest.TestCase):
     def test_the_defaults_are_ten_twenty_two_six(self):
         c = Conventions()
