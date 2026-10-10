@@ -38,9 +38,10 @@ class EnableAutoMerge:
 @dataclasses.dataclass
 class MergePR:
     """Merge PR number ``pr`` now, only while its head is still ``head_sha``
-    (``--match-head-commit``): it is CLEAN, approved, green on every required check and had
-    auto-merge enabled a tick ago, yet GitHub's auto-merge has not fired (seen 2026-10-10 once
-    strict was turned off: 19 green PRs idle 30+ min)."""
+    (``--match-head-commit``): it is CLEAN, approved and green on every required check — either
+    auto-merge was enabled a tick ago yet has not fired (seen 2026-10-10 once strict was turned
+    off: 19 green PRs idle 30+ min), or it is not on and GitHub refuses to enable it on a PR
+    already CLEAN (F-0337)."""
     pr: int
     head_sha: str
 
@@ -303,7 +304,7 @@ def describe(action):
     if isinstance(action, EnableAutoMerge):
         return 'auto-merge #%d' % action.pr
     if isinstance(action, MergePR):
-        return 'MERGE direct #%d (auto-merge idle)' % action.pr
+        return 'MERGE direct #%d (clean and green)' % action.pr
     if isinstance(action, UpdateBranch):
         return 'update-branch #%d' % action.pr
     if isinstance(action, OpenPR):
