@@ -414,6 +414,13 @@ def build_parser():
 
     p_backlog_view = sub.add_parser('backlog', help='the BOARD table: one row per Feature, grouped by Epic')
     p_backlog_view.add_argument('--product')
+    p_backlog_view.add_argument('--epic', help='keep only this Epic\'s group (the full board can '
+                                 'run past a console\'s own output cap)')
+    p_backlog_view.add_argument('--all', action='store_true',
+                                 help='opt out of the default collapsing: a full row for every '
+                                 'Feature, undecided and Closed/on-prod ones included, not just '
+                                 'a one-line summary for each (the board as it was before '
+                                 'B-0088 — it can run past a console\'s own output cap)')
 
     p_parity = sub.add_parser('parity', help='the PARITY table: one row per Story')
     p_parity.add_argument('--product')
