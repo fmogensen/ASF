@@ -1,7 +1,7 @@
 """A batch in flight survives everything that is not a verdict on its own code
 (:mod:`asf.merge_queue`).
 
-Five ways a live batch was lost or kept expensive (2026-10-05, overnight):
+Six ways a live batch was lost or kept expensive (2026-10-05, overnight):
 
 1. a ``--priority`` land request must queue behind (or stack on) the batches in CI — never
    destroy them;
@@ -13,19 +13,26 @@ Five ways a live batch was lost or kept expensive (2026-10-05, overnight):
    verdict: its failed jobs are re-run once on the batch sha, then the batch is cut again —
    never red, never held for hours;
 5. only the required checks judge: a red job the product does not require never drops a batch,
-   and the queue never re-runs one.
+   and the queue never re-runs one;
+6. a workflow run the host cut short (a cancel, a timeout) is no verdict on the batch, whatever
+   its skipped required jobs say — the run is re-run whole once, then the batch is cut again, and
+   a contention cancel the CI start queue already made is its re-run to own.
 """
+import copy
+import datetime
+import json
+import os
 import time
 import unittest
+from unittest import mock
 
-from asf import ci_queue, merge_queue
+from asf import ci_queue, flake, merge_queue
 from asf.harvest import lane
 
 from tests.test_lane import sh
 from tests.test_merge_queue import SLUG, NoVerdictGH, QueueRepo, run_check, stamp
 from asf import github
 from tests import contracts
-from unittest import mock
 
 CANCELED = [{'message': 'The operation was canceled.', 'annotation_level': 'failure'}]
 
@@ -55,6 +62,13 @@ class Survival(QueueRepo):
 
     def dropped_lines(self):
         return [l for l in self.lines if 'dropped' in l]
+
+    def red_ledger_rows(self):
+        path = os.path.join(self.state_dir, 'gates.jsonl')
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding='utf-8') as fh:
+            return [json.loads(l)['line'] for l in fh]
 
 
 class PriorityNeverDestroys(Survival):
@@ -415,3 +429,403 @@ class SkippedBehindUnrequired(Survival):
         self.assertEqual(merge_queue.job_of(jobs, 'rules'), 'rules')
         scalar = merge_queue.workflow_jobs('jobs:\n  a:\n    x: 1\n  b:\n    needs: a\n')
         self.assertEqual(scalar['b']['needs'], ['a'])
+
+
+def _cut_short_check(name, conclusion='skipped', run=600001):
+    return {'name': name, 'status': 'completed', 'conclusion': conclusion,
+            'details_url': f'https://github.com/o/p/actions/runs/{run}/job/{run + 1}'}
+
+
+def _cut_short_listing(run_id, conclusion, status='completed'):
+    return {'id': run_id, 'status': status, 'conclusion': conclusion}
+
+
+class CutShortReads(unittest.TestCase):
+    """Design §1's two pure readers, over hand-written check runs and run listings — no repo, no
+    fake host, no batch: the one piece of this change assertable without either (S-91805)."""
+
+    def test_a_cancelled_run_comes_back_marked_with_its_run_id(self):
+        runs = [_cut_short_check('gate'), _cut_short_check('gate-tests')]
+        why = 'gate (skipped), gate-tests (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        marked, ids = merge_queue.run_cut_short(runs, why, wf)
+        self.assertEqual(ids, ['600001'])
+        self.assertEqual([r['conclusion'] for r in marked], ['cancelled', 'cancelled'])
+
+    def test_a_timed_out_run_comes_back_the_same_way(self):
+        runs = [_cut_short_check('gate'), _cut_short_check('gate-tests')]
+        why = 'gate (skipped), gate-tests (skipped)'
+        wf = [_cut_short_listing(600001, 'timed_out')]
+        marked, ids = merge_queue.run_cut_short(runs, why, wf)
+        self.assertEqual(ids, ['600001'])
+        self.assertEqual([r['conclusion'] for r in marked], ['cancelled', 'cancelled'])
+
+    def test_a_check_a_runner_judged_beside_skipped_ones_is_nothing_at_all(self):
+        runs = [_cut_short_check('gate', 'failure'), _cut_short_check('gate-tests')]
+        why = 'gate (failure), gate-tests (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, why, wf))
+
+    def test_a_judged_leg_beside_a_skipped_sibling_leg_is_nothing_at_all(self):
+        runs = [_cut_short_check('gate-tests (a)', 'failure'), _cut_short_check('gate-tests (b)')]
+        why = 'gate-tests (failure), gate-tests (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, why, wf))
+
+    def test_a_skipped_check_on_a_failed_run_is_nothing_at_all(self):
+        runs = [_cut_short_check('gate')]
+        why = 'gate (skipped)'
+        wf = [_cut_short_listing(600001, 'failure')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, why, wf))
+
+    def test_a_skipped_check_on_a_successful_run_is_nothing_at_all(self):
+        runs = [_cut_short_check('gate')]
+        why = 'gate (skipped)'
+        wf = [_cut_short_listing(600001, 'success')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, why, wf))
+
+    def test_a_skipped_check_with_no_run_id_is_nothing_at_all(self):
+        runs = [{'name': 'gate', 'status': 'completed', 'conclusion': 'skipped',
+                'details_url': 'https://github.com/o/p/pull/1'}]
+        why = 'gate (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, why, wf))
+
+    def test_a_skipped_check_whose_run_is_absent_is_nothing_at_all(self):
+        runs = [_cut_short_check('gate')]
+        why = 'gate (skipped)'
+        wf = [_cut_short_listing(600099, 'cancelled')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, why, wf))
+
+    def test_skipped_checks_across_two_runs_come_back_with_both_ids_sorted(self):
+        runs = [_cut_short_check('gate', run=600003), _cut_short_check('gate-tests', run=600001)]
+        why = 'gate (skipped), gate-tests (skipped)'
+        wf = [_cut_short_listing(600003, 'cancelled'), _cut_short_listing(600001, 'timed_out')]
+        marked, ids = merge_queue.run_cut_short(runs, why, wf)
+        self.assertEqual(ids, ['600001', '600003'])
+
+    def test_one_healthy_leg_beside_a_cut_short_leg_of_the_same_job_is_nothing_at_all(self):
+        runs = [_cut_short_check('gate-tests (a)', run=600001),
+                _cut_short_check('gate-tests (b)', run=600002)]
+        why = 'gate-tests (skipped), gate-tests (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled'), _cut_short_listing(600002, 'success')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, why, wf))
+
+    def test_an_unrequired_check_is_neither_read_nor_remarked(self):
+        runs = [_cut_short_check('gate'), _cut_short_check('site', 'failure')]
+        why = 'gate (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        marked, _ids = merge_queue.run_cut_short(runs, why, wf)
+        site = next(r for r in marked if r['name'] == 'site')
+        self.assertEqual(site['conclusion'], 'failure')
+
+    def test_a_matrix_leg_is_read_by_its_job_key(self):
+        runs = [_cut_short_check('gate-tests (a)')]
+        why = 'gate-tests (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        marked, _ids = merge_queue.run_cut_short(runs, why, wf)
+        self.assertEqual(marked[0]['conclusion'], 'cancelled')
+
+    def test_the_input_is_not_mutated(self):
+        runs = [_cut_short_check('gate'), _cut_short_check('gate-tests')]
+        why = 'gate (skipped), gate-tests (skipped)'
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        before = copy.deepcopy(runs)
+        marked, _ids = merge_queue.run_cut_short(runs, why, wf)
+        self.assertEqual(runs, before)
+        self.assertIsNot(marked, runs)
+        self.assertEqual([r['conclusion'] for r in marked], ['cancelled', 'cancelled'])
+
+    def test_green_pending_or_no_skip_is_nothing_at_all(self):
+        runs = [_cut_short_check('gate', 'success')]
+        wf = [_cut_short_listing(600001, 'cancelled')]
+        self.assertIsNone(merge_queue.run_cut_short(runs, '', wf))
+        self.assertIsNone(merge_queue.run_cut_short(runs, 'gate (failure)', wf))
+
+
+class HostCancelIsNoVerdict(Survival):
+    """2026-10-08: a batch whose required jobs were only skipped on a host-cancelled run was
+    dropped as red and split — PRs #1294, #1295 and #1254 lost. A run the host cut short judges
+    no code one level up from a single skipped check (S-91806)."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(self.repo, '.github/workflows/ci.yml', WORKFLOW)
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'ci'], cwd=self.repo, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+
+    def cut_one(self):
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1),
+                                      self.entry('worker/T-0002', 2, 'T-0002')])
+        (batch,) = self.batches()
+        return batch
+
+    def cancel(self, batch, run_id=600001, conclusion='cancelled', completed=None):
+        self.gh.checks[batch['sha']] = [
+            job_check('gate', 'skipped', 600003, run=run_id, completed=completed),
+            job_check('gate-tests (a)', 'skipped', 600004, run=run_id, completed=completed)]
+        self.gh.wf[batch['sha']] = [{'id': run_id, 'status': 'completed', 'conclusion': conclusion,
+                                     'head_branch': batch['ref'],
+                                     'path': '.github/workflows/ci.yml'}]
+
+    def _run_reads(self):
+        return [c for c in self.gh.calls if c[0] == 'api' and '/actions/runs?head_sha=' in c[1]]
+
+    def test_a_host_cancelled_run_is_rerun_whole_once_then_recut_never_red(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '600001', '-R', SLUG]])
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        self.assertEqual((self.backs, self.dropped_lines()), ([], []))
+        self.assertEqual(self.red_ledger_rows(), [])
+        claim = ci_queue.load_claims(self.state_dir)['600001']
+        self.assertEqual((claim['cause'], claim['sha']), (merge_queue.MQ_RERUN, batch['sha']))
+        self.assertTrue(any('host cut short run(s) 600001' in l
+                            and 'the required jobs judged no code' in l for l in self.lines),
+                        self.lines)
+        # its re-run cut short again: no verdict twice — cut again, nobody blamed
+        self.cancel(batch, completed=stamp(120))
+        _next_second()
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.gh.reruns()), 1)
+        self.assertEqual(self.backs, [])
+        self.assertEqual(self.red_ledger_rows(), [])
+        self.assertTrue(any('ALARM' in l and batch['ref'] in l for l in self.lines), self.lines)
+        (recut,) = self.batches()
+        self.assertNotEqual(recut['sha'], batch['sha'])
+        self.assertEqual(self.heads()['main'], batch['base'])
+
+    def test_no_member_is_blamed_and_no_batch_is_split(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.queue_pass(self.lane(), [])
+        self.cancel(batch, completed=stamp(120))
+        _next_second()
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        (recut,) = self.batches()
+        self.assertEqual({m['branch'] for m in recut['members']},
+                         {'worker/T-0001', 'worker/T-0002'})
+
+    def test_a_judged_upstream_on_a_cut_short_run_is_rerun_whole_not_announced(self):
+        batch = self.cut_one()
+        self.gh.checks[batch['sha']] = [
+            job_check('rules', 'failure', 600002),
+            job_check('gate', 'skipped', 600003),
+            job_check('gate-tests (a)', 'skipped', 600004)]
+        self.gh.wf[batch['sha']] = [{'id': 600001, 'status': 'completed',
+                                     'conclusion': 'cancelled', 'head_branch': batch['ref'],
+                                     'path': '.github/workflows/ci.yml'}]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '600001', '-R', SLUG]])
+        self.assertFalse(any('the real cause' in l for l in self.lines), self.lines)
+        self.assertEqual((self.backs, self.dropped_lines()), ([], []))
+
+    def test_an_ordinary_red_reads_the_listing_not_at_all(self):
+        batch = self.cut_one()
+        self.gh.checks[batch['sha']] = [run_check('gate', 'failure'), run_check('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self._run_reads(), [])
+
+    def test_a_skip_only_red_reads_the_listing_once(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self._run_reads()), 1)
+
+    def test_skipped_behind_a_cancelled_upstream_reads_the_listing_once(self):
+        batch = self.cut_one()
+        self.gh.checks[batch['sha']] = [
+            job_check('rules', 'cancelled', 600002),
+            job_check('gate', 'skipped', 600003),
+            job_check('gate-tests (a)', 'skipped', 600004)]
+        self.gh.wf[batch['sha']] = [{'id': 600001, 'status': 'completed',
+                                     'conclusion': 'cancelled', 'head_branch': batch['ref'],
+                                     'path': '.github/workflows/ci.yml'}]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self._run_reads()), 1)
+
+    def test_an_unreadable_listing_leaves_the_batch_judged_as_before(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        with mock.patch.object(merge_queue, '_workflow_runs', return_value=None):
+            self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [])
+        self.assertFalse(any('host cut short' in l for l in self.lines), self.lines)
+
+    def test_no_flake_settle_for_skipped_checks(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.queue_pass(self.lane(), [])
+        data = flake.load(self.state_dir)
+        self.assertEqual(data['reruns'], {})
+        self.assertEqual(data['quarantine'], [])
+
+
+class _ContentionSrc:
+    """:func:`asf.ci_queue._contention`'s ``src``: a fixed p50 and a fixed ``gh run rerun``
+    answer, honoured or refused."""
+
+    def __init__(self, ok=True):
+        self.ok = ok
+
+    def job_p50_min(self, _wf, _job):
+        return 3
+
+    def _gh(self, _args):
+        return (0, '', '') if self.ok else None
+
+
+class ContentionIsTheStartQueuesRerun(Survival):
+    """2026-10-08: the merge queue and the CI start queue both asked the host to re-run the same
+    cut-short run, each unaware of the other's claim. A contention cancel the start queue already
+    made is its re-run to own (S-91807)."""
+
+    def setUp(self):
+        super().setUp()
+        self.write(self.repo, '.github/workflows/ci.yml', WORKFLOW)
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'ci'], cwd=self.repo, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+
+    def cut_one(self):
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1),
+                                      self.entry('worker/T-0002', 2, 'T-0002')])
+        (batch,) = self.batches()
+        return batch
+
+    def cancel(self, batch, run_id=600001):
+        self.gh.checks[batch['sha']] = [job_check('gate', 'skipped', 600003, run=run_id),
+                                        job_check('gate-tests (a)', 'skipped', 600004, run=run_id)]
+        self.gh.wf[batch['sha']] = [{'id': run_id, 'status': 'completed',
+                                     'conclusion': 'cancelled', 'head_branch': batch['ref'],
+                                     'path': '.github/workflows/ci.yml'}]
+
+    def claim(self, batch, cause=None, run_id='600001', age_s=0, **extra):
+        at = ci_queue._now() - datetime.timedelta(seconds=age_s)
+        fields = {'sha': batch['sha'], 'branch': batch['ref'], 'job': 'rules', 'p50': 3,
+                  'timeout': 10, 'attempt': 1}
+        fields.update(extra)
+        ci_queue.claim_cancel(self.state_dir, run_id, cause or ci_queue.CONTENTION_RERUN, at,
+                              **fields)
+
+    def test_with_a_contention_rerun_claim_the_judge_asks_the_host_for_nothing(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.claim(batch)
+        before = ci_queue.load_claims(self.state_dir)['600001']
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [])
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        claims = ci_queue.load_claims(self.state_dir)
+        self.assertEqual(claims['600001'], before)
+        self.assertNotIn(f"mq:{batch['sha']}", claims)
+        self.assertTrue(any('runner contention' in l and 'the CI start queue' in l
+                            for l in self.lines), self.lines)
+
+    def test_a_contention_rerun_claim_past_grace_with_nothing_live_cuts_the_batch_again(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.claim(batch, age_s=merge_queue.RERUN_GRACE_S + 1)
+        _next_second()
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertTrue(any('ALARM' in l and batch['ref'] in l for l in self.lines), self.lines)
+        (recut,) = self.batches()
+        self.assertNotEqual(recut['sha'], batch['sha'])
+
+    def test_a_contention_rerun_claim_past_grace_with_a_run_still_live_stays_pending(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.gh.wf[batch['sha']].append({'id': 600005, 'status': 'in_progress',
+                                         'conclusion': None, 'head_branch': batch['ref']})
+        self.claim(batch, age_s=merge_queue.RERUN_GRACE_S + 1)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        self.assertEqual(self.backs, [])
+
+    def test_a_contention_refused_claim_cuts_the_batch_again_never_red(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.claim(batch, cause=ci_queue.CONTENTION_REFUSED)
+        _next_second()
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.red_ledger_rows(), [])
+        (recut,) = self.batches()
+        self.assertNotEqual(recut['sha'], batch['sha'])
+
+    def test_a_contention_alarm_claim_cuts_the_batch_again_never_red(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.claim(batch, cause=ci_queue.CONTENTION_ALARM)
+        _next_second()
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.red_ledger_rows(), [])
+        (recut,) = self.batches()
+        self.assertNotEqual(recut['sha'], batch['sha'])
+
+    def test_a_cutting_contention_claim_writes_the_alarm_claim_and_leaves_the_start_queues_claim(
+            self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.claim(batch, cause=ci_queue.CONTENTION_REFUSED)
+        before = dict(ci_queue.load_claims(self.state_dir)['600001'])
+        self.queue_pass(self.lane(), [])
+        claims = ci_queue.load_claims(self.state_dir)
+        self.assertEqual(claims['600001'], before)
+        alarm = claims[f"mq:{batch['sha']}"]
+        self.assertEqual(alarm['cause'], merge_queue.MQ_ALARM)
+        rows = merge_queue.doctor_rows(self.product())
+        self.assertTrue(any(batch['ref'] in d for _ok, _red, d in rows), rows)
+
+    def test_a_contention_claim_for_another_sha_is_ignored(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.claim(batch, run_id='700001', sha='f' * 40)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.gh.reruns(), [['run', 'rerun', '600001', '-R', SLUG]])
+
+    def test_the_newest_claim_decides_when_more_than_one_names_the_sha(self):
+        batch = self.cut_one()
+        self.cancel(batch)
+        self.claim(batch, cause=ci_queue.CONTENTION_ALARM, run_id='600001', age_s=100)
+        self.claim(batch, cause=ci_queue.CONTENTION_RERUN, run_id='600002', age_s=1)
+        self.queue_pass(self.lane(), [])
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        self.assertEqual(self.gh.reruns(), [])
+
+    def test_the_refused_cause_is_a_named_constant_written_and_read_back(self):
+        out = []
+        run = {'databaseId': 900001, 'headBranch': 'worker/T-0001', 'headSha': 'a' * 40,
+              'attempt': 1}
+        ci_queue._contention(self.product(), _ContentionSrc(ok=False), 'ci.yml', run, 'rules',
+                             10, {}, self.state_dir, 'run 900001', out.append, False,
+                             ci_queue._now())
+        claim = ci_queue.load_claims(self.state_dir)['900001']
+        self.assertEqual(claim['cause'], ci_queue.CONTENTION_REFUSED)
+        self.assertEqual(claim['cause'], 'contention-refused')
+
+    def test_the_alarm_cause_is_the_existing_constant_unchanged_on_disk(self):
+        out = []
+        run = {'databaseId': 900002, 'headBranch': 'worker/T-0001', 'headSha': 'b' * 40,
+              'attempt': 1}
+        ci_queue._contention(self.product(), _ContentionSrc(), 'ci.yml', run, 'rules', 10, {},
+                             self.state_dir, 'run 900002', out.append, False, ci_queue._now())
+        claims = ci_queue.load_claims(self.state_dir)
+        run2 = dict(run, databaseId=900003)
+        ci_queue._contention(self.product(), _ContentionSrc(), 'ci.yml', run2, 'rules', 10,
+                             claims, self.state_dir, 'run 900003', out.append, False,
+                             ci_queue._now())
+        claim = ci_queue.load_claims(self.state_dir)['900003']
+        self.assertEqual(claim['cause'], ci_queue.CONTENTION_ALARM)
+        self.assertEqual(claim['cause'], 'contention-alarm')
+
+    def test_all_three_contention_constants_are_read_by_the_existing_tables(self):
+        from asf import ci_cancels
+        from asf.metrics import reds
+        for cause in (ci_queue.CONTENTION_RERUN, ci_queue.CONTENTION_REFUSED,
+                      ci_queue.CONTENTION_ALARM):
+            self.assertEqual(ci_cancels.HONOURED[cause], 'timeout')
+            self.assertIn(cause, reds.RUNNER_CLAIMS)

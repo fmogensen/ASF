@@ -56,8 +56,18 @@ batch whose ``gate`` was cancelled sat "pending" 3 h, the green batch behind it 
 chain). A cancel the CI start queue made itself (its ``relief`` record) is its own to re-run. A required
 job lost with its runner — a kill or an OOM the host reports as ``failure`` with ``The operation
 was canceled.`` (:func:`asf.flake.infra_red`) — is the same non-verdict (:func:`_runner_lost`).
-Only the required jobs are re-run (``gh run rerun --job``), never the whole run's red jobs: a
-red job the product does not require never judges a batch and is never re-run by the queue.
+A **run** the host cut short is the same non-verdict one level up: when every red entry of a
+verdict is a required check ``skipped`` and the runs those skips belong to concluded ``cancelled``
+or ``timed_out`` (:func:`run_cut_short`), nothing judged the batch — whatever cut the run, a
+skipped job is no reading of the members' code. Where the ``needs:`` graph can name the job the
+host cut (:func:`skipped_behind`) that job is re-run and this never fires; where it cannot, the
+run is re-run whole once per batch sha, then the batch is cut again. A cancel the CI start queue
+already read as runner contention (:func:`asf.ci_queue._contention`) is its re-run to own: the
+queue waits for it, and cuts again when it was refused or alarmed.
+Only the required jobs are re-run (``gh run rerun --job``) wherever the job to re-run can be
+named: a red job the product does not require never judges a batch and is never re-run on its
+own account. A run in which no such job can be named is re-run whole (:func:`run_cut_short`) —
+there is nothing else left to ask for.
 The verdict reads every attempt on the sha (:func:`batch_runs`): per check, the newest attempt
 that completed and judged code — a cancelled re-run never hides an earlier green attempt.
 
@@ -1038,13 +1048,16 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     if runs is None:
         return 'pending', 'check runs unreadable', None
     state, why = verdict(runs, required, NONVERDICT)
+    wf, skip = None, None
     if state == 'red':
         # a required job lost with its runner (a kill, an OOM: "The operation was canceled.")
         # concluded failure on the host but judged no code: a non-verdict like a cancel — its
         # jobs re-run once on the sha, then the batch is cut again; never red, never held
         lost = _runner_lost(lane, runs, required, why)
-        wf = _workflow_runs(lane.slug, sha) if lost is not None else None
-        if wf is not None:     # unreadable: the flake triage below re-runs it, as before
+        skip = _skip_only(why)                       # pure; the gate, and the job names below
+        if lost is not None or skip:
+            wf = _workflow_runs(lane.slug, sha)       # once, for all four readers below
+        if lost is not None and wf is not None:      # unreadable: the triage below re-runs it
             marked, jobs, names = lost
             got = _nonverdict(lane, batch, marked, required, st, rerun_jobs=jobs, wf=wf)
             if got:
@@ -1054,7 +1067,7 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     # upstream is the cause, read off the workflow's own graph — cut short (a cancel, a
     # timeout) it judged no code: a non-verdict, re-run once then cut again; failed, it is the
     # real cause, said, and the only failure the triage and the blame below read
-    behind = skipped_behind(lane, runs, required, why, sha) if state == 'red' else None
+    behind = skipped_behind(lane, runs, required, why, sha, wf=wf) if state == 'red' else None
     causes = {}
     if behind:
         from asf.harvest import deploy
@@ -1066,10 +1079,28 @@ def judge(lane, batch, members, heads, trunk_sha, st):
                       if deploy.job_key(r.get('name')) in behind
                       and r.get('conclusion') == 'skipped' else r for r in runs]
             jobs = sorted({_job_id(r) for rs in behind.values() for r in rs} - {None})
-            got = _nonverdict(lane, batch, marked, required, st, rerun_jobs=jobs or None)
+            got = _nonverdict(lane, batch, marked, required, st, rerun_jobs=jobs or None, wf=wf)
             if got:
                 return got
             return 'pending', f'{said} — not required, cut short: no verdict', None
+    # a workflow run the host cut short (a cancel, a timeout) where the ``needs:`` graph names
+    # no cause at all: every red required check merely skipped, with nothing of its own to
+    # re-run — the whole run is re-run once per batch sha, then the batch is cut again
+    if state == 'red' and wf is not None:
+        cut = run_cut_short(runs, why, wf)
+        if cut is not None:
+            marked, run_ids = cut
+            cut_said = (f"{why} — the host cut short run(s) {', '.join(run_ids)}: "
+                        f"the required jobs judged no code")
+            lane.out(f'merge queue: {ref} {cut_said}')
+            got = _contention_held(lane, batch, sha, wf, cut_said, sorted(skip))
+            if got is not None:
+                return got
+            got = _nonverdict(lane, batch, marked, required, st, rerun_run=True, wf=wf)
+            if got:
+                return got
+            return 'pending', f'{cut_said} — no verdict', None
+    if behind:
         lane.out(f"merge queue: {ref} {said} — the real cause, a job the product does not "
                  f"require; {', '.join(sorted(behind))} judged no code")
     checks = flake.batch_checks(runs)
@@ -1169,6 +1200,38 @@ def _ci_queue_holds(lane, ref):
     return any(isinstance(r, dict) and r.get('branch') == ref for r in relief)
 
 
+def _contention_held(lane, batch, sha, wf, said, jobs):
+    """What to do about a batch whose cut-short run the CI start queue already read as runner
+    contention (:func:`asf.ci_queue._contention`, the claim in ``ci-cancels.json``): ``None``
+    when there is no such claim — this judge asks for the re-run itself. Its
+    ``contention-rerun`` is left to land, the batch pending, while a run on the sha is live or
+    the claim is younger than :data:`RERUN_GRACE_S`; past that, and for a ``contention-refused``
+    or a ``contention-alarm`` — the queue has had its answer on that run — the batch is cut
+    again, nobody blamed, with the :data:`MQ_ALARM` claim at the ``mq:<sha>`` key so
+    :func:`doctor_rows` sees it. Never red: the claim is the host's cancel, not a reading of the
+    code."""
+    now = ci_queue._now()
+    claims = ci_queue.load_claims(lane.state_dir)
+    mine = [c for c in claims.values() if isinstance(c, dict)
+            and c.get('cause') in (ci_queue.CONTENTION_RERUN, ci_queue.CONTENTION_REFUSED,
+                                    ci_queue.CONTENTION_ALARM) and c.get('sha') == sha]
+    if not mine:
+        return None
+    claim = min(mine, key=lambda c: ci_queue._age(c.get('at'), now))
+    cause = claim.get('cause')
+    if cause == ci_queue.CONTENTION_RERUN:
+        live = any(r.get('status') != 'completed' for r in wf or ())
+        if live or ci_queue._age(claim.get('at'), now) < RERUN_GRACE_S:
+            return 'pending', f'{said} — the CI start queue re-ran it as runner contention', None
+    members = ', '.join(f"#{m.get('pr')}" for m in batch['members'])
+    lane.out(f"merge queue: ALARM {batch['ref']} {said} — contention {cause}, no re-run "
+             f'coming; cut again ({members}), no member blamed')
+    ci_queue.claim_cancel(lane.state_dir, f'mq:{sha}', MQ_ALARM, now, sha=sha,
+                          ref=batch['ref'], jobs=jobs,
+                          prs=[m.get('pr') for m in batch['members']], why=said)
+    return 'recut', f'{said} — contention {cause} on {sha[:9]}, no re-run coming', None
+
+
 def _advance_member(lane, batch, f, head):
     """Move batch member ``f``'s head to ``head`` (a marker-only move, :func:`asf.harvest.lane.
     marker_move`) in the batch record and, for a lane-held member still QUEUED on this batch, on
@@ -1239,7 +1302,7 @@ def _job_id(r):
     return None
 
 
-def _nonverdict(lane, batch, runs, required, st, rerun_jobs=None, wf=None):
+def _nonverdict(lane, batch, runs, required, st, rerun_jobs=None, wf=None, rerun_run=False):
     """A pending batch whose required checks judged no code, with nothing queued or running on
     its sha to replace them — a cancelled (or ``timed_out``/``stale``/``startup_failure``,
     :data:`NONVERDICT`) required check, or a batch pending past ``merge_queue.stuck_min`` with
@@ -1329,6 +1392,8 @@ def _nonverdict(lane, batch, runs, required, st, rerun_jobs=None, wf=None):
                                for j in [_job_id(r)] if j}) if gone else []
     if rerun_jobs:
         jobs_of = {rid: list(rerun_jobs) if i == 0 else [] for i, rid in enumerate(ids)}
+    if rerun_run:
+        jobs_of = {rid: [] for rid in ids}
     refused = []
     for rid in ids:
         if jobs_of.get(rid):
@@ -1336,7 +1401,8 @@ def _nonverdict(lane, batch, runs, required, st, rerun_jobs=None, wf=None):
         elif rerun_jobs:
             continue
         else:
-            calls = [['run', 'rerun', rid, '-R', lane.slug] + (['--failed'] if gone else [])]
+            calls = [['run', 'rerun', rid, '-R', lane.slug]
+                     + (['--failed'] if gone and not rerun_run else [])]
         if [args for args in calls if H._gh(args)[0] != 0]:
             refused.append(rid)
     for rid in refused:
@@ -1494,9 +1560,59 @@ def skipped_behind(lane, runs, required, why, sha, wf=None):
     return out
 
 
+def run_cut_short(runs, why, wf):
+    """``(runs, run ids)`` when the red verdict ``why`` is no verdict at all because the host cut
+    its run short: every red entry in ``why`` is a required check that concluded ``skipped``
+    (:func:`_skip_only`), and every workflow run those skipped checks belong to (``wf``, by
+    :func:`_run_id`) concluded in :data:`NONVERDICT` — a cancel, a timeout, a supersede, a run
+    whose jobs never started. ``runs`` comes back with those checks re-marked ``cancelled``, the
+    non-verdict they are, so :func:`_nonverdict` reads them; the run ids are the runs to re-run
+    whole (a skipped job has nothing of its own to re-run). None when any red entry is a check a
+    runner judged (a verdict, whatever happened to its run afterwards), when a skipped check
+    names no readable run, or when its run reached a verdict of its own — a path-filtered skip on
+    a healthy run is red, as it has been since 2026-09-26. ``why`` must be the one :func:`verdict`
+    returned for these ``runs``, which is what makes every name in it a required one; no
+    ``required`` is taken, because a second filter on names that are required by construction
+    would guard nothing. Not :meth:`asf.harvest.lane.Lane.cut_short`, which cuts a PR's gate
+    short. Pure: the caller reads the checks and the runs once."""
+    from asf.harvest import deploy
+    skipped = _skip_only(why)
+    if not skipped:
+        return None
+    by_id = {str(r.get('id')): r for r in wf or ()}
+    run_ids = set()
+    for name in sorted(skipped):
+        mine = [r for r in runs or () if deploy.job_key(r.get('name')) == name
+                and r.get('conclusion') == 'skipped']
+        for r in mine:
+            rid = _run_id(r)
+            if not rid:
+                return None
+            run = by_id.get(rid)
+            if run is None or run.get('conclusion') not in NONVERDICT:
+                return None
+            run_ids.add(rid)
+    marked = [dict(r, conclusion='cancelled')
+              if deploy.job_key(r.get('name')) in skipped and r.get('conclusion') == 'skipped'
+              else r for r in runs]
+    return marked, sorted(run_ids)
+
+
 def _skipped(why):
     """The required names a verdict's ``why`` reads as ``skipped``."""
     return {n.split(' ', 1)[0] for n in (why or '').split(', ') if n.endswith('(skipped)')}
+
+
+def _skip_only(why):
+    """The required job keys a red verdict ``why`` reads as ``skipped`` when **every** red entry
+    in it is one — else None. One entry per check run, not per job (:func:`verdict` loops over
+    every run of a required name), because a required job with one matrix leg a runner concluded
+    ``failure`` and a sibling leg ``skipped`` — the shape a cancel makes when a leg had not
+    started — has ``red - skipped`` empty and is still a verdict."""
+    red = [e for e in (why or '').split(', ') if e]
+    if not red or any(not e.endswith('(skipped)') for e in red):
+        return None
+    return {e.split(' ', 1)[0] for e in red}
 
 
 def root_failures(checks, why):

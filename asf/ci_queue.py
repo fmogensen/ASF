@@ -2962,6 +2962,8 @@ JOB_P50_RUNS = 10
 _JOB_P50 = {}
 #: the claim causes of a timeout read as contention (:func:`_contention`)
 CONTENTION_RERUN, CONTENTION_ALARM = 'contention-rerun', 'contention-alarm'
+#: its re-run the host refused: not asked again on that run
+CONTENTION_REFUSED = 'contention-refused'
 
 
 def _job_key(name):
@@ -3006,7 +3008,7 @@ def _contention(product, src, wf, run, job, mins, claims, state_dir, who, out, d
         out(f'ci queue: ALARM {who} — job {job} cancelled by its {mins} min timeout again on '
             f'the same head (p50 {p50} min): runner contention twice, not re-run')
         if not dry_run:
-            claim_cancel(state_dir, rid, 'contention-alarm', now, **extra)
+            claim_cancel(state_dir, rid, CONTENTION_ALARM, now, **extra)
         return True
     if dry_run:
         out(f'ci queue: would re-run {who} — job {job} hit its {mins} min timeout with p50 '
@@ -3017,7 +3019,7 @@ def _contention(product, src, wf, run, job, mins, claims, state_dir, who, out, d
         f'p50 is {p50} min: runner contention, not a verdict — '
         + ('re-run of its failed jobs requested (once per head)' if ok
            else 're-run refused, not asked again'))
-    claim_cancel(state_dir, rid, 'contention-rerun' if ok else 'contention-refused', now,
+    claim_cancel(state_dir, rid, CONTENTION_RERUN if ok else CONTENTION_REFUSED, now,
                  **extra)
     return True
 
