@@ -83,6 +83,93 @@ class PlanTests(FixtureSuite):
         self.assertEqual(len(set(pool + serial)), len(pool + serial))
 
 
+class PartTests(FixtureSuite):
+    """F-0301: ``--part K/N`` — CI's N parallel jobs together run every module exactly once."""
+
+    def test_parse_part(self):
+        self.assertEqual(self.runner.parse_part('2/4'), (2, 4))
+        for bad in ('0/4', '5/4', '4', 'a/b', ''):
+            with self.assertRaises(ValueError, msg=bad):
+                self.runner.parse_part(bad)
+
+    def test_the_parts_partition_the_real_suite(self):
+        tests_dir = os.path.join(REPO_ROOT, 'tests')
+        pool, serial = self.runner.plan(tests_dir)
+        for n in range(1, 9):
+            parts = [self.runner.plan_part(tests_dir, (k, n)) for k in range(1, n + 1)]
+            got = [m for p, t in parts for m in p + t]
+            self.assertEqual(sorted(got), sorted(pool + serial), n)
+            self.assertEqual(len(got), len(set(got)), n)
+
+    def test_the_parts_are_balanced_and_keep_the_heaviest_first_order(self):
+        weights = {'a': 9, 'b': 5, 'c': 4, 'd': 3, 'e': 1}
+        parts = self.runner.partition(['a', 'b', 'c', 'd', 'e'], weights, 2)
+        self.assertEqual(parts, [['a', 'd'], ['b', 'c', 'e']])  # loads 12 and 10
+        self.assertEqual(self.runner.partition(['a', 'b'], weights, 4), [['a'], ['b'], [], []])
+
+    def test_serial_modules_go_to_part_one_and_a_part_runs_only_its_own(self):
+        self.module('test_00_home', GREEN)
+        self.module('test_a', GREEN)
+        self.module('test_b', GREEN + "    def test_three(self):\n        pass\n")
+        self.module('test_alone', GREEN)
+        self.assertEqual(self.runner.plan_part(self.tests, (1, 2), serial=('test_alone',)),
+                         (['test_b'], ['test_alone']))
+        self.assertEqual(self.runner.plan_part(self.tests, (2, 2), serial=('test_alone',)),
+                         (['test_a'], []))
+        rc, text = self.run_suite(shards=2, part=(2, 2), serial=('test_alone',))
+        self.assertEqual(rc, 0, text)
+        self.assertRegex(text, r'(?m)^Ran \d+ tests in [\d.]+s \(1 module\(s\), 2 at a time\)$')
+
+    def records(self, n, python='3.12', skip=(), checks=True):
+        d = os.path.join(self.root, 'records')
+        os.makedirs(d, exist_ok=True)
+        green = os.path.join(self.root, 'green.out')
+        with open(green, 'w') as f:
+            f.write('Ran 7 tests in 1.0s (3 module(s), 4 at a time)\n\nOK\n')
+        for k in range(1, n + 1):
+            if k not in skip:
+                with redirect_stdout(io.StringIO()):
+                    self.runner.record(os.path.join(d, f'part-{python}-{k}.txt'), self.tests,
+                                       (k, n), [green, green])
+        if checks:
+            open(os.path.join(d, f'checks-{python}.txt'), 'w').close()
+        return d
+
+    def gather(self, d, n, python='3.12'):
+        lines = []
+        return self.runner.gather(d, self.tests, python, n, out=lines.append), '\n'.join(lines)
+
+    def test_gather_is_green_when_every_part_and_the_checks_are(self):
+        for m in ('test_00_home', 'test_a', 'test_b', 'test_c'):
+            self.module(m, GREEN)
+        rc, text = self.gather(self.records(2), 2)
+        self.assertEqual(rc, 0, text)
+        self.assertIn('3 of 3 module(s) in 2 part(s); tests ran per pass: 14 / 14', text)
+
+    def test_gather_is_red_on_a_missing_part_checks_or_module(self):
+        for m in ('test_00_home', 'test_a', 'test_b', 'test_c'):
+            self.module(m, GREEN)
+        rc, text = self.gather(self.records(2, skip=(2,)), 2)
+        self.assertEqual(rc, 1)
+        self.assertIn('part (3.12, 2) did not finish green', text)
+        rc, text = self.gather(self.records(2, python='3.13', checks=False), 2, python='3.13')
+        self.assertIn('checks (3.13) did not finish green', text)
+        d = self.records(2)
+        self.module('test_d', GREEN)  # a module no part's record names
+        rc, text = self.gather(d, 2)
+        self.assertEqual(rc, 1)
+        self.assertIn('run in no part: test_d', text)
+
+    def test_record_is_red_when_a_run_was(self):
+        self.module('test_a', GREEN)
+        red = os.path.join(self.root, 'red.out')
+        with open(red, 'w') as f:
+            f.write('Ran 2 tests in 1.0s\n\nFAILED (failures=1)\n')
+        with redirect_stdout(io.StringIO()):
+            rc = self.runner.record(os.path.join(self.root, 'r.txt'), self.tests, (1, 1), [red])
+        self.assertEqual(rc, 1)
+
+
 class RunTests(FixtureSuite):
     def test_green_suite_prints_the_suites_summary_and_exits_zero(self):
         self.module('test_a', GREEN)
