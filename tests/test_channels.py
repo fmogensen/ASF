@@ -425,6 +425,16 @@ class PublishTest(ChannelsStateHome):
         self.assertEqual(detail, '')
         self.assertEqual(_ref_sha(self.bare, 'refs/heads/releases/edge'), self.c1)
 
+    def test_a_publish_passes_the_exact_refspec_and_refs_only_to_gitpush_push(self):
+        with mock.patch('asf.gitpush.push') as push:
+            push.return_value = subprocess.CompletedProcess(['git', 'push'], 0, '', '')
+            ok, detail = channels.publish(self.product, 'edge', self.c1)
+        self.assertTrue(ok, detail)
+        push.assert_called_once()
+        args, kwargs = push.call_args
+        self.assertEqual(args[0], ['-q', 'origin', f'{self.c1}:refs/heads/releases/edge'])
+        self.assertTrue(kwargs['refs_only'])
+
     def test_a_guard_refusal_pushes_nothing_and_leaves_the_log_unchanged(self):
         channels.write_log(self.P, lambda l: channels.note_edge(l, 'v0.1.0', self.c1, 'T0'))
         before = channels.read_log(self.P)
