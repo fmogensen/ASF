@@ -144,13 +144,27 @@ def load(product):
     try:
         with open(_path(product), encoding='utf-8') as f:
             data = json.load(f)
-    except OSError:
+    except (OSError, ValueError):
         data = {}
     data = data if isinstance(data, dict) else {}
     for k in ('max', 'cpu', 'claims', 'pass'):
         if not isinstance(data.get(k), dict):
             data[k] = {}
     return data
+
+
+def _raise_if_malformed(product):
+    """Raises the ``json.loads`` error when ``ci-stall.json`` exists and is not valid JSON.
+    :func:`load` reads the same file tolerantly (an empty table, never a raise) because the
+    live ``asf ci stall-watch`` pass must keep running on a corrupt file; this strict read is
+    the doctor's own, so :func:`doctor_rows` turns a genuinely malformed file into a row
+    instead of a quiet empty one."""
+    try:
+        with open(_path(product), encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return
+    json.loads(text)
 
 
 def save(product, data):
@@ -381,7 +395,10 @@ def doctor_rows(product, now=None):
     (:data:`BAD_STATES`) with its re-run still owed, else one ok row off the last ``pass``.
     ``[]`` for a product with no ``ci.pool`` and no ``pass`` block — not asked about. Reads only
     :func:`load`, :func:`asf.ci_heartbeat.boxes`, :func:`mode` and :func:`legacy_active`: no ssh,
-    no ``gh`` call."""
+    no ``gh`` call. A genuinely malformed ``ci-stall.json`` raises (:func:`_raise_if_malformed`)
+    rather than reading as an empty table — :func:`asf.doctor.check_ci_stall` turns that into
+    its own row."""
+    _raise_if_malformed(product)
     now = now if now is not None else _now()
     boxes = ci_heartbeat.boxes(product)
     data = load(product)
