@@ -829,6 +829,43 @@ class RealRecord:
                               question=question or None)
         return out
 
+    def note_of(self, target):
+        """The note key ``target`` names — ``inbox.<slug>``, ``<slug>.md``, ``<intake>/<slug>.md``
+        or ``<slug>`` — when that note sits in the intake dir, else ''."""
+        from asf.kernel import intake
+        name = os.path.basename(str(target or '').strip())
+        if intake.is_note(name):
+            name = intake.note_name(name)
+        elif not name.endswith('.md'):
+            name += '.md'
+        path = os.path.join(self.root or '', self._intake(), name)
+        return intake.note_key(name) if name != '.md' and os.path.isfile(path) else ''
+
+    def answer_note(self, key, text):
+        """Apply the operator's answer ``text`` to the note ``key`` through the inbox's own
+        grammar (:func:`asf.kernel.intake.operator_clauses`, :func:`asf.groom.inbox.apply_answer`):
+        its question goes, the next tick's mint reads it afresh, and its intake tries and kept
+        rejection are cleared — an answer is a fresh start. '' when applied, else why not."""
+        from asf.groom import inbox
+        from asf.kernel import intake
+        from asf.record.core import today
+        clauses, why = intake.operator_clauses(text)
+        if not clauses:
+            return why
+        ok, why = inbox.apply_answer(self.root, intake.note_name(key), clauses, today(),
+                                     'operator', intake_dir=self._intake())
+        if not ok:
+            return why or 'the answer was not applied'
+        for path, load in ((self._tries_path(), self.intake_tries),
+                           (os.path.join(self.state_dir, INTAKE_REJECTIONS_FILE),
+                            self.intake_rejections)):
+            got = load()
+            if got.pop(key, None) is not None:
+                with open(path + '.tmp', 'w', encoding='utf-8') as f:
+                    json.dump(got, f, indent=1, sort_keys=True)
+                os.replace(path + '.tmp', path)
+        return ''
+
     def intake_rejections(self):
         """``{key: why}``: each key's last rejected intake verdict."""
         try:

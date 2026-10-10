@@ -94,6 +94,26 @@ def _text(args):
     return text
 
 
+def _answer_note(product, target, text):
+    """An inbox note Stuck on the operator (``inbox.<slug>``, the kernel's Stuck row) is answered
+    by code through the record port (:meth:`asf.kernel.ports.RealRecord.answer_note`): the exit
+    code, or None when ``target`` names no inbox note."""
+    from asf.kernel import ports
+    try:
+        rec = ports.RealRecord(product, state_dir=env.state_dir(product))
+        key = rec.note_of(target)
+    except Exception:  # noqa: BLE001 — no record: not a note, the ledger path answers
+        return None
+    if not key:
+        return None
+    why = rec.answer_note(key, text)
+    if why:
+        print(f'asf answer: {key}: {why}')
+        return 1
+    print(f'answered {key}: the next tick mints it, or asks its next question')
+    return 0
+
+
 def cmd_answer(args):
     from asf.workers.unpark import _target
     product = env.load_product(getattr(args, 'product', None))
@@ -105,8 +125,11 @@ def cmd_answer(args):
     if not text:
         print('asf answer: --text or --file is required — it is the answer the session is given')
         return 2
-    path = pool_mod.sessions_path(product)
     target = (args.target or '').strip()
+    note = _answer_note(product, target, text)
+    if note is not None:
+        return note
+    path = pool_mod.sessions_path(product)
     scope, item, _branch, job = _target(path, target)
     if scope is None or not any(r.get('item') == item
                                 for rs in lifecycle.runs(path).values() for r in rs):
