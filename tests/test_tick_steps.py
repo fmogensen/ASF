@@ -1877,11 +1877,13 @@ class BatchStep(StepsTestCase):
 
     def test_no_ci_capacity_configured_makes_no_gh_call(self):
         # the product declares no `ci:` block, so the resolver's own CI law never picks CiRuns —
-        # this proves it end to end, with the real resolver, not the stub above
-        with mock.patch('subprocess.run') as gh:
+        # this proves it end to end, with the real resolver, not the stub above. The tick's own
+        # preflight (upgrade.checkout_off_main, the release channel's installed_release) shells
+        # out to `git` on every tick regardless of `steps=`, so only a `gh` call is the resolver's.
+        with mock.patch('subprocess.run', wraps=subprocess.run) as run:
             rc, out = self.run_tick(steps='batch')
         self.assertEqual(rc, 0)
-        gh.assert_not_called()
+        self.assertFalse(any(c.args[0][:1] == ['gh'] for c in run.call_args_list))
         self.assertIn('[command:batch] batch ran', out)
 
 
