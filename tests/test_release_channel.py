@@ -168,6 +168,79 @@ class LatestReleaseIsReadOnceAnHourTests(_HomeCase):
         self.assertEqual(sha, 'b' * 40)   # the peeled commit, never the tag object's own sha
 
 
+class TheInstallSourceUrlIsReadOnceAnHourTests(_HomeCase):
+    """The read-only views take the install's own source url off the cache on the release
+    cache's hour (D4). Every ``pipx`` call writes a timestamped log file into the operator's
+    home (``~/.local/state/pipx/log``, or ``$PIPX_HOME/logs``), and this url is read by every
+    tick's release line and every ``asf doctor`` row: uncached, they pile those logs up for an
+    answer that changes only when the install is replaced — and a second ``asf install`` over
+    one home stopped being a no-op (``tests.test_install_e2e``'s own
+    ``test_second_run_writes_nothing_new``)."""
+
+    SPEC = {'venvs': {'asf-factory': {'metadata': {'main_package': {
+        'package_or_url': 'git+https://example.invalid/x.git@v0.1.62'}}}}}
+    LOCAL = {'venvs': {'asf-factory': {'metadata': {'main_package': {
+        'package_or_url': '/checkout'}}}}}   # a directory install records no git url at all
+
+    def _run(self, calls, spec=None):
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout=json.dumps(self.SPEC if spec is None else spec),
+                             stderr='')
+        return run
+
+    def test_three_cached_reads_inside_the_hour_ask_pipx_once(self):
+        calls = []
+        run = self._run(calls)
+        now = 1_000_000.0
+        for at in (now, now + 10, now + 20):
+            self.assertEqual(upgrade.repo_url(run, cached=True, now=at),
+                             'https://example.invalid/x.git')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:2], ['pipx', 'list'])
+
+    def test_a_cached_read_past_the_hour_asks_again(self):
+        calls = []
+        run = self._run(calls)
+        now = 1_000_000.0
+        upgrade.repo_url(run, cached=True, now=now)
+        upgrade.repo_url(run, cached=True, now=now + upgrade.RELEASE_POLL_S + 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_an_install_reads_it_uncached_every_time(self):
+        calls = []
+        run = self._run(calls)
+        self.assertEqual(upgrade.repo_url(run), 'https://example.invalid/x.git')
+        self.assertEqual(upgrade.repo_url(run), 'https://example.invalid/x.git')
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(os.path.exists(upgrade.source_path()))  # an install caches nothing
+
+    def test_a_directory_install_caches_the_empty_answer_and_the_fallback_stays_live(self):
+        calls = []
+        run = self._run(calls, spec=self.LOCAL)
+        now = 1_000_000.0
+        with mock.patch.dict(os.environ, {'ASF_REPO_URL': 'https://example.invalid/a.git'}):
+            self.assertEqual(upgrade.repo_url(run, cached=True, now=now),
+                             'https://example.invalid/a.git')
+        with mock.patch.dict(os.environ, {'ASF_REPO_URL': 'https://example.invalid/b.git'}):
+            self.assertEqual(upgrade.repo_url(run, cached=True, now=now + 10),
+                             'https://example.invalid/b.git')
+        self.assertEqual(len(calls), 1)   # the empty answer is the one a checkout gives forever
+
+    def test_two_ticks_release_lines_inside_the_hour_ask_pipx_once(self):
+        calls = []
+        run = self._run(calls)
+        product = env.Product('p', {'repo_slug': 'a/b',
+                                    'conventions': {'flags': {'upgrade': 'off'}}})
+        now = 1_000_000.0
+        with mock.patch.object(upgrade, 'latest_release', return_value=('v0.1.62', 'a' * 40)), \
+                mock.patch.object(upgrade, 'installed_release', return_value=('v0.1.62', 'b' * 40)):
+            for at in (now, now + 10):
+                ctx = types.SimpleNamespace(product=product, upgrade_line=None)
+                upgrade.release_report(ctx, out=lambda _line: None, now=at, run=run)
+        self.assertEqual(len(calls), 1)
+
+
 class MidLandingTests(_HomeCase):
     """D7/PD14: ``occupancy(...)['landing']`` is what "mid-landing" means; an unreadable ledger
     holds the install — it returns ``[]``, the same shape as "nothing is landing", but the

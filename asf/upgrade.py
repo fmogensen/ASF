@@ -412,15 +412,51 @@ def _out(run, cmd, timeout=60):
     return p.stdout if p.returncode == 0 and isinstance(p.stdout, str) else None
 
 
-def repo_url(run=subprocess.run):
-    """The git url the current install came from (its pipx spec), else install.sh's default."""
+def source_path():
+    """``<ASF_HOME>/state/install-source.json`` — ``{'url', 'at'}``: the git url ``pipx``
+    records as this install's source, beside the release cache and read on the same hour."""
+    return os.path.join(env.ASF_HOME, 'state', 'install-source.json')
+
+
+def _spec_url(run):
+    """The git url ``pipx`` records as this install's source, ``''`` when it records none (a
+    local-directory install, no pipx on PATH, an unreadable listing)."""
     text = _out(run, ['pipx', 'list', '--json'])
     try:
         spec = json.loads(text)['venvs'][PACKAGE_NAME]['metadata']['main_package']['package_or_url']
     except (TypeError, ValueError, KeyError):
         spec = ''
     m = re.match(r'git\+(.+?)(@[^@/]+)?$', spec or '')
-    return m.group(1) if m else os.environ.get('ASF_REPO_URL', tunable('DEFAULT_REPO_URL'))
+    return m.group(1) if m else ''
+
+
+def _cached_spec_url(run, now):
+    """:func:`_spec_url` off :func:`source_path` while its entry is younger than
+    :data:`RELEASE_POLL_S`, else read again and written back stamped — the empty answer cached
+    too, since it is the one a checkout gives on every single read."""
+    entry = _read_json(source_path())
+    url, at = entry.get('url'), entry.get('at')
+    if isinstance(url, str) and isinstance(at, (int, float)) and now - at < RELEASE_POLL_S:
+        return url
+    url = _spec_url(run)
+    _write_json(source_path(), {'url': url, 'at': now})
+    return url
+
+
+def repo_url(run=subprocess.run, cached=False, now=None):
+    """The git url the current install came from (its pipx spec), else install.sh's default.
+
+    ``cached`` takes that pipx answer off :func:`source_path` on the release cache's own hour
+    (D4), and is what the read-only views ask for. Every ``pipx`` call writes a timestamped log
+    file into the operator's home (``~/.local/state/pipx/log``, or ``$PIPX_HOME/logs``), and the
+    tick's release line and ``asf doctor``'s ``upgrade`` row both read this url on every run: a
+    tick a minute and a doctor beside it pile those logs up for an answer that changes only when
+    the install is replaced, and a second ``asf install`` over one home stops being the no-op
+    ``tests.test_install_e2e`` holds it to. An install reads it uncached — it is the one caller
+    that has just replaced what pipx records."""
+    url = _cached_spec_url(run, now if now is not None else time.time()) if cached \
+        else _spec_url(run)
+    return url or os.environ.get('ASF_REPO_URL', tunable('DEFAULT_REPO_URL'))
 
 
 def remote_head(url, run=subprocess.run, branch='main'):
@@ -714,7 +750,9 @@ def release_report(ctx, out=print, now=None, run=subprocess.run):
     try:
         product = ctx.product
         policy = product.upgrade
-        url = repo_url(run)
+        # `cached=True`: the tick's line is a read, and an uncached url costs a `pipx` call
+        # — and a pipx log file in the operator's home — on every tick (see `repo_url`)
+        url = repo_url(run, cached=True, now=now)
         tag, _sha = latest_release(url, now, run)
         old, old_sha = installed_release()
         if old is None:

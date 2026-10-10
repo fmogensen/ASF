@@ -1199,7 +1199,10 @@ def check_upgrade(product):
     if not all(hasattr(upgrade, name) for name in _RELEASE_CHANNEL_ATTRS):
         return True, f'{policy} (F-0112 release channel not landed on this install yet)'
     old, _old_sha = upgrade.installed_release()
-    entry = _release_cache_entry(upgrade.repo_url())
+    # `cached=True`: the row costs no network and no `pipx` of its own either — this one is run
+    # by hand, by CI and by every tick's health step, and an uncached read leaves a pipx log in
+    # the operator's home each time (asf.upgrade.repo_url)
+    entry = _release_cache_entry(upgrade.repo_url(cached=True))
     tag = entry.get('tag')
     state = upgrade._read_release_state(product)
     last = (state or {}).get('last') or {}
