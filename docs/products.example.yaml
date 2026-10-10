@@ -494,6 +494,7 @@ kernel:
     correct: claude-sonnet-5        # a fix round on an open PR
     review: claude-sonnet-5
     light-review: claude-sonnet-5   # a docs-only PR's review (review.light_paths)
+    groom-fill: claude-sonnet-5     # fills a card the Definition of Ready holds (dor:)
     spec: claude-opus-5
     plan: claude-opus-5
   review:
@@ -618,6 +619,21 @@ kernel:
                             # <sha> cost: ...`. A move costing more than alarm_minutes logs `MAIN
                             # MOVE ALARM` once, shown by `asf kernel status` and `asf kernel
                             # watch`. `asf kernel main-moves [--since T]`: moves per hour, p50/p90
+  dor:                      # the Definition of Ready (asf.kernel.dor): a Task or Bug starts only
+    enabled: false          # when its card (i) names a test — an `## Acceptance` line
+                            # (tests/<file>.py::<Test>, or a dotted tests.test_x module) or a
+                            # `**Gate**` block line naming a test module on the trunk or in its
+                            # writes; (ii) has writes:, each on origin's trunk or listed in
+                            # creates: (declared new); (iii) names after: ids that are on the
+                            # record and not parked; (iv) names a parent that exists and is not
+                            # Done (a Task must name one). Else it stays New, `dor: <missing>`
+                            # (an idle reason, never LIMBO), and a groom-fill session judges it
+                            # and returns a GROOM-FILL verdict (proceed | superseded | reshape |
+                            # fill) that code validates and applies: superseded retires the card
+                            # (superseded_by:), fill/reshape write its acceptance and writes:
+    fill_per_tick: 3        # groom-fill launches a tick, after fix rounds, reviews and builds
+    max_fills: 2            # groom-fill sessions per card; then Stuck on the operator (judged
+                            # afresh every tick: a card mended by hand starts)
   floor:
     close_orphan_prs: true  # an open PR on a kernel branch (code/fix/spec/plan prefix) whose item
                             # is not on the record, Done or retired is closed with a comment

@@ -16,6 +16,7 @@ class FakeRecord:
         self._paused = paused
         self.fail = set(fail)
         self.writes, self.minted, self.recorded, self.changes = [], [], [], []
+        self.filled, self.superseded = [], []
 
     def items(self):
         out = {}
@@ -37,6 +38,7 @@ class FakeRecord:
             it.reverted = list(f.get(P.REVERTED, it.reverted))
             it.notes = list(f.get(P.NOTES, it.notes))
             it.after = list(f.get(P.AFTER, it.after))
+            it.dor_fills = f.get(P.DOR_FILLS, it.dor_fills)
             out[iid] = it
         return out
 
@@ -80,6 +82,19 @@ class FakeRecord:
                                      state=M.State.NEW)
         self.fields[bug_id] = {}
         return bug_id
+
+    def fill_card(self, item_id, acceptance, writes, creates=(), why=''):
+        if ('fill', item_id) in self.fail:
+            raise P.PortError('%s: refused' % item_id)
+        self.filled.append((item_id, list(acceptance), list(writes), list(creates)))
+        it = self._items[item_id]
+        it.writes, it.creates = list(writes), list(creates)
+        it.body = '## Acceptance\n' + ''.join('- [ ] %s\n' % a for a in acceptance)
+
+    def supersede(self, item_id, by, why):
+        self.superseded.append((item_id, by))
+        it = self._items[item_id]
+        it.state, it.priority = M.State.DONE, 'later'
 
     def mint_story(self, feature_id, story_id, title, acceptance):
         self.minted.append((feature_id, story_id, title, list(acceptance)))

@@ -30,6 +30,7 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # the tick reads no new change or failed log
       models:     {coder: claude-sonnet-5, fix-bug: claude-sonnet-5, correct: claude-sonnet-5,
                    review: claude-sonnet-5, light-review: claude-sonnet-5,
+                   groom-fill: claude-sonnet-5,
                    spec: claude-opus-5, plan: claude-opus-5}   # per brief kind: a model id, or
                                               # a worker_pool.models label (heavy, light, cheap)
       review:     {light_paths: ['docs/**', '*.md']}   # a PR changing only these (or the
@@ -113,6 +114,15 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # ALARM (asf.kernel.mainmoves); the cost is
                                               # measured over window_ticks ticks
                    window_ticks: 15}
+      dor:        {enabled: false,            # the Definition of Ready: a Task or Bug starts only
+                                              # when its card names a test (Acceptance, or its
+                                              # Gate block), its writes (on the trunk or in
+                                              # creates:), after: ids on the record and not
+                                              # parked, and a parent that is not Done; else it
+                                              # stays New (dor: <missing>) and a groom-fill
+                                              # session (models.groom-fill) fills the card
+                   fill_per_tick: 3,          # groom-fill launches a tick (after finishing work)
+                   max_fills: 2}              # groom-fill sessions per card, then Stuck
       floor:      {close_orphan_prs: true,    # an open PR on a kernel branch whose item is not on
                                               # the record, Done or retired is closed (comment)
                    cancel_stale_ci: true}     # a queued/running CI run whose PRs are all closed,
@@ -138,7 +148,7 @@ import datetime
 #: a spec and a plan on the deeper one
 LIGHT_MODEL, HEAVY_MODEL = 'claude-sonnet-5', 'claude-opus-5'
 MODEL_KINDS = {'coder': LIGHT_MODEL, 'fix-bug': LIGHT_MODEL, 'correct': LIGHT_MODEL,
-               'review': LIGHT_MODEL, 'light-review': LIGHT_MODEL,
+               'review': LIGHT_MODEL, 'light-review': LIGHT_MODEL, 'groom-fill': LIGHT_MODEL,
                'spec': HEAVY_MODEL, 'plan': HEAVY_MODEL}
 
 #: every key, its default and its kind: ``int``/``float`` (non-negative), ``bool``, a tuple of
@@ -203,6 +213,7 @@ SPEC = {
               'max_review_session_age': ('90m', 'duration'),
               'max_ci_age': ('1h', 'duration'), 'bound_min_samples': (20, int)},
     'main_move': {'alarm_minutes': (5, float), 'window_ticks': (15, int)},
+    'dor': {'enabled': (False, bool), 'fill_per_tick': (3, int), 'max_fills': (2, int)},
     'floor': {'close_orphan_prs': (True, bool), 'cancel_stale_ci': (True, bool)},
     'install': {'shadow': (True, bool), 'max_state_changes': (25, int),
                 'lock_timeout_s': (600, int)},

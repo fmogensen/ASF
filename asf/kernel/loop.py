@@ -98,6 +98,7 @@ def summarize(plan, facts, result=None, dry_run=False):
         'gate': list(getattr(plan, 'gate', None) or []),
         'pending': sorted(iid for iid, texts in (getattr(plan, 'notes', None) or {}).items()
                           if PENDING in texts),
+        'dor': getattr(plan, 'dor', None),
     }
 
 
@@ -128,6 +129,20 @@ def wip_line(wip):
         return ''
     return ('WIP CAP: %d open PRs (Review + Landing) > %d — %d new build/plan/spec launch(es) '
             'wait; seats go to finishing work' % (wip['open'], wip['cap'], wip['held']))
+
+
+def dor_line(held):
+    """The Definition of Ready's hold as one line (``DOR: 31 held New — no test named in
+    Acceptance or Gate 26, writes: empty 2``: the gaps most cards share first), or '' when it holds
+    none."""
+    if not held:
+        return ''
+    gaps = collections.Counter(g.split(':', 1)[0] if g.startswith('writes not on trunk') or
+                               g.startswith('after:') else g
+                               for why in held.values()
+                               for g in why[len('dor: '):].split('; '))
+    return 'DOR: %d held New — %s' % (len(held), ', '.join(
+        '%s %d' % kv for kv in sorted(gaps.items(), key=lambda kv: (-kv[1], kv[0]))[:4]))
 
 
 def breach_line(b):
@@ -162,6 +177,8 @@ def print_summary(summary, out=print):
         out(gate_line(rec))
     if summary.get('pending'):
         out('proving-tests check pending: %s' % ', '.join(summary['pending']))
+    if summary.get('dor'):
+        out(dor_line(summary['dor']))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:

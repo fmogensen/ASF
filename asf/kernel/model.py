@@ -95,6 +95,9 @@ class Item:
     ``created`` the card's creation date (``created:``, else its History's ``created`` line, else
     its ``stage_since``; '' when unknown): the still-needed gate (:mod:`asf.kernel.needed`) dates
     the item's baseline by them. ``signature`` is a Bug card's ``signature:`` ('' when none).
+    ``creates`` are the ``writes`` paths the card declares new (not on the trunk yet: the
+    Definition of Ready, :mod:`asf.kernel.dor`); ``dor_fills`` counts the groom-fill sessions
+    launched for it.
     """
     id: str
     type: str = 'task'
@@ -123,6 +126,8 @@ class Item:
     plan: str = ''
     created: str = ''
     signature: str = ''
+    creates: list = dataclasses.field(default_factory=list)
+    dor_fills: int = 0
 
 
 @dataclasses.dataclass
@@ -332,7 +337,9 @@ class Facts:
     REPORT names to its full sha when the trunk holds it ('' when not). ``ci_runs`` are the
     repo's queued and running workflow runs (:class:`CIRun`, read before the PRs) and
     ``open_heads`` every open PR's number -> head sha (None when unread): a run whose PRs are all
-    closed, or whose head is no longer its PR's head, is cancelled."""
+    closed, or whose head is no longer its PR's head, is cancelled.
+    ``trunk_files`` are the paths on origin's trunk (None when unread): the Definition of Ready
+    (:mod:`asf.kernel.dor`) checks a card's ``writes`` against them."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -357,6 +364,7 @@ class Facts:
     landed_shas: dict = dataclasses.field(default_factory=dict)
     ci_runs: list = dataclasses.field(default_factory=list)
     open_heads: dict = None
+    trunk_files: frozenset = None
 
 
 @dataclasses.dataclass
@@ -408,7 +416,11 @@ class Config:
     :mod:`asf.kernel.needed`): ``needed_satisfied`` — a fresh Task or Bug whose named tests are
     new since its plan and green on the trunk is Done, not launched.
     ``cancel_stale_ci``: a queued or running CI run whose PRs are closed, or whose head is no
-    longer its PR's head, is cancelled (:class:`asf.kernel.actions.CancelRun`)."""
+    longer its PR's head, is cancelled (:class:`asf.kernel.actions.CancelRun`).
+    ``dor``: the Definition of Ready (:mod:`asf.kernel.dor`) holds a Task or Bug New until its
+    card names a test, its writes, its ``after:`` and its parent (off — the bare model's
+    default); ``dor_fill_per_tick`` groom-fill sessions launch a tick for the cards it holds, at
+    most ``dor_max_fills`` per card (then Stuck on the operator), on ``groom_branch`` + the id."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -442,3 +454,7 @@ class Config:
     max_open_prs: int = None
     needed_satisfied: bool = False
     cancel_stale_ci: bool = False
+    dor: bool = False
+    dor_fill_per_tick: int = 3
+    dor_max_fills: int = 2
+    groom_branch: str = 'groom-fill/'

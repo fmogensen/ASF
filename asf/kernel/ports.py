@@ -37,6 +37,14 @@ marker), so every old writer carries them through byte for byte
   (:class:`~asf.kernel.actions.RevertPR`): they no longer make the item Done.
 - ``kernel_notes``: the questions a session asked while its work moved on anyway (a ``done``
   REPORT with a pushed head) — shown by ``asf kernel status``, holding nothing.
+- ``kernel_dor_fills``: the groom-fill sessions launched for a card the Definition of Ready
+  holds (:mod:`asf.kernel.dor`).
+
+A groom-fill verdict (:func:`asf.kernel.dor.parse_verdict`) is applied through the record's own
+writer (:func:`asf.record.setfield.set_typed`: the parser round-trip and the record stage):
+:meth:`RealRecord.fill_card` writes ``writes:`` (and ``creates:``) and the ``## Acceptance``
+lines; :meth:`RealRecord.supersede` retires the card with ``removed:`` and ``superseded_by:``
+(and ``supersedes:`` on the successor), or ``landed:`` for a sha.
 """
 import datetime
 import hashlib
@@ -48,6 +56,7 @@ import typing
 
 from asf.kernel import model as M
 from asf.kernel import reports
+from asf.kernel.decide import READ_ONLY
 from asf.record.core import ID_TOKEN_RE, as_list, canonicalize, is_retired, load_items
 from asf.workers import cloudpid
 
@@ -57,15 +66,16 @@ FINDINGS, ANSWERS, QUESTION = 'kernel_findings', 'kernel_answers', 'kernel_quest
 STUCK_REASON, STUCK_OWNER = 'kernel_stuck_reason', 'kernel_stuck_owner'
 STUCK_NEXT, STUCK_SINCE, REOPENED = 'kernel_stuck_next', 'kernel_stuck_since', 'kernel_reopened'
 NOTES, EXTRA_ROUNDS, REBUILDS = 'kernel_notes', 'kernel_extra_rounds', 'kernel_rebuilds'
-REVERTED = 'kernel_reverted'
 #: the card's declared wait edges — a human key the kernel may add to
 #: (:class:`~asf.kernel.actions.WaitOn`), written in the typed block, never the machine block
 AFTER = 'after'
 HUMAN_KEYS = (AFTER,)
+REVERTED, DOR_FILLS = 'kernel_reverted', 'kernel_dor_fills'
 #: the machine-block keys that hold a Stuck (cleared together)
 STUCK_KEYS = (STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE)
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
-               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS, REBUILDS, REVERTED)
+               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS, REBUILDS, REVERTED,
+               DOR_FILLS)
 
 #: the branch prefix a rebuilt item's old head is pushed under (:class:`ArchiveAndReset`)
 ARCHIVE_PREFIX = 'archive/'
@@ -178,6 +188,8 @@ def item_from_card(rec):
         question=machine.get(QUESTION) or None, reopened=bool(machine.get(REOPENED)),
         notes=[str(n) for n in as_list(machine.get(NOTES))],
         reverted=[int(n) for n in as_list(machine.get(REVERTED)) if str(n).isdigit()],
+        creates=[str(c) for c in as_list(meta.get('creates'))],
+        dor_fills=int(machine.get(DOR_FILLS) or 0),
         stuck_since=(str(machine.get(STUCK_SINCE)) if stuck is not None and machine.get(STUCK_SINCE)
                      else None),
         plan=_plan_link(meta), created=_created(meta, machine, rec.get('body') or ''),
@@ -474,6 +486,88 @@ class RealRecord:
         write_new_item(self.root, cards, 'bug', bug_id, fields, self._scrub(body), today(),
                        'kernel: main is red')
         return bug_id
+
+    def trunk_files(self):
+        """The paths on ``origin/<main>`` in the product's repo (``git ls-tree``, no fetch: the
+        launches fetch it), as a frozenset; None when unreadable."""
+        from asf import gitops
+        repo = getattr(self.product, 'repo_dir', None)
+        if not repo or not os.path.isdir(repo):
+            return None
+        r = gitops.git(['ls-tree', '-r', '--name-only', 'origin/%s' % self.product.main], repo,
+                       timeout=60)
+        if not r.ok:
+            return None
+        return frozenset(line for line in (r.data or '').splitlines() if line)
+
+    def _rec(self, item_id):
+        rec = self._load().get(item_id)
+        if rec is None:
+            raise PortError('%s: no card on the record' % item_id)
+        return rec
+
+    def fill_card(self, item_id, acceptance, writes, creates=(), why=''):
+        """A groom-fill's ``fill``/``reshape``: ``writes:`` (and ``creates:``, the paths it
+        declares new) through :func:`asf.record.setfield.set_typed`, then the ``## Acceptance``
+        section replaced by ``acceptance`` (one ``- [ ]`` line each) with a History line."""
+        from asf.record import frontmatter, writer
+        from asf.record.core import parse_sections, render_sections, today
+        from asf.record.setfield import set_typed
+        rec = self._rec(item_id)
+        updates = {'writes': self._scrub(list(writes))}
+        if creates or rec['meta'].get('creates'):
+            updates['creates'] = self._scrub(list(creates)) or None
+        err = set_typed(rec, updates, writer='groom-fill')
+        if err:
+            raise PortError(err)
+        meta, body = frontmatter.parse(rec['text'], path=rec['relpath'])
+        pre, sections = parse_sections(body)
+        lines = ''.join('- [ ] %s\n' % a for a in self._scrub(list(acceptance)))
+        found = False
+        for sec in sections:
+            if sec[0].strip() == '## Acceptance':
+                sec[1], found = '\n' + lines + '\n', True
+        if not found:
+            sections.insert(0, ['## Acceptance', '\n' + lines + '\n'])
+        from asf.record.ingest import append_history_lines
+        body = append_history_lines(render_sections(pre, sections), [
+            '- %s groom-fill: acceptance and writes filled%s' % (today(), ' — ' + why if why
+                                                                 else '')])
+        text = frontmatter.render(meta, body)
+        writer.write_card(rec['path'], text)
+        rec['meta'], rec['text'], rec['body'] = meta, text, body
+
+    def supersede(self, item_id, by, why):
+        """A groom-fill's ``superseded``: retire ``item_id`` (``removed:``) with
+        ``superseded_by: <by>`` and ``supersedes:`` on ``by`` when it is a card; a sha is
+        ``landed:`` instead."""
+        from asf.record.core import today
+        from asf.record.retire import landing_ref, removal
+        from asf.record.setfield import set_typed
+        rec = self._rec(item_id)
+        kind, ref = landing_ref(by)
+        cards = self._load()
+        updates = {'removed': removal('superseded by %s — %s' % (by, self._scrub(why)),
+                                      [(kind, ref)] if kind == 'sha' else [])}
+        if kind == 'sha':
+            updates['landed'] = ref
+        elif by in cards:
+            updates['superseded_by'] = by
+        else:
+            raise PortError('superseded_by %s is not on the record' % by)
+        err = set_typed(rec, updates, writer='groom-fill', history=[
+            '- %s groom-fill: retired, superseded by %s' % (today(), by)])
+        if err:
+            raise PortError(err)
+        if kind != 'sha':
+            win = cards[by]
+            have = [str(x) for x in as_list(win['meta'].get('supersedes'))]
+            if item_id not in have:
+                err = set_typed(win, {'supersedes': sorted(set(have) | {item_id})},
+                                writer='groom-fill', history=[
+                                    '- %s groom-fill: supersedes %s' % (today(), item_id)])
+                if err:
+                    raise PortError(err)
 
     def mint_story(self, feature_id, story_id, title, acceptance):
         from asf.record.core import today
@@ -1320,7 +1414,7 @@ class RealSessions:
             pushed = not alive and pushlog.count(self.product, run['job']) > 0
             said = reports.read(result)
             unpushed, refused = '', ''
-            if result is not None and kind != 'review' and not pushed \
+            if result is not None and kind not in READ_ONLY and not pushed \
                     and (said['status'] == reports.DONE or run.get('kernel_pr') is not None):
                 unpushed, refused = unpushed_head(
                     run.get('worktree') or '', run.get('branch') or '', self.product.main,
@@ -1354,7 +1448,7 @@ class RealSessions:
         from asf.workers import lifecycle, pool
         rows = [r for r in pool.load_sessions(self.product).values()
                 if r.get('item') == item_id and not lifecycle.is_live(r)
-                and _kernel_kind(r.get('kind')) != 'review' and r.get('worktree')
+                and _kernel_kind(r.get('kind')) not in READ_ONLY and r.get('worktree')
                 and os.path.isdir(r.get('worktree'))]
         if not rows:
             return None
@@ -1798,7 +1892,7 @@ def session_result(kind, pushed, said):
     or none."""
     if pushed:
         return 'pushed'
-    if kind == 'review':
+    if kind in READ_ONLY:
         return 'report'
     if said['question']:
         return 'question'
@@ -1901,7 +1995,9 @@ def config_for(product, cfg=None, github=None):
         needed_satisfied=bool(k['gate']['satisfied']),
         main_red_revert=bool(k['landing']['main_red_revert']),
         revert_branch=conv.prefix('revert'),
-        max_open_prs=int(k['launch']['max_open_prs']) or None)
+        max_open_prs=int(k['launch']['max_open_prs']) or None,
+        dor=bool(k['dor']['enabled']), dor_fill_per_tick=int(k['dor']['fill_per_tick']),
+        dor_max_fills=int(k['dor']['max_fills']), groom_branch=conv.prefix('groom-fill'))
 
 
 

@@ -63,12 +63,13 @@ import dataclasses
 import re
 
 from asf.kernel import actions as A
+from asf.kernel import dor as D
 from asf.kernel.actions import describe  # noqa: F401 — the applier's log line, re-exported
 from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               NO_VERDICT, OVER_AGE, RELAUNCH, answer_attempt, conflict_attempt, host_pushes, host_refuses,
+                               NO_VERDICT, OVER_AGE, READ_ONLY, RELAUNCH, answer_attempt, conflict_attempt, host_pushes, host_refuses,
                                no_report, rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
 
@@ -121,7 +122,8 @@ class _Applier:
         return {P.ATTEMPTS: list(it.attempts), P.FIX_ROUNDS: it.fix_rounds,
                 P.ANSWERS: list(it.answers), P.NOTES: list(it.notes),
                 P.EXTRA_ROUNDS: it.extra_rounds, P.FINDINGS: list(it.findings),
-                P.REBUILDS: it.rebuilds, P.REVERTED: list(it.reverted)}.get(key, default)
+                P.REBUILDS: it.rebuilds, P.REVERTED: list(it.reverted),
+                P.DOR_FILLS: it.dor_fills}.get(key, default)
 
     def set(self, iid, **fields):
         self.updates.setdefault(iid, {}).update(fields)
@@ -138,6 +140,8 @@ class _Applier:
         it = self.facts.items.get(a.item_id)
         if it is not None and it.state is State.STUCK:
             self.set(a.item_id, **{P.QUESTION: None, P.ATTEMPTS: [answer_attempt(a.text)]})
+            if it.dor_fills:  # an answer to a Definition-of-Ready Stuck: groom-fill again
+                self.set(a.item_id, **{P.DOR_FILLS: None})
         if it is not None and a.extra_round:  # one more fix round; a spent rebase is retried
             self.set(a.item_id, **{
                 P.EXTRA_ROUNDS: self.field(a.item_id, P.EXTRA_ROUNDS, 0) + 1,
@@ -185,12 +189,14 @@ class _Applier:
             self.attempt(s.item_id, CRASH)
         elif s.kind == 'review':
             self.verdict(s)
+        elif s.kind == D.GROOM_FILL:
+            self.groom_fill(s)
         elif s.api_error and not s.fields and not published:
             self.attempt(s.item_id, API_FAILED)
         free, note = a.free_worktree, None
         if host_refuses(s):
             free = False  # origin holds commits this history never had: the operator carries them
-        elif s.ended and s.kind != 'review' and no_report(s) and not published:
+        elif s.ended and s.kind not in READ_ONLY and no_report(s) and not published:
             self.attempt(s.item_id, NO_REPORT)
             free = False  # the relaunch continues on its worktree and branch
         sha = host_push_sha(s)
@@ -235,6 +241,37 @@ class _Applier:
             return
         self.ports.record.record_review(s.item_id, s.pr or (pr.number if pr else None), tree,
                                         got[0], got[1], change)
+
+    def groom_fill(self, s):
+        """Apply an ended groom-fill session's verdict (:func:`asf.kernel.dor.parse_verdict`):
+        ``superseded`` retires the card, ``fill``/``reshape`` write its acceptance and writes,
+        ``proceed`` changes nothing; a rejected block (or a write the record refuses) is a note on
+        the card. ``risk_raise: high`` is a note too (the risk flag is the product's config). The
+        next tick judges the card afresh."""
+        v, why = D.parse_verdict(s.report)
+        note = None
+        if v is None:
+            note = '%s: groom-fill verdict rejected: %s' % (s.job, why)
+        else:
+            try:
+                if v.verdict == 'superseded':
+                    self.ports.record.supersede(s.item_id, v.superseded_by, v.reason)
+                elif v.verdict in ('fill', 'reshape'):
+                    self.ports.record.fill_card(s.item_id, v.acceptance, v.writes, v.creates,
+                                                '%s: %s' % (v.verdict, v.reason))
+            except Exception as e:  # the card stays as it was; the next fill is its next chance
+                note = '%s: groom-fill %s not written: %s' % (s.job, v.verdict, e)
+            if v.risk_raise == 'high':
+                self._note(s.item_id, '%s: groom-fill raised risk high: %s' % (s.job, v.reason))
+        if note:
+            self._note(s.item_id, R.cap(note))
+        self.log('%s %s — groom-fill %s' % (s.job, s.item_id, note or '%s: %s' % (
+            v.verdict, v.reason)))
+
+    def _note(self, iid, text):
+        notes = self.field(iid, P.NOTES, [])
+        if text not in notes:
+            self.set(iid, **{P.NOTES: notes + [text]})
 
     def MarkStuck(self, a):
         pass  # written with the item's state below (one card write per item)
@@ -310,6 +347,7 @@ class _Applier:
                    if p.item_id == a.item_id and not p.merged and p.branch == a.branch), None)
         fix = a.kind == 'build' and pr is not None
         findings = []
+        groom = a.kind == D.GROOM_FILL
         if fix:
             findings = [f for r in self.facts.reviews
                         if r.item_id == a.item_id and verdict_holds(r, pr)
@@ -336,6 +374,9 @@ class _Applier:
         if fix:
             self.set(a.item_id, **{P.FIX_ROUNDS: self.field(a.item_id, P.FIX_ROUNDS, 0) + 1,
                                    P.FINDINGS: findings})
+        if groom:  # it stays New while its card is filled; the fill counts against its budget
+            self.set(a.item_id, **{P.DOR_FILLS: self.field(a.item_id, P.DOR_FILLS, 0) + 1})
+            return 'job %s' % job
         self.set(a.item_id, **{P.STATE: (State.REVIEW if a.kind == 'review'
                                          else State.BUILDING).value})
         return 'job %s' % job

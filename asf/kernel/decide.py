@@ -182,6 +182,7 @@ import fnmatch
 import re
 
 from asf.kernel import actions as A
+from asf.kernel import dor as D
 from asf.kernel import idclaims
 from asf.kernel import resolvers
 from asf.kernel import mainline
@@ -197,6 +198,9 @@ CONTAINERS = ('epic', 'feature', 'story')
 
 #: the item types a build session works on
 BUILDABLE = ('task', 'bug')
+
+#: the session kinds that only read and judge: they never push, open a PR or hold a build
+READ_ONLY = ('review', D.GROOM_FILL)
 
 #: the one item type a document lane (spec, then plan once its spec landed) launches for: a
 #: childless Story or Epic is New, never a spec
@@ -254,6 +258,7 @@ IDLE_REASONS = {
     'new': 'not ready (new)',
     'seat': 'no free seat',
     'wip': 'WIP cap: finishing first',
+    'dor': 'dor: not ready (groom-fill)',
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
@@ -348,6 +353,8 @@ class _Judged:
     behind_pr: object = None
     updating: bool = False
     model: str = ''
+    start: bool = False
+    dor: str = ''
 
 
 def decide(facts, config):
@@ -379,6 +386,7 @@ def decide(facts, config):
     actions += gate_actions
     actions += needed.stale_runs(facts, config, {a.pr for a in actions
                                                  if isinstance(a, A.ClosePR)})
+    unready = hold_unready(items, judged, facts, config, parked_all)
     for iid, j in judged.items():
         old = items[iid]
         if j.state is State.STUCK and (old.state is not State.STUCK or old.stuck != j.stuck):
@@ -405,6 +413,8 @@ def decide(facts, config):
                               key=lambda p: p.number, default=None)
     train, notes = _merge_train(items, judged, config, blocks, facts.now,
                                 first={i for i, (c, _a) in due.items() if c in ('train', 'merge')})
+    for iid, why in unready.items():
+        notes.setdefault(iid, []).append(why)
     actions += train
     for iid, texts in gate_notes.items():
         notes.setdefault(iid, []).extend(texts)
@@ -419,7 +429,7 @@ def decide(facts, config):
     queued, wip = {}, {}
     launches, skipped = (([], {}) if facts.paused
                          else _launches(facts, config, judged, children, states, parked, blocks,
-                                        due, queued, wip))
+                                        due, queued, wip, unready))
     actions += launches
     actions.sort(key=lambda a: ORDER.index(type(a)))
     idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
@@ -428,7 +438,8 @@ def decide(facts, config):
     return A.Plan(states=states, actions=actions, idle=idle, notes=notes,
                   limbo=limbo(facts, config, judged, states, parked, children, actions, queued,
                               stalled),
-                  breaches=found, main=main, wip=wip or None, gate=gate)
+                  breaches=found, main=main, wip=wip or None, gate=gate,
+                  dor=unready if config.dor else None)
 
 
 def blind_plan(facts):
@@ -490,6 +501,7 @@ def _judge(it, facts, config, actions, parked=()):
     report naming one is no wait)."""
     stuck = (it.stuck if it.state is State.STUCK and not _legacy_conflict(it.stuck)
              and not _red_off(it.stuck) and not _rejudged(it.stuck, config)
+             and not str(it.stuck.reason).startswith(D.PREFIX)
              and R.meaningful(it.stuck.reason) else None)
     question = it.question
     hold = False
@@ -536,8 +548,8 @@ def _judge(it, facts, config, actions, parked=()):
         hold = True
         if not s.ended:
             attempts.append(CRASH)
-        elif s.kind == 'review':
-            continue  # a reviewer's verdict is read off its report by the applier
+        elif s.kind in READ_ONLY:
+            continue  # a reviewer's (a groom-fill's) verdict is read off its report by the applier
         elif host_refuses(s):
             ended_stuck = _stuck(R.cap(NOT_PUSHED + s.push_refused), 'operator')
         elif host_pushes(s) and s.status != R.DONE:
@@ -599,8 +611,10 @@ def _judge(it, facts, config, actions, parked=()):
         return _Judged(State.STUCK, ended_stuck)
     if question:
         return _Judged(State.STUCK, _stuck(question, 'operator'))
+    if live and all(s.kind == D.GROOM_FILL for s in live):
+        return _Judged(State.NEW, hold=True, dor=D.PREFIX + 'groom-fill %s in flight' % live[0].job)
     if live:
-        builds = [s for s in live if s.kind != 'review']
+        builds = [s for s in live if s.kind not in READ_ONLY]
         return _Judged(State.BUILDING if builds else State.REVIEW, hold=True)
     repeated = _repeated(attempts, config.max_attempts)
     if repeated:
@@ -619,7 +633,34 @@ def _judge(it, facts, config, actions, parked=()):
         return _Judged(State.NEW, hold=hold)
     if it.type not in BUILDABLE and it.type != DOCUMENTED:
         return _Judged(State.NEW, hold=hold)  # only a Feature gets a spec or plan launch
-    return _Judged(State.READY, hold=hold, findings=relaunch_findings(it))
+    return _Judged(State.READY, hold=hold, findings=relaunch_findings(it), start=True)
+
+
+def hold_unready(items, judged, facts, config, parked):
+    """``{item: dor reason}``: every Task or Bug about to start (Ready, no open PR) that the
+    Definition of Ready (``config.dor``, :func:`asf.kernel.dor.missing`) holds — New with the
+    reason ``dor: <missing>``; once ``config.dor_max_fills`` groom-fill sessions could not make it
+    ready, Stuck on the operator with that reason (judged afresh every tick: a card mended by hand
+    starts). ``judged`` is updated in place."""
+    if not config.dor:
+        return {}
+    out = {}
+    for iid in sorted(judged):
+        j, it = judged[iid], items[iid]
+        if not j.start or it.type not in BUILDABLE or iid in parked:
+            continue
+        gaps = D.missing(it, items, facts.trunk_files, parked)
+        if not gaps:
+            continue
+        why = D.reason(gaps)
+        if it.dor_fills >= config.dor_max_fills:
+            judged[iid] = _Judged(State.STUCK, _stuck(
+                '%s — %d groom-fill session(s) could not make it ready' % (why, it.dor_fills),
+                'operator'))
+        else:
+            judged[iid] = _Judged(State.NEW, hold=j.hold, dor=why)
+        out[iid] = why
+    return out
 
 
 #: a Stuck reason a session's REPORT left (:func:`asf.kernel.reports.stuck_reason`)
@@ -861,7 +902,7 @@ def _host_publishable(s):
     either reported ``done`` or ran on an open PR's branch (``Session.pr``: a rebase or fix round,
     whatever it reported — ``partial``, ``blocked`` or no REPORT: its sandbox refused the
     force-push it needed)."""
-    return (s.ended and s.kind != 'review' and s.result != 'pushed' and bool(s.unpushed)
+    return (s.ended and s.kind not in READ_ONLY and s.result != 'pushed' and bool(s.unpushed)
             and (s.status == R.DONE or s.pr is not None))
 
 
@@ -1404,8 +1445,9 @@ def _mint(facts, parked):
 
 
 #: the launch classes, in the order scarce seats fill (finish first): a fix round or rebase on an
-#: open PR, a review, a build of a Task/Bug, a plan, a spec
-FINISH_FIRST = ('fix', 'review', 'build', 'plan', 'spec')
+#: open PR, a review, a build of a Task/Bug, a plan, a spec, a groom-fill of a card the
+#: Definition of Ready holds
+FINISH_FIRST = ('fix', 'review', 'build', 'plan', 'spec', 'groom')
 
 #: the launch classes the WIP cap (``Config.max_open_prs``) holds back: new work
 NEW_WORK = ('build', 'plan', 'spec')
@@ -1420,7 +1462,7 @@ def open_prs(judged, on_pr=()):
 
 
 def _launches(facts, config, judged, children, states, parked, blocks=None, due=None,
-              queued=None, wip=None):
+              queued=None, wip=None, unready=None):
     """``(launches, skipped)``: while sessions are free, finish first (:data:`FINISH_FIRST`) — a
     Ready item with an open PR (a fix round, a rebase), then reviews, then builds, plans and specs
     — each class in launch order (:func:`launch_order`): an item whose wait is over its target
@@ -1431,7 +1473,9 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
     Landing exceed ``config.max_open_prs`` (the WIP cap) no build, plan or spec launches
     (``skipped[iid] = 'wip'``) and ``wip`` (filled when given) records the hold. ``queued``
     (filled when given) maps every item left for want of a seat to ``'seat'``, every overlap to
-    ``'overlap'`` and every WIP hold to ``'wip'``."""
+    ``'overlap'`` and every WIP hold to ``'wip'``. Last come the groom-fill sessions of the cards
+    the Definition of Ready holds (``unready``), at most ``config.dor_fill_per_tick`` a tick and
+    ``config.dor_max_fills`` a card, never held by the WIP cap or a file overlap (they only read)."""
     items = facts.items
     free = _free(facts, config)
     inherit = config.rank != 'own'
@@ -1449,14 +1493,21 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
                 and not _derived(iid, items, children)):
             kind = _kind(items[iid], facts, config)
             cands.append(('fix' if iid in on_pr else kind, iid, first(iid)))
+    for iid in sorted(unready or ()):
+        j = judged[iid]
+        if (j.state is State.NEW and not j.hold and _visible(items, iid, parked)
+                and items[iid].dor_fills < config.dor_max_fills):
+            cands.append(('groom', iid, first(iid)))
     cands.sort(key=lambda c: (FINISH_FIRST.index(c[0]), c[2]))
     cap = config.max_open_prs
     n_open = open_prs(judged, on_pr)
     over = cap is not None and n_open > cap
     busy = [items[i].writes for i in items
             if states[i][0] is State.BUILDING and _visible(items, i, parked)]
-    out, skipped, held = [], {}, 0
+    out, skipped, held, fills = [], {}, 0, 0
     for cls, iid, _key in cands:
+        if cls == 'groom' and fills >= config.dor_fill_per_tick:
+            continue
         if over and cls in NEW_WORK:
             skipped[iid] = queued[iid] = 'wip'
             held += 1
@@ -1466,6 +1517,11 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
             continue
         if cls == 'review':
             out.append(A.Launch('review', iid, judged[iid].review_branch, local=iid in due))
+            free -= 1
+            continue
+        if cls == 'groom':
+            out.append(A.Launch(D.GROOM_FILL, iid, config.groom_branch + iid, [judged[iid].dor]))
+            fills += 1
             free -= 1
             continue
         if any(_overlap(items[iid].writes, w) for w in busy):
@@ -1501,7 +1557,7 @@ def _idle(facts, config, judged, states, parked, skipped):
             continue
         if state is State.NEW:
             waits = open_edges(it, items, states, parked, facts.unreadable or {})
-            why = 'after' if waits else 'new'
+            why = 'after' if waits else 'dor' if judged[iid].dor else 'new'
         elif facts.paused:
             why = 'paused'
         else:

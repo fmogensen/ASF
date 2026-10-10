@@ -23,6 +23,7 @@ import fnmatch
 import importlib
 import re
 
+from asf.kernel import dor as D
 from asf.kernel import settings as kernel_settings
 from asf.kernel.model import RED_CONCLUSIONS
 
@@ -75,6 +76,42 @@ tests: none — documentation
 left out: none
 ```
 """
+
+#: a groom-fill session's brief (:func:`_groom_brief`): the kernel's own, short, on the light model
+GROOM_FILL_TEXT = """# Groom-fill: {item_id} — {title}
+
+The kernel holds {item_id} New: its card does not meet the Definition of Ready.
+What is missing: {missing}
+
+You only read and judge — never edit, commit or push anything. Read the card below and the
+repository at `origin/{main}`, then decide one verdict:
+- `proceed`: the card is ready as it stands (say why);
+- `superseded`: the work already landed, or another card covers it — name that card's id or the
+  trunk commit's sha in `superseded_by`;
+- `fill`: write the acceptance lines, each naming the test that proves it
+  (`<line> — tests/<file>.py::<Test>`), and the `writes` (repo paths; one that does not exist
+  yet ends ` (new)`);
+- `reshape`: the same two fields, when the card's scope must change to be buildable.
+Name only tests and paths that exist on the trunk or that the writes create. `risk_raise: high`
+when the change touches the record, CI, the kernel or the release tooling.
+
+## The card
+
+- type: {type}; parent: {parent}; after: {after}
+- writes: {writes}
+- creates: {creates}
+
+{body}
+
+End with exactly this block (lists as JSON), and nothing after it:
+
+```
+{schema}
+```
+"""
+
+#: the most characters of a card's body a groom-fill brief quotes
+GROOM_BODY_MAX = 6000
 
 #: what a kernel session does with a rebase: its sandbox refuses a force-push, so the host
 #: publishes it (``--force-with-lease`` over origin's tip, only when that tip is in the branch's
@@ -242,6 +279,23 @@ def _light_brief(product, launch, item, pr, model):
                        id_ranges_needed=False)
 
 
+def _groom_brief(product, launch, item, findings, model):
+    """The :class:`asf.briefs.build.Brief` of a groom-fill session (:data:`GROOM_FILL_TEXT`)."""
+    floor = importlib.import_module('asf.briefs.build')
+    body = str(item.body or '').strip()
+    if len(body) > GROOM_BODY_MAX:
+        body = body[:GROOM_BODY_MAX] + '\n…'
+    text = GROOM_FILL_TEXT.format(
+        item_id=item.id, title=item.title or '', type=item.type, parent=item.parent or 'none',
+        after=', '.join(item.after) or 'none', writes=', '.join(item.writes) or 'none',
+        creates=', '.join(getattr(item, 'creates', ()) or ()) or 'none',
+        missing='; '.join(str(f)[len(D.PREFIX):] if str(f).startswith(D.PREFIX) else str(f)
+                          for f in findings) or 'see the card',
+        main=getattr(product, 'main', 'main') or 'main', body=body, schema=D.VERDICT_SCHEMA)
+    return floor.Brief(kind=D.GROOM_FILL, item_id=item.id, text=text, model=model, add_dirs=[],
+                       id_ranges_needed=False)
+
+
 def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=None, log=None):
     """The :class:`asf.briefs.build.Brief` for ``launch`` of ``item`` (a kernel Item). ``index``
     is the record's ``index.json`` (``{'items': {...}}``); ``repo_facts`` a callable
@@ -251,6 +305,9 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
     floor = importlib.import_module('asf.briefs.build')
     fix = launch.kind == 'build' and pr is not None
     kind = brief_kind(launch, item, fix)
+    if kind == D.GROOM_FILL:
+        return _groom_brief(product, launch, item, findings,
+                            getattr(launch, 'model', '') or model_for(product, D.GROOM_FILL))
     limit = kernel_block(product)['briefs']['max_appended_chars']
     (findings, answers), dropped = cap_sections([list(findings), list(item.answers)], limit)
     if dropped:

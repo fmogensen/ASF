@@ -36,6 +36,8 @@ The still-needed gate's probe (:mod:`asf.kernel.needed_probe`, after the questio
 two share the trunk probe's per-tick cap) fills ``Facts.needed`` and ``Facts.landed_shas``; the
 repo's queued and running CI runs are read before the PRs (``Facts.ci_runs``) and every open PR's
 head after (``Facts.open_heads``, off the port's open listing).
+The trunk's file list (``Facts.trunk_files``, ``record.trunk_files`` when the port has it) is
+what the Definition of Ready (:mod:`asf.kernel.dor`) checks a card's ``writes`` against.
 
 A GitHub read that fails (the port has already retried a transient one) leaves no partial PR
 facts: ``prs``, GitHub's reviews and the pushed branches are empty and ``Facts.github_error``
@@ -47,7 +49,7 @@ import string
 from asf.kernel import idclaims
 from asf.kernel import resolvers
 
-from asf.kernel.decide import stranded as decide_stranded
+from asf.kernel.decide import READ_ONLY, stranded as decide_stranded
 from asf.kernel.model import Facts, State
 
 
@@ -72,7 +74,7 @@ def open_questions(items, sessions):
     question (else its reason), for an item on the record."""
     out = []
     for s in sessions:
-        if s.ended and not s.alive and s.kind != 'review' and s.question:
+        if s.ended and not s.alive and s.kind not in READ_ONLY and s.question:
             out.append((s.item_id, s.question))
     for iid in sorted(items):
         it = items[iid]
@@ -251,6 +253,8 @@ def read_facts(ports):
     resolved = read_resolved(ports, items, sessions, prs)
     needed, landed = read_needed(ports, items, prs, sessions) if not github_error else ({}, {})
     heads = getattr(ports.github, 'open_heads', None) if not github_error else None
+    files = getattr(record, 'trunk_files', None)
+    trunk_files = files() if files else None
     return Facts(unreadable=dict(look_bad() or {}) if look_bad else {},
                  items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
@@ -259,4 +263,5 @@ def read_facts(ports):
                  open_heads=dict(heads) if isinstance(heads, dict) else None,
                  github_error=github_error, orphan_prs=orphans, strict=strict, main=main,
                  seats=seats,
+                 trunk_files=trunk_files,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

@@ -253,7 +253,8 @@ class Plan:
     cap's hold this tick (``{'open', 'cap', 'held'}``: open PRs in Review + Landing, the cap, the
     new builds/plans/specs that wait; None when it holds nothing back). ``gate`` are the
     still-needed gate's lines (:func:`asf.kernel.needed.gate_line`): ``{'item', 'verdict',
-    'why'}`` each."""
+    'why'}`` each. ``dor`` maps each Task or Bug the
+    Definition of Ready holds to its ``dor: <missing>`` reason (None while it is off)."""
     states: dict = dataclasses.field(default_factory=dict)
     actions: list = dataclasses.field(default_factory=list)
     idle: dict = None
@@ -263,6 +264,7 @@ class Plan:
     main: dict = None
     wip: dict = None
     gate: list = dataclasses.field(default_factory=list)
+    dor: dict = None
 
 
 def describe(action):
