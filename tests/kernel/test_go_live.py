@@ -39,17 +39,43 @@ class Parked(unittest.TestCase):
         plan = decide(B.facts([B.item('F-0001')], specs_landed={'F-0001': SPEC}), B.config())
         self.assertEqual([m.story_id for m in B.of(plan, A.MintStory)], ['S-0009'])
 
-    def test_the_open_pr_of_a_parked_task_gets_no_review_and_no_upkeep(self):
+    def test_the_open_pr_of_a_parked_task_carries_on_through_review_and_landing(self):
+        # parking stops NEW launches only: work already in flight on an open kernel PR is
+        # reviewed, kept up to date and landed, so the finished work lands rather than rots
         items = [B.item('S-0001', priority='later'),
                  B.task('T-0001', parent='S-0001', state=State.REVIEW)]
-        red = B.check(name='ci', conclusion='failure', run_id=9)
-        for pr in (B.pr(7, 'T-0001'), B.pr(7, 'T-0001', behind=True, checks=[red])):
-            plan = decide(B.facts(items, prs=[pr]), B.config())
-            self.assertEqual(plan.actions, [])
-            self.assertEqual(B.state(plan, 'T-0001'), State.PARKED)
+        plan = decide(B.facts(items, prs=[B.pr(7, 'T-0001')]), B.config())
+        self.assertEqual(B.launched(plan, 'review'), ['T-0001'])
+        self.assertEqual(B.state(plan, 'T-0001'), State.REVIEW)
+        self.assertEqual(plan.limbo, {})
         plan = decide(B.facts(items, prs=[B.pr(7, 'T-0001')], reviews=[B.review('T-0001')]),
                       B.config())
-        self.assertEqual(B.of(plan, A.EnableAutoMerge), [])
+        self.assertEqual([a.pr for a in B.of(plan, A.EnableAutoMerge)], [7])
+        self.assertEqual(B.state(plan, 'T-0001'), State.LANDING)
+        self.assertEqual(plan.limbo, {})
+
+    def test_a_parked_task_whose_pr_landed_is_done_and_launches_nothing_new(self):
+        items = [B.item('S-0001', priority='later'),
+                 B.task('T-0001', parent='S-0001', state=State.LANDING),
+                 B.task('T-0002', parent='S-0001')]
+        plan = decide(B.facts(items, prs=[B.pr(7, 'T-0001', merged=True)]), B.config())
+        self.assertEqual(B.state(plan, 'T-0001'), State.DONE)
+        self.assertEqual(B.state(plan, 'T-0002'), State.PARKED)
+        self.assertEqual(B.launched(plan), [])
+
+    def test_a_parked_item_with_no_open_pr_or_a_hand_made_branch_stays_parked(self):
+        items = [B.task('T-0001', priority='later')]
+        for prs in ([], [B.pr(7, 'T-0001', branch='fix/T-0001-by-hand')],
+                    [B.pr(7, 'T-0001', merged=False, branch='someone/T-0001')]):
+            plan = decide(B.facts(items, prs=prs), B.config())
+            self.assertEqual(B.state(plan, 'T-0001'), State.PARKED)
+            self.assertEqual(B.launched(plan), [])
+
+    def test_a_parked_feature_with_an_open_spec_pr_lands_it_but_mints_nothing(self):
+        items = [B.item('F-0001', priority='later')]
+        plan = decide(B.facts(items, specs_landed={'F-0001': SPEC},
+                              prs=[B.pr(7, 'F-0001', branch='spec/F-0001')]), B.config())
+        self.assertEqual(B.of(plan, A.MintStory), [])
 
     def test_a_stuck_parked_item_is_not_listed_and_blocks_no_one(self):
         items = [B.task('T-0001', state=State.STUCK, stuck=B.M.Stuck('red', 'ci'),

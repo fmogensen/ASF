@@ -342,7 +342,8 @@ def decide(facts, config):
     closes = floor_closes(facts, config)
     closing = {a.item_id for a in closes if a.item_id in items}
 
-    parked = _parked(items)
+    parked_all = _parked(items)
+    parked = parked_all - flying(facts, config)
     judged = {iid: (_Judged(State.DONE) if iid in closing
                     else _park(items[iid], facts, config) if iid in parked
                     else _judge(items[iid], facts, config, actions)) for iid in sorted(items)}
@@ -381,7 +382,7 @@ def decide(facts, config):
             states[a.item_id] = (State.READY, None)
         if not (isinstance(a, A.Rerun) and a.run_id in have):
             actions.append(a)
-    actions += _mint(facts, parked)
+    actions += _mint(facts, parked_all)
     queued = {}
     launches, skipped = (([], {}) if facts.paused
                          else _launches(facts, config, judged, children, states, parked, blocks,
@@ -899,6 +900,16 @@ def _park(it, facts, config):
     facts would ask for is dropped."""
     j = _judge(it, facts, config, [])
     return j if j.state is State.DONE else _Judged(State.PARKED, hold=True)
+
+
+def flying(facts, config):
+    """The ids of the items with an open kernel PR (:func:`kernel_owned` branch, not merged).
+    Parking stops NEW launches only: a parked item in this set carries on through review, its
+    fix rounds, the merge train and landing as any other — the finished work lands rather than
+    rots — and once its PR merged it is Done (and parked again for anything new)."""
+    return {p.item_id for p in facts.prs
+            if not p.merged and p.item_id in facts.items
+            and kernel_owned(p.branch, config, p.item_id)}
 
 
 def _parked(items):
@@ -1655,8 +1666,6 @@ def limbo(facts, config, judged, states, parked, children, actions, queued=None,
                    default=None)
         if mine != p.number:
             out['PR #%d' % p.number] = '%s has a newer open PR #%d' % (p.item_id, mine)
-        elif p.item_id in parked and states.get(p.item_id, (None,))[0] is not State.DONE:
-            out['PR #%d' % p.number] = 'its item %s is parked (priority: later)' % p.item_id
     return out
 
 
