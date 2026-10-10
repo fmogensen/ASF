@@ -230,3 +230,61 @@ def take(store, conv, wt, branch, item, remote_sha=''):
         except OSError:
             pass
     return filed
+
+
+#: Where a :func:`recover`-ed entry's text came from.
+FROM_WORKTREE, FROM_REPORT = 'the review file in its worktree', 'the session REPORT'
+
+
+def _resolved_head(repo, sha):
+    sha = (sha or '').strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{7,40}', sha):
+        return None
+    if _git(repo, 'rev-parse', '--verify', '--quiet', f'{sha}^{{commit}}').returncode == 0:
+        return sha
+    return None
+
+
+def recover(store, conv, repo, wt, branch, item, pr_head='', report='', launch_head=''):
+    """File the review of a finished session whose worktree is no git checkout — what
+    :func:`take` refuses (:class:`NotACheckout`) because nothing there can be bound to a head.
+
+    Returns ``(round, entry path, source)``, or None when there is nothing to file.
+
+    The review is read without git: the newest review file of ``item`` in ``wt``
+    (:func:`asf.evidence.review.worktree_review` — ``os.walk`` and ``open``), else the verdict
+    block of ``report`` as a review text (:func:`asf.evidence.review.recovered_review`).
+
+    The head it is bound to is the first of these the repo can ``rev-parse --verify``: the head
+    the review itself names (its ``verdict`` block, then its ``head:`` line), the run's
+    ``launch_head``, ``pr_head``. None of them resolvable is None: an entry bound to a sha no
+    reader can resolve is worse than no entry (F-0313 D3).
+
+    Nothing is written to ``wt`` and nothing is removed from it: the sandbox that broke the
+    gitdir may refuse writes there too. The caller's ``review_filed`` is what keeps a later pass
+    from filing the same review twice (F-0313 D6).
+    """
+    from asf.evidence import review
+    hit = review.worktree_review(conv, wt, item)
+    if hit is not None:
+        n, _path, text = hit
+        source = FROM_WORKTREE
+    else:
+        n, text, source = 1, report or '', FROM_REPORT
+
+    v = review.verdict_block(text)
+    head = None
+    for candidate in (v.head if v else None, review.head_of(text), launch_head, pr_head):
+        head = _resolved_head(repo, candidate)
+        if head:
+            break
+    if head is None:
+        return None
+
+    if source == FROM_REPORT:
+        text = review.recovered_review(report, head, item=item, n=n, source=FROM_REPORT)
+        if not text:
+            return None
+
+    entry = put(store, str(item).lower(), branch, n, head, text)
+    return n, entry, source
