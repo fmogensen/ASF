@@ -49,45 +49,141 @@ class FrontmatterDict(dict):
         self.entries = []
         self.machine_keys = set()
         self.comments = {}
+        #: keys read from a shape an older writer left (a value split over lines, a stray quote)
+        self.lenient = set()
 
 
 _MISSING = object()
 
 
-def _split_comment(s):
-    """Return (content, comment) splitting on the first unquoted '#'."""
-    in_quote = False
+def _scan(s):
+    """Yield ``(index, char, quoted)`` for every character of ``s`` outside an escape: a
+    double-quoted span is ``quoted`` (its quotes too), and inside one a backslash escapes the
+    next character (an escaped ``\\"`` never ends the span)."""
+    in_quote = escaped = False
     for idx, ch in enumerate(s):
+        if escaped:
+            escaped = False
+            continue
+        if in_quote and ch == '\\':
+            escaped = True
+            continue
         if ch == '"':
             in_quote = not in_quote
-        elif ch == '#' and not in_quote:
+            yield idx, ch, True
+            continue
+        yield idx, ch, in_quote
+
+
+def _split_comment(s):
+    """Return (content, comment) splitting on the first unquoted '#'."""
+    for idx, ch, quoted in _scan(s):
+        if ch == '#' and not quoted:
             return s[:idx], s[idx:]
     return s, None
 
 
 def _split_top(s, sep):
     """Split s on sep at top level, respecting double-quoted spans."""
-    parts = []
-    cur = ''
-    in_quote = False
-    for ch in s:
+    parts, start = [], 0
+    for idx, ch, quoted in _scan(s):
+        if ch == sep and not quoted:
+            parts.append(s[start:idx])
+            start = idx + 1
+    parts.append(s[start:])
+    return parts
+
+
+def _legacy_list(whole):
+    """The elements of the inline list ``whole`` (``[`` … ``]``) as an older reader split it:
+    every ``"`` toggles a quoted span, a backslash escapes nothing. The one reading left for a
+    list that older reader wrote back with a stray quote (an element split on an escaped
+    quote), which no escape-aware reading balances."""
+    parts, cur, in_quote = [], '', False
+    for ch in whole[1:-1]:
         if ch == '"':
             in_quote = not in_quote
-            cur += ch
-        elif ch == sep and not in_quote:
+        if ch == ',' and not in_quote:
             parts.append(cur)
             cur = ''
-        else:
-            cur += ch
+            continue
+        cur += ch
     parts.append(cur)
-    return parts
+    return [_coerce_scalar(t) for t in parts if t.strip() != '']
+
+
+def _is_open(content):
+    """Whether a value's text continues on the next line: it opens as a quoted span or an inline
+    collection (``"``, ``[``, ``{``) and its quote is unterminated, or more ``[``/``{`` than
+    ``]``/``}`` stand outside quoted spans — the shape an older writer left when it put a raw
+    newline inside a quoted value (:func:`_quote` now escapes it). A bare value never is."""
+    if content.strip()[:1] not in ('"', '[', '{'):
+        return False
+    depth = quotes = 0
+    for _idx, ch, quoted in _scan(content):
+        if ch == '"':
+            quotes += 1
+        elif not quoted:
+            depth += (ch in '[{') - (ch in ']}')
+    return quotes % 2 == 1 or depth > 0
+
+
+def _unbalanced(content):
+    """More ``[``/``{`` than ``]``/``}`` outside quoted spans."""
+    depth = 0
+    for _idx, ch, quoted in _scan(content):
+        if not quoted:
+            depth += (ch in '[{') - (ch in ']}')
+    return depth > 0
+
+
+def _extent(lines, i):
+    """The index of the last physical line of the ``key:`` line ``lines[i]``: ``i`` unless its
+    value is open (:func:`_is_open`) and a later line closes it. A value that never closes is
+    one line, so the parser names it."""
+    m = _KEY_RE.match(lines[i])
+    if not m:
+        return i
+    content, j = m.group(2), i
+    while _is_open(_split_comment(content)[0]) and j + 1 < len(lines):
+        j += 1
+        content += '\n' + lines[j]
+    return j if j > i and not _is_open(_split_comment(content)[0]) else i
+
+
+def _logical(lines):
+    """``lines`` grouped into logical lines (:func:`_extent`), each a list of physical lines."""
+    out, i = [], 0
+    while i < len(lines):
+        j = _extent(lines, i)
+        out.append(lines[i:j + 1])
+        i = j + 1
+    return out
+
+
+#: the escapes a quoted value may carry (:func:`_quote` writes them, :func:`_unquote` reads them)
+_ESCAPES = {'\\': '\\', '"': '"', 'n': '\n', 'r': '\r', 't': '\t'}
+
+
+def _unquote(inner):
+    """The text of a quoted value: ``\\\\``, ``\\"``, ``\\n``, ``\\r``, ``\\t`` decoded; any other
+    backslash kept as written."""
+    out, i, n = [], 0, len(inner)
+    while i < n:
+        ch = inner[i]
+        if ch == '\\' and i + 1 < n and inner[i + 1] in _ESCAPES:
+            out.append(_ESCAPES[inner[i + 1]])
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
 
 
 def _coerce_scalar(token):
     token = token.strip()
     if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
-        inner = token[1:-1]
-        return inner.replace('\\"', '"').replace('\\\\', '\\')
+        return _unquote(token[1:-1])
     if token == 'true':
         return True
     if token == 'false':
@@ -124,6 +220,8 @@ def _needs_quote(s, in_list=False):
         return True
     if s.strip() != s:
         return True
+    if any(c in s for c in '\n\r\t'):
+        return True
     if ': ' in s or s.endswith(':'):
         return True
     if s[0] in '#[]{}"\'':
@@ -140,7 +238,10 @@ def _needs_quote(s, in_list=False):
 
 
 def _quote(s):
-    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    """``s`` as one double-quoted line: a backslash, a quote and every line break escaped, so a
+    multi-line value (a CI log, a review finding) never spills over the next key."""
+    return '"' + (s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                  .replace('\r', '\\r').replace('\t', '\\t')) + '"'
 
 
 def _format_scalar(value, in_list=False):
@@ -199,6 +300,7 @@ def parse(text, path=None):
     body = '\n'.join(lines[end + 1:])
 
     meta = FrontmatterDict()
+    lenient = set()
     entries = []
     machine_keys = set()
     in_machine = False
@@ -220,6 +322,11 @@ def parse(text, path=None):
         m = _KEY_RE.match(raw_line)
         if not m:
             raise FrontmatterError(path, line_no, f"cannot parse line: {raw_line!r}")
+        last = _extent(header_lines, i)
+        if last > i:  # a raw newline inside a quoted value (an older writer): one logical line
+            raw_line = '\n'.join(header_lines[i:last + 1])
+            m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*):(.*)$', raw_line, re.S)
+            lenient.add(m.group(1))
         key, rest = m.group(1), m.group(2)
         content, _comment = _split_comment(rest)
         content = content.strip()
@@ -276,21 +383,25 @@ def parse(text, path=None):
                 i += 1
                 continue
         else:
-            if len(content) >= 2 and (
-                (content.count('[') > content.count(']')) or
-                (content.count('{') > content.count('}'))
-            ):
-                raise FrontmatterError(path, line_no, f"unbalanced inline collection: {raw_line!r}")
-            value = _parse_value(content)
+            whole = rest.strip()
+            if len(content) >= 2 and _unbalanced(content):
+                if not (whole.startswith('[') and whole.endswith(']')):
+                    raise FrontmatterError(path, line_no,
+                                           f"unbalanced inline collection: {raw_line!r}")
+                value = _legacy_list(whole)
+                lenient.add(key)
+            else:
+                value = _parse_value(content)
             entries.append(_Entry('scalar', key, value, raw_line))
             meta[key] = value
             if in_machine:
                 machine_keys.add(key)
-            i += 1
+            i = last + 1
             continue
 
     meta.entries = entries
     meta.machine_keys = machine_keys
+    meta.lenient = lenient
     return meta, body
 
 
@@ -327,6 +438,7 @@ def clone(meta):
     ]
     new.machine_keys = set(meta.machine_keys)
     new.comments = dict(meta.comments)
+    new.lenient = set(getattr(meta, "lenient", ()))
     return new
 
 
@@ -455,10 +567,11 @@ def _machine_entries(block):
     """``[(key or None, [raw line, …])]``: one entry per machine key with its continuation lines
     (a ``- item`` list, a nested map); a line that opens no key (a comment) is its own entry."""
     out = []
-    for line in block:
+    for group in _logical(block):
+        line = group[0]
         m = _KEY_RE.match(line)
         if m:
-            out.append((m.group(1), [line]))
+            out.append((m.group(1), list(group)))
         elif out and line[:1] in (' ', '\t') and out[-1][0] is not None:
             out[-1][1].append(line)
         else:
@@ -561,8 +674,9 @@ def write_typed(path, updates):
         if m and m.group(1) in remaining:
             key = m.group(1)
             value = remaining.pop(key)
-            # skip any continuation lines this key owned (a `- item` or nested `key:` block)
-            j = i + 1
+            # skip any continuation lines this key owned (a `- item` or nested `key:` block, or
+            # the rest of a value an older writer split over lines)
+            j = _extent(head, i) + 1
             while j < n and re.match(r'^\s+\S', head[j]):
                 j += 1
             if value is not None:
@@ -581,3 +695,17 @@ def write_typed(path, updates):
     body = '\n'.join(lines[end + 1:])
     new_text = '---\n' + '\n'.join(new_head + tail) + '\n---\n' + body
     writer.write_card(path, new_text)
+
+
+def normalize(text, path=None):
+    """``text`` with every value read from a shape an older writer left (a raw newline inside a
+    quoted value, a stray quote: ``meta.lenient``) rendered afresh on one line by
+    :func:`_format_entry`; every other line byte for byte.
+    The same text when there is none. Raises :class:`FrontmatterError` as :func:`parse` does."""
+    meta, body = parse(text, path=path)
+    split = [e for e in meta.entries if e.kind == 'scalar' and e.key in meta.lenient]
+    if not split:
+        return text
+    for e in split:
+        e.raw = _format_entry(e.key, e.value)
+    return render(meta, body)

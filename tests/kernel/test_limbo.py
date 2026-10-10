@@ -426,11 +426,15 @@ class UnreadableCards(unittest.TestCase):
         root = tempfile.mkdtemp()
         os.makedirs(os.path.join(root, 'tasks'))
         with open(os.path.join(root, 'tasks', 'T-0009.md'), 'w', encoding='utf-8') as f:
-            f.write('---\nid: T-0009\ntype: task\nkernel_findings: ["red: a\nb"]\n---\nbody\n')
+            f.write('---\nid: T-0009\ntype: task\nkernel_findings: ["red: a\n---\nbody\n')
+        # the multi-line shape an older writer left is read, not dropped
+        with open(os.path.join(root, 'tasks', 'T-0010.md'), 'w', encoding='utf-8') as f:
+            f.write('---\nid: T-0010\ntype: task\nkernel_findings: ["red: a\nb"]\n---\nbody\n')
         product = env.Product('sample', {'repo_slug': 'o/r', 'main': 'main', 'backlog_dir': root})
         rec = P.RealRecord(product, state_dir=tempfile.mkdtemp())
         self.assertNotIn('T-0009', rec.items())
         self.assertEqual(list(rec.unreadable()), ['T-0009'])
+        self.assertIn('T-0010', rec.items())
 
 
 class Settings(unittest.TestCase):

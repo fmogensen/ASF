@@ -386,6 +386,8 @@ def build_parser():
     register_answer(sub)
     from asf.tick.migrate_landing import register as register_migrate_landing
     register_migrate_landing(sub)
+    from asf.record.repair import register as register_record_repair
+    register_record_repair(sub)
     from asf.trunk_ruleset import register as register_ruleset
     register_ruleset(sub)
     from asf.facts.landing import register as register_facts
@@ -729,6 +731,12 @@ def _main(argv=None):
             return cmd_migrate_landing(args, resolve_record(args))
         return _published(cmd_migrate_landing, args, resolve_record(args),
                           'record: migrate-landing ' + ('--revert' if args.revert else '--apply'))
+    if args.command == 'record-repair':
+        from asf.record.repair import cmd_record_repair
+        if not args.apply:   # the dry run writes nothing: nothing to publish
+            return cmd_record_repair(args, resolve_record(args))
+        return _published(cmd_record_repair, args, resolve_record(args),
+                          'record: record-repair --apply (multi-line values back on one line)')
     if args.command == 'groom':
         from asf.groom.groom import cmd_groom
         return cmd_groom(args, resolve_record(args))
