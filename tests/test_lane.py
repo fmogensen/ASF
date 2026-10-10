@@ -2437,6 +2437,19 @@ class GitMechanicsNeverSpawnASession(LaneFixture):
         self.assertIn('conflicts in c.txt', corr['text'])
         self.assertEqual(self.lane_of(self.B)['state'], lane.BACK)
 
+    def test_b83471_conflict_text_never_reads_a_clean_status_as_nothing_to_fix(self):
+        # B-83471: the launch rebase onto the trunk (asf.workers.spawn._rebase_onto_trunk)
+        # always aborts a conflict before a session's worktree exists, so `git status` there
+        # is clean whether or not the conflict stands — three correct sessions on T-0654 and
+        # T-47334 read that clean status as "nothing to do" and reported "done, commits: none"
+        # without touching the conflict that was the whole of the work.
+        text = lane.conflict_text(7, 'main', ['a.ts', 'b.ts'])
+        self.assertIn('conflicts with origin/main in a.ts, b.ts', text)
+        self.assertIn('git status', text)
+        self.assertIn('proves nothing', text)
+        self.assertIn('rebase the branch onto origin/main yourself', text)
+        self.assertIn('git rebase origin/main', text)
+
     def test_the_pre_push_check_runs_before_the_mechanical_push(self):
         old = self.branch()
         self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
