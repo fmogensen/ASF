@@ -3506,5 +3506,119 @@ class RelaunchOnlyWhatChanged(LaneFixture):
         self.assertFalse(any('not sent back again' in l for l in lines), lines)
 
 
+class ProvesRefusalTests(LaneFixture):
+    """F-0040 S-56306: the landing refuses a Task branch that proves no acceptance line of a
+    Story it lists."""
+
+    ITEM = 'T-0123'
+    STORY = 'S-18750'
+
+    def setUp(self):
+        super().setUp()
+        self.root = tempfile.mkdtemp(prefix='record_')
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, 'stories'))
+        with open(os.path.join(self.root, 'stories', f'{self.STORY}.md'), 'w',
+                  encoding='utf-8') as f:
+            f.write('## Acceptance\n- [ ] one\n- [ ] two\n')
+        self.story_item = {'type': 'story', 'folder': 'stories', 'id': self.STORY}
+        self.task_item = {'type': 'task', 'stories': [self.STORY]}
+        self.items = {self.STORY: self.story_item, self.ITEM: self.task_item}
+
+    def push_commits(self, branch, commits):
+        """``commits``: ``[(subject, {rel: text})]`` — one commit per pair, oldest first."""
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', branch, 'origin/main'], cwd=self.worker)
+        for subject, files in commits:
+            for rel, text in files.items():
+                self.write(self.worker, rel, text)
+            sh(['git', 'add', '-A'], cwd=self.worker)
+            sh(['git', 'commit', '-qm', subject], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', branch], cwd=self.worker)
+
+    def refusal(self, commits, item=None, items=None, root=None):
+        branch = f'worker/{item or self.ITEM}'
+        self.push_commits(branch, commits)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return lane.lane_refusal(self.repo, 'main', branch, item or self.ITEM,
+                                 items=self.items if items is None else items,
+                                 root=self.root if root is None else root)
+
+    def test_a_branch_with_no_trailer_is_refused(self):
+        kind, text = self.refusal([('feat(T-0123): a', {'a.txt': 'a\n'})])
+        self.assertEqual(kind, 'proves')
+        self.assertIn('no claim', text)
+        self.assertIn(self.STORY, text)
+        self.assertIn('1 one', text)
+        self.assertIn('2 two', text)
+        self.assertIn('Proves: <S-id> line <n>', text)
+
+    def test_a_valid_trailer_is_not_refused(self):
+        self.assertIsNone(self.refusal(
+            [('feat(T-0123): a', {'a.txt': 'a\n'}),
+             ('fix(T-0123): b\n\nProves: S-18750 line 1 — tests/test_a.py::T::test_x',
+              {'tests/test_a.py': 'x\n'})]))
+
+    def test_a_claim_naming_a_story_the_task_does_not_list_is_refused(self):
+        kind, text = self.refusal(
+            [('feat(T-0123): a\n\nProves: S-9999 line 1 — tests/test_a.py::T::test_x',
+              {'tests/test_a.py': 'x\n'})])
+        self.assertEqual(kind, 'proves')
+        self.assertIn('unknown story', text)
+
+    def test_a_line_past_the_end_of_the_list_is_refused(self):
+        kind, text = self.refusal(
+            [('feat(T-0123): a\n\nProves: S-18750 line 7 — tests/test_a.py::T::test_x',
+              {'tests/test_a.py': 'x\n'})])
+        self.assertEqual(kind, 'proves')
+        self.assertIn('no such line', text)
+
+    def test_a_test_path_absent_from_the_tree_is_refused(self):
+        kind, text = self.refusal(
+            [('feat(T-0123): a\n\nProves: S-18750 line 1 — tests/nope.py::T::test_x',
+              {'a.txt': 'a\n'})])
+        self.assertEqual(kind, 'proves')
+        self.assertIn('no such test', text)
+
+    def test_an_item_that_is_not_a_task_is_not_refused(self):
+        self.items[self.ITEM] = {'type': 'bug'}
+        self.assertIsNone(self.refusal([('fix(T-0123): a', {'a.txt': 'a\n'})]))
+
+    def test_a_task_listing_no_story_is_not_refused(self):
+        self.items[self.ITEM] = {'type': 'task'}
+        self.assertIsNone(self.refusal([('feat(T-0123): a', {'a.txt': 'a\n'})]))
+
+    def test_a_call_with_no_items_is_not_refused(self):
+        self.assertIsNone(self.refusal([('feat(T-0123): a', {'a.txt': 'a\n'})], items={}))
+
+    def test_a_call_with_no_root_is_not_refused(self):
+        self.assertIsNone(self.refusal([('feat(T-0123): a', {'a.txt': 'a\n'})], root=''))
+
+    def test_the_merge_refusal_still_fires_first(self):
+        self.push_commits('worker/T-0123', [('feat(T-0123): a', {'a.txt': 'a\n'})])
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, 'm.txt', 'm\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'trunk moves'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', 'worker/T-0123'], cwd=self.worker)
+        sh(['git', 'merge', '-q', '--no-edit', 'main', '-m', 'fix(T-0123): merge main'],
+           cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', 'worker/T-0123'], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        kind, _text = lane.lane_refusal(self.repo, 'main', 'worker/T-0123', self.ITEM,
+                                        items=self.items, root=self.root)
+        self.assertEqual(kind, 'merge')
+
+    def test_the_naming_refusal_still_fires_first(self):
+        kind, _text = self.refusal([('fix(B-0099): not this item', {'a.txt': 'a\n'})])
+        self.assertEqual(kind, lifecycle.NAMING)
+
+    def test_an_existing_four_argument_call_still_works(self):
+        self.push_commits('worker/T-0123', [('feat(T-0123): a', {'a.txt': 'a\n'})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        self.assertIsNone(lane.lane_refusal(self.repo, 'main', 'worker/T-0123', self.ITEM))
+
+
 if __name__ == '__main__':
     unittest.main()

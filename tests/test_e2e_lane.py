@@ -190,9 +190,13 @@ class LaneCase(unittest.TestCase):
         return self.f.push('main', {'tests/test_trunk.py': None}, 'test: the trunk is green again')
 
     def branch_by_hand(self, branch, item, title):
-        """``branch`` pushed and its PR opened by someone outside the factory."""
-        head = self.f.push(branch, {'src/lines.py': LINES_PY, 'tests/test_lines.py': LINES_TEST},
-                           f'feat({item}): {title}, by hand')
+        """``branch`` pushed and its PR opened by someone outside the factory. Carries the same
+        ``Proves:`` trailer the scripted coder's commit does (``coder.json``): F-0040's landing
+        refusal (S-56306) gates every Task branch alike, by hand or by session."""
+        head = self.f.push(
+            branch, {'src/lines.py': LINES_PY, 'tests/test_lines.py': LINES_TEST},
+            f'feat({item}): {title}, by hand\n\n'
+            'Proves: S-0001 line 1 — tests/test_lines.py::LinesTests::test_last_line')
         return head, self.f.open_pr(branch, f'{item} — {title}')
 
     def ready_to_land(self, item, limit=4):
@@ -531,7 +535,8 @@ class FootprintPartialFF(LaneCase):
         f = self.f
         f.runtime.queue('coder-t-0001', {
             'writes': {'{w0}': LINES_PY, '{w1}': LINES_TEST},
-            'commit': 'feat({item}): count lines, src/count.py still to change',
+            'commit': 'feat({item}): count lines, src/count.py still to change\n\n'
+                     'Proves: S-0001 line 1 — tests/test_lines.py::LinesTests::test_last_line',
             'status': 'partial', 'needs_writes': 'src/count.py',
             'left_out': 'src/count.py: count must share the splitter'})
         f.runtime.queue('correct', {

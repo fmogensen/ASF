@@ -1,3 +1,6 @@
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -6,8 +9,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from asf.rules import rules
+from asf.rules import rules, story_proof
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
@@ -503,3 +507,197 @@ class CoreRulesTests(unittest.TestCase):
         proc = self._run(['check', '--product', 'p'], root='/nonexistent')
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(proc.stdout.strip(), '== RULES 1 checked, 0 violations, 0 unenforced')
+
+
+# ---- F-0040 S-56310: the story-proof backstop -------------------------------------------------
+
+#: The text ``rules/story-proof.sh`` ships (NEEDS OPERATOR: the file itself is in
+#: ``conventions.amendable_paths`` — no session may write it; these tests exercise the same text
+#: from a core-rules-dir stand-in instead of the protected path).
+SHIPPED_SCRIPT = (
+    "#!/usr/bin/env bash\n"
+    "# F-0040 — every landed Task ticks the acceptance line its tests prove.\n"
+    'exec asf proves check --product "${ASF_PRODUCT:?}"\n'
+)
+
+
+class StoryProofViolationsTests(unittest.TestCase):
+    """:func:`asf.rules.story_proof.violations` over a temp record and a stub evidence dict."""
+
+    def setUp(self):
+        self.root = make_repo()
+        for sid in ('S-1', 'S-2'):
+            with open(os.path.join(self.root, 'stories', f'{sid}.md'), 'w',
+                      encoding='utf-8') as f:
+                f.write('## Acceptance\n- [ ] one\n- [ ] two\n')
+        self.items = {
+            'S-1': {'type': 'story', 'folder': 'stories', 'id': 'S-1'},
+            'S-2': {'type': 'story', 'folder': 'stories', 'id': 'S-2'},
+            'T-1': {'type': 'task', 'stories': ['S-1'], 'updated': '2026-09-20T00:00:00Z'},
+            'T-2': {'type': 'task', 'stories': ['S-2'], 'updated': '2026-09-22T00:00:00Z'},
+            'T-3': {'type': 'task', 'updated': '2026-09-21T00:00:00Z'},
+            'T-4': {'type': 'task', 'stories': ['S-1'], 'updated': '2026-09-23T00:00:00Z'},
+            'T-5': {'type': 'task', 'stories': ['S-1'], 'updated': '2026-09-24T00:00:00Z'},
+        }
+        self.ev = {
+            'ids': {'T-1': {'commit': 'a'}, 'T-2': {'commit': 'b'}, 'T-3': {'commit': 'c'},
+                   'T-5': {'commit': 'e'}},  # T-4: no landing evidence at all
+            'proves': {
+                'S-1': [{'line': 1, 'test': 'tests/x.py::T::a', 'task': 'T-1', 'pr': 1, 'sha': 'a'}],
+                'S-2': [{'line': 7, 'test': 'tests/x.py::T::b', 'task': 'T-2', 'pr': 2, 'sha': 'b'}],
+            },
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_a_task_landed_proving_nothing(self):
+        self.assertIn('task landed proving nothing T-5 (S-1) since 2026-09-24',
+                      story_proof.violations(self.items, self.ev, self.root))
+
+    def test_a_claim_naming_a_line_the_story_has_not_got(self):
+        self.assertIn('claim names a line S-2 has no more S-2 line 7 (T-2) since 2026-09-22',
+                      story_proof.violations(self.items, self.ev, self.root))
+
+    def test_a_task_listing_no_story(self):
+        self.assertIn('task lists no story T-3 since 2026-09-21',
+                      story_proof.violations(self.items, self.ev, self.root))
+
+    def test_a_fully_proven_task_is_not_reported(self):
+        lines = story_proof.violations(self.items, self.ev, self.root)
+        self.assertFalse(any('T-1' in l for l in lines), lines)
+
+    def test_a_task_with_no_landing_evidence_is_not_reported_at_all(self):
+        lines = story_proof.violations(self.items, self.ev, self.root)
+        self.assertFalse(any('T-4' in l for l in lines), lines)
+
+    def test_sorted_and_exactly_three(self):
+        lines = story_proof.violations(self.items, self.ev, self.root)
+        self.assertEqual(lines, sorted(lines))
+        self.assertEqual(len(lines), 3, lines)
+
+
+class StoryProofCmdTests(unittest.TestCase):
+    """:func:`asf.rules.story_proof.cmd_proves` — the ``check`` and ``show`` subcommands."""
+
+    def setUp(self):
+        self.root = make_repo()
+        with open(os.path.join(self.root, 'stories', 'S-1.md'), 'w', encoding='utf-8') as f:
+            f.write('## Acceptance\n- [ ] one\n- [ ] two\n')
+        self.items = {
+            'S-1': {'type': 'story', 'folder': 'stories', 'id': 'S-1'},
+            'T-1': {'type': 'task', 'stories': ['S-1'], 'updated': '2026-09-20T00:00:00Z'},
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _check(self, ev, as_json=False):
+        args = argparse.Namespace(proves_command='check', item=None, product=None, branch=None,
+                                  json=as_json)
+        buf = io.StringIO()
+        with mock.patch.object(story_proof, '_product', return_value=object()), \
+             mock.patch('asf.evidence.evidence.load', return_value=ev), \
+             mock.patch('asf.views.index_reader.load', return_value=(self.items, '')), \
+             contextlib.redirect_stdout(buf):
+            rc = story_proof.cmd_proves(args, self.root)
+        return rc, buf.getvalue()
+
+    def test_check_exits_1_with_one_line_per_violation(self):
+        ev = {'ids': {'T-1': {'commit': 'a'}}, 'proves': {}}
+        rc, out = self._check(ev)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.strip(), 'task landed proving nothing T-1 (S-1) since 2026-09-20')
+
+    def test_check_exits_0_with_none(self):
+        ev = {'ids': {}, 'proves': {}}
+        rc, out = self._check(ev)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, '')
+
+    def test_json_carries_the_same_rows(self):
+        ev = {'ids': {'T-1': {'commit': 'a'}}, 'proves': {}}
+        rc, out = self._check(ev, as_json=True)
+        self.assertEqual(rc, 1)
+        payload = json.loads(out)
+        self.assertEqual(payload['violations'],
+                         ['task landed proving nothing T-1 (S-1) since 2026-09-20'])
+
+    @staticmethod
+    def _git_commit(repo, subject, files, env):
+        for rel, text in files.items():
+            path = os.path.join(repo, rel)
+            os.makedirs(os.path.dirname(path) or repo, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+        subprocess.run(['git', 'add', '-A'], cwd=repo, check=True)
+        subprocess.run(['git', 'commit', '-qm', subject], cwd=repo, env=env, check=True)
+
+    def test_show_falls_back_to_head_when_no_code_branch_exists_on_origin(self):
+        repo = tempfile.mkdtemp(prefix='show_repo_')
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t',
+                  GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+        subprocess.run(['git', 'init', '-q', '-b', 'main', repo], check=True)
+        self._git_commit(repo, 'init', {'a.txt': 'a\n'}, env)
+        subprocess.run(['git', 'update-ref', 'refs/remotes/origin/main', 'HEAD'], cwd=repo,
+                       check=True)
+        self._git_commit(
+            repo, 'feat(T-1): the parser\n\nProves: S-18750 line 1 — tests/test_a.py::T::test_x',
+            {'tests/test_a.py': 'x\n'}, env)
+
+        class Conv:
+            @staticmethod
+            def prefix(_kind):
+                return 'worker/'
+
+        product = argparse.Namespace(repo_dir=repo, main='main', conventions=Conv())
+        items = {'S-18750': {'type': 'story', 'folder': 'stories', 'id': 'S-18750'},
+                 'T-1': {'type': 'task', 'stories': ['S-18750']}}
+        with open(os.path.join(self.root, 'stories', 'S-18750.md'), 'w', encoding='utf-8') as f:
+            f.write('## Acceptance\n- [ ] one\n- [ ] two\n')
+        args = argparse.Namespace(proves_command='show', item='T-1', branch=None, product=None,
+                                  json=False)
+        buf = io.StringIO()
+        with mock.patch.object(story_proof, '_product', return_value=product), \
+             mock.patch('asf.views.index_reader.load', return_value=(items, '')), \
+             contextlib.redirect_stdout(buf):
+            rc = story_proof.cmd_proves(args, self.root)
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertIn('S-18750 line 1 — tests/test_a.py::T::test_x', buf.getvalue())
+
+    def test_show_with_no_item_is_an_error(self):
+        args = argparse.Namespace(proves_command='show', item=None, branch=None, product=None,
+                                  json=False)
+        self.assertEqual(story_proof.cmd_proves(args, self.root), 2)
+
+
+class ShippedScriptTests(unittest.TestCase):
+    """P12/P13: the shipped script's text and how ``rules.resolve_script`` finds it from the
+    core rules dir — a stand-in for the protected ``rules/story-proof.sh`` (NEEDS OPERATOR)."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.core = tempfile.mkdtemp(prefix='core_rules_')
+        self.script = os.path.join(self.core, 'story-proof.sh')
+        with open(self.script, 'w', encoding='utf-8') as f:
+            f.write(SHIPPED_SCRIPT)
+        os.chmod(self.script, os.stat(self.script).st_mode | stat.S_IXUSR)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.core, ignore_errors=True)
+
+    def test_the_script_names_asf_proves_check_with_the_product_from_the_environment(self):
+        self.assertIn('asf proves check --product "${ASF_PRODUCT:?}"', SHIPPED_SCRIPT)
+
+    def test_resolve_script_finds_it_from_a_record_with_no_rules_of_its_own(self):
+        with mock.patch.dict(os.environ, {'ASF_CORE_RULES_DIR': self.core}):
+            self.assertEqual(rules.resolve_script(self.root, 'rules/story-proof.sh'), self.script)
+
+    def test_the_script_exits_nonzero_with_nothing_on_stdout_when_product_is_unset(self):
+        env = dict(os.environ)
+        env.pop('ASF_PRODUCT', None)
+        proc = subprocess.run(['bash', self.script], env=env, capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, '')

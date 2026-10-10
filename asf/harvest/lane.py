@@ -145,8 +145,8 @@ import subprocess
 import tempfile
 import time
 
-from asf import (approvals, attestation, ci_flight, ci_pool, customer_content, env, gitpush,
-                 refguard, reviews, run_cancel, tree_green)
+from asf import (approvals, attestation, ci_flight, ci_pool, customer_content, env, gitops,
+                 gitpush, proves, refguard, reviews, run_cancel, tree_green)
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -1133,12 +1133,40 @@ def delivery_note(repo, trunk, branch, members):
     return note + (f' — no commit for {", ".join(missing)}' if missing else '')
 
 
-def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
+def proves_refusal(repo, trunk, branch, card, items, root):
+    """``(kind, text)`` when ``branch``'s commits prove no acceptance line of a Story ``card``
+    (a Task) lists, else None (F-0040). Reads the branch's ``Proves:`` trailers through the
+    injected git callable (D11) and its tree, and validates them with
+    :func:`asf.proves.validate`. The text names what ``validate`` found wrong, then each Story
+    the Task covers (:func:`asf.proves.stories_of_task`) with its acceptance bullets numbered —
+    the same numbering the trailer's ``line <n>`` counts (D2) — and closes with the trailer's
+    exact shape and the lane's standing instruction to push again."""
+    claims = proves.claims_on_branch(lambda *a: gitops.git(list(a), repo).stdout, trunk, branch)
+    tree = gitops.git(['ls-tree', '-r', '--name-only', f'origin/{branch}'], repo).stdout.split()
+    _good, problems = proves.validate(claims, card, items, root, tree)
+    if not problems:
+        return None
+    lines = list(problems)
+    for sid in proves.stories_of_task(card, items):
+        bullets = proves.card_bullets(root, (items or {}).get(sid) or {})
+        if not bullets:
+            continue
+        lines.append(f'{sid}, whose acceptance is')
+        lines.extend(f'  {n} {text}' for n, text in enumerate(bullets, start=1))
+    lines.append('add a trailer to one of your commits naming the line your tests prove, e.g.')
+    lines.append('  Proves: <S-id> line <n> — <the test path that proves it>')
+    lines.append('then push; the factory publishes the rewritten branch')
+    return 'proves', '\n'.join(lines)
+
+
+def lane_refusal(repo, trunk, branch, item, conv=None, members=(), items=None, root=None):
     """``(kind, text)`` for a branch the lane refuses before any gate, or None: a merge commit
-    on it (B-0056), a commit not naming the item or one of a delivery's ``members``, or a line
-    it adds to customer content that carries a forbidden marker
-    (:func:`asf.customer_content.refusal`, ``file:line`` each) — each a correction back to its
-    session."""
+    on it (B-0056), a commit not naming the item or one of a delivery's ``members``, a line it
+    adds to customer content that carries a forbidden marker
+    (:func:`asf.customer_content.refusal`, ``file:line`` each), or — only when both ``items``
+    and ``root`` are given (D4), the item is a Task and it covers a Story (D5) — a Task branch
+    that proves no acceptance line of that Story (:func:`proves_refusal`, F-0040) — each a
+    correction back to its session."""
     merges = merge_commits(repo, trunk, branch)
     if merges:
         return 'merge', (f'merge commit on a lane branch: {merges[0]} — a lane branch is straight '
@@ -1152,7 +1180,14 @@ def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
             f'names its item — the lane could not reword them: reword them; the factory '
             f'publishes the rewritten branch')
     if conv is not None:
-        return customer_content.refusal(repo, trunk, branch, conv)
+        refusal = customer_content.refusal(repo, trunk, branch, conv)
+        if refusal:
+            return refusal
+    card = (items or {}).get(item) or {}
+    if root and card.get('type') == 'task' and proves.stories_of_task(card, items):
+        refusal = proves_refusal(repo, trunk, branch, card, items, root)
+        if refusal:
+            return refusal
     return None
 
 
@@ -1884,7 +1919,8 @@ class Lane:
                 f['host_dirty'] = host_reads_dirty(self.slug, (pr or {}).get('number'), head)
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
             members = delivery_members(self.items, item)
-            f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members)
+            f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members,
+                                       items=self.items, root=self.root)
             if not f['refusal'] and feature_delivery(self.items, item):
                 # a Feature delivery not whole: no PR, back to its session (T9i). An F-0102
                 # cross-item delivery keeps its D11: the branch lands without a member. A member
@@ -2732,7 +2768,8 @@ class Lane:
                 if not why:  # every subject names its item now: nothing left to reword
                     f['head'] = old
                     f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
-                                                members=delivery_members(self.items, item))
+                                                members=delivery_members(self.items, item),
+                                                items=self.items, root=self.root)
                     if f['refusal'] is None or f['refusal'][0] != lifecycle.NAMING:
                         self.out(f'reword {b}: every subject names {item} already at '
                                  f'{old[:9]} — nothing to push')
@@ -2767,7 +2804,8 @@ class Lane:
         self.out(f'reword {b}: {n} subjects, trees identical — pushed')
         f['head'] = new
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
-                                    members=delivery_members(self.items, item))
+                                    members=delivery_members(self.items, item),
+                                    items=self.items, root=self.root)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new,
@@ -2952,7 +2990,8 @@ class Lane:
                  f'{new[:9]}, trees identical — no session')
         f['head'] = new
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
-                                    members=delivery_members(self.items, item))
+                                    members=delivery_members(self.items, item),
+                                    items=self.items, root=self.root)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new,
@@ -3006,7 +3045,8 @@ class Lane:
         H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
         f['head'] = new
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv,
-                                    members=delivery_members(self.items, f.get('item')))
+                                    members=delivery_members(self.items, f.get('item')),
+                                    items=self.items, root=self.root)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new,
