@@ -205,6 +205,44 @@ class StaleCommandTests(unittest.TestCase):
         found = [l for l in r.stdout.splitlines() if l.startswith('F-0003') and '> 3d' in l]
         self.assertEqual(len(found), 1, r.stdout)
 
+    def test_card_in_progress_by_operator_over_2h_is_flagged(self):
+        """B-0070: a card held `in_progress_by: operator` past `stage_limits.operator_hours`
+        (default 2h) is named stale — the lane must not launch a session that would duplicate
+        a fix the operator is already carrying by hand."""
+        write_item(self.root, 'B-0099', 'bug', 'Held by hand', parent='E-0009',
+                  typed_lines=['decided: true', 'severity: S3', 'in_progress_by: operator'],
+                  machine_lines=['state: New', f'stage_since: {iso(self.old)}',
+                                 f'updated: {iso(self.old)}'])
+        run(['index'], self.root, self.home)
+        r = self.stale()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        found = [l for l in r.stdout.splitlines() if l.startswith('B-0099')]
+        self.assertEqual(len(found), 1, r.stdout)
+        self.assertIn('> 2h', found[0])
+
+    def test_card_in_progress_by_operator_under_2h_is_not_flagged(self):
+        write_item(self.root, 'B-0098', 'bug', 'Just claimed', parent='E-0009',
+                  typed_lines=['decided: true', 'severity: S3', 'in_progress_by: operator'],
+                  machine_lines=['state: New', f'stage_since: {iso(self.recent)}',
+                                 f'updated: {iso(self.recent)}'])
+        run(['index'], self.root, self.home)
+        r = self.stale()
+        found = [l for l in r.stdout.splitlines() if l.startswith('B-0098')]
+        self.assertEqual(found, [], r.stdout)
+
+    def test_in_progress_by_a_session_id_is_not_the_operator_rule(self):
+        """Only the literal `operator` value is the hand-held claim the stale rule watches; a
+        session id names a live session, which the lifecycle already watches for stalls."""
+        write_item(self.root, 'B-0097', 'bug', 'Session claimed', parent='E-0009',
+                  typed_lines=['decided: true', 'severity: S3',
+                               'in_progress_by: asf/build-b-0097-1@20261009T000000Z'],
+                  machine_lines=['state: New', f'stage_since: {iso(self.old)}',
+                                 f'updated: {iso(self.old)}'])
+        run(['index'], self.root, self.home)
+        r = self.stale()
+        found = [l for l in r.stdout.splitlines() if l.startswith('B-0097')]
+        self.assertEqual(found, [], r.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

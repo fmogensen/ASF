@@ -1037,6 +1037,14 @@ class BugQuietTests(IngestTestCase):
         self.run_ingest(self.bug())
         self.assertEqual(self.meta('bugs', 'B-0001')['state'], 'Closed')
 
+    def test_the_landing_clears_in_progress(self):
+        """B-0070: the ingest sees the landing commit naming the id and clears the operator's
+        hand-held claim — a closed card never stays stamped `in_progress_by` forever."""
+        self.run_ingest(self.bug('in_progress_by: operator'))
+        bug = self.meta('bugs', 'B-0001')
+        self.assertEqual(bug['state'], 'Closed')
+        self.assertNotIn('in_progress_by', bug)
+
 
 class DeliveryStageTests(IngestTestCase):
     """T-0177: a lead of any type but Feature stages itself off its own plan document, the same
