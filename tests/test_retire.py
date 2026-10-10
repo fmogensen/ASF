@@ -319,5 +319,17 @@ class UndeliverTests(unittest.TestCase):
         self.assertEqual(run(['check'], self.root).returncode, 0)
 
 
+class UndeliveredFromTests(unittest.TestCase):
+    """D5: the one test that formats ``undeliver.HISTORY`` both ways and reads it back —
+    pinned beside the writer so the pair cannot drift."""
+
+    def test_the_member_line_round_trips_and_the_lead_line_does_not(self):
+        from asf.record.undeliver import HISTORY, undelivered_from
+        member_line = HISTORY.format(date='2026-01-01', who='', lead='T-0001', why='a')
+        lead_line = HISTORY.format(date='2026-01-01', who='T-0009 ', lead='T-0001', why='a')
+        self.assertEqual(undelivered_from(f'## History\n{member_line}\n'), ['T-0001'])
+        self.assertEqual(undelivered_from(f'## History\n{lead_line}\n'), [])
+
+
 if __name__ == '__main__':
     unittest.main()

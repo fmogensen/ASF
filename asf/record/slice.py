@@ -33,6 +33,7 @@ record does not import the feeder: :data:`DONE_STATES` and :data:`BUILD_STAGES` 
 import re
 
 from asf.record.core import canonicalize, load_items
+from asf.record import undeliver
 
 DONE_STATES = ('Resolved', 'Closed')       # == asf.feeder.rows.DONE_STATES
 BUILD_STAGES = ('plan-approved', 'building')  # == asf.feeder.rows.BUILD_STAGES
@@ -132,6 +133,17 @@ def _in_delivery(meta):
     return bool(meta.get('delivers') or meta.get('delivered_by'))
 
 
+def undelivered_tasks(canonical):
+    """The Task ids an ``asf undeliver`` has taken out of a delivery (D4, D6): every Task whose
+    card carries a member-shape ``## History`` line (:func:`asf.record.undeliver.undelivered_from`).
+    The frontmatter cannot answer this directly — ``undeliver`` deletes ``delivered_by:``
+    (:func:`asf.record.undeliver.cmd_undeliver`), so a Task it ruled out reads exactly like a
+    Task that was never bundled. The pass reads the card text itself instead, once per tick, to
+    keep that Task out of every delivery it would otherwise rejoin."""
+    return {tid for tid, rec in canonical.items() if rec['meta'].get('type') == 'task'
+            and undeliver.undelivered_from(rec.get('text'))}
+
+
 PR_RE = re.compile(r'\bPR #\d+\b')  # == asf.feeder.rows.PR_RE
 
 
@@ -143,11 +155,12 @@ def idle(meta, busy=()):
             and not any(PR_RE.search(str(e)) for e in meta.get('evidence') or []))
 
 
-def free_tasks(metas, fid, busy=()):
+def free_tasks(metas, fid, busy=(), skip=()):
     """The Feature's Tasks the pass may deliver, in plan order (rank, then id — a minted Task's
     id order is its plan order): New (or Active on an idle branch, :func:`idle`), ``decided``,
-    not blocked, not removed, no session or pushed branch on them (``busy``), and in no
-    delivery yet."""
+    not blocked, not removed, no session or pushed branch on them (``busy``), in no delivery
+    yet, and not an ``asf undeliver`` has ruled out of this Feature's deliveries (``skip``,
+    :func:`undelivered_tasks`)."""
     out = []
     for tid, m in metas.items():
         if m.get('type') != 'task' or m.get('removed') or m.get('moved_to'):
@@ -156,7 +169,8 @@ def free_tasks(metas, fid, busy=()):
         if not f or f.get('id') != fid:
             continue
         if (m.get('state', 'New') != 'New' and not idle(m, busy)) or m.get('decided') is not True \
-                or m.get('blocked') or tid in busy or _in_delivery(m) or m.get('reshape'):
+                or m.get('blocked') or tid in busy or _in_delivery(m) or m.get('reshape') \
+                or tid in skip:
             continue
         out.append(tid)
     return sorted(out, key=lambda t: (_rank(metas[t]), t))
@@ -181,12 +195,12 @@ def started_tasks(metas, fid, busy=()):
     return sorted(out)
 
 
-def plan_slices(metas, fid, conv, busy=()):
+def plan_slices(metas, fid, conv, busy=(), skip=()):
     """The deliveries the pass would form for ``fid`` now: ``[(lead, members)]`` for every slice
     of two or more free Tasks (:func:`cut` over :func:`free_tasks`) — a preview of the pass, with
     no write. ``conv`` is the product's :class:`asf.conventions.Conventions`."""
     feature = metas.get(fid) or {}
-    free = free_tasks(metas, fid, busy)
+    free = free_tasks(metas, fid, busy, skip)
     if len(free) < 2:
         return []
     after = {t: [a for a in (metas[t].get('after') or ()) if isinstance(a, str)] for t in free}
@@ -210,24 +224,52 @@ def deliverable_features(metas):
     return sorted(out)
 
 
+def _edge_clause(t, member, glob):
+    """One ``after:`` edge named by why it is there: the started Task, the member whose
+    footprint it meets, and the glob pair :func:`asf.feeder.footprint.first_intersection`
+    returned for ``(t's writes, member's writes)`` — the member's glob printed first, joined to
+    the started Task's by `` ~ `` when the two strings differ, one glob when they are equal."""
+    started_glob, member_glob = glob
+    shared = member_glob if member_glob == started_glob else f'{member_glob} ~ {started_glob}'
+    return f'{t} ({member} shares {shared})'
+
+
 def deliveries(root, product, busy=(), out=print):
     """The pass: every deliverable Feature's free Tasks become deliveries. Writes go through
     :func:`asf.record.setfield.set_typed` (the parser round-trip). Returns
     ``{lead: [members]}`` for the deliveries written."""
     from asf.record.setfield import set_typed
+    from asf.feeder import footprint  # this module's own idiom, not a layering rule — the
+    # record already opens `deliveries` with a function-local `set_typed` and
+    # `unordered_overlaps` does the same; `asf/record/check.py` imports the feeder at module
+    # scope, so nothing rides on the form either way (F-0315 PD4)
     conv = product.conventions
     by_id, _errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
     metas = {i: r['meta'] for i, r in canonical.items()}
     busy = set(busy or ())
+    shared = footprint.shared_globs(product)
+    skip = undelivered_tasks(canonical)
     written = {}
     for fid in deliverable_features(metas):
         started = started_tasks(metas, fid, busy)
-        slices = plan_slices(metas, fid, conv, busy)
+        slices = plan_slices(metas, fid, conv, busy, skip)
         for n, (lead, members) in enumerate(slices, 1):
             waits = [a for a in (metas[lead].get('after') or ()) if isinstance(a, str)]
             covered = {a for m in members for a in (metas[m].get('after') or ())}
-            extra = [t for t in started if t not in covered and t not in members]
+            binds, loose = [], []
+            for t in started:
+                if t in covered or t in members:
+                    continue
+                hit = None
+                for m in members:
+                    glob = footprint.first_intersection(metas[t].get('writes'),
+                                                        metas[m].get('writes'), shared)
+                    if glob:
+                        hit = (t, m, glob)
+                        break
+                (binds if hit else loose).append(hit or t)
+            extra = [t for t, _m, _g in binds]
             updates = {'delivers': list(members)}
             if extra:
                 updates['after'] = waits + [t for t in extra if t not in waits]
@@ -243,7 +285,9 @@ def deliveries(root, product, busy=(), out=print):
             stories = sorted({s for m in members for s in (metas[m].get('stories') or ())})
             out(f"slice: {fid} {n}/{len(slices)}: {lead} delivers {', '.join(members)}"
                 + (f" (proves {', '.join(stories)})" if stories else '')
-                + (f" after {', '.join(extra)}" if extra else ''))
+                + (f" after {', '.join(_edge_clause(*b) for b in binds)}" if binds else '')
+                + (f" — {len(loose)} started, no shared path: {', '.join(loose)}"
+                   if loose else ''))
     return written
 
 

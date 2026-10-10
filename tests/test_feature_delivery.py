@@ -213,19 +213,25 @@ class MigrationTests(RecordFixture):
         self.task('T-0001', ['a.py'], state='Closed')
         self.task('T-0002', ['b.py'], state='Active', evidence=['branch worker/T-0002, PR #7 OPEN'])
         self.task('T-0003', ['c.py'])
-        self.task('T-0004', ['d.py'])
+        self.task('T-0004', ['b.py'])
 
     def test_free_tasks_become_a_delivery_after_the_started_ones(self):
+        # T-0006: started too, but its footprint shares no path with either member — disjoint,
+        # beside T-0002's overlap with T-0004, in the class that owns the migration (D7)
+        self.task('T-0006', ['far/away.py'], state='Active',
+                  evidence=['branch worker/T-0006, PR #9 OPEN'])
         self.assertEqual(self.run_pass(), {'T-0003': ['T-0003', 'T-0004']})
         lead = read_meta(self.root, 'task', 'T-0003')
         self.assertEqual(lead['delivers'], ['T-0003', 'T-0004'])
-        self.assertEqual(lead['after'], ['T-0002'])   # Active: a hold; Closed: not
+        self.assertEqual(lead['after'], ['T-0002'])   # Active: a hold; Closed: not; T-0006: disjoint
         self.assertEqual(read_meta(self.root, 'task', 'T-0004')['delivered_by'], 'T-0003')
         for tid in ('T-0001', 'T-0002'):
             m = read_meta(self.root, 'task', tid)
             self.assertNotIn('delivers', m)
             self.assertNotIn('delivered_by', m)
-        self.assertEqual(self.lines, ['slice: F-0001 1/1: T-0003 delivers T-0003, T-0004 after T-0002'])
+        self.assertEqual(self.lines, ['slice: F-0001 1/1: T-0003 delivers T-0003, T-0004 '
+                                      'after T-0002 (T-0004 shares b.py) '
+                                      '— 1 started, no shared path: T-0006'])
 
     def test_a_task_a_session_holds_is_started_not_free(self):
         self.assertEqual(self.run_pass(busy={'T-0003'}), {})   # one free Task left: no delivery
@@ -251,10 +257,283 @@ class MigrationTests(RecordFixture):
         self.assertEqual(self.run_pass(busy={'T-0005'}), {})
 
     def test_a_task_started_since_waits_the_delivery(self):
-        self.task('T-0005', ['e.py'])
+        self.task('T-0005', ['c.py'])
         out = self.run_pass(busy={'T-0003'})
         self.assertEqual(out, {'T-0004': ['T-0004', 'T-0005']})
         self.assertEqual(sorted(read_meta(self.root, 'task', 'T-0004')['after']), ['T-0002', 'T-0003'])
+
+
+class SharedPathBindingTests(RecordFixture):
+    """S-82205: a delivery lead waits on a started Task only when they share a path — the
+    ``binds``/``loose`` split in :func:`slice.deliveries` that replaces the old unconditional
+    ``extra``."""
+
+    def base(self):
+        self.feature(stage='building 1/3')
+        self.task('T-0001', ['a.py'])
+        self.task('T-0002', ['b.py'], after=['T-0001'])
+
+    def started(self, tid, writes):
+        self.task(tid, writes, state='Active', evidence=[f'branch worker/{tid}, PR #9 OPEN'])
+
+    def test_a_disjoint_started_task_leaves_the_leads_after_as_it_was(self):
+        self.base()
+        self.started('T-0003', ['z.py'])
+        self.assertEqual(self.run_pass(), {'T-0001': ['T-0001', 'T-0002']})
+        self.assertNotIn('after', read_meta(self.root, 'task', 'T-0001'))
+
+    def test_a_lead_with_its_own_after_keeps_it_and_nothing_more(self):
+        self.feature(stage='building 1/3')
+        self.task('T-0009', ['y.py'], state='Active', evidence=['branch worker/T-0009, PR #1 OPEN'])
+        self.task('T-0001', ['a.py'], after=['T-0009'])
+        self.task('T-0002', ['b.py'], after=['T-0001'])
+        self.started('T-0003', ['z.py'])
+        self.assertEqual(self.run_pass(), {'T-0001': ['T-0001', 'T-0002']})
+        self.assertEqual(read_meta(self.root, 'task', 'T-0001')['after'], ['T-0009'])
+
+    def test_a_glob_matching_a_members_path_binds_the_lead(self):
+        self.base()
+        self.started('T-0003', ['b.py'])
+        self.assertEqual(self.run_pass(), {'T-0001': ['T-0001', 'T-0002']})
+        self.assertEqual(read_meta(self.root, 'task', 'T-0001')['after'], ['T-0003'])
+
+    def test_a_path_shared_with_a_non_lead_member_binds_the_lead_not_that_member(self):
+        self.base()
+        self.started('T-0003', ['b.py'])
+        self.run_pass()
+        self.assertEqual(read_meta(self.root, 'task', 'T-0001')['after'], ['T-0003'])
+        self.assertEqual(read_meta(self.root, 'task', 'T-0002')['after'], ['T-0001'])
+
+    def test_a_started_task_a_member_already_waits_on_is_not_added_twice(self):
+        self.feature(stage='building 1/3')
+        self.task('T-0001', ['a.py'])
+        self.task('T-0002', ['b.py'], after=['T-0001', 'T-0003'])
+        self.started('T-0003', ['b.py'])
+        self.run_pass()
+        self.assertNotIn('after', read_meta(self.root, 'task', 'T-0001'))
+
+    def test_a_shared_path_match_does_not_bind(self):
+        self.feature(stage='building 1/3')
+        self.task('T-0001', ['a.py'])
+        self.task('T-0002', ['uv.lock'], after=['T-0001'])
+        self.started('T-0003', ['uv.lock'])
+        self.assertEqual(self.run_pass(shared_paths=['uv.lock']), {'T-0001': ['T-0001', 'T-0002']})
+        self.assertNotIn('after', read_meta(self.root, 'task', 'T-0001'))
+
+    def test_a_task_with_no_footprint_binds_nothing_and_is_bound_by_nothing(self):
+        self.feature(stage='building 1/3')
+        self.task('T-0001', [])
+        self.task('T-0002', ['b.py'], after=['T-0001'])
+        self.started('T-0003', [])
+        self.assertEqual(self.run_pass(), {'T-0001': ['T-0001', 'T-0002']})
+        self.assertNotIn('after', read_meta(self.root, 'task', 'T-0001'))
+
+
+class EdgeLineTests(RecordFixture):
+    """S-82206: the pass names each ``after:`` edge it adds, the member and the path that
+    caused it, and the started Tasks it declined to wait on."""
+
+    def base(self):
+        self.feature(stage='building 1/3')
+        self.task('T-0001', ['a.py'])
+        self.task('T-0002', ['b.py'], after=['T-0001'])
+
+    def started(self, tid, writes):
+        self.task(tid, writes, state='Active', evidence=[f'branch worker/{tid}, PR #9 OPEN'])
+
+    def test_one_line_per_delivery_written(self):
+        self.feature(fid='F-0001')
+        self.task('T-0001', ['a.py'], fid='F-0001')
+        self.task('T-0002', ['b.py'], after=['T-0001'], fid='F-0001')
+        self.feature(fid='F-0002')
+        self.task('T-0003', ['c.py'], fid='F-0002')
+        self.task('T-0004', ['d.py'], after=['T-0003'], fid='F-0002')
+        self.run_pass()
+        self.assertEqual(len(self.lines), 2)
+
+    def test_each_edge_names_the_task_the_member_and_the_glob(self):
+        self.base()
+        self.started('T-0003', ['b.py'])
+        self.run_pass()
+        self.assertEqual(self.lines, ['slice: F-0001 1/1: T-0001 delivers T-0001, T-0002 '
+                                      'after T-0003 (T-0002 shares b.py)'])
+
+    def test_two_differing_globs_are_both_printed_member_first(self):
+        self.feature(stage='building 1/3')
+        self.task('T-0001', ['a.py'])
+        self.task('T-0002', ['apps/web/**'], after=['T-0001'])
+        self.started('T-0003', ['apps/web/x.ts'])
+        self.run_pass()
+        self.assertEqual(self.lines, ['slice: F-0001 1/1: T-0001 delivers T-0001, T-0002 '
+                                      'after T-0003 (T-0002 shares apps/web/** ~ apps/web/x.ts)'])
+
+    def test_two_equal_globs_are_printed_once(self):
+        self.base()
+        self.started('T-0003', ['b.py'])
+        self.run_pass()
+        self.assertEqual(self.lines, ['slice: F-0001 1/1: T-0001 delivers T-0001, T-0002 '
+                                      'after T-0003 (T-0002 shares b.py)'])
+
+    def test_started_tasks_that_bound_nothing_are_named_with_their_count(self):
+        self.base()
+        self.started('T-0003', ['z.py'])
+        self.started('T-0004', ['y.py'])
+        self.run_pass()
+        self.assertEqual(self.lines, ['slice: F-0001 1/1: T-0001 delivers T-0001, T-0002 '
+                                      '— 2 started, no shared path: T-0003, T-0004'])
+
+    def test_both_clauses_absent_when_there_is_nothing_to_say(self):
+        self.base()
+        self.run_pass()
+        self.assertEqual(self.lines, ['slice: F-0001 1/1: T-0001 delivers T-0001, T-0002'])
+
+
+class RemovedEdgeTests(RecordFixture):
+    """S-82207: a lead already in a delivery is never re-cut (:func:`slice._in_delivery`), so
+    an ``after:`` edge the pass wrote and an operator then removed by hand is not put back — the
+    mechanism S-82205/S-82206 build on, pinned directly."""
+
+    def setUp(self):
+        super().setUp()
+        self.feature(stage='building 1/3')
+        self.task('T-0001', ['a.py'])
+        self.task('T-0002', ['b.py'], after=['T-0001'])
+        self.task('T-0003', ['b.py'], state='Active', evidence=['branch worker/T-0003, PR #9 OPEN'])
+
+    def clear_lead_after(self):
+        from asf.record.core import canonicalize, load_items
+        from asf.record.setfield import set_typed
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        err = set_typed(canonical['T-0001'], {'after': None})
+        self.assertIsNone(err)
+
+    def test_a_removed_after_edge_is_not_re_added(self):
+        self.assertEqual(self.run_pass(), {'T-0001': ['T-0001', 'T-0002']})
+        self.assertEqual(read_meta(self.root, 'task', 'T-0001')['after'], ['T-0003'])
+        self.clear_lead_after()
+        self.assertNotIn('after', read_meta(self.root, 'task', 'T-0001'))
+        self.lines.clear()
+        self.assertEqual(self.run_pass(), {})
+        self.assertNotIn('after', read_meta(self.root, 'task', 'T-0001'))
+        self.assertEqual(self.lines, [])
+
+    def test_the_delivers_and_delivered_by_lists_are_untouched_by_the_second_pass(self):
+        self.run_pass()
+        self.clear_lead_after()
+        self.run_pass()
+        self.assertEqual(read_meta(self.root, 'task', 'T-0001')['delivers'], ['T-0001', 'T-0002'])
+        self.assertEqual(read_meta(self.root, 'task', 'T-0002')['delivered_by'], 'T-0001')
+
+    def test_a_delivering_lead_is_not_among_the_free_tasks(self):
+        self.run_pass()
+        from asf.record.core import canonicalize, load_items
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        metas = {i: r['meta'] for i, r in canonical.items()}
+        self.assertNotIn('T-0001', slice_mod.free_tasks(metas, 'F-0001'))
+
+    def test_a_delivered_by_member_is_not_among_the_free_tasks(self):
+        self.run_pass()
+        from asf.record.core import canonicalize, load_items
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        metas = {i: r['meta'] for i, r in canonical.items()}
+        self.assertNotIn('T-0002', slice_mod.free_tasks(metas, 'F-0001'))
+
+
+class UndeliveredTests(RecordFixture):
+    """S-82208: a Task an ``asf undeliver`` ruled out of a delivery is never bundled back into
+    one — the ``skip`` thread (:func:`slice.undelivered_tasks`) that reads the member-shape
+    ``## History`` line directly, because ``undeliver`` deletes ``delivered_by:``."""
+
+    def setUp(self):
+        super().setUp()
+        self.feature(stage='building 1/5')
+        self.task('T-0001', ['a.py'])
+        self.task('T-0002', ['b.py'], after=['T-0001'])
+        self.task('T-0003', ['c.py'], after=['T-0002'])
+        self.task('T-0004', ['d.py'], after=['T-0003'])
+
+    def undeliver(self, lead, member, why='ruled out'):
+        from asf.record.core import canonicalize, load_items, today
+        from asf.record.setfield import set_typed
+        from asf.record.undeliver import HISTORY
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        lead_rec, member_rec = canonical[lead], canonical[member]
+        kept = [m for m in lead_rec['meta'].get('delivers') or () if m != member]
+        err = set_typed(lead_rec, {'delivers': kept if [m for m in kept if m != lead] else None},
+                        history=[HISTORY.format(date=today(), who=f'{member} ', lead=lead, why=why)])
+        self.assertIsNone(err)
+        err = set_typed(member_rec, {'delivered_by': None},
+                        history=[HISTORY.format(date=today(), who='', lead=lead, why=why)])
+        self.assertIsNone(err)
+
+    def test_an_undelivered_member_is_in_no_delivery_after_two_further_passes(self):
+        self.assertEqual(self.run_pass(), {'T-0001': ['T-0001', 'T-0002', 'T-0003', 'T-0004']})
+        self.undeliver('T-0001', 'T-0002')
+        self.assertEqual(self.run_pass(), {})
+        self.assertEqual(self.run_pass(), {})
+
+    def test_the_undelivered_member_gains_no_after_edge_from_the_pass(self):
+        self.run_pass()
+        self.undeliver('T-0001', 'T-0002')
+        self.run_pass()
+        self.run_pass()
+        # T-0002 keeps the after: it declared in the plan — the pass only ever writes after:
+        # onto a slice's lead, and T-0002 is no lead of any delivery the pass formed
+        self.assertEqual(read_meta(self.root, 'task', 'T-0002')['after'], ['T-0001'])
+
+    def test_two_members_undelivered_from_the_same_lead_are_not_bundled_with_each_other(self):
+        self.run_pass()
+        self.undeliver('T-0001', 'T-0002')
+        self.undeliver('T-0001', 'T-0003')
+        self.assertEqual(self.run_pass(), {})
+        self.assertEqual(self.run_pass(), {})
+        for tid in ('T-0002', 'T-0003'):
+            m = read_meta(self.root, 'task', tid)
+            self.assertNotIn('delivers', m)
+            self.assertNotIn('delivered_by', m)
+
+    def test_the_members_that_stayed_keep_their_delivery_unchanged(self):
+        self.run_pass()
+        self.undeliver('T-0001', 'T-0002')
+        self.undeliver('T-0001', 'T-0003')
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(read_meta(self.root, 'task', 'T-0001')['delivers'], ['T-0001', 'T-0004'])
+        self.assertEqual(read_meta(self.root, 'task', 'T-0004')['delivered_by'], 'T-0001')
+
+    def test_a_later_free_task_is_bundled_with_neither_undelivered_task(self):
+        self.run_pass()
+        self.undeliver('T-0001', 'T-0002')
+        self.undeliver('T-0001', 'T-0003')
+        self.task('T-0005', ['e.py'])
+        self.task('T-0006', ['f.py'])
+        out = self.run_pass()
+        for members in out.values():
+            self.assertNotIn('T-0002', members)
+            self.assertNotIn('T-0003', members)
+
+    def test_an_undelivered_task_that_is_started_still_binds_a_lead_sharing_its_path(self):
+        self.run_pass()
+        self.undeliver('T-0001', 'T-0002')
+        from asf.record import frontmatter
+        from asf.record.core import canonicalize, load_items
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        # T-0002 is now started (Active, a PR open) — undelivered still means "excluded from
+        # being bundled", never "excluded from being waited on" (PD6)
+        frontmatter.write_machine(canonical['T-0002']['path'],
+                                  {'state': 'Active', 'stage_since': '2026-01-01T00:00:00Z',
+                                   'evidence': ['branch worker/T-0002, PR #9 OPEN'],
+                                   'updated': '2026-01-01T00:00:00Z'})
+        self.task('T-0005', ['x.py'])
+        self.task('T-0006', ['b.py'])
+        out = self.run_pass()
+        self.assertEqual(out, {'T-0005': ['T-0005', 'T-0006']})
+        self.assertEqual(read_meta(self.root, 'task', 'T-0005')['after'], ['T-0002'])
 
 
 class NotOptedInTests(RecordFixture):
