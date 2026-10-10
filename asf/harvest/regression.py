@@ -12,9 +12,10 @@ import re
 
 from asf.feeder import widen
 
-#: the `found_in` values the gate does not cover, absent a `flags.regression.exempt_found_in`
-#: override (`gated` reads it through `conv`, so a product need not wait for the flag's own
-#: registration in `conventions.KNOWN_FLAGS` to set it).
+#: the `found_in` values the gate does not cover. The `flags.regression.exempt_found_in`
+#: override lands with the flag's registration in `conventions.KNOWN_FLAGS` and not before: a
+#: name read here that the registry lacks is one `asf doctor` calls unknown on the very product
+#: that set it, which is what `tests.test_conventions_flags` refuses.
 DEFAULT_EXEMPT_FOUND_IN = ('ci',)
 
 #: a failing case's line in a test runner's log: `unittest`'s ``FAIL:``/``ERROR:``, node:test
@@ -41,15 +42,13 @@ def _case_name(raw):
 def gated(conv, items, item, branch, files):
     """``(True, '')`` when this branch is one the regression gate covers, else ``(False, why)``:
     a `fix` lane branch (`conv.branch_kind(branch) == 'fix'`) whose card's `found_in` is not in
-    `conv.flag('regression.exempt_found_in', DEFAULT_EXEMPT_FOUND_IN)`, carrying both a test
-    file and a non-test change (D1, D11)."""
+    :data:`DEFAULT_EXEMPT_FOUND_IN`, carrying both a test file and a non-test change (D1, D11)."""
     kind = conv.branch_kind(branch)
     if kind != 'fix':
         return False, f'not a fix branch: {kind or "none"}'
     card = (items or {}).get(item or '') or {}
     found_in = card.get('found_in')
-    exempt = conv.flag('regression.exempt_found_in', DEFAULT_EXEMPT_FOUND_IN)
-    if found_in in exempt:
+    if found_in in DEFAULT_EXEMPT_FOUND_IN:
         return False, f'found_in: {found_in}'
     tests = test_files(files)
     if not tests:

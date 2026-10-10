@@ -128,11 +128,6 @@ the `I14` row of `asf status` and `i14_report_lines` in `asf scorecard`); `refus
 card back together with the parents the same writer resolved on it. `asf check --invariants`
 lists the findings in either mode.
 
-`regression.exempt_found_in: [ci]` (default `(ci,)`) is the `found_in` values the regression
-gate (`asf/harvest/regression.py`) does not cover: a fix branch whose card's `found_in` is one of
-these is skipped, named in `gated`'s `why` as `found_in: <value>`. A card with no `found_in` at
-all is gated regardless — an absent field is not a licence.
-
 Before editing a pinned product's file, check it loads under that product's own venv.
 `tools/pinned-readers.txt` names the oldest reader still live; the test suite loads a file with
 every planned flag under that sha's own loader.
