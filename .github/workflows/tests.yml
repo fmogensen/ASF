@@ -19,9 +19,53 @@ env:
   # must equal the length of the `part` matrix below (tests/test_workflow.py holds them together)
   PARTS: 4
 
+# One run per pull request head ref: a new push cancels the PR's run in progress (its verdict is
+# moot). On main, one run per workflow with cancel-in-progress off: the running one finishes and
+# gives a verdict, and a newer push replaces any run still pending — only the newest main head
+# needs one, and a red on it is attributed by the trunk watch (asf.trunk_red).
+concurrency:
+  group: tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.head_ref) || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # The docs-only fast path: a pull request touching only the Markdown records no test reads
+  # (tools/ci_paths.py) runs here the checks that do read every tracked file, and `checks` and
+  # every `part` are skipped. A push to main is never docs-only. When this job cannot tell
+  # (docs_only is not "true"), the full suite runs.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: is this pull request docs-only
+        id: diff
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            python3 tools/ci_paths.py >> "$GITHUB_OUTPUT"
+          else
+            echo docs_only=false >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.diff.outputs.docs_only == 'true'
+        with:
+          python-version: "3.12"
+      - name: the factory-only merge rule (a hand branch into main is refused)
+        if: steps.diff.outputs.docs_only == 'true'
+        run: bash tools/check_factory_only.sh
+      - name: check generic
+        if: steps.diff.outputs.docs_only == 'true'
+        run: bash tools/check_generic.sh
+      - name: privacy sweep (no operator paths, e-mails or private links)
+        if: steps.diff.outputs.docs_only == 'true'
+        run: bash tools/check_privacy.sh
+
   checks:
     name: checks (${{ matrix.python }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       # a real failure on one Python version must not cancel the other's job (B-82155: that
@@ -95,6 +139,8 @@ jobs:
 
   part:
     name: part (${{ matrix.python }}, ${{ matrix.part }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -149,9 +195,10 @@ jobs:
 
   # The required checks. `if: always()` because a skipped job would read as green to a ruleset;
   # each reads its own Python's records only, so a red 3.13 part never turns `tests (3.12)` red.
+  # On the docs-only fast path it is green only when `changes` (with its checks) was.
   tests:
     name: tests (${{ matrix.python }})
-    needs: [checks, part]
+    needs: [changes, checks, part]
     if: always()
     runs-on: ubuntu-latest
     strategy:
@@ -159,12 +206,20 @@ jobs:
       matrix:
         python: ["3.12", "3.13"]
     steps:
+      - name: docs-only pull request — the docs checks are green, no test shard was needed
+        if: needs.changes.outputs.docs_only == 'true'
+        env:
+          CHANGES: ${{ needs.changes.result }}
+        run: test "$CHANGES" = success
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
       - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.docs_only != 'true'
         continue-on-error: true
         with:
           pattern: "*-${{ matrix.python }}*"
           path: ci-parts
           merge-multiple: true
       - name: the checks and every part are green, and the parts ran every module once
+        if: needs.changes.outputs.docs_only != 'true'
         run: python3 tools/run_tests.py --gather ci-parts --python "${{ matrix.python }}" --parts "$PARTS"
