@@ -7,17 +7,25 @@ the peel — see the module's own docstring and PD9's note that every later Task
 classes to this one file and runs it whole).
 
 Task 2 adds the log half: ``LogTest``, over ``asf.state.store`` and a registered
-``channels.json`` — one case per checkbox line of S-81207."""
+``channels.json`` — one case per checkbox line of S-81207.
+
+Task 3 adds the edge half: ``EdgeTest`` (``edge_candidate``, bound to ``upgrade.ci_verdict``'s
+own answers — PD10, this module writes no verdict logic of its own) and ``PublishTest``
+(``publish``, one fast-forward push through the guard — real git, real refusals, never a hand
+built ``CompletedProcess``, the same discipline ``tests.test_gitpush`` holds its own fixture to)
+— one case per checkbox line of S-81205."""
 import contextlib
 import io
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
-from asf import channels, cli, env
+from asf import channels, cli, env, mutation_guard
 from asf.state import registry, store
 
 
@@ -235,3 +243,223 @@ class LogTest(ChannelsStateHome):
             channels.note_edge(built, 'v0.1.1', 'c1', 'the-logged-time')
         self.assertEqual(built['edge']['at'], 'the-logged-time')
         self.assertEqual(built['edge_log'][0]['at'], 'the-logged-time')
+
+
+# --- Task 3: edge — the newest green tag, and one fast-forward through the guard -----------
+
+#: a github-shaped url, so ``upgrade._gh_slug`` resolves it and ``ci_verdict`` asks ``gh`` —
+#: never a real one: every answer below comes from :class:`FakeGh`
+CI_URL = 'https://github.com/o/r.git'
+#: the two landing checks every :class:`FakeGh` case answers for (the shape
+#: ``tests.test_upgrade.CHECKS`` already uses)
+CI_CHECKS = ['tests (3.12)', 'tests (3.13)']
+
+
+class FakeGh:
+    """``run`` for :func:`asf.upgrade.ci_verdict`, reached through :func:`asf.channels.edge_candidate`
+    — ``gh api .../check-runs`` and ``.../status`` answered per commit, by one of the shapes
+    S-81205 is proved against: ``'green'``, ``'red'``, ``'pending'`` (every check still running),
+    ``'gh-failure'`` (the call itself fails — an unreadable ``gh``), and ``'no-run'`` (the
+    check-runs list and the commit status are both empty — ``clear``, never read as green here,
+    PD10). Any commit not named in ``states`` answers ``'green'``."""
+
+    def __init__(self, states=None):
+        self.states = dict(states or {})
+        self.calls = []
+
+    def __call__(self, cmd, **_kw):
+        self.calls.append(list(cmd))
+        if cmd[:2] != ['gh', 'api']:
+            return mock.Mock(returncode=1, stdout='', stderr=f'unexpected call: {cmd}')
+        m = re.search(r'/commits/([0-9a-fA-F]+)/', cmd[2])
+        state = self.states.get(m.group(1) if m else None, 'green')
+        if state == 'gh-failure':
+            # never a rate-limit-shaped message (asf.gh_limit.is_rate_limited): that would latch
+            # this whole test process against every later gh call, this suite's included
+            return mock.Mock(returncode=1, stdout='', stderr='gh: authentication required')
+        if 'check-runs' not in cmd[2]:
+            return mock.Mock(returncode=0, stdout=json.dumps({'statuses': []}), stderr='')
+        if state == 'no-run':
+            runs = []
+        elif state == 'pending':
+            runs = [{'id': i + 1, 'name': n, 'status': 'in_progress', 'conclusion': None}
+                    for i, n in enumerate(CI_CHECKS)]
+        else:
+            runs = [{'id': i + 1, 'name': n, 'status': 'completed',
+                    'conclusion': 'success' if state == 'green' else 'failure'}
+                    for i, n in enumerate(CI_CHECKS)]
+        return mock.Mock(returncode=0, stdout=json.dumps({'check_runs': runs}), stderr='')
+
+
+class EdgeTest(unittest.TestCase):
+    """S-81205 — ``edge_candidate`` asks :func:`asf.upgrade.ci_verdict` one tag at a time, newest
+    first, and takes the first green; every case here is a verdict shape ``ci_verdict`` already
+    answers (PD10) — this module asserts the answers, it writes no verdict logic of its own."""
+
+    P = env.Product('edge-test-product', {'main': 'main'})
+
+    def test_the_newest_green_tag_is_the_candidate_and_older_green_tags_are_not(self):
+        tags = [('v0.1.3', 'c3'), ('v0.1.2', 'c2'), ('v0.1.1', 'c1')]
+        fake = FakeGh({'c3': 'green', 'c2': 'green', 'c1': 'green'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake)
+        self.assertEqual((tag, commit), ('v0.1.3', 'c3'))
+        self.assertIn('v0.1.3', detail)
+        self.assertIn('green', detail)
+        # the scan stopped at the first green: the older green tags were never asked
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_a_tag_whose_ci_is_red_is_skipped_and_the_next_older_one_is_examined(self):
+        tags = [('v0.1.3', 'c3'), ('v0.1.2', 'c2'), ('v0.1.1', 'c1')]
+        fake = FakeGh({'c3': 'red', 'c2': 'green', 'c1': 'green'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake)
+        self.assertEqual((tag, commit), ('v0.1.2', 'c2'))
+        self.assertIn('v0.1.2', detail)
+        self.assertIn('green', detail)
+        # c3 was asked (and skipped, red) and c1 (older than the chosen c2) never was
+        self.assertEqual(len(fake.calls), 2)
+
+    def test_when_nothing_is_green_the_detail_names_every_verdict_examined(self):
+        tags = [('v0.1.3', 'c3'), ('v0.1.2', 'c2')]
+        fake = FakeGh({'c3': 'red', 'c2': 'red'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake)
+        self.assertIsNone(tag)
+        self.assertIsNone(commit)
+        self.assertIn('v0.1.3 red', detail)
+        self.assertIn('v0.1.2 red', detail)
+
+    def test_a_tag_with_no_run_at_all_is_not_a_candidate(self):
+        tags = [('v0.1.1', 'c1')]
+        fake = FakeGh({'c1': 'no-run'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake)
+        self.assertIsNone(tag)
+        self.assertIsNone(commit)
+        self.assertIn('v0.1.1 unknown', detail)
+        self.assertIn('has no run', detail)
+
+    def test_pending_checks_and_an_unreadable_gh_call_are_both_not_a_candidate(self):
+        tags = [('v0.1.2', 'c2'), ('v0.1.1', 'c1')]
+        fake = FakeGh({'c2': 'pending', 'c1': 'gh-failure'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake)
+        self.assertIsNone(tag)
+        self.assertIsNone(commit)
+        self.assertIn('v0.1.2 unknown', detail)
+        self.assertIn('v0.1.1 unknown', detail)
+        self.assertIn('could not read the check runs', detail)
+
+    def test_a_repo_whose_product_names_no_landing_checks_advances_nothing_and_says_why(self):
+        tags = [('v0.1.1', 'c1')]
+        fake = FakeGh({'c1': 'green'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=[]):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake)
+        self.assertIsNone(tag)
+        self.assertIsNone(commit)
+        self.assertIn('no product names landing_checks', detail)
+        self.assertEqual(fake.calls, [])  # unknown before any gh call: nothing is named to ask
+
+    def test_the_scan_never_examines_more_than_lookback_tags(self):
+        tags = [(f'v0.1.{i}', f'c{i}') for i in range(15, 0, -1)]  # 15 tags, newest first
+        fake = FakeGh({f'c{i}': 'red' for i in range(15, 0, -1)})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake)
+        self.assertIsNone(tag)
+        self.assertEqual(len(fake.calls), channels.DEFAULTS['lookback_tags'])
+        self.assertNotIn('v0.1.1 ', detail)  # the oldest five tags were never reached
+
+    def test_a_configured_limit_bounds_the_scan_before_a_later_green_tag(self):
+        tags = [('v0.1.3', 'c3'), ('v0.1.2', 'c2'), ('v0.1.1', 'c1')]
+        fake = FakeGh({'c3': 'red', 'c2': 'green', 'c1': 'green'})
+        with mock.patch('asf.upgrade.landing_checks_for', return_value=CI_CHECKS):
+            tag, commit, detail = channels.edge_candidate(self.P, CI_URL, tags, run=fake, limit=1)
+        self.assertIsNone(tag)
+        self.assertEqual(len(fake.calls), 1)
+
+
+def _repo_fixture(tmp):
+    """A bare remote plus a local clone with ``origin`` set to it and one commit — the shape
+    :func:`channels.publish` pushes against, built the same way :class:`tests.test_gitpush.PushTest`
+    builds its own, so ``PublishTest`` needs nothing that suite does not already prove."""
+    bare, local = os.path.join(tmp, 'origin.git'), os.path.join(tmp, 'repo')
+    _git(['init', '-q', '--bare', '-b', 'main', bare])
+    _git(['clone', '-q', bare, local])
+    _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'seed'],
+        local)
+    _git(['push', '-q', 'origin', 'HEAD:main'], local)
+    return bare, local
+
+
+def _ref_sha(repo, ref):
+    """``ref``'s sha in ``repo``, or ``None`` when it does not exist — never raises."""
+    r = subprocess.run(['git', 'rev-parse', '-q', '--verify', ref], cwd=repo,
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+class PublishTest(ChannelsStateHome):
+    """S-81205 — ``publish`` is one fast-forward push through the guard: a guard refusal, a dry
+    run and git's own non-fast-forward are each a detail, never an exception, and each leaves
+    both the remote and the channel log exactly as they were (D1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo_tmp = tempfile.mkdtemp(prefix='channels_publish_')
+        self.addCleanup(shutil.rmtree, self.repo_tmp, ignore_errors=True)
+        self.bare, self.local = _repo_fixture(self.repo_tmp)
+        self.c1 = _git(['rev-parse', 'HEAD'], self.local)
+        self.c2 = self._commit('second')
+        self.product = env.Product(self.P, {'repo_dir': self.local, 'main': 'main'})
+
+    def _commit(self, msg):
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', msg], self.local)
+        return _git(['rev-parse', 'HEAD'], self.local)
+
+    def test_a_publish_is_one_fast_forward_push_through_the_guard(self):
+        lines = []
+        ok, detail = channels.publish(self.product, 'edge', self.c1, out=lines.append)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, '')
+        self.assertEqual(_ref_sha(self.bare, 'refs/heads/releases/edge'), self.c1)
+
+    def test_a_publish_passes_the_exact_refspec_and_refs_only_to_gitpush_push(self):
+        with mock.patch('asf.gitpush.push') as push:
+            push.return_value = subprocess.CompletedProcess(['git', 'push'], 0, '', '')
+            ok, detail = channels.publish(self.product, 'edge', self.c1)
+        self.assertTrue(ok, detail)
+        push.assert_called_once()
+        args, kwargs = push.call_args
+        self.assertEqual(args[0], ['-q', 'origin', f'{self.c1}:refs/heads/releases/edge'])
+        self.assertTrue(kwargs['refs_only'])
+
+    def test_a_guard_refusal_pushes_nothing_and_leaves_the_log_unchanged(self):
+        channels.write_log(self.P, lambda l: channels.note_edge(l, 'v0.1.0', self.c1, 'T0'))
+        before = channels.read_log(self.P)
+        protected = env.Product(self.P, {'repo_dir': self.local, 'main': 'main',
+                                         'conventions': {'protected_refs': ['releases/*']}})
+        ok, detail = channels.publish(protected, 'edge', self.c1)
+        self.assertFalse(ok)
+        self.assertIn('REF GUARD', detail)
+        self.assertIsNone(_ref_sha(self.bare, 'refs/heads/releases/edge'))
+        self.assertEqual(channels.read_log(self.P), before)
+
+    def test_a_dry_run_publishes_nothing_and_says_what_it_would_have_pushed(self):
+        with mutation_guard.active():
+            ok, detail = channels.publish(self.product, 'edge', self.c1)
+        self.assertFalse(ok)
+        self.assertIn('would run', detail)
+        self.assertIn('releases/edge', detail)
+        self.assertIsNone(_ref_sha(self.bare, 'refs/heads/releases/edge'))
+
+    def test_a_non_fast_forward_refuses_and_the_head_is_never_moved_backwards(self):
+        channels.write_log(self.P, lambda l: channels.note_edge(l, 'v0.1.1', self.c2, 'T1'))
+        before = channels.read_log(self.P)
+        ok, _detail = channels.publish(self.product, 'edge', self.c2)
+        self.assertTrue(ok, _detail)
+        ok2, detail2 = channels.publish(self.product, 'edge', self.c1)  # c1 is c2's own ancestor
+        self.assertFalse(ok2)
+        self.assertEqual(_ref_sha(self.bare, 'refs/heads/releases/edge'), self.c2)  # unmoved
+        self.assertEqual(channels.read_log(self.P), before)  # the refused push wrote nothing
