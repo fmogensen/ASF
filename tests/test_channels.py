@@ -13,8 +13,15 @@ Task 3 adds the edge half: ``EdgeTest`` (``edge_candidate``, bound to ``upgrade.
 own answers — PD10, this module writes no verdict logic of its own) and ``PublishTest``
 (``publish``, one fast-forward push through the guard — real git, real refusals, never a hand
 built ``CompletedProcess``, the same discipline ``tests.test_gitpush`` holds its own fixture to)
-— one case per checkbox line of S-81205."""
+— one case per checkbox line of S-81205.
+
+Task 4 adds the stable gate: ``StableGateTest`` (over ``channels.stable_rows``, a
+``FakeRehearsalGh`` for its rehearsal row) and ``S1WindowTest`` (over ``channels.s1_in_window`` and
+``release_preview.open_defects``, against the fixture record at
+``tests/fixtures/channels/record`` — four Bug cards, the four answers D9 has to tell apart) —
+one case per checkbox line of S-81206."""
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -25,8 +32,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import channels, cli, env, mutation_guard
+from asf import channels, cli, env, mutation_guard, release_preview
 from asf.state import registry, store
+
+UTC = datetime.timezone.utc
 
 
 def _git(args, cwd=None):
@@ -463,3 +472,230 @@ class PublishTest(ChannelsStateHome):
         self.assertFalse(ok2)
         self.assertEqual(_ref_sha(self.bare, 'refs/heads/releases/edge'), self.c2)  # unmoved
         self.assertEqual(channels.read_log(self.P), before)  # the refused push wrote nothing
+
+
+def product(slug='o/r', channels_block=None):
+    """A minimal :class:`asf.env.Product` — ``repo_slug`` for the rehearsal row's gh read, and
+    ``release.channels`` overlaid when a case needs a non-default threshold (:func:`channels.settings`)."""
+    data = {'repo_slug': slug}
+    if channels_block is not None:
+        data['release'] = {'channels': channels_block}
+    return env.Product('p', data)
+
+
+class FakeRehearsalGh:
+    """``subprocess.run`` for :func:`asf.upgrade.ci_verdict`'s two gh reads — the check-runs
+    list, then (only for a name check-runs did not answer) the combined status — one verdict
+    per commit sha: ``'green'``, ``'red'``, or absent, which answers ``'missing'`` (no run at
+    all — the D8/PD10 case a renamed or deleted job leaves behind)."""
+
+    def __init__(self, answers=None):
+        self.answers = dict(answers or {})
+        self.calls = []
+
+    def __call__(self, cmd, **_kw):
+        self.calls.append(list(cmd))
+        ok = lambda out='': mock.Mock(returncode=0, stdout=out, stderr='')  # noqa: E731
+        if cmd[:2] != ['gh', 'api']:
+            return mock.Mock(returncode=1, stdout='', stderr='unexpected call')
+        path = cmd[2]
+        m = re.search(r'commits/([0-9a-f]+)/', path)
+        state = self.answers.get(m.group(1) if m else '', 'missing')
+        if 'check-runs' in path:
+            if state == 'missing':
+                return ok(json.dumps({'check_runs': []}))
+            conclusion = {'green': 'success', 'red': 'failure'}[state]
+            return ok(json.dumps({'check_runs': [
+                {'id': 1, 'name': 'rehearsal', 'status': 'completed', 'conclusion': conclusion}]}))
+        return ok(json.dumps({'statuses': []}))
+
+
+class StableGateTest(unittest.TestCase):
+    """S-81206 — one case per checkbox line: stable promotes only when all four criteria —
+    the cadence, the dwell, the rehearsal and the S1 window — are met, and names the one that
+    is not. ``self.root`` carries no ``bugs/`` folder, so the S1 window reads as met in every
+    case that does not test it on its own (that is ``S1WindowTest``, over the fixture record)."""
+
+    NOW = datetime.datetime(2026, 10, 10, 12, 0, 0, tzinfo=UTC)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='channels_stable_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.root = os.path.join(self.tmp, 'record')
+
+    def by_key(self, rows):
+        return {r.key: r for r in rows}
+
+    def test_all_four_rows_met_promotes_and_moves_the_head(self):
+        remote = os.path.join(self.tmp, 'remote.git')
+        _git(['init', '-q', '-b', 'main', remote])
+
+        def commit(msg):
+            _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+                 '-m', msg], remote)
+            return _git(['rev-parse', 'HEAD'], remote)
+
+        old = commit('old stable')
+        _git(['update-ref', 'refs/heads/releases/stable', old], remote)
+        candidate_commit = commit('candidate')
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'tag', '-a', 'v0.1.5', '-m', 'v0.1.5'],
+             remote)
+        candidate = ('v0.1.5', candidate_commit)
+        edge_log = [{'tag': 'v0.1.5', 'commit': candidate_commit, 'at': '2026-10-08T00:00:00Z'}]
+
+        rows = channels.stable_rows(product(channels_block={'rehearsal_check': 'off'}),
+                                    self.root, log(edge_log=edge_log), candidate, self.NOW)
+        self.assertTrue(all(r.met for r in rows), rows)
+
+        before_tag, before_commit = channels.resolve(remote, 'stable')
+        self.assertIsNone(before_tag)
+        self.assertEqual(before_commit, old)
+
+        # the fast-forward all four met rows allow (Task 5's daily part pushes it; proven here
+        # with the resolver Task 1 already built, over a real remote)
+        _git(['update-ref', 'refs/heads/releases/stable', candidate_commit], remote)
+        after_tag, after_commit = channels.resolve(remote, 'stable')
+        self.assertEqual((after_tag, after_commit), ('v0.1.5', candidate_commit))
+
+    def test_any_one_row_unmet_promotes_nothing(self):
+        commit_ = 'c' * 40
+        candidate = ('v0.1.9', commit_)
+        edge_log = [{'tag': 'v0.1.9', 'commit': commit_, 'at': '2026-10-10T11:00:00Z'}]  # 1 h old
+
+        rows = channels.stable_rows(product(channels_block={'rehearsal_check': 'off'}),
+                                    self.root, log(edge_log=edge_log), candidate, self.NOW)
+        by_key = self.by_key(rows)
+        self.assertFalse(all(r.met for r in rows))
+        self.assertFalse(by_key['dwell'].met)
+        self.assertIn('1 h', by_key['dwell'].evidence)
+        self.assertIn('48 h', by_key['dwell'].evidence)
+        # the other three rows are met: the evidence names only what promotion is waiting for
+        self.assertTrue(by_key['cadence'].met)
+        self.assertTrue(by_key['rehearsal'].met)
+        self.assertTrue(by_key['no_s1'].met)
+
+    def test_the_cadence_row_is_unmet_until_the_configured_days_have_passed(self):
+        commit_ = 'c' * 40
+        candidate = ('v0.1.9', commit_)
+        edge_log = [{'tag': 'v0.1.9', 'commit': commit_, 'at': '2026-10-01T00:00:00Z'}]
+        stable_at = (self.NOW - datetime.timedelta(days=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        rows = channels.stable_rows(
+            product(channels_block={'rehearsal_check': 'off'}), self.root,
+            log(edge_log=edge_log, stable={'tag': 'v0.1.1', 'commit': 'b' * 40, 'at': stable_at}),
+            candidate, self.NOW)
+        by_key = self.by_key(rows)
+        self.assertFalse(by_key['cadence'].met)
+        self.assertIn('v0.1.1', by_key['cadence'].evidence)
+        self.assertIn('due in 2 d', by_key['cadence'].evidence)
+        self.assertTrue(by_key['dwell'].met)  # the candidate itself is long on edge
+
+    def test_the_cadence_row_is_met_with_no_stable_release_yet(self):
+        commit_ = 'c' * 40
+        candidate = ('v0.1.9', commit_)
+        edge_log = [{'tag': 'v0.1.9', 'commit': commit_, 'at': '2026-10-01T00:00:00Z'}]
+
+        rows = channels.stable_rows(product(channels_block={'rehearsal_check': 'off'}),
+                                    self.root, log(edge_log=edge_log), candidate, self.NOW)
+        by_key = self.by_key(rows)
+        self.assertTrue(by_key['cadence'].met)
+        self.assertEqual(by_key['cadence'].evidence, 'no stable release yet')
+
+    def test_the_dwell_row_takes_the_newest_tag_published_long_enough(self):
+        candidate = ('v0.1.9', 'c' * 40)
+        edge_log = [{'tag': 'v0.1.9', 'commit': 'c' * 40, 'at': '2026-10-08T00:00:00Z'},  # 60 h
+                    {'tag': 'v0.1.8', 'commit': 'd' * 40, 'at': '2026-10-01T00:00:00Z'}]  # older
+
+        rows = channels.stable_rows(product(channels_block={'rehearsal_check': 'off'}),
+                                    self.root, log(edge_log=edge_log), candidate, self.NOW)
+        by_key = self.by_key(rows)
+        self.assertTrue(by_key['dwell'].met)
+        self.assertIn('60 h', by_key['dwell'].evidence)
+        self.assertIn('48 h', by_key['dwell'].evidence)
+
+    def test_a_tag_never_published_to_edge_is_never_a_candidate(self):
+        candidate = ('v9.9.9', 'e' * 40)  # not in the edge log at all, however old the tag is
+        edge_log = [{'tag': 'v0.1.1', 'commit': 'c' * 40, 'at': '2000-01-01T00:00:00Z'}]
+
+        rows = channels.stable_rows(product(channels_block={'rehearsal_check': 'off'}),
+                                    self.root, log(edge_log=edge_log), candidate, self.NOW)
+        by_key = self.by_key(rows)
+        self.assertFalse(by_key['dwell'].met)
+        self.assertIn('never published to edge', by_key['dwell'].evidence)
+
+    def test_the_rehearsal_row_is_met_only_when_the_check_succeeded(self):
+        commit_ = 'f' * 40
+        candidate = ('v0.1.9', commit_)
+        edge_log = [{'tag': 'v0.1.9', 'commit': commit_, 'at': '2026-10-01T00:00:00Z'}]
+        gh = FakeRehearsalGh({commit_: 'green'})
+
+        rows = channels.stable_rows(product(), self.root, log(edge_log=edge_log), candidate,
+                                    self.NOW, run=gh)
+        by_key = self.by_key(rows)
+        self.assertTrue(by_key['rehearsal'].met)
+        self.assertEqual(by_key['rehearsal'].evidence, 'rehearsal success')
+
+        gh_red = FakeRehearsalGh({commit_: 'red'})
+        rows = channels.stable_rows(product(), self.root, log(edge_log=edge_log), candidate,
+                                    self.NOW, run=gh_red)
+        self.assertFalse(self.by_key(rows)['rehearsal'].met)
+
+    def test_the_rehearsal_row_is_not_met_without_the_check(self):
+        commit_ = 'f' * 40
+        candidate = ('v0.1.9', commit_)
+        edge_log = [{'tag': 'v0.1.9', 'commit': commit_, 'at': '2026-10-01T00:00:00Z'}]
+        gh = FakeRehearsalGh({})  # no run at all — a renamed or deleted job
+
+        rows = channels.stable_rows(product(), self.root, log(edge_log=edge_log), candidate,
+                                    self.NOW, run=gh)
+        by_key = self.by_key(rows)
+        self.assertFalse(by_key['rehearsal'].met)
+        self.assertEqual(by_key['rehearsal'].evidence, 'rehearsal has no run')
+
+    def test_the_rehearsal_row_is_n_a_when_the_setting_is_off(self):
+        commit_ = 'f' * 40
+        candidate = ('v0.1.9', commit_)
+        edge_log = [{'tag': 'v0.1.9', 'commit': commit_, 'at': '2026-10-01T00:00:00Z'}]
+        gh = FakeRehearsalGh({commit_: 'green'})
+
+        rows = channels.stable_rows(
+            product(channels_block={'rehearsal_check': 'off'}), self.root,
+            log(edge_log=edge_log), candidate, self.NOW, run=gh)
+        by_key = self.by_key(rows)
+        self.assertTrue(by_key['rehearsal'].met)
+        self.assertEqual(by_key['rehearsal'].evidence,
+                         'n/a (release.channels.rehearsal_check off)')
+        self.assertEqual(gh.calls, [])  # off is read before ci_verdict is ever called (PD10)
+
+
+class S1WindowTest(unittest.TestCase):
+    """S-81206, D9's two reads — over the fixture record at ``tests/fixtures/channels/record``:
+    an S1 whose typed fields fall inside the window (B-0001), one raised and closed before it
+    (B-0002), an open S1 from a month before it (B-0003), and an S2 inside it (B-0004) — the
+    four answers D9 has to tell apart."""
+
+    ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'channels',
+                        'record')
+    SINCE = '2026-10-08T00:00:00Z'
+    NOW = '2026-10-10T12:00:00Z'
+
+    def windowed_ids(self):
+        return [r[0] for r in channels.s1_in_window(self.ROOT, self.SINCE, now=self.NOW)]
+
+    def open_s1_ids(self):
+        return [r[0] for r in release_preview.open_defects(self.ROOT, ('S1',))]
+
+    def test_an_s1_inside_the_window_blocks_and_names_the_card(self):
+        self.assertEqual(self.windowed_ids(), ['B-0001'])
+
+    def test_an_s1_closed_before_the_window_does_not_block(self):
+        self.assertNotIn('B-0002', self.windowed_ids())
+        self.assertNotIn('B-0002', self.open_s1_ids())
+
+    def test_an_open_s1_of_any_age_blocks(self):
+        self.assertNotIn('B-0003', self.windowed_ids())  # outside the window by date
+        self.assertIn('B-0003', self.open_s1_ids())  # still blocks: it is open
+
+    def test_an_s2_inside_the_window_does_not_block(self):
+        self.assertNotIn('B-0004', self.windowed_ids())
+        self.assertNotIn('B-0004', self.open_s1_ids())
