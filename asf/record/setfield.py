@@ -17,6 +17,7 @@ the severity that holds the whole tier-2 queue (:func:`asf.feeder.rows.bug_rows`
 spends something that belongs to other work; the sentence that justifies it is worth more later
 than the field."""
 import os
+import re
 import sys
 import tempfile
 
@@ -94,7 +95,11 @@ def reshape_applied(rec, updates, why):
 def _as_list(value):
     if value is None or value == '':
         return []
-    return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    # a raw CLI value such as ``a, b, c`` or ``a b c`` is comma- and/or space-separated;
+    # split it here so an entry never keeps a trailing comma (B-121288)
+    return [v for v in re.split(r'[,\s]+', str(value).strip()) if v]
 
 
 def _set_only(type_, key, raw, canonical):
