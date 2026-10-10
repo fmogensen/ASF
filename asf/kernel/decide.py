@@ -53,7 +53,12 @@ item and the actions of one tick. The rules it holds, in the design's words:
   before any other Ready item, the ones that hold the most others first. A ``done`` session
   whose worktree holds commits origin lacks (``Session.unpushed``) is pushed by the host with a
   lease and counts as pushed; one whose origin branch holds commits its history never had
-  (``Session.push_refused``) is Stuck(owner=operator) on that reason. A ``done`` session
+  (``Session.push_refused``) is Stuck(owner=operator) on that reason. A session on an open PR's
+  branch (a rebase or fix round) is published the same way at any end — ``partial``,
+  ``blocked`` or no REPORT too: its sandbox refuses a force-push, so the host's push replaces
+  it, the item is not Stuck for that session, and the PR is judged on the next tick's facts. A
+  recorded Stuck a refused force-push left (:func:`stranded`) whose rebase worktree still holds
+  a safe rebased HEAD (``Facts.stranded``) is re-judged: :class:`PushStranded`, then Review. A ``done`` session
   that pushed a new head moves on (to Review) whatever ``NEEDS OPERATOR:`` line it also carries:
   the question becomes an item note (:class:`NoteItem`, shown by status) and holds nothing. A session whose API
   failed is an attempt :data:`API_FAILED` — relaunched, then Stuck(owner=loop). A dead pid ends
@@ -115,7 +120,8 @@ REBASE = 'rebase'
 
 #: what a rebase round's session does, after the finding's prefix
 REBASE_ASK = ("rebase the branch onto the base, resolve the conflicts, keep the change's intent, "
-              "run the touched tests, push")
+              "run the touched tests, commit it locally (do not force-push yourself) and report "
+              "status: done, pushed: rebased <sha> — the host publishes it")
 
 #: what the operator does with a conflict the rebase session could not resolve
 CONFLICT_NEXT = 'rebase PR #%d onto its base by hand and push, or close it and reopen the item'
@@ -153,7 +159,7 @@ IDLE_REASONS = {
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
-ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.NoteItem, A.MarkStuck, A.MintStory, A.OpenPR, A.Rerun,
+ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem, A.MarkStuck, A.MintStory, A.OpenPR, A.Rerun,
          A.UpdateBranch, A.EnableAutoMerge, A.Launch)
 
 #: the prefix of a Stuck reason a ``done`` REPORT left (its ``NEEDS OPERATOR:`` question, before
@@ -291,6 +297,12 @@ def _judge(it, facts, config, actions):
         if again:
             actions.append(A.ClearStuck(it.id, again))
             stuck, hold = None, True
+    if stuck is not None and stranded(stuck):
+        s = next((s for s in facts.stranded if s.item_id == it.id and s.unpushed
+                  and not s.push_refused), None)
+        if s is not None:  # the host publishes the rebase it left; next tick judges the PR
+            actions.append(A.PushStranded(s.job, it.id))
+            return _Judged(State.REVIEW, hold=True)
 
     sessions = [s for s in facts.sessions if s.item_id == it.id]
     live = [s for s in sessions if s.alive]
@@ -305,6 +317,11 @@ def _judge(it, facts, config, actions):
             attempts.append(CRASH)
         elif s.kind == 'review':
             continue  # a reviewer's verdict is read off its report by the applier
+        elif host_refuses(s):
+            ended_stuck = _stuck(R.cap(NOT_PUSHED + s.push_refused), 'operator')
+        elif host_pushes(s) and s.status != R.DONE:
+            pushed = s  # the host publishes its rebase; the PR is judged on next tick's facts
+            _note(it, pushed_note(s), actions)
         elif s.api_error and not s.fields:
             attempts.append(API_FAILED)
             api_detail = s.api_error
@@ -340,7 +357,8 @@ def _judge(it, facts, config, actions):
             repeated = '%s: %s' % (API_FAILED, api_detail)
         return _Judged(State.STUCK, _stuck(repeated, 'loop'))
     if open_pr is not None:
-        j = _judge_pr(it, open_pr, attempts, facts, config, actions, extra, granted)
+        j = _judge_pr(it, open_pr, attempts, facts, config, actions, extra, granted,
+                      fresh=pushed is not None)
         j.hold = j.hold or hold
         return j
     if it.state is State.DONE and not it.reopened:
@@ -423,12 +441,37 @@ def done_and_pushed(s, facts=None):
                                                     s.branch, facts)
 
 
+def _host_publishable(s):
+    """Whether ended session ``s``'s worktree is one the host publishes from: a non-review
+    session that pushed nothing itself, holding commits origin lacks (``Session.unpushed``), and
+    either reported ``done`` or ran on an open PR's branch (``Session.pr``: a rebase or fix round,
+    whatever it reported — ``partial``, ``blocked`` or no REPORT: its sandbox refused the
+    force-push it needed)."""
+    return (s.ended and s.kind != 'review' and s.result != 'pushed' and bool(s.unpushed)
+            and (s.status == R.DONE or s.pr is not None))
+
+
 def host_pushes(s):
     """Whether the host pushes ended session ``s``'s worktree HEAD (``Session.unpushed``) with a
-    lease before it is ended: a ``done``, non-review session that pushed nothing itself and whose
-    origin branch holds nothing its history never had."""
-    return (s.ended and s.kind != 'review' and s.status == R.DONE and s.result != 'pushed'
-            and bool(s.unpushed) and not s.push_refused)
+    lease before it is ended (:func:`_host_publishable`, and origin's branch holds nothing its
+    history never had)."""
+    return _host_publishable(s) and not s.push_refused
+
+
+def host_refuses(s):
+    """Whether ended session ``s`` left work the host will not push: origin's branch holds a
+    commit its history never had (``Session.push_refused``). Stuck(owner=operator) on that."""
+    return _host_publishable(s) and bool(s.push_refused)
+
+
+def stranded(stuck):
+    """Whether a recorded Stuck is one a rebase the host could publish may have left — a conflict
+    the rebase session could not resolve, or a session asking the operator for the
+    ``--force-with-lease`` push its sandbox refused: re-judged when its worktree still holds a
+    safe rebased HEAD (``Facts.stranded``)."""
+    reason = str(stuck.reason) if stuck is not None else ''
+    return (' the rebase session could not resolve: ' in reason
+            or ('NEEDS OPERATOR' in reason and 'force-with-lease' in reason))
 
 
 def no_report(s):
@@ -567,11 +610,15 @@ def _parked(items):
     return out
 
 
-def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False):
+def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, fresh=False):
     """The state of ``it`` holding open PR ``pr``: conflict, red checks, then the review. Its
     fix-round cap is ``config.max_fix_rounds`` + ``extra`` (rounds operator answers granted);
-    ``granted``: an answer granted one this tick, so a spent rebase finding no longer counts."""
+    ``granted``: an answer granted one this tick, so a spent rebase finding no longer counts;
+    ``fresh``: a session's head was pushed (or is published by the host) this tick, so the PR's
+    conflict facts predate it and it is judged next tick."""
     if conflicting(pr, attempts):
+        if fresh:
+            return _Judged(State.REVIEW, hold=True)
         if not granted and any(rebase_finding(f, pr.number) for f in it.findings):
             reason = ('%s the rebase session could not resolve: PR #%d still conflicts on head %s'
                       % (CONFLICT, pr.number, pr.head_sha or '?'))

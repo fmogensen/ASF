@@ -237,7 +237,9 @@ class Facts:
     """Everything one tick knows. ``items`` maps id -> :class:`Item` (every type: Epics, Features,
     Stories, Tasks, Bugs). ``specs_landed`` maps a Feature id to the text of its spec, for every
     spec merged to trunk. ``paused`` holds every launch; nothing else. ``branches`` are the
-    :class:`Branch` values on origin under the kernel's work prefixes."""
+    :class:`Branch` values on origin under the kernel's work prefixes. ``stranded`` are the ended
+    :class:`Session` values (``unpushed``/``push_refused`` read) whose kept worktree holds a rebase
+    a Stuck item's refused force-push left (:func:`asf.kernel.decide.stranded`)."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -246,6 +248,7 @@ class Facts:
     specs_landed: dict = dataclasses.field(default_factory=dict)
     paused: bool = False
     branches: list = dataclasses.field(default_factory=list)
+    stranded: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

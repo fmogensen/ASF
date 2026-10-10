@@ -77,6 +77,16 @@ class EndSession:
 
 
 @dataclasses.dataclass
+class PushStranded:
+    """Publish the rebased HEAD that ended session ``job`` left in its kept worktree for
+    ``item_id`` (Stuck on a force-push its sandbox refused: ``Facts.stranded``): the host's
+    ``--force-with-lease`` push, after the same ancestry check. A refused push leaves the item
+    Stuck(owner=operator) on the refusal."""
+    job: str
+    item_id: str
+
+
+@dataclasses.dataclass
 class NoteItem:
     """Add ``text`` to ``item_id``'s notes: a question a session asked while its work moved on
     anyway (a ``done`` REPORT with a pushed head), or a red on a check that is not required.

@@ -1,5 +1,6 @@
-"""A kernel session pushes its own branch (B-82658, B-83312): every kernel brief says so — a
-rebase with ``git push --force-with-lease origin <branch>`` — and none says "the factory
+"""A kernel session pushes its own branch fast-forward (B-82658, B-83312) and never force-pushes
+a rebase (B-84832: its sandbox refuses it): every kernel brief says to commit the rebase and
+report ``pushed: rebased <sha>`` — the host publishes it — and none says "the factory
 publishes", while the floor's own brief keeps its wording. The host's safety net: a session that
 still ended ``pushed: rebased <sha>`` has that sha pushed once from its worktree."""
 import os
@@ -25,7 +26,8 @@ except ImportError:  # pragma: no cover - import shape only
     from tests.kernel.test_go_live import _briefer, _product
 
 State = B.State
-LEASE = '`git push --force-with-lease origin worker/T-0001`'
+PLAIN = '`git push origin worker/T-0001`'
+HOST = KB.HOST_REBASE
 
 
 class KernelBriefsPush(unittest.TestCase):
@@ -35,7 +37,7 @@ class KernelBriefsPush(unittest.TestCase):
         return _briefer(_product())(item, A.Launch(kind, 'T-0001', 'worker/T-0001'),
                                     list(findings), pr).text
 
-    def test_every_kernel_brief_says_the_session_pushes_its_own_rebase(self):
+    def test_every_kernel_brief_says_the_host_publishes_the_rebase(self):
         texts = {'coder': self.brief('build'),
                  'correct': self.brief('build', ['src/a.py:3 — guard'], B.pr(7, 'T-0001')),
                  'review': self.brief('review', pr=B.pr(7, 'T-0001'))}
@@ -43,16 +45,21 @@ class KernelBriefsPush(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertNotIn('factory publishes', text)
                 self.assertNotIn('the factory publishes', text.lower())
-                self.assertIn(LEASE, text)
-                self.assertIn('You push your own branch', text)
+                self.assertIn(PLAIN, text)
+                self.assertIn('You push your own branch fast-forward', text)
+                self.assertIn('Do not force-push yourself; commit the rebased branch locally and '
+                              'end with REPORT `status: done`, `pushed: rebased <sha>`; the host '
+                              'publishes it.', text)
+                self.assertNotIn('--force-with-lease origin', text)
         self.assertIn('kind: correct', texts['correct'])
         # the review's verdict lines stay last
         self.assertTrue(texts['review'].rstrip().endswith(KB.VERDICT_RULE.splitlines()[-1]))
 
     def test_the_correct_template_and_the_report_line_are_rewritten(self):
         text = self.brief('build', ['src/a.py:3 — guard'], B.pr(7, 'T-0001'))
-        self.assertIn('push it yourself with ' + LEASE, text)
-        self.assertIn('rebased <sha> — pushed with --force-with-lease', text)
+        self.assertIn('the rebase you were handed: ' + HOST, text)
+        self.assertIn('rebased <sha> — the host publishes it', text)
+        self.assertNotIn('push it yourself', text)
 
     def test_the_floors_brief_keeps_its_wording(self):
         from asf.briefs.build import TAIL
@@ -64,7 +71,8 @@ class KernelBriefsPush(unittest.TestCase):
     def test_the_rewrite_is_idempotent_on_text_without_the_floor_wording(self):
         out = KB.kernel_push_text('plain brief\n', 'b1')
         self.assertTrue(out.startswith('plain brief\n\n## Pushing'))
-        self.assertIn('`git push --force-with-lease origin b1`', out)
+        self.assertIn('`git push origin b1`', out)
+        self.assertIn(HOST, out)
 
 
 def _rebased(job, kind='build', sha='abc1234', worktree='/work/j'):

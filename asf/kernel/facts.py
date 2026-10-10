@@ -17,8 +17,11 @@ reviewer report, keyed by the tree it read), GitHub's own reviews on the head, a
 approvals that still name the head (:meth:`asf.kernel.ports.RealGitHub.floor_approvals`). Parked
 items (``priority: later`` on the item or an ancestor) are not filtered here: ``decide`` holds
 that rule, so it is the same everywhere. The pushed branches
-(:meth:`asf.kernel.ports.RealGitHub.branches`) count only for items on the record.
+(:meth:`asf.kernel.ports.RealGitHub.branches`) count only for items on the record. A Stuck item a
+refused force-push left (:func:`asf.kernel.decide.stranded`) has its last ended session's kept
+worktree read (``sessions.stranded``, when the port has it) into ``Facts.stranded``.
 """
+from asf.kernel.decide import stranded as decide_stranded
 from asf.kernel.model import Facts, State
 
 
@@ -46,5 +49,14 @@ def read_facts(ports):
              if fid in items and items[fid].state is not State.DONE}
     branches = getattr(ports.github, 'branches', None)
     pushed = [b for b in (branches() if branches else []) if b.item_id in items]
+    look = getattr(ports.sessions, 'stranded', None)
+    stranded = []
+    for iid in sorted(items):
+        it = items[iid]
+        if look and it.state is State.STUCK and decide_stranded(it.stuck):
+            s = look(iid)
+            if s is not None:
+                stranded.append(s)
     return Facts(items=items, prs=prs, sessions=list(ports.sessions.sessions()), reviews=reviews,
-                 answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed)
+                 answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
+                 stranded=stranded)

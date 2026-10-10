@@ -72,7 +72,7 @@ class HostPushDecide(unittest.TestCase):
         self.assertEqual(info.reason, NOT_PUSHED + why)
         self.assertEqual(B.of(plan, A.OpenPR), [])
 
-    def test_partial_work_or_a_review_is_never_host_pushed(self):
+    def test_partial_work_off_a_pr_or_a_review_is_never_host_pushed(self):
         for s in (_done(status='partial', unpushed=HEAD, fields={'status': 'partial'}),
                   _done(kind='review', unpushed=HEAD)):
             plan = decide(B.facts([B.task('T-0001', state=State.BUILDING)], sessions=[s]),
@@ -211,6 +211,17 @@ class RealGit(unittest.TestCase):
             with self.assertRaises(P.PortError):
                 P.RealSessions(self.product).push_rebase(_done(worktree=self.wt), head)
         self.assertEqual(_git(['rev-parse', 'worker/T-0001'], self.origin), foreign)
+
+    def test_an_ended_sessions_kept_rebase_is_read_as_stranded(self):
+        from asf.workers import pool
+        os.makedirs(self.state, exist_ok=True)
+        with mock.patch('asf.env.state_dir', return_value=self.state):
+            pool.append_session(self.product, {'job': 'j0', 'item': 'T-0001', 'kind': 'task',
+                                               'worktree': self.wt, 'branch': 'worker/T-0001',
+                                               'kernel_pr': 7, 'ended': '2026-10-10T00:00:00Z'})
+            s = P.RealSessions(self.product, cfg={}).stranded('T-0001')
+            self.assertEqual((s.job, s.unpushed, s.push_refused, s.pr), ('j0', self.head, '', 7))
+            self.assertIsNone(P.RealSessions(self.product, cfg={}).stranded('T-0002'))
 
     def test_the_trunk_is_never_a_target(self):
         _git(['checkout', '-q', 'main'], self.wt)

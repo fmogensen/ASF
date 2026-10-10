@@ -7,8 +7,10 @@ carries it — and the common REPORT tail). The kinds map as :func:`brief_kind` 
 is ``coder`` (``fix-bug`` for a Bug), a build on the item's open PR is a ``correct`` round whose
 correction is the review's findings or the red checks, and ``review``/``spec``/``plan`` keep
 their names. The kernel adds three things the floor's text does not carry: :data:`PUSH_RULE` (a
-kernel session pushes its own branch, a rebase with `--force-with-lease`; the floor's "the factory
-publishes" wording is rewritten, its templates untouched), the operator's answers
+kernel session pushes its own branch fast-forward and never force-pushes a rebase: it commits it
+and reports ``pushed: rebased <sha>``, and the host publishes it — :data:`HOST_REBASE`; the
+floor's "the factory publishes" wording is rewritten, its templates untouched), the operator's
+answers
 already on the card, and — for a review — :data:`VERDICT_RULE`, the lines :func:`parse_verdict`
 reads back off the session's report. It also drops the floor's heartbeat wording
 (:data:`_HEARTBEAT_REWRITES`): a kernel session is launched with no beat loop — the kernel judges
@@ -33,40 +35,38 @@ the REPORT block, print exactly one line `VERDICT: approve` or `VERDICT: changes
 and nothing after them — this overrides "nothing after it" above. A review that ends without a
 `VERDICT:` line counts as no review and is run again."""
 
-#: the kernel's push rule: a session publishes its own branch — the kernel never pushes a rebase
-#: for it (B-82658, B-83312). Appended to every kernel brief; overrides the floor's text above.
+#: what a kernel session does with a rebase: its sandbox refuses a force-push, so the host
+#: publishes it (``--force-with-lease`` over origin's tip, only when that tip is in the branch's
+#: own history) at any session end
+HOST_REBASE = ('Do not force-push yourself; commit the rebased branch locally and end with REPORT '
+               '`status: done`, `pushed: rebased <sha>`; the host publishes it.')
+
+#: the kernel's push rule: a session pushes its own branch fast-forward; a rebase is published by
+#: the host (B-84832). Appended to every kernel brief; overrides the floor's text above.
 PUSH_RULE = """## Pushing (the kernel's rule — it overrides anything above)
 
-You push your own branch; nothing pushes it for you. Your last act is `git push origin {branch}`.
-After a rebase (onto `origin/{main}`, or a push refused as non-fast-forward because the branch was
-rebased), push it yourself with `git push --force-with-lease origin {branch}` — never a bare
-`--force`, never a merge of `origin/{main}` into it — then report
-`pushed: yes <the sha origin/{branch} now points at>`. Work that is committed but not on origin
-is lost."""
+You push your own branch fast-forward: your last act is `git push origin {branch}`. After a rebase
+(onto `origin/{main}`, or a push refused as non-fast-forward because the branch was rebased) —
+never a merge of `origin/{main}` into it, never a `--force` of any kind: %s
+Committed work the host can publish is never lost; uncommitted work is.""" % HOST_REBASE
 
 #: the floor's "the factory publishes a rebase" wording, and what a kernel brief says instead
 _FLOOR_REWRITES = (
-    # the TAIL's lane paragraph: refused push → stop, the factory publishes
-    (re.compile(r'never force-push,(\s+)never'),
-     r'never force-push except `--force-with-lease` after a rebase,\1never'),
+    # the TAIL's lane paragraph: refused push -> stop, the factory publishes
     (re.compile(r'If that is refused as\s+non-fast-forward, the rebase is why:.*?'
                 r'a refused push is never a `NEEDS OPERATOR`\.', re.S),
-     'If that is refused as non-fast-forward, the rebase is why: push it yourself with '
-     '`git push --force-with-lease origin {branch}` — never merge, never a bare force. '
-     'Publishing is yours; landing is the factory\'s: never run `asf land` or any other '
-     '`asf` command to publish, and a refused push is never a `NEEDS OPERATOR`.'),
-    # correct.md: refused push → stop and report the factory publishes
-    (re.compile(r'never a force\.(\s+)A push refused as non-fast-forward is the rebase you were '
-                r'handed: stop there and report `pushed: rebased <sha> — the factory publishes`\.'),
-     r'never a bare force.\1A push refused as non-fast-forward is the rebase you were handed: '
-     r'push it yourself with `git push --force-with-lease origin {branch}` and report '
-     r'`pushed: yes <sha>`.'),
+     'If that is refused as non-fast-forward, the rebase is why: never merge. ' + HOST_REBASE +
+     ' Landing is the factory\'s: never run `asf land` or any other `asf` command to publish, '
+     'and a refused push is never a `NEEDS OPERATOR`.'),
+    # correct.md: refused push -> stop and report the factory publishes
+    (re.compile(r'A push refused as non-fast-forward is the rebase you were handed: stop there and '
+                r'report `pushed: rebased <sha> — the factory publishes`\.'),
+     'A push refused as non-fast-forward is the rebase you were handed: ' + HOST_REBASE),
     # the REPORT line's alternative
-    (re.compile(r'rebased <sha> — the factory publishes'),
-     'rebased <sha> — pushed with --force-with-lease'),
+    (re.compile(r'rebased <sha> — the factory publishes'), 'rebased <sha> — the host publishes it'),
     # anything else of the floor's in the same vein
     (re.compile(r'the factory publishes the (rebased |rewritten )?branch'),
-     r'you push the \1branch yourself (`git push --force-with-lease`)'),
+     r'the host publishes the \1branch'),
 )
 
 
@@ -83,8 +83,8 @@ _HEARTBEAT_REWRITES = (
 
 def kernel_push_text(text, branch, main='main'):
     """``text`` (a floor brief) with every "the factory publishes a rebase" line rewritten to the
-    kernel's rule, the floor's heartbeat wording dropped, and :data:`PUSH_RULE` appended: a kernel
-    session pushes its own branch."""
+    kernel's rule (:data:`HOST_REBASE`), the floor's heartbeat wording dropped, and
+    :data:`PUSH_RULE` appended: a kernel session pushes its own branch, the host its rebase."""
     for pat, repl in _HEARTBEAT_REWRITES:
         text = pat.sub(repl, text)
     for pat, repl in _FLOOR_REWRITES:

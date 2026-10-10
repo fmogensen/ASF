@@ -113,13 +113,17 @@ class FakeGitHub:
 
 class FakeSessions:
 
-    def __init__(self, sessions=(), fail=()):
+    def __init__(self, sessions=(), fail=(), stranded=()):
         self._sessions = list(sessions)
         self.fail = set(fail)
+        self._stranded = {s.item_id: s for s in stranded}
         self.launched, self.ended, self.meta, self.pushed = [], [], [], []
 
     def sessions(self):
         return copy.deepcopy(self._sessions)
+
+    def stranded(self, item_id):
+        return copy.deepcopy(self._stranded.get(item_id))
 
     def launch(self, kind, item_id, branch, brief, meta=None):
         if ('launch', item_id) in self.fail:

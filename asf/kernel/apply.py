@@ -20,6 +20,10 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   log) before the session is ended — a kernel session pushes its own branch, and this is the
   safety net; a refused push keeps the worktree, skips the item's OpenPR and leaves it
   Stuck(owner=operator) on the refusal;
+- a Stuck item a refused force-push left (:func:`asf.kernel.decide.stranded`) whose kept rebase
+  worktree holds a safe HEAD is published the same way (:class:`~asf.kernel.actions.PushStranded`)
+  and goes to Review, its PR judged next tick; a refused push leaves it Stuck(owner=operator) on
+  the refusal;
 - an answer to a Stuck item resets its attempts to one relaunch marker carrying the answer
   (:func:`asf.kernel.decide.answer_attempt`); one that grants an extra fix round adds one to
   ``kernel_extra_rounds`` and drops the spent rebase finding; a :class:`~asf.kernel.actions.ClearStuck` appends
@@ -47,8 +51,8 @@ from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               answer_attempt, conflict_attempt, host_pushes, no_report,
-                               rebase_finding)
+                               answer_attempt, conflict_attempt, host_pushes, host_refuses,
+                               no_report, rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
@@ -70,7 +74,8 @@ def rebased_sha(s):
 def host_push_sha(s):
     """The sha the host pushes for ended session ``s`` before ending it, else '': a reported
     ``rebased <sha>``, else the worktree HEAD a ``done`` session left unpushed
-    (:func:`asf.kernel.decide.host_pushes`)."""
+    (:func:`asf.kernel.decide.host_pushes`: also a ``partial``, ``blocked`` or no-REPORT one on
+    an open PR's branch)."""
     return rebased_sha(s) or (s.unpushed.lower() if host_pushes(s) else '')
 
 
@@ -105,6 +110,8 @@ def describe(action):
         return 'answer %s' % action.item_id
     if isinstance(action, A.ClearStuck):
         return 're-judge %s: %s' % (action.item_id, action.attempt)
+    if isinstance(action, A.PushStranded):
+        return 'publish %s rebase of %s' % (action.item_id, action.job)
     if isinstance(action, A.NoteItem):
         return 'note %s: %s' % (action.item_id, action.text)
     return repr(action)
@@ -162,14 +169,17 @@ class _Applier:
         s = next((s for s in self.facts.sessions if s.job == a.job), None)
         if s is None:
             return 'not in the facts'
+        published = host_pushes(s) or host_refuses(s)  # the host's push judges this end
         if not s.ended:
             self.attempt(s.item_id, CRASH)
         elif s.kind == 'review':
             self.verdict(s)
-        elif s.api_error and not s.fields:
+        elif s.api_error and not s.fields and not published:
             self.attempt(s.item_id, API_FAILED)
         free, note = a.free_worktree, None
-        if s.ended and s.kind != 'review' and no_report(s):
+        if host_refuses(s):
+            free = False  # origin holds commits this history never had: the operator carries them
+        elif s.ended and s.kind != 'review' and no_report(s) and not published:
             self.attempt(s.item_id, NO_REPORT)
             free = False  # the relaunch continues on its worktree and branch
         sha = host_push_sha(s)
@@ -183,6 +193,17 @@ class _Applier:
                     self.refused[s.item_id] = why
             self.log('%s %s — %s' % (s.job, s.item_id, note))
         self.ports.sessions.end(s, free)
+        return note
+
+    def PushStranded(self, a):
+        s = next((s for s in self.facts.stranded if s.job == a.job), None)
+        if s is None:
+            return 'not in the facts'
+        try:
+            note = self.ports.sessions.push_rebase(s, s.unpushed.lower())
+        except Exception as e:  # stays Stuck on the operator, on the refusal
+            self.refused[a.item_id] = str(e) or type(e).__name__
+            raise
         return note
 
     def verdict(self, s):

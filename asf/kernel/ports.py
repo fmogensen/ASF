@@ -646,7 +646,7 @@ class RealSessions:
             said = reports.read(result)
             unpushed, refused = '', ''
             if result is not None and kind != 'review' and not pushed \
-                    and said['status'] == reports.DONE:
+                    and (said['status'] == reports.DONE or run.get('kernel_pr') is not None):
                 unpushed, refused = unpushed_head(
                     run.get('worktree') or '', run.get('branch') or '', self.product.main,
                     refguard_listed(self.product))
@@ -663,6 +663,27 @@ class RealSessions:
                 unpushed=unpushed, push_refused=refused))
             out[-1].started = run.get('started') or ''
         return out
+
+    def stranded(self, item_id):
+        """The last ended (non-review) session of ``item_id`` whose kept worktree still holds a
+        HEAD origin lacks — the rebase a refused force-push left — as a :class:`M.Session` with
+        ``unpushed``/``push_refused`` read (:func:`unpushed_head`), else None."""
+        from asf.workers import lifecycle, pool
+        rows = [r for r in pool.load_sessions(self.product).values()
+                if r.get('item') == item_id and not lifecycle.is_live(r)
+                and _kernel_kind(r.get('kind')) != 'review' and r.get('worktree')
+                and os.path.isdir(r.get('worktree'))]
+        if not rows:
+            return None
+        run = rows[-1]  # the ledger is in launch order: the last one ended
+        unpushed, refused = unpushed_head(run['worktree'], run.get('branch') or '',
+                                          self.product.main, refguard_listed(self.product))
+        if not unpushed:
+            return None
+        return M.Session(job=run['job'], item_id=item_id, kind=_kernel_kind(run.get('kind')),
+                         pid=run.get('pid'), alive=False, ended=True, result='none',
+                         worktree=run['worktree'], branch=run.get('branch') or '',
+                         pr=run.get('kernel_pr'), unpushed=unpushed, push_refused=refused)
 
     def _account(self):
         from asf.workers import lifecycle, pool
