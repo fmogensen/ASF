@@ -66,6 +66,11 @@ LINES_PY = 'def count_lines(text):\n    return len(text.splitlines())\n'
 LINES_TEST = ('import unittest\n\n\nclass LinesTests(unittest.TestCase):\n'
               '    def test_last_line(self):\n'
               '        self.assertEqual(len(\'a\\nb\'.splitlines()), 2)\n')
+#: The trailer a commit on T-0001's branch carries: S-0001's only acceptance line and the test in
+#: :data:`LINES_TEST` that proves it. A Task branch whose commits claim nothing is refused before
+#: any gate (F-0040, ``lane.lane_refusal``'s ``proves`` kind), so every branch here that is meant
+#: to land says what it proves — as the scripted coder does (``tests/e2e/scripts/coder.json``).
+PROVES = 'Proves: S-0001 line 1 — tests/test_lines.py::LinesTests::test_last_line'
 
 
 def expected_failure(fn):
@@ -189,10 +194,13 @@ class LaneCase(unittest.TestCase):
     def green_trunk(self):
         return self.f.push('main', {'tests/test_trunk.py': None}, 'test: the trunk is green again')
 
-    def branch_by_hand(self, branch, item, title):
-        """``branch`` pushed and its PR opened by someone outside the factory."""
+    def branch_by_hand(self, branch, item, title, proves=None):
+        """``branch`` pushed and its PR opened by someone outside the factory. ``proves``: the
+        trailer the commit carries — :data:`PROVES` on a Task's branch, which may not land
+        without one (F-0040); None for an item that proves nothing, a Bug's fix branch."""
+        subject = f'feat({item}): {title}, by hand'
         head = self.f.push(branch, {'src/lines.py': LINES_PY, 'tests/test_lines.py': LINES_TEST},
-                           f'feat({item}): {title}, by hand')
+                           f'{subject}\n\n{proves}' if proves else subject)
         return head, self.f.open_pr(branch, f'{item} — {title}')
 
     def ready_to_land(self, item, limit=4):
@@ -355,7 +363,8 @@ class PreexistingPR:
 
     def test_r19_s5_open_pr_is_adopted_not_rebuilt(self):
         f = self.f
-        _head, number = self.branch_by_hand('feature/T-0001', 'T-0001', 'count lines')
+        _head, number = self.branch_by_hand('feature/T-0001', 'T-0001', 'count lines',
+                                            proves=PROVES)
         opened_by_hand = len(f.gh_calls('pr', 'create'))
         self.until(lambda: self.harvested('T-0001'), 5, 'the adopted PR lands')
         self.assertEqual(self.launches(item='T-0001', kind='coder'), [], 'a second coder')
@@ -531,7 +540,7 @@ class FootprintPartialFF(LaneCase):
         f = self.f
         f.runtime.queue('coder-t-0001', {
             'writes': {'{w0}': LINES_PY, '{w1}': LINES_TEST},
-            'commit': 'feat({item}): count lines, src/count.py still to change',
+            'commit': f'feat({{item}}): count lines, src/count.py still to change\n\n{PROVES}',
             'status': 'partial', 'needs_writes': 'src/count.py',
             'left_out': 'src/count.py: count must share the splitter'})
         f.runtime.queue('correct', {
