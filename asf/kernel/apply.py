@@ -114,6 +114,7 @@ class _Applier:
         self.updates = {}   # item id -> {machine key: value}
         self.refused = {}   # item id -> why the host did not push its session's work
         self.unwidened = {}  # item id -> why the record refused a needs-writes grant
+        self.moved = {}     # PR number -> what this apply did to it (merged, closed, updated, ...)
         self.result = Result()
 
     def field(self, iid, key, default):
@@ -400,13 +401,52 @@ class _Applier:
                                          else State.BUILDING).value})
         return 'job %s' % job
 
+    # ---- a write invalidates the view it was decided on --------------------------------------
+
+    def stale(self, action):
+        """Why ``action`` must not run: it targets a PR an earlier action of this apply changed
+        (merged, closed, archived, reverted, updated), so the plan's view of that PR (its head,
+        checks, reviews, mergeability) is the pre-write one. The next tick decides it afresh."""
+        for number in self.targets(action):
+            if number in self.moved:
+                return 'skipped: #%s was %s earlier this tick' % (number, self.moved[number])
+        return ''
+
+    def targets(self, action):
+        """The PR numbers ``action`` acts on."""
+        if isinstance(action, (A.MergePR, A.EnableAutoMerge, A.UpdateBranch, A.ClosePR,
+                               A.ArchiveAndReset, A.RevertPR)):
+            return [action.pr]
+        if isinstance(action, (A.Rerun, A.CancelRun)):
+            return [p.number for p in self.facts.prs
+                    if any(c.run_id == action.run_id for c in p.checks)]
+        if isinstance(action, A.Launch):
+            return [p.number for p in self.facts.prs
+                    if p.item_id == action.item_id and not p.merged
+                    and p.branch == action.branch]
+        return []
+
+    def mark(self, action):
+        """Record what a successful ``action`` did to its PR."""
+        what = {A.MergePR: 'merged', A.ClosePR: 'closed', A.ArchiveAndReset: 'closed',
+                A.RevertPR: 'reverted', A.UpdateBranch: 'updated'}.get(type(action))
+        if what:
+            for number in self.targets(action):
+                self.moved[number] = what
+
     # ---- the walk -------------------------------------------------------------------------
 
     def run(self):
         for action in self.plan.actions:
             name = type(action).__name__
+            why = self.stale(action)
+            if why:
+                self.result.done.append((action, why))
+                self.log('%s — %s' % (describe(action), why))
+                continue
             try:
                 note = getattr(self, name)(action)
+                self.mark(action)
             except Exception as e:  # one action's failure never stops the rest
                 self.result.failed.append((action, str(e) or type(e).__name__))
                 self.log('FAILED %s — %s' % (describe(action), e))

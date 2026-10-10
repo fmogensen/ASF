@@ -1285,10 +1285,17 @@ class RealGitHub:
         """Merge ``pr`` now with the product's method, only while its head is ``head_sha``."""
         merge = self.product.conventions.get('merge')
         method = (merge.get('method') if isinstance(merge, dict) else None) or 'squash'
+        self._forget(pr)
         self._write(['pr', 'merge', str(pr), '-R', self.slug, '--' + method,
                      '--match-head-commit', head_sha], 'merge #%d' % pr)
 
+    def _forget(self, pr):
+        """A write to PR ``pr`` drops the per-tick view of it (its head sha read before)."""
+        if self.open_heads is not None:
+            self.open_heads.pop(pr, None)
+
     def update_branch(self, pr):
+        self._forget(pr)
         self._write(['api', '-X', 'PUT', 'repos/%s/pulls/%d/update-branch' % (self.slug, pr)],
                     'update-branch #%d' % pr)
 
@@ -1401,6 +1408,7 @@ class RealGitHub:
         if not head_sha:
             raise PortError('archive %s: no head sha' % branch)
         archive = ARCHIVE_PREFIX + branch
+        self._forget(pr)
         r = self._gh(['api', '-X', 'POST', 'repos/%s/git/refs' % self.slug,
                       '-f', 'ref=refs/heads/%s' % archive, '-f', 'sha=%s' % head_sha],
                      retry=False)
@@ -1415,6 +1423,7 @@ class RealGitHub:
 
     def close_pr(self, pr, comment):
         """Close PR ``pr`` with ``comment`` (its branch is kept)."""
+        self._forget(pr)
         self._write(['pr', 'close', str(pr), '-R', self.slug, '--comment', comment],
                     'close #%d' % pr)
 
