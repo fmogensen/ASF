@@ -80,6 +80,7 @@ class Item:
     still moved on (a ``done`` REPORT with a pushed head): kept for status, holding nothing.
     ``reopened`` is set when a Done item was reopened. ``stuck_since`` is when the card's Stuck
     was recorded (ISO-8601 UTC, None when unknown): an operator answer given after it clears it.
+    ``extra_rounds`` are the fix rounds operator answers granted beyond ``max_fix_rounds``.
     """
     id: str
     type: str = 'task'
@@ -100,6 +101,7 @@ class Item:
     reopened: bool = False
     notes: list = dataclasses.field(default_factory=list)
     stuck_since: str = None
+    extra_rounds: int = 0
 
 
 @dataclasses.dataclass

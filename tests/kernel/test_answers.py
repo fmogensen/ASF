@@ -158,5 +158,87 @@ class Loop(unittest.TestCase):
         self.assertIn(D.HOOK_FINDING, sess.launched[0][3])
 
 
+
+CAPPED = 'review: changes requested after 2 fix rounds'
+ADD_TEST = 'add a test'
+
+
+class CappedAnswer(unittest.TestCase):
+    """An operator answer on an item Stuck at the fix-round cap grants exactly one more round."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.product = env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
+
+    def tick(self, ports):
+        return loop.tick(self.product, ports=ports, config=B.config(max_fix_rounds=2),
+                         state_dir=self.tmp, out=lambda *_: None)
+
+    def capped(self, answers=(), reason=CAPPED, findings=()):
+        it = stuck('T-0432', reason, owner='operator', fix_rounds=2, findings=list(findings))
+        review = B.review('T-0432', verdict='changes', findings=[ADD_TEST])
+        rec = F.FakeRecord([it], answers=list(answers), reviews=[review])
+        return F.ports(record=rec, github=F.FakeGitHub(prs=[B.pr(7, 'T-0432')]),
+                       sessions=F.FakeSessions())
+
+    def test_decide_grants_one_extra_round(self):
+        it = stuck('T-0432', CAPPED, owner='operator', fix_rounds=2)
+        f = B.facts([it], answers=[answer('T-0432', 'just add the test')], prs=[B.pr(7, 'T-0432')],
+                    reviews=[B.review('T-0432', verdict='changes', findings=[ADD_TEST])])
+        plan = D.decide(f, B.config(max_fix_rounds=2))
+        self.assertEqual([a.extra_round for a in B.of(plan, A.ApplyAnswer)], [True])
+        self.assertEqual(B.state(plan, 'T-0432'), State.READY)
+        other = D.decide(B.facts([stuck('T-0001')], answers=[answer('T-0001')]), B.config())
+        self.assertEqual([a.extra_round for a in B.of(other, A.ApplyAnswer)], [False])
+        self.assertTrue(D.capped(B.M.Stuck(
+            'conflict: PR #7 the rebase session could not resolve: PR #7 still conflicts on head h',
+            'operator')))
+
+    def test_answered_capped_item_launches_then_sticks_after_3_rounds(self):
+        ports = self.capped([answer('T-0432', 'just add the test')])
+        rec, sess = ports.record, ports.sessions
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'ready')
+        self.assertEqual(rec.fields['T-0432'][P.EXTRA_ROUNDS], 1)
+        self.assertEqual(sess.launched, [])
+        self.tick(ports)
+        self.assertEqual([(k, i, b) for k, i, b, _t in sess.launched],
+                         [('build', 'T-0432', 'worker/T-0432')], 'a fix round, not Stuck')
+        brief = sess.launched[0][3]
+        self.assertIn(ADD_TEST, brief)
+        self.assertIn('operator answer: just add the test', brief)
+        self.assertEqual(rec.fields['T-0432'][P.FIX_ROUNDS], 3)
+        sess._sessions.clear()  # the round ended; the review still asks for changes
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'stuck')
+        self.assertEqual(rec.fields['T-0432'][P.STUCK_REASON],
+                         'review: changes requested after 3 fix rounds')
+
+    def test_no_answer_leaves_it_unchanged(self):
+        ports = self.capped()
+        self.tick(ports)
+        self.assertNotIn(P.STATE, ports.record.fields['T-0432'])
+        self.assertNotIn(P.EXTRA_ROUNDS, ports.record.fields['T-0432'])
+        self.assertEqual(ports.sessions.launched, [])
+
+    def test_answered_unresolved_conflict_gets_one_more_rebase_round(self):
+        reason = ('conflict: PR #7 the rebase session could not resolve: PR #7 still conflicts '
+                  'on head head-1')
+        it = stuck('T-0432', reason, owner='operator', fix_rounds=1)
+        rec = F.FakeRecord([it], answers=[answer('T-0432', 'try again')])
+        rec.fields['T-0432'][P.FINDINGS] = [D.rebase_finding_for(7)]  # the spent rebase round
+        sess = F.FakeSessions()
+        ports = F.ports(record=rec, github=F.FakeGitHub(prs=[B.pr(7, 'T-0432', conflicting=True)]),
+                        sessions=sess)
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'ready')
+        self.tick(ports)
+        self.assertEqual([i for _k, i, _b, _t in sess.launched], ['T-0432'])
+        self.assertIn(D.REBASE_ASK, sess.launched[0][3])
+        sess._sessions.clear()
+        self.tick(ports)
+        self.assertEqual(rec.fields['T-0432'][P.STATE], 'stuck', 'it still conflicts')
+
+
 if __name__ == '__main__':
     unittest.main()

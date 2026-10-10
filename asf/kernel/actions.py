@@ -89,9 +89,13 @@ class NoteItem:
 class ApplyAnswer:
     """Write the operator's answer ``text`` to ``item_id``'s card and clear its question. On a
     Stuck item the answer is a fresh start too: its attempts become the one relaunch marker
-    :func:`asf.kernel.decide.answer_attempt` (the relaunch carries the answer as a finding)."""
+    :func:`asf.kernel.decide.answer_attempt` (the relaunch carries the answer as a finding).
+    ``extra_round``: the item was Stuck at its fix-round cap (or on a conflict its rebase session
+    could not resolve), so the answer grants one more fix round (``kernel_extra_rounds`` + 1) and
+    drops the spent rebase finding from the card."""
     item_id: str
     text: str
+    extra_round: bool = False
 
 
 @dataclasses.dataclass

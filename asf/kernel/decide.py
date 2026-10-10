@@ -71,6 +71,9 @@ item and the actions of one tick. The rules it holds, in the design's words:
   to whatever its facts imply (Ready, Building under a live session, Review on an open PR). Its
   attempts become one :data:`RELAUNCH` marker carrying the answer (:func:`answer_attempt`): the
   next tick relaunches it first, the one holding the most others first, the answer a finding.
+  An answer to a Stuck at the fix-round cap (or a conflict the rebase session could not resolve,
+  :func:`capped`) grants exactly one more fix round (``Item.extra_rounds`` + 1; the cap is
+  ``max_fix_rounds`` + ``extra_rounds``): the fix round carries the findings and the answer.
 - Legacy Stuck: a recorded Stuck(owner=session) the newer rules handle is re-judged once
   (:func:`legacy_relaunch`, :class:`ClearStuck`): "ended without a REPORT" with no
   :data:`NO_REPORT` attempt yet gets its one relaunch; "done without a push: pushed: no — hook
@@ -87,6 +90,7 @@ this tick is not relaunched until the next tick has read the record again.
 """
 import dataclasses
 import fnmatch
+import re
 
 from asf.kernel import actions as A
 from asf.kernel import reports as R
@@ -271,11 +275,14 @@ def _judge(it, facts, config, actions):
     question = it.question
     hold = False
     attempts = list(it.attempts)
-    answered = False
+    answered = granted = False
+    extra = it.extra_rounds
     for a in facts.answers:
         if a.item_id == it.id and not answered and (
                 a.text not in it.answers or _answers_stuck(a, it)):
-            actions.append(A.ApplyAnswer(it.id, a.text))
+            granted = it.state is State.STUCK and capped(it.stuck)
+            extra += 1 if granted else 0
+            actions.append(A.ApplyAnswer(it.id, a.text, granted))
             stuck, question, hold, answered = None, None, True, True
             if it.state is State.STUCK:  # a fresh start: the applier resets the attempts too
                 attempts = [answer_attempt(a.text)]
@@ -333,7 +340,7 @@ def _judge(it, facts, config, actions):
             repeated = '%s: %s' % (API_FAILED, api_detail)
         return _Judged(State.STUCK, _stuck(repeated, 'loop'))
     if open_pr is not None:
-        j = _judge_pr(it, open_pr, attempts, facts, config, actions)
+        j = _judge_pr(it, open_pr, attempts, facts, config, actions, extra, granted)
         j.hold = j.hold or hold
         return j
     if it.state is State.DONE and not it.reopened:
@@ -560,15 +567,17 @@ def _parked(items):
     return out
 
 
-def _judge_pr(it, pr, attempts, facts, config, actions):
-    """The state of ``it`` holding open PR ``pr``: conflict, red checks, then the review."""
+def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False):
+    """The state of ``it`` holding open PR ``pr``: conflict, red checks, then the review. Its
+    fix-round cap is ``config.max_fix_rounds`` + ``extra`` (rounds operator answers granted);
+    ``granted``: an answer granted one this tick, so a spent rebase finding no longer counts."""
     if conflicting(pr, attempts):
-        if any(rebase_finding(f, pr.number) for f in it.findings):
+        if not granted and any(rebase_finding(f, pr.number) for f in it.findings):
             reason = ('%s the rebase session could not resolve: PR #%d still conflicts on head %s'
                       % (CONFLICT, pr.number, pr.head_sha or '?'))
             return _Judged(State.STUCK, Stuck(reason, 'operator', CONFLICT_NEXT % pr.number))
         return _fix_round(it, pr, '%s: PR #%d' % (CONFLICT, pr.number), config,
-                          [rebase_finding_for(pr.number)])
+                          [rebase_finding_for(pr.number)], extra)
 
     reds = [c for c in pr.checks if c.status == 'completed' and c.conclusion in RED_CONCLUSIONS]
     gating = [c for c in reds if required(c.name, config)]
@@ -578,7 +587,7 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
     own = [c for c in gating if on_pr(c, pr)]
     if own:
         return _fix_round(it, pr, '%s: %s' % (RED, ', '.join(c.name for c in own)), config,
-                          [red_finding(c) for c in own])
+                          [red_finding(c) for c in own], extra)
     for c in gating:
         if c.attempt - 1 < config.max_reruns:
             actions.append(A.Rerun(c.run_id))
@@ -593,7 +602,7 @@ def _judge_pr(it, pr, attempts, facts, config, actions):
     if verdict is None:
         return _Judged(State.REVIEW, review_branch=pr.branch)
     if verdict.verdict != 'approve':
-        return _fix_round(it, pr, 'review: changes requested', config)
+        return _fix_round(it, pr, 'review: changes requested', config, extra=extra)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
     if pr.behind:
@@ -666,13 +675,26 @@ def _red_off(stuck):
     return stuck is not None and stuck.owner == 'ci' and str(stuck.reason).startswith(RED_OFF)
 
 
-def _fix_round(it, pr, reason, config, findings=()):
-    """Ready on ``pr``'s branch for one more fix round (carrying ``findings`` into the launch),
-    or Stuck(operator) past the cap."""
-    if it.fix_rounds + 1 > config.max_fix_rounds:
+def _fix_round(it, pr, reason, config, findings=(), extra=0):
+    """Ready on ``pr``'s branch for one more fix round (carrying ``findings`` and an operator
+    answer's text into the launch), or Stuck(operator) past the cap: ``config.max_fix_rounds``
+    plus the ``extra`` rounds operator answers granted."""
+    if it.fix_rounds + 1 > config.max_fix_rounds + extra:
         return _Judged(State.STUCK, _stuck('%s after %d fix rounds' % (reason, it.fix_rounds),
                                            'operator'))
-    return _Judged(State.READY, branch=pr.branch, findings=list(findings))
+    answered = [f for f in relaunch_findings(it) if f.startswith(ANSWERED)]
+    return _Judged(State.READY, branch=pr.branch, findings=list(findings) + answered)
+
+
+#: the end of a Stuck reason at the fix-round cap (:func:`_fix_round`)
+CAPPED_RE = re.compile(r' after \d+ fix rounds$')
+
+
+def capped(stuck):
+    """Whether recorded Stuck ``stuck`` is the fix-round cap's, or a conflict the rebase session
+    could not resolve: an operator answer to it grants one more fix round."""
+    reason = str(stuck.reason) if stuck is not None else ''
+    return bool(CAPPED_RE.search(reason)) or ' the rebase session could not resolve: ' in reason
 
 
 def rebase_finding_for(pr_number):

@@ -28,6 +28,7 @@ class FakeRecord:
                 it.stuck = M.Stuck(f[P.STUCK_REASON], f[P.STUCK_OWNER], f.get(P.STUCK_NEXT, ''))
             it.attempts = list(f.get(P.ATTEMPTS, it.attempts))
             it.fix_rounds = f.get(P.FIX_ROUNDS, it.fix_rounds)
+            it.extra_rounds = f.get(P.EXTRA_ROUNDS, it.extra_rounds)
             it.answers = list(f.get(P.ANSWERS, it.answers))
             it.findings = list(f.get(P.FINDINGS, it.findings))
             out[iid] = it

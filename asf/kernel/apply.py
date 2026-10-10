@@ -21,7 +21,8 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   safety net; a refused push keeps the worktree, skips the item's OpenPR and leaves it
   Stuck(owner=operator) on the refusal;
 - an answer to a Stuck item resets its attempts to one relaunch marker carrying the answer
-  (:func:`asf.kernel.decide.answer_attempt`); a :class:`~asf.kernel.actions.ClearStuck` appends
+  (:func:`asf.kernel.decide.answer_attempt`); one that grants an extra fix round adds one to
+  ``kernel_extra_rounds`` and drops the spent rebase finding; a :class:`~asf.kernel.actions.ClearStuck` appends
   its attempt; a build launched off a PR carries the launch's findings (a granted relaunch's)
   into the brief, and writes no fix round;
 - a session that ended without a REPORT is an attempt :data:`asf.kernel.decide.NO_REPORT` and
@@ -46,7 +47,8 @@ from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               answer_attempt, conflict_attempt, host_pushes, no_report)
+                               answer_attempt, conflict_attempt, host_pushes, no_report,
+                               rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
@@ -124,7 +126,8 @@ class _Applier:
         if it is None:
             return default
         return {P.ATTEMPTS: list(it.attempts), P.FIX_ROUNDS: it.fix_rounds,
-                P.ANSWERS: list(it.answers), P.NOTES: list(it.notes)}.get(key, default)
+                P.ANSWERS: list(it.answers), P.NOTES: list(it.notes),
+                P.EXTRA_ROUNDS: it.extra_rounds, P.FINDINGS: list(it.findings)}.get(key, default)
 
     def set(self, iid, **fields):
         self.updates.setdefault(iid, {}).update(fields)
@@ -141,6 +144,11 @@ class _Applier:
         it = self.facts.items.get(a.item_id)
         if it is not None and it.state is State.STUCK:
             self.set(a.item_id, **{P.QUESTION: None, P.ATTEMPTS: [answer_attempt(a.text)]})
+        if it is not None and a.extra_round:  # one more fix round; a spent rebase is retried
+            self.set(a.item_id, **{
+                P.EXTRA_ROUNDS: self.field(a.item_id, P.EXTRA_ROUNDS, 0) + 1,
+                P.FINDINGS: [f for f in self.field(a.item_id, P.FINDINGS, [])
+                             if not rebase_finding(f)]})
 
     def ClearStuck(self, a):
         self.attempt(a.item_id, a.attempt)

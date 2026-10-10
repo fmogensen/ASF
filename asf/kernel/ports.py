@@ -24,6 +24,9 @@ marker), so every old writer carries them through byte for byte
   ``kernel_stuck_since``: the :class:`~asf.kernel.model.Stuck` while ``kernel_state`` is
   ``stuck`` (``since`` is when it first got stuck on that reason, for the status table's age).
 - ``kernel_fix_rounds``: red- or review-driven fix rounds already launched.
+- ``kernel_extra_rounds``: fix rounds granted beyond ``max_fix_rounds`` — one per operator
+  answer to a Stuck at the fix-round cap (or a conflict its rebase session could not resolve);
+  the item's cap is ``max_fix_rounds`` + this.
 - ``kernel_attempts``: the reason of each failed attempt, oldest first.
 - ``kernel_findings``: the review findings handed to the next fix round.
 - ``kernel_answers``: the operator answers already applied; ``kernel_question``: the open one.
@@ -48,9 +51,9 @@ STATE, ATTEMPTS, FIX_ROUNDS = 'kernel_state', 'kernel_attempts', 'kernel_fix_rou
 FINDINGS, ANSWERS, QUESTION = 'kernel_findings', 'kernel_answers', 'kernel_question'
 STUCK_REASON, STUCK_OWNER = 'kernel_stuck_reason', 'kernel_stuck_owner'
 STUCK_NEXT, STUCK_SINCE, REOPENED = 'kernel_stuck_next', 'kernel_stuck_since', 'kernel_reopened'
-NOTES = 'kernel_notes'
+NOTES, EXTRA_ROUNDS = 'kernel_notes', 'kernel_extra_rounds'
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
-               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES)
+               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS)
 
 #: the card types the kernel judges (decisions and rules are never work)
 WORK_TYPES = ('epic', 'feature', 'story', 'task', 'bug')
@@ -144,6 +147,7 @@ def item_from_card(rec):
         writes=[str(w) for w in as_list(meta.get('writes'))], body=rec.get('body') or '',
         state=state, stuck=stuck, attempts=[str(a) for a in as_list(machine.get(ATTEMPTS))],
         fix_rounds=int(machine.get(FIX_ROUNDS) or 0),
+        extra_rounds=int(machine.get(EXTRA_ROUNDS) or 0),
         findings=[str(f) for f in as_list(machine.get(FINDINGS))],
         answers=[str(a) for a in as_list(machine.get(ANSWERS))],
         question=machine.get(QUESTION) or None, reopened=bool(machine.get(REOPENED)),
