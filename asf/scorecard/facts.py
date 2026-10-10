@@ -49,6 +49,7 @@ class Facts:
     as_of: str = ''             # the reading's clock, ISO
     diagnostics: list = dataclasses.field(default_factory=list)  # gaps in the reading, one line each
     disagree: list = dataclasses.field(default_factory=list)  # asf.facts.disagree records
+    landings: list = dataclasses.field(default_factory=list)  # metrics/landings events
 
 
 # ----------------------------------------------------------------- time --
@@ -556,7 +557,7 @@ def load(root, product=None, *, registry=True, forge=True, as_of=None):
                  gates=_stream(root, 'gates'), runs=runs, clutter=clutter,
                  denials=job_denials(product, runs) if registry else [],
                  as_of=as_of or now_iso(), diagnostics=diagnostics(items, untraced),
-                 disagree=disagree)
+                 disagree=disagree, landings=_stream(root, 'landings'))
 
 
 def state_file(product, name):

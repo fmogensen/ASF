@@ -222,6 +222,16 @@ class Log(Home):
         f.disagree = []
         self.assertEqual(score.headline(f)['facts_disagree'], 0)
 
+    def test_facts_carries_landings_a_record_with_no_landings_file_reads_empty_no_diagnostic(self):
+        # S-77507: Facts.landings is filled from the `landings` stream; a record with no
+        # `landings/` day file at all reads as [] and raises no diagnostic.
+        from asf.scorecard import facts as sfacts
+        tmp = tempfile.mkdtemp(prefix='asf-facts-landings-')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        f = sfacts.load(tmp, None, as_of='2026-10-04T00:00:00Z')
+        self.assertEqual(f.landings, [])
+        self.assertEqual(f.diagnostics, [])
+
 
 class Cache(Home):
     def test_keyed_by_head(self):
