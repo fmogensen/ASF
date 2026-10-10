@@ -64,7 +64,7 @@ import os
 import re
 import subprocess
 
-from asf import approvals, budget, env
+from asf import approvals, budget, env, trunk_watch
 from asf import pause as pause_mod
 from asf import tune as tune_mod
 from asf import capacity as capacity_mod
@@ -88,6 +88,9 @@ _GROOM_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
 #: wave (this product's or another's — :func:`s1_bypass_live`) can see one is still live.
 HOST_LOAD_BYPASS_FIELD = 'host_load_bypass'
 
+#: how far back the wave step reads the trunk for landed PR numbers (:func:`occupancy`)
+TRUNK_LANDED_DAYS = 2
+
 
 def capacity(product=None):
     return capacity_mod.resolve(product or env.load_product()).sessions
@@ -104,13 +107,29 @@ def attempts(product):
     return lifecycle.attempts(pool_mod.sessions_path(product))
 
 
+def trunk_landed(product):
+    """``{pr number: sha}`` the trunk carries as landed within :data:`TRUNK_LANDED_DAYS`
+    (:func:`asf.trunk_watch.landed_prs` over :func:`asf.trunk_watch.first_parent`); ``{}`` when
+    git cannot read it — unknown is never "not landed"."""
+    repo = getattr(product, 'repo_dir', None)
+    if not repo:
+        return {}
+    commits = trunk_watch.first_parent(os.path.expanduser(repo), product.main,
+                                        days=TRUNK_LANDED_DAYS)
+    if commits is None:
+        return {}
+    return trunk_watch.landed_prs(commits)
+
+
 def occupancy(product):
     """The one answer to "is this item busy?" (:func:`asf.workers.lifecycle.occupancy`): live
     runs, work waiting to land, the lane's states (off the run lines), pending corrections — a
-    lane record naming a PR the evidence pass saw merged or closed held over by nothing
+    lane record naming a PR the evidence pass saw merged or closed, or the trunk itself already
+    carries as landed (:func:`trunk_landed`), held over by nothing
     (:func:`asf.workers.lifecycle.ended_prs`)."""
     path = pool_mod.sessions_path(product)
-    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path)),
+    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path),
+                                                                landed=trunk_landed(product)),
                                on_origin=lambda branches: on_origin(product, branches))
 
 

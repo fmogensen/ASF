@@ -1387,23 +1387,29 @@ def correction_of(path, item):
 PR_CACHE = 'cache-prs.json'
 
 
-def ended_prs(state_dir):
-    """``{number: {'state', 'head'}}`` of every PR the evidence pass last saw MERGED or CLOSED,
-    read off its cache (no ``gh``); ``{}`` when there is none or it cannot be read. A merged or
-    closed PR is over: :func:`occupancy` never lets a lane record still naming it ask for a
-    review, a landing or a correction (the lane catches up on its own next pass)."""
+def ended_prs(state_dir, landed=()):
+    """``{number: {'state', 'head'}}`` of every PR that is over: the rows the evidence pass last
+    saw MERGED or CLOSED on its cache, plus every number in ``landed``
+    (:func:`asf.trunk_watch.landed_prs`) as MERGED, whatever its cached row says — the trunk
+    carries the merge, and the cache is a copy of an older answer (F-0277). ``{}`` when there is
+    no cache and ``landed`` is empty."""
     try:
         with open(os.path.join(state_dir, PR_CACHE)) as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return {}
-    out = {}
+        data = []
+    out, heads = {}, {}
     for p in data if isinstance(data, list) else ():
         if not isinstance(p, dict):
             continue
         state, number = str(p.get('state') or '').upper(), p.get('number')
-        if state in ('MERGED', 'CLOSED') and isinstance(number, int):
-            out[number] = {'state': state, 'head': p.get('headRefOid') or None}
+        if not isinstance(number, int):
+            continue
+        heads[number] = p.get('headRefOid') or None
+        if state in ('MERGED', 'CLOSED'):
+            out[number] = {'state': state, 'head': heads[number]}
+    for number in landed or ():
+        out[number] = {'state': 'MERGED', 'head': heads.get(number)}
     return out
 
 
