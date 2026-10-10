@@ -922,7 +922,8 @@ def tick_line(ctx, ran, now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     line = dict(ctx.counts, ts=now.strftime('%Y-%m-%dT%H:%M:%SZ'), tick=int(now.strftime('%H%M')),
                 duration_s=round(sum(r['seconds'] for r in ran), 1), quota={},
-                refused_files={}, product=ctx.product.name, steps=ran, wave=ctx.wave)
+                refused_files={}, product=ctx.product.name, steps=ran,
+                wave=getattr(ctx, 'wave', {}))
     seats = getattr(ctx, 'seats', None)
     if isinstance(seats, dict):   # the wave's seat reading (asf.metrics.throughput)
         line['seats'] = seats
