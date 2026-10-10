@@ -122,7 +122,8 @@ item and the actions of one tick. The rules it holds, in the design's words:
   over its class's target (``config.wait_targets`` against ``Facts.waits``, the wait ledger's
   current spell) is a breach (:func:`breaches`, ``Plan.breaches``) and takes the breach action
   the kernel has: a Ready item launches first while a seat is free; a Review gets its reviewer
-  first, on a local seat first; a behind Landing PR goes to the front of the merge train (a
+  first, on a local seat first; a behind Landing PR — or a green one GitHub has not merged past the ``merge``
+  target (its PR listing can call a behind PR clean) — goes to the front of the merge train (a
   conflicting or red one is already a fix round); a Stuck takes its escalation. A live session
   older than ``config.max_session_age_h`` is ended (:class:`EndSession`, worktree kept, attempt
   :data:`OVER_AGE`) so its item is relaunched. Live processes are bounded by measured p90s
@@ -347,8 +348,14 @@ def decide(facts, config):
         actions += [A.Rerun(r, cancel=True) for r in runs if r not in have]
         have.update(runs)
 
+    for iid, (cls, _age) in due.items():  # green, auto-merge on, yet not merged past its target:
+        j = judged.get(iid)                # GitHub's listing may call a PR clean that is behind
+        if (cls == 'merge' and j is not None and j.state is State.LANDING
+                and j.behind_pr is None and not j.updating):
+            j.behind_pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
+                              key=lambda p: p.number, default=None)
     train, notes = _merge_train(items, judged, config, blocks, facts.now,
-                                first={i for i, (c, _a) in due.items() if c == 'train'})
+                                first={i for i, (c, _a) in due.items() if c in ('train', 'merge')})
     actions += train
     actions += _mint(facts, parked)
     queued = {}

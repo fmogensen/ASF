@@ -160,6 +160,15 @@ class Breach(unittest.TestCase):
         self.assertEqual([(b['item'], b['action']) for b in plan.breaches],
                          [('T-3', 'update-branch #3')])
 
+    def test_a_green_pr_not_merged_past_its_target_is_updated_first(self):
+        pr, rv = approved('T-1', 7, auto_merge=True)  # the listing says clean; GitHub won't merge
+        f = facts([B.task('T-1', state=State.LANDING)], prs=[pr], reviews=[rv],
+                  waits={'T-1': ('merge', ago(25))})
+        plan = D.decide(f, config())
+        self.assertEqual([a.pr for a in B.of(plan, A.UpdateBranch)], [7])
+        self.assertEqual(plan.breaches[0]['action'], 'update-branch #7')
+        self.assertEqual(plan.limbo, {})
+
     def test_a_session_past_its_max_age_is_ended(self):
         items = [B.task('T-1', state=State.BUILDING)]
         old = B.session('j1', 'T-1', started=ago(200))
