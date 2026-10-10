@@ -173,7 +173,8 @@ item and the actions of one tick. The rules it holds, in the design's words:
   the item stays Done.
 
 How the record keeps up (the applier's side of the contract): ``Item.fix_rounds`` counts the fix
-rounds already launched; a failed ``UpdateBranch`` whose error says "merge conflict" (or on a
+rounds already launched on the item's open PR — a build's, a spec's or a plan's alike (B-82960: a
+document PR's review rounds are capped like a code PR's; a new document PR starts at zero); a failed ``UpdateBranch`` whose error says "merge conflict" (or on a
 PR already conflicting) is recorded as an attempt :func:`conflict_attempt` (its reason starts
 with :data:`CONFLICT` and names the PR and head); a fix round's findings (a :data:`REBASE` one
 included) are written to ``Item.findings`` when it launches. An item whose session ended, or whose answer is applied,
