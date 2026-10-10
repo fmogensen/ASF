@@ -545,7 +545,10 @@ class DoctorClockInstallRowTests(unittest.TestCase):
         _write_plist(os.path.join(self.agents, 'asf.sample.daily.plist'),
                     [python, '-m', 'asf.cli', 'tick'])
         real_run = subprocess.run
-        with mock.patch('asf.clockinstall.subprocess.run', side_effect=real_run) as run_mock:
+        # is_factory_repo's own git call (B-0144) is a once-per-row-set lookup, not the per-clock
+        # trunk memo this test is about — pin it so the count below stays about that memo alone.
+        with mock.patch.object(doctor, 'is_factory_repo', return_value=False), \
+                mock.patch('asf.clockinstall.subprocess.run', side_effect=real_run) as run_mock:
             rows = self._rows()
         self.assertEqual(len(rows), 2)
         self.assertEqual(run_mock.call_count, 2)  # rev-list, merge-base — once, not twice
