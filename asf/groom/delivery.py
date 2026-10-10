@@ -234,7 +234,7 @@ def releasable(canonical):
                 if i == lead:
                     continue
                 r = recs.get(i)
-                if r is not None and _state(r) != 'Closed':
+                if r is not None and _state(r) == 'New' and not r['meta'].get('evidence'):
                     out.append((lead, i))
             continue
         for i in ids:
