@@ -291,6 +291,11 @@ def refusal_facts(ctx, items, out=print, tracked_fn=tracked_paths):
             run, needs, fact,
             f'{corr.get("text")}\nfootprint: the refusal names {" ".join(needs)} outside writes:',
             corr.get('at') or pool_mod.now_iso())
+        # this call site turned a HOOK_REFUSED refusal into a footprint hold: the class is
+        # 'footprint', overwriting whatever `hook_refusal_hold` wrote — `footprint_hold`'s other
+        # two callers (asf/harvest/lane.py, :105 above) hold a footprint read off a REPORT or the
+        # gate, where no push was refused, so `footprint_hold` itself stays untouched (PD5)
+        fields['correction']['refusal'] = 'footprint'
         pool_mod.update_session(product, job, **fields)
         ctx.event('held', job=job, item=run.get('item'), text=line)
         out(line)

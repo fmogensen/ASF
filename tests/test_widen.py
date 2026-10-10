@@ -735,7 +735,7 @@ class RefusalWidenTests(WidenStepBase):
         self.session(job=job, ended='2026-09-24T08:30:00Z',
                      end_reason=f'failed: {lifecycle.HOOK_REFUSED}: {text}')
         self.session(job=job, correction={
-            'kind': lifecycle.HOOK_REFUSED, 'at': '2026-09-24T08:30:00Z',
+            'kind': lifecycle.HOOK_REFUSED, 'at': '2026-09-24T08:30:00Z', 'refusal': 'gate',
             'text': f"the push was refused by the repo's own hook — {text} — fix what it "
                     f"names, commit, and push again"})
 
@@ -836,7 +836,22 @@ class RefusalWidenTests(WidenStepBase):
         path = pool_mod.sessions_path(self.product)
         corr = lifecycle.latest(path)['coder-t-0001']['correction']
         self.assertEqual(corr['kind'], lifecycle.HOOK_REFUSED)
+        # the footprint_read path leaves the plain correction's class as hook_refusal_hold
+        # wrote it (P11's "keeps first claim") — refusal_facts never touches it here
+        self.assertEqual(corr['refusal'], 'gate')
         self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+
+    def test_a_turned_correction_carries_the_footprint_refusal_class(self):
+        # F-0235, P11: refusal_facts's own claim overwrites whatever hook_refusal_hold wrote,
+        # the moment a refusal is turned into a footprint hold
+        self.refused()
+        items = self.items()
+        turned = widen_footprint.refusal_facts(self.ctx_, items, out=self.lines.append)
+        self.assertEqual(turned, ['coder-t-0001'], self.lines)
+        path = pool_mod.sessions_path(self.product)
+        corr = lifecycle.latest(path)['coder-t-0001']['correction']
+        self.assertEqual(corr['kind'], lifecycle.FOOTPRINT)
+        self.assertEqual(corr['refusal'], 'footprint')
 
     def test_advisory_paths_off_a_push_that_went_through_never_widen(self):
         # T-0349: done, pushed; an advisory "touched-vs-listed FAIL" row named paths

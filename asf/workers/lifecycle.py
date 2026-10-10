@@ -3325,7 +3325,7 @@ def footprint_hold(run, paths, fact, text, now, tests=()):
                     f'widen_footprint decides')
 
 
-def hook_refusal_hold(path, run, text, now):
+def hook_refusal_hold(path, run, text, now, retried=False):
     """``(fields, line)``: ``run``'s push the repo's own pre-push hook refused. A redaction
     finding (:data:`HOOK_REDACTION_RE`) is parked as a security hold on the FIRST refusal: only a
     person decides what a flagged secret needs, never another session. Otherwise the first hold on
@@ -3336,24 +3336,43 @@ def hook_refusal_hold(path, run, text, now):
     (B-0140) — anything else is marked ``at_cap`` so the item goes to ADJUDICATE the way any other stuck finding does
     (:func:`hold`). A lint or test naming paths outside the Task's own ``writes:`` is left as a
     plain ``hook refused`` correction either way: :mod:`asf.tick.widen_footprint` turns that into
-    a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``."""
+    a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``.
+
+    ``retried`` (F-0235, :func:`asf.workers.report.hook_retried`) is True when the session's own
+    report already said the hook refused the identical push twice in-run: it has then spent, in
+    that one run, exactly the retry a second session would otherwise have been launched to make,
+    so the FIRST hold is the cap for it — routed by :data:`HOOK_REFUSAL_CAP` the same as an
+    unretried second hold. The unretried ladder is unchanged and the cap is still 2.
+    ``corr['retried']`` is written only when ``retried`` is true, so a correction written before
+    this reads exactly as it did before.
+
+    Every return carries ``corr['refusal']``, the class of the refusal: ``'redaction'`` when
+    :data:`HOOK_REDACTION_RE` matches, else ``'gate'`` — on the first hold and the second alike.
+    A third class, ``'footprint'``, is never written here: it is
+    :func:`asf.tick.widen_footprint.refusal_facts`'s own claim, for a refusal naming paths
+    outside the Task's ``writes:``, and it keeps first claim the same tick (P11)."""
     branch = run.get('branch') or run.get('job')
     keys, same = next_finding(path, run, HOOK_REFUSED, text)
-    corr = {'kind': HOOK_REFUSED, 'text': text, 'at': now, 'finding': keys, 'same': same}
-    if HOOK_REDACTION_RE.search(text):
+    redaction = HOOK_REDACTION_RE.search(text)
+    refusal = 'redaction' if redaction else 'gate'
+    corr = {'kind': HOOK_REFUSED, 'text': text, 'at': now, 'finding': keys, 'same': same,
+            'refusal': refusal}
+    if retried:
+        corr['retried'] = True
+    if redaction:
         # held on the first refusal: a product's correct-f-0086 was relaunched 100 times on one
         # redaction finding, its streak reset each time by a lane hold in between
         reason = (f'a redaction finding refused the push ({same} time(s) running) — a person '
                   'decides, not another session')
         corr.update(parked=True, reason=reason)
         return ({'correction': corr, 'operator_flagged': 1},
-                f'held {branch}: {reason} (security hold)')
-    if same < hook_refusal_cap():
-        return {'correction': corr}, f'held {branch}: {text} (no round spent)'
+                f'held {branch}: {reason} (security hold, {refusal})')
+    if same < hook_refusal_cap() and not retried:
+        return {'correction': corr}, f'held {branch}: {text} (no round spent, {refusal})'
     corr['at_cap'] = True
     return ({'correction': corr},
             f'held {branch}: {text} — adjudicate pending (hook refused the same way {same} '
-            f'times in a row)')
+            f'times in a row, {refusal})')
 
 
 def widenings(path, item):
