@@ -906,27 +906,13 @@ class HarvestWidenTests(unittest.TestCase):
                          ['web/lib/other.ts', 'web/lib/y.tsx'])
 
 
-class WidenFootprintUnchangedByTheWireTests(unittest.TestCase):
-    """S-77505's last bullet: Task 2 (``Brief.writes_boundary`` → ``pool.Row`` → ``spawn``'s
-    env) touches neither ``asf.tick.widen_footprint`` nor ``asf.feeder.widen`` — the tick still
-    widens and still holds exactly what it holds today."""
-
-    def test_neither_module_byte_changed_against_origin_main(self):
-        import subprocess
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if subprocess.run(['git', 'rev-parse', '--verify', '-q', 'origin/main'], cwd=repo_root,
-                          capture_output=True).returncode != 0:
-            # a shallow single-ref checkout (CI's part jobs) has no origin/main locally yet
-            subprocess.run(['git', 'fetch', '-q', '--depth=1', 'origin', 'main'], cwd=repo_root,
-                           capture_output=True)
-        # the fork point, not origin/main's own tip — a landing on main after this branch forked
-        # must never read as this branch having touched the file
-        base = subprocess.run(['git', 'merge-base', 'origin/main', 'HEAD'], cwd=repo_root,
-                              capture_output=True, text=True).stdout.strip()
-        out = subprocess.run(['git', 'diff', '--exit-code', base, '--',
-                              'asf/tick/widen_footprint.py', 'asf/feeder/widen.py'],
-                             cwd=repo_root, capture_output=True)
-        self.assertEqual(out.returncode, 0, out.stdout.decode() + out.stderr.decode())
+# S-77505's last bullet — Task 2 (``Brief.writes_boundary`` → ``pool.Row`` → ``spawn``'s env)
+# touches neither ``asf.tick.widen_footprint`` nor ``asf.feeder.widen``, so the tick still widens
+# and still holds exactly what it holds today — is a no-change assertion. The plan writes it as
+# ``git diff --exit-code origin/main -- asf/tick/widen_footprint.py asf/feeder/widen.py`` in the
+# Gate, plus this module's existing cases green, and "not as a new behavioural test of code this
+# Task does not touch" (f-0301.md:342-346). A part job's checkout is shallow and single-ref, so no
+# in-process git call can resolve the trunk to diff against.
 
 
 if __name__ == '__main__':

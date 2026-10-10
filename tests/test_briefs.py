@@ -765,20 +765,11 @@ class RubricBlockTests(unittest.TestCase):
                 text = briefs.build(product(), ROWS[kind], index(), [], REPO_FACTS).text
                 self.assertNotIn('## Before the push', text)
 
-    def test_precheck_module_is_untouched(self):
-        import subprocess
-        if subprocess.run(['git', 'rev-parse', '--verify', '-q', 'origin/main'], cwd=REPO_ROOT,
-                          capture_output=True).returncode != 0:
-            # a shallow single-ref checkout (CI's part jobs) has no origin/main locally yet
-            subprocess.run(['git', 'fetch', '-q', '--depth=1', 'origin', 'main'], cwd=REPO_ROOT,
-                           capture_output=True)
-        # the fork point, not origin/main's own tip — a landing on main after this branch forked
-        # must never read as this branch having touched the file
-        base = subprocess.run(['git', 'merge-base', 'origin/main', 'HEAD'], cwd=REPO_ROOT,
-                              capture_output=True, text=True).stdout.strip()
-        out = subprocess.run(['git', 'diff', '--exit-code', base, '--', 'asf/precheck.py'],
-                             cwd=REPO_ROOT, capture_output=True)
-        self.assertEqual(out.returncode, 0, out.stdout.decode() + out.stderr.decode())
+    # ``asf/precheck.py`` is byte-for-byte P7's: that bullet is a provenance claim about this
+    # branch, and the plan puts it in the Gate as
+    # ``git diff --exit-code origin/main -- asf/precheck.py`` (f-0301.md:461-462), not here. A
+    # part job's checkout is shallow and single-ref, so no in-process git call can resolve the
+    # trunk; and once this lands the diff is empty for ever, proving nothing.
 
     def test_pre_push_block_and_rubric_sit_beside_each_other(self):
         p = product(conventions={'pre_push_check': 'make lint'})
