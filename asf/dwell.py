@@ -496,6 +496,7 @@ def chain_no_cut(facts):
 
 
 def launchable_idle(facts):
+    from asf.feeder import rows as feeder_rows
     from asf.tick import step_wave
     got = facts.would_start()
     if not got:
@@ -507,6 +508,10 @@ def launchable_idle(facts):
     out = []
     for s in screened:
         if not s.row.launches or s.kind == step_wave.NO_SEAT:
+            continue
+        # the groom row speaks for the day's open questions, not for the item it happens to be
+        # named after (the same exception asf.feeder.rows.hold_unlanded makes) — B-84837
+        if s.row.kind in (feeder_rows.GROOM_ADJUDICATE, feeder_rows.GROOM_CLERK):
             continue
         why = s.why or "passes the wave's filter, not started yet"
         out.append(Finding('launchable_idle', s.row.item_id,
