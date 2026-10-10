@@ -977,7 +977,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             pool_mod.update_session(product, job, pushes=pushes, **extra)
             if defect:
                 found.append((job, 'defect', defect))
-        question = report_mod.needs_input(str((ev.result or {}).get('result') or ''))
+        result_text = str((ev.result or {}).get('result') or '')
+        question = report_mod.needs_input(result_text)
         if question and relaunch_mod.ended_on_heartbeat(str((ev.result or {}).get('result'))):
             # the sandbox refused the session's beat loop: nothing about the work, so the
             # relaunch cap does not count this run (F-0279) — marked while the log is its own
@@ -994,7 +995,11 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         if retry:
             text = (f'the push was refused by the repo\'s own hook — {retry[1]} — fix what it '
                     f'names, commit, and push again')
-            fields, line = lifecycle.hook_refusal_hold(registry, s, text, now)
+            # one parse, bound to a local, feeding `retried` the way `question` above already
+            # reads the same result text (F-0235, PD4): `push_retry`'s own parse is untouched
+            rep = report_mod.parse(result_text)
+            retried = report_mod.hook_retried(rep)
+            fields, line = lifecycle.hook_refusal_hold(registry, s, text, now, retried=retried)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.landed_earlier(registry, s):

@@ -9,9 +9,23 @@ on:
   push:
     branches: [main]
   pull_request:
+    # not a required check: a pull request touching only the Markdown records no install reads
+    # (tools/ci_paths.py DOCS_ONLY_DIRS) needs no clean-machine install
+    paths-ignore:
+      - "docs/specs/**.md"
+      - "docs/plans/**.md"
+      - "docs/decisions/**.md"
+      - "docs/research/**.md"
+      - "docs/reviews/**.md"
 
 permissions:
   contents: read
+
+# One run per pull request head ref (a new push cancels the running one); on main the running
+# run finishes and a newer push replaces any still pending (see tests.yml).
+concurrency:
+  group: install-clean-${{ github.event_name == 'pull_request' && format('pr-{0}', github.head_ref) || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   install-clean-linux:

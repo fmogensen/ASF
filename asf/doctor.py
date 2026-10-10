@@ -69,7 +69,8 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
+from asf import (approvals, clockinstall, conventions, drift, env, gitops, hooks, schema,
+                 scheduler, tokens)
 from asf import pause as pause_mod
 from asf.workers import lifecycle, pool
 
@@ -120,14 +121,30 @@ def _project_name(repo_dir):
         return None
 
 
+def _git_common_dir(repo):
+    """The repo's shared ``.git`` dir, real-pathed — the same for every ``git worktree`` of one
+    repo, so two worktrees of the same checkout compare equal even though their own paths don't."""
+    if not repo or not os.path.isdir(repo):
+        return None
+    r = gitops.git(['rev-parse', '--git-common-dir'], repo)
+    if not r.ok or not r.data:
+        return None
+    return os.path.realpath(r.data if os.path.isabs(r.data) else os.path.join(repo, r.data))
+
+
 def is_factory_repo(product):
     """True when the product's repo is the ASF package's own source: the checkout it runs from
-    (real paths compared), or — since the clocks run the installed package, never the checkout —
-    the repo whose pyproject names the distribution the running package was installed as."""
+    (real paths compared), a ``git worktree`` of that same checkout (B-0144: the clock itself
+    runs one, never the checkout — :mod:`asf.snapshot` — so the shared ``.git`` common dir is
+    compared too), or — since an install carries no ``.git`` at all — the repo whose pyproject
+    names the distribution the running package was installed as."""
     repo = product.repo_dir
     if not repo:
         return False
     if os.path.realpath(repo) == os.path.realpath(package_root()):
+        return True
+    repo_git = _git_common_dir(repo)
+    if repo_git is not None and repo_git == _git_common_dir(package_root()):
         return True
     name = _project_name(repo)
     return bool(name) and name in installed_dist_names()
@@ -1136,6 +1153,67 @@ def check_drift(product, installed=None):
     return True, drift.line(d)
 
 
+#: ``asf.upgrade`` attributes F-0112 Tasks 2/3/5 add, that :func:`check_upgrade` depends on but
+#: this checkout's footprint (T-0436) may not touch — see that function's own docstring.
+_RELEASE_CHANNEL_ATTRS = ('installed_release', 'releases_path', '_read_release_state', 'newer')
+
+
+def _release_cache_entry(url):
+    """The shared release cache's entry for ``url`` (``{'tag', 'sha', 'at'}``), or ``{}`` — a
+    direct read of :func:`asf.upgrade.releases_path`, never :func:`asf.upgrade.latest_release`:
+    the doctor row costs no network of its own (F-0112 S-69310)."""
+    from asf import upgrade
+    import json
+    try:
+        with open(upgrade.releases_path(), encoding='utf-8') as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return (cache or {}).get(url) or {}
+
+
+def check_upgrade(product):
+    """(ok, detail) — the ``upgrade`` row (F-0112 S-69310): the release channel's policy against
+    the newest known ASF release, read entirely off the shared cache and this product's own
+    channel state — no ``git ls-remote`` of its own. RED for a declared policy word that is none
+    of ``auto``/``notify``/``off`` (quoting the word verbatim, D2), or when the last release
+    install was rolled back and that release is still the newest known one. A product whose repo
+    is the factory's own source is on the trunk channel instead, under ``approvals.upgrade``, and
+    is never RED for an ``upgrade:`` key it does not read (D3) — the same structural question the
+    tick's fork asks (:func:`asf.drift.is_factory_source`).
+
+    Assumes F-0112 Tasks 2/3/5's ``asf/upgrade.py`` (``releases_path``, ``installed_release``,
+    ``_read_release_state``) as specced; not yet landed on this checkout (T-0436's ``needs
+    writes``). Until they do, :data:`_RELEASE_CHANNEL_ATTRS` is missing off :mod:`asf.upgrade`
+    and the row reads ok and says so, rather than raising out of every ``asf doctor`` run."""
+    from asf import upgrade
+    repo = product.repo_dir
+    if repo and os.path.isdir(repo) and drift.is_factory_source(repo):
+        word = str((product.approvals or {}).get('upgrade', '')).lower()
+        return True, (f"trunk channel (this repo is the factory's own source) — "
+                      f"approvals.upgrade: {word}")
+    declared = product.upgrade_declared
+    if declared is not None and str(declared).strip().lower() not in env.UPGRADE_POLICIES:
+        return False, f'upgrade: "{declared}" is not auto|notify|off — reading it as notify'
+    policy = product.upgrade
+    if not all(hasattr(upgrade, name) for name in _RELEASE_CHANNEL_ATTRS):
+        return True, f'{policy} (F-0112 release channel not landed on this install yet)'
+    old, _old_sha = upgrade.installed_release()
+    entry = _release_cache_entry(upgrade.repo_url())
+    tag = entry.get('tag')
+    state = upgrade._read_release_state(product)
+    last = (state or {}).get('last') or {}
+    if last.get('result') == 'rolled-back' and tag and last.get('to') == tag:
+        return False, (f'{tag} was rolled back after a RED doctor; held at '
+                       f'{last.get("from")} (see the filed Bug)')
+    if old is None:
+        return True, f'{policy} · installed release unreadable'
+    if tag and upgrade.newer(tag, old):
+        age = format_age(_age_s_since(entry.get('at')))
+        return True, f'{policy} · running {old} · newest release {tag} available (read {age} ago)'
+    return True, f'{policy} · running {old} · current'
+
+
 def check_readme(product):
     """``(ok, detail)``, or ``None`` to skip the row entirely — the committed README against its
     committed facts (``asf readme --check --json``, F-0030 §2.7). Skipped for a product whose
@@ -1663,6 +1741,8 @@ def run(product_name):
         rows.append(('network clock', False, host[0], host[1]))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
+    ok, detail = check_upgrade(product)
+    rows.append(('upgrade', True, ok, detail))
     readme_result = check_readme(product)
     if readme_result is not None:
         rows.append(('readme', True, readme_result[0], readme_result[1]))
@@ -1707,6 +1787,8 @@ def run(product_name):
         rows.append(('ci runners', required, ok, detail))
     for required, ok, detail in check_ci_heartbeat(product):
         rows.append(('ci heartbeat', required, ok, detail))
+    for required, ok, detail in check_ci_stall(product):
+        rows.append(('ci stall', required, ok, detail))
     for required, ok, detail in check_queue_bypass(product):
         rows.append(('queue bypass', required, ok, detail))
     for required, ok, detail in check_queue_cancels(product):
@@ -1953,6 +2035,17 @@ def check_ci_heartbeat(product, now=None):
         return ci_heartbeat.doctor_rows(product, now=now)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(False, None, f'cannot read the ci heartbeat file — {e}')]
+
+
+def check_ci_stall(product, now=None):
+    """[(required, ok, detail)] — which watcher acts on a CI stall, when the last pass ran, and
+    every cancel of this watch's that was not re-run (:func:`asf.ci_stall.doctor_rows`, off
+    ``ci-stall.json``: no ssh, no ``gh``). No rows for a product with no pool and no pass."""
+    from asf import ci_stall
+    try:
+        return ci_stall.doctor_rows(product, now=now)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(False, None, f'cannot read the ci stall file — {e}')]
 
 
 def check_ci_runners(product, now=None):

@@ -305,5 +305,118 @@ class TrunkCheckRunsThePinOrRefuses(PrePushAllow):
         self.assertEqual(self.lines(), [])
 
 
+class ThePrePushDoorRunsAfterTrunkCheck(ARefusedPushIsWrittenDown):
+    """F-0301 S-77504's last two bullets: a matched rule's refusal is written down and reaches
+    ``<job>.refusals`` the same way the shim's other refusals do, a passing push is still logged
+    in ``<job>.pushes``, a heartbeat push and a scratch-repo fixture push reach neither call, and
+    the landed ordering (push-allow, then trunk-check, then the door, on the same ``cli``) holds.
+    These are assertions about that wiring, not a re-test of ``asf pre-push`` itself
+    (:mod:`tests.test_prepush`'s)."""
+
+    def setUp(self):
+        super().setUp()
+        self.env['ASF_PRODUCT'] = 'p'
+        self.pushes = os.path.join(self.tmp, 'gates', 'job.pushes')
+        self.env['ASF_PUSH_LOG'] = self.pushes
+        self.markers = os.path.join(self.tmp, 'markers')
+        os.makedirs(self.markers)
+        self.env['CALL_MARKERS'] = self.markers
+
+    def pushes_logged(self):
+        try:
+            with open(self.pushes, encoding='utf-8') as f:
+                return [l.strip() for l in f if l.strip()]
+        except OSError:
+            return []
+
+    def called(self, name):
+        return os.path.exists(os.path.join(self.markers, f'{name}-called'))
+
+    def install_fake_dispatcher(self):
+        cli = os.path.join(self.tmp, '.local', 'bin', 'asf')
+        fallback = os.path.join(self.tmp, 'fallback-cli')
+        with open(fallback, 'w', encoding='utf-8') as f:
+            f.write(
+                '#!/bin/sh\ncat >/dev/null\n'
+                'touch "$CALL_MARKERS/$1-called" 2>/dev/null || :\n'
+                'case "$1" in\n'
+                '  trunk-check)\n'
+                '    [ -n "$TRUNK_CHECK_FAIL" ] && '
+                '{ echo "asf: push refused — trunk check failed" >&2; exit 1; }\n'
+                '    exit 0 ;;\n'
+                '  pre-push)\n'
+                '    [ -n "$PREPUSH_REFUSE" ] && '
+                '{ echo "asf: push refused — every test module that covers a file you touched" '
+                '>&2; exit 1; }\n'
+                '    exit 0 ;;\n'
+                'esac\n'
+                'exit 0\n')
+        os.chmod(fallback, 0o755)
+        rc, detail = dispatch.install(path=cli, asf_home=os.path.join(self.tmp, 'dispatch-home'),
+                                       venvs=os.path.join(self.tmp, 'dispatch-venvs'),
+                                       default_product='', cli=fallback)
+        self.assertEqual(rc, 0, detail)
+        return cli
+
+    def test_a_push_a_matched_rule_fails_is_refused_and_written_into_refusals(self):
+        self.install_fake_dispatcher()
+        e = dict(self.env, PREPUSH_REFUSE='1')
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, e)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('every test module that covers a file you touched', p.stderr)
+        self.assertTrue(self.called('trunk-check'))
+        self.assertTrue(self.called('pre-push'))
+        [rec] = self.lines()
+        self.assertEqual(rec['kind'], 'hook refused')
+        self.assertIn('every test module that covers a file you touched', rec['line'])
+        self.assertEqual(self.pushes_logged(), [])
+
+    def test_a_push_every_matched_rule_passes_is_logged_in_pushes_as_before(self):
+        self.install_fake_dispatcher()
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(self.called('pre-push'))
+        sha = _git(['rev-parse', 'cloud/T-0001'], self.wt).stdout.strip()
+        self.assertEqual(self.pushes_logged(), [sha])
+        self.assertEqual(self.lines(), [])
+
+    def test_a_heartbeat_push_reaches_neither_call(self):
+        self.install_fake_dispatcher()
+        p = _git(['push', '-q', 'origin', 'HEAD:refs/asf/hb/job'], self.wt, self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(self.called('trunk-check'))
+        self.assertFalse(self.called('pre-push'))
+        self.assertEqual(self.pushes_logged(), [])
+
+    def test_a_scratch_repo_fixture_push_reaches_neither_call(self):
+        self.install_fake_dispatcher()
+        bare = os.path.join(self.tmp, 'fixture.git')
+        _git(['init', '-q', '--bare', bare], self.tmp)
+        fx = os.path.join(self.tmp, 'fixture')
+        _git(['init', '-q', '-b', 'main', fx], self.tmp)
+        _git(['commit', '-q', '--allow-empty', '-m', 'x'], fx, self.env)
+        p = _git(['push', '-q', bare, 'main'], fx, self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse(self.called('trunk-check'))
+        self.assertFalse(self.called('pre-push'))
+
+    def test_the_push_allow_refusal_still_comes_before_trunk_check_and_the_door(self):
+        self.install_fake_dispatcher()
+        p = _git(['push', '-q', 'origin', 'HEAD:refs/heads/ci/gate-manifest'], self.wt, self.env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('pushes only to factory branches', p.stderr)
+        self.assertFalse(self.called('trunk-check'))
+        self.assertFalse(self.called('pre-push'))
+
+    def test_trunk_check_still_runs_before_the_door_on_the_same_cli(self):
+        self.install_fake_dispatcher()
+        e = dict(self.env, TRUNK_CHECK_FAIL='1')
+        p = _git(['push', '-q', 'origin', 'cloud/T-0001'], self.wt, e)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('trunk check failed', p.stderr)
+        self.assertTrue(self.called('trunk-check'))
+        self.assertFalse(self.called('pre-push'))  # a red trunk-check refuses before the door runs
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -424,7 +424,15 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                # F-0112/T-0431: how this product's tick takes a new ASF release — auto | notify
                # (default) | off (asf.env.Product.upgrade). A flag, not a top-level PRODUCT_FIELDS
                # key: a new one is refused by tests.test_env.PinnedReader (PR #675).
-               'upgrade')
+               'upgrade',
+               # F-0300: off opts a product out of the rule pass that waives a cosmetic or
+               # already-settled dispute before any adjudicate session is spawned
+               # (asf.evidence.rulepass) — default off
+               'rule_pass',
+               # B-0121: how often the console's FACTORY STATUS feed ticks — off | 0 | a number
+               # of minutes | a unit-suffixed duration (5m, 30s, 1h); overrides config.yaml's own
+               # console.status_every (asf.console_feed.resolve_every). Same reasoning as 'upgrade'.
+               'console_status_every')
 
 
 
@@ -446,6 +454,7 @@ DEFAULT_DESIGN_SPEC_NAME = None  # the one spec `asf migrate` reads as the desig
 DEFAULT_DECISIONS_FILE = None    # a decisions file `asf migrate` mines for D-rows
 DEFAULT_REPORTS_DIR = None       # a directory of hotfix / diagnostic reports `asf migrate` adopts
 DEFAULT_REPORT_PATTERN = None    # regex over a file name in reports_dir; None → every .md
+DEFAULT_LEGACY_BRANCH = None     # regex (named group slug) over a pre-ASF branch name (F-0130)
 DEFAULT_CI_WORKFLOW = None       # the workflow whose runs on the trunk are the green evidence
 DEFAULT_CI_DEV_JOB = None        # the job in that workflow whose success marks the dev sha
 DEFAULT_CI_WORKFLOWS = ()        # extra workflows the ci stream backfill always keeps (metrics.py)
@@ -571,10 +580,10 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
-    ``worktree_setup``, ``pre_push_check``, ``auth_env``, ``full_suite_commands``,
-    ``check_commands``, ``read_only_allow``, ``customer_content``, ``security`` and ``feeder`` are
-    checked — every other key is kept verbatim (see the module doc), so a product file written
-    for a newer ``asf`` still loads."""
+    ``worktree_setup``, ``pre_push_check``, ``pre_push_checks``, ``auth_env``,
+    ``full_suite_commands``, ``check_commands``, ``read_only_allow``, ``customer_content``,
+    ``security``, ``feeder`` and ``legacy_branch`` are checked — every other key is kept verbatim
+    (see the module doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -619,6 +628,19 @@ def validate_mapping(data):
                     re.compile(pattern)
                 except re.error as e:
                     problems.append(('full_suite_commands', f'{pattern!r} is not a regex ({e})'))
+    legacy_branch = data.get('legacy_branch')
+    if legacy_branch is not None:
+        if not isinstance(legacy_branch, str) or not legacy_branch.strip():
+            problems.append(('legacy_branch', f'must be a regex string, not {legacy_branch!r}'))
+        else:
+            try:
+                pattern = re.compile(legacy_branch)
+            except re.error as e:
+                problems.append(('legacy_branch', f'{legacy_branch!r} is not a regex ({e})'))
+            else:
+                if 'slug' not in pattern.groupindex:
+                    problems.append(('legacy_branch',
+                                     f'must have a named group slug, not {legacy_branch!r}'))
     checks = data.get('check_commands')
     if checks is not None:
         if not isinstance(checks, list):
@@ -662,6 +684,26 @@ def validate_mapping(data):
                 except re.error as e:
                     problems.append(('customer_content.forbidden_markers',
                                      f'{pattern!r} is not a regex ({e})'))
+    checks = data.get('pre_push_checks')
+    if checks is not None:
+        if not isinstance(checks, list):
+            problems.append(('pre_push_checks', f'must be a list of rules, not {checks!r}'))
+        else:
+            for i, rule in enumerate(checks):
+                if not isinstance(rule, dict):
+                    problems.append((f'pre_push_checks[{i}]',
+                                     f'must be a map (paths, run, why), not {rule!r}'))
+                    continue
+                run = rule.get('run')
+                if not isinstance(run, str) or not run.strip():
+                    problems.append((f'pre_push_checks[{i}].run',
+                                     f'must be a non-empty command string, not {run!r}'))
+                why = _path_list_problem(rule.get('paths'))
+                if why:
+                    problems.append((f'pre_push_checks[{i}].paths', why))
+                w = rule.get('why')
+                if w is not None and not isinstance(w, str):
+                    problems.append((f'pre_push_checks[{i}].why', f'must be a string, not {w!r}'))
     sec = data.get('security')
     if sec is not None:
         if not isinstance(sec, dict):
@@ -853,6 +895,16 @@ class Conventions:
     decisions_file: str = DEFAULT_DECISIONS_FILE
     reports_dir: str = DEFAULT_REPORTS_DIR
     report_pattern: str = DEFAULT_REPORT_PATTERN
+    #: ``legacy_branch``: a regex over a pre-ASF branch name, with a named group ``slug`` and an
+    #: optional named group ``task``, read by ``asf backfill`` only when the record's own legacy
+    #: matcher (:func:`asf.record.match.match_event`, rule 4) resolved nothing for the name (F-0130,
+    #: D5). ``None`` — the default — means that fallback is not offered. ``legacy_review`` is not
+    #: declared: F-0130's replan cut it along with its only reader, an open-pull-request adoption
+    #: path this product no longer has — do not re-add it speculatively. A product's pre-ASF
+    #: branch *prefixes* are a different key, ``branch_prefixes.legacy`` (F-0130, D8), already read
+    #: by :meth:`branch_kind`, the lane's ``orphan_claims``/``unclaimed_legacy`` and
+    #: ``branch_retention.legacy_prefixes``.
+    legacy_branch: str = DEFAULT_LEGACY_BRANCH
     ci_workflow: str = DEFAULT_CI_WORKFLOW
     #: Extra workflow names/files the metrics backfill always keeps, matched against a run's
     #: display name or its workflow file's basename, beside the generic pull-request/trunk/batch
@@ -1308,6 +1360,31 @@ class Conventions:
         not a silent default."""
         value = self.map_of('security').get('paths')
         return value if isinstance(value, dict) else {}
+
+    def pre_push_checks(self):
+        """``pre_push_checks``: ``[{paths: [glob], run: str, why: str}]`` in declaration order —
+        the reader shape of :func:`security_paths`: a value that is not a list reads as ``[]``.
+        A rule that is not a map, has no non-empty ``run``, a ``paths`` that is not a list of
+        non-empty strings, or a non-string ``why`` is dropped — ``validate_mapping`` is where a
+        malformed one is a loud problem; a half-read rule must never refuse a push."""
+        value = self.get('pre_push_checks')
+        if not isinstance(value, list):
+            return []
+        out = []
+        for rule in value:
+            if not isinstance(rule, dict):
+                continue
+            run = rule.get('run')
+            if not isinstance(run, str) or not run.strip():
+                continue
+            paths = rule.get('paths')
+            if _path_list_problem(paths) is not None:
+                continue
+            why = rule.get('why', '')
+            if why is not None and not isinstance(why, str):
+                continue
+            out.append({'paths': list(paths), 'run': run, 'why': why or ''})
+        return out
 
     def security_alerts(self):
         """``security.alerts``: ``{max_age_h}`` — :data:`DEFAULT_ALERT_MAX_AGE_H` when unset or

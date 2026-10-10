@@ -584,6 +584,7 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
     """End ``run`` (stalled) and launch its continuation on ``runtime``: the same job, branch,
     worktree and account, a fresh ``ASF-Session``. Returns the new ledger record, or None when
     the continuation could not start (the run is then left to health's own dead path)."""
+    from asf import prepush
     from asf.workers import githooks
     from asf.workers import lifecycle
     from asf.workers import pool as pool_mod
@@ -616,6 +617,7 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
                **githooks.item_env(conv, run.get('item'), run.get('branch')),
                **pushlog.env_for(product, job_name, run.get('kind')),
                **refusals.env_for(product, job_name),
+               **prepush.env_for(product, job_name),
                'ASF_SESSION': sid}
     allow = spawn_mod.push_allow(product, row, run.get('branch'))
     if allow:
@@ -645,6 +647,7 @@ def launch(product, run, why, runtime, cfg, notes='', summary='', head=None, out
     stopgate.clear(product, job_name)
     pushlog.clear(product, job_name)
     refusals.clear(product, job_name)
+    prepush.clear(product, job_name)
     try:
         result = runtime.run(job)
     except Exception as e:  # noqa: BLE001 — a failed relaunch leaves the run to health

@@ -67,6 +67,42 @@ class IsSharedTests(unittest.TestCase):
         self.assertFalse(footprint.is_shared('x', None))
 
 
+class FirstIntersectionTests(unittest.TestCase):
+    """Task 1's own, S-82204: the narrow test ``unordered_overlaps`` refactors onto, returning the
+    witness glob pair rather than a boolean."""
+
+    def test_no_common_path_is_none(self):
+        self.assertIsNone(footprint.first_intersection(['a.py'], ['b.py']))
+
+    def test_a_glob_and_a_path_it_matches_come_back_in_order(self):
+        self.assertEqual(
+            footprint.first_intersection(['asf/record/slice.py'], ['asf/record/*.py']),
+            ('asf/record/slice.py', 'asf/record/*.py'))
+
+    def test_the_first_matching_pair_wins_over_a_later_one(self):
+        # 'x/*.py' matches 'x/a.py' on the first pass through writes_b; 'y/*.py' would also
+        # match 'y/b.py' later, but that pair is never reached.
+        self.assertEqual(
+            footprint.first_intersection(['x/*.py', 'y/*.py'], ['y/b.py', 'x/a.py']),
+            ('x/*.py', 'x/a.py'))
+
+    def test_an_empty_or_missing_footprint_on_either_side_is_none(self):
+        self.assertIsNone(footprint.first_intersection([], ['a.py']))
+        self.assertIsNone(footprint.first_intersection(None, ['a.py']))
+        self.assertIsNone(footprint.first_intersection(['a.py'], []))
+        self.assertIsNone(footprint.first_intersection([], []))
+        self.assertIsNone(footprint.first_intersection(None, None))
+
+    def test_a_shared_path_is_skipped_on_either_side(self):
+        self.assertIsNone(footprint.first_intersection(['uv.lock'], ['uv.lock'],
+                                                        shared=('uv.lock',)))
+
+    def test_a_bare_directory_glob_is_no_intersection_where_overlaps_says_it_overlaps(self):
+        self.assertIsNone(footprint.first_intersection(['asf/record/'],
+                                                        ['asf/record/slice.py']))
+        self.assertTrue(footprint.globs_overlap('asf/record/', 'asf/record/slice.py'))
+
+
 class RecordCheckTests(unittest.TestCase):
     """Task 2, S-37302: ``record_findings``'s Active-pair loop skips a shared glob on either
     side — the record half of ``asf check`` and I3 agreeing with the feeder. ``SharedPathI3Tests``

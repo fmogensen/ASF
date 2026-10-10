@@ -2,10 +2,12 @@
 (no deploy), against a temp ASF_HOME and a tiny record. No network: every row that would call
 ``gh`` is either unconfigured here or stubbed."""
 import datetime as dt
+import io
 import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -144,7 +146,7 @@ class StatusViewTests(ViewsTestCase):
     def test_unconfigured_rows_name_their_key_never_a_bare_dash(self):
         rows = self.rows({'scheduler': {'kind': 'none'}})
         self.assertEqual(rows['Runners'], '— (not configured: ci.provider (none))')
-        self.assertEqual(rows['Prod'], '— (not configured: deploy_sha.workflow)')
+        self.assertEqual(rows['Prod'], 'trunk is production — no deploy configured (B-0077)')
         self.assertEqual(rows['Quota 5h/7d'], '— (not configured: worker_pool.quota_command)')
         self.assertEqual(rows['Cron'], '— (not configured: scheduler.kind (none has no status adapter))')
         self.assertEqual(rows['Groom'], '— (not configured: approvals.groom)')
@@ -199,6 +201,23 @@ class StatusViewTests(ViewsTestCase):
             self.assertEqual(cell, '? (no successful deploy.yml run readable)', data)
             self.assertIn('deploy.yml', sh.call_args[0][0])
 
+    def test_prod_row_names_trunk_as_production_with_no_deploy_configured(self):
+        """B-0093: a product with hosted CI and no deploy (B-0077's `trunk is production`) is
+        not a misconfiguration — Prod must not say `not configured`."""
+        product = env.Product('p', {'ci': {'provider': 'github-actions'},
+                                    'repo_slug': 'x/y', 'repo_dir': self.tmp})
+        cell = status.prod_cell(product)
+        self.assertNotIn('not configured', cell)
+        self.assertIn('B-0077', cell)
+
+    def test_runners_row_names_hosted_ci_with_no_self_hosted_pool(self):
+        """B-0093: hosted CI (no `ci.runner_org`/`ci.pool` declared, nothing self-hosted to
+        track) is not a misconfiguration — Runners must not say `not configured`."""
+        product = env.Product('p', {'ci': {'provider': 'github-actions'},
+                                    'repo_slug': 'x/y', 'repo_dir': self.tmp})
+        cell = status.runners_cell(product)
+        self.assertNotIn('not configured', cell)
+
     def test_groom_row_reads_the_newest_digest(self):
         product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
                                     'deploy_sha': 'none', 'approvals': {'groom': 'auto'}})
@@ -222,6 +241,16 @@ class StatusViewTests(ViewsTestCase):
         rows = self.rows({'scheduler': {'kind': 'none'}})
         self.assertEqual(rows['Agents'], '1 working')
         self.assertEqual(rows['Ready to launch'], '0')  # the Feature is in flight
+
+    def test_ready_to_launch_holds_every_row_while_the_product_is_paused(self):
+        """B-84833: the wave's own pause hold (F-0137) must show up in the one cell the
+        watchdog reads as a free seat sitting idle, not just in :func:`asf.tick.step_wave.
+        would_start`'s preview — else a paused product's held row reads as launchable here
+        while the live wave correctly holds it."""
+        from asf import pause
+        pause.pause('p', 'release freeze', 'op1')
+        rows = self.rows({'scheduler': {'kind': 'none'}})
+        self.assertEqual(rows['Ready to launch'], '0 (1 held back (paused 1))')
 
     def test_features_in_build_against_the_cap(self):
         # F-0195: X / N and the inputs auto sized N from
@@ -340,36 +369,137 @@ class StatusViewTests(ViewsTestCase):
             self.assertIn('| PAUSED | X |', status.render(self.root, self.product, cfg={}))
 
     def test_no_index_names_the_backlog(self):
-        self.assertEqual(status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product),
-                         '— (not configured: backlog_dir (no index.json))')
+        plan = status._plan(os.path.join(self.tmp, 'nowhere'), self.product)
+        self.assertEqual(status.ready_cell(plan), '— (not configured: backlog_dir (no index.json))')
+
+    def test_the_plan_overlays_after_before_planning_when_the_product_has_a_repo_dir(self):
+        """C1 of docs/reviews/1-t-0441.md: `_plan` must plan from the same `after:`-overlaid
+        items `would_start` plans from — a derived predecessor a card's plan implies, not just
+        an explicit one, holds it back the same way the real tick holds it."""
+        from asf.record import plan_order
+        with mock.patch.object(plan_order, 'overlay', wraps=plan_order.overlay) as spy:
+            plan = status._plan(self.root, self.product)
+        spy.assert_called_once()
+        call_items, call_reader = spy.call_args[0]
+        self.assertIs(call_items, plan.items)
+        self.assertIsInstance(call_reader, plan_order.TrunkReader)
+
+    def test_the_plan_never_overlays_without_a_repo_dir(self):
+        from asf.record import plan_order
+        product = env.Product('p', {'main': 'trunk', 'ci': {'provider': 'none'},
+                                     'deploy_sha': 'none'})
+        with mock.patch.object(plan_order, 'overlay') as spy:
+            status._plan(self.root, product)
+        spy.assert_not_called()
 
     def test_the_ready_cell_counts_rows_failing_to_spawn(self):
         from asf.feeder import rows as feeder_rows
-        from asf.tick import step_wave
+        from asf.tick.step_wave import Screened
         mk = lambda iid, action: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
                                                  feature_id='F-0001', action=action,
                                                  brief_kind='task', branch='', reason='')
-        screened = [step_wave.Screened(mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2')),
-                    step_wave.Screened(mk('T-0002', 'would launch'))]
-        with mock.patch.object(step_wave, 'would_start', return_value=(screened, 5, [])):
-            cell = status.ready_cell(self.root, self.product)
-        # the wave tries the failing row, but it does not start: N is the one that does
-        self.assertEqual(cell, f'1 — first: {feeder_rows.PLAN_CODE} T-0002; 1 failing to spawn')
+        screened = [Screened(mk('T-0001', 'would launch — FAILING TO SPAWN: held ×2')),
+                   Screened(mk('T-0002', 'would launch'))]
+        plan = status.Plan(product=self.product, items={}, rows=[], inputs={}, capacity=5,
+                           inflight=[], gate=None, screened=screened)
+        # the plan tries the failing row, but it does not start: N is the one that does
+        self.assertEqual(status.ready_cell(plan),
+                         f'1 — first: {feeder_rows.PLAN_CODE} T-0002; 1 failing to spawn')
 
     def test_the_ready_cell_counts_only_what_the_wave_would_start(self):
-        # 2026-10-04: status said 2 ready while the wave launched 0 — an ungrantable approval
-        # hold and a relaunch-cap park, both refused by the wave's own filter
+        """C1 of docs/reviews/1-t-0441.md: a row the plan would launch but the wave's own filter
+        (held, host pressure, trunk close, a cloud lane's seats, the relaunch cap) refuses is
+        named as held back, by why — never counted as ready, and never silently dropped."""
         from asf.feeder import rows as feeder_rows
+        from asf.tick.step_wave import CAPPED, HELD, Screened
+        mk = lambda iid, action: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
+                                                 feature_id='F-0001', action=action,
+                                                 brief_kind='task', branch='', reason='')
+        screened = [Screened(mk('T-0001', 'would launch'), why='held b (minor)', kind=HELD),
+                   Screened(mk('T-0002', 'would launch'), why='landed: abc (verified on origin/'
+                                                               'trunk); closed, not relaunched',
+                             kind=CAPPED)]
+        plan = status.Plan(product=self.product, items={}, rows=[], inputs={}, capacity=5,
+                           inflight=[], gate=None, screened=screened)
+        self.assertEqual(status.ready_cell(plan),
+                         '0 (2 held back (held 1, relaunch cap 1))')
+
+    def _s1_gate_record(self, bugs, features, capacity=3):
+        items = {'E-0001': INDEX['items']['E-0001']}
+        items.update(bugs)
+        items.update(features)
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+        return env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
+                                 'deploy_sha': 'none', 'capacity': {'sessions': capacity}})
+
+    def _holding_record(self):
+        """RD8: five open S1 Bugs (the fifth blocked), seven decided Feature cards, 3 seats,
+        nothing in flight — ``B-0004`` holds the floor and the lane cuts every Feature row
+        behind it."""
+        bugs = {f'B-{n:04d}': {'id': f'B-{n:04d}', 'type': 'bug', 'title': f'bug {n}',
+                               'severity': 'S1', 'decided': True, 'state': 'New',
+                               'stage_since': f'2026-01-01T0{n}:00:00Z'}
+               for n in range(1, 5)}
+        bugs['B-0005'] = {'id': 'B-0005', 'type': 'bug', 'title': 'bug 5', 'severity': 'S1',
+                          'decided': True, 'state': 'New', 'blocked': True,
+                          'blocked_by_open': ['B-0099'], 'stage_since': '2026-01-01T05:00:00Z'}
+        features = {f'F-{n:04d}': {'id': f'F-{n:04d}', 'type': 'feature', 'title': f'feature {n}',
+                                   'parent': 'E-0001', 'rank': n, 'stage': 'card', 'state': 'New',
+                                   'decided': True}
+                   for n in range(1, 8)}
+        return self._s1_gate_record(bugs, features, capacity=3)
+
+    def test_the_s1_gate_row_names_the_holder_and_the_unworked_s1(self):
+        self.product = self._holding_record()
+        rows = self.rows({'scheduler': {'kind': 'none'}})
+        self.assertEqual(rows['S1 gate'],
+                         'B-0004 holds 7 rows (CARD → SPEC 7) · '
+                         'B-0005 S1, nothing working it (blocked by B-0099)')
+
+    def test_the_s1_gate_row_sits_between_ready_to_launch_and_decisions(self):
+        self.product = self._holding_record()
+        text = status.render(self.root, self.product, cfg={'scheduler': {'kind': 'none'}})
+        names = [ln.split(' | ')[0].lstrip('| ') for ln in text.splitlines() if ln.startswith('| ')]
+        self.assertEqual(names[names.index('Ready to launch') + 1], 'S1 gate')
+        self.assertEqual(names[names.index('S1 gate') + 1], 'Decisions')
+
+    def test_the_default_record_has_no_s1_gate_row_and_is_unchanged(self):
+        rows = self.rows({'scheduler': {'kind': 'none'}})
+        self.assertNotIn('S1 gate', rows)
+        self.assertEqual(rows['Ready to launch'], '1 — first: CARD → SPEC F-0001')
+        self.assertRegex(rows['Features in build'],
+                         r'^0 / \d+ \(auto: sessions \d+, quota-stopped \S+, CI free \S+\)$')
+
+    def test_an_all_seated_s1_renders_the_unworked_sentence_with_no_held_clause(self):
+        # RD3: holders == [] with held > 0 — the one S1 that launches gets a real seat, so it
+        # is never a holder; the blocked one still goes unworked
+        bugs = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'title': 'bug 1', 'severity': 'S1',
+                           'decided': True, 'state': 'New', 'stage_since': '2026-01-01T01:00:00Z'},
+               'B-0002': {'id': 'B-0002', 'type': 'bug', 'title': 'bug 2', 'severity': 'S1',
+                         'decided': True, 'state': 'New', 'blocked': True,
+                         'blocked_by_open': ['B-0099'], 'stage_since': '2026-01-01T02:00:00Z'}}
+        features = {f'F-{n:04d}': {'id': f'F-{n:04d}', 'type': 'feature', 'title': f'feature {n}',
+                                   'parent': 'E-0001', 'rank': n, 'stage': 'card', 'state': 'New',
+                                   'decided': True}
+                   for n in range(1, 4)}
+        product = self._s1_gate_record(bugs, features, capacity=1)
+        plan = status._plan(self.root, product)
+        self.assertEqual(plan.gate.holders, [])
+        self.assertGreater(plan.gate.held, 0)
+        self.assertEqual(status.s1_gate_cell(plan),
+                         'B-0002 S1, nothing working it (blocked by B-0099)')
+
+    def test_one_plan_feeds_every_feeder_row(self):
+        # D15, RD5: a render whose four feeder rows (Features in build, Ready to launch, S1
+        # gate, Decisions) are all filled still reads the ledger and the record once for the
+        # feeder's own plan — Parked's _stalemate_parks, grown on trunk since RD5 was measured,
+        # is a second, independent plan_inputs call of its own, not one of the four feeder rows
         from asf.tick import step_wave
-        mk = lambda iid: feeder_rows.Row(tier=2, kind=feeder_rows.PLAN_CODE, item_id=iid,
-                                         feature_id='F-0001', action='would launch',
-                                         brief_kind='task', branch='', reason='')
-        screened = [step_wave.Screened(mk('T-0001'), 'held touch_amendable_set (human-now)',
-                                       step_wave.HELD),
-                    step_wave.Screened(mk('T-0002'), 'launched 2 time(s)', step_wave.CAPPED)]
-        with mock.patch.object(step_wave, 'would_start', return_value=(screened, 5, [])):
-            cell = status.ready_cell(self.root, self.product)
-        self.assertEqual(cell, '0 (2 held back (held 1, relaunch cap 1))')
+        product = self._holding_record()
+        with mock.patch.object(step_wave, 'plan_inputs', wraps=step_wave.plan_inputs) as spy:
+            status.render(self.root, product, cfg={'scheduler': {'kind': 'none'}})
+        self.assertEqual(spy.call_count, 2)
 
 
 class DecisionsCellTests(ViewsTestCase):
@@ -391,18 +521,18 @@ class DecisionsCellTests(ViewsTestCase):
 
     def test_the_count_and_the_first_ids(self):
         self._index(73)
-        self.assertEqual(status.decisions_cell(self.root, self.product),
+        self.assertEqual(status.decisions_cell(status._plan(self.root, self.product)),
                          '73 undecided — next: F-0001, F-0002, F-0003, F-0004, F-0005')
         self.assertEqual(self.rows()[1]['Decisions'],
                          '73 undecided — next: F-0001, F-0002, F-0003, F-0004, F-0005')
 
     def test_every_card_decided_is_zero(self):
         self._index(3, decided=True)
-        self.assertEqual(status.decisions_cell(self.root, self.product), '0')
+        self.assertEqual(status.decisions_cell(status._plan(self.root, self.product)), '0')
 
     def test_no_index_names_the_backlog(self):
-        self.assertEqual(status.decisions_cell(os.path.join(self.tmp, 'nowhere'), self.product),
-                         status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product))
+        plan = status._plan(os.path.join(self.tmp, 'nowhere'), self.product)
+        self.assertEqual(status.decisions_cell(plan), status.ready_cell(plan))
 
     def test_a_raising_cell_leaves_the_table(self):
         with mock.patch.object(status, 'decisions_cell', side_effect=ValueError('boom')):
@@ -413,6 +543,73 @@ class DecisionsCellTests(ViewsTestCase):
     def test_the_row_sits_directly_after_ready_to_launch(self):
         names, _ = self.rows()
         self.assertEqual(names[names.index('Ready to launch') + 1], 'Decisions')
+
+
+class RulePassCellTests(ViewsTestCase):
+    def _product(self, flag='on'):
+        return env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
+                                 'deploy_sha': 'none', 'conventions': {'flags': {'rule_pass': flag}}})
+
+    def _event(self, day, rule):
+        path = os.path.join(self.root, 'metrics', 'events', f'{day}.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'kind': 'rule_pass', 'item': 'F-0001', 'rule': rule,
+                                 'finding': '', 'where': 'correction', 'cite': ''}) + '\n')
+
+    def rows(self, product):
+        text = status.render(self.root, product, cfg={'scheduler': {'kind': 'none'}})
+        return [ln.split(' | ')[0].lstrip('| ') for ln in text.splitlines() if ln.startswith('| ')], \
+            {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+             for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+
+    def test_three_events_name_the_count_both_splits_and_the_sessions(self):
+        today = dt.date.today().isoformat()
+        self._event(today, 'commit-shape')
+        self._event(today, 'wording')
+        self._event(today, 'precedent')
+        product = self._product()
+        self.assertEqual(status.rule_pass_cell(self.root, product),
+                         '3 ruled in 7d — cosmetic 2 (commit-shape 1, wording 1), precedent 1; '
+                         '3 adjudicate sessions not spawned')
+
+    def test_flag_off_and_flag_on_with_no_event_are_both_none(self):
+        today = dt.date.today().isoformat()
+        self.assertIsNone(status.rule_pass_cell(self.root, self._product(flag='off')))
+        self._event(today, 'commit-shape')
+        self.assertIsNone(status.rule_pass_cell(self.root, self._product(flag='off')))
+        empty_root = os.path.join(self.tmp, 'empty-record')
+        self.assertIsNone(status.rule_pass_cell(empty_root, self._product()))
+
+    def test_outside_window_not_counted_and_a_malformed_day_is_skipped(self):
+        today = dt.date.today().isoformat()
+        old_day = (dt.date.today() - dt.timedelta(days=8)).isoformat()
+        bad_day = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        self._event(today, 'commit-shape')
+        self._event(old_day, 'wording')
+        bad_path = os.path.join(self.root, 'metrics', 'events', f'{bad_day}.jsonl')
+        with open(bad_path, 'w', encoding='utf-8') as f:
+            f.write('{\n')
+        self.assertEqual(status.rule_pass_cell(self.root, self._product()),
+                         '1 ruled in 7d — cosmetic 1 (commit-shape 1); '
+                         '1 adjudicate sessions not spawned')
+
+    def test_the_cards_own_mix_is_the_windows_own_tally(self):
+        today = dt.date.today().isoformat()
+        for _ in range(5):
+            self._event(today, 'commit-shape')
+        for _ in range(3):
+            self._event(today, 'wording')
+        for _ in range(3):
+            self._event(today, 'precedent')
+        self.assertEqual(status.rule_pass_cell(self.root, self._product()),
+                         '11 ruled in 7d — cosmetic 8 (commit-shape 5, wording 3), precedent 3; '
+                         '11 adjudicate sessions not spawned')
+
+    def test_the_row_sits_directly_after_decisions(self):
+        self._event(dt.date.today().isoformat(), 'commit-shape')
+        names, _ = self.rows(self._product())
+        self.assertEqual(names[names.index('Decisions') + 1], 'Rule pass')
 
 
 class RecordCellTests(ViewsTestCase):
@@ -488,6 +685,44 @@ class CapacityTable(ViewsTestCase):
             'batch': {'per_run': 8, 'parallel': 2, 'runners': 4},
             'deprecated': [],
         })
+
+
+class CapacityAllIsolatesInvalidProduct(ViewsTestCase):
+    """B-0098: one invalid product file under ~/.ASF/products/ must not blank the whole
+    ``capacity --all`` view — it becomes a single row naming ``asf doctor``, and the valid
+    products still render and count."""
+
+    def _write(self, name, text):
+        products = os.path.join(env.ASF_HOME, 'products')
+        os.makedirs(products, exist_ok=True)
+        with open(os.path.join(products, f'{name}.yaml'), 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def test_the_valid_product_still_renders_and_the_invalid_one_names_doctor(self):
+        self._write('web', 'product: web\n')
+        self._write('asf', 'product: asf\ncapacity:\n  sessions: TODO\n')
+        args = types.SimpleNamespace(all=True, product=None, json=False)
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            rc = capacity_view.cmd_capacity(args)
+        self.assertEqual(rc, 0)
+        lines = [ln for ln in out.getvalue().splitlines() if ln]
+        web_row = next(ln for ln in lines if ln.startswith('web '))
+        self.assertIn('default', web_row)
+        self.assertIn('asf  config invalid — asf doctor --product asf', lines)
+
+    def test_json_names_the_invalid_product_instead_of_raising(self):
+        self._write('web', 'product: web\n')
+        self._write('asf', 'product: asf\ncapacity:\n  sessions: TODO\n')
+        args = types.SimpleNamespace(all=True, product=None, json=True)
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out):
+            rc = capacity_view.cmd_capacity(args)
+        self.assertEqual(rc, 0)
+        data = json.loads(out.getvalue())
+        by_name = {row['product']: row for row in data}
+        self.assertIn('sessions', by_name['web'])
+        self.assertEqual(by_name['asf']['error'], 'config invalid — asf doctor --product asf')
 
 
 class StatusRow(ViewsTestCase):
@@ -671,6 +906,30 @@ class RetirementRuleTests(ViewsTestCase):
         self.assertNotIn('F-0001', text)
         self.assertIn('F-0003', text)
 
+    def test_epic_filter_keeps_only_that_epics_group(self):
+        """B-0088: ``board.render(root, epic=...)`` is the whole fix — the board grows one row
+        per Feature with no cap (339 lines / 67 KB on the real record), and a console that caps
+        its own output (the operator's terminal, an agent's tool result) cuts it off before the
+        epic the operator asked about ever appears. Filtering to one epic keeps that epic's
+        rows out of the part that gets cut."""
+        self.write({
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'title': 'first goal', 'folder': 'epics',
+                       'state': 'New', 'decided': True, 'rank': 1},
+            'E-0002': {'id': 'E-0002', 'type': 'epic', 'title': 'second goal', 'folder': 'epics',
+                       'state': 'New', 'decided': True, 'rank': 2},
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'in the first epic',
+                       'folder': 'features', 'parent': 'E-0001', 'state': 'New', 'decided': True,
+                       'rank': 1, 'stage': 'card'},
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'title': 'in the second epic',
+                       'folder': 'features', 'parent': 'E-0002', 'state': 'New', 'decided': True,
+                       'rank': 1, 'stage': 'card'},
+        })
+        text = board.render(self.root, epic='E-0002')
+        self.assertIn('F-0002', text)
+        self.assertNotIn('F-0001', text)
+        self.assertNotIn('E-0001', text)
+        self.assertIn('2 Features', text)  # the summary line still counts the whole backlog
+
     def test_a_moved_card_lands_in_the_right_retirement_set(self):
         from asf.views import index_reader as ix
         raw = {
@@ -688,6 +947,89 @@ class RetirementRuleTests(ViewsTestCase):
         self.assertEqual(set(out), {'T-0005'})
         self.assertEqual(set(out.retired_done), {'T-0001', 'T-0003'})
         self.assertEqual(set(out.retired_open), {'T-0002', 'T-0004'})
+
+
+class BoardCollapsingTests(ViewsTestCase):
+    """B-0088 review round 1: the board's default must collapse on its own — ``--epic`` narrows
+    it further, it was never the whole fix."""
+
+    def write(self, items):
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    ITEMS = {
+        'E-0001': {'id': 'E-0001', 'type': 'epic', 'title': 'first goal', 'folder': 'epics',
+                   'state': 'New', 'decided': True, 'rank': 1},
+        'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'still moving',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Active', 'decided': True,
+                   'rank': 1, 'stage': 'building 1/3'},
+        'F-0002': {'id': 'F-0002', 'type': 'feature', 'title': 'just landed',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Active', 'decided': True,
+                   'rank': 2, 'stage': 'landed'},
+        'F-0003': {'id': 'F-0003', 'type': 'feature', 'title': 'shipped long ago',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Active', 'decided': True,
+                   'rank': 3, 'stage': 'on-prod'},
+        'F-0004': {'id': 'F-0004', 'type': 'feature', 'title': 'closed as wontdo',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'Closed', 'decided': True,
+                   'rank': 4, 'stage': 'card'},
+        'F-0005': {'id': 'F-0005', 'type': 'feature', 'title': 'groom has not decided',
+                   'folder': 'features', 'parent': 'E-0001', 'state': 'New', 'decided': False,
+                   'rank': 5},
+    }
+
+    def test_the_default_collapses_done_and_undecided_to_one_line_each(self):
+        self.write(self.ITEMS)
+        text = board.render(self.root)
+        self.assertIn('F-0001', text)
+        self.assertIn('F-0002', text)
+        self.assertNotIn('F-0003', text)
+        self.assertNotIn('F-0004', text)
+        self.assertNotIn('F-0005', text)
+        self.assertIn('**Undecided** — 1 Feature (`--all` to list)', text)
+        self.assertIn('**Closed / on-prod** — 2 Features (`--all` to list)', text)
+
+    def test_all_opts_out_of_the_collapsing(self):
+        self.write(self.ITEMS)
+        text = board.render(self.root, show_all=True)
+        for fid in ('F-0001', 'F-0002', 'F-0003', 'F-0004', 'F-0005'):
+            self.assertIn(fid, text)
+        self.assertNotIn('Undecided —', text)
+        self.assertNotIn('Closed / on-prod —', text)
+
+    def test_epic_narrows_the_collapsed_summaries_too(self):
+        items = dict(self.ITEMS)
+        items['E-0002'] = {'id': 'E-0002', 'type': 'epic', 'title': 'second goal',
+                            'folder': 'epics', 'state': 'New', 'decided': True, 'rank': 2}
+        items['F-0006'] = {'id': 'F-0006', 'type': 'feature', 'title': 'closed elsewhere',
+                            'folder': 'features', 'parent': 'E-0002', 'state': 'Closed',
+                            'decided': True, 'rank': 1, 'stage': 'card'}
+        self.write(items)
+        text = board.render(self.root, epic='E-0001')
+        self.assertIn('**Closed / on-prod** — 2 Features (`--all` to list)', text)
+        self.assertNotIn('F-0006', text)
+        self.assertNotIn('E-0002', text)
+
+    def test_closed_counts_as_done_even_when_groom_never_decided_it(self):
+        """B-0088 review round 1, C1: ``'done'`` is tested before ``decided``. A Feature that
+        shipped or was closed before groom ever marked it (``F-0009``, ``F-0011``, ``F-0012`` on
+        the live record: ``Closed``, ``landed``, ``decided: false``) needs no look either, so it
+        belongs in the ``Closed / on-prod`` line, not in the ``Undecided`` one an operator does
+        still scan."""
+        items = dict(self.ITEMS)
+        items['F-0007'] = {'id': 'F-0007', 'type': 'feature', 'title': 'closed, never decided',
+                            'folder': 'features', 'parent': 'E-0001', 'state': 'Closed',
+                            'decided': False, 'rank': 6, 'stage': 'landed'}
+        items['F-0008'] = {'id': 'F-0008', 'type': 'feature', 'title': 'on prod, no decided key',
+                            'folder': 'features', 'parent': 'E-0001', 'state': 'Active',
+                            'rank': 7, 'stage': 'on-prod'}
+        self.write(items)
+        self.assertEqual(board.feature_status(items['F-0007']), 'done')
+        self.assertEqual(board.feature_status(items['F-0008']), 'done')
+        text = board.render(self.root)
+        self.assertIn('**Closed / on-prod** — 4 Features (`--all` to list)', text)
+        self.assertIn('**Undecided** — 1 Feature (`--all` to list)', text)
+        self.assertNotIn('F-0007', text)
+        self.assertNotIn('F-0008', text)
 
 
 if __name__ == '__main__':

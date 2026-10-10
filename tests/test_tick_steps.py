@@ -773,10 +773,87 @@ class WaveStepTests(StepsTestCase):
         self.assertEqual(state['open'], ['F-0001'])
 
     def test_nothing_to_launch(self):
+        ctx = self.ctx()
         with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
-            step_wave.run(self.ctx(), out=self.lines.append)
+            step_wave.run(ctx, out=self.lines.append)
         self.assertEqual(self.lines, ['wave: nothing to launch'])
         self.assertEqual(self.waved, [])
+        self.assertTrue(ctx.wave['idle'])
+
+    def test_a_tick_over_record_and_wave_writes_the_waves_idle_state_on_the_tick_line(self):
+        # T-0203, plan step 8: the index's only items are a bug and a feature, no Task — so an
+        # idle wave's own line carries no New Tasks either.
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
+            rc, _out = self.run_tick(steps='record,wave')
+        self.assertEqual(rc, 0)
+        day = metrics_mod.today()
+        tick_log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
+        line = json.loads(tick_log.splitlines()[-1])
+        self.assertEqual(line['wave'], {'idle': True, 'new_tasks': 0, 'new_task_ids': [], 'gates': {}})
+
+    def test_a_tick_over_record_alone_carries_no_wave(self):
+        rc, _out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        day = metrics_mod.today()
+        tick_log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
+        line = json.loads(tick_log.splitlines()[-1])
+        self.assertEqual(line['wave'], {})
+
+
+class WaveStateTests(unittest.TestCase):
+    """§2.3, T5: ``wave_state`` reads :func:`step_wave.screen`'s own ``Screened`` list — no
+    record, no product, nothing but the facts the wave already has in hand."""
+
+    def row(self, item_id='T-0001', action='', waits_on=''):
+        return feeder_rows.Row(tier=2, kind='PLAN → CODE', item_id=item_id, feature_id='F-0001',
+                               action=action, brief_kind='task', branch=f'task/{item_id}',
+                               reason='ready', waits_on=waits_on)
+
+    def new_tasks(self, n):
+        return {f'T-{i:04d}': {'id': f'T-{i:04d}', 'type': 'task', 'state': 'New'}
+                for i in range(n)}
+
+    def test_waits_on_trunk_and_held_gates_with_the_idle_flag_and_new_tasks(self):
+        waits_row = self.row('T-0010', action='WAITS ON T-0044', waits_on='T-0044')
+        trunk_row = self.row('T-0011', action='ON TRUNK', waits_on='trunk')
+        held_row = self.row('T-0012')
+        held = {'T-0012': ('merge_pr', 'human-now')}
+        screened = [step_wave.Screened(waits_row, waits_row.action, step_wave.WAITS),
+                    step_wave.Screened(trunk_row, trunk_row.action, step_wave.WAITS),
+                    step_wave.Screened(held_row, 'held merge_pr (human-now)', step_wave.HELD)]
+        items = self.new_tasks(3)
+        state = step_wave.wave_state(screened, held, items, launching=0)
+        self.assertTrue(state['idle'])
+        self.assertEqual(state['new_tasks'], 3)
+        self.assertEqual(state['new_task_ids'], sorted(items))
+        self.assertEqual(state['gates'], {'T-0044': 1, 'trunk': 1, 'held merge_pr': 1})
+        self.assertFalse(step_wave.wave_state(screened, held, items, launching=1)['idle'])
+
+    def test_new_task_ids_are_capped_at_ten_the_count_itself_is_not(self):
+        items = self.new_tasks(13)
+        state = step_wave.wave_state([], {}, items, launching=0)
+        self.assertEqual(state['new_tasks'], 13)
+        self.assertEqual(state['new_task_ids'], sorted(items)[:step_wave.GATE_CAP])
+        self.assertEqual(len(state['new_task_ids']), 10)
+
+    def test_an_empty_screened_names_no_row_planned_only_while_new_tasks_are_open(self):
+        items = self.new_tasks(2)
+        self.assertEqual(step_wave.wave_state([], {}, items)['gates'], {step_wave.NO_ROW: 2})
+        self.assertEqual(step_wave.wave_state([], {}, {})['gates'], {})
+
+    def test_a_waits_row_with_no_waits_on_falls_back_to_the_first_word_of_its_action(self):
+        row = self.row('T-0020', action='would launch task-t-0020 (Opus)')
+        screened = [step_wave.Screened(row, row.action, step_wave.WAITS)]
+        self.assertEqual(step_wave.wave_state(screened, {}, {})['gates'], {'would': 1})
+
+    def test_closed_host_no_seat_and_relaunch_cap_count_by_kind_not_by_row(self):
+        rows = [self.row(f'T-003{i}') for i in range(4)]
+        screened = [step_wave.Screened(rows[0], 'closed', step_wave.CLOSED),
+                    step_wave.Screened(rows[1], 'held: host pressure', step_wave.HOST),
+                    step_wave.Screened(rows[2], 'no seat left', step_wave.NO_SEAT),
+                    step_wave.Screened(rows[3], 'relaunch cap', step_wave.CAPPED)]
+        self.assertEqual(step_wave.wave_state(screened, {}, {})['gates'],
+                         {'closed': 1, 'host': 1, 'no seat': 1, 'relaunch cap': 1})
 
 
 class WaveFactsTests(StepsTestCase):
@@ -1510,6 +1587,56 @@ class PrsStepTests(StepsTestCase):
         self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
         self.assertEqual(self.creates(), [])
         self.assertEqual(self.lane_of('fix/B-0002')['state'], 'MERGED')
+
+
+class ProvesBlockTests(StepsTestCase):
+    """``title_and_body``'s ``## Proves`` block (F-0040 §2.4): one bullet per claim the branch's
+    own commits carry, between the card's ``## Acceptance`` checkboxes and the closing line —
+    absent, with no stray heading, on a branch with no claim or with ``repo``/``trunk`` left
+    ``None`` (the shape a real pull request gets today, :mod:`asf.harvest.lane` leaving them
+    unset and appending its own ``## Proves`` from ``commits_note`` instead)."""
+
+    def setUp(self):
+        super().setUp()
+        _git(['pull', '-q', 'origin', 'main'], self.operator)
+        self.item = INDEX['items']['B-0001']
+
+    def push_commits(self, branch, messages):
+        _git(['checkout', '-q', '-b', branch, 'main'], self.repo)
+        for i, msg in enumerate(messages):
+            with open(os.path.join(self.repo, f"{branch.replace('/', '_')}_{i}"), 'w') as f:
+                f.write(f'{i}\n')
+            _git(['add', '-A'], self.repo)
+            _git(['commit', '-q', '-m', msg], self.repo)
+        _git(['push', '-q', 'origin', branch], self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+
+    def test_proves_block_between_acceptance_and_closing_line(self):
+        self.push_commits('worker/B-0001', [
+            'task(B-0001): the one commit\n\nProves: S-0077 line 1 — tests/test_a.py'])
+        _, body = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0001',
+                                           repo=self.repo, trunk='main')
+        self.assertIn(
+            '- [ ] the named test passes\n- [ ] no regression\n\n'
+            '## Proves\n- S-0077 line 1 — tests/test_a.py\n\n'
+            'Opened by the tick from `worker/B-0001`.\n', body)
+
+    def test_absent_with_no_stray_heading_when_the_branch_has_no_claim(self):
+        self.push_commits('worker/B-0002', ['task(B-0001): no claim here'])
+        _, body = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0002',
+                                           repo=self.repo, trunk='main')
+        self.assertNotIn('## Proves', body)
+        self.assertIn('## Acceptance', body)
+
+    def test_absent_when_repo_or_trunk_is_none(self):
+        self.push_commits('worker/B-0003', [
+            'task(B-0001): claimed\n\nProves: S-0077 line 1 — tests/test_a.py'])
+        _, no_repo = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0003',
+                                              trunk='main')
+        _, no_trunk = step_prs.title_and_body('B-0001', self.item, self.operator, 'worker/B-0003',
+                                               repo=self.repo)
+        self.assertNotIn('## Proves', no_repo)
+        self.assertNotIn('## Proves', no_trunk)
 
 
 # ---- harvest ----------------------------------------------------------------------

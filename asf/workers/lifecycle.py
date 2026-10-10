@@ -142,6 +142,12 @@ RETRY_CLASSES = (HOOK_REFUSED, NETWORK_ERROR)
 NETWORK_RE = re.compile(r'could not resolve host|connection (?:reset|refused|timed out|closed)|'
                         r'network is unreachable|unable to access|operation timed out|early eof|'
                         r'remote end hung up|ssl_error|gnutls', re.I)
+#: In-tick backoff (seconds) for :func:`publish`'s own retry of a transient network refusal
+#: (B-0097): short enough together never to hold a health tick, long enough for a DNS blip —
+#: the signature this card was filed on resolved inside a minute — to clear within it. Exhausted,
+#: the refusal falls through to the next tick's health pass, which tries again from the
+#: session's worktree (``NETWORK_ERROR`` in :func:`asf.workers.health.push_retry`).
+PUBLISH_RETRY_BACKOFF_S = (1.0, 2.0)
 #: The end_reason of a run a spent window cut short (asf.workers.headroom).
 QUOTA_EXHAUSTED_REASON = f'failed: {headroom.QUOTA_EXHAUSTED}'
 #: The end_reason of a run an auth error refused on its account (asf.workers.account_auth).
@@ -845,6 +851,22 @@ def by_branch(path):
     return out
 
 
+def review_attempts(path, lanes):
+    """``{branch: n}`` — ended review runs on that branch started at or after its lane record's
+    ``head_at``: how many reviewers this head has already had."""
+    out = {}
+    for rs in runs(path).values():
+        for r in rs:
+            b = r.get('branch')
+            if not b or r.get('kind') != 'review' or not r.get('ended'):
+                continue
+            head_at = (lanes.get(b) or {}).get('head_at')
+            if not head_at or (r.get('started') or '') < head_at:
+                continue
+            out[b] = out.get(b, 0) + 1
+    return out
+
+
 def lane_of(run):
     """``run['lane']`` as the lane state machine's record (:mod:`asf.harvest.lane`), ``{}`` when
     the run carries none or it is not a map. A cloud-lane launch's own ``runtime_lane`` marker
@@ -1371,23 +1393,29 @@ def correction_of(path, item):
 PR_CACHE = 'cache-prs.json'
 
 
-def ended_prs(state_dir):
-    """``{number: {'state', 'head'}}`` of every PR the evidence pass last saw MERGED or CLOSED,
-    read off its cache (no ``gh``); ``{}`` when there is none or it cannot be read. A merged or
-    closed PR is over: :func:`occupancy` never lets a lane record still naming it ask for a
-    review, a landing or a correction (the lane catches up on its own next pass)."""
+def ended_prs(state_dir, landed=()):
+    """``{number: {'state', 'head'}}`` of every PR that is over: the rows the evidence pass last
+    saw MERGED or CLOSED on its cache, plus every number in ``landed``
+    (:func:`asf.trunk_watch.landed_prs`) as MERGED, whatever its cached row says — the trunk
+    carries the merge, and the cache is a copy of an older answer (F-0277). ``{}`` when there is
+    no cache and ``landed`` is empty."""
     try:
         with open(os.path.join(state_dir, PR_CACHE)) as fh:
             data = json.load(fh)
     except (OSError, ValueError):
-        return {}
-    out = {}
+        data = []
+    out, heads = {}, {}
     for p in data if isinstance(data, list) else ():
         if not isinstance(p, dict):
             continue
         state, number = str(p.get('state') or '').upper(), p.get('number')
-        if state in ('MERGED', 'CLOSED') and isinstance(number, int):
-            out[number] = {'state': state, 'head': p.get('headRefOid') or None}
+        if not isinstance(number, int):
+            continue
+        heads[number] = p.get('headRefOid') or None
+        if state in ('MERGED', 'CLOSED'):
+            out[number] = {'state': state, 'head': heads[number]}
+    for number in landed or ():
+        out[number] = {'state': 'MERGED', 'head': heads.get(number)}
     return out
 
 
@@ -1425,10 +1453,11 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
     BACK rows. An item is in at most one of ``busy`` and ``waiting_landing``.
 
     Beside those, for the feeder's rows: ``lanes`` (``{branch: lane record + item, kind}`` of
-    every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr}}`` — lane
-    REVIEW: a PUSHED → REVIEW row), ``landing`` (``{item: {branch, state, pr, why}}`` — the other
-    lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}`` of every waiting branch)
-    and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and waiting is not starved);
+    every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr, why,
+    attempts}}`` — lane REVIEW: a PUSHED → REVIEW row), ``landing`` (``{item: {branch, state,
+    pr, why}}`` — the other lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}``
+    of every waiting branch) and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and
+    waiting is not starved);
     ``parks`` (:func:`parks`): the standing operator parks — a branch or job one holds only its
     own rows (its branch is skipped here; the feeder turns its rows into one PARKED row).
 
@@ -1525,6 +1554,10 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
         out['branches'][branch] = why
         if kind:
             out['docs'].setdefault(item, {})[kind] = why
+    if out['review']:
+        tries = review_attempts(path, out['lanes'])
+        for entry in out['review'].values():
+            entry['attempts'] = tries.get(entry['branch'], 0)
     # a park outlives its PR: a closed PR left the row that looped on it (a product's
     # delivery-code-t-0042, its PR closed, launched 69 times) — only an unpark or a release lifts it.
     # Any other correction on a dead branch moves to the item's open code branch when it has one
@@ -2106,8 +2139,26 @@ def _rewrite_account_names(wt, remote_sha, findings):
     return bool(new) and _git(['reset', '-q', '--hard', new], wt).returncode == 0
 
 
+def _push_retrying(args, wt, limit, guard, sleep=time.sleep, backoff=PUBLISH_RETRY_BACKOFF_S):
+    """``gitpush.push``, retried right here with backoff (B-0097) while the only thing refusing
+    it is a transient network error — a blip the tick's own retry clears far more often than it
+    survives to the next one. A non-network refusal (the hook, auth, a rejected ref) returns on
+    its first try, same as before this retry existed. ``sleep`` is overridden by tests."""
+    from asf import gitpush
+    p = gitpush.push(args, wt, timeout=limit, guard=guard)
+    for delay in backoff:
+        if p.returncode == 0:
+            break
+        text = git_error((p.stderr or '') + chr(10) + (p.stdout or ''))
+        if not NETWORK_RE.search(text):
+            break
+        sleep(delay)
+        p = gitpush.push(args, wt, timeout=limit, guard=guard)
+    return p
+
+
 def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None,
-            droppable=None, transplant=False):
+            droppable=None, transplant=False, sleep=time.sleep):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -2140,6 +2191,11 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     The old tip's archive carries no new code and skips the product's pre-push hook; the
     branch's own push runs it. Each push is killed after ``push_timeout_s`` (default
     :func:`asf.gitpush.push_timeout`): a hook or a network hang never holds the tick.
+    The branch's own push is retried in place, with backoff, while a transient network error
+    (B-0097) is the only thing refusing it (:func:`_push_retrying`,
+    :data:`PUBLISH_RETRY_BACKOFF_S`); a refusal that is still network after the backoff falls
+    through to the caller, whose own next-tick retry (:func:`asf.workers.health.push_retry`)
+    picks it up from there. A non-network refusal is never retried here.
     Before any push, the archive included, :func:`_redaction_findings` runs the same scan the
     hook would; a finding refuses the push right there with a precise ``redact: <file>:<line>
     …`` correction (:func:`asf.redact.correction`, F-0035) rather than the hook's generic
@@ -2244,7 +2300,7 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
-    p = gitpush.push(args, wt, timeout=limit, guard=refguard.Guard(main, protected))
+    p = _push_retrying(args, wt, limit, refguard.Guard(main, protected), sleep=sleep)
     if p.returncode != 0:
         hook_findings = redact.parse_finding_lines(f'{p.stderr or ""}\n{p.stdout or ""}')
         if hook_findings:
@@ -2536,6 +2592,12 @@ def gather(product, run, alive=None, worktree=None, heads=None, liveness=None, s
         log = _git(['reflog', 'show', '--format=%gs', f'refs/heads/{branch}'], wt)
         ev.has_commits = log.returncode == 0 and any(
             not ln.startswith('branch: Created from') for ln in log.stdout.splitlines() if ln.strip())
+        if not ev.has_commits and ev.remote_sha:
+            # this worktree's own reflog is blind to work pushed before it ever checked the
+            # branch out — a cloud session's direct push, or an earlier worktree already gone
+            # (B-0584): read origin's own commits past the trunk instead of calling it empty
+            ahead = _git(['rev-list', '--no-merges', f'origin/{main}..{ev.remote_sha}'], wt)
+            ev.has_commits = ahead.returncode == 0 and bool(ahead.stdout.split())
     if ev.remote_sha:
         ev.head_on_remote = _git(['merge-base', '--is-ancestor', 'HEAD', ev.remote_sha], wt).returncode == 0
         ev.unpushed = unpushed_commits(wt, ev.remote_sha, main)
@@ -3322,7 +3384,7 @@ def footprint_hold(run, paths, fact, text, now, tests=()):
                     f'widen_footprint decides')
 
 
-def hook_refusal_hold(path, run, text, now):
+def hook_refusal_hold(path, run, text, now, retried=False):
     """``(fields, line)``: ``run``'s push the repo's own pre-push hook refused. A redaction
     finding (:data:`HOOK_REDACTION_RE`) is parked as a security hold on the FIRST refusal: only a
     person decides what a flagged secret needs, never another session. Otherwise the first hold on
@@ -3333,24 +3395,43 @@ def hook_refusal_hold(path, run, text, now):
     (B-0140) — anything else is marked ``at_cap`` so the item goes to ADJUDICATE the way any other stuck finding does
     (:func:`hold`). A lint or test naming paths outside the Task's own ``writes:`` is left as a
     plain ``hook refused`` correction either way: :mod:`asf.tick.widen_footprint` turns that into
-    a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``."""
+    a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``.
+
+    ``retried`` (F-0235, :func:`asf.workers.report.hook_retried`) is True when the session's own
+    report already said the hook refused the identical push twice in-run: it has then spent, in
+    that one run, exactly the retry a second session would otherwise have been launched to make,
+    so the FIRST hold is the cap for it — routed by :data:`HOOK_REFUSAL_CAP` the same as an
+    unretried second hold. The unretried ladder is unchanged and the cap is still 2.
+    ``corr['retried']`` is written only when ``retried`` is true, so a correction written before
+    this reads exactly as it did before.
+
+    Every return carries ``corr['refusal']``, the class of the refusal: ``'redaction'`` when
+    :data:`HOOK_REDACTION_RE` matches, else ``'gate'`` — on the first hold and the second alike.
+    A third class, ``'footprint'``, is never written here: it is
+    :func:`asf.tick.widen_footprint.refusal_facts`'s own claim, for a refusal naming paths
+    outside the Task's ``writes:``, and it keeps first claim the same tick (P11)."""
     branch = run.get('branch') or run.get('job')
     keys, same = next_finding(path, run, HOOK_REFUSED, text)
-    corr = {'kind': HOOK_REFUSED, 'text': text, 'at': now, 'finding': keys, 'same': same}
-    if HOOK_REDACTION_RE.search(text):
+    redaction = HOOK_REDACTION_RE.search(text)
+    refusal = 'redaction' if redaction else 'gate'
+    corr = {'kind': HOOK_REFUSED, 'text': text, 'at': now, 'finding': keys, 'same': same,
+            'refusal': refusal}
+    if retried:
+        corr['retried'] = True
+    if redaction:
         # held on the first refusal: a product's correct-f-0086 was relaunched 100 times on one
         # redaction finding, its streak reset each time by a lane hold in between
         reason = (f'a redaction finding refused the push ({same} time(s) running) — a person '
                   'decides, not another session')
         corr.update(parked=True, reason=reason)
         return ({'correction': corr, 'operator_flagged': 1},
-                f'held {branch}: {reason} (security hold)')
-    if same < hook_refusal_cap():
-        return {'correction': corr}, f'held {branch}: {text} (no round spent)'
+                f'held {branch}: {reason} (security hold, {refusal})')
+    if same < hook_refusal_cap() and not retried:
+        return {'correction': corr}, f'held {branch}: {text} (no round spent, {refusal})'
     corr['at_cap'] = True
     return ({'correction': corr},
             f'held {branch}: {text} — adjudicate pending (hook refused the same way {same} '
-            f'times in a row)')
+            f'times in a row, {refusal})')
 
 
 def widenings(path, item):

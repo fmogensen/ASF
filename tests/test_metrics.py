@@ -239,6 +239,27 @@ class Schema(Base):
         self.assertIn('no rule matched', ev['item_reason'])
 
 
+class TickWaveSchemaTests(Base):
+    """§2.3, T5: ``ticks``' new ``wave`` key — a plain ``dict``, nothing in ``validate`` keys
+    off it (unlike ``kind``/``item``, which stay stream-specific branches)."""
+
+    TICK = {'tick': 1, 'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
+
+    def test_a_line_carrying_wave_is_accepted_unchanged(self):
+        wave = {'idle': True, 'new_tasks': 0, 'new_task_ids': [], 'gates': {}}
+        ev = metrics.validate('ticks', dict(self.TICK, wave=wave), self.items)
+        self.assertEqual(ev['wave'], wave)
+
+    def test_a_line_without_wave_comes_back_with_the_empty_default(self):
+        ev = metrics.validate('ticks', self.TICK, self.items)
+        self.assertEqual(ev['wave'], {})
+
+    def test_a_wave_that_is_not_an_object_raises(self):
+        with self.assertRaises(metrics.SchemaError) as cm:
+            metrics.validate('ticks', dict(self.TICK, wave='idle'), self.items)
+        self.assertIn("'wave' must be dict", str(cm.exception))
+
+
 class CiWorkflowSelection(Base):
     """`ci_from_api` imports every workflow a pull request or the trunk runs, and a batch/queue
     ref's own run, never only the one `conventions.ci_workflow` (or its stand-in default)

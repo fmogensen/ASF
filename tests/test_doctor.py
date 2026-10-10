@@ -247,6 +247,33 @@ class TestOneFactoryCheck(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn('old-tool.sh', detail)
 
+    def test_a_worktree_of_the_factory_repo_is_not_a_second_copy(self):
+        # B-0144: the clock never runs from the checkout, it runs from a detached `git worktree`
+        # of it (asf/snapshot.py) — package_root() then sits in the worktree while the product's
+        # repo_dir names the checkout; neither realpath nor an installed dist name match them,
+        # so only the shared `.git` common dir can tell this is the same repo, not a second one.
+        with tempfile.TemporaryDirectory() as d:
+            legacy = os.path.join(d, 'legacy')
+            os.makedirs(legacy)
+            open(os.path.join(legacy, 'frontmatter.py'), 'w').close()
+            repo = os.path.join(d, 'repo')
+            os.makedirs(os.path.join(repo, 'asf'))
+            open(os.path.join(repo, 'asf', 'frontmatter.py'), 'w').close()
+            subprocess.run(['git', 'init', '-q', repo], check=True, capture_output=True)
+            subprocess.run(['git', '-C', repo, 'add', '-A'], check=True, capture_output=True)
+            subprocess.run(['git', '-C', repo, 'commit', '-q', '-m', 'x'], check=True,
+                            capture_output=True)
+            worktree = os.path.join(d, 'worktree')
+            subprocess.run(['git', '-C', repo, 'worktree', 'add', '-q', worktree], check=True,
+                            capture_output=True)
+            cfg = {'legacy_paths': [legacy]}
+            product = env.Product('asf', {'repo_dir': repo})
+            with mock.patch.object(doctor, 'package_root', return_value=worktree), \
+                    mock.patch.object(doctor, 'installed_dist_names', return_value=set()):
+                ok, detail = doctor.check_one_factory(cfg, product)
+            self.assertTrue(ok, detail)
+            self.assertIn('it is the factory itself', detail)
+
     def test_the_factory_repo_itself_is_not_a_second_copy(self):
         with tempfile.TemporaryDirectory() as d:
             legacy = os.path.join(d, 'legacy')
@@ -538,6 +565,48 @@ class LegacySchedulerJobTests(unittest.TestCase):
         row = [r for r in rows if r[0] == 'scheduler'][0]
         self.assertFalse(row[2])
         self.assertTrue(doctor.is_red(rows))
+
+
+class CheckCiStallTests(unittest.TestCase):
+    """S-76005: ``asf doctor``'s ``ci stall`` row, immediately after ``ci heartbeat``."""
+
+    def test_an_unreadable_ci_stall_file_is_one_unknown_row_and_never_raises(self):
+        from asf import ci_stall
+        product = env.Product('x', {})
+        old = env.ASF_HOME
+        with tempfile.TemporaryDirectory() as home:
+            env.ASF_HOME = home
+            try:
+                path = os.path.join(env.state_dir(product.name), ci_stall.STATE_FILE)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write('{not json')
+                rows = doctor.check_ci_stall(product)
+            finally:
+                env.ASF_HOME = old
+        self.assertEqual(len(rows), 1, rows)
+        required, ok, detail = rows[0]
+        self.assertFalse(required)
+        self.assertIsNone(ok)
+        self.assertTrue(detail.startswith('cannot read the ci stall file'), detail)
+
+    def test_the_ci_stall_label_is_immediately_after_ci_heartbeat(self):
+        with open(os.path.join(PROJECT_ROOT, 'asf', 'doctor.py'), encoding='utf-8') as f:
+            text = f.read()
+        import re
+        labels = re.findall(r"rows\.append\(\('([^']+)'", text)
+        self.assertEqual(labels[labels.index('ci heartbeat') + 1], 'ci stall')
+
+    def test_a_product_with_no_ci_pool_draws_no_row(self):
+        # doctor_rows is [] for a product with no ci.pool and no pass block: the row count a
+        # product with no CI pool sees is unchanged by this feature
+        old = env.ASF_HOME
+        with tempfile.TemporaryDirectory() as home:
+            env.ASF_HOME = home
+            try:
+                self.assertEqual(doctor.check_ci_stall(env.Product('x', {})), [])
+            finally:
+                env.ASF_HOME = old
 
 
 class TestNoPrHost(unittest.TestCase):
@@ -1912,3 +1981,118 @@ class ReadmeRowTests(unittest.TestCase):
         out = doctor.format_table('sample', [('readme', True, ok, detail)])
         self.assertIn('readme', out)
         self.assertIn('RED', out)
+
+
+class UpgradeRowTests(unittest.TestCase):
+    """``doctor.check_upgrade`` — F-0112 S-69310, the ``upgrade`` row: the release channel's
+    policy against the newest known ASF release, read-only.
+
+    T-0436's footprint is ``asf/doctor.py``, ``docs/guide/upgrading.md`` and this file only;
+    F-0112's Tasks 2/3/5 (``asf/upgrade.py``'s ``releases_path``, ``installed_release``,
+    ``_read_release_state``) have not landed on this checkout. These tests patch them onto the
+    module with ``create=True``, taking the plan's stated shape on trust (T-0436's recorded
+    assumption) — once Tasks 2/3/5 land for real, these patches resolve to the real attributes
+    unchanged."""
+
+    def _product(self, declared=None, repo_dir=None, approvals=None):
+        data = {'repo_slug': 'a/b'}
+        if repo_dir is not None:
+            data['repo_dir'] = repo_dir
+        if declared is not None:
+            data['conventions'] = {'flags': {'upgrade': declared}}
+        if approvals is not None:
+            data['approvals'] = approvals
+        return env.Product('p', data)
+
+    def _factory_repo(self):
+        d = tempfile.mkdtemp(prefix='doctor_upgrade_')
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, 'pyproject.toml'), 'w', encoding='utf-8') as f:
+            f.write('[project]\nname = "asf-factory"\n')
+        return d
+
+    def _cache(self, url, tag, at):
+        path = os.path.join(tempfile.mkdtemp(prefix='doctor_upgrade_cache_'), 'releases.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({url: {'tag': tag, 'sha': 'abc1234', 'at': at}}, f)
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        return path
+
+    def _patched(self, old, tag, at, last=None, newer=True):
+        from asf import upgrade
+        url = 'https://github.com/x/asf'
+        return (
+            mock.patch.object(upgrade, 'installed_release', create=True,
+                              return_value=(old, 'oldsha7')),
+            mock.patch.object(upgrade, 'repo_url', return_value=url),
+            mock.patch.object(upgrade, 'releases_path', create=True,
+                              return_value=self._cache(url, tag, at)),
+            mock.patch.object(upgrade, '_read_release_state', create=True,
+                              return_value={'last': last} if last else {}),
+            mock.patch.object(upgrade, 'newer', create=True, return_value=newer),
+        )
+
+    def test_green_row_names_the_policy_release_and_cache_age(self):
+        patches = self._patched(old='v0.1.62', tag='v0.1.63', at=time.time() - 720, newer=True)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            ok, detail = doctor.check_upgrade(self._product(declared='auto'))
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail,
+                         'auto · running v0.1.62 · newest release v0.1.63 available (read 12m ago)')
+
+    def test_green_row_reads_current_when_nothing_newer(self):
+        patches = self._patched(old='v0.1.62', tag='v0.1.62', at=time.time() - 60, newer=False)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            ok, detail = doctor.check_upgrade(self._product(declared='auto'))
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, 'auto · running v0.1.62 · current')
+
+    def test_a_typo_is_red_and_quotes_the_word_verbatim(self):
+        ok, detail = doctor.check_upgrade(self._product(declared='atuo'))
+        self.assertFalse(ok)
+        self.assertEqual(detail, 'upgrade: "atuo" is not auto|notify|off — reading it as notify')
+
+    def test_an_absent_key_is_not_red(self):
+        patches = self._patched(old='v0.1.62', tag='v0.1.62', at=time.time() - 60, newer=False)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            ok, detail = doctor.check_upgrade(self._product(declared=None))
+        self.assertTrue(ok, detail)
+
+    def test_rolled_back_at_the_newest_tag_is_red_and_names_both_releases(self):
+        patches = self._patched(old='v0.1.62', tag='v0.1.63', at=time.time(),
+                                last={'result': 'rolled-back', 'to': 'v0.1.63', 'from': 'v0.1.62'})
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            ok, detail = doctor.check_upgrade(self._product(declared='auto'))
+        self.assertFalse(ok)
+        self.assertIn('v0.1.63', detail)
+        self.assertIn('v0.1.62', detail)
+        self.assertIn('rolled back', detail)
+
+    def test_rolled_back_is_not_red_once_a_newer_tag_is_cut(self):
+        patches = self._patched(old='v0.1.62', tag='v0.1.64', at=time.time(), newer=True,
+                                last={'result': 'rolled-back', 'to': 'v0.1.63', 'from': 'v0.1.62'})
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            ok, detail = doctor.check_upgrade(self._product(declared='auto'))
+        self.assertTrue(ok, detail)
+        self.assertIn('v0.1.64', detail)
+
+    def test_factory_source_names_the_trunk_channel_and_is_never_red(self):
+        ok, detail = doctor.check_upgrade(self._product(
+            declared='bogus', repo_dir=self._factory_repo(), approvals={'upgrade': 'auto'}))
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail,
+                         "trunk channel (this repo is the factory's own source) — "
+                         "approvals.upgrade: auto")
+
+    def test_the_row_triggers_no_ls_remote_of_its_own(self):
+        from asf import upgrade
+        patches = self._patched(old='v0.1.62', tag='v0.1.63', at=time.time() - 60, newer=True)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+             mock.patch.object(upgrade, 'latest_release', create=True) as latest:
+            doctor.check_upgrade(self._product(declared='auto'))
+        latest.assert_not_called()
+
+    def test_without_the_release_channel_landed_the_row_is_ok_not_a_crash(self):
+        """The real ``asf.upgrade`` on this checkout — F-0112 Tasks 2/3/5 not landed, no mocks."""
+        ok, detail = doctor.check_upgrade(self._product(declared='auto'))
+        self.assertTrue(ok, detail)

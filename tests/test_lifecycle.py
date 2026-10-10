@@ -23,7 +23,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import env, redact
+from asf import env, gitpush, redact
 from asf.scorecard import score
 from asf.workers import lifecycle as lc
 from asf.workers import observe
@@ -223,6 +223,85 @@ class RegistryFoldInvariants(unittest.TestCase):
             for ln in lines:
                 f.write(json.dumps(ln) + '\n')
         return path
+
+
+class ReviewAttemptsTests(unittest.TestCase):
+    """``review_attempts`` (S-36503): how many reviewers a head has already had — folded over
+    every run on the branch, not just its latest (:func:`lc.by_branch` would cap every count at
+    1, PD8)."""
+
+    def _write(self, lines):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 'sessions.jsonl')
+        with open(path, 'w') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return path
+
+    def test_counts_only_ended_review_runs_on_the_branch_at_or_after_head_at(self):
+        lines = [
+            # started before head_at: does not count
+            {'job': 'review-1', 'pid': 1, 'started': '2026-01-01T00:00:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-1', 'ended': '2026-01-01T00:01:00Z', 'end_reason': 'finished'},
+            # at/after head_at, ended, kind review: counts
+            {'job': 'review-2', 'pid': 2, 'started': '2026-01-02T00:00:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-2', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'},
+            # another kind: does not count
+            {'job': 'correct-1', 'pid': 3, 'started': '2026-01-02T00:02:00Z',
+             'branch': 'worker/T-1', 'kind': 'correct'},
+            {'job': 'correct-1', 'ended': '2026-01-02T00:03:00Z', 'end_reason': 'finished'},
+            # live, no ended: does not count
+            {'job': 'review-3', 'pid': 4, 'started': '2026-01-02T00:04:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            # another branch: does not count
+            {'job': 'review-4', 'pid': 5, 'started': '2026-01-02T00:05:00Z',
+             'branch': 'worker/T-2', 'kind': 'review'},
+            {'job': 'review-4', 'ended': '2026-01-02T00:06:00Z', 'end_reason': 'finished'},
+        ]
+        path = self._write(lines)
+        lanes = {'worker/T-1': {'head_at': '2026-01-02T00:00:00Z'}}
+        self.assertEqual(lc.review_attempts(path, lanes), {'worker/T-1': 1})
+
+    def test_two_qualifying_runs_under_different_jobs_count_two(self):
+        # by_branch keeps one run per branch and would cap this at 1 (PD8): review_attempts
+        # folds `runs`, not `by_branch`
+        lines = [
+            {'job': 'review-1', 'pid': 1, 'started': '2026-01-02T00:00:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-1', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'},
+            {'job': 'review-2', 'pid': 2, 'started': '2026-01-02T00:02:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-2', 'ended': '2026-01-02T00:03:00Z', 'end_reason': 'finished'},
+        ]
+        path = self._write(lines)
+        lanes = {'worker/T-1': {'head_at': '2026-01-02T00:00:00Z'}}
+        self.assertEqual(lc.review_attempts(path, lanes), {'worker/T-1': 2})
+
+    def test_a_branch_with_no_head_at_in_lanes_yields_zero(self):
+        lines = [{'job': 'review-1', 'pid': 1, 'started': '2026-01-02T00:00:00Z',
+                  'branch': 'worker/T-1', 'kind': 'review'},
+                 {'job': 'review-1', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {}), {})
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {}}), {})
+
+    def test_occupancy_carries_the_attempts_count_on_its_review_entry_including_zero(self):
+        lines = [{'job': 'review-1', 'pid': 1, 'started': '2026-01-02T00:00:00Z',
+                  'branch': 'worker/T-1', 'item': 'T-1', 'kind': 'review'},
+                 {'job': 'review-1', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'}]
+        path = self._write(lines)
+        lanes = {'worker/T-1': {'state': 'REVIEW', 'round': 2,
+                                'head_at': '2026-01-02T00:00:00Z'}}
+        out = lc.occupancy(path, lanes=lanes)
+        self.assertEqual(out['review']['T-1']['attempts'], 1)
+
+        lanes2 = {'worker/T-1': {'state': 'REVIEW', 'round': 2,
+                                 'head_at': '2026-01-03T00:00:00Z'}}
+        out2 = lc.occupancy(path, lanes=lanes2)
+        self.assertEqual(out2['review']['T-1']['attempts'], 0)
 
 
 class RegistryReadOnceInvariants(unittest.TestCase):
@@ -1234,12 +1313,13 @@ class HookRefusalEscalation(unittest.TestCase):
             for ln in lines:
                 f.write(json.dumps(ln) + '\n')
 
-    def hold(self, text):
+    def hold(self, text, retried=False):
         self.n += 1
         run = {'job': f'fix-{self.n}', 'item': 'B-0140', 'branch': 'fix/B-0140',
                'pid': self.n, 'started': f't{self.n:02d}a', 'kind': 'fix-bug'}
         self.write(run)
-        fields, line = lc.hook_refusal_hold(self.path, run, text, f't{self.n:02d}b')
+        fields, line = lc.hook_refusal_hold(self.path, run, text, f't{self.n:02d}b',
+                                            retried=retried)
         self.write(dict(fields, job=run['job']))
         return fields, line
 
@@ -1253,7 +1333,7 @@ class HookRefusalEscalation(unittest.TestCase):
         self.assertEqual(fields['correction']['same'], 1)
         self.assertNotIn('at_cap', fields['correction'])
         self.assertNotIn('parked', fields['correction'])
-        self.assertIn('(no round spent)', line)
+        self.assertIn('(no round spent, gate)', line)
 
     def test_the_correction_carries_the_hooks_own_tail(self):
         fields, _ = self.hold(self.LINT)
@@ -1293,6 +1373,58 @@ class HookRefusalEscalation(unittest.TestCase):
         fields, _ = self.hold(self.REDACT)
         self.assertEqual(fields['correction']['same'], 1)
         self.assertNotIn('at_cap', fields['correction'])
+
+    def test_a_retried_first_lint_hold_goes_straight_to_adjudicate(self):
+        # F-0235: the session already said it retried in-run, so the first hold is the cap
+        fields, line = self.hold(self.LINT, retried=True)
+        self.assertEqual(fields['correction']['same'], 1)
+        self.assertTrue(fields['correction']['at_cap'])
+        self.assertIn('adjudicate pending', line)
+        self.assertIs(fields['correction']['retried'], True)
+
+    def test_a_retried_first_redaction_hold_is_still_a_security_hold(self):
+        fields, line = self.hold(self.REDACT, retried=True)
+        self.assertTrue(fields['correction']['parked'])
+        self.assertEqual(fields.get('operator_flagged'), 1)
+        self.assertIn('security hold', line)
+        self.assertIs(fields['correction']['retried'], True)
+
+    def test_an_unretried_correction_carries_no_retried_key_at_all(self):
+        fields, _ = self.hold(self.LINT)
+        self.assertNotIn('retried', fields['correction'])
+
+    def test_the_cap_is_still_two_and_the_unretried_free_relaunch_stands(self):
+        # D5: the `published` population's free first relaunch is not touched by F-0235
+        self.assertEqual(lc.HOOK_REFUSAL_CAP, 2)
+        fields, line = self.hold(self.LINT)
+        self.assertNotIn('at_cap', fields['correction'])
+        self.assertIn('(no round spent', line)
+
+    def test_refusal_class_is_redaction_for_a_redact_text(self):
+        fields, _ = self.hold(self.REDACT)
+        self.assertEqual(fields['correction']['refusal'], 'redaction')
+
+    def test_refusal_class_is_gate_for_a_lint_text(self):
+        fields, _ = self.hold(self.LINT)
+        self.assertEqual(fields['correction']['refusal'], 'gate')
+
+    def test_refusal_class_holds_on_the_second_identical_redaction_refusal_too(self):
+        self.hold(self.REDACT)
+        fields, _ = self.hold(self.REDACT)
+        self.assertEqual(fields['correction']['refusal'], 'redaction')
+
+    def test_refusal_class_holds_on_the_second_identical_lint_refusal_too(self):
+        self.hold(self.LINT)
+        fields, _ = self.hold(self.LINT)
+        self.assertEqual(fields['correction']['refusal'], 'gate')
+
+    def test_the_three_refusal_classes_are_disjoint(self):
+        fields, _ = self.hold(self.REDACT)
+        self.assertNotEqual(fields['correction']['refusal'], 'gate')
+        self.assertNotEqual(fields['correction']['refusal'], 'footprint')
+        fields, _ = self.hold(self.LINT)
+        self.assertNotEqual(fields['correction']['refusal'], 'redaction')
+        self.assertNotEqual(fields['correction']['refusal'], 'footprint')
 
 
 class EmptyEndsTests(unittest.TestCase):
@@ -1892,6 +2024,66 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         ok, line = lc.publish(self.repo, 'fix/B-9998', '', main='main')
         self.assertTrue(ok, line)
         self.assertEqual(line, 'published fix/B-9998 at ' + self.sh(['rev-parse', '--short', 'HEAD'], self.repo))
+
+    def test_b0097_a_network_blip_is_retried_in_place_with_backoff_and_then_succeeds(self):
+        # B-0097: a DNS blip on the branch's own push is retried right here, with backoff,
+        # rather than failing the tick on the first attempt
+        self.sh(['checkout', '-q', '-b', 'fix/B-9997'], self.repo)
+        self.commit('new', 'new work')
+        blip = subprocess.CompletedProcess([], 1, '',
+            "fatal: unable to access 'url': Could not resolve host: github.com\n")
+        calls, slept = [], []
+        real_push = gitpush.push
+
+        def flaky(args, wt, **kwargs):
+            calls.append(1)
+            if len(calls) < 3:
+                return blip
+            return real_push(args, wt, **kwargs)
+
+        with mock.patch('asf.gitpush.push', side_effect=flaky):
+            ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main', sleep=slept.append)
+        self.assertTrue(ok, line)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(slept, list(lc.PUBLISH_RETRY_BACKOFF_S))
+
+    def test_b0097_a_hook_refusal_is_never_retried(self):
+        # a non-network refusal (the hook, here) returns on its first try: retrying it would
+        # just ask the hook the same question again
+        self.sh(['checkout', '-q', '-b', 'fix/B-9996'], self.repo)
+        self.commit('new', 'new work')
+        refused = subprocess.CompletedProcess([], 1, '', 'remote rejected (pre-push hook declined)\n')
+        calls, slept = [], []
+
+        def hooked(args, wt, **kwargs):
+            calls.append(1)
+            return refused
+
+        with mock.patch('asf.gitpush.push', side_effect=hooked):
+            ok, line = lc.publish(self.repo, 'fix/B-9996', '', main='main', sleep=slept.append)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(slept, [])
+
+    def test_b0097_a_network_blip_that_outlasts_the_backoff_falls_through(self):
+        # exhausted, the refusal is returned as any other — the next tick's health pass
+        # (health.push_retry) is what retries it from here
+        self.sh(['checkout', '-q', '-b', 'fix/B-9995'], self.repo)
+        self.commit('new', 'new work')
+        blip = subprocess.CompletedProcess([], 1, '',
+            "fatal: unable to access 'url': Could not resolve host: github.com\n")
+        calls, slept = [], []
+
+        def always_blips(args, wt, **kwargs):
+            calls.append(1)
+            return blip
+
+        with mock.patch('asf.gitpush.push', side_effect=always_blips):
+            ok, line = lc.publish(self.repo, 'fix/B-9995', '', main='main', sleep=slept.append)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1 + len(lc.PUBLISH_RETRY_BACKOFF_S))
+        self.assertEqual(slept, list(lc.PUBLISH_RETRY_BACKOFF_S))
+        self.assertEqual(lc.push_failure(line.split('refused: ', 1)[1]), lc.NETWORK_ERROR)
 
     def _push_from_elsewhere(self, subject):
         """A person pushes ``subject`` onto ``origin/fix/B-9999`` from another clone; this repo
@@ -3800,3 +3992,63 @@ class WorktreeStatusSnapshot(unittest.TestCase):
             ev = lc.gather(None, run)
         self.assertEqual(ev.uncommitted, 1)
         self.assertEqual(self._count_status(spy), 1)
+
+
+class GatherHasCommitsOnAFreshCheckoutOfAPushedBranchTests(unittest.TestCase):
+    """B-0584: a branch a prior pass already pushed past the trunk — a cloud session's push, or a
+    worktree this one never saw before — reads `has_commits=False` the first time *this*
+    worktree checks it out: its own reflog holds nothing but `branch: Created from
+    origin/<branch>` (the filtered entry), though the branch itself carries real work. `judge`
+    then reads a report that truthfully says there is nothing new to commit as an empty branch,
+    and F-0097's replan parked twice in 24h on work that was already on origin."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='lifecycle_gather_fresh_')
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        origin, main_repo, self.wt = (os.path.join(self.root, n)
+                                      for n in ('origin.git', 'main', 'wt'))
+        self.git('init', '-q', '--bare', '-b', 'main', origin, cwd=self.root)
+        self.git('clone', '-q', origin, main_repo, cwd=self.root)
+        for k, v in (('user.name', 'T'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.git('config', k, v, cwd=main_repo)
+        self._commit(main_repo, 'seed')
+        self.git('push', '-q', 'origin', 'HEAD:main', cwd=main_repo)
+        # a prior pass pushed its work straight to the branch, past the trunk
+        self.git('checkout', '-q', '-b', 'lane/x', cwd=main_repo)
+        self._commit(main_repo, 'the work')
+        self.git('push', '-q', 'origin', 'lane/x', cwd=main_repo)
+        self.git('checkout', '-q', 'main', cwd=main_repo)
+        self.git('branch', '-q', '-D', 'lane/x', cwd=main_repo)
+        # this worktree checks the branch out for the first time, after that commit is already
+        # on origin — its own reflog is just the branch's creation
+        self.git('worktree', 'add', '-q', '-b', 'lane/x', self.wt, 'origin/lane/x', cwd=main_repo)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', *args], cwd=cwd or self.wt, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _commit(self, repo, name):
+        with open(os.path.join(repo, name), 'w') as f:
+            f.write('x\n')
+        self.git('add', '-A', cwd=repo)
+        self.git('commit', '-qm', name, cwd=repo)
+
+    def test_a_fresh_checkout_of_a_branch_already_ahead_of_trunk_has_commits(self):
+        reflog = self.git('reflog', 'show', '--format=%gs', 'refs/heads/lane/x')
+        self.assertEqual(reflog, 'branch: Created from origin/lane/x')
+        ev = lc.gather(None, {'worktree': self.wt, 'branch': 'lane/x'})
+        self.assertTrue(ev.has_commits, 'the branch is ahead of main on origin')
+
+    def test_judge_does_not_call_it_an_empty_branch(self):
+        run = {'worktree': self.wt, 'branch': 'lane/x', 'kind': 'replan'}
+        ev = lc.gather(None, run)
+        ev.result = OK
+        self.assertEqual(lc.judge(run, ev), lc.FINISHED)
+
+    def test_a_branch_truly_never_pushed_past_trunk_still_has_no_commits(self):
+        wt2 = os.path.join(self.root, 'wt2')
+        self.git('worktree', 'add', '-q', '-b', 'lane/never', wt2, 'origin/main',
+                 cwd=os.path.join(self.root, 'main'))
+        ev = lc.gather(None, {'worktree': wt2, 'branch': 'lane/never'})
+        self.assertFalse(ev.has_commits)

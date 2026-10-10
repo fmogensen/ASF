@@ -96,6 +96,17 @@ def confine_hooks_to_temp(env=None):
 #: ``GIT_CONFIG_GLOBAL``; nothing in ASF spawns a child through either today.
 GIT_CONFIG_NOT_INHERITED = ('core.hookspath',)
 
+#: A second, suite-only name beside :data:`GIT_CONFIG_NOT_INHERITED`: what the suite's own two
+#: entry points (``tests/__init__.py``, ``tests/test_00_home.py``) refuse from a caller, never the
+#: default :func:`strip_git_config` every other caller gets. A session's ``user.name``/
+#: ``user.email`` outranks a fixture repo's own repo-local identity (P5, F-0116) — the same leak
+#: B-0114 names in the hooks direction — so a suite run from inside a worker session would read
+#: every fixture's planted author back as the caller's own. ``GIT_CONFIG_NOT_INHERITED`` itself
+#: stays untouched: PD11's reason, and ``tests/test_hermetic.py`` pins that the default strip
+#: keeps both keys (a worker session's own git invocations must still carry its identity
+#: anywhere, not only inside the suite).
+GIT_CONFIG_NOT_INHERITED_BY_SUITE = GIT_CONFIG_NOT_INHERITED + ('user.name', 'user.email')
+
 #: ``GIT_CONFIG_KEY_3``/``GIT_CONFIG_VALUE_3`` — one entry of git's environment config.
 GIT_CONFIG_VAR_RE = re.compile(r'^GIT_CONFIG_(?:KEY|VALUE)_\d+$')
 

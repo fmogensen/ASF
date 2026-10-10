@@ -13,6 +13,7 @@ deleted, and each card gets a ``## History`` line — written through the ``asf 
 wraps it in the record's publish path (``asf.cli._published``), so both cards and the derived
 ``index.json`` land in one signed-off commit.
 """
+import re
 import sys
 
 from asf.record.check import product_of
@@ -20,6 +21,20 @@ from asf.record.core import canonicalize, is_open, load_items, today
 
 #: The History line each card gets; ``{who}`` is empty on the member, ``<task> `` on the lead.
 HISTORY = '- {date} undeliver: {who}undelivered from {lead}: {why}'
+
+#: Matches the member's own History line (``{who}`` empty) and not the lead's (``{who}`` =
+#: ``<task> ``, so the literal ``undelivered from`` right after ``undeliver:`` fails to match it)
+#: — both shapes sit on the same card after an ``asf undeliver``.
+MEMBER_RE = re.compile(r'(?m)^\s*-\s+\S+\s+undeliver:\s+undelivered from\s+(\S+?):')
+
+
+def undelivered_from(text):
+    """The lead ids a card's own member-shape ``## History`` line names it undelivered from, in
+    first-seen order. ``[]`` for ``None``/empty text, or a card no ``asf undeliver`` ever
+    touched."""
+    if not text:
+        return []
+    return list(dict.fromkeys(MEMBER_RE.findall(text)))
 
 
 def cmd_undeliver(args, root):

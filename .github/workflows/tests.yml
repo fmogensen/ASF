@@ -9,8 +9,63 @@ on:
     branches: [main]
   pull_request:
 
+# F-0301: the suite is split across PARTS parallel `part` jobs per Python (`run_tests.py --part
+# K/N`, a partition: every module in exactly one part); the quick checks and the end-to-end steps
+# run once per Python in `checks`; `tests` gathers them. `tests (3.12)` / `tests (3.13)` are the
+# check names main's ruleset requires (and tools/merge-pr.sh's MERGE_PR_CHECKS default), so the
+# gathering job keeps exactly those names, always runs, and is green only when its Python's checks
+# job and every one of its parts were green — and the parts together ran every module once.
+env:
+  # must equal the length of the `part` matrix below (tests/test_workflow.py holds them together)
+  PARTS: 4
+
+# One run per pull request head ref: a new push cancels the PR's run in progress (its verdict is
+# moot). On main, one run per workflow with cancel-in-progress off: the running one finishes and
+# gives a verdict, and a newer push replaces any run still pending — only the newest main head
+# needs one, and a red on it is attributed by the trunk watch (asf.trunk_red).
+concurrency:
+  group: tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.head_ref) || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  tests:
+  # The docs-only fast path: a pull request touching only the Markdown records no test reads
+  # (tools/ci_paths.py) runs here the checks that do read every tracked file, and `checks` and
+  # every `part` are skipped. A push to main is never docs-only. When this job cannot tell
+  # (docs_only is not "true"), the full suite runs.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.diff.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: is this pull request docs-only
+        id: diff
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            python3 tools/ci_paths.py >> "$GITHUB_OUTPUT"
+          else
+            echo docs_only=false >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.diff.outputs.docs_only == 'true'
+        with:
+          python-version: "3.12"
+      - name: the factory-only merge rule (a hand branch into main is refused)
+        if: steps.diff.outputs.docs_only == 'true'
+        run: bash tools/check_factory_only.sh
+      - name: check generic
+        if: steps.diff.outputs.docs_only == 'true'
+        run: bash tools/check_generic.sh
+      - name: privacy sweep (no operator paths, e-mails or private links)
+        if: steps.diff.outputs.docs_only == 'true'
+        run: bash tools/check_privacy.sh
+
+  checks:
+    name: checks (${{ matrix.python }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       # a real failure on one Python version must not cancel the other's job (B-82155: that
@@ -49,18 +104,15 @@ jobs:
           bash tools/check_clients.sh --against HEAD^1
       - name: plugin is generated from the CLI
         run: asf plugin check
-      # B-0068: one test module per process, min(cpu_count, 8) at a time — the same modules
-      # `unittest discover -s tests` runs, the same summary shape, non-zero when any is red.
-      - name: tests
+      - name: a git identity for the end-to-end steps
         run: |
           git config --global user.name ci
           git config --global user.email ci@localhost
-          python3 tools/run_tests.py
       - name: the sample product, end to end (init, one tick, next, doctor)
         run: python3 -m unittest -v tests.test_sample_product
       # F-0107/T-0409: zero to green — one `asf install` into a temp HOME, doctor green, a dry
       # run, then the same command again writing nothing new. Beside the sample step (not inside
-      # it, and before the hermetic re-run below) so a failure here names the installer, not the
+      # it, and before the hermetic re-run) so a failure here names the installer, not the
       # sample product's own tick.
       - name: asf install, zero to green (a temp HOME, sample/, doctor, a dry run, then again)
         run: python3 -m unittest -v tests.test_install_e2e
@@ -77,6 +129,42 @@ jobs:
       # the sample product on the replay runtime, with the stamped tables pinned to goldens.
       - name: the whole loop, card to release notes (goldens)
         run: python3 -m unittest -v tests.test_sample_product.WholeLoopFromCardToRelease
+      - name: record this job green for the gathering job
+        run: mkdir -p ci-parts && echo ok > "ci-parts/checks-${{ matrix.python }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checks-${{ matrix.python }}
+          path: ci-parts/
+          retention-days: 1
+
+  part:
+    name: part (${{ matrix.python }}, ${{ matrix.part }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+        part: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: install with pipx
+        run: |
+          python -m pip install --upgrade pipx
+          python -m pipx install --python "$(which python)" .
+      # B-0068: one test module per process, min(cpu_count, 8) at a time — the same modules
+      # `unittest discover -s tests` runs, the same summary shape, non-zero when any is red.
+      # F-0301: only this job's part of them.
+      - name: tests
+        run: |
+          set -o pipefail
+          git config --global user.name ci
+          git config --global user.email ci@localhost
+          python3 tools/run_tests.py --part "${{ matrix.part }}/$PARTS" | tee "$RUNNER_TEMP/tests.out"
       # F-0087 (B-0033, B-0038, B-0043, B-0047): the suite is hermetic. It runs once more under
       # `env -i` with an operator-like home that names this checkout as the product `asf`,
       # ASF_PRODUCT exported the way the tick exports it, and a host git config whose
@@ -84,6 +172,7 @@ jobs:
       # identity or the host's git defaults goes red here, on a plain install.
       - name: the suite is hermetic (env -i, an operator home, ASF_PRODUCT set, foreign default branch)
         run: |
+          set -o pipefail
           OPERATOR="$RUNNER_TEMP/operator"
           mkdir -p "$OPERATOR/.ASF/products"
           printf 'default_product: asf\nscheduler:\n  kind: none\n' > "$OPERATOR/.ASF/config.yaml"
@@ -92,4 +181,45 @@ jobs:
           HOME="$OPERATOR" git config --global user.email ci@localhost
           HOME="$OPERATOR" git config --global init.defaultBranch master
           env -i PATH="$PATH" HOME="$OPERATOR" ASF_HOME="$OPERATOR/.ASF" ASF_PRODUCT=asf \
-            python3 tools/run_tests.py
+            python3 tools/run_tests.py --part "${{ matrix.part }}/$PARTS" | tee "$RUNNER_TEMP/hermetic.out"
+      - name: record the modules and tests this part ran
+        run: |
+          mkdir -p ci-parts
+          python3 tools/run_tests.py --record "ci-parts/part-${{ matrix.python }}-${{ matrix.part }}.txt" \
+            --part "${{ matrix.part }}/$PARTS" "$RUNNER_TEMP/tests.out" "$RUNNER_TEMP/hermetic.out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.python }}-${{ matrix.part }}
+          path: ci-parts/
+          retention-days: 1
+
+  # The required checks. `if: always()` because a skipped job would read as green to a ruleset;
+  # each reads its own Python's records only, so a red 3.13 part never turns `tests (3.12)` red.
+  # On the docs-only fast path it is green only when `changes` (with its checks) was.
+  tests:
+    name: tests (${{ matrix.python }})
+    needs: [changes, checks, part]
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - name: docs-only pull request — the docs checks are green, no test shard was needed
+        if: needs.changes.outputs.docs_only == 'true'
+        env:
+          CHANGES: ${{ needs.changes.result }}
+        run: test "$CHANGES" = success
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.docs_only != 'true'
+      - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.docs_only != 'true'
+        continue-on-error: true
+        with:
+          pattern: "*-${{ matrix.python }}*"
+          path: ci-parts
+          merge-multiple: true
+      - name: the checks and every part are green, and the parts ran every module once
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python3 tools/run_tests.py --gather ci-parts --python "${{ matrix.python }}" --parts "$PARTS"

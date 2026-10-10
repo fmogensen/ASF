@@ -13,6 +13,7 @@ from unittest import mock
 
 from asf import env
 from asf import hermetic
+from asf import identity
 from asf.harvest import harvest
 from asf.metrics import metrics
 from asf.views import sessions as sessions_view
@@ -259,6 +260,26 @@ class CommitTrailerTest(Home):
         msg = _git(['log', '-1', '--format=%B'], wt, env=e).stdout
         self.assertIn('chained', msg)
 
+    def test_tracked_githooks_dir_chains_when_hookspath_was_never_configured(self):
+        # the self-hosted asf repo's own case (B-83472): nobody ever ran `asf init` on this
+        # checkout to point core.hooksPath at its tracked .githooks/, so the shim's "own" lookup
+        # would otherwise fall through to the empty default <git-common-dir>/hooks and silently
+        # skip the product's redaction gate
+        job_obj = self._spawn_job(job='j5')
+        wt = job_obj.cwd
+        marker = os.path.join(wt, 'marker')
+        _git(['config', '--unset-all', 'core.hooksPath'], wt)
+        hooks_dir = os.path.join(wt, '.githooks')
+        os.makedirs(hooks_dir, exist_ok=True)
+        pre_commit = os.path.join(hooks_dir, 'pre-commit')
+        with open(pre_commit, 'w', encoding='utf-8') as f:
+            f.write(f'#!/bin/sh\ntouch "{marker}"\n')
+        os.chmod(pre_commit, 0o755)
+        e = self._env(job_obj)
+        p = self._commit(wt, e)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(os.path.exists(marker))
+
     def _subject(self, wt, e):
         return _git(['log', '-1', '--format=%s'], wt, env=e).stdout.strip()
 
@@ -346,6 +367,137 @@ class CommitTrailerTest(Home):
         trailer = _git(['log', '-1', '--format=%(trailers:key=ASF-Session,valueonly)'],
                        wt).stdout.strip()
         self.assertEqual(trailer, '')
+
+
+class AgentIdentityTest(Home):
+    """F-0116 §3.1: the launch configures the agent's identity — through
+    :func:`asf.workers.runtime.write_identity_gitconfig` and the ``GIT_CONFIG_*`` channel
+    :func:`asf.workers.runtime.build_env` carries it on — and it is never the operator's, however
+    many layers (a seeded ``.gitconfig``, a repo-local ``user.name``) it has to beat."""
+
+    OPERATOR_NAME = 'An Operator'
+    OPERATOR_EMAIL = 'an.operator@example.invalid'
+
+    def setUp(self):
+        super().setUp()
+        self.operator_home = tempfile.mkdtemp(prefix='asf-identity-ophome-')
+        self.addCleanup(shutil.rmtree, self.operator_home, ignore_errors=True)
+        with open(os.path.join(self.operator_home, '.gitconfig'), 'w', encoding='utf-8') as f:
+            f.write(f'[user]\n\tname = {self.OPERATOR_NAME}\n\temail = {self.OPERATOR_EMAIL}\n')
+
+    def _repo(self):
+        repo = tempfile.mkdtemp(prefix='asf-identity-repo-')
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        _git(['init', '-q', '-b', 'main'], repo)
+        return repo
+
+    def _hooks_dir(self):
+        """A minimal ``core.hooksPath`` dir carrying the real ``ASF_HOOK`` — the §3.0 probe's own
+        fixture shape, so the commit-msg hook's ``Signed-off-by:`` is the real one."""
+        hooks = tempfile.mkdtemp(prefix='asf-identity-hooks-')
+        self.addCleanup(shutil.rmtree, hooks, ignore_errors=True)
+        with open(os.path.join(hooks, 'asf-hook'), 'w', encoding='utf-8') as f:
+            f.write(githooks.ASF_HOOK)
+        os.chmod(os.path.join(hooks, 'asf-hook'), 0o755)
+        for name in ('prepare-commit-msg', 'commit-msg'):
+            path = os.path.join(hooks, name)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(f'#!/bin/sh\nexec "$(dirname "$0")/asf-hook" {name} "$@"\n')
+            os.chmod(path, 0o755)
+        return hooks
+
+    def _build_env(self, acct, repo, hooks, signoff=True, base=None):
+        job = runtime_mod.Job('sample', 'j', repo, '/b.md', 'opus', account=acct, hooks_dir=hooks,
+                              env={'ASF_SIGNOFF': '1'} if signoff else {})
+        return runtime_mod.build_env(job, base=base or {'PATH': os.environ.get('PATH', '')})
+
+    def _commit_author(self, repo, e, msg='do a thing'):
+        with open(os.path.join(repo, 'a.txt'), 'a', encoding='utf-8') as f:
+            f.write(msg + '\n')
+        _git(['add', 'a.txt'], repo, env=e)
+        p = _git(['commit', '-q', '-m', msg], repo, env=e)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return _git(['log', '-1', '--format=author: %an <%ae>%ncommitter: %cn <%ce>%n--%n%B'],
+                    repo, env=e).stdout
+
+    def test_the_session_gitconfig_is_the_agent_not_the_operator(self):
+        home = tempfile.mkdtemp(prefix='asf-identity-home-')
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        path = runtime_mod.write_identity_gitconfig(home)
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn(identity.AGENT_NAME, text)
+        self.assertIn(identity.AGENT_EMAIL, text)
+        self.assertNotIn(self.OPERATOR_NAME, text)
+        self.assertNotIn(self.OPERATOR_EMAIL, text)
+
+    def test_build_env_carries_the_identity_as_git_config(self):
+        acct = pool_mod.Account('acct-a', cap=1)
+        e = self._build_env(acct, '/wt', '/hooks', signoff=False)
+        n = int(e['GIT_CONFIG_COUNT'])
+        pairs = [(e[f'GIT_CONFIG_KEY_{i}'], e[f'GIT_CONFIG_VALUE_{i}']) for i in range(n)]
+        self.assertIn(('core.hooksPath', '/hooks'), pairs)
+        self.assertIn(('user.name', identity.AGENT_NAME), pairs)
+        self.assertIn(('user.email', identity.AGENT_EMAIL), pairs)
+
+    def test_a_commit_in_a_session_env_is_authored_by_the_agent(self):
+        repo, hooks = self._repo(), self._hooks_dir()
+        acct = pool_mod.Account('acct-a', cap=1)
+        e = self._build_env(acct, repo, hooks)
+        out = self._commit_author(repo, e)
+        self.assertIn(f'author: {identity.AGENT_NAME} <{identity.AGENT_EMAIL}>', out)
+        self.assertIn(f'committer: {identity.AGENT_NAME} <{identity.AGENT_EMAIL}>', out)
+        self.assertIn(f'Signed-off-by: {identity.AGENT_NAME} <{identity.AGENT_EMAIL}>', out)
+
+    def test_the_agent_wins_over_a_seeded_gitconfig_and_a_repo_local_user(self):
+        seed_src = tempfile.mkdtemp(prefix='asf-identity-seed-')
+        self.addCleanup(shutil.rmtree, seed_src, ignore_errors=True)
+        seed_gitconfig = os.path.join(seed_src, '.gitconfig')
+        with open(seed_gitconfig, 'w', encoding='utf-8') as f:
+            f.write(f'[user]\n\tname = {self.OPERATOR_NAME}\n\temail = {self.OPERATOR_EMAIL}\n')
+        acct = pool_mod.Account('acct-a', cap=1, home_seed=[seed_gitconfig])
+        home, missing = runtime_mod.seed_home(acct, operator_home=self.operator_home)
+        self.assertEqual(missing, [])
+        with open(os.path.join(home, '.gitconfig'), encoding='utf-8') as f:
+            # home_seed wins over ASF's own write — still the operator's, seeded deliberately
+            self.assertIn(self.OPERATOR_NAME, f.read())
+
+        repo, hooks = self._repo(), self._hooks_dir()
+        _git(['config', 'user.name', 'Repo Local'], repo)
+        _git(['config', 'user.email', 'local@example.invalid'], repo)
+        e = self._build_env(acct, repo, hooks)
+        out = self._commit_author(repo, e)
+        self.assertIn(f'author: {identity.AGENT_NAME} <{identity.AGENT_EMAIL}>', out)
+        self.assertNotIn('Repo Local', out)
+        self.assertNotIn(self.OPERATOR_NAME, out)
+
+    def test_an_account_identity_overrides_the_default(self):
+        repo, hooks = self._repo(), self._hooks_dir()
+        acct = pool_mod.Account('acct-a', cap=1,
+                                identity={'name': 'Factory', 'email': 'factory@example.invalid'})
+        e = self._build_env(acct, repo, hooks)
+        out = self._commit_author(repo, e)
+        self.assertIn('author: Factory <factory@example.invalid>', out)
+        self.assertIn('Signed-off-by: Factory <factory@example.invalid>', out)
+
+    def test_a_malformed_account_identity_is_a_config_problem(self):
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'identity': ['a']}]}}
+        problems = dict(env.validate_worker_pool(cfg))
+        self.assertIn('worker_pool.accounts[acct-a].identity', problems)
+        os.makedirs(os.path.dirname(env.config_path()), exist_ok=True)
+        with open(env.config_path(), 'w', encoding='utf-8') as f:
+            f.write('worker_pool:\n  accounts:\n    - name: acct-a\n      identity: [a]\n')
+        with self.assertRaises(env.ConfigError) as cm:
+            env.load_config()
+        self.assertIn('worker_pool.accounts[acct-a].identity', str(cm.exception))
+
+    def test_the_agent_identity_is_not_an_account_name(self):
+        acct = pool_mod.Account('acct-a', cap=1)
+        name, email = identity.agent_identity(acct)
+        self.assertNotIn('acct-a', name)
+        self.assertNotIn('acct-a', email)
+        self.assertNotIn(self.OPERATOR_NAME, name)
+        self.assertNotIn(self.OPERATOR_EMAIL, email)
 
 
 class ObserveTest(unittest.TestCase):

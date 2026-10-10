@@ -79,6 +79,26 @@ class NewPublishesTests(unittest.TestCase):
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
         self.assertIn('put back', err.getvalue())
 
+    def test_in_progress_flag_sets_in_progress_by(self):
+        """B-0070: `asf new --in-progress operator` stamps the card so the lane does not
+        duplicate a fix the operator is already carrying by hand."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cmd_new(self._args(in_progress='operator'), self.root), 0)
+        new_id = out.getvalue().strip()
+        with open(os.path.join(self.root, 'stories', f'{new_id}.md'), encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read())
+        self.assertEqual(meta['in_progress_by'], 'operator')
+
+    def test_no_in_progress_flag_leaves_the_field_out(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cmd_new(self._args(), self.root), 0)
+        new_id = out.getvalue().strip()
+        with open(os.path.join(self.root, 'stories', f'{new_id}.md'), encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read())
+        self.assertNotIn('in_progress_by', meta)
+
     def test_write_new_item_state_keyword(self):
         write_new_item(self.root, {}, 'decision', 'D-0001', {'title': 'A decision'}, '',
                        '2026-01-01', 'seed', state='Closed')

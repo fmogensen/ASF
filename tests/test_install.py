@@ -2107,27 +2107,6 @@ class VersionStringTest(unittest.TestCase):
             _git(['tag', 'release-2026-09-24-abc'], tmp)
             self.assertIsNone(cli._release(tmp, {}))
 
-    def test_the_latest_release_is_the_newest_version_tag_and_its_date(self):
-        from asf import cli
-        with tempfile.TemporaryDirectory() as tmp:
-            self._repo_with_tag(tmp, past=2)
-            _git(['tag', 'v0.1.10'], tmp)                       # numeric, not lexical: 10 > 1
-            with mock.patch.object(cli, '_checkout_root', return_value=tmp):
-                tag, when = cli.latest_release()
-        self.assertEqual(tag, 'v0.1.10')
-        self.assertLess(abs((datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()), 600)
-
-    def test_the_latest_release_of_a_git_install_is_its_remote_newest_tag(self):
-        from asf import cli
-        listed = subprocess.CompletedProcess([], 0, 'aa\trefs/tags/v0.1.2\nbb\trefs/tags/v0.1.10\n'
-                                                    'cc\trefs/tags/release-x\n', '')
-        with mock.patch.object(cli, '_checkout_root', return_value=None), self._dist({}), \
-                mock.patch('asf.cli.subprocess.run', return_value=listed):
-            self.assertEqual(cli.latest_release(), ('v0.1.10', None))
-        with mock.patch.object(cli, '_checkout_root', return_value=None), \
-                mock.patch.object(cli, '_direct_url', return_value={}):
-            self.assertIsNone(cli.latest_release())
-
     def test_status_shows_the_running_version_and_the_latest_release(self):
         from asf import cli
         from asf.views import status
@@ -2165,6 +2144,63 @@ class VersionStringTest(unittest.TestCase):
         dist.read_text.return_value = json.dumps({'url': 'file:///x', 'dir_info': {'editable': True}})
         with self._no_checkout(), mock.patch('importlib.metadata.distribution', return_value=dist):
             self.assertEqual(cli.version_string(), asf.__version__)
+
+
+class LatestReleaseTests(HomeCase):
+    """PD8/D12: the three ``cli.latest_release`` cases this module always owned — lifted out of
+    ``VersionStringTest`` unchanged now that the remote branch is routed through
+    :func:`asf.upgrade.latest_release`'s shared cache — plus the cache itself: the remote branch
+    shells out to ``git ls-remote`` only while the cached entry is stale."""
+
+    def _dist(self, vcs_info):
+        dist = mock.Mock()
+        dist.read_text.return_value = json.dumps(
+            {'url': 'https://example.invalid/asf.git', 'vcs_info': {'vcs': 'git', **vcs_info}})
+        return mock.patch('importlib.metadata.distribution', return_value=dist)
+
+    def _repo_with_tag(self, tmp, past):
+        _git(['init', '-q', '-b', 'main'], tmp)
+        for i in range(past + 1):
+            _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+                  '-m', f'c{i}'], tmp)
+            if i == 0:
+                _git(['tag', 'v0.1.0'], tmp)
+                _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q',
+                      '--allow-empty', '-m', 'release'], tmp)
+                _git(['tag', 'not-a-release'], tmp)
+                _git(['tag', 'v0.1.1'], tmp)
+
+    def test_the_latest_release_is_the_newest_version_tag_and_its_date(self):
+        from asf import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_with_tag(tmp, past=2)
+            _git(['tag', 'v0.1.10'], tmp)                       # numeric, not lexical: 10 > 1
+            with mock.patch.object(cli, '_checkout_root', return_value=tmp):
+                tag, when = cli.latest_release()
+        self.assertEqual(tag, 'v0.1.10')
+        self.assertLess(abs((datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()),
+                        600)
+
+    def test_the_latest_release_of_a_git_install_is_its_remote_newest_tag(self):
+        from asf import cli
+        listed = subprocess.CompletedProcess([], 0, 'aa\trefs/tags/v0.1.2\nbb\trefs/tags/v0.1.10\n'
+                                                    'cc\trefs/tags/release-x\n', '')
+        with mock.patch.object(cli, '_checkout_root', return_value=None), self._dist({}), \
+                mock.patch('asf.cli.subprocess.run', return_value=listed):
+            self.assertEqual(cli.latest_release(), ('v0.1.10', None))
+        with mock.patch.object(cli, '_checkout_root', return_value=None), \
+                mock.patch.object(cli, '_direct_url', return_value={}):
+            self.assertIsNone(cli.latest_release())
+
+    def test_the_remote_branch_reads_the_shared_cache_while_fresh(self):
+        from asf import cli
+        url = 'https://example.invalid/asf.git'
+        upgrade._write_json(upgrade.releases_path(),
+                            {url: {'tag': 'v0.1.10', 'sha': 'a' * 40, 'at': time.time()}})
+        with mock.patch.object(cli, '_checkout_root', return_value=None), self._dist({}), \
+                mock.patch('asf.cli.subprocess.run') as m_run:
+            self.assertEqual(cli.latest_release(), ('v0.1.10', None))
+        m_run.assert_not_called()
 
 
 #: The one-product install script, as the suite runs it.
@@ -2516,6 +2552,39 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(self._pipx_call(), f'install --force git+{self.remote}@v0.3.0')
         self.assertEqual(self._asf_call(), 'install --product demo')
         self.assertIn(f'install: product demo, release v0.3.0 from {self.remote}', r.stdout)
+
+    def test_an_unreachable_repo_fails_tag_resolution_with_needs_operator(self):
+        """B-0113: with no ref, resolving the newest tag runs ``git ls-remote`` before pipx is
+        ever reached; an unreachable repo must not fall through ``set -e`` silently with git's
+        own exit code — it names NEEDS OPERATOR, exits 2, and pipx is never invoked."""
+        bad_remote = os.path.join(self.tmp, 'no-such-remote.git')
+        r = self._run(['demo'], ASF_REPO_URL=bad_remote)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('install: NEEDS OPERATOR:', r.stderr)
+        self.assertIn(bad_remote, r.stderr)
+        self.assertFalse(os.path.exists(self.pipx_log))
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_a_failing_pipx_names_needs_operator_with_its_last_stderr_line(self):
+        """B-0113: pipx itself failing (the ref unresolvable, the network down, the spec
+        rejected …) must not fall through ``set -e`` with pipx's own exit code and no guidance —
+        it names NEEDS OPERATOR, carries pipx's last stderr line, and exits 2."""
+        self._write_scripts()
+        pipx_path = os.path.join(self.bin_dir, 'pipx')
+        with open(pipx_path, 'w') as f:
+            f.write('#!/bin/sh\n'
+                    'echo "pipx: looking for spec" >&2\n'
+                    'echo "pipx: ERROR: could not find a version that satisfies the '
+                    'requirement" >&2\n'
+                    'exit 1\n')
+        os.chmod(pipx_path, 0o755)
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
+                           text=True, **_operator_tty(), env=self._env(), timeout=60)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn('install: NEEDS OPERATOR: pipx install of deadbeef failed', r.stderr)
+        self.assertIn('could not find a version that satisfies the requirement', r.stderr)
+        self.assertIn('check the ref and network', r.stderr)
+        self.assertFalse(os.path.exists(self.log))
 
     def test_a_second_argument_pins_the_ref_with_no_tag_resolution(self):
         r = self._run(['demo', 'deadbeef'])
@@ -3320,6 +3389,25 @@ class InstallStepsTests(HomeCase):
 
     def test_step_8_install_failure_is_not_masked_by_the_read_back(self):
         args = _install_args(scheduler='launchd')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=1):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (1, 'asf scheduler install failed'))
+
+    def test_step_8_cron_prints_the_crontab_line_and_is_not_a_failure(self):
+        """B-0112: ``scheduler.cmd_scheduler`` returns 3 for a kind with no on-machine adapter
+        (cron: it only prints the line for the operator) — this must read as ``ok``, never
+        ``FAILED``."""
+        args = _install_args(scheduler='cron')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=3) as cmd, \
+                mock.patch.object(install.env, 'load_config',
+                                  return_value={'scheduler': {'kind': 'cron'}}):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (0, 'ok'))
+        cmd.assert_called_once()
+
+    def test_step_8_a_real_scheduler_install_failure_still_fails_under_cron(self):
+        """A genuine failure (anything but 0 or 3) is not swallowed by the cron carve-out."""
+        args = _install_args(scheduler='cron')
         with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=1):
             result = install._step_scheduler(args)
         self.assertEqual(result, (1, 'asf scheduler install failed'))

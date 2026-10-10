@@ -485,6 +485,12 @@ def collect(product, row, index, inflight=None, repo_facts=None):
     skip = set().union(*feeder_rows.left_out(product, items, item.get('id'))) \
         if item.get('delivers') else set()
     delivers = [str(i) for i in item.get('delivers') or [] if i not in skip]
+    branch = getattr(row, 'branch', '') or ''
+    prior_head = ''
+    if product is not None and branch and item_id and item_id != 'none':
+        from asf.evidence import review_store
+        prior_head = (review_store.newest(review_store.root(product), str(item_id).lower(), branch)
+                      or {}).get('head') or ''
     return {
         'kind': kind,
         'items': items,
@@ -511,8 +517,9 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'proves_lines': proves_lines(product, items, item),
         'round': read_round,
         'next_round': rnd + 1 if rnd else 1,
+        'prior_head': prior_head,  # the head the previous review round read (review_store), '' when none
         'review_path': review_path,
-        'branch': getattr(row, 'branch', '') or '',
+        'branch': branch,
         'head': (repo_facts or {}).get('head') or '',
         'branch_exists': (repo_facts or {}).get('branch_exists'),
         'last_report': (repo_facts or {}).get('last_report') or '',

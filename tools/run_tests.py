@@ -20,6 +20,11 @@ A red module's output is printed the moment it finishes; ``-v`` prints every mod
 is the suite's own summary shape — ``Ran X tests in Ys`` and ``OK`` / ``FAILED (...)`` — and the
 exit status is non-zero when any process was. ``--shards 1`` is the serial suite, one module at
 a time. Python 3 stdlib only.
+
+``--part K/N`` runs only the K-th of N parts of the modules (F-0301): CI splits the suite across N
+parallel jobs, each running one part. The parts are a partition — every module in exactly one,
+balanced by the tests each carries, serial modules in part 1 — so the N jobs together run the
+whole suite once. ``--list --part K/N`` prints that part's plan.
 """
 import argparse
 import hashlib
@@ -55,6 +60,11 @@ VERDICT_RE = re.compile(r'^(OK|FAILED)(?: \((.*)\))?\s*$', re.M)
 #: ``expected failures=8`` counted as ``failures`` and turned a green run red.
 COUNT_RE = re.compile(r'(expected failures|unexpected successes|\w+)=(\d+)')
 TEST_DEF_RE = re.compile(r'^\s+(?:async )?def test_', re.M)
+FAIL_HEAD_RE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([\w.]+)\)\s*$', re.M)
+FRAME_RE = re.compile(r'^\s*File "([^"]*)", line (\d+),', re.M)
+#: The default extra attempt a red module gets, and the most red modules a run will retry.
+RETRY = 1
+RETRY_MAX = 4
 
 
 def default_shards():
@@ -92,6 +102,102 @@ def plan(tests_dir, serial=SERIAL):
     pool.sort(key=lambda m: (-weights[m], m))
     tail = [m for m in weights if m in serial]
     return pool, tail
+
+
+def parse_part(text):
+    """``(k, n)`` from ``'K/N'`` with ``1 <= k <= n``; ``ValueError`` otherwise."""
+    m = re.fullmatch(r'\s*(\d+)\s*/\s*(\d+)\s*', text or '')
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise ValueError(f'not a part K/N with 1 <= K <= N: {text!r}')
+    return int(m.group(1)), int(m.group(2))
+
+
+def partition(modules, weights, n):
+    """``modules`` split into ``n`` lists, each module in exactly one: heaviest first onto the
+    lightest list so far (ties to the lowest index), each list keeping ``modules``' own order.
+    Deterministic, so N jobs that compute it apart agree on it."""
+    loads = [0] * n
+    where = {}
+    for m in sorted(modules, key=lambda m: (-weights.get(m, 0), m)):
+        i = min(range(n), key=lambda j: (loads[j], j))
+        where[m] = i
+        loads[i] += max(1, weights.get(m, 0))
+    return [[m for m in modules if where[m] == i] for i in range(n)]
+
+
+def plan_part(tests_dir, part, serial=SERIAL):
+    """``plan`` narrowed to ``part`` (``(k, n)``, or None for the whole suite)."""
+    pool, tail = plan(tests_dir, serial)
+    if part is None:
+        return pool, tail
+    k, n = part
+    return partition(pool, discover(tests_dir), n)[k - 1], (tail if k == 1 else [])
+
+
+def record(path, tests_dir, part, outputs):
+    """Write a part job's record to ``path``: ``module <name>`` per module of ``part`` and
+    ``ran <n>`` per run summary in ``outputs`` (the run's printed text, one file per run); the
+    exit status, non-zero when a run's text has no green summary."""
+    pool, tail = plan_part(tests_dir, part)
+    lines = [f'module {m}' for m in pool + tail]
+    rc = 0
+    for f in outputs:
+        with open(f, encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+        n, _s, verdict, _c = parse(text)
+        if verdict != 'OK':
+            print(f'run_tests: {f}: no green summary ({verdict or "none"})')
+            rc = 1
+        lines.append(f'ran {n}')
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as fh:
+        fh.write('\n'.join(lines) + '\n')
+    print(f'run_tests: part {part[0]}/{part[1]}: {len(pool + tail)} module(s), ran '
+          + ', '.join(l.split()[1] for l in lines if l.startswith('ran ')))
+    return rc
+
+
+def gather(records_dir, tests_dir, python, parts, out=print):
+    """The required check over one Python's records (F-0301): its ``checks-<python>.txt`` and
+    ``part-<python>-<k>.txt`` for every k in 1..``parts`` are present (a job writes its record
+    only when it went green), and the parts' modules are exactly the unsharded plan, each once.
+    The exit status."""
+    problems = []
+    if not os.path.isfile(os.path.join(records_dir, f'checks-{python}.txt')):
+        problems.append(f'checks ({python}) did not finish green')
+    modules = []
+    runs = []
+    for k in range(1, parts + 1):
+        f = os.path.join(records_dir, f'part-{python}-{k}.txt')
+        if not os.path.isfile(f):
+            problems.append(f'part ({python}, {k}) did not finish green')
+            continue
+        with open(f, encoding='utf-8') as fh:
+            rows = [l.split(None, 1) for l in fh.read().splitlines() if l.strip()]
+        modules += [v for key, v in rows if key == 'module']
+        runs.append([int(v) for key, v in rows if key == 'ran'])
+    if not problems:
+        pool, tail = plan(tests_dir)
+        want = sorted(pool + tail)
+        dup = sorted({m for m in modules if modules.count(m) > 1})
+        if dup:
+            problems.append('run in more than one part: ' + ', '.join(dup))
+        missing = sorted(set(want) - set(modules))
+        if missing:
+            problems.append('run in no part: ' + ', '.join(missing))
+        extra = sorted(set(modules) - set(want))
+        if extra:
+            problems.append('not in the suite\'s plan: ' + ', '.join(extra))
+        totals = [sum(r[i] for r in runs if len(r) > i) for i in range(max(map(len, runs), default=0))]
+        out(f'tests ({python}): {len(modules)} of {len(want)} module(s) in {parts} part(s); '
+            f'tests ran per pass: {" / ".join(map(str, totals)) or "none"}')
+    for p in problems:
+        out(f'FAILED: {p}')
+    if not problems:
+        out('OK')
+    return 1 if problems else 0
 
 
 def changed_files(root, base):
@@ -253,6 +359,30 @@ def hook_digest(dirs):
     return out
 
 
+def flaky_rows(module, rc, output):
+    """The flaky rows a module's *first*, red attempt names: ``[(file, line, title)]``, one per
+    ``FAIL:``/``ERROR:`` block in ``output``, in the order they print. Pure: no process, no file,
+    no environment. A block with no frame under the module's own file falls back to line 1; an
+    attempt that never reached a summary (no block at all) yields one row naming the crash."""
+    own_file = f'tests/{module.replace(".", "/")}.py'
+    heads = list(FAIL_HEAD_RE.finditer(output or ''))
+    if not heads:
+        return [(own_file, 1, f'{module}: no summary (rc {rc})')]
+    rows = []
+    for i, head in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(output)
+        block = output[head.end():end]
+        title = '.'.join(head.group(1).split('.')[-2:])
+        file_, line = own_file, 1
+        for frame in FRAME_RE.finditer(block):
+            path = frame.group(1).replace(os.sep, '/')
+            if path == own_file or path.endswith('/' + own_file):
+                line = int(frame.group(2))
+                break
+        rows.append((file_, line, title))
+    return rows
+
+
 def hook_leaks(before, after):
     """The lines naming every hook file added, changed or removed between two digests; empty when
     the run left them all byte-identical."""
@@ -269,12 +399,15 @@ def hook_leaks(before, after):
     return sorted(lines)
 
 
-def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=None):
-    """Run the suite — or, with ``only``, just those modules of it; the exit status."""
+def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=None,
+       retry=RETRY, retry_max=RETRY_MAX, part=None):
+    """Run the suite — or, with ``only``, just those modules of it; the exit status. A red
+    module (up to ``retry_max`` of them) gets ``retry`` more attempts; one that goes green on a
+    retry is reported as flaky rather than red (D1-D8)."""
     tests_dir = os.path.abspath(tests_dir)
     root, package = os.path.split(tests_dir)
     shards = shards or default_shards()
-    pool, tail = plan(tests_dir, serial)
+    pool, tail = plan_part(tests_dir, part, serial)
     if only is not None:
         pool = [m for m in pool if m in only]
         tail = [m for m in tail if m in only]
@@ -282,11 +415,16 @@ def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=No
     dirs = hook_dirs(root)
     before = hook_digest(dirs)
     results = []
+    flaky = []
     started = time.monotonic()
 
-    def finish(module, proc):
+    def finish(module, proc, replace_at=None):
         output = proc.communicate()[0]
-        results.append((module, proc.returncode, output))
+        entry = (module, proc.returncode, output)
+        if replace_at is None:
+            results.append(entry)
+        else:
+            results[replace_at] = entry
         n, s, verdict, _c = parse(output)
         if proc.returncode != 0 or verdict != 'OK':
             out(f'--- {module}: {verdict or "no summary"} (rc {proc.returncode})')
@@ -311,10 +449,41 @@ def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=No
                 finish(m, p)
         if tail:
             finish('+'.join(tail), run_modules(tail, root, package, os.path.join(homes, 'serial')))
+
+        red = [m for m, rc, o in results if rc != 0 or parse(o)[2] != 'OK']
+        index = {m: i for i, (m, _rc, _o) in enumerate(results)}
+        if retry and red:
+            if len(red) > retry_max:
+                out(f'retry: skipped — {len(red)} red module(s) over the bound of {retry_max}')
+            else:
+                first = {m: (rc, o) for m, rc, o in results if m in red}
+                out('retry: ' + ', '.join(red))
+                running = []
+                queue = list(red)
+                while queue or running:
+                    while queue and len(running) < shards:
+                        module = queue.pop(0)
+                        running.append((module, run_modules([module], root, package,
+                                                            os.path.join(homes, module + '#2'))))
+                    done = [(m, p) for m, p in running if p.poll() is not None]
+                    if not done:
+                        time.sleep(0.05)
+                        continue
+                    for m, p in done:
+                        running.remove((m, p))
+                        finish(m, p, replace_at=index[m])
+                for m in red:
+                    _m, rc, o = results[index[m]]
+                    if rc == 0 and parse(o)[2] == 'OK':
+                        flaky.extend(flaky_rows(m, *first[m]))
     finally:
         shutil.rmtree(homes, ignore_errors=True)
     out('')
     out(summary(results, time.monotonic() - started, shards))
+    if flaky:
+        out(f'{len(flaky)} flaky')
+        for file_, line, title in flaky:
+            out(f'  {file_}:{line}:1 › {title}')
     leaks = hook_leaks(before, hook_digest(dirs))
     for line in leaks:
         out(f'hook leak: {line}')
@@ -334,12 +503,40 @@ def build_parser():
     p.add_argument('--touched', metavar='BASE',
                    help='only the test modules the changes since BASE touch (the pre-push gate: '
                         'every touched module whole, never the full suite)')
+    p.add_argument('--part', metavar='K/N', type=parse_part, default=None,
+                   help='only the K-th of N parts of the modules (CI runs the N parts in parallel '
+                        'jobs; together they are the whole suite, each module once)')
+    p.add_argument('--record', metavar='OUT',
+                   help='write --part\'s record (its modules, and the tests each OUTPUTS run ran) '
+                        'to OUT and exit — non-zero when a run was not green')
+    p.add_argument('--gather', metavar='DIR',
+                   help='the required check over the part records in DIR (with --python, --parts)')
+    p.add_argument('--python', help='with --gather: the Python version whose records to read')
+    p.add_argument('--parts', type=int, help='with --gather: how many parts there are')
+    p.add_argument('outputs', nargs='*', help='with --record: the printed text of each run')
+    p.add_argument('--retry', type=int, default=RETRY,
+                   help=f'extra attempts for a red module (default {RETRY})')
+    p.add_argument('--retry-max', type=int, default=RETRY_MAX,
+                   help=f'no retry past this many red modules (default {RETRY_MAX})')
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     only = parse_only(os.environ.pop(ONLY_VAR, ''))
+    if args.gather:
+        if not args.python or not args.parts:
+            print('run_tests: --gather needs --python and --parts')
+            return 2
+        return gather(args.gather, args.start_directory, args.python, args.parts)
+    if args.record:
+        if not args.part:
+            print('run_tests: --record needs --part')
+            return 2
+        return record(args.record, args.start_directory, args.part, args.outputs)
+    if args.outputs:
+        print('run_tests: run outputs are read only with --record')
+        return 2
     if args.touched:
         root = os.path.dirname(os.path.abspath(args.start_directory))
         files = changed_files(root, args.touched)
@@ -354,14 +551,15 @@ def main(argv=None):
         print(f'run_tests: {len(mods)} touched module(s): {" ".join(mods)}')
         only = [m for m in mods if only is None or m in only]
     if args.list:
-        pool, tail = plan(args.start_directory)
+        pool, tail = plan_part(args.start_directory, args.part)
         print(f'shards: {args.shards or default_shards()}')
         for m in pool:
             print(f'pool    {m}')
         for m in tail:
             print(f'serial  {m}')
         return 0
-    return run(args.start_directory, args.shards, args.verbose, only=only)
+    return run(args.start_directory, args.shards, args.verbose, only=only,
+              retry=args.retry, retry_max=args.retry_max, part=args.part)
 
 
 if __name__ == '__main__':

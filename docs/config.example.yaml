@@ -69,6 +69,8 @@ worker_pool:
       role: local
       cap: 2
       config_dir: ~/.ASF/accounts/acct-a
+      # provider: plan-small   # the provider *kind*: accounts of one kind share one window scale.
+      #                        # Unset = the kind `default`. See quota_guards.window_usd.
       # auth_env:                          # VARIABLE: file — its content is that variable in this
       #                                    # account's sessions only; a missing file refuses the launch
       #   CLAUDE_CODE_OAUTH_TOKEN: ~/.ASF/secrets/acct-a.token   # `claude setup-token`, once
@@ -149,6 +151,10 @@ quota_guards:
   # seven_d_cooldown: 90         # the older flat spelling of cooldown.seven_d
   # stale_after_min: 30          # a quota reading older than this is stale
   # five_h_usd: 40               # dollars of one full 5h window (unset: estimated from history)
+  # window_usd:                  # …and per provider kind, which overrides it. A window not named is
+  #                              # derived from that kind's five_h × the window-length ratio (7d = 33.6×).
+  #   plan-small: {five_h: 12}
+  #   plan-large: {five_h: 48, seven_d: 1200}
   # running_allowance: 0.5       # the share of its estimate a running session still holds
   # min_runs: 3                  # runs of one (kind, family) before history replaces default_cost
   # model_families: [opus, sonnet, haiku]   # names a model id contains, matched in this order
@@ -507,6 +513,7 @@ capacity:
 #     factor: 2               # a job's max is its measured p95 times this
 #     default_max_s: 3600     # the max of a job kind with too few readings
 #     cpu_floor: 0.05         # cores: a job using at least this much CPU is never a stall
+#     pass_stale_s: 900       # no stall-watch pass this long with a pool is nobody watching
 #   job_timeout_min: 360      # a job with no timeout-minutes of its own (the host's default)
 #   measure:                  # runner scores (asf.ci_measure)
 #     window_days: 14

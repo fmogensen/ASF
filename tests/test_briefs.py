@@ -26,6 +26,7 @@ from asf import env
 from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
 from asf.env import Product
+from asf.evidence import review_store
 from asf.feeder.rows import Row
 
 # ``asf.briefs.build`` is both the package's entry function and a submodule; the function wins
@@ -326,6 +327,57 @@ class GoldenBriefTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 text = build_mod.load_template(kind)
                 self.assertNotIn('counted dead and relaunched on top of you', text)
+
+
+class LaterRoundReadOrderTests(unittest.TestCase):
+    """S-36502: a round-1 review brief's read order is unchanged, byte for byte; a later round
+    is sent to the previous round's C list, then the increment since the head that round read,
+    then a name-only diff for the scope row — never the whole diff against the trunk again. The
+    verdict block, the checklist and the rounds rule do not move."""
+
+    BRANCH = 'task/T-0001'
+
+    def setUp(self):
+        store = review_store.root(product())
+        self.addCleanup(shutil.rmtree,
+                        os.path.join(store, 't-0001', review_store.branch_key(self.BRANCH)), True)
+
+    def read_order(self):
+        collected = preamble_mod.collect(product(), ROWS['review'], index(), [], REPO_FACTS)
+        ctx = build_mod.context(product(), ROWS['review'], 'review', collected)
+        return ctx['read_order']
+
+    def test_round_one_is_byte_identical_to_todays_sentence(self):
+        self.assertEqual(self.read_order(),
+                         "the writer's report on `task/T-0001`, then the diff against "
+                         "`origin/main`,\nthen the plan `docs/plans/checkout-resilience.md` "
+                         "for the Task it claims to deliver.")
+
+    def test_a_later_round_names_the_increment_and_refuses_the_whole_diff(self):
+        head = 'b' * 40
+        review_store.put(review_store.root(product()), 't-0001', self.BRANCH, 1, head,
+                         'verdict: approved')
+        order = self.read_order()
+        self.assertIn(f'git diff {head}...HEAD', order)
+        self.assertIn('git diff --name-only origin/main...HEAD', order)
+        self.assertIn('the branch was recut', order)
+        self.assertNotIn('then the diff against `origin/main`,', order)
+
+    def test_verdict_block_checklist_and_rounds_rule_stay_byte_identical(self):
+        before = briefs.build(product(), ROWS['review'], index(), [], REPO_FACTS).text
+        review_store.put(review_store.root(product()), 't-0001', self.BRANCH, 1, 'c' * 40,
+                         'verdict: approved')
+        after = briefs.build(product(), ROWS['review'], index(), [], REPO_FACTS).text
+        for block in (
+            '| check | result | evidence |\n| --- | --- | --- |\n'
+            '| the diff stays inside `writes:` | pass \\| fail | the file, or the one outside it |',
+            '```verdict\nverdict: approved\n'
+            'head: <the 40-hex sha `git rev-parse HEAD` printed — the code you read>\nasks: []\n```',
+            'Round 1 finds everything: run the whole table before writing a single finding.',
+        ):
+            self.assertIn(block, before)
+            self.assertIn(block, after)
+        self.assertNotEqual(before, after)   # the read order and the quoted review do move
 
 
 class ReshapeBriefTest(unittest.TestCase):
@@ -1265,6 +1317,18 @@ class KindModelGrantTest(unittest.TestCase):
     def test_a_groom_brief_grants_the_intake_directory_its_inbox_lines_name(self):
         brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
         self.assertIn('inbox', brief.add_dirs)
+
+    def test_a_spec_amend_brief_grants_the_record_root_for_asf_new_story(self):
+        brief = briefs.build(product(), ROWS['spec-amend'], index(), [], REPO_FACTS)
+        self.assertIn(RECORD, brief.add_dirs)
+
+    def test_a_plain_spec_brief_grants_no_record_root(self):
+        brief = briefs.build(product(), ROWS['spec'], index(), [], REPO_FACTS)
+        self.assertNotIn(RECORD, brief.add_dirs)
+
+    def test_add_dirs_for_spec_amend_needs_no_row_and_degrades_without_a_product(self):
+        self.assertEqual(build_mod.add_dirs_for(None, kind='spec-amend'), [])
+        self.assertEqual(build_mod.add_dirs_for(Product('bare', {}), kind='spec-amend'), [])
 
 
 class ModelMapThroughTheProductFileTests(unittest.TestCase):

@@ -84,7 +84,13 @@ configured: <key>)`.
 **Prod reads `deploy_sha.workflow`**: the deploy workflow whose newest successful run is prod,
 the same key the evidence pass reads for a Feature's `on-prod`. `conventions.deploy_workflow` and
 `ci.deploy_workflow` are read as aliases of it, so a file written for the old hint still loads;
-write new files with `deploy_sha.workflow` (or `deploy_sha.prod.workflow`).
+write new files with `deploy_sha.workflow` (or `deploy_sha.prod.workflow`). With none of these
+set, Prod reads `trunk is production — no deploy configured (B-0077)`: a package, library or
+tool that deploys nothing, not a missing key.
+
+**Runners with no self-hosted pool**: with neither `ci.runner_org` nor `ci.pool` declared,
+Runners reads `hosted — no self-hosted ci.pool or ci.runner_org declared` — hosted CI (GitHub's
+own runners) has no pool to read, not a missing key.
 
 **Deploys are set per environment** with `deploy_sha.dev.mode` and `deploy_sha.prod.mode`:
 
@@ -635,9 +641,14 @@ A worker session starts from **an allow-list, not the tick's environment**: `PAT
 `LC_*`, `TERM`, `TMPDIR`, `USER`, `SHELL`, the names you list in `worker_pool.env_passthrough`, and
 the job's own variables (`ASF_PRODUCT`, `ASF_JOB`, …, the account's `CLAUDE_CONFIG_DIR`). A secret
 exported in the shell that ran the tick does not reach it. Its `HOME` is its account's own
-(`~/.ASF/state/homes/<account>`), holding only what `home_seed` lists and a `.gitconfig` with your
-`user.name` and `user.email` — none of your CLI logins. `isolate_home: false` gives a session your
-`HOME` back; `asf doctor`'s `worker env` row is red while any account does.
+(`~/.ASF/state/homes/<account>`), holding only what `home_seed` lists and a `.gitconfig` naming the
+agent it commits as — `asf worker <asf-worker@localhost>` by default, never your own `user.name`
+or `user.email`, so a session's commits are never filed under your name. `GIT_CONFIG_*` in the
+session's own environment carries the same pair and is what actually binds it: it outranks this
+file, a `home_seed`ed `~/.gitconfig` and even a repo-local `user.name` a product's
+`worktree_setup` sets. `worker_pool.accounts[].identity: {name, email}` overrides it for one
+account — the code host's `noreply` form, say. `isolate_home: false` gives a session your `HOME`
+back, your own identity included; `asf doctor`'s `worker env` row is red while any account does.
 
 ### Credentials: `auth_env`
 

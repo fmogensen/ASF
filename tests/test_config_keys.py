@@ -199,6 +199,14 @@ class Documented(unittest.TestCase):
             text = f.read()
         self.assertTrue(_documented('proves.partial_markers', text))
 
+    def test_ci_stall_watch_pass_stale_s_is_registered_typed_and_documented(self):
+        self.assertEqual(config_keys.TYPED['ci.stall_watch.pass_stale_s'],
+                         (config_keys.NUM, 1, None))
+        self.assertIn('ci.stall_watch.pass_stale_s', config_keys.KNOWN_CONFIG_KEYS)
+        with open(os.path.join(ROOT, 'docs', 'config.example.yaml'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertTrue(_documented('ci.stall_watch.pass_stale_s', text))
+
 
 def _value_calls():
     """``{key: file}`` for every ``config_keys.value('<key>', ...)`` call in asf/."""

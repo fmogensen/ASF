@@ -326,6 +326,19 @@ conventions:
   # check_commands:
   #   - bash tools/check_conventions.sh
   #   - make lint
+  # path-matched pre-push checks (F-0301): an ordered list of {paths, run, why}. The session's
+  # `pre-push` hook asks git which paths the push adds over the trunk, runs the `run` of every
+  # rule whose `paths` any added path hits, in this order, and refuses the push on the first one
+  # that exits non-zero — with `why` and the command's last lines. A rule whose `paths` match
+  # nothing in a given push does not run. Unset, or a list of malformed rules, is read as `[]`:
+  # no path is ever checked (default: none).
+  # pre_push_checks:
+  #   - paths: ['asf/**', 'tests/**']
+  #     run: 'python3 tools/run_tests.py --touched origin/main --shards 2'
+  #     why: 'every test module that covers a file you touched, each module whole'
+  #   - paths: ['asf/schema.py', 'asf/record/**', 'asf/tick/migrate*.py']
+  #     run: 'python3 -m asf.schema --check'
+  #     why: 'the schema and migration lists the record reads'
   # whether the approvals hook grants a factory session's Bash call outright when the command is
   # provably read-only (git reads, ls/cat/head/tail/grep/rg/find/wc, cd, and this product's own
   # check_commands/pre_push_check/test_command) — compound, `cd X && …` and `$?` forms included.
@@ -349,6 +362,7 @@ conventions:
   # `asf doctor`'s `product` row (asf.conventions.KNOWN_FLAGS).
   # flags:
   #   mechanical: on     # conflict/copies/merge → the lane rebases it (a pending hold retried once the trunk moved, before any adjudication); naming → reworded; footprint → the widening verdict in the hold; not pushed → published from the worktree, review/notes rounds archived; hook refused → trunk history dropped and published again; an approval carried over the lane's own clean rebuild (default off)
+  #   rule_pass: on      # cosmetic (commit-shape/wording/formatting) or already-settled (a standing ruling, a decision the register confirms) dispute → waived before any adjudicate session is spawned; a genuinely new finding still fires one (asf.evidence.rulepass) (default off)
   #   plan_ahead: 2
   #   console_wait: aside  # hold (default) | aside: an item whose only row waits on the console orders nothing
   #   verdict_block: warn   # off (default) | warn | on: a review's ```verdict block is read
@@ -748,6 +762,7 @@ stage_limits:
   bug_S1: 10m
   bug_S2: 24h
   undecided_close: 14d
+  operator_hours: 2h
 
 # size classes: how a Task's footprint maps to a train/lane.
 size_classes:
@@ -851,6 +866,14 @@ clocks:
 #   readme_sections: [Install, Quick start, Configuration, Upgrade]
 #   ci_steps: {install_from_zero: 'asf install, zero to green', generic: check generic, second_product: sample product,
 #              rehearsal: release rehearsal}
+#   channels: {stable_every_days: 7, edge_dwell_h: 48, rehearsal_check: rehearsal, lookback_tags: 10, log_keep: 60}
+#                                  # F-0308's release channels (asf.channels): the weekly cadence
+#                                  # (stable_every_days), hours a tag must sit on edge before
+#                                  # stable considers it (edge_dwell_h), the named CI check
+#                                  # stable's rehearsal row reads — off disables the row
+#                                  # (rehearsal_check) — at most this many tags examined, newest
+#                                  # first, for edge's candidate (lookback_tags), and edge
+#                                  # publications kept in the channel log (log_keep)
 #   requires: {install: [], upgrade: [], generic: [], docs: [], rehearsal: []}   # Features each criterion also needs landed
 #   blocking: []                   # Features that must be landed before a release
 #   floor:                         # criterion 9: no leftover older than its deadline; `off` disables a kind

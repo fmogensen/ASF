@@ -322,6 +322,64 @@ class Quarantine(unittest.TestCase):
         with mock.patch.object(env, 'state_dir', lambda *_a, **_k: self.state_dir):
             self.assertIn('gate-tests until 2099-10-05', status.quarantine_cell(self.product))
 
+    def test_status_names_the_class_and_head_of_one_infra_re_run(self):
+        flake.save(self.state_dir, {'quarantine': [], 'reruns': {},
+                                     'infra': {'47be7bdd1' + 'a' * 31:
+                                               {'count': 1, 'class': 'phantom', 'run': '77',
+                                                'at': '2026-10-01T10:00:00Z'}}})
+        cell = flake.status_cell(self.product, state_dir=self.state_dir, now=NOW)
+        self.assertEqual(cell, '1 infra re-run(s): phantom @ 47be7bdd1 re-run once')
+
+    def test_status_names_the_breach_on_a_held_infra_re_run(self):
+        sha = '47be7bdd1' + 'a' * 31
+        flake.save(self.state_dir, {'quarantine': [], 'reruns': {},
+                                     'infra': {sha: {'count': 1, 'class': 'lost-runner',
+                                                      'run': '77', 'at': '2026-10-01T10:00:00Z',
+                                                      'breach': '2026-10-01T11:00:00Z'}}})
+        cell = flake.status_cell(self.product, state_dir=self.state_dir, now=NOW)
+        self.assertEqual(cell, '1 infra re-run(s): lost-runner @ 47be7bdd1 re-run once — BREACH, '
+                                'not re-run again')
+
+    def test_status_names_two_infra_re_runs_counted_and_sorted(self):
+        head_a, head_b = 'a' * 40, 'b' * 40
+        flake.save(self.state_dir, {'quarantine': [], 'reruns': {},
+                                     'infra': {head_b: {'count': 1, 'class': 'phantom', 'run': '1',
+                                                         'at': '2026-10-01T10:00:00Z'},
+                                               head_a: {'count': 1, 'class': 'lost-runner',
+                                                        'run': '2', 'at': '2026-10-01T10:00:00Z'}}})
+        cell = flake.status_cell(self.product, state_dir=self.state_dir, now=NOW)
+        self.assertEqual(cell, '2 infra re-run(s): lost-runner @ aaaaaaaaa re-run once; '
+                                'phantom @ bbbbbbbbb re-run once')
+
+    def test_status_skips_a_probe_record_and_a_zero_count_record(self):
+        flake.save(self.state_dir, {'quarantine': [], 'reruns': {},
+                                     'infra': {'probe|77': {'at': '2026-10-01T10:00:00Z'},
+                                               HEAD: {'count': 0, 'class': 'phantom',
+                                                      'at': '2026-10-01T10:00:00Z'}}})
+        self.assertIsNone(flake.status_cell(self.product, state_dir=self.state_dir, now=NOW))
+
+    def test_status_a_pruned_infra_record_leaves_no_row(self):
+        flake.save(self.state_dir, {'quarantine': [], 'reruns': {},
+                                     'infra': {HEAD: {'count': 1, 'class': 'phantom', 'run': '1',
+                                                       'at': '2026-09-28T10:00:00Z'}}})
+        self.assertIsNone(flake.status_cell(self.product, state_dir=self.state_dir, now=NOW))
+
+    def test_status_keeps_quarantine_and_held_order_with_infra_added_after(self):
+        flake.save(self.state_dir, {
+            'quarantine': [{'job': 'gate-tests', 'sha': 'c' * 40,
+                            'expires': '2099-10-05T12:00:00Z'}],
+            'reruns': {'d' * 40 + '|gate': {'at': '2026-10-01T10:00:00Z'}},
+            'infra': {HEAD: {'count': 1, 'class': 'phantom', 'run': '1',
+                              'at': '2026-10-01T10:00:00Z'}}})
+        cell = flake.status_cell(self.product, state_dir=self.state_dir, now=NOW)
+        self.assertEqual(cell,
+                          'gate-tests until 2099-10-05 (flaked on ccccccccc), '
+                          '1 re-run(s) in triage, 1 infra re-run(s): phantom @ aaaaaaaaa re-run once')
+
+    def test_status_is_none_when_nothing_is_live(self):
+        flake.save(self.state_dir, {'quarantine': [], 'reruns': {}, 'infra': {}})
+        self.assertIsNone(flake.status_cell(self.product, state_dir=self.state_dir, now=NOW))
+
 
 class BatchTriage(QueueRepo):
     """A batch red on one required job is re-run before it is split or a member sent back."""

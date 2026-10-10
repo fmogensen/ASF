@@ -13,6 +13,7 @@ from unittest import mock
 from asf import env
 from asf.groom.inbox import parse_inbox_file
 from asf.improve.measure import Run
+from asf.metrics import reds, throughput
 from asf.scorecard import diagnose, facts, loop, score
 from asf.scorecard.facts import Facts
 from asf.workers import lifecycle
@@ -49,6 +50,20 @@ def gate(ts, signature='--- test_tick_steps: FAILED (rc 1)', conclusion='failure
     if scheme is not None:
         g['signature_scheme'] = scheme
     return g
+
+
+def fpg_facts(sessions=(), gates=(), ci=(), landings=(), runs=()):
+    """A bare Facts for score.first_push_green_row — no items, no clutter reading."""
+    return Facts(items={}, sessions=list(sessions), ci=list(ci), gates=list(gates), runs=list(runs),
+                 clutter={'open_prs': None, 'stale_prs': None, 'branches': None}, landings=list(landings))
+
+
+def fpg_session(ts, task, branch, item=None):
+    return {'ts': ts, 'task': task, 'item': item, 'branch': branch, 'usd': 1.0, 'minutes': 10.0}
+
+
+def landing(ts, job, sha, branch, kind='code', item=None):
+    return {'ts': ts, 'job': job, 'sha': sha, 'branch': branch, 'kind': kind, 'item': item}
 
 
 def items_fixture():
@@ -181,6 +196,17 @@ class ScoreTests(unittest.TestCase):
         self.assertFalse(score.is_dead(run('j', '2026-09-01T00:00:00Z', 'finished')))
         self.assertFalse(score.is_dead(run('j', '2026-09-01T00:00:00Z', 'failed', landed=True)))
 
+    def test_f0235_the_hook_refused_cause_key_and_threshold_hold(self):
+        # P5, D6: F-0235's own two-week verify reads `failure:failed: hook refused` against the
+        # 5 runs/week threshold — this is that key made into a test, so a later change that
+        # regroups or renames it is caught here rather than making the card unverifiable
+        for text in ('failed: hook refused',
+                     'failed: hook refused: pre-push: red',
+                     'failed: hook refused: redact: docs/x.md:3 names a worker account'):
+            with self.subTest(text=text):
+                self.assertEqual(score.failure_class(text), 'failed: hook refused')
+        self.assertEqual(diagnose.THRESHOLDS['failure_per_week'], 5.0)
+
 
 class RepairPrefixTests(unittest.TestCase):
     """score.REPAIR_PREFIXES carries 'precheck' (F-0224 S-36505): a precheck session is repair
@@ -261,6 +287,128 @@ class PlannedFirstReviewTests(unittest.TestCase):
         rep = next(c for c in d['criteria'] if c['key'] == 'repair')
         self.assertIn(f"{h['repair_sessions']} repair sessions / {h['landed']} Features", rep['evidence'])
         self.assertIn('(correct 1)', rep['evidence'])
+
+
+class FirstPushGreenTests(unittest.TestCase):
+    """score.first_push_green_row (S-77507): per landed lane branch, did it need no second
+    round? START/END bracket every fixture's landing; a reading outside it is simply not a
+    candidate branch."""
+
+    START = facts.to_dt('2026-09-01T00:00:00Z')
+    END = facts.to_dt('2026-09-10T00:00:00Z')
+    BRANCH = 'task/T-9002'
+
+    def _green_case(self, branch=BRANCH, kind='code'):
+        return dict(
+            landings=[landing('2026-09-05T10:00:00Z', 'coder-t-9002-a-0001', 'abc123', branch, kind=kind)],
+            sessions=[fpg_session('2026-09-05T09:00:00Z', 'coder-t-9002', branch)],
+            gates=[gate('2026-09-05T09:30:00Z', conclusion='success', branches=[branch])],
+            ci=[{'ts': '2026-09-05T09:15:00Z', 'pr': 50, 'sha': 'abc123', 'attempt': 1,
+                 'conclusion': 'success', 'branch': branch}])
+
+    def test_one_building_session_a_success_gate_and_a_green_first_head_counts_green(self):
+        f = fpg_facts(**self._green_case())
+        row = score.first_push_green_row(f, self.START, self.END)
+        self.assertEqual((row['branches'], row['green'], row['rate_pct']), (1, 1, 100.0))
+        self.assertEqual(row['not_green'], [])
+
+    def test_a_repair_session_alone_takes_it_out_of_green(self):
+        case = self._green_case()
+        case['sessions'] = list(case['sessions']) + [
+            fpg_session('2026-09-05T09:10:00Z', 'correct-t-9002', self.BRANCH)]
+        row = score.first_push_green_row(fpg_facts(**case), self.START, self.END)
+        self.assertEqual((row['branches'], row['green']), (1, 0))
+        self.assertIn('repair session', row['not_green'][0]['reason'])
+
+    def test_a_second_building_session_alone_takes_it_out_of_green(self):
+        case = self._green_case()
+        case['sessions'] = list(case['sessions']) + [
+            fpg_session('2026-09-05T09:20:00Z', 'coder-t-9002', self.BRANCH)]
+        row = score.first_push_green_row(fpg_facts(**case), self.START, self.END)
+        self.assertEqual((row['branches'], row['green']), (1, 0))
+        self.assertIn('building session', row['not_green'][0]['reason'])
+
+    def test_a_failing_gate_alone_takes_it_out_of_green(self):
+        case = self._green_case()
+        case['gates'] = [gate('2026-09-05T09:30:00Z', conclusion='failure', branches=[self.BRANCH])]
+        row = score.first_push_green_row(fpg_facts(**case), self.START, self.END)
+        self.assertEqual((row['branches'], row['green']), (1, 0))
+        self.assertIn('failing gate', row['not_green'][0]['reason'])
+
+    def test_a_red_first_head_alone_takes_it_out_of_green(self):
+        case = self._green_case()
+        case['ci'] = [{'ts': '2026-09-05T09:15:00Z', 'pr': 50, 'sha': 'abc123', 'attempt': 1,
+                       'conclusion': 'failure', 'branch': self.BRANCH}]
+        row = score.first_push_green_row(fpg_facts(**case), self.START, self.END)
+        self.assertEqual((row['branches'], row['green']), (1, 0))
+        self.assertIn('CI head', row['not_green'][0]['reason'])
+
+    def test_p12_three_correction_rounds_read_green_on_the_old_metrics_not_here(self):
+        # the card's own probe: a PR whose first head was green and whose next three heads were
+        # red, red, green — throughput.first_pass and reds.first_pass_window are unchanged (C8)
+        # and still read (1, 1); first_push_green_row reads the branch not green.
+        ci = [
+            {'ts': '2026-09-05T09:00:00Z', 'pr': 50, 'sha': 'aaa', 'attempt': 1, 'conclusion': 'success',
+             'branch': self.BRANCH},
+            {'ts': '2026-09-05T10:00:00Z', 'pr': 50, 'sha': 'bbb', 'attempt': 1, 'conclusion': 'failure',
+             'branch': self.BRANCH},
+            {'ts': '2026-09-05T11:00:00Z', 'pr': 50, 'sha': 'ccc', 'attempt': 1, 'conclusion': 'failure',
+             'branch': self.BRANCH},
+            {'ts': '2026-09-05T12:00:00Z', 'pr': 50, 'sha': 'ddd', 'attempt': 1, 'conclusion': 'success',
+             'branch': self.BRANCH},
+        ]
+        case = self._green_case()
+        case['ci'] = ci
+        row = score.first_push_green_row(fpg_facts(**case), self.START, self.END)
+        self.assertEqual((row['branches'], row['green']), (1, 0))
+        self.assertIn('CI head', row['not_green'][0]['reason'])
+        self.assertEqual(throughput.first_pass(ci, self.START, self.END), (1, 1))
+        self.assertEqual(reds.first_pass_window(ci, 1), (1, 1))
+
+    def test_a_branch_with_no_pr_run_at_all_is_still_counted_by_its_gate_and_its_sessions(self):
+        case = self._green_case()
+        case['ci'] = []
+        row = score.first_push_green_row(fpg_facts(**case), self.START, self.END)
+        self.assertEqual((row['branches'], row['green']), (1, 1))
+
+    def test_rate_pct_is_none_over_no_landed_branch_never_zero(self):
+        row = score.first_push_green_row(fpg_facts(), self.START, self.END)
+        self.assertEqual(row['branches'], 0)
+        self.assertIsNone(row['rate_pct'])
+
+    def test_by_kind_splits_code_fix_spec_plan(self):
+        code = self._green_case(branch='task/T-9002', kind='code')
+        fix = self._green_case(branch='fix/B-9003', kind='fix')
+        fix['ci'] = [{'ts': '2026-09-05T09:15:00Z', 'pr': 51, 'sha': 'abc123', 'attempt': 1,
+                      'conclusion': 'failure', 'branch': 'fix/B-9003'}]
+        merged = {k: list(code.get(k, [])) + list(fix.get(k, [])) for k in ('landings', 'sessions', 'gates', 'ci')}
+        row = score.first_push_green_row(fpg_facts(**merged), self.START, self.END)
+        self.assertEqual(row['by_kind'], {'code': [1, 1], 'fix': [0, 1]})
+
+    def test_caught_sums_prepush_refused_over_the_counted_branches_runs(self):
+        case = self._green_case()
+        runs = [Run(job='coder-t-9002-a-0001', kind='task', model='m', item=None, started='x', ended='y',
+                    minutes=1.0, landed=True, end_reason='', usd=0.0, prepush_refused=2),
+                Run(job='coder-t-9002-a-0001', kind='task', model='m', item=None, started='x', ended='y',
+                    minutes=1.0, landed=True, end_reason='', usd=0.0, prepush_refused=1),
+                Run(job='some-other-job', kind='task', model='m', item=None, started='x', ended='y',
+                    minutes=1.0, landed=True, end_reason='', usd=0.0, prepush_refused=9)]
+        case['runs'] = runs
+        row = score.first_push_green_row(fpg_facts(**case), self.START, self.END)
+        self.assertEqual(row['caught'], 3)   # 2 + 1, not the other job's 9
+
+    def test_window_row_carries_first_push_green(self):
+        f = fpg_facts(**self._green_case())
+        w = score.window_row(f, self.START, self.END)
+        self.assertEqual(w['first_push_green']['branches'], 1)
+
+    def test_headline_line_names_it_and_total_row_does_not_average_it(self):
+        f = fpg_facts(**self._green_case())
+        h = score.window_row(f, self.START, self.END)
+        self.assertIn('first-push green: 100 % (1/1) — 0 caught at the hook', score.headline_line(h))
+        self.assertNotIn('first_push_green', score.total_row([h]))
+        self.assertEqual(score.DELTA_KEYS, ('on_prod', 'landed', 'usd_per_feature', 'own_usd_per_feature',
+                                            'repair_per_feature', 'usd'))
 
 
 class FalseCloseTimelineTests(unittest.TestCase):

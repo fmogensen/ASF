@@ -1212,6 +1212,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None, heartbeat=T
     """Launch one row on ``account``. Returns the session record written to the ledger.
     ``heartbeat=False`` launches without the beat (no HEARTBEAT block, no ``heartbeat_min``):
     the 0.2 kernel judges a session by its pid and REPORT."""
+    from asf import prepush  # local: prepush pulls in asf.feeder, which reaches back to
+                              # asf.workers.health/stall (circular at module scope)
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
     passthrough = env.env_passthrough(cfg)
@@ -1260,6 +1262,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None, heartbeat=T
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)
     refusals.clear(product, row.job)  # ... and keeps its own refusals (F-0266)
+    prepush.clear(product, row.job)   # ... and the door's own catches (F-0301)
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
     for d in getattr(row, 'add_dirs', None) or ():  # the row's own grants are the factory's dirs
         d = os.path.expanduser(d)
@@ -1279,6 +1282,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None, heartbeat=T
                                                    row.item, branch),
                                **pushlog.env_for(product, row.job, row.kind),
                                **refusals.env_for(product, row.job),
+                               **prepush.env_for(product, row.job),
                                'ASF_PUSH_ALLOW': push_allow(product, row, branch),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid,
                                'ASF_READ_ROOTS': os.pathsep.join(add_dirs)},

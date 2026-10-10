@@ -53,6 +53,7 @@ class Run:
     attempt: int = 1        # 1-based, among this job's ended runs in ledger order
     cloud: bool = False     #: ran on the cloud lane (its pid is a cloud token); read by asf.metrics.throughput
     usd_estimated: bool = False  #: `usd` is a same-(kind, model) median, not a measurement
+    prepush_refused: int = 0  #: the hook's own refusals on this run (asf.prepush); read by score.first_push_green_row and by nothing else
 
 
 class Cell(collections.namedtuple('Cell', 'sessions hours usd')):
@@ -184,7 +185,8 @@ def ended_runs(product, *, ledger=None, logs_dir=None, since=None, as_of=None, c
                 minutes=m, landed=bool(r.get('harvested')), end_reason=r.get('end_reason') or '',
                 usd=None if spend is None else spend * share,
                 publish_refused=r.get('publish_refused') or '', worktree=r.get('worktree') or '',
-                attempt=attempt, cloud=cloudpid.is_token(r.get('pid'))))
+                attempt=attempt, cloud=cloudpid.is_token(r.get('pid')),
+                prepush_refused=int(r.get('prepush_refused') or 0)))
     out = _estimate_cloud_spend(out, cfg)
     if since:
         out = [r for r in out if r.ended[:10] >= since]

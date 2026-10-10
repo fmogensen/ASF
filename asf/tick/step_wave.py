@@ -64,7 +64,7 @@ import os
 import re
 import subprocess
 
-from asf import approvals, budget, env
+from asf import approvals, budget, env, trunk_watch
 from asf import pause as pause_mod
 from asf import tune as tune_mod
 from asf import capacity as capacity_mod
@@ -88,6 +88,9 @@ _GROOM_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
 #: wave (this product's or another's — :func:`s1_bypass_live`) can see one is still live.
 HOST_LOAD_BYPASS_FIELD = 'host_load_bypass'
 
+#: how far back the wave step reads the trunk for landed PR numbers (:func:`occupancy`)
+TRUNK_LANDED_DAYS = 2
+
 
 def capacity(product=None):
     return capacity_mod.resolve(product or env.load_product()).sessions
@@ -104,13 +107,29 @@ def attempts(product):
     return lifecycle.attempts(pool_mod.sessions_path(product))
 
 
+def trunk_landed(product):
+    """``{pr number: sha}`` the trunk carries as landed within :data:`TRUNK_LANDED_DAYS`
+    (:func:`asf.trunk_watch.landed_prs` over :func:`asf.trunk_watch.first_parent`); ``{}`` when
+    git cannot read it — unknown is never "not landed"."""
+    repo = getattr(product, 'repo_dir', None)
+    if not repo:
+        return {}
+    commits = trunk_watch.first_parent(os.path.expanduser(repo), product.main,
+                                        days=TRUNK_LANDED_DAYS)
+    if commits is None:
+        return {}
+    return trunk_watch.landed_prs(commits)
+
+
 def occupancy(product):
     """The one answer to "is this item busy?" (:func:`asf.workers.lifecycle.occupancy`): live
     runs, work waiting to land, the lane's states (off the run lines), pending corrections — a
-    lane record naming a PR the evidence pass saw merged or closed held over by nothing
+    lane record naming a PR the evidence pass saw merged or closed, or the trunk itself already
+    carries as landed (:func:`trunk_landed`), held over by nothing
     (:func:`asf.workers.lifecycle.ended_prs`)."""
     path = pool_mod.sessions_path(product)
-    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path)),
+    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path),
+                                                                landed=trunk_landed(product)),
                                on_origin=lambda branches: on_origin(product, branches))
 
 
@@ -737,6 +756,13 @@ def relaunch_capped(product, row, wrow, out=print):
 STARTS, WAITS, HELD, CLOSED, PAUSED, HOST, NO_SEAT, CAPPED = (
     '', 'waits', 'held', 'closed', 'paused', 'host', 'no seat', 'relaunch cap')
 
+#: §2.3 — ``wave_state``'s own gates: how many New Task ids it names, so an idle wave's line
+#: never grows without bound on a backlog that is mostly New.
+GATE_CAP = 10
+#: §2.3 — the gate :func:`wave_state` names when the feeder planned no row at all (an empty
+#: ``screened``) while New Tasks exist anyway — nothing else in ``screened`` to blame instead.
+NO_ROW = 'no row planned'
+
 
 class Screened:
     """One planned row through :func:`screen`: ``why`` empty when the wave starts it, else the
@@ -846,7 +872,22 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
         if bypass:
             bypass_open = False                 # one bypass at a time, across the whole wave
         if act:
-            wrow, brief = build(row, bypass)
+            try:
+                wrow, brief = build(row, bypass)
+            except Exception as e:  # noqa: BLE001 — one row's brief never costs the rest
+                # B-83575: build() used to raise straight out of screen(), aborting the wave
+                # before _wave() ever ran — a free seat and a launchable row sat idle, tick
+                # after tick, while the preview (preview_row, never the real brief builder)
+                # kept reporting the row as launchable (B-82809)
+                room += 1
+                if bypass:
+                    bypass_open = True
+                why = f'brief build failed: {(str(e) or type(e).__name__).splitlines()[0]}'
+                say(f'waits    {job:<24} {row.item_id:<10} — {why}')
+                import traceback
+                say(traceback.format_exc().rstrip())
+                result.append(Screened(row, why, WAITS))
+                continue
             capped = 'parked' if relaunch_capped(product, row, wrow, out) else ''
         else:
             wrow, brief = preview_row(product, row, items), None
@@ -862,11 +903,44 @@ def screen(product, planned, items, running, held, seats, host=None, bypass_open
     return result
 
 
+def wave_state(screened, held, items, launching=0):
+    """§2.3 — the one fact the wave knows and nothing else does: that it launched nothing (or
+    not), that New Tasks existed anyway, and which gate held the rows it planned but did not
+    launch. Pure — :func:`launch` is the only caller, right after it knows ``worker_rows``.
+
+    ``{'idle': bool, 'new_tasks': int, 'new_task_ids': [...], 'gates': {gate: count}}`` —
+    ``gates`` counts a non-starting ``screened`` entry under: its ``row.waits_on`` (``WAITS``,
+    falling back to the first word of ``row.action`` for a row without one set); the held
+    class alone, not the level (``HELD``); else the kind string itself (``CLOSED``, ``HOST``,
+    ``NO_SEAT``, ``CAPPED``). An empty ``screened`` with New Tasks still open names
+    :data:`NO_ROW` instead — there is nothing else in it to blame."""
+    new_task_ids = sorted(iid for iid, item in items.items()
+                          if item.get('type') == 'task' and item.get('state', 'New') == 'New')
+    new_tasks = len(new_task_ids)
+    gates = {}
+    if screened:
+        for s in screened:
+            if s.starts:
+                continue
+            if s.kind == WAITS:
+                gate = s.row.waits_on or s.row.action.split()[0]
+            elif s.kind == HELD:
+                gate = f'held {held[s.row.item_id][0]}'
+            else:
+                gate = s.kind
+            gates[gate] = gates.get(gate, 0) + 1
+    elif new_tasks:
+        gates = {NO_ROW: new_tasks}
+    return {'idle': not launching, 'new_tasks': new_tasks,
+            'new_task_ids': new_task_ids[:GATE_CAP], 'gates': gates}
+
+
 def would_start(product, root, items=None):
     """``(screened, seats, running)`` — the wave this tick would run, previewed: the plan the
-    wave cuts (the same ceiling, cloud seats, gate and holds) through :func:`screen` with
-    nothing acted on. What ``asf status`` counts as Ready to launch, and what the dwell
-    watchdog (:mod:`asf.dwell`) asks why a free seat stays free."""
+    wave cuts (the same ceiling, cloud seats, gate and holds, the operator's own pause among
+    them — B-84836) through :func:`screen` with nothing acted on. What ``asf status`` counts as
+    Ready to launch, and what the dwell watchdog (:mod:`asf.dwell`) asks why a free seat stays
+    free."""
     from asf.views import index_reader
     if items is None:
         items, _generated = index_reader.load(root)
@@ -876,19 +950,22 @@ def would_start(product, root, items=None):
     r = capacity_mod.resolve(product)
     cloud = cloud_settings(product)
     ready = cloud_readiness(product, cloud)
-    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    cloud_inflight = cloud_mod.inflight_all() if cloud.on else 0
+    _held, _hold, extra = split_hold(cloud, ready, False, '', inflight=cloud_inflight)
     inputs = plan_inputs(product, root, items)
     seats = r.sessions + extra
     planned, _dropped = gated_plan(items, product, running, seats, inputs, out=_quiet)
     host_held, host_why, reading = host_hold(planned)
-    host_held, _local, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, _local, _extra = split_hold(cloud, ready, host_held, host_why,
+                                           inflight=cloud_inflight)
     bypass_open = bool(host_held
                        and host_mod.load_only_hold(reading,
                                                    host_mod.guards_from_config(env.load_config()))
                        and not s1_bypass_live())
     held = approvals.parked(product)
+    paused = pause_mod.held(product)            # F-0137: the operator's own hold, durable
     return (screen(product, planned, items, running, held, seats, (host_held, host_why),
-                   bypass_open, act=False), seats, running)
+                   bypass_open, act=False, paused=paused), seats, running)
 
 
 def trunk_preflight(ctx, planned, items, out=print):
@@ -980,12 +1057,15 @@ def local_seats(sessions, running):
     return max(0, sessions - sum(1 for r in running if not cloud_mod.is_cloud(r)))
 
 
-def split_hold(cloud, ready, host_held, host_why):
+def split_hold(cloud, ready, host_held, host_why, inflight=0):
     """``(host_held, local_hold, extra seats)``: a ready cloud lane takes the host hold off its
-    own rows — the hold becomes ``local_hold`` (the local lane only) — and adds its seats beside
-    the local ones; an off or unready lane leaves the hold on every row and adds none."""
+    own rows — the hold becomes ``local_hold`` (the local lane only) — and adds its free seats
+    beside the local ones (``max_inflight`` less ``inflight``, the lane's live runs across every
+    product — :func:`asf.workers.cloud.inflight_all`; B-83574: counting only ``max_inflight``
+    added seats this product's own wave had no claim to, while another product's cloud runs
+    already held them); an off or unready lane leaves the hold on every row and adds none."""
     lane_open = cloud.on and bool(ready and ready[0])
-    extra = cloud.max_inflight if lane_open else 0
+    extra = max(0, cloud.max_inflight - inflight) if lane_open else 0
     if host_held and lane_open:
         return False, host_why, extra
     return host_held, '', extra
@@ -1151,7 +1231,8 @@ def launch(ctx, out=print):
     # ones too) off the sum, so what is left is the free local seats plus the free cloud ones
     cloud = cloud_settings(product)
     ready = cloud_readiness(product, cloud)     # once per tick, never per row
-    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    cloud_inflight = cloud_mod.inflight_all() if cloud.on else 0
+    _held, _hold, extra = split_hold(cloud, ready, False, '', inflight=cloud_inflight)
     inputs = plan_inputs(product, ctx.record_root(), items)
     # a Task whose writes: reach the amendable set launches nothing: say it to the console once
     approvals.announce_console_amends(
@@ -1185,7 +1266,8 @@ def launch(ctx, out=print):
     note_seats(ctx, r.sessions, cloud, running, wanted_n,
                host_why if host_held else top_cause(waits))
     # a loaded host still starts cloud sessions: nothing of theirs runs here
-    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why,
+                                               inflight=cloud_inflight)
     # an S1 item's row passes the LOAD half of the guard — never memory/swap pressure, and at
     # most one such bypass live at a time, across every product (asf.workers.host.load_only_hold)
     s1_bypass_open = (host_held
@@ -1211,6 +1293,7 @@ def launch(ctx, out=print):
     starting = [s for s in screened if s.starts]
     bypassed = any(s.bypass for s in starting)
     worker_rows = [s.wrow for s in starting]
+    ctx.wave = wave_state(screened, held, items, launching=len(worker_rows))
     # the self-tuning loop (asf.tune): its pass, then the tuned model and seat share per kind
     worker_rows = tune_mod.wave_hook(product, worker_rows, running, out=out, event=ctx.event)
     texts = {s.wrow.job: s.brief.text for s in starting}
@@ -1276,6 +1359,7 @@ def launch_now(ctx, out=print):
     the two never launch it twice."""
     from asf.views import index_reader
     product = ctx.product
+    paused = pause_mod.held(product)            # F-0137: the operator's own hold, durable
     root = ctx.record_root()
     items, _generated = index_reader.load(root)
     if product.repo_dir:
@@ -1284,12 +1368,14 @@ def launch_now(ctx, out=print):
     r = capacity_mod.resolve(product)
     cloud = cloud_settings(product)
     ready = cloud_readiness(product, cloud)
-    _held, _hold, extra = split_hold(cloud, ready, False, '')
+    cloud_inflight = cloud_mod.inflight_all() if cloud.on else 0
+    _held, _hold, extra = split_hold(cloud, ready, False, '', inflight=cloud_inflight)
     inputs = plan_inputs(product, root, items)
     planned, _dropped = gated_plan(items, product, running, r.sessions + extra, inputs, out=out)
     held = approvals.parked(product)
     host_held, host_why, reading = host_hold(planned)
-    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
+    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why,
+                                               inflight=cloud_inflight)
     s1_bypass_open = (host_held
                       and host_mod.load_only_hold(reading, host_mod.guards_from_config(env.load_config()))
                       and not s1_bypass_live())
@@ -1301,8 +1387,12 @@ def launch_now(ctx, out=print):
         return worker_row(row, brief, items, host_load_bypass=bypass), brief
 
     screened = screen(product, planned, items, running, held, seats, (host_held, host_why),
-                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx)
+                      s1_bypass_open, act=True, out=out, build=build, ctx=ctx, paused=paused)
     starting = [s for s in screened if s.starts]
+    if paused:
+        out(f'wave: {pause_mod.hold_reason(paused)} — no new session this run; '
+            f'recording and harvesting go on, and the sessions in flight finish and land')
+        return 0
     if host_held and not any(s.bypass for s in starting):
         out(f'wave: held: {host_why} — no new session this run; running sessions go on')
         return 0

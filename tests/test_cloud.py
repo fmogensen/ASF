@@ -787,6 +787,43 @@ class StepWaveLanes(unittest.TestCase):
         off = cloud.settings({})
         self.assertEqual(step_wave.split_hold(off, (False, 'off'), True, 'h'), (True, '', 0))
 
+    def test_the_extra_seats_are_the_lane_less_what_already_fills_it(self):
+        """B-83574: a launchable row sat idle past the watchdog's limit while its wave kept
+        reading a seat free — the lane's whole ``max_inflight`` was added beside the share
+        however many of its seats another product's cloud runs already held. ``inflight``
+        (:func:`asf.workers.cloud.inflight_all`, counted the same way the lane's own cap —
+        :meth:`asf.workers.pool.Pool.cloud_load` — counts it) takes those seats off first."""
+        from asf.tick import step_wave
+        s = cloud.settings({'cloud': dict(ON, max_inflight=2)})
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, '', inflight=1), (False, '', 1))
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, '', inflight=2), (False, '', 0))
+        # the lane overcommitted (more live runs than its own cap): never a negative seat count
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, '', inflight=5), (False, '', 0))
+
+
+class CloudInflightAll(Home):
+    """``inflight_all`` (B-83574): the lane's live runs across every product on the host, the
+    same scope the lane's own cap reads (:meth:`asf.workers.pool.Pool.cloud_load`) — a
+    product's own ledger alone missed a sibling product's cloud runs."""
+
+    def test_it_sums_live_cloud_runs_across_products_and_skips_the_rest(self):
+        other = env.Product('two', {'repo_dir': self.repo, 'main': 'main'})
+        for product, job, trig in ((self.product, 'coder-a', 'A'), (other, 'coder-b', 'B')):
+            tok = f'actions:{trig}'
+            pool_mod.append_session(product, {
+                'job': job, 'item': 'T-1', 'kind': 'coder', 'account': 'acct-c', 'pid': tok,
+                'runtime': 'actions', 'runtime_lane': 'cloud', 'started': '2026-10-08T20:00:00Z'})
+            cloudpid.record(tok, cloudpid.WORKING, 'in_progress')
+        # ended: holds no seat; local: not the cloud lane — neither counts
+        pool_mod.append_session(self.product, {
+            'job': 'coder-ended', 'item': 'T-2', 'kind': 'coder', 'account': 'acct-c',
+            'pid': 'actions:C', 'runtime': 'actions', 'runtime_lane': 'cloud',
+            'started': '2026-10-08T19:00:00Z', 'ended': '2026-10-08T19:30:00Z'})
+        pool_mod.append_session(self.product, {
+            'job': 'coder-local', 'item': 'T-3', 'kind': 'coder', 'account': 'acct-a', 'pid': 1,
+            'started': '2026-10-08T20:00:00Z'})
+        self.assertEqual(cloud.inflight_all(), 2)
+
 
 class Readiness(unittest.TestCase):
     def product(self):

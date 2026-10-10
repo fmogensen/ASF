@@ -88,6 +88,20 @@ def unpushed(report):
     return bool(value) and bool(NO_RE.match(value))
 
 
+#: A ``pushed:`` value declaring the repo's own pre-push hook refused the identical push twice
+#: in this run — the shape :data:`asf.briefs.preamble.HOOK_REFUSAL_RULE` tells a session to
+#: write (F-0235): the retry a second hold would otherwise be launched to spend, already spent.
+HOOK_RETRIED_RE = re.compile(r'\bhook\s+refused\s+twice\b', re.I)
+
+
+def hook_retried(report):
+    """True when ``report``'s own ``pushed:`` line says the hook refused the identical push
+    twice in this run (F-0235) — so :func:`asf.workers.lifecycle.hook_refusal_hold` can route on
+    the first hold instead of costing a second session the same retry."""
+    value = (report or {}).get('pushed') or ''
+    return bool(HOOK_RETRIED_RE.search(value))
+
+
 #: A ``pushed:`` value declaring a rebase the factory publishes: ``rebased <sha> — …``.
 REBASED_RE = re.compile(r'^\s*rebased\s+`?(?P<sha>[0-9a-f]{7,40})\b', re.I)
 

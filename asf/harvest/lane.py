@@ -146,7 +146,7 @@ import tempfile
 import time
 
 from asf import (approvals, attestation, ci_flight, ci_pool, customer_content, env, gitpush,
-                 refguard, reviews, run_cancel, tree_green)
+                 proves, refguard, reviews, run_cancel, tree_green)
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.evidence import rulings as rulings_mod
@@ -1133,12 +1133,41 @@ def delivery_note(repo, trunk, branch, members):
     return note + (f' — no commit for {", ".join(missing)}' if missing else '')
 
 
-def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
+def proves_refusal_text(card, items, root, problems):
+    """§2.5's correction text for the ``proves`` refusal (Step 4): ``validate``'s own
+    ``problems`` named first — a claim naming a Story the Task does not list is a different
+    mistake from writing no claim at all, and the session cannot fix what it is not told — then
+    the Task's Stories, their acceptance bullets numbered (D2), and the exact trailer to write,
+    with a real line number in it."""
+    stories = card.get('stories') or []
+    single = len(stories) == 1
+    lines = list(problems)
+    lines.append(f"no acceptance line proved: this Task lists {', '.join(stories)}, "
+                 f"whose acceptance is")
+    example_story, example_line = stories[0], 1
+    seen = False
+    for sid in stories:
+        story_item = (items or {}).get(sid) or {}
+        for n, bullet in enumerate(proves.card_bullets(root, story_item), 1):
+            prefix = f'  {n}' if single else f'  {sid} line {n}'
+            lines.append(f'{prefix} {bullet}')
+            if not seen:
+                example_story, example_line, seen = sid, n, True
+    lines.append('add a trailer to one of your commits naming the line your tests prove, e.g.')
+    lines.append(f'  Proves: {example_story} line {example_line} — <the test path that proves it>')
+    lines.append('then push; the factory publishes the rewritten branch')
+    return '\n'.join(lines)
+
+
+def lane_refusal(repo, trunk, branch, item, conv=None, members=(), items=None, root=None):
     """``(kind, text)`` for a branch the lane refuses before any gate, or None: a merge commit
-    on it (B-0056), a commit not naming the item or one of a delivery's ``members``, or a line
-    it adds to customer content that carries a forbidden marker
-    (:func:`asf.customer_content.refusal`, ``file:line`` each) — each a correction back to its
-    session."""
+    on it (B-0056), a commit not naming the item or one of a delivery's ``members``, a line it
+    adds to customer content that carries a forbidden marker
+    (:func:`asf.customer_content.refusal`, ``file:line`` each), or a Task branch that proves
+    nothing (F-0040): a lane branch may not land unless its commits name the acceptance line its
+    tests tick. Skipped — never refused — when ``items`` or ``root`` is missing, when the item
+    is not a Task, or when the Task lists no Story (D4, D5): the rule check is the backstop for
+    both. Each a correction back to its session."""
     merges = merge_commits(repo, trunk, branch)
     if merges:
         return 'merge', (f'merge commit on a lane branch: {merges[0]} — a lane branch is straight '
@@ -1152,7 +1181,19 @@ def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
             f'names its item — the lane could not reword them: reword them; the factory '
             f'publishes the rewritten branch')
     if conv is not None:
-        return customer_content.refusal(repo, trunk, branch, conv)
+        refusal = customer_content.refusal(repo, trunk, branch, conv)
+        if refusal is not None:
+            return refusal
+    card = (items or {}).get(item) or {}
+    if not (root and card.get('type') == 'task' and card.get('stories')):
+        return None
+    claims = proves.claims_on_branch(
+        lambda *a: H.sh(['git', *a], cwd=repo).stdout, trunk, branch)  # client-exempt: §2.5 Step 3, through H.sh like lane.py's other reads
+    tree = H.sh(['git', 'ls-tree', '-r', '--name-only', f'origin/{branch}'],  # client-exempt: as above
+               cwd=repo).stdout.split()
+    _good, problems = proves.validate(claims, card, items, root, tree)
+    if problems:
+        return 'proves', proves_refusal_text(card, items, root, problems)
     return None
 
 
@@ -1884,7 +1925,8 @@ class Lane:
                 f['host_dirty'] = host_reads_dirty(self.slug, (pr or {}).get('number'), head)
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
             members = delivery_members(self.items, item)
-            f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members)
+            f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members,
+                                        items=self.items, root=self.root)
             if not f['refusal'] and feature_delivery(self.items, item):
                 # a Feature delivery not whole: no PR, back to its session (T9i). An F-0102
                 # cross-item delivery keeps its D11: the branch lands without a member. A member
@@ -2732,7 +2774,8 @@ class Lane:
                 if not why:  # every subject names its item now: nothing left to reword
                     f['head'] = old
                     f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
-                                                members=delivery_members(self.items, item))
+                                                members=delivery_members(self.items, item),
+                                                items=self.items, root=self.root)
                     if f['refusal'] is None or f['refusal'][0] != lifecycle.NAMING:
                         self.out(f'reword {b}: every subject names {item} already at '
                                  f'{old[:9]} — nothing to push')
@@ -2767,7 +2810,8 @@ class Lane:
         self.out(f'reword {b}: {n} subjects, trees identical — pushed')
         f['head'] = new
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
-                                    members=delivery_members(self.items, item))
+                                    members=delivery_members(self.items, item),
+                                    items=self.items, root=self.root)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new,
@@ -2952,7 +2996,8 @@ class Lane:
                  f'{new[:9]}, trees identical — no session')
         f['head'] = new
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
-                                    members=delivery_members(self.items, item))
+                                    members=delivery_members(self.items, item),
+                                    items=self.items, root=self.root)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new,
@@ -3006,7 +3051,8 @@ class Lane:
         H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
         f['head'] = new
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv,
-                                    members=delivery_members(self.items, f.get('item')))
+                                    members=delivery_members(self.items, f.get('item')),
+                                    items=self.items, root=self.root)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new,
@@ -4180,12 +4226,18 @@ def conflict_files(repo, trunk, branch, fetch=True):
 
 def conflict_text(number, trunk, files):
     """The correction for a branch that conflicts with ``trunk`` in ``files``, PR ``number``
-    (None: no PR yet)."""
+    (None: no PR yet). B-83471: never lets a session read a clean ``git status`` as proof there
+    is nothing to do — the launch's own rebase onto the trunk aborts a conflict before the
+    worktree is handed over (:func:`asf.workers.spawn._rebase_onto_trunk`), so the status reads
+    clean whether the conflict stands or not; three correct sessions on T-0654 and T-47334 took
+    that silence for "carry on" and reported done with no commits."""
     what = f'PR #{number}' if number else 'the branch'
     return (f'{what} conflicts with origin/{trunk} in {", ".join(files)} — GitHub runs no '
-            f'pull_request workflow on a conflicting PR, so its required checks never start; '
-            f'rebase the branch onto origin/{trunk} (git rebase origin/{trunk}), never merge; '
-            f'the factory publishes the rebased branch')
+            f'pull_request workflow on a conflicting PR, so its required checks never start. '
+            f'A clean `git status` here proves nothing: a conflicted rebase is always aborted '
+            f'before your worktree existed, never left in place for you to find — rebase the '
+            f'branch onto origin/{trunk} yourself (`git rebase origin/{trunk}`), resolve those '
+            f'files so both sides survive, never merge, then push')
 
 
 def host_reads_dirty(slug, number, head):
@@ -5077,6 +5129,40 @@ class GitHubHost(Host):
                  state=WAITING_CI)
         return True
 
+    def infra_gate(self, f, number, required, checks, probe=False):
+        """True (and the gate judges nothing this pass) when ``checks`` sit under an infra red
+        (:func:`asf.flake.infra_class`: a phantom run or a lost runner) and the factory answered
+        it — re-run once on this head, or one watchdog breach on the second. A lost-runner red
+        sent to a correct round is a session against a head nothing is wrong with, and a phantom
+        waited out is a PR held until someone re-runs it by hand (F-0295).
+
+        ``probe``: a head that is not red is re-read at most once per
+        :data:`asf.flake.PHANTOM_PROBE_S`. False when there is no infra red, when the re-run was
+        refused, or when nothing could be read: the gate judges exactly as before."""
+        from asf import flake
+        lane, out = self.lane, self.lane.out
+        head = exact_head(f) or f.get('head')
+        if not head or not checks:
+            return False
+        try:
+            infra = flake.infra_class(self.slug, checks, required, gh=H._gh,
+                                      state_dir=lane.state_dir if probe else None)
+        except Exception:   # noqa: BLE001 — unreadable: judged as before
+            return False
+        if not infra:
+            return False
+        cls, rid, attempt = infra
+        got = flake.infra_rerun(lane.state_dir, self.slug, head, rid, cls,
+                                where=f'PR #{number}', out=out, gh=H._gh, attempt=attempt)
+        if got == 'refused':
+            return False
+        said = {'rerun': 're-run queued', 'held': 're-run queued, awaiting it',
+                'breach': 'watchdog breach — re-run once already, not again'}
+        out(f'waiting {f["branch"]}: PR #{number} infra red ({cls}) at {head[:9]} — '
+            f'{said.get(got, got)}, never a correct round')
+        wait(lane, f, f'infra red ({cls}): {said.get(got, got)}', state=WAITING_CI)
+        return True
+
     def check_gate(self, f, number, files):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
         checks passed under ``wait``), or None when it waits or went back. Under
@@ -5113,6 +5199,8 @@ class GitHubHost(Host):
             now = lane.now or time.time()
             since = (rec.get('ci_since') if rec.get('state') == WAITING_CI and rec.get('ci_since')
                      else now)
+            if self.infra_gate(f, number, required, judged_pending(checks, required), probe=True):
+                return None     # a phantom under the checks it waits on: re-run, not waited out
             lane.out(f'waiting {b}: PR #{number} checks pending — {detail} '
                      f'({int((now - float(since)) // 60)} min)')
             wait(lane, f, f'checks pending: {detail}', state=WAITING_CI, ci_since=since)
@@ -5135,6 +5223,12 @@ class GitHubHost(Host):
                 return None
             if self.cut_short(f, number, [c for c in checks if c.get('bucket') in RED_BUCKETS
                                           and c.get('name') in red], red):
+                return None
+            # a lost runner or a phantom (asf.flake.classify_red): infra, re-run once on this
+            # head, never a correct round — a second on the same head is a watchdog breach
+            if self.infra_gate(f, number, required, [c for c in checks
+                                                     if c.get('bucket') in RED_BUCKETS
+                                                     and c.get('name') in red]):
                 return None
             on_trunk = self.trunk_red(red)
             try:
@@ -5185,6 +5279,10 @@ class GitHubHost(Host):
             return None
         kick = {}
         if skipped or missing:
+            # a required job that never got a job at all is the card's phantom: the run behind
+            # the head's other checks says so, and it is re-run once rather than gated locally
+            if self.infra_gate(f, number, required, checks, probe=True):
+                return None
             stalled = self.stalled(f, number)
             if stalled == 'back':
                 return None
@@ -5624,6 +5722,13 @@ def not_required_red(checks, required):
         return []
     return [c.get('name') or '?' for c in checks
             if c.get('bucket') in RED_BUCKETS and not required_name(c.get('name'), required)]
+
+
+def judged_pending(checks, required=()):
+    """The required checks of ``checks`` that have not reached a verdict — what the gate is
+    waiting on, and the only runs its phantom probe reads."""
+    return [c for c in checks or () if c.get('bucket') == 'pending'
+            and (not required or required_name(c.get('name'), required))]
 
 
 def protected_checks(slug, trunk, state_dir, now=None):

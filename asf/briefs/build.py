@@ -292,7 +292,13 @@ def add_dirs_for(product, row=None, kind=None):
     worktree, expanded but not checked (the runtime is what fails on a missing one).
 
     A ``groom`` or ``groom-clerk`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
-    session reads the one and writes the other, and neither sits inside its worktree."""
+    session reads the one and writes the other, and neither sits inside its worktree.
+
+    A ``spec-amend`` row (:data:`asf.feeder.rows.NO_STORIES`) also grants the record root
+    (``product.backlog_dir``): the template tells the session to mint any Story the Feature
+    lacks with ``asf new story``, and that writes outside the worktree exactly as ``asf inbox``
+    does (groom's own grant, above) — without this the session has no way to reach the one
+    directory the one write it is told to make requires."""
     grants = []
     if product is not None:
         raw = product._get('job_grants') if hasattr(product, '_get') else None
@@ -307,6 +313,9 @@ def add_dirs_for(product, row=None, kind=None):
         for d in dirs:
             if d and d not in grants:
                 grants.append(d)
+    if kind == 'spec-amend' and product is not None and product.backlog_dir:
+        if product.backlog_dir not in grants:
+            grants.append(product.backlog_dir)
     return grants
 
 
@@ -378,6 +387,30 @@ GATE_LOCAL = ("BEFORE THE PUSH: the Task's Gate commands, and its acceptance tes
 GATE_REMOTE = ("BEFORE THE PUSH: the Task's acceptance tests, byte-identical from the plan and passing, "
                "run on the\nfiles they cover only. The Task's Gate runs in remote CI on the pull "
                "request, never here: do not run it.")
+
+
+#: The round-1 read order (:func:`read_order`) — the tail of today's sentence, byte-identical to
+#: ``review.md``'s own lines so a round-1 brief renders unchanged.
+READ_ORDER_FIRST = ("the writer's report on `{branch}`, then the diff against `origin/{main}`,\n"
+                    "then the plan `{plan_path}` for the Task it claims to deliver.")
+
+#: A later round's read order: the previous round's C list, then the increment since the head
+#: that round read, then a name-only diff for the scope row — never the whole diff again.
+READ_ORDER_LATER = ("the newest review quoted at the end of this brief — its C list is what this "
+                    "round is for — then **`git diff {prior_head}...HEAD`**, which is everything "
+                    "the correcting session did about it, then `git diff --name-only "
+                    "origin/{main}...HEAD` for the scope row. Do **not** re-read the whole diff "
+                    "against `origin/{main}`: round {round} already read it, and this brief's "
+                    "rounds rule below says what you may do with anything you would find there. "
+                    "If `{prior_head}` is not on this branch, the branch was recut — read the "
+                    "whole diff as round 1 does, and say so in the review's evidence.")
+
+
+def read_order(ctx):
+    """The read-order sentence for ``review.md``: round 1's (``ctx['prior_head']`` empty) is
+    :data:`READ_ORDER_FIRST`, a later round's is :data:`READ_ORDER_LATER` — chosen by
+    ``prior_head``'s truthiness, never by the round number (PD13)."""
+    return (READ_ORDER_LATER if ctx['prior_head'] else READ_ORDER_FIRST).format(**ctx)
 
 
 #: The same two for a direct-lane Feature (``direct``): no plan, so no Task Gate — the session's
@@ -452,7 +485,7 @@ def context(product, row, kind, facts):
     """Every name a template may use. One flat dict, so a missing key is a missing key."""
     item, feature, epic = facts['item'], facts['feature'], facts['epic']
     sections = facts['sections']
-    return {
+    ctx = {
         'kind': kind,
         'gate_before_push': gate_before_push(product),
         'gate_before_push_direct': gate_before_push_direct(product),
@@ -481,6 +514,7 @@ def context(product, row, kind, facts):
         'reviews_dir': preamble_mod.conventions(product).reviews_dir,
         'round': facts['round'],
         'next_round': facts['next_round'],
+        'prior_head': facts['prior_head'],
         'head': facts['head'] or preamble_mod.UNKNOWN,
         'writes': writes_text(product, facts['writes']),
         'tests': ', '.join(facts['tests']) if facts['tests'] else '(name the test you add)',
@@ -501,6 +535,8 @@ def context(product, row, kind, facts):
                          else ''),
         **replan_context(product, feature, facts.get('items') or {}),
     }
+    ctx['read_order'] = read_order(ctx)
+    return ctx
 
 
 def replan_context(product, feature, items):
