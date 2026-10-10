@@ -319,6 +319,43 @@ class Cap(unittest.TestCase):
         self.assertLessEqual(added, 4000)
 
 
+class NoSeatWaits(unittest.TestCase):
+    """max_sessions pools local and cloud seats, so the plan can hold a local-only launch (a
+    review, a rebase round) while only cloud seats are free: it waits for a local seat — never an
+    attempt on the item (three of them would make it Stuck) — and the cloud launches after it
+    still go."""
+
+    class Sessions(F.FakeSessions):
+        def launch(self, kind, item_id, branch, brief, meta=None):
+            if kind == 'review':
+                raise P.NoSeat('no free seat: local 10/10, cloud 0/8 (review is not in '
+                               'kernel.launch.cloud_kinds)')
+            return super().launch(kind, item_id, branch, brief, meta)
+
+    def test_a_local_only_launch_on_a_full_local_lane_waits_without_an_attempt(self):
+        rec = F.FakeRecord([B.task('T-0001', state=State.REVIEW), B.task('T-0002')])
+        facts = B.facts([B.task('T-0001', state=State.REVIEW), B.task('T-0002')],
+                        prs=[B.pr(7, 'T-0001')])
+        sessions = self.Sessions()
+        plan = A.Plan(actions=[A.Launch('review', 'T-0001', 'worker/T-0001', []),
+                               A.Launch('build', 'T-0002', 'worker/T-0002', [])], states={})
+        lines = []
+        result = apply(plan, facts, F.ports(record=rec, sessions=sessions), now='t',
+                       log=lines.append)
+        self.assertEqual(result.failed, [])
+        self.assertNotIn(P.ATTEMPTS, rec.fields.get('T-0001', {}))
+        self.assertEqual([i for _, i, _, _ in sessions.launched], ['T-0002'])
+        self.assertTrue(any('T-0001' in x and 'waits for a seat' in x for x in lines), lines)
+
+    def test_the_lane_refusal_is_a_no_seat(self):
+        port = P.RealSessions(product({'launch': {'local_max': 0, 'cloud_max': 2}}), cfg=CFG)
+        with mock.patch.object(pool, 'load_sessions', return_value={}), \
+                mock.patch.object(cloud, 'Breaker', FakeBreaker):
+            with self.assertRaises(P.NoSeat):
+                port.lane('review')
+            self.assertEqual(port.lane('coder'), 'cloud')
+
+
 class RebaseRoundStaysLocal(unittest.TestCase):
 
     def test_a_rebase_round_launch_carries_the_host_flag(self):

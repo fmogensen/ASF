@@ -8,7 +8,8 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   and the brief;
 - a failed :class:`~asf.kernel.actions.UpdateBranch` on a conflicting PR, or whose error says
   "merge conflict", is an attempt :func:`asf.kernel.decide.conflict_attempt` (PR and head), so
-  the next tick routes the PR to its rebase session; a failed launch is an attempt ``launch: …``;
+  the next tick routes the PR to its rebase session; a failed launch is an attempt ``launch: …``
+  — but one with no seat on its lane (:class:`asf.kernel.ports.NoSeat`) only waits a tick;
 - a session whose pid died without ending is an attempt :data:`asf.kernel.decide.CRASH`; one whose
   API failed before it reported is an attempt :data:`asf.kernel.decide.API_FAILED`;
 - an ended session that reported ``pushed: rebased <sha>`` (the floor's wording: "the factory
@@ -274,6 +275,8 @@ class _Applier:
                 raise P.PortError('no brief maker on the ports')
             job = self.ports.sessions.launch(a.kind, a.item_id, a.branch,
                                              self.ports.brief(it, a, findings, pr), meta)
+        except P.NoSeat as e:  # a capacity wait, not a failed attempt on the item
+            return 'waits for a seat: %s' % e
         except Exception as e:
             self.attempt(a.item_id, 'launch: %s' % e)
             raise

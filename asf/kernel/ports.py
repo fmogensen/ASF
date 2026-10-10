@@ -121,6 +121,12 @@ class PortError(Exception):
     """A write a port could not do; the message is the reason the applier records."""
 
 
+class NoSeat(PortError):
+    """A launch with no seat on its lane (:meth:`RealSessions.lane`): ``max_sessions`` pools the
+    local and cloud seats, so a local-only launch (a review, a rebase round) can meet a full local
+    lane while cloud seats are free. It waits for a seat — the applier records no attempt."""
+
+
 # ---- the record ---------------------------------------------------------------------------------
 
 def item_from_card(rec):
@@ -731,7 +737,7 @@ class RealSessions:
         a cloud seat — if its brief kind is in ``kernel.launch.cloud_kinds`` (a review would push a
         report commit and restart the PR's CI, so reviews stay local) — while the lane has one (``kernel.launch.cloud_max``), its creates this tick
         are under ``cloud.max_creates_per_tick`` and its fallback breaker has not tripped; else a
-        local seat (``kernel.launch.local_max``). Raises :class:`PortError` when neither has one."""
+        local seat (``kernel.launch.local_max``). Raises :class:`NoSeat` when neither has one."""
         from asf.workers import cloud
         local_max, cloud_max = lane_seats(self.product, self.cfg())
         local, in_cloud, _ = self._live()
@@ -752,7 +758,7 @@ class RealSessions:
             return 'cloud'
         if local < local_max:
             return 'local'
-        raise PortError('no free seat: local %d/%d, cloud %d/%d (%s)'
+        raise NoSeat('no free seat: local %d/%d, cloud %d/%d (%s)'
                         % (local, local_max, in_cloud, cloud_max, why))
 
     def launch(self, kind, item_id, branch, brief, meta=None):
