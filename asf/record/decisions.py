@@ -2,10 +2,15 @@
 
 A decision exists when the record holds it (a ``decisions/D-nnnn.md`` card) or the product's
 own ``docs/decisions/`` carries it — a file named ``D-nnnn.md``, a file whose front matter says
-``id: D-nnnn``, or a numbered record ``nnnn-<slug>.md`` (read as ``D-nnnn``). Two readers:
-the ingest, where a Story's acceptance line counts as deferred only by a decision the register
-holds, and the plan-tasks step, which refuses a plan whose Tasks cite a decision it lacks.
+``id: D-nnnn``, or a numbered record ``nnnn-<slug>.md`` (read as ``D-nnnn``). A spec's own "The
+choices" table (``| D1 | ... |``) is a third register: it numbers that spec's own decisions
+``D1, D2, …`` from 1, independent of the record's own ``D-nnnn`` cards, and a Task body that
+cites one bare (``D4's chain``) is citing the spec, not whichever record card happens to share
+the number. Two readers: the ingest, where a Story's acceptance line counts as deferred only by
+a decision the register holds, and the plan-tasks step, which refuses a plan whose Tasks cite a
+decision it lacks.
 """
+import glob
 import os
 import re
 
@@ -14,7 +19,11 @@ _NUMBERED_RE = re.compile(r'^(\d{4,})-')
 _FRONT_ID_RE = re.compile(r'^id:\s*(D-\d{4,})\s*$', re.M)
 #: a fenced block or an inline code span — a decision id inside one is an example, not a citation
 _CODE_RE = re.compile(r'```.*?```|`[^`\n]*`', re.S)
+#: a "The choices" table row: `| D4 | the choice | ... |` — the row's own id, left of the first
+#: cell's content
+_SPEC_TABLE_ROW_RE = re.compile(r'^\|\s*D(\d{1,3})\s*\|', re.M)
 DOCS_DIR = os.path.join('docs', 'decisions')
+SPECS_DIR = os.path.join('docs', 'specs')
 
 
 def repo_dir(product):
@@ -34,7 +43,7 @@ def docs_ids(repo_dir):
     try:
         names = sorted(os.listdir(folder))
     except OSError:
-        return out
+        names = []
     for name in names:
         if not name.endswith('.md'):
             continue
@@ -52,6 +61,14 @@ def docs_ids(repo_dir):
         m = _FRONT_ID_RE.search(head)
         if m:
             out.add(m.group(1).upper())
+    for path in glob.glob(os.path.join(repo_dir, SPECS_DIR, '*.md')):
+        try:
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+        except OSError:
+            continue
+        for m in _SPEC_TABLE_ROW_RE.finditer(text):
+            out.add(f'D-{int(m.group(1)):04d}')
     return out
 
 

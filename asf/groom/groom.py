@@ -912,6 +912,33 @@ def groom_over_budget_section(canonical, derived, product):
     return lines
 
 
+def groom_operator_stale_section(canonical, product):
+    """One question per open card ``in_progress_by: operator`` has held past
+    ``stage_limits.operator_hours`` (default 2h, B-0070): the lane would otherwise duplicate a
+    fix the operator is already carrying by hand, so a claim that old with no landing is asked
+    about — land it, hand it back, or close it."""
+    from asf.tick import stale
+    now = datetime.datetime.now(datetime.timezone.utc)
+    limit = stale.load_limits(product).get('operator_hours', stale.DEFAULT_LIMITS['operator_hours'])
+    lines = []
+    for iid, rec in sorted(canonical.items()):
+        if not is_open(rec):
+            continue
+        typed, machine = frontmatter.split_machine(rec['meta'])
+        if typed.get('in_progress_by') != 'operator':
+            continue
+        since = stale.parse_iso(machine.get('stage_since'))
+        if since is None:
+            continue
+        age = (now - since).total_seconds()
+        if age <= stale.limit_seconds(limit):
+            continue
+        why = (f"in progress by the operator for {stale.format_age(age)} (> {limit}): land it, "
+               f"hand it back to the lane (clear `in_progress_by`) or close it (`no: <why>`)")
+        lines.append(_card_line(iid, typed.get('title', ''), why))
+    return lines
+
+
 GROOM_SECTIONS = [
     ('Inbox cards to decide', 'inbox'),
     ('Undecided, asked nowhere else', 'undecided_new'),
@@ -996,7 +1023,13 @@ OVER_BUDGET_QUESTIONS = ('Over budget', 'over_budget')
 #: Rendered only when it has lines (``flags.roots``): a parked item many rows wait on, parked
 #: for days (:func:`asf.groom.policy.stale_park_section`) — one question per root.
 STALE_PARK_QUESTIONS = ('Parked roots others wait on', 'stale_parks')
-EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS, OVER_BUDGET_QUESTIONS, STALE_PARK_QUESTIONS]
+#: Rendered only when it has lines: an open card ``in_progress_by: operator`` has held past
+#: ``stage_limits.operator_hours`` (:func:`groom_operator_stale_section`, B-0070) — the lane
+#: would otherwise duplicate a fix the operator is already carrying by hand with no sign that
+#: anyone is still on it.
+OPERATOR_STALE_QUESTIONS = ('Held by the operator, stale', 'operator_stale')
+EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS, OVER_BUDGET_QUESTIONS, STALE_PARK_QUESTIONS,
+                  OPERATOR_STALE_QUESTIONS]
 
 _SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + EXTRA_SECTIONS}
 _HEADER_RE = re.compile(r'^## (.+)$')
@@ -1324,6 +1357,7 @@ def _groom(args, root):
     sections[REFUSED_QUESTIONS[1]] = groom_refused_section(canonical, product)
     sections[OVER_BUDGET_QUESTIONS[1]] = groom_over_budget_section(canonical, derived, product)
     sections[STALE_PARK_QUESTIONS[1]] = policy.stale_park_section(product, root, canonical)
+    sections[OPERATOR_STALE_QUESTIONS[1]] = groom_operator_stale_section(canonical, product)
 
     if sticky.structural(product) == 'report':
         # G1: a Feature/Story shape gap is reported, never asked — an undecided Feature still

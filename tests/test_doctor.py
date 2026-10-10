@@ -247,6 +247,33 @@ class TestOneFactoryCheck(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn('old-tool.sh', detail)
 
+    def test_a_worktree_of_the_factory_repo_is_not_a_second_copy(self):
+        # B-0144: the clock never runs from the checkout, it runs from a detached `git worktree`
+        # of it (asf/snapshot.py) — package_root() then sits in the worktree while the product's
+        # repo_dir names the checkout; neither realpath nor an installed dist name match them,
+        # so only the shared `.git` common dir can tell this is the same repo, not a second one.
+        with tempfile.TemporaryDirectory() as d:
+            legacy = os.path.join(d, 'legacy')
+            os.makedirs(legacy)
+            open(os.path.join(legacy, 'frontmatter.py'), 'w').close()
+            repo = os.path.join(d, 'repo')
+            os.makedirs(os.path.join(repo, 'asf'))
+            open(os.path.join(repo, 'asf', 'frontmatter.py'), 'w').close()
+            subprocess.run(['git', 'init', '-q', repo], check=True, capture_output=True)
+            subprocess.run(['git', '-C', repo, 'add', '-A'], check=True, capture_output=True)
+            subprocess.run(['git', '-C', repo, 'commit', '-q', '-m', 'x'], check=True,
+                            capture_output=True)
+            worktree = os.path.join(d, 'worktree')
+            subprocess.run(['git', '-C', repo, 'worktree', 'add', '-q', worktree], check=True,
+                            capture_output=True)
+            cfg = {'legacy_paths': [legacy]}
+            product = env.Product('asf', {'repo_dir': repo})
+            with mock.patch.object(doctor, 'package_root', return_value=worktree), \
+                    mock.patch.object(doctor, 'installed_dist_names', return_value=set()):
+                ok, detail = doctor.check_one_factory(cfg, product)
+            self.assertTrue(ok, detail)
+            self.assertIn('it is the factory itself', detail)
+
     def test_the_factory_repo_itself_is_not_a_second_copy(self):
         with tempfile.TemporaryDirectory() as d:
             legacy = os.path.join(d, 'legacy')
