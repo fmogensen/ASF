@@ -2513,13 +2513,22 @@ def push_failure(text):
 #: never commits.
 NO_LANDING_KINDS = ('groom', 'groom-clerk')
 
+#: Kinds whose work is a file the factory takes off the branch, not a commit on it: a review
+#: session writes ``docs/reviews/<n>-<item>.md`` in its worktree and leaves it uncommitted for
+#: :mod:`asf.evidence.review_store` to file, because a push to the branch moves its PR head and
+#: restarts the PR's whole CI. Only the kind is exempt, never the branch: a review runs on the
+#: item's own branch, and the code and correction runs that share it must still be held for
+#: their work — so these kinds are read apart from :data:`NO_LANDING_KINDS`, whose branch a
+#: run of any kind inherits (B-0276).
+OFF_BRANCH_KINDS = ('review',)
+
 
 def lands(run, path=None):
-    """False for a run whose work is not its branch: a :data:`NO_LANDING_KINDS` run, or any run
+    """False for a run whose work is not its branch: a :data:`NO_LANDING_KINDS` run, any run
     sent back on a branch such a run was launched on (a correction takes the branch, not the
-    kind). Such a run is judged on its result alone, never held for an unpushed or empty
-    branch."""
-    if (run or {}).get('kind') in NO_LANDING_KINDS:
+    kind), or an :data:`OFF_BRANCH_KINDS` run — by kind alone, its branch being the item's own.
+    Such a run is judged on its result alone, never held for an unpushed or empty branch."""
+    if (run or {}).get('kind') in NO_LANDING_KINDS + OFF_BRANCH_KINDS:
         return False
     branch = (run or {}).get('branch')
     if path and branch:
@@ -2552,13 +2561,14 @@ def judge(run, ev, landing=None):
                 and not ev.result.get('is_error')
                 and ev.result.get('subtype', 'success') == 'success'):
             return f'failed: {sig}' if sig else 'failed'
-    if run.get('branch') and landing:
-        if not ev.pushed:
-            return f'failed: {push_gap(ev)}'
-        if not ev.has_commits and not run.get('review_filed'):
-            # a review session commits nothing: the review it wrote, filed off the branch
-            # (asf.evidence.review_store), is its work
-            return f'failed: {EMPTY_BRANCH}'
+    if run.get('branch') and landing and not ev.pushed:
+        return f'failed: {push_gap(ev)}'
+    # an :data:`OFF_BRANCH_KINDS` run is never held for a push (B-0276), but it still owes the
+    # work it does not commit: a review session's is the review it wrote, filed off the branch
+    # (asf.evidence.review_store), and one that filed none did nothing
+    if run.get('branch') and (landing or (run or {}).get('kind') in OFF_BRANCH_KINDS) \
+            and not ev.has_commits and not run.get('review_filed'):
+        return f'failed: {EMPTY_BRANCH}'
     return FINISHED
 
 

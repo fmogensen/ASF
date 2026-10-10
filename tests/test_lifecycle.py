@@ -621,6 +621,63 @@ class NoLandingRunInvariants(unittest.TestCase):
         self.assertEqual(lc.derive(corr, ev, path=path).name, lc.PUSHED)
 
 
+class ReviewRunInvariants(unittest.TestCase):
+    """B-0276: a review session writes ``docs/reviews/<n>-<item>.md`` in its worktree and leaves
+    it uncommitted for the factory to file off the branch (:mod:`asf.evidence.review_store`),
+    because a push to the branch moves its PR head and restarts the PR's whole CI. Judged like a
+    lane that must push, such a run was read ``not pushed`` over that one file and sent a
+    correction telling it to commit what its brief forbids: the review looped to the daily
+    relaunch cap and was parked, no approval was ever written, and PRs green for hours (#842,
+    #848, #849, #858, #859 on 2026-10-06) waited. It is never held for a push — but it still owes
+    a review, so one that filed none is still ``empty branch``."""
+    REVIEW = {'job': 'review-t-0589', 'kind': 'review', 'branch': 'worker/T-0589',
+              'item': 'T-0589', 'pid': 1, 'started': 't'}
+    FILED = dict(REVIEW, review_filed='/store/1-t-0589.md')
+
+    def test_a_review_run_lands_nothing(self):
+        self.assertFalse(lc.lands(self.REVIEW))
+
+    def test_a_review_run_is_not_held_for_its_uncommitted_review(self):
+        dirty = lc.Evidence(result=OK, remote_sha='s', uncommitted=1, has_commits=False,
+                            worktree=True)
+        clean = lc.Evidence(result=OK, remote_sha='s', head_on_remote=True, has_commits=False,
+                            worktree=True)
+        for ev in (dirty, clean, lc.Evidence(result=OK)):
+            self.assertEqual(lc.judge(self.FILED, ev), lc.FINISHED)
+        self.assertEqual(lc.judge(self.FILED, lc.Evidence(result=ERR)), 'failed')
+
+    def test_a_review_report_saying_pushed_no_is_not_unpushed_work(self):
+        rec = dict(OK, result='REPORT\nitem: T-0589\nkind: review\nstatus: done\n'
+                              'pushed: no — the review is left for the factory to file\n')
+        self.assertEqual(lc.judge(self.FILED, lc.Evidence(result=rec, remote_sha='s')),
+                         lc.FINISHED)
+
+    def test_a_review_run_that_filed_no_review_is_still_empty(self):
+        """The push is forgiven, the review is not: a session that left none did nothing, and
+        the round that says so is what gets the item a verdict."""
+        dirty = lc.Evidence(result=OK, remote_sha='s', uncommitted=1, has_commits=False,
+                            worktree=True)
+        self.assertEqual(lc.judge(self.REVIEW, dirty), f'failed: {lc.EMPTY_BRANCH}')
+
+    def test_the_reviewed_branchs_own_runs_are_still_held(self):
+        """The exemption is the kind, never the branch: a review runs on the item's own branch,
+        so the code and correction runs that share it must still be held for their work."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, 'sessions.jsonl')
+        coder = {'job': 'coder-t-0589', 'kind': 'coder', 'branch': 'worker/T-0589',
+                 'item': 'T-0589', 'pid': 2, 'started': 't2'}
+        with open(path, 'w') as f:
+            for rec in (self.REVIEW, {'job': self.REVIEW['job'], 'ended': 't1'}, coder):
+                f.write(json.dumps(rec) + '\n')
+        self.assertFalse(lc.lands(self.REVIEW, path))
+        self.assertTrue(lc.lands(coder, path))
+        dirty = lc.Evidence(result=OK, remote_sha='s', uncommitted=1, has_commits=False,
+                            worktree=True)
+        self.assertEqual(lc.judge(coder, dirty, landing=lc.lands(coder, path)),
+                         f'failed: {lc.push_gap(dirty)}')
+
+
 class StateMachineInvariants(unittest.TestCase):
     def test_every_state_but_reaped_has_a_successor_and_all_successors_are_states(self):
         self.assertEqual(set(lc.TRANSITIONS), set(lc.STATES))
