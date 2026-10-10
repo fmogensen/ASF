@@ -341,6 +341,8 @@ def build(record_dir, repo_dir, out, product=None):
         'cards': cards,
         'widest_id': widest,
         'refs': refs,
+        'refs_total': len(refs),
+        'refs_annotated': sum(1 for r in refs if r['annotated']),
         'branches': branches,
         'merges': merges,
         'intake': intake,
@@ -435,6 +437,21 @@ def manifest_holds(snapshot):
         problems.append("refs: manifest.json and repo/refs.json disagree")
     elif not any(r.get('annotated') for r in claimed_refs):
         problems.append("refs: no annotated tag claimed")
+
+    # the ref plan's own scalar claims (PD: plan Step 2's "tag count, annotated count") — kept
+    # separate from the `refs` list itself so flipping one `annotated` flag in both manifest.json
+    # and repo/refs.json (leaving the two lists equal to each other) still shows as a mismatch
+    # against the counts recorded at build time.
+    actual_refs = independent_refs if independent_refs is not None else claimed_refs
+    actual_total = len(actual_refs)
+    actual_annotated = sum(1 for r in actual_refs if r.get('annotated'))
+    claimed_total = manifest.get('refs_total')
+    claimed_annotated = manifest.get('refs_annotated')
+    if claimed_total != actual_total:
+        problems.append(f"refs_total: manifest claims {claimed_total}, snapshot has {actual_total}")
+    if claimed_annotated != actual_annotated:
+        problems.append(f"refs_annotated: manifest claims {claimed_annotated}, "
+                         f"snapshot has {actual_annotated}")
 
     claimed_intake = manifest.get('intake') or {}
     intake_dir_name = manifest.get('intake_dir') or conventions_mod.DEFAULT_INTAKE_DIR

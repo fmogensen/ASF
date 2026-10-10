@@ -161,7 +161,7 @@ class IntakeThreeStates(unittest.TestCase):
 
     def test_intake_done_header_kept_text_cleared(self):
         name = self.manifest['intake']['done'][0]
-        intake_dir = self.manifest.get('intake_dir', 'inbox')
+        intake_dir = self.manifest['intake_dir']
         path = os.path.join(COMMITTED_SNAPSHOT, 'record', intake_dir, 'done', name)
         with open(path, encoding='utf-8') as f:
             text = f.read()
@@ -312,6 +312,32 @@ class ManifestHoldsDetectsBreakage(unittest.TestCase):
             json.dump(manifest, f)
         problems = rehearsal.manifest_holds(self.out)
         self.assertTrue(any('refs' in p for p in problems), problems)
+
+    def test_annotated_flag_flipped_in_both_files_is_still_a_red_line(self):
+        # the same flip, made consistently in manifest.json's `refs` list and the independent
+        # repo/refs.json it is cross-checked against — the `refs` comparison alone (C8) can't
+        # catch this, since the two lists still agree with each other; only the separate
+        # refs_total/refs_annotated scalar claims, recorded at build time, catch it.
+        manifest_path = os.path.join(self.out, 'manifest.json')
+        refs_path = os.path.join(self.out, 'repo', 'refs.json')
+        with open(manifest_path, encoding='utf-8') as f:
+            manifest = json.load(f)
+        with open(refs_path, encoding='utf-8') as f:
+            independent_refs = json.load(f)
+        flipped = False
+        for ref, iref in zip(manifest['refs'], independent_refs):
+            if ref['annotated']:
+                ref['annotated'] = False
+                iref['annotated'] = False
+                flipped = True
+                break
+        self.assertTrue(flipped, manifest['refs'])
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f)
+        with open(refs_path, 'w', encoding='utf-8') as f:
+            json.dump(independent_refs, f)
+        problems = rehearsal.manifest_holds(self.out)
+        self.assertTrue(any('refs_annotated' in p for p in problems), problems)
 
 
 class CmdRehearseBuildFromProduct(unittest.TestCase):

@@ -1,12 +1,12 @@
 {
-  "asf_version": "0.1.318.post2+gdbf0c4c7c",
+  "asf_version": "0.0.0",
   "branches": [
     "worker/T-00001",
     "fix/T-00001",
     "spec/T-00001",
     "plan/T-00001"
   ],
-  "built_at": "2026-10-10T12:21:37Z",
+  "built_at": "2026-10-10T13:46:09Z",
   "cards": {
     "bugs": 48,
     "decisions": 10,
@@ -36,6 +36,7 @@
       "open-note-2.md"
     ]
   },
+  "intake_dir": "inbox",
   "merges": [
     "B-00001 \u2014 ullamco duis cillum proident ali (#1201)",
     "D-0001 \u2014 ullamco duis cillum proident ali (#1202)",
@@ -48,24 +49,29 @@
   "refs": [
     {
       "annotated": true,
+      "date": "2026-10-10",
       "message": "ad nisi culpa nostrud ea des",
       "name": "v0.1.0",
       "prerelease": false
     },
     {
       "annotated": true,
+      "date": "2026-10-10",
       "message": "ad nisi culpa nostrud ea des",
       "name": "v0.1.1",
       "prerelease": false
     },
     {
       "annotated": false,
+      "date": "2026-10-10",
       "message": "",
       "name": "v0.1.2-rc1",
       "prerelease": true
     }
   ],
-  "source_sha": "27beda4b23652ea531e5e08b39feea07d101b44f",
+  "refs_annotated": 2,
+  "refs_total": 3,
+  "source_sha": "05c1504dadd18ac54778e78d28f2befa92165609",
   "widest_id": {
     "B": "B-00001",
     "D": "D-0001",

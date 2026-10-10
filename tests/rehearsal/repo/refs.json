@@ -1,18 +1,21 @@
 [
   {
     "annotated": true,
+    "date": "2026-10-10",
     "message": "ad nisi culpa nostrud ea des",
     "name": "v0.1.0",
     "prerelease": false
   },
   {
     "annotated": true,
+    "date": "2026-10-10",
     "message": "ad nisi culpa nostrud ea des",
     "name": "v0.1.1",
     "prerelease": false
   },
   {
     "annotated": false,
+    "date": "2026-10-10",
     "message": "",
     "name": "v0.1.2-rc1",
     "prerelease": true
