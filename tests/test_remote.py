@@ -107,6 +107,7 @@ class Body(unittest.TestCase):
         self.assertEqual(remote.trigger_body('n', 'the brief', ENV_ID, 'claude-opus-5', ['Bash'],
                                              'https://github.com/o/r'), {
             'name': 'n', 'enabled': True, 'persist_session': False,
+            'run_once_at': remote.FAR_FUTURE,
             'job_config': {'ccr': {
                 'environment_id': ENV_ID,
                 'events': [{'type': 'user', 'data': {'message': {'role': 'user',

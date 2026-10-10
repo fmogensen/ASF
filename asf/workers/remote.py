@@ -23,7 +23,7 @@ routine's setting (check the branch out, export the worker environment, run the 
 to origin's brief ref first (:func:`asf.workers.actions.push_brief`, ``refs/asf/briefs/<job>``,
 deleted when the run ends) — never into the routine body: the helper is a model, and a model
 does not copy a multi-KB brief byte-exact. ``create`` makes a routine on the dispatching
-account — no schedule (the API refuses ``run_once_at``), so nothing fires by itself — whose one event is a short,
+account — ``run_once_at`` far out, so nothing fires by schedule — whose one event is a short,
 fixed, ASCII pointer to that ref (:func:`pointer`), whose source is the product repo, in the account's
 environment (``cloud.environment_id``: one id, or a map account → id — an environment belongs to
 one account, and another account's is refused ``environment_not_found``) with ``cloud.model`` (else the row's model) and ``cloud.allowed_tools``;
@@ -78,6 +78,8 @@ PREFIX = cloudpid.REMOTE_PREFIX
 DEFAULT_ALLOWED_TOOLS = ('Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep')
 DEFAULT_HELPER_MODEL = 'haiku'
 DEFAULT_POLL_MIN = 15
+#: a routine ASF fires by ``run``: its schedule never comes
+FAR_FUTURE = '2036-01-01T00:00:00Z'
 #: one helper call's hard limit: a create relays a short body in seconds; a helper past this
 #: is killed and the launch fails clean (``timeout``) instead of holding the tick
 HELPER_TIMEOUT_S = 120
@@ -143,13 +145,14 @@ def pointer(job, ref, url):
 
 
 def trigger_body(name, prompt, environment_id, model, allowed_tools, url):
-    """The ``create`` body: a routine with no schedule that ASF fires itself (``run``), one
+    """The ``create`` body: a run-once routine ASF fires itself (``run_once_at`` far out), one
     user event carrying ``prompt``, the repo ``url`` as its source. Pure (golden-tested)."""
     ctx = {'allowed_tools': list(allowed_tools or DEFAULT_ALLOWED_TOOLS),
            'sources': [{'git_repository': {'url': url}}]}
     if model:
         ctx['model'] = model
     return {'name': name, 'enabled': True, 'persist_session': False,
+            'run_once_at': FAR_FUTURE,
             'job_config': {'ccr': {
                 'environment_id': environment_id,
                 'events': [{'type': 'user',
