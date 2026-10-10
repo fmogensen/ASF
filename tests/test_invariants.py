@@ -64,6 +64,21 @@ class R10I4OneLaunchPerBranchOfItsKind(unittest.TestCase):
         ctx = feeder(rows, lanes={'worker/T-0001': {'state': 'REVIEW'}})
         self.assertEqual(invariants.check_i4(ctx), [])
 
+    def test_r10_the_stalemate_adjudicate_the_ceiling_sends_is_legal_on_a_review_branch(self):
+        rows = [row('STALEMATE → ADJUDICATE', 'T-0001', 'worker/T-0001', brief='adjudicate')]
+        ctx = feeder(rows, lanes={'worker/T-0001': {'state': 'REVIEW'}})
+        self.assertEqual(invariants.check_i4(ctx), [])
+
+    def test_r10_a_review_row_beside_the_adjudicate_is_the_second_launch_finding(self):
+        # the ceiling's adjudicate is still the only launching row a REVIEW branch may have —
+        # a review row beside it is caught as a second launch, not as a kind violation
+        rows = [row('STALEMATE → ADJUDICATE', 'T-0001', 'worker/T-0001', brief='adjudicate'),
+                row('PUSHED → REVIEW', 'T-0001', 'worker/T-0001', brief='review')]
+        ctx = feeder(rows, lanes={'worker/T-0001': {'state': 'REVIEW'}})
+        found = invariants.check_i4(ctx)
+        self.assertEqual(len(found), 1)
+        self.assertIn('a second launching row', found[0].message)
+
     def test_r10_a_coder_on_a_branch_the_lane_holds_is_dropped(self):
         rows = [row('PLAN → CODE', 'T-0001', 'worker/T-0001'),
                 row('PLAN → CODE', 'T-0002', 'worker/T-0002')]

@@ -845,6 +845,22 @@ def by_branch(path):
     return out
 
 
+def review_attempts(path, lanes):
+    """``{branch: n}`` — ended review runs on that branch started at or after its lane record's
+    ``head_at``: how many reviewers this head has already had."""
+    out = {}
+    for rs in runs(path).values():
+        for r in rs:
+            b = r.get('branch')
+            if not b or r.get('kind') != 'review' or not r.get('ended'):
+                continue
+            head_at = (lanes.get(b) or {}).get('head_at')
+            if not head_at or (r.get('started') or '') < head_at:
+                continue
+            out[b] = out.get(b, 0) + 1
+    return out
+
+
 def lane_of(run):
     """``run['lane']`` as the lane state machine's record (:mod:`asf.harvest.lane`), ``{}`` when
     the run carries none or it is not a map. A cloud-lane launch's own ``runtime_lane`` marker
@@ -1425,10 +1441,11 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
     BACK rows. An item is in at most one of ``busy`` and ``waiting_landing``.
 
     Beside those, for the feeder's rows: ``lanes`` (``{branch: lane record + item, kind}`` of
-    every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr}}`` — lane
-    REVIEW: a PUSHED → REVIEW row), ``landing`` (``{item: {branch, state, pr, why}}`` — the other
-    lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}`` of every waiting branch)
-    and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and waiting is not starved);
+    every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr, why,
+    attempts}}`` — lane REVIEW: a PUSHED → REVIEW row), ``landing`` (``{item: {branch, state,
+    pr, why}}`` — the other lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}``
+    of every waiting branch) and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and
+    waiting is not starved);
     ``parks`` (:func:`parks`): the standing operator parks — a branch or job one holds only its
     own rows (its branch is skipped here; the feeder turns its rows into one PARKED row).
 
@@ -1525,6 +1542,10 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None, on_origin=N
         out['branches'][branch] = why
         if kind:
             out['docs'].setdefault(item, {})[kind] = why
+    if out['review']:
+        tries = review_attempts(path, out['lanes'])
+        for entry in out['review'].values():
+            entry['attempts'] = tries.get(entry['branch'], 0)
     # a park outlives its PR: a closed PR left the row that looped on it (a product's
     # delivery-code-t-0042, its PR closed, launched 69 times) — only an unpark or a release lifts it.
     # Any other correction on a dead branch moves to the item's open code branch when it has one

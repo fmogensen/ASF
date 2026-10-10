@@ -225,6 +225,85 @@ class RegistryFoldInvariants(unittest.TestCase):
         return path
 
 
+class ReviewAttemptsTests(unittest.TestCase):
+    """``review_attempts`` (S-36503): how many reviewers a head has already had — folded over
+    every run on the branch, not just its latest (:func:`lc.by_branch` would cap every count at
+    1, PD8)."""
+
+    def _write(self, lines):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 'sessions.jsonl')
+        with open(path, 'w') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return path
+
+    def test_counts_only_ended_review_runs_on_the_branch_at_or_after_head_at(self):
+        lines = [
+            # started before head_at: does not count
+            {'job': 'review-1', 'pid': 1, 'started': '2026-01-01T00:00:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-1', 'ended': '2026-01-01T00:01:00Z', 'end_reason': 'finished'},
+            # at/after head_at, ended, kind review: counts
+            {'job': 'review-2', 'pid': 2, 'started': '2026-01-02T00:00:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-2', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'},
+            # another kind: does not count
+            {'job': 'correct-1', 'pid': 3, 'started': '2026-01-02T00:02:00Z',
+             'branch': 'worker/T-1', 'kind': 'correct'},
+            {'job': 'correct-1', 'ended': '2026-01-02T00:03:00Z', 'end_reason': 'finished'},
+            # live, no ended: does not count
+            {'job': 'review-3', 'pid': 4, 'started': '2026-01-02T00:04:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            # another branch: does not count
+            {'job': 'review-4', 'pid': 5, 'started': '2026-01-02T00:05:00Z',
+             'branch': 'worker/T-2', 'kind': 'review'},
+            {'job': 'review-4', 'ended': '2026-01-02T00:06:00Z', 'end_reason': 'finished'},
+        ]
+        path = self._write(lines)
+        lanes = {'worker/T-1': {'head_at': '2026-01-02T00:00:00Z'}}
+        self.assertEqual(lc.review_attempts(path, lanes), {'worker/T-1': 1})
+
+    def test_two_qualifying_runs_under_different_jobs_count_two(self):
+        # by_branch keeps one run per branch and would cap this at 1 (PD8): review_attempts
+        # folds `runs`, not `by_branch`
+        lines = [
+            {'job': 'review-1', 'pid': 1, 'started': '2026-01-02T00:00:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-1', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'},
+            {'job': 'review-2', 'pid': 2, 'started': '2026-01-02T00:02:00Z',
+             'branch': 'worker/T-1', 'kind': 'review'},
+            {'job': 'review-2', 'ended': '2026-01-02T00:03:00Z', 'end_reason': 'finished'},
+        ]
+        path = self._write(lines)
+        lanes = {'worker/T-1': {'head_at': '2026-01-02T00:00:00Z'}}
+        self.assertEqual(lc.review_attempts(path, lanes), {'worker/T-1': 2})
+
+    def test_a_branch_with_no_head_at_in_lanes_yields_zero(self):
+        lines = [{'job': 'review-1', 'pid': 1, 'started': '2026-01-02T00:00:00Z',
+                  'branch': 'worker/T-1', 'kind': 'review'},
+                 {'job': 'review-1', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'}]
+        path = self._write(lines)
+        self.assertEqual(lc.review_attempts(path, {}), {})
+        self.assertEqual(lc.review_attempts(path, {'worker/T-1': {}}), {})
+
+    def test_occupancy_carries_the_attempts_count_on_its_review_entry_including_zero(self):
+        lines = [{'job': 'review-1', 'pid': 1, 'started': '2026-01-02T00:00:00Z',
+                  'branch': 'worker/T-1', 'item': 'T-1', 'kind': 'review'},
+                 {'job': 'review-1', 'ended': '2026-01-02T00:01:00Z', 'end_reason': 'finished'}]
+        path = self._write(lines)
+        lanes = {'worker/T-1': {'state': 'REVIEW', 'round': 2,
+                                'head_at': '2026-01-02T00:00:00Z'}}
+        out = lc.occupancy(path, lanes=lanes)
+        self.assertEqual(out['review']['T-1']['attempts'], 1)
+
+        lanes2 = {'worker/T-1': {'state': 'REVIEW', 'round': 2,
+                                 'head_at': '2026-01-03T00:00:00Z'}}
+        out2 = lc.occupancy(path, lanes=lanes2)
+        self.assertEqual(out2['review']['T-1']['attempts'], 0)
+
+
 class RegistryReadOnceInvariants(unittest.TestCase):
     """The registry is parsed once per content, not once per question (the tick's own CPU: the
     feeder's ``corrections`` asked ``item_runs`` per run per item, each a full re-read and

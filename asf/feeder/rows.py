@@ -1123,7 +1123,10 @@ def lane_rows(items, product, busy, occupancy):
     """One row per Task/Bug the lane holds (``occupancy['review']`` / ``['landing']``) that is
     open and no session holds and no correction speaks for (``busy``): PUSHED → REVIEW, a launch,
     for the lane's REVIEW state (the round it asks for); a ``WAITS ON landing`` PUSHED → LAND row
-    for any other open lane state. BACK is a correction's (FIX → CORRECT)."""
+    for any other open lane state. BACK is a correction's (FIX → CORRECT). A round at or past
+    ``stalemate_round`` gets a STALEMATE → ADJUDICATE launch instead, and a head whose reviewers
+    filed nothing ``attempt_limit`` times gets a non-launching ``WAITS ON hold`` row naming the
+    count — the ceiling tested before the floor, so a head that is both goes to the ceiling."""
     out = []
     occ = occupancy or {}
     held = [(iid, h, True) for iid, h in (occ.get('review') or {}).items()]
@@ -1152,6 +1155,22 @@ def lane_rows(items, product, busy, occupancy):
             h = dict(h, state='REVIEW', why='docs-only writes: no review (flags.docs_review)')
         if review:
             rnd = int(h.get('round') or 1)
+            limit = stalemate_round(product)
+            if rnd >= limit:
+                out.append(Row(tier=review_tier(item), kind=STALEMATE, item_id=iid,
+                               feature_id=fid, action=LAUNCH, brief_kind='adjudicate',
+                               branch=branch,
+                               reason=f'review round {rnd} >= r{limit}: adjudicate, no '
+                                      f'further round'))
+                continue
+            tries = int(h.get('attempts') or 0)
+            if tries >= attempt_limit(product):
+                out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid,
+                               feature_id=fid, action=f'{HOLD}: {tries} reviewers filed nothing',
+                               brief_kind='review', branch=branch, waits_on='hold',
+                               reason=f'{tries} review sessions on this head ended with no '
+                                      f'review filed: no further reviewer until the head moves'))
+                continue
             out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid,
                            feature_id=fid, action=LAUNCH, brief_kind='review', branch=branch,
                            review_round=rnd,
