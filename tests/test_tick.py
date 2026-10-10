@@ -38,12 +38,17 @@ def _args(**kw):
 TIMING_RE = re.compile(r'^(\[(?:step|record):[a-z-]+\]|tick: total|tick: wave latency) \d+\.\ds')
 #: F-0142's start line — a per-step log line too, so `untimed` strips it with the rest
 STEP_START_RE = re.compile(r'^\[step:[a-z-]+\] start ')
+#: T-0433: the tick's version/release-check line (`asf.drift.report` / `asf.upgrade.release_report`)
+#: — printed once, before any step, on every tick; `untimed` strips it with the rest.
+FACTORY_LINE_RE = re.compile(r'^factory: ')
 
 
 def untimed(out):
-    """``out`` without the per-step and per-record-part timing lines and the tick's total."""
+    """``out`` without the per-step and per-record-part timing lines, the tick's total, and the
+    version/release-check line."""
     return ''.join(l for l in out.splitlines(True)
-                   if not (TIMING_RE.match(l.rstrip('\n')) or STEP_START_RE.match(l)))
+                   if not (TIMING_RE.match(l.rstrip('\n')) or STEP_START_RE.match(l)
+                           or FACTORY_LINE_RE.match(l)))
 
 
 def steps_only(out):
