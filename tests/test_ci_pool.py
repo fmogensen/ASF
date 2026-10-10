@@ -22,8 +22,11 @@ def pool_data():
     ]
 
 
-def product(pool=None, cap=None, name='p'):
-    data = {'repo_slug': 'o/r', 'ci': {'provider': 'github-actions', 'pool': pool_data() if pool is None else pool}}
+def product(pool=None, cap=None, name='p', reserve=None):
+    ci = {'provider': 'github-actions', 'pool': pool_data() if pool is None else pool}
+    if reserve is not None:
+        ci['reserve'] = reserve
+    data = {'repo_slug': 'o/r', 'ci': ci}
     if cap is not None:
         data['capacity'] = cap
     return env.Product(name, data)
@@ -393,8 +396,11 @@ class JobTimeouts(unittest.TestCase):
 
 
 class Drift(unittest.TestCase):
-    def findings(self, runners, runs_on, pool=None):
-        return [d for ok, d in ci_pool.drift(ci_pool.load_pool(product(pool)), runners, runs_on)
+    def findings(self, runners, runs_on, pool=None, reserve=None):
+        p = product(pool, reserve=reserve)
+        owned = ci_pool.reserve_labels(p)
+        return [d for ok, d in ci_pool.drift(ci_pool.load_pool(p), runners, runs_on,
+                                             owned=owned, product=p)
                 if not ok]
 
     def test_a_runner_whose_labels_no_job_asks_for_is_stranded(self):
@@ -413,6 +419,21 @@ class Drift(unittest.TestCase):
                       "role (heavy, light) — ask for a role", got)
         self.assertTrue(any("'provider-beta', a provider label" in d for d in got), got)
         self.assertTrue(any(d.startswith('unsatisfiable: ci.yml:j') for d in got), got)
+
+    def test_a_reserve_label_in_runs_on_is_a_derived_role_not_provider_like(self):
+        # B-0150: ci.reserve: {label: class-pr-heavy, of: heavy, keep_free: 2} — the CI queue
+        # applies class-pr-heavy to one of the reserved runners, so runs-on asking for it is
+        # sound — and the row comes out ok, not just free of the one provider-like finding.
+        runners = [runner('ci-1', 'heavy'), runner('ci-1b', 'light'),
+                   runner('ci-h1', 'heavy', 'class-pr-heavy')]
+        p = product(reserve={'label': 'class-pr-heavy', 'of': 'heavy', 'keep_free': 2})
+        owned = ci_pool.reserve_labels(p)
+        got = ci_pool.drift(ci_pool.load_pool(p), runners,
+                            [ro('self-hosted', 'class-pr-heavy'), ro('self-hosted', 'light'),
+                             ro('self-hosted', 'heavy')],
+                            owned=owned, product=p)
+        self.assertEqual(got, [(True, '3 runners declared, all online and reachable '
+                                      '(heavy 3, light 1)')])
 
     def test_hosted_and_unresolvable_jobs_are_never_judged(self):
         runners = [runner('ci-1', 'heavy'), runner('ci-1b', 'light'), runner('ci-h1', 'heavy')]
