@@ -21,9 +21,9 @@ import os
 import random
 import re
 import shutil
-import subprocess
 
 from asf import conventions as conventions_mod
+from asf import gitops
 from asf.record import core, frontmatter
 from asf.record.writer import write_card, write_text
 
@@ -168,33 +168,26 @@ def _asf_version():
     return asf.__version__
 
 
-def _repo_sha(repo_dir, run=subprocess.run):
-    try:
-        r = run(['git', '-C', repo_dir, 'rev-parse', 'HEAD'], capture_output=True, text=True)
-    except (OSError, FileNotFoundError):
-        return ''
-    return r.stdout.strip() if r.returncode == 0 else ''
+def _repo_sha(repo_dir):
+    r = gitops.git(['rev-parse', 'HEAD'], repo_dir)
+    return r.data if r.ok else ''
 
 
-def _repo_tags(repo_dir, run=subprocess.run):
+def _repo_tags(repo_dir):
     """``[(name, annotated, message)]`` for every ``v<x.y.z>`` (optionally ``-<suffix>``) tag in
     ``repo_dir``, oldest first; ``()`` when ``repo_dir`` is not a git checkout or carries none."""
-    try:
-        names = run(['git', '-C', repo_dir, 'tag', '-l', 'v*'], capture_output=True, text=True)
-    except (OSError, FileNotFoundError):
-        return []
-    if names.returncode != 0:
+    names = gitops.git(['tag', '-l', 'v*'], repo_dir)
+    if not names.ok:
         return []
     out = []
-    for name in sorted(n for n in names.stdout.split() if _TAG_RE.match(n)):
-        kind = run(['git', '-C', repo_dir, 'cat-file', '-t', f'refs/tags/{name}'],
-                    capture_output=True, text=True)
-        annotated = kind.returncode == 0 and kind.stdout.strip() == 'tag'
+    for name in sorted(n for n in names.data.split() if _TAG_RE.match(n)):
+        kind = gitops.git(['cat-file', '-t', f'refs/tags/{name}'], repo_dir)
+        annotated = kind.ok and kind.data == 'tag'
         message = ''
         if annotated:
-            msg = run(['git', '-C', repo_dir, 'for-each-ref', '--format=%(contents)',
-                       f'refs/tags/{name}'], capture_output=True, text=True)
-            message = (msg.stdout or '').rstrip('\n')
+            msg = gitops.git(['for-each-ref', '--format=%(contents)', f'refs/tags/{name}'],
+                              repo_dir)
+            message = msg.data.rstrip('\n') if msg.ok else ''
         out.append((name, annotated, message))
     return out
 

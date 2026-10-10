@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from asf import env, rehearsal
+from tests import gitfixture
 
 DESCRIPTION = """## Description
 {body}
@@ -86,8 +87,7 @@ def _build_source(root, n_per_type=3):
         f.write(f"→ {task_ref}\n\na groomed note, already typed into a card")
 
     subprocess.run(['git', 'init', '-q', repo], check=True)
-    subprocess.run(['git', '-C', repo, 'config', 'user.email', 'ci@localhost'], check=True)
-    subprocess.run(['git', '-C', repo, 'config', 'user.name', 'ci'], check=True)
+    gitfixture.identity(repo, 'ci', 'ci@localhost')
     with open(os.path.join(repo, 'README.md'), 'w', encoding='utf-8') as f:
         f.write('placeholder\n')
     subprocess.run(['git', '-C', repo, 'add', '.'], check=True)
