@@ -20,6 +20,10 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   log) before the session is ended — a kernel session pushes its own branch, and this is the
   safety net; a refused push keeps the worktree, skips the item's OpenPR and leaves it
   Stuck(owner=operator) on the refusal;
+- an answer to a Stuck item resets its attempts to one relaunch marker carrying the answer
+  (:func:`asf.kernel.decide.answer_attempt`); a :class:`~asf.kernel.actions.ClearStuck` appends
+  its attempt; a build launched off a PR carries the launch's findings (a granted relaunch's)
+  into the brief, and writes no fix round;
 - a session that ended without a REPORT is an attempt :data:`asf.kernel.decide.NO_REPORT` and
   its worktree is kept: the relaunch continues on it;
 - a review session that ended has its report's verdict lines
@@ -42,7 +46,7 @@ from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               conflict_attempt, host_pushes, no_report)
+                               answer_attempt, conflict_attempt, host_pushes, no_report)
 from asf.kernel.model import State, Stuck, verdict_holds
 
 #: the attempt a review session that ended without a ``VERDICT:`` line records
@@ -97,6 +101,8 @@ def describe(action):
         return 'end session %s%s' % (action.job, ' + free worktree' if action.free_worktree else '')
     if isinstance(action, A.ApplyAnswer):
         return 'answer %s' % action.item_id
+    if isinstance(action, A.ClearStuck):
+        return 're-judge %s: %s' % (action.item_id, action.attempt)
     if isinstance(action, A.NoteItem):
         return 'note %s: %s' % (action.item_id, action.text)
     return repr(action)
@@ -132,6 +138,12 @@ class _Applier:
         answers = self.field(a.item_id, P.ANSWERS, [])
         if a.text not in answers:
             self.set(a.item_id, **{P.ANSWERS: answers + [a.text], P.QUESTION: None})
+        it = self.facts.items.get(a.item_id)
+        if it is not None and it.state is State.STUCK:
+            self.set(a.item_id, **{P.QUESTION: None, P.ATTEMPTS: [answer_attempt(a.text)]})
+
+    def ClearStuck(self, a):
+        self.attempt(a.item_id, a.attempt)
 
     def NoteItem(self, a):
         notes = self.field(a.item_id, P.NOTES, [])
@@ -222,6 +234,8 @@ class _Applier:
                         if r.item_id == a.item_id and verdict_holds(r, pr)
                         and r.verdict != 'approve' for f in r.findings]
             findings += [f for f in a.findings if f not in findings]
+        elif a.kind != 'review':
+            findings = list(a.findings)
         meta = ({'pr': pr.number, 'tree': pr.tree_sha, 'change': pr.change_id}
                 if pr is not None else {})
         try:

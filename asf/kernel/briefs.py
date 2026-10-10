@@ -158,6 +158,8 @@ def build(product, launch, item, findings=(), pr=None, index=None, repo_facts=No
     b = dataclasses.replace(b, text=kernel_push_text(b.text, launch.branch,
                                                      getattr(product, 'main', 'main') or 'main'))
     extra = []
+    if findings and not fix:
+        extra += ['## Findings', ''] + ['- %s' % f for f in findings] + ['']
     if item.answers:
         extra += ['## Operator answers', ''] + ['- %s' % a for a in item.answers]
     if launch.kind == 'review':

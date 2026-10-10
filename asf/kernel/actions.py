@@ -87,9 +87,21 @@ class NoteItem:
 
 @dataclasses.dataclass
 class ApplyAnswer:
-    """Write the operator's answer ``text`` to ``item_id``'s card and clear its question."""
+    """Write the operator's answer ``text`` to ``item_id``'s card and clear its question. On a
+    Stuck item the answer is a fresh start too: its attempts become the one relaunch marker
+    :func:`asf.kernel.decide.answer_attempt` (the relaunch carries the answer as a finding)."""
     item_id: str
     text: str
+
+
+@dataclasses.dataclass
+class ClearStuck:
+    """A legacy Stuck the newer rules re-judge: append ``attempt`` to ``item_id``'s attempts (the
+    one relaunch it is given — a :data:`asf.kernel.decide.NO_REPORT`, or a
+    :data:`asf.kernel.decide.RELAUNCH` marker carrying a finding); its Stuck is cleared with the
+    item's state."""
+    item_id: str
+    attempt: str
 
 
 @dataclasses.dataclass

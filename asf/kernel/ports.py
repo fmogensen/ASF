@@ -147,7 +147,9 @@ def item_from_card(rec):
         findings=[str(f) for f in as_list(machine.get(FINDINGS))],
         answers=[str(a) for a in as_list(machine.get(ANSWERS))],
         question=machine.get(QUESTION) or None, reopened=bool(machine.get(REOPENED)),
-        notes=[str(n) for n in as_list(machine.get(NOTES))])
+        notes=[str(n) for n in as_list(machine.get(NOTES))],
+        stuck_since=(str(machine.get(STUCK_SINCE)) if stuck is not None and machine.get(STUCK_SINCE)
+                     else None))
 
 
 def _jsonl(path):
@@ -224,7 +226,7 @@ class RealRecord:
         return rec is not None and rec['meta'].get('type') == 'feature'
 
     def answers(self):
-        return [M.Answer(str(r['item']), str(r['text']))
+        return [M.Answer(str(r['item']), str(r['text']), str(r.get('at') or ''))
                 for r in _jsonl(os.path.join(self.state_dir, ANSWERS_FILE))
                 if r.get('item') and r.get('text')]
 

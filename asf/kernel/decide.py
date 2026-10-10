@@ -66,6 +66,15 @@ item and the actions of one tick. The rules it holds, in the design's words:
 - Idle: when ``config.idle_alarm`` is on, nothing launches, at least ``config.idle_min_free``
   seats are free and visible Tasks/Bugs wait (New or Ready), the plan carries ``idle``: the free
   seats, how many wait, and the top three reasons with counts (:data:`IDLE_REASONS`).
+- Answers: an operator answer the facts let through (newer than the item's Stuck, whatever its
+  owner, or to an open question) clears that Stuck once: :class:`ApplyAnswer`, and the item goes
+  to whatever its facts imply (Ready, Building under a live session, Review on an open PR). Its
+  attempts become one :data:`RELAUNCH` marker carrying the answer (:func:`answer_attempt`): the
+  next tick relaunches it first, the one holding the most others first, the answer a finding.
+- Legacy Stuck: a recorded Stuck(owner=session) the newer rules handle is re-judged once
+  (:func:`legacy_relaunch`, :class:`ClearStuck`): "ended without a REPORT" with no
+  :data:`NO_REPORT` attempt yet gets its one relaunch; "done without a push: pushed: no — hook
+  refused" is relaunched once with :data:`HOOK_FINDING`.
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -140,7 +149,7 @@ IDLE_REASONS = {
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
-ORDER = (A.ApplyAnswer, A.EndSession, A.NoteItem, A.MarkStuck, A.MintStory, A.OpenPR, A.Rerun,
+ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.NoteItem, A.MarkStuck, A.MintStory, A.OpenPR, A.Rerun,
          A.UpdateBranch, A.EnableAutoMerge, A.Launch)
 
 #: the prefix of a Stuck reason a ``done`` REPORT left (its ``NEEDS OPERATOR:`` question, before
@@ -154,6 +163,24 @@ NO_PUSH_STUCK = 'done without a push: pushed: '
 #: the prefix of the Stuck reason of a required red off the PR that used up its reruns: judged
 #: afresh every tick (the check may not be required, or its files may not be known)
 RED_OFF = 'red off the PR after '
+
+#: the prefix of an attempt that is a relaunch the kernel grants (an operator answer, a legacy
+#: Stuck re-judged): the item is relaunched before other Ready items, the rest of the attempt
+#: is the finding its brief carries (:func:`relaunch_finding`)
+RELAUNCH = 'relaunch: '
+
+#: the finding an operator answer's relaunch carries, before the answer's text
+ANSWERED = 'operator answer: '
+
+#: the most characters of an answer a relaunch marker carries (the brief quotes it whole)
+ANSWER_MAX = 600
+
+#: a legacy ``done without a push`` Stuck whose push hook refused (the pre-push check timed out
+#: under load before it was shortened): relaunched once with :data:`HOOK_FINDING`
+HOOK_REFUSED_STUCK = NO_PUSH_STUCK + 'no'
+HOOK_REFUSED = 'hook refused'
+HOOK_FINDING = ('the pre-push check timed out at load; it is now shortened (no touched-tests '
+                'step), push again')
 
 #: the prefix of a red-driven fix round's finding (:func:`red_finding`)
 RED = 'red'
@@ -243,14 +270,23 @@ def _judge(it, facts, config, actions):
              and not _red_off(it.stuck) and R.meaningful(it.stuck.reason) else None)
     question = it.question
     hold = False
+    attempts = list(it.attempts)
+    answered = False
     for a in facts.answers:
-        if a.item_id == it.id and a.text not in it.answers:
+        if a.item_id == it.id and not answered and (
+                a.text not in it.answers or _answers_stuck(a, it)):
             actions.append(A.ApplyAnswer(it.id, a.text))
-            stuck, question, hold = None, None, True
+            stuck, question, hold, answered = None, None, True, True
+            if it.state is State.STUCK:  # a fresh start: the applier resets the attempts too
+                attempts = [answer_attempt(a.text)]
+    if stuck is not None:
+        again = legacy_relaunch(it)
+        if again:
+            actions.append(A.ClearStuck(it.id, again))
+            stuck, hold = None, True
 
     sessions = [s for s in facts.sessions if s.item_id == it.id]
     live = [s for s in sessions if s.alive]
-    attempts = list(it.attempts)
     prs = [p for p in facts.prs if p.item_id == it.id]
     open_pr = max((p for p in prs if not p.merged), key=lambda p: p.number, default=None)
     ended_stuck, api_detail, pushed = None, '', None
@@ -307,7 +343,43 @@ def _judge(it, facts, config, actions):
         return _Judged(State.NEW, hold=hold)
     if it.type not in BUILDABLE and it.type != DOCUMENTED:
         return _Judged(State.NEW, hold=hold)  # only a Feature gets a spec or plan launch
-    return _Judged(State.READY, hold=hold)
+    return _Judged(State.READY, hold=hold, findings=relaunch_findings(it))
+
+
+def _answers_stuck(answer, it):
+    """Whether ``answer`` (already filtered by the facts) clears ``it``'s Stuck afresh though its
+    text is on the card: both times are known, so the facts let only a newer answer through."""
+    return it.state is State.STUCK and bool(answer.at) and bool(it.stuck_since)
+
+
+def answer_attempt(text):
+    """The attempts an operator answer to a Stuck item leaves: one relaunch marker carrying it."""
+    return RELAUNCH + ANSWERED + R.cap(text, ANSWER_MAX)
+
+
+def legacy_relaunch(it):
+    """The attempt a legacy Stuck the newer rules handle is re-judged with (its one relaunch), or
+    None: a session ``ended without a REPORT`` once with no :data:`NO_REPORT` on the record (a
+    relaunch not spent yet), or a ``done without a push`` whose push hook refused, not yet
+    relaunched with :data:`HOOK_FINDING`."""
+    st = it.stuck
+    if it.state is not State.STUCK or st is None or st.owner != 'session':
+        return None
+    reason = str(st.reason)
+    if reason.startswith(NO_REPORT) and NO_REPORT not in it.attempts:
+        return NO_REPORT
+    marker = RELAUNCH + HOOK_FINDING
+    if reason.startswith(HOOK_REFUSED_STUCK) and HOOK_REFUSED in reason \
+            and marker not in it.attempts:
+        return marker
+    return None
+
+
+def relaunch_findings(it):
+    """The finding a granted relaunch carries into its brief (its last attempt is a
+    :data:`RELAUNCH` marker), else none."""
+    last = it.attempts[-1] if it.attempts else ''
+    return [last[len(RELAUNCH):]] if str(last).startswith(RELAUNCH) else []
 
 
 def effective_rank(iid, items, inherit=True):
@@ -360,8 +432,11 @@ def no_report(s):
 
 
 def relaunch(it):
-    """Whether ``it``'s last attempt is a session that ended without a REPORT: relaunched first."""
-    return bool(it.attempts) and it.attempts[-1] == NO_REPORT
+    """Whether ``it``'s last attempt is a session that ended without a REPORT, or a relaunch the
+    kernel granted (:data:`RELAUNCH`: an operator answer, a legacy Stuck re-judged): relaunched
+    first."""
+    return bool(it.attempts) and (it.attempts[-1] == NO_REPORT
+                                  or str(it.attempts[-1]).startswith(RELAUNCH))
 
 
 def _claimed_on_origin(value, iid, branch, facts):

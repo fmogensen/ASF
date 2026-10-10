@@ -3,9 +3,11 @@
 Every read happens here, once per tick, and nothing is written. Three filters keep the facts to
 what ``decide`` should act on:
 
-- an operator answer counts only for an item the kernel is waiting on for one (a ``question`` on
-  the card, or Stuck with ``owner: operator``) — the answers ledger also holds the old floor's
-  answers, already acted on;
+- an operator answer counts for an item with an open ``question`` on its card, and for a Stuck
+  item of any owner when it was given after the Stuck was recorded (``Answer.at`` later than
+  ``Item.stuck_since``); with either time unknown it counts only for a Stuck with ``owner:
+  operator``. The answers ledger also holds the old floor's answers, already acted on, and an
+  answer older than the Stuck never clears it (:func:`answer_counts`);
 - a PR whose item is not on the record is dropped (a branch naming a retired or foreign id);
 - a landed spec counts only while its Feature's card is not Done: a finished Feature's Stories
   are history, never minted afresh (the old record never minted the Stories of its early specs).
@@ -20,16 +22,26 @@ that rule, so it is the same everywhere. The pushed branches
 from asf.kernel.model import Facts, State
 
 
+def answer_counts(answer, it):
+    """Whether operator ``answer`` is one ``it`` waits on: ``it`` has an open question, or is Stuck
+    and the answer is newer than its Stuck (with a time unknown: only a Stuck on the operator)."""
+    if it.question:
+        return True
+    if it.state is not State.STUCK or it.stuck is None:
+        return False
+    if answer.at and it.stuck_since:
+        return str(answer.at) > str(it.stuck_since)
+    return it.stuck.owner == 'operator'
+
+
 def read_facts(ports):
     """The :class:`~asf.kernel.model.Facts` the three ports describe now."""
     record = ports.record
     items = record.items()
     prs = [p for p in ports.github.prs() if p.item_id in items]
     reviews = list(record.reviews()) + list(ports.github.reviews([p for p in prs if not p.merged]))
-    waiting = {iid for iid, it in items.items()
-               if it.question or (it.state is State.STUCK and it.stuck
-                                  and it.stuck.owner == 'operator')}
-    answers = [a for a in record.answers() if a.item_id in waiting]
+    answers = [a for a in record.answers()
+               if a.item_id in items and answer_counts(a, items[a.item_id])]
     specs = {fid: text for fid, text in record.specs_landed().items()
              if fid in items and items[fid].state is not State.DONE}
     branches = getattr(ports.github, 'branches', None)
