@@ -130,7 +130,7 @@ class Decide(unittest.TestCase):
         self.assertEqual(B.launched(plan), ['T-0001'])
         self.assertIsNone(plan.dor)
 
-    def test_groom_fills_are_capped_per_tick_and_come_after_finishing_work(self):
+    def test_groom_fills_are_capped_per_tick_and_come_after_finishing_work_before_builds(self):
         tasks = [ready_task('T-%04d' % n, writes=[]) for n in range(1, 6)]
         tasks.append(B.task('T-0009', state=State.REVIEW, parent='F-0001'))
         f = world(*tasks, prs=[B.pr(9, 'T-0009')])
@@ -141,6 +141,10 @@ class Decide(unittest.TestCase):
         plan = decide(f, cfg(dor_fill_per_tick=3, max_sessions=1))
         self.assertEqual([(a.kind, a.item_id) for a in B.of(plan, A.Launch)],
                          [('review', 'T-0009')])
+        f = world(ready_task('T-0001', writes=[]), ready_task('T-0002'))
+        plan = decide(f, cfg(max_sessions=1))
+        self.assertEqual([(a.kind, a.item_id) for a in B.of(plan, A.Launch)],
+                         [('groom-fill', 'T-0001')], 'a groom-fill is not starved by builds')
 
     def test_the_idle_alarm_names_the_hold(self):
         plan = decide(world(ready_task(writes=[], dor_fills=2)), cfg(dor_max_fills=3,

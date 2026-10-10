@@ -636,7 +636,7 @@ kernel:
                             # and returns a GROOM-FILL verdict (proceed | superseded | reshape |
                             # fill) that code validates and applies: superseded retires the card
                             # (superseded_by:), fill/reshape write its acceptance and writes:
-    fill_per_tick: 3        # groom-fill launches a tick, after fix rounds, reviews and builds
+    fill_per_tick: 3        # groom-fill launches a tick: after fix rounds and reviews, before builds
     max_fills: 2            # groom-fill sessions per card; then Stuck on the operator (judged
                             # afresh every tick: a card mended by hand starts)
   risk:                     # the coarse risk flag, from this file only

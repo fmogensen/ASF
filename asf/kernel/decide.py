@@ -1533,9 +1533,10 @@ def _mint(facts, parked):
 
 
 #: the launch classes, in the order scarce seats fill (finish first): a fix round or rebase on an
-#: open PR, a review, a build of a Task/Bug, a plan, a spec, a groom-fill of a card the
-#: Definition of Ready holds
-FINISH_FIRST = ('fix', 'review', 'build', 'plan', 'spec', 'groom')
+#: open PR, a review, a groom-fill of a card the Definition of Ready holds (capped a tick: a
+#: build needs a ready card, and a full house of builds would starve it), a build of a Task/Bug,
+#: a plan, a spec
+FINISH_FIRST = ('fix', 'review', 'groom', 'build', 'plan', 'spec')
 
 #: the launch classes the WIP cap (``Config.max_open_prs``) holds back: new work
 NEW_WORK = ('build', 'plan', 'spec')
@@ -1561,8 +1562,9 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
     Landing exceed ``config.max_open_prs`` (the WIP cap) no build, plan or spec launches
     (``skipped[iid] = 'wip'``) and ``wip`` (filled when given) records the hold. ``queued``
     (filled when given) maps every item left for want of a seat to ``'seat'``, every overlap to
-    ``'overlap'`` and every WIP hold to ``'wip'``. Last come the groom-fill sessions of the cards
-    the Definition of Ready holds (``unready``), at most ``config.dor_fill_per_tick`` a tick and
+    ``'overlap'`` and every WIP hold to ``'wip'``. After the reviews come the groom-fill sessions of
+    the cards the Definition of Ready holds (``unready``), at most ``config.dor_fill_per_tick`` a
+    tick and
     ``config.dor_max_fills`` a card, never held by the WIP cap or a file overlap (they only read)."""
     items = facts.items
     free = _free(facts, config)

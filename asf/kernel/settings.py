@@ -121,7 +121,7 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # parked, and a parent that is not Done; else it
                                               # stays New (dor: <missing>) and a groom-fill
                                               # session (models.groom-fill) fills the card
-                   fill_per_tick: 3,          # groom-fill launches a tick (after finishing work)
+                   fill_per_tick: 3,          # groom-fills a tick (after reviews, before builds)
                    max_fills: 2}              # groom-fill sessions per card, then Stuck
       risk:       {high: [],                  # path globs: an item whose writes (or PR files)
                                               # hit one is high-risk — its review runs on
