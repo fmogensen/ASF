@@ -31,6 +31,12 @@ SETTABLE['bug'] |= {'severity'}
 #: into one session and lets its small Tasks skip the review; ``ab_pair`` names the experiment
 #: pair the scorecard compares it in (``asf scorecard --by-lane``).
 SETTABLE['feature'] |= {'lane', 'size', 'ab_pair'}
+#: ``stability: true`` on a Feature, or on the Epic above it, is the product's statement that
+#: this Feature is stability work — the exemption the S1 gate reads
+#: (:func:`asf.feeder.rows.is_stability`, F-0307) to let it start during a freeze that holds
+#: every other new Feature.
+SETTABLE['feature'] |= {'stability'}
+SETTABLE['epic'] |= {'stability'}
 #: ``reshape_applied=current`` (with ``--why``) records a Feature's or a Task's pending
 #: ``reshape:`` as carried out by hand — the digest of the text on the card, its time and a
 #: History line (:func:`asf.record.setfield.reshape_applied`); its one value is ``current``.
@@ -45,8 +51,9 @@ FIELD_WORDS = {'lane': ('direct', 'full'), 'size': ('s', 'm', 'l'), 'severity': 
 #: deliberately not in here.
 FIELD_UPPER = frozenset({'severity'})
 #: Boolean fields: ``true`` / ``false`` (``local_only: true`` keeps a card's rows off the cloud
-#: lane, :func:`asf.workers.cloud.local_only`); anything else is refused before the card is touched.
-BOOL_FIELDS = ('local_only',)
+#: lane, :func:`asf.workers.cloud.local_only`; ``stability: true`` is the S1 gate's exemption,
+#: above); anything else is refused before the card is touched.
+BOOL_FIELDS = ('local_only', 'stability')
 
 
 def _parse_sets(type_, pairs):

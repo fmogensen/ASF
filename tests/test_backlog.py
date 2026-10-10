@@ -218,12 +218,13 @@ class SetCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
-        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        self.epic = write_item(self.root, 'E-0001', 'epic', 'Factory')
+        self.feature = write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
         self.bug = write_item(self.root, 'B-0001', 'bug', 'Broken', parent='E-0001',
                               typed_lines=('severity: S2',))
 
-    def read(self):
-        with open(self.bug, encoding='utf-8') as f:
+    def read(self, path=None):
+        with open(path or self.bug, encoding='utf-8') as f:
             return f.read()
 
     def test_set_writes_a_typed_field_through_the_parser(self):
@@ -273,6 +274,29 @@ class SetCommandTests(unittest.TestCase):
         r = run(['check'], self.root)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('local_only must be true or false', r.stdout + r.stderr)
+
+    def test_set_stability_round_trips_on_a_feature_and_on_an_epic(self):
+        for id_, path in (('F-0001', self.feature), ('E-0001', self.epic)):
+            for word, want in (('true', True), ('false', False)):
+                r = run(['set', id_, f'stability={word}'], self.root)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                meta, _ = frontmatter.parse(self.read(path))
+                self.assertIs(meta['stability'], want)
+
+    def test_set_stability_refuses_a_non_boolean_and_check_flags_one(self):
+        for id_, path in (('F-0001', self.feature), ('E-0001', self.epic)):
+            before = self.read(path)
+            r = run(['set', id_, 'stability=maybe'], self.root)
+            self.assertEqual(r.returncode, 2)
+            self.assertIn('true, false', r.stderr)
+            self.assertEqual(self.read(path), before)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(before.replace('# ---- machine ----', 'stability: maybe\n# ---- machine ----'))
+            r = run(['check'], self.root)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn('stability must be true or false', r.stdout + r.stderr)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(before)
 
     def test_set_takes_many_ids_in_one_call(self):
         other = write_item(self.root, 'B-0002', 'bug', 'Also', parent='E-0001',
