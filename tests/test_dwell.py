@@ -291,6 +291,19 @@ class ProbeTests(DwellTestCase):
                                   'launchable_idle')
         self.assertEqual(none_free, [])
 
+    def test_a_groom_adjudicate_row_speaks_for_the_day_not_the_item_it_names(self):
+        # B-84837: the row's item_id is the oldest open question's item — not an item the wave
+        # is failing to start — so it is left alone, the same exception hold_unlanded makes.
+        mk = lambda kind, iid: feeder_rows.Row(
+            tier=2, kind=kind, item_id=iid, feature_id='', action='would launch',
+            brief_kind='groom', branch='', reason='')
+        screened = [step_wave.Screened(mk(feeder_rows.GROOM_ADJUDICATE, 'B-83470')),
+                    step_wave.Screened(mk(feeder_rows.GROOM_CLERK, 'B-1')),
+                    step_wave.Screened(mk(feeder_rows.PLAN_CODE, 'T-2'))]
+        got = self.by_state(self.found(FakeFacts(self.product, wave=(screened, 4, [{}]))),
+                            'launchable_idle')
+        self.assertEqual([f.key for f in got], ['T-2'])
+
     def test_a_pushed_branch_with_no_pr_ages_from_its_push(self):
         lane = {'worker/t-1': {'state': 'PUSHED', 'head': 'abc', 'at': iso(NOW - 11 * 60)},
                 'worker/t-2': {'state': 'PR_OPEN', 'head': 'abc', 'pr': 3,

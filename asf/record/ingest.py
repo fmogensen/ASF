@@ -1568,12 +1568,19 @@ def ingest_into(root, ev, product=None):
         if ordered is None:
             continue
         write_fields(rec['path'], machine, ordered)
-        if history:
+        # B-0070: the ingest sees the landing commit naming the id, so the operator's hand-held
+        # claim is cleared the same moment the card closes — a stale in_progress_by never outlives
+        # the fix it was carrying.
+        clears_in_progress = (type_ in LANDING_TYPES and new_state[iid] in _DONE_STATES
+                              and _typed.get('in_progress_by'))
+        if history or clears_in_progress:
             with open(rec['path'], encoding='utf-8') as f:
                 text = f.read()
             meta2, body2 = frontmatter.parse(text, path=rec['relpath'])
-            new_body = append_history_lines(body2, history)
-            if new_body != body2:
+            new_body = append_history_lines(body2, history) if history else body2
+            if clears_in_progress:
+                meta2.pop('in_progress_by', None)
+            if new_body != body2 or clears_in_progress:
                 writer.write_card(rec['path'], frontmatter.render(meta2, new_body))
         if type_ == 'feature' and stage_val.get(iid) == 'on-prod' and old != 'on-prod':
             write_on_prod_event(root, iid, old, now)

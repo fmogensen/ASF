@@ -99,6 +99,23 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual([s.row.item_id for s in live if s.starts], ['T-0002'])
         self.assertEqual([s.row.item_id for s in preview if s.starts], ['T-0002'])
 
+    def test_a_brief_build_failure_waits_that_row_and_still_launches_the_rest(self):
+        """B-83575: one row's brief crashing must not cost every other row its seat — else a
+        wave with free seats launches nothing, tick after tick, while the preview (which never
+        calls the real brief builder) keeps reporting the crashing row as launchable (B-82809)."""
+        planned = [row('T-0001'), row('T-0002')]
+        ctx = types.SimpleNamespace(event=lambda *a, **k: None)
+
+        def build(r, _bypass):
+            if r.item_id == 'T-0001':
+                raise RuntimeError('boom')
+            return (pool_mod.Row(step_wave.job_name('task', r.item_id), r.item_id),
+                    types.SimpleNamespace(text='brief', kind='task'))
+        live = step_wave.screen(PRODUCT, planned, ITEMS, [], {}, 2, act=True,
+                                out=lambda _l: None, build=build, ctx=ctx)
+        self.assertEqual([s.row.item_id for s in live if s.starts], ['T-0002'])
+        self.assertEqual([s.kind for s in live if s.row.item_id == 'T-0001'], [step_wave.WAITS])
+
 
 if __name__ == '__main__':
     unittest.main()
