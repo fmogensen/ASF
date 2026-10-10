@@ -1343,6 +1343,30 @@ class RealSessions:
                 return acct
         raise PortError('no account with a free seat')
 
+    def capacity(self):
+        """The seats a launch can take now, live ones included (``Facts.seats``):
+        ``kernel.launch.local_max`` plus the cloud seats the lane can really fill — its live cloud
+        runs plus the free seats of its accounts (:func:`asf.workers.cloud.lane_accounts`), at
+        most ``cloud_max``; only the live cloud runs while the lane is off or its breaker tripped
+        — and never more than the accounts' caps together. Measured 2026-10-10 09:44Z: 22
+        configured seats (10 local + 12 cloud) on accounts holding 18, the breaker tripped: 16
+        real, so 6 "free" seats only failed their launches."""
+        from asf.workers import cloud, pool
+        local_max, cloud_max = lane_seats(self.product, self.cfg())
+        _local, in_cloud, live = self._live()
+        accounts = pool.accounts_from_config(self.cfg())
+        s = cloud_lane(self.product, self.cfg()) if cloud_max else None
+        if s is None or cloud.Breaker(self.product, s).tripped():
+            cloud_seats = in_cloud
+        else:
+            free = sum(max(0, a.cap - live.get(a.name, 0))
+                       for a in cloud.lane_accounts(accounts, s))
+            cloud_seats = min(cloud_max, in_cloud + free)
+        seats = local_max + cloud_seats
+        if accounts:
+            seats = min(seats, sum(a.cap for a in accounts))
+        return seats
+
     def lane(self, kind, meta=None):
         """``'cloud'`` or ``'local'``: the seat a ``kind`` launch takes. A launch that needs the
         host (``meta['host']``: a rebase round, which the host publishes from its worktree; a
@@ -1393,9 +1417,19 @@ class RealSessions:
             meta = dict(meta or {}, host=True)
         if self.lane(bk, meta) == 'cloud':
             s = cloud_lane(self.product, self.cfg())
+            try:  # every lane account full is a want of a seat, never a create error
+                acct = self._account(s)
+            except PortError as e:
+                if self._live()[0] >= lane_seats(self.product, self.cfg())[0]:
+                    raise NoSeat('no free seat: %s, and every local seat is taken' % e)
+                acct = None
+            if acct is None:
+                job += '-local'
+                self._spawn(kind, item_id, branch, brief, job, self._account())
+                return self._meta(job, meta)
             self._creates += 1
             try:
-                self._spawn(kind, item_id, branch, brief, job, self._account(s),
+                self._spawn(kind, item_id, branch, brief, job, acct,
                             cloud.lane_runtime(s, self.product))
                 cloud.Breaker(self.product, s).ok()
             except PortError as e:
@@ -1413,6 +1447,10 @@ class RealSessions:
                 runtime = cloud.lane_runtime(cloud.settings(self.cfg(), self.product),
                                              self.product)
             self._spawn(kind, item_id, branch, brief, job, acct, runtime)
+        return self._meta(job, meta)
+
+    def _meta(self, job, meta):
+        """Put ``meta``'s ``pr``/``tree``/``change`` on ``job``'s ledger row; returns ``job``."""
         if meta and any(meta.get(k) is not None for k in ('pr', 'tree', 'change')):
             from asf.workers import pool
             pool.update_session(self.product, job, kernel_pr=meta.get('pr'),

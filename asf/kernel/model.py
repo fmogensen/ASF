@@ -304,7 +304,9 @@ class Facts:
     merely BEHIND PR updated, through the merge train — without it GitHub merges a green PR
     behind its base, so an update would only burn CI. ``main`` are the trunk's newest commits
     (:class:`MainCommit`, newest first; empty when unread): the main safety net
-    (:mod:`asf.kernel.mainline`) judges the newest completed required checks on them."""
+    (:mod:`asf.kernel.mainline`) judges the newest completed required checks on them. ``seats``
+    is how many sessions the host can run now, live ones included (local seats plus the cloud
+    seats its accounts and breaker allow; None: unknown, ``Config.max_sessions`` holds)."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -324,6 +326,7 @@ class Facts:
     resolved: dict = dataclasses.field(default_factory=dict)
     strict: bool = True
     main: list = dataclasses.field(default_factory=list)
+    seats: int = None
 
 
 @dataclasses.dataclass

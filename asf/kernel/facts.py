@@ -170,6 +170,18 @@ def read_trunk(ports):
     return strict, main
 
 
+def read_seats(ports):
+    """The seats the session port can launch on now (its ``capacity``), or None when it cannot
+    say (no such method, or the read failed): ``decide`` then keeps ``Config.max_sessions``."""
+    capacity = getattr(ports.sessions, 'capacity', None)
+    if capacity is None:
+        return None
+    try:
+        return int(capacity())
+    except Exception:  # noqa: BLE001 — an unread capacity never stops the tick
+        return None
+
+
 def read_facts(ports):
     """The :class:`~asf.kernel.model.Facts` the three ports describe now."""
     record = ports.record
@@ -192,6 +204,7 @@ def read_facts(ports):
             if s is not None:
                 stranded.append(s)
     sessions = list(ports.sessions.sessions())
+    seats = read_seats(ports)
     look_bad = getattr(record, 'unreadable', None)
     strict, main = read_trunk(ports) if not github_error else (True, [])
     return Facts(unreadable=dict(look_bad() or {}) if look_bad else {},
@@ -200,4 +213,5 @@ def read_facts(ports):
                  stranded=stranded, id_claims=read_id_claims(record, items, sessions),
                  resolved=read_resolved(ports, items, sessions, prs),
                  github_error=github_error, orphan_prs=orphans, strict=strict, main=main,
+                 seats=seats,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

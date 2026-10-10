@@ -212,6 +212,36 @@ class Launch(unittest.TestCase):
         self.assertEqual(port.lane('build'), 'local')
         self.assertEqual([(a, rt) for _j, a, rt, _m, _h in self.spawned], [('l1', None)])
 
+    def _cloud_accounts_full(self):
+        for n, acct in enumerate(('c1', 'c1', 'c2', 'c2')):
+            job = 'build-t-09%02d-1' % n
+            self.live[job] = {'job': job, 'account': acct, 'pid': remote.token('trig_%d' % n)}
+
+    def test_cloud_accounts_full_is_no_seat_not_a_create_error(self):
+        # 2026-10-10 09:44Z: the lane said 6/12 while its accounts' caps were spent; every launch
+        # failed "no cloud account with a free seat", tripped the breaker and locked the lane local
+        self.port = P.RealSessions(product({'launch': {'local_max': 1, 'cloud_max': 8}}),
+                                   cfg=CFG, log=lambda *_: None)
+        self._cloud_accounts_full()
+        self.port.launch('review', 'T-0001', 'worker/T-0001', self.brief())
+        self.assertEqual([(a, rt) for _j, a, rt, _m, _h in self.spawned], [('l1', None)])
+        with self.assertRaises(P.NoSeat):
+            self.port.launch('review', 'T-0002', 'worker/T-0002', self.brief())
+        self.assertEqual(FakeBreaker.failed, [])
+
+    def test_capacity_is_the_seats_a_launch_can_take_now(self):
+        port = P.RealSessions(product({'launch': {'local_max': 1, 'cloud_max': 8}}), cfg=CFG,
+                              log=lambda *_: None)
+        self.assertEqual(port.capacity(), 1 + 4)  # the lane accounts c1 + c2 hold 2 + 2
+        self._cloud_accounts_full()
+        self.assertEqual(port.capacity(), 1 + 4)
+        FakeBreaker.tripped_why = 'cloud launches erroring'
+        self.assertEqual(port.capacity(), 1 + 4)  # tripped: only the cloud runs still live
+        self.live.clear()
+        self.assertEqual(port.capacity(), 1)
+        self.assertEqual(P.RealSessions(product({'launch': {'local_max': 3}}), cfg={}).capacity(),
+                         3)
+
     def test_creates_per_tick_bound_the_cloud(self):
         port = P.RealSessions(product({'launch': {'local_max': 5, 'cloud_max': 8}}),
                               cfg=dict(CFG, cloud=dict(CFG['cloud'], max_creates_per_tick=1)))

@@ -1363,7 +1363,10 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
 
 
 def _free(facts, config):
-    return config.max_sessions - sum(1 for s in facts.sessions if s.alive)
+    """Seats free now: ``config.max_sessions`` — or the host's real capacity
+    (``Facts.seats``) when lower — less the live sessions."""
+    seats = config.max_sessions if facts.seats is None else min(config.max_sessions, facts.seats)
+    return seats - sum(1 for s in facts.sessions if s.alive)
 
 
 def _idle(facts, config, judged, states, parked, skipped):

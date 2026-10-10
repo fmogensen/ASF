@@ -135,6 +135,33 @@ class WipCap(unittest.TestCase):
                                'build/plan/spec launch(es) wait; seats go to finishing work'])
 
 
+class RealSeats(unittest.TestCase):
+    """Seats are what the host can launch on now (``Facts.seats``: local seats plus the cloud
+    seats its accounts and breaker allow), never the configured lane sizes alone."""
+
+    def test_the_host_capacity_bounds_the_launches(self):
+        items = [B.task('T-%04d' % n, rank=n) for n in range(1, 6)]
+        f = B.facts(items, seats=3, sessions=[B.session('j1', 'T-0009')])
+        plan = decide(f, B.config(max_sessions=10))
+        self.assertEqual(B.launched(plan), ['T-0001', 'T-0002'])
+
+    def test_unknown_capacity_keeps_max_sessions(self):
+        items = [B.task('T-%04d' % n, rank=n) for n in range(1, 6)]
+        plan = decide(B.facts(items), B.config(max_sessions=4))
+        self.assertEqual(len(B.launched(plan)), 4)
+
+    def test_read_facts_takes_the_session_port_capacity(self):
+        from asf.kernel.facts import read_facts
+        try:
+            from kernel import fakes as F
+        except ImportError:  # pragma: no cover
+            from tests.kernel import fakes as F
+        s = F.FakeSessions()
+        self.assertIsNone(read_facts(F.ports(sessions=s)).seats)
+        s.capacity = lambda: 7
+        self.assertEqual(read_facts(F.ports(sessions=s)).seats, 7)
+
+
 class Knob(unittest.TestCase):
 
     def test_the_knob_defaults_to_30_and_0_turns_it_off(self):
