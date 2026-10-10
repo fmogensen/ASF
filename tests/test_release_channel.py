@@ -60,6 +60,28 @@ class VersionComparisonTests(unittest.TestCase):
         self.assertFalse(upgrade.newer('main', 'v0.1.62'))
 
 
+class InstalledReleaseTests(unittest.TestCase):
+    """``installed_release`` prepends the ``v`` :func:`asf.cli._release` leaves off, so its tag
+    is what :func:`version_tuple`/:func:`newer` actually parse (``RELEASE_RE`` requires it)."""
+
+    def test_a_bare_release_is_returned_v_prefixed_and_sha_matched(self):
+        from asf import cli, drift
+        with mock.patch.object(cli, '_release', return_value='0.1.62'), \
+                mock.patch.object(drift, 'installed_commit', return_value='a' * 40):
+            tag, sha = upgrade.installed_release()
+        self.assertEqual(tag, 'v0.1.62')
+        self.assertTrue(upgrade.RELEASE_RE.match(tag))
+        self.assertEqual(sha, 'a' * 40)
+
+    def test_no_release_at_all_is_none_not_a_bare_v(self):
+        from asf import cli, drift
+        with mock.patch.object(cli, '_release', return_value=None), \
+                mock.patch.object(drift, 'installed_commit', return_value=None):
+            tag, sha = upgrade.installed_release()
+        self.assertIsNone(tag)
+        self.assertIsNone(sha)
+
+
 class _HomeCase(unittest.TestCase):
     """A temp ``ASF_HOME`` so the release cache and a product's lane registry never touch the
     operator's real one."""
