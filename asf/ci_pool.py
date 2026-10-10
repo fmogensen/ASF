@@ -1103,7 +1103,8 @@ def drift(pool, runners, runs_on, owned=frozenset(), why=None, product=None):
         flagged = set()
         for ro in jobs:
             for label in sorted(ro.labels):
-                if is_default(label) or label in role_set or (ro.workflow, label) in flagged:
+                if is_default(label) or label in role_set or label in owned \
+                        or (ro.workflow, label) in flagged:
                     continue
                 flagged.add((ro.workflow, label))
                 reason = ('a provider label' if label.startswith(PROVIDER_PREFIX)
