@@ -426,7 +426,11 @@ KNOWN_FLAGS = ('mechanical', 'verdict_block', 'plan_ahead', 'roots', 'i14', 'i16
                # F-0300: off opts a product out of the rule pass that waives a cosmetic or
                # already-settled dispute before any adjudicate session is spawned
                # (asf.evidence.rulepass) — default off
-               'rule_pass')
+               'rule_pass',
+               # B-0121: how often the console's FACTORY STATUS feed ticks — off | 0 | a number
+               # of minutes | a unit-suffixed duration (5m, 30s, 1h); overrides config.yaml's own
+               # console.status_every (asf.console_feed.resolve_every). Same reasoning as 'upgrade'.
+               'console_status_every')
 
 
 

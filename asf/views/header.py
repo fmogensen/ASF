@@ -18,6 +18,7 @@ TITLES = {
     'ci reserve': 'CI RESERVE',   'ci cancels': 'CI CANCELS',
     'health': 'HEALTH',
     'performance': 'PERFORMANCE',
+    'console-feed': 'FACTORY STATUS',
 }
 
 #: The commands whose stamp names asf's own release rather than the product's HEAD: a table that

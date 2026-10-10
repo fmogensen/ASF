@@ -110,6 +110,22 @@ class PluginTests(unittest.TestCase):
                         'no SessionStart hook prints the console rules')
         self.assertEqual(plugin_build.diff(), [], 'run `asf plugin build`')
 
+    def test_b0121_plugin_ships_a_hook_that_starts_the_status_feed(self):
+        # B-0121: every console should get the FACTORY STATUS table automatically, on a clock,
+        # instead of the operator typing `/loop 5m /asf:status` by hand. A second SessionStart
+        # hook runs `console-feed-hint`, which prints the one line that starts that loop.
+        import json
+        path = os.path.join(REPO_ROOT, 'plugin', 'hooks', 'hooks.json')
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        session_start = data['hooks']['SessionStart']
+        commands = [h['command'] for group in session_start for h in group['hooks']]
+        self.assertTrue(any('console-feed-hint' in c for c in commands),
+                        'no SessionStart hook starts the status feed loop')
+        self.assertIn('console-feed', registered_commands())
+        self.assertIn('console-feed-hint', registered_commands())
+        self.assertEqual(plugin_build.diff(), [], 'run `asf plugin build`')
+
     def test_preamble_and_groom_dialogue_name_the_four_step_order(self):
         # F-0110/T-0426: #198 made the four-step order true (asf/env.py:459-474); both strings
         # that state it in prose name the working-directory step, not just --product/$ASF_PRODUCT
