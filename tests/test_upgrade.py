@@ -104,7 +104,7 @@ class FakeOps:
         self.log.append(('resume', product, tuple(clocks)))
         return []
 
-    def install_clocks(self, product):
+    def install_floor(self, product, clocks):
         rec = installs.read(product)
         self.log.append(('clocks', product, rec.sha if rec else None))
         return self.clocks_rc

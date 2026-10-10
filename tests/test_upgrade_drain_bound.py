@@ -164,9 +164,9 @@ class WaitPathsTest(FakeClockCase):
         seen = []
 
         class Ops(FakeOps):
-            def install_clocks(inner, product):
+            def install_floor(inner, product, clocks):
                 seen.append(('clocks', upgrade.draining(product)))
-                return super().install_clocks(product)
+                return super().install_floor(product, clocks)
 
             def smoke(inner, product):
                 seen.append(('smoke', upgrade.draining(product)))

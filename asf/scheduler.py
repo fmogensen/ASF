@@ -1302,13 +1302,17 @@ def retire_candidates(product_name, declared_labels, cfg=None):
 
     The trailing dot in ``<prefix>.<product>.`` keeps another product's jobs
     (``<prefix>.other.*``) and a ``legacy_labels`` match out — only this product's own jobs are
-    ever retired by a whole-file install (D4).
+    ever retired by a whole-file install (D4). The kernel's own two jobs are never candidates
+    either: they are ``asf kernel install``'s to retire, and a whole-file 0.1 install is not
+    entitled to them (F-0342).
     """
+    from asf.kernel import host
     cfg = env.load_config() if cfg is None else cfg
     prefix = f'{label_prefix(cfg)}.{product_name}.'
-    declared = set(declared_labels)
+    kept = set(declared_labels) | {label_for(product_name, c, cfg)
+                                   for c in (host.TICK, host.WATCH)}
     return [job['label'] for job in loaded_jobs(cfg=cfg)
-            if job['label'].startswith(prefix) and job['label'] not in declared]
+            if job['label'].startswith(prefix) and job['label'] not in kept]
 
 
 # ---- the installed job read back as the clock it was rendered from -----------------------

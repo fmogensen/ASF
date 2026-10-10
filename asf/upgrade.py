@@ -1014,7 +1014,9 @@ def _install(ref, run, out, pin=None, sha=None):
 # background harvest of the product runs and its ``harvest.lock`` is free; a batch cut by a pass
 # that was already running lifts the hold again until it lands. After ``--wait-s`` the move
 # refuses and resumes exactly the clocks it paused. Then boot the clocks out, record the pin
-# with the venv it replaces as ``previous``, render the clocks and the hooks from it, smoke,
+# with the venv it replaces as ``previous``, render the floor it quiesced and the hooks from it
+# — the kernel's own two jobs through their own renderer, every other clock through its own
+# install call, never a whole-file install on a product the kernel runs (F-0342) — smoke,
 # re-render a stale host clock, resume. ``--rollback`` moves back to ``previous`` the same way,
 # offline. A move killed outright leaves its pause records behind: they carry its pid, and the
 # next move or ``asf scheduler status`` lifts them (:func:`lift_stale_pauses`).
@@ -1036,6 +1038,20 @@ MOVE_PATTERN = r'(-m asf\.cli|/asf\S*) (tick|ci queue|wave)( |$)|-m asf\.tick\.s
 MOVE_DEFERRED = 3
 #: a check run conclusion that is a red verdict (anything else not ``success`` is Unknown)
 RED_CONCLUSIONS = ('failure', 'timed_out', 'cancelled', 'startup_failure')
+#: the clock names of the kernel's own two launchd jobs (:mod:`asf.kernel.host`): a floor the
+#: kernel renders and owns, never a clock of the product file's ``clocks:`` block. A move splits
+#: the floor it quiesces on this set and hands each half to its own installer (F-0342)
+KERNEL_CLOCKS = ('kernel', 'kernel-watch')      # asf.kernel.host.TICK, .WATCH
+
+
+def on_kernel(product_name, cfg=None):
+    """True when ``product_name``'s floor is the kernel's: a job definition for its tick
+    (``asf.<p>.kernel``) is on disk. Read off disk, not out of the product file: every key of the
+    ``kernel:`` block has a default, so the block is no evidence either way. A booted-out
+    job keeps its definition, so this answer holds throughout a move."""
+    from asf import scheduler
+    return os.path.exists(scheduler.definition_path(
+        scheduler.label_for(product_name, KERNEL_CLOCKS[0], cfg), cfg))
 
 
 #: a pause record's ``reason`` written by a move (:meth:`MoveOps.pause`)
@@ -1413,14 +1429,49 @@ class MoveOps:
         from asf import scheduler
         return scheduler.resume(product_name, clocks)
 
-    def install_clocks(self, product_name):
-        """``asf scheduler install --product <p>`` in this process (rc): the render reads the
-        pin from ``install.json``; a paused clock's plist is written, not loaded."""
+    def install_floor(self, product_name, clocks):
+        """Re-render exactly the floor the move quiesced, from the pin on record (rc; 0 is fine).
+
+        The kernel's two jobs (:data:`KERNEL_CLOCKS`) are rendered by their own writer
+        (:func:`asf.kernel.host.jobs`) from the pinned venv's interpreter and written through
+        :func:`asf.scheduler.install` — the move never grows a second renderer of them (D1, D3).
+        Every other name goes through its own command, one clock per call (``asf scheduler
+        install --product <p> --clock <c>``): the whole-file install would write the plists of
+        clocks this move never quiesced and retire every loaded label the file does not declare
+        (D2)."""
         import argparse
-        from asf import scheduler
-        return scheduler.cmd_scheduler(argparse.Namespace(
-            scheduler_command='install', product=product_name, clock=None, json=False,
-            label=None, reason=None, by=None))
+        from asf import installs, scheduler
+        from asf.kernel import host
+        clocks = list(clocks)
+        kernel_clocks = [c for c in clocks if c in KERNEL_CLOCKS]
+        legacy = [c for c in clocks if c not in KERNEL_CLOCKS]
+        rc = 0
+        if on_kernel(product_name):
+            for c in legacy:
+                r = scheduler.cmd_scheduler(argparse.Namespace(
+                    scheduler_command='install', product=product_name, clock=c, json=False,
+                    label=None, reason=None, by=None))
+                if r not in (0, None) and rc in (0, None):
+                    rc = r
+        else:
+            r = scheduler.cmd_scheduler(argparse.Namespace(
+                scheduler_command='install', product=product_name, clock=None, json=False,
+                label=None, reason=None, by=None))
+            if r not in (0, None) and rc in (0, None):
+                rc = r
+        if kernel_clocks:
+            try:
+                jobs = host.jobs(env.load_product(product_name),
+                                 python=installs.interpreter(scheduler.pinned_venv(product_name)))
+            except (env.ConfigError, scheduler.SchedulerError):
+                return 2 if rc in (0, None) else rc
+            for job in jobs:
+                if job.get('clock') not in kernel_clocks:
+                    continue
+                lines = scheduler.install(job)
+                if rc in (0, None) and any('failed' in str(line) for line in lines):
+                    rc = 1
+        return rc
 
     def install_hooks(self, product_name):
         """``asf hooks install --product <p>`` (rc, message) — as the command runs it: the
@@ -1526,15 +1577,38 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
         shared = installs.shared_venv(run)
         previous = ({'sha': installs.commit_of(shared), 'venv': shared}
                     if installs.usable(shared) else None)
-    steps = []
-    if not local:
-        steps.append(' '.join(pipx_suffix_command(url, product_name, sha)))
     if not dry_run:
         # a killed move's pauses: lifted here, or they would read as the operator's below and
         # stay paused after this move, too
         for line in lift_stale_pauses(product_name, ops.resume):
             out(line)
-    clocks = [c for c in ops.clock_names(product_name) if c not in ops.paused(product_name)]
+    quiesce = [c for c in ops.clock_names(product_name) if c not in ops.paused(product_name)]
+    kernel = [c for c in quiesce if c in KERNEL_CLOCKS]
+    legacy = [c for c in quiesce if c not in KERNEL_CLOCKS]
+    if kernel and legacy:
+        out(f'NEEDS OPERATOR: {product_name} runs the kernel floor '
+            f'({", ".join(kernel)}) and its 0.1 clock(s) {", ".join(legacy)} are still loaded — '
+            f'two floors on one product, and a move cannot leave both right. Pause them: '
+            f'`asf scheduler pause --product {product_name} --clock {",".join(legacy)} '
+            f'--reason "the kernel floor replaced it"` — then run the move again')
+        return 2
+    clocks = quiesce
+    steps = []
+    if not local:
+        steps.append(' '.join(pipx_suffix_command(url, product_name, sha)))
+    if kernel:
+        out(f'upgrade: {product_name} runs the kernel floor ({", ".join(kernel)})')
+        retired = sorted(set(ops.clock_names(product_name)) - set(quiesce) - set(KERNEL_CLOCKS))
+        if retired:
+            out(f'upgrade: its 0.1 clocks ({", ".join(retired)}) are paused — this move writes '
+                f'no plist of theirs and smokes none of them')
+    if kernel:
+        install_steps = [f'render {", ".join(KERNEL_CLOCKS)} from {installs.interpreter(venv)} '
+                          f'(asf.kernel.host) and load them']
+        install_steps += [f'asf scheduler install --product {product_name} --clock {c}'
+                          for c in legacy]
+    else:
+        install_steps = [f'asf scheduler install --product {product_name}']
     steps += [f'drain: no new merge-queue cut; the clocks run until no batch is in '
               f'flight (up to {int(wait_s)}s in all; else refuse, nothing paused)',
               f'pause clocks {", ".join(clocks) or "(none)"} (the record: no new tick starts)',
@@ -1544,12 +1618,12 @@ def move(product_name, to=None, rollback=False, wait_s=DEFAULT_MOVE_WAIT_S, forc
               f'bootout clocks {", ".join(clocks) or "(none)"}',
               f'record {installs.record_path(product_name)}: {sha[:7]} {venv}; previous '
               f'{((previous or {}).get("sha") or "none")[:7]} {(previous or {}).get("venv") or ""}',
-              f'asf scheduler install --product {product_name}',
+              *install_steps,
               f'asf hooks install --product {product_name}',
-              'smoke: each clock plist\'s interpreter imports asf.cli and loads the product, '
-              'and runs the clock\'s own command in its no-op form (tick --manifest); '
-              'gh auth status, git/claude/toolchain --version under the plist env '
-              '(any failure: roll back)',
+              f'smoke: {", ".join(clocks) or "(none)"} — each clock plist\'s interpreter '
+              'imports asf.cli and loads the product, and runs the clock\'s own command in its '
+              'no-op form (tick --manifest); gh auth status, git/claude/toolchain --version '
+              'under the plist env (any failure: roll back)',
               'host clocks: asf scheduler install --host when the one on disk is stale '
               '(network.probe on)',
               f'resume clocks {", ".join(clocks) or "(none)"}']
@@ -1593,7 +1667,7 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
             out(line)
         installs.write(product_name, sha, venv, previous=previous, by=by)
         out(f'upgrade: {product_name} pinned to {_v(sha)} ({venv})')
-        rc = ops.install_clocks(product_name)
+        rc = ops.install_floor(product_name, clocks)
         if rc not in (0, None):
             if rec is None:
                 os.remove(installs.record_path(product_name))
@@ -1623,7 +1697,7 @@ def _quiesced_switch(product_name, sha, venv, previous, rec, clocks, wait_s, by,
                 os.remove(installs.record_path(product_name))
             else:
                 installs.write(product_name, rec.sha, rec.venv, previous=rec.previous, by=rec.by)
-            back = ops.install_clocks(product_name)
+            back = ops.install_floor(product_name, clocks)
             brc, bmsg = ops.install_hooks(product_name)
             for line in (bmsg or '').splitlines():
                 out(line)
