@@ -714,6 +714,25 @@ class CoverBlameTests(QueueRepo):
         named, covered = merge_queue.blame(ln, batch, members, found)
         self.assertEqual((list(named), covered), (['worker/T-0001'], True))
 
+    def test_an_absolute_only_traceback_still_reaches_the_hop(self):
+        """P4: an absolute-path traceback frame with no other ``path:line`` in the log leaves
+        ``item['paths']`` empty (``_BARE_PATH_RE`` cannot start a match on it, unlike the
+        relative frame :func:`found_and_members` uses) — ``blame`` must fall through to
+        :func:`cover_blame` instead of returning empty on the empty ``paths`` early."""
+        ln = self.lane()
+        self.queue_pass(ln, self.entries())
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [job_run('rules', '101'), check_run('gate', 'skipped'),
+                                        check_run('gate-tests', 'skipped')]
+        self.gh.logs['101'] = traceback_log('/home/x/work/o/p/tests/test_audit.py')
+        self.gh.steps['101'] = 'gate:fast (brand parity)'
+        roots = merge_queue.flake.batch_checks([self.gh.checks[batch['sha']][0]])
+        found = merge_queue.failure_findings(SLUG, roots)
+        self.assertEqual(found[0]['paths'], [])
+        members = [merge_queue._member_facts(batch, m, {}) for m in batch['members']]
+        named, covered = merge_queue.blame(ln, batch, members, found)
+        self.assertEqual((list(named), covered), (['worker/T-0001'], True))
+
     def test_a_full_red_cycle_sends_the_covered_member_back_with_its_own_file(self):
         self.queue_pass(self.lane(), self.entries())
         (batch,) = self.batches()

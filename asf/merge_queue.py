@@ -1760,10 +1760,9 @@ def blame(lane, batch, members, found, tests=None):
     drop line, since the recorded entries hold the member's own files, never the test's. Both the
     direct reading and the hop share the same two no-verdict rules: empty (the batch splits) when
     no finding maps to a member, or — with several members — when every member is named (neither
-    reading can tell them apart)."""
+    reading can tell them apart). An empty ``paths`` (an absolute-path-only traceback, P4) never
+    short-circuits: ``named`` stays ``{}`` and falls through to the hop below."""
     paths = [x for item in found for x in item['paths']]
-    if not paths:
-        return {}, False
     named = {}
     files_of = {f['branch']: _member_files(lane, batch, f) for f in members}
     for x in paths:
