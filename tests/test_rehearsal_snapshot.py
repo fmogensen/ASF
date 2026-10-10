@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -12,6 +13,7 @@ import unittest
 from unittest import mock
 
 from asf import env, rehearsal
+from asf.record import core, frontmatter
 from tests import gitfixture
 
 DESCRIPTION = """## Description
@@ -23,11 +25,16 @@ DESCRIPTION = """## Description
 ## History
 - 2026-01-01: created
 - 2026-01-02: groom: priority → P1, see {ref}
+{continuation}
 
 ## Children
 
 ## Backlinks
 """
+
+#: a ``## History`` line that does not open an entry: the wrapped tail of the one above it, and
+#: free prose like the entry itself. It must not reach the snapshot as written.
+HISTORY_CONTINUATION = '  wrapped on from the line above, free prose and not a new entry'
 
 #: a ``done/`` header of the shape :func:`asf.groom.inbox.move_to_done` writes — free prose, with
 #: an operator-ish name and a filesystem path in it. Neither may reach the snapshot; the ``→`` and
@@ -37,6 +44,22 @@ PROSE_HEADER = '→ closed (groom 2026-02-03, lane-1 via /opt/elsewhere/notes.md
 #: a ``removed:`` reason of the shape :func:`asf.record.setfield._set_only` accepts. The prose must
 #: not reach the snapshot; the task id :mod:`asf.record.ingest` reads back out of it must.
 REMOVED_REASON = 'merged into T-00002 after lane-1 found the duplicate'
+
+#: the prose-bearing typed fields a real card carries beyond its title — none of them on the
+#: builder's structural allowlist, every one of them free text a person or a groom wrote:
+#: a Task's ``reshape:`` (:data:`asf.tick.rejudge.RESHAPE_KIND`), a Decision's ``decided_by:``
+#: and a Rule's ``reason:``/``check:`` (``asf/record/new.py:21-22``), plus an ``area:`` label.
+RESHAPE = 'split T-00003 | T-00004 (groom 2026-02-04)'
+DECIDED_BY = 'lane-1, after the second rehearsal of the week'
+RULE_REASON = 'a snapshot that carries real prose is not a fixture but a leak'
+RULE_CHECK = 'the tracked snapshot is scanned by this product own privacy scan'
+AREA = 'the rehearsal lane'
+LINK_LABEL = 'the thread this was agreed in filed by hand'
+
+#: every prose value above, the shape a leak check reads: none of these may appear in the
+#: snapshot, whole or in part.
+PROSE_VALUES = (RESHAPE, DECIDED_BY, RULE_REASON, RULE_CHECK, AREA, LINK_LABEL, REMOVED_REASON,
+                HISTORY_CONTINUATION.strip(), PROSE_HEADER)
 
 #: folder -> (type, prefix, digit width). Three prefixes five digits wide, four kept at four —
 #: the same shape the plan's own sizing table reads off the real record.
@@ -50,18 +73,35 @@ _SHAPES = {
     'rules': ('rule', 'R', 4),
 }
 
+#: folder -> the parent id a card of that folder points at (``parent:`` is structural: kept).
+_PARENTS = {
+    'features': 'E-0001', 'stories': 'F-0001', 'tasks': 'S-00001', 'bugs': 'F-0001',
+    'decisions': 'E-0001', 'rules': 'E-0001',
+}
 
-def _write_card(record, folder, iid, type_, title, body, extra=''):
+#: the per-folder card counts the committed ``tests/rehearsal/`` is built at — a record of real
+#: shape (185 cards: a handful of Epics, many Tasks), kept here so the committed fixture is
+#: regenerable from this module alone for as long as it stands on a synthetic stand-in source.
+#: The operator refresh (``asf rehearse --build --from-product <p>``) replaces it with the real
+#: record's own shape; nothing here pins the fixture's counts, only this generator's.
+FIXTURE_COUNTS = {'epics': 6, 'features': 24, 'stories': 22, 'tasks': 64, 'bugs': 48,
+                  'decisions': 10, 'rules': 11}
+
+
+def _write_card(record, folder, iid, type_, title, body, typed='', machine='', state='New'):
+    """One card file: ``typed`` lines go in the typed block (where a person's own fields live),
+    ``machine`` lines after the marker."""
     os.makedirs(os.path.join(record, folder), exist_ok=True)
     text = (
         '---\n'
         f'id: {iid}\n'
         f'type: {type_}\n'
         f'title: {title}\n'
+        f'{typed}'
         '# ---- machine ----\n'
         'schema_version: 1\n'
-        'state: New\n'
-        f'{extra}'
+        f'state: {state}\n'
+        f'{machine}'
         'stage_since: 2026-01-01T09:00:00Z\n'
         'updated: 2026-01-01T09:00:00Z\n'
         '---\n'
@@ -69,6 +109,39 @@ def _write_card(record, folder, iid, type_, title, body, extra=''):
     )
     with open(os.path.join(record, folder, f'{iid}.md'), 'w', encoding='utf-8') as f:
         f.write(text)
+
+
+def _card_fields(folder, index):
+    """``(typed, machine)`` frontmatter lines for one card — a mix of the structural fields the
+    snapshot keeps verbatim (``parent``, ``rank``, ``writes``, ``after``, ``priority``,
+    ``severity``, ``lane``, ``size``, a Decision's ISO ``date``) and the prose fields it has to
+    clear (``reshape``, ``decided_by``, a Rule's ``reason``/``check``, ``area``, ``links``,
+    and ``removed``, whose id must survive its prose)."""
+    typed = []
+    machine = []
+    if folder in _PARENTS:
+        typed.append(f'parent: {_PARENTS[folder]}\n')
+    typed.append(f'rank: {100 + index}\n')
+    typed.append(f'priority: P{1 + index % 3}\n')
+    if folder == 'tasks':
+        typed.append('writes: [asf/rehearsal.py, tests/test_rehearsal_snapshot.py]\n')
+        typed.append('after: [T-00002]\n')
+        if index == 1:
+            typed.append(f'reshape: {RESHAPE}\n')
+            machine.append(f'removed: {REMOVED_REASON}\n')
+    if folder == 'bugs':
+        typed.append(f'severity: S{1 + index % 3}\n')
+    if folder == 'features':
+        typed.append('lane: full\nsize: m\n')
+    if folder == 'decisions':
+        typed.append(f'decided_by: {DECIDED_BY}\ndate: 2026-01-05\n')
+    if folder == 'rules':
+        typed.append(f'scope: repo\nenforced: true\nreason: {RULE_REASON}\ncheck: {RULE_CHECK}\n')
+    if folder == 'stories':
+        typed.append(f'area: {AREA}\n')
+    if index == 1:
+        typed.append(f'links: {{note: {LINK_LABEL}}}\n')
+    return ''.join(typed), ''.join(machine)
 
 
 def _tree_digest(root, skip_git=False):
@@ -85,11 +158,56 @@ def _tree_digest(root, skip_git=False):
     return out
 
 
-def _build_source(root, n_per_type=3, tags=True):
+#: the one shape a generated intake note name may have (``asf/rehearsal.py:_build_intake``).
+INTAKE_NAME_RE = re.compile(r'^(open|done)-note-\d+\.md$')
+
+
+def _uncleared(text):
+    """The characters of ``text`` that no clearing could have left behind: filler is ASCII
+    lowercase words and spaces, an id token is kept verbatim, and
+    :func:`asf.rehearsal._clear_gap` keeps the run of non-word characters at a gap's edges. An
+    uppercase letter, a digit or an underscore outside an id token is prose copied through."""
+    rest = core.ID_TOKEN_RE.sub('', text)
+    return [c for c in rest
+            if (c.isalnum() or c == '_') and not (c.isascii() and c.isalpha() and c.islower())]
+
+
+def _strings(value):
+    """Every string inside a frontmatter value — the scalar itself, or a list's or dict's."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [x for v in value for x in _strings(v)]
+    if isinstance(value, dict):
+        return [x for v in value.values() for x in _strings(v)]
+    return []
+
+
+def _history_lines(body):
+    """The ``## History`` lines of ``body`` that do not open an entry and are not blank — the
+    continuation lines, free prose the clearer owes the same treatment as the entry above."""
+    _preamble, sections = core.parse_sections(body)
+    out = []
+    for heading, content in sections:
+        if heading.strip() != '## History':
+            continue
+        for line in content.split('\n'):
+            if line.strip() and not line.lstrip().startswith('- '):
+                out.append(line)
+    return out
+
+
+def _build_source(root, n_per_type=3, tags=True, counts=None):
     """A from-scratch synthetic record + repo of real *shape*: every item type, a five-digit id
-    for three prefixes, intake in its three states, two tags (one annotated, one a pre-release).
-    ``tags=False`` leaves the repo tag-less, the shape that drives the builder's synthetic-ref
-    fallback. Returns ``(record_dir, repo_dir, {folder: [ids]})``."""
+    for three prefixes, each card carrying both structural and prose-bearing typed fields and a
+    ``## History`` with a continuation line, intake in its three states, three tags (two
+    annotated, one a lightweight pre-release). ``counts`` gives a per-folder card count where
+    the flat ``n_per_type`` will not do (:data:`FIXTURE_COUNTS`); ``tags=False`` leaves the repo
+    tag-less, the shape that drives the builder's synthetic-ref fallback. Returns
+    ``(record_dir, repo_dir, {folder: [ids]})``.
+
+    Nothing real is in here: every prose value is a stand-in this module spells out, and no
+    account name or machine path of any host is among them."""
     record = os.path.join(root, 'record')
     repo = os.path.join(root, 'repo')
     os.makedirs(record, exist_ok=True)
@@ -99,26 +217,34 @@ def _build_source(root, n_per_type=3, tags=True):
     task_ref = f"T-{1:05d}"
     for folder, (type_, prefix, width) in _SHAPES.items():
         ids[folder] = []
-        for i in range(1, n_per_type + 1):
+        how_many = (counts or {}).get(folder, n_per_type)
+        for i in range(1, how_many + 1):
             iid = f"{prefix}-{i:0{width}d}"
             ids[folder].append(iid)
-            body = DESCRIPTION.format(body='a card body of some real length here ' * 3,
-                                       ref=task_ref)
-            # one card carries a free-text `removed:` reason — the shape setfield accepts and
-            # ingest reads a task id back out of
-            extra = f'removed: {REMOVED_REASON}\n' if (folder, i) == ('tasks', 1) else ''
-            _write_card(record, folder, iid, type_, 'a representative title here', body,
-                        extra=extra)
+            # body and title lengths vary with the index: the filler is seeded by the length of
+            # what it replaces, so a record of one length everywhere proves nothing
+            body = DESCRIPTION.format(body='a card body of some real length here ' * (2 + i % 3),
+                                       ref=task_ref, continuation=HISTORY_CONTINUATION)
+            typed, machine = _card_fields(folder, i)
+            _write_card(record, folder, iid, type_, 'a representative title here' + ' x' * (i % 4),
+                        body, typed=typed, machine=machine,
+                        state=('New', 'Active', 'Done')[i % 3])
 
     os.makedirs(os.path.join(record, 'inbox', 'done'), exist_ok=True)
     with open(os.path.join(record, 'inbox', 'open-1.md'), 'w', encoding='utf-8') as f:
         f.write('an open note\nwith two lines of text')
+    with open(os.path.join(record, 'inbox', 'a-second-filed-note.md'), 'w',
+              encoding='utf-8') as f:
+        f.write('a second open note, filed under a name made from its own title')
     with open(os.path.join(record, 'inbox', 'done', 'done-1.md'), 'w', encoding='utf-8') as f:
         f.write(f"→ {task_ref}\n\na groomed note, already typed into a card")
     # the second done note's header is what `move_to_done` actually writes: free prose, with an
     # account name and a machine path in it (asf/groom/inbox.py)
     with open(os.path.join(record, 'inbox', 'done', 'done-2.md'), 'w', encoding='utf-8') as f:
         f.write(f"{PROSE_HEADER}\n\na second groomed note, closed by hand")
+    with open(os.path.join(record, 'inbox', 'done', 'done-3.md'), 'w', encoding='utf-8') as f:
+        f.write(f"→ {task_ref} (a third note, done)\n\na third groomed note, longer than the "
+                 "two above it so the cleared copies differ in length too")
 
     subprocess.run(['git', 'init', '-q', repo], check=True)
     gitfixture.identity(repo, 'ci', 'ci@localhost')
@@ -127,10 +253,26 @@ def _build_source(root, n_per_type=3, tags=True):
     subprocess.run(['git', '-C', repo, 'add', '.'], check=True)
     subprocess.run(['git', '-C', repo, 'commit', '-q', '-m', 'first'], check=True)
     if tags:
+        # two annotated tags, so flipping one `annotated` flag leaves the other standing — the
+        # shape the annotated *count* claim is there to catch
         subprocess.run(['git', '-C', repo, 'tag', '-a', 'v0.1.0', '-m',
                         'release notes of some length'], check=True)
-        subprocess.run(['git', '-C', repo, 'tag', 'v0.1.1-rc1'], check=True)
+        subprocess.run(['git', '-C', repo, 'tag', '-a', 'v0.1.1', '-m',
+                        'a second release, with notes of its own'], check=True)
+        subprocess.run(['git', '-C', repo, 'tag', 'v0.1.2-rc1'], check=True)
     return record, repo, ids
+
+
+def build_fixture_source(root):
+    """The synthetic stand-in the committed ``tests/rehearsal/`` stands on: this module's own
+    generator at the fixture's card counts. Public on purpose — it is what a refresh of the
+    committed fixture runs against until the operator console rebuilds it from a real product
+    (see ``tests/rehearsal/README.md``). Those two lines are::
+
+        record, repo, _ids = build_fixture_source(tempfile.mkdtemp())
+        rehearsal.build(record, repo, 'tests/rehearsal')
+    """
+    return _build_source(root, counts=FIXTURE_COUNTS)
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -262,7 +404,12 @@ class BuildWritesTheSnapshot(unittest.TestCase):
             text = f.read()
         self.assertIn('- 2026-01-01: created', text)
         self.assertIn('- 2026-01-02: groom:', text)
-        self.assertNotIn('priority', text)
+        # the entry's own prose is gone — read off the History section, since `priority:` is a
+        # structural frontmatter key the same card keeps verbatim
+        _preamble, sections = core.parse_sections(text.split('---\n', 2)[2])
+        history = dict((h.strip(), c) for h, c in sections)['## History']
+        self.assertNotIn('priority', history)
+        self.assertNotIn('P1', history)
 
     def test_history_id_reference_kept(self):
         iid = self.ids['tasks'][0]
@@ -275,7 +422,7 @@ class BuildWritesTheSnapshot(unittest.TestCase):
         self.assertEqual(rehearsal.manifest_holds(self.out), [])
 
     def test_a_done_headers_free_prose_is_cleared_and_its_arrow_and_id_kept(self):
-        path = os.path.join(self.out, 'record', 'inbox', 'done', 'done-2.md')
+        path = os.path.join(self.out, 'record', 'inbox', 'done', 'done-note-2.md')
         with open(path, encoding='utf-8') as f:
             header = f.read().split('\n\n', 1)[0]
         self.assertNotEqual(header, PROSE_HEADER)
@@ -283,6 +430,72 @@ class BuildWritesTheSnapshot(unittest.TestCase):
         self.assertTrue(header.startswith('→ '), header)
         for leaked in ('closed', 'groom', '2026-02-03', 'lane-1', '/opt/elsewhere/notes.md'):
             self.assertNotIn(leaked, header, header)
+
+    def _card(self, folder, which=0):
+        iid = self.ids[folder][which]
+        with open(os.path.join(self.out, 'record', folder, f'{iid}.md'), encoding='utf-8') as f:
+            return frontmatter.parse(f.read(), f'{iid}.md')
+
+    def test_no_prose_value_of_the_source_reaches_the_snapshot(self):
+        # every typed field but the structural allowlist is prose until proven otherwise: a
+        # Task's `reshape:`, a Decision's `decided_by:`, a Rule's `reason:`/`check:`, an
+        # `area:`, a `links:` label — none of them may be copied through (C4).
+        for dirpath, _dirs, files in os.walk(self.out):
+            for name in files:
+                with open(os.path.join(dirpath, name), encoding='utf-8') as f:
+                    text = f.read()
+                for value in PROSE_VALUES:
+                    self.assertNotIn(value, text, f'{name}: {value!r}')
+
+    def test_a_prose_typed_field_is_cleared_to_its_own_length(self):
+        reshape = self._card('tasks')[0]['reshape']
+        self.assertEqual(len(reshape), len(RESHAPE))
+        self.assertEqual(_uncleared(reshape), [], reshape)
+        rule = self._card('rules')[0]
+        self.assertEqual(len(rule['reason']), len(RULE_REASON))
+        self.assertEqual(len(rule['check']), len(RULE_CHECK))
+        decision = self._card('decisions')[0]
+        self.assertEqual(len(decision['decided_by']), len(DECIDED_BY))
+        self.assertEqual(_uncleared(decision['decided_by']), [], decision['decided_by'])
+
+    def test_every_structural_field_is_kept_verbatim(self):
+        task = self._card('tasks')[0]
+        self.assertEqual(task['parent'], 'S-00001')
+        self.assertEqual(task['rank'], 101)
+        self.assertEqual(task['priority'], 'P2')
+        self.assertEqual(task['writes'], ['asf/rehearsal.py', 'tests/test_rehearsal_snapshot.py'])
+        self.assertEqual(task['after'], ['T-00002'])
+        self.assertEqual(task['state'], 'Active')
+        self.assertEqual(task['stage_since'], '2026-01-01T09:00:00Z')
+        self.assertEqual(self._card('decisions')[0]['date'], '2026-01-05')   # a date is kept
+        self.assertEqual(self._card('bugs')[0]['severity'], 'S2')
+        feature = self._card('features')[0]
+        self.assertEqual((feature['lane'], feature['size']), ('full', 'm'))
+        self.assertIs(self._card('rules')[0]['enforced'], True)
+
+    def test_a_history_continuation_line_is_cleared_too(self):
+        _meta, body = self._card('tasks')
+        lines = _history_lines(body)
+        self.assertEqual(len(lines), 1, lines)
+        line = lines[0]
+        self.assertEqual(len(line), len(HISTORY_CONTINUATION))
+        self.assertTrue(line.startswith('  '), repr(line))   # the shape of the line survives
+        self.assertEqual(_uncleared(line), [], line)
+        self.assertNotIn('wrapped on from the line above', line)
+
+    def test_intake_notes_are_written_under_generated_names(self):
+        # a note's own file name is a slug of its title (asf/groom/inbox.py), so it is prose:
+        # the snapshot names its notes itself and the manifest claims those names.
+        intake = os.path.join(self.out, 'record', 'inbox')
+        open_names = sorted(n for n in os.listdir(intake) if n.endswith('.md'))
+        done_names = sorted(os.listdir(os.path.join(intake, 'done')))
+        self.assertEqual(open_names, ['open-note-1.md', 'open-note-2.md'])
+        self.assertEqual(done_names, ['done-note-1.md', 'done-note-2.md', 'done-note-3.md'])
+        self.assertEqual(sorted(self.manifest['intake']['open']), open_names)
+        self.assertEqual(sorted(self.manifest['intake']['done']), done_names)
+        for source_name in ('open-1.md', 'a-second-filed-note.md', 'done-1.md', 'done-2.md',
+                            'done-3.md'):
+            self.assertNotIn(source_name, open_names + done_names)
 
     def test_a_removed_reasons_prose_is_cleared_and_its_id_kept(self):
         iid = self.ids['tasks'][0]
@@ -314,6 +527,55 @@ class CommittedSnapshotIsScannedClean(unittest.TestCase):
     def test_check_privacy_is_clean(self):
         r = self._run('check_privacy.sh')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class CommittedSnapshotIsCleared(unittest.TestCase):
+    """The committed ``tests/rehearsal/`` carries no prose the builder owes a clearing — read
+    off the fixture itself, as a property, so it holds for the synthetic stand-in this fixture
+    stands on *and* for the operator refresh that will rebuild it from the real record."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cards = []
+        for folder in core.ITEM_FOLDERS:
+            d = os.path.join(COMMITTED_SNAPSHOT, 'record', folder)
+            if not os.path.isdir(d):
+                continue
+            for name in sorted(os.listdir(d)):
+                if not name.endswith('.md'):
+                    continue
+                path = os.path.join(d, name)
+                with open(path, encoding='utf-8') as f:
+                    cls.cards.append((os.path.join(folder, name),
+                                       frontmatter.parse(f.read(), path)))
+        with open(os.path.join(COMMITTED_SNAPSHOT, 'manifest.json'), encoding='utf-8') as f:
+            cls.manifest = json.load(f)
+
+    def test_there_are_cards_to_check(self):
+        self.assertTrue(self.cards)
+
+    def test_every_non_structural_frontmatter_value_is_cleared(self):
+        for relpath, (meta, _body) in self.cards:
+            for key, value in meta.items():
+                if key in rehearsal._STRUCTURAL_KEYS:
+                    continue
+                for text in _strings(value):
+                    if rehearsal._ISO_RE.match(text):
+                        continue
+                    self.assertEqual(_uncleared(text), [], f'{relpath}: {key}: {text!r}')
+
+    def test_every_history_continuation_line_is_cleared(self):
+        for relpath, (_meta, body) in self.cards:
+            for line in _history_lines(body):
+                self.assertEqual(_uncleared(line), [], f'{relpath}: {line!r}')
+
+    def test_every_intake_note_carries_a_generated_name(self):
+        intake = os.path.join(COMMITTED_SNAPSHOT, 'record', self.manifest['intake_dir'])
+        names = [n for n in os.listdir(intake) if n.endswith('.md')]
+        names += os.listdir(os.path.join(intake, 'done'))
+        self.assertTrue(names)
+        for name in names:
+            self.assertRegex(name, INTAKE_NAME_RE)
 
 
 class ManifestHoldsDetectsBreakage(unittest.TestCase):

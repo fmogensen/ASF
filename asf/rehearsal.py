@@ -125,17 +125,43 @@ def clear_history_line(line):
     return prefix + verb + clear_ids_kept(rest)
 
 
-#: frontmatter scalar keys cleared to filler — the only prose a card's frontmatter ever carries.
-#: Everything else (id, type, state, stage, parent, dates, ``writes``, ``delivers`` ...) is
-#: structural and kept verbatim.
-_PROSE_KEYS = ('title',)
+#: The frontmatter keys whose value is *structure*, not prose: an id, a type, a state, a stage,
+#: a date, a rank, a priority, a severity, a lane, a size, a footprint, an edge. These are kept
+#: verbatim and **everything else** a card's frontmatter carries is prose until proven otherwise
+#: and is cleared (C4) — so a Task's ``reshape:``, a Decision's ``decided_by:`` and a Rule's
+#: ``reason:``/``check:`` can never reach the snapshot as written. An allowlist, not a denylist:
+#: a typed field this product grows later is cleared by default rather than copied by default.
+_STRUCTURAL_KEYS = frozenset((
+    'id', 'type', 'state', 'stage', 'stage_since', 'updated', 'parent', 'schema_version',
+    'dates', 'rank', 'priority', 'severity', 'lane', 'size', 'writes', 'after', 'delivers',
+    'blockedBy', 'supersedes', 'superseded_by', 'legacy_id',
+))
 
-#: frontmatter scalar keys cleared with :func:`clear_ids_kept` rather than :func:`clear_line`.
-#: ``removed``'s value is ``true``/``false`` *or* a hand-written reason
-#: (:func:`asf.record.setfield._set_only`), and :mod:`asf.record.ingest` reads a task id back out
-#: of that reason, so the prose goes and every id token in it stays. A boolean is structural and
-#: is left alone.
-_PROSE_KEYS_IDS_KEPT = ('removed',)
+#: The keys cleared with :func:`clear_ids_kept` rather than :func:`clear_line`. ``removed``'s
+#: value is ``true``/``false`` *or* a hand-written reason (:func:`asf.record.setfield._set_only`),
+#: and :mod:`asf.record.ingest` reads a task id back out of that reason, so the prose goes and
+#: every id token in it stays. A boolean is not a string and is left alone.
+_IDS_KEPT_KEYS = frozenset(('removed',))
+
+#: An ISO date or timestamp, whatever key it sits under (a Decision's ``date:``, a ``decided:``,
+#: a timestamp a machine field carries): a value the design keeps — "every structural frontmatter
+#: field and value, every date" — and one that carries no prose to clear.
+_ISO_RE = re.compile(r'^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:?\d{2})?)?$')
+
+
+def _clear_meta_value(value, ids_kept=False):
+    """``value`` with every string inside it cleared: a scalar, or the values of a list or of
+    the one level of nesting the frontmatter subset allows. A bool, an int, a float and ``None``
+    are structure and come back as they are, and so does an ISO date (:data:`_ISO_RE`)."""
+    if isinstance(value, str):
+        if _ISO_RE.match(value):
+            return value
+        return clear_ids_kept(value) if ids_kept else clear_line(value)
+    if isinstance(value, list):
+        return [_clear_meta_value(v, ids_kept) for v in value]
+    if isinstance(value, dict):
+        return {k: _clear_meta_value(v, ids_kept) for k, v in value.items()}
+    return value
 
 
 def _clear_card_body(body):
@@ -146,8 +172,12 @@ def _clear_card_body(body):
     for heading, content in sections:
         if heading.strip() == '## History':
             lines = content.split('\n')
+            # a line that does not open an entry is a continuation of the one above it — free
+            # prose too, so it is cleared id-preservingly rather than copied. A blank line
+            # clears to a blank line, so the section's own shape survives.
             content = '\n'.join(
-                clear_history_line(l) if l.lstrip().startswith('- ') else l for l in lines)
+                clear_history_line(l) if l.lstrip().startswith('- ') else clear_ids_kept(l)
+                for l in lines)
         else:
             content = clear_block(content)
         new_sections.append([heading, content])
@@ -155,13 +185,14 @@ def _clear_card_body(body):
 
 
 def _clear_card(meta, body):
+    """``(meta, body)`` cleared: every frontmatter value but a structural one
+    (:data:`_STRUCTURAL_KEYS`) replaced by filler of its own length, and the body cleared
+    section by section."""
     cleared = frontmatter.clone(meta)
-    for key in _PROSE_KEYS:
-        if isinstance(cleared.get(key), str):
-            cleared[key] = clear_line(cleared[key])
-    for key in _PROSE_KEYS_IDS_KEPT:
-        if isinstance(cleared.get(key), str):
-            cleared[key] = clear_ids_kept(cleared[key])
+    for key, value in list(cleared.items()):
+        if key in _STRUCTURAL_KEYS:
+            continue
+        cleared[key] = _clear_meta_value(value, ids_kept=key in _IDS_KEPT_KEYS)
     return cleared, _clear_card_body(body)
 
 
@@ -282,11 +313,18 @@ def _build_repo_seed(repo_dir, out_repo, widest):
 
 def _build_intake(record_dir, intake_dir_name, out_record):
     """Carry intake in its three states (S-79606's shape): notes still under ``<intake>/``,
-    notes moved to ``<intake>/done/`` with their ``→ <id>`` header kept and their text
-    cleared, and one done note the manifest names whose cleared text is a byte or two shorter
-    than the ``original`` it also records — so that recorded ``original`` is never a substring
-    of what the snapshot actually carries, the shape the staged guard's one escape turns on
-    (P5). Returns the manifest's ``intake`` claim."""
+    notes moved to ``<intake>/done/`` with their ``→ <id>`` header cleared id-preservingly and
+    their text cleared, and one done note the manifest names whose cleared text is a byte or two
+    shorter than the ``original`` it also records — so that recorded ``original`` is never a
+    substring of what the snapshot actually carries, the shape the staged guard's one escape
+    turns on (P5). Returns the manifest's ``intake`` claim.
+
+    Every note is written under a **generated** name — ``open-note-<n>.md`` /
+    ``done-note-<n>.md``, numbered in the source's own sort order — never the source's own file
+    name: :func:`asf.groom.inbox.file_card` and :func:`asf.groom.inbox.process_inbox` both
+    derive that name from the note's own *title* (a slug of it), so the file name is prose like
+    any other and may not reach the snapshot. The ``intake`` claim records the generated names, which is what the snapshot
+    carries and what :func:`manifest_holds` reads back."""
     src_intake = os.path.join(record_dir, intake_dir_name)
     out_intake = os.path.join(out_record, intake_dir_name)
     out_done = os.path.join(out_intake, 'done')
@@ -299,8 +337,9 @@ def _build_intake(record_dir, intake_dir_name, out_record):
                 continue
             with open(os.path.join(src_intake, name), encoding='utf-8') as f:
                 text = f.read()
-            write_text(os.path.join(out_intake, name), clear_block(text))
-            open_names.append(name)
+            out_name = f"open-note-{len(open_names) + 1}.md"
+            write_text(os.path.join(out_intake, out_name), clear_block(text))
+            open_names.append(out_name)
 
     done_names = []
     src_done = os.path.join(src_intake, 'done')
@@ -315,23 +354,23 @@ def _build_intake(record_dir, intake_dir_name, out_record):
             # free prose into it (``→ closed (groom <date>, <who>)``, ``→ <removal> (<date>)``),
             # so it is cleared id-preservingly too — the ``→`` and every id token survive, the
             # account name, the date's prose and any path in it do not.
-            write_text(os.path.join(out_done, name),
+            out_name = f"done-note-{len(done_names) + 1}.md"
+            write_text(os.path.join(out_done, out_name),
                        f"{clear_block_ids_kept(header)}\n\n{clear_block(text)}")
-            done_names.append(name)
+            done_names.append(out_name)
 
     if not open_names:
-        write_text(os.path.join(out_intake, 'note-1.md'), clear_block('a filed note\nwith two lines'))
-        open_names.append('note-1.md')
-    n = 1
+        write_text(os.path.join(out_intake, 'open-note-1.md'),
+                   clear_block('a filed note\nwith two lines'))
+        open_names.append('open-note-1.md')
     while len(done_names) < 2:
-        name = f"done-pad-{n}.md"
-        n += 1
-        if name in done_names:
-            continue
-        write_text(os.path.join(out_done, name),
+        # the snapshot owes its own shape two done notes whatever the source carried: the
+        # mismatch claim below takes the last of them, and one note alone is not a state.
+        n = len(done_names) + 1
+        out_name = f"done-note-{n}.md"
+        write_text(os.path.join(out_done, out_name),
                    f"→ T-00000\n\n{clear_block('a groomed note' * n)}")
-        done_names.append(name)
-    done_names.sort()
+        done_names.append(out_name)
 
     mismatch_name = done_names[-1]
     path = os.path.join(out_done, mismatch_name)
@@ -394,17 +433,22 @@ _README = """# tests/rehearsal/
 
 What this is: a record-shaped snapshot of a real ASF product, built by `asf rehearse --build`
 (`asf/rehearsal.py:build`). Every id is kept verbatim at its real width; every structural
-frontmatter field, date and History line's date/verb/id reference is kept; every title, body,
-intake note and tag annotation is cleared to deterministic ASCII filler of the same length and
-line count. No title, body, History prose, intake note text or commit message from the real
-record is in it.
+frontmatter field, date and History line's date/verb/id reference is kept; every other
+frontmatter value, every title, body, History continuation line, intake note and tag annotation
+is cleared to deterministic ASCII filler of the same length and line count. Each intake note is
+written under a name this builder generates (`open-note-<n>.md`, `done-note-<n>.md`), because a
+note's own file name is a slug of its title. No title, body, History prose, intake note text,
+file name or commit message from the real record is in it.
 
 What it must preserve: `manifest.json`'s claims — card count per type, widest id per prefix, the
 tag/ref plan, the intake states. `rehearsal.manifest_holds` checks the snapshot against them;
 a refresh that changes a claim it does not also meet is a builder defect, not a passing rebuild.
 
 How to refresh it: `asf rehearse --build --from-product <p>`, then re-run this product's own
-unit tests and its generic/privacy scans before committing the diff.
+unit tests and its generic/privacy scans before committing the diff. Until an operator has run
+that against a real product, this tree stands on the synthetic stand-in source
+`tests/test_rehearsal_snapshot.build_fixture_source` writes, and is refreshed by building from
+it: see that function's docstring for the two lines that do it.
 
 What never goes in it: any real title, body, History prose, intake note text, commit message,
 account name or machine path. The filler is seeded only by the length of what it replaces.
