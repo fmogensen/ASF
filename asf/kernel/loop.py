@@ -12,6 +12,7 @@ and nothing in flight, listed one per line: ``limbo <id>: <why>``) and logs one
 ``BREACH <item> <class> <age> -> <action>`` line per breach (:func:`asf.kernel.decide.breaches`).
 A question the facts answered logs ``RESOLVED <item> <class> -> <answer>``, and the tick counts
 them against the questions still on the console (:func:`questions_line`).
+While the trunk is red it logs ``MAIN RED <sha> -> <action>`` (:mod:`asf.kernel.mainline`).
 
 A tick whose GitHub read failed (``Facts.github_error``, after the port's retries) is blind
 (:func:`blind_tick`): it applies :func:`asf.kernel.decide.blind_plan` only, writes no state, keeps
@@ -87,6 +88,7 @@ def summarize(plan, facts, result=None, dry_run=False):
         'resolved': sum(1 for a in plan.actions if isinstance(a, A.ApplyAnswer) and a.by),
         'escalated': sum(1 for s, st in plan.states.values()
                          if s is State.STUCK and st is not None and st.owner == 'operator'),
+        'main': getattr(plan, 'main', None),
     }
 
 
@@ -116,6 +118,11 @@ def breach_line(b):
     return 'BREACH %s %s %s -> %s' % (b['item'], b['class'], dur(b['age_s']), b['action'])
 
 
+def main_line(main):
+    """``MAIN RED <sha> -> <action>`` of :attr:`Plan.main` (:mod:`asf.kernel.mainline`)."""
+    return 'MAIN RED %s -> %s' % (main['sha'], main['action'])
+
+
 def print_summary(summary, out=print):
     limbo = summary.get('limbo') or {}
     out('kernel tick%s: %s, LIMBO %d' % (
@@ -127,6 +134,8 @@ def print_summary(summary, out=print):
         out(breach_line(b))
     if questions_line(summary):
         out(questions_line(summary))
+    if summary.get('main'):
+        out(main_line(summary['main']))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:

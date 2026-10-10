@@ -3,7 +3,9 @@
 :func:`asf.kernel.decide.decide` returns a :class:`Plan`; the applier walks ``Plan.actions`` in
 order and does each one. An action is idempotent on the world it was decided from: applying a plan
 twice does what applying it once did. No action merges a PR — landing is GitHub's (required checks
-+ up to date + auto-merge); the kernel only enables auto-merge and updates a branch that is behind.
++ up to date when the ruleset is strict + auto-merge); the kernel only enables auto-merge, updates
+a branch that is behind (a strict ruleset only), opens a revert PR off a red trunk, and merges
+directly (:class:`MergePR`) a green, CLEAN PR whose enabled auto-merge has not fired.
 """
 import dataclasses
 
@@ -29,6 +31,16 @@ class Launch:
 class EnableAutoMerge:
     """Turn on auto-merge for PR number ``pr`` (approved on its head tree, not yet enabled)."""
     pr: int
+
+
+@dataclasses.dataclass
+class MergePR:
+    """Merge PR number ``pr`` now, only while its head is still ``head_sha``
+    (``--match-head-commit``): it is CLEAN, approved, green on every required check and had
+    auto-merge enabled a tick ago, yet GitHub's auto-merge has not fired (seen 2026-10-10 once
+    strict was turned off: 19 green PRs idle 30+ min)."""
+    pr: int
+    head_sha: str
 
 
 @dataclasses.dataclass
@@ -158,6 +170,34 @@ class ClosePR:
 
 
 @dataclasses.dataclass
+class RevertPR:
+    """Main is red and ``item_id``'s merged PR ``pr`` (squash commit ``sha``) is the one change
+    since the last green commit: the host pushes ``git revert <sha>`` on top of the trunk to
+    ``branch`` (``revert/<item>``), opens its PR with ``title`` and ``body`` and enables
+    auto-merge on it; the item goes back to Ready with ``note`` (and ``finding`` for its
+    relaunch). Idempotent: an open PR on ``branch`` is reused."""
+    item_id: str
+    pr: int
+    sha: str
+    branch: str
+    title: str
+    body: str
+    note: str = ''
+    finding: str = ''
+
+
+@dataclasses.dataclass
+class FileBug:
+    """Main is red with several candidate PRs (or none the kernel can revert): write a Bug card
+    titled ``title`` with ``body`` (the candidates, the red checks and the ``key`` marker line
+    that keeps it filed once) at ``rank`` — the next tick launches its fix session."""
+    key: str
+    title: str
+    body: str
+    rank: int = 0
+
+
+@dataclasses.dataclass
 class Plan:
     """The whole decision of one tick. ``states`` maps every item id the kernel judged (Tasks and
     Bugs, plus the derived state of every Feature and Story) to ``(State, Stuck or None)`` — the
@@ -169,13 +209,16 @@ class Plan:
     non-terminal item (or ``PR #n``) with no action this tick and nothing in flight to why
     (:func:`asf.kernel.decide.limbo`; the target is none). ``breaches`` are the waits over their
     class's target: ``{'item', 'class', 'age_s', 'action'}`` each, ``action`` the one line of
-    what this tick does about it (:func:`asf.kernel.decide.breaches`)."""
+    what this tick does about it (:func:`asf.kernel.decide.breaches`). ``main`` is the main
+    safety net's verdict when the trunk is red (``{'sha', 'action'}``, logged ``MAIN RED <sha>
+    -> <action>``; None when green or unread: :mod:`asf.kernel.mainline`)."""
     states: dict = dataclasses.field(default_factory=dict)
     actions: list = dataclasses.field(default_factory=list)
     idle: dict = None
     notes: dict = dataclasses.field(default_factory=dict)
     limbo: dict = dataclasses.field(default_factory=dict)
     breaches: list = dataclasses.field(default_factory=list)
+    main: dict = None
 
 
 def describe(action):
@@ -185,6 +228,8 @@ def describe(action):
                                          ' (local first)' if action.local else '')
     if isinstance(action, EnableAutoMerge):
         return 'auto-merge #%d' % action.pr
+    if isinstance(action, MergePR):
+        return 'MERGE direct #%d (auto-merge idle)' % action.pr
     if isinstance(action, UpdateBranch):
         return 'update-branch #%d' % action.pr
     if isinstance(action, OpenPR):
@@ -214,4 +259,9 @@ def describe(action):
     if isinstance(action, ArchiveAndReset):
         return 'rebuild %s: archive %s, close #%d (%s)' % (action.item_id, action.branch,
                                                            action.pr, action.reason)
+    if isinstance(action, RevertPR):
+        return 'revert #%d of %s (%s) on %s' % (action.pr, action.item_id, action.sha[:9],
+                                                action.branch)
+    if isinstance(action, FileBug):
+        return 'file bug: %s' % action.title
     return repr(action)

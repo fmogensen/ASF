@@ -12,7 +12,7 @@ every spell and nothing else. ``reason`` is the item's wait class (:data:`CLASSE
 - ``seat``: Ready, no seat has taken it yet
 - ``ci``: its PR's required checks are still running
 - ``review``: its PR awaits a verdict
-- ``train``: approved and behind, queued for an update (the merge train)
+- ``train``: approved and behind, queued for an update (the merge train; a strict ruleset only)
 - ``merge``: approved and green, waiting on GitHub to merge it
 - ``conflict``: its PR conflicts with the base
 - ``stuck:<owner>``: Stuck, on that owner's move (``loop``, ``session``, ``ci``, ``operator``)
@@ -123,7 +123,7 @@ def classify(iid, state, stuck, facts, config, notes=None):
         return 'conflict', 'PR #%d conflicts' % pr.number
     if state is State.REVIEW:
         return 'review', 'PR #%d' % pr.number
-    if pr.behind:
+    if pr.behind and getattr(facts, 'strict', True):  # not strict: GitHub merges it behind
         note = [n for n in (notes or {}).get(iid, []) if 'merge train' in n]
         return 'train', 'PR #%d %s' % (pr.number, note[-1] if note else 'behind')
     running = [c.name for c in pr.checks if c.status != 'completed' and _required(c.name, config)]

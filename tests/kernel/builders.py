@@ -19,6 +19,7 @@ def config(**kw):
     kw.setdefault('doc_paths', DOC_PATHS)
     kw.setdefault('work_branch', 'worker/')
     kw.setdefault('fix_branch', 'fix/')
+    kw.setdefault('revert_branch', 'revert/')
     return M.Config(**kw)
 
 

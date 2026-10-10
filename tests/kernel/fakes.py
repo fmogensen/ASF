@@ -34,6 +34,8 @@ class FakeRecord:
                 it.stuck_since = f[P.STUCK_SINCE]
             it.answers = list(f.get(P.ANSWERS, it.answers))
             it.findings = list(f.get(P.FINDINGS, it.findings))
+            it.reverted = list(f.get(P.REVERTED, it.reverted))
+            it.notes = list(f.get(P.NOTES, it.notes))
             out[iid] = it
         return out
 
@@ -67,6 +69,17 @@ class FakeRecord:
             else:
                 self.fields[item_id][k] = v
 
+    def file_bug(self, key, title, body, rank=None):
+        for iid, it in self._items.items():
+            if key in (it.body or ''):
+                return iid
+        bug_id = 'B-%04d' % (9000 + len(self.minted))
+        self.minted.append(('bug', bug_id, title, [key]))
+        self._items[bug_id] = M.Item(id=bug_id, type='bug', title=title, body=body, rank=rank,
+                                     state=M.State.NEW)
+        self.fields[bug_id] = {}
+        return bug_id
+
     def mint_story(self, feature_id, story_id, title, acceptance):
         self.minted.append((feature_id, story_id, title, list(acceptance)))
         self._items[story_id] = M.Item(id=story_id, type='story', title=title, parent=feature_id)
@@ -75,8 +88,10 @@ class FakeRecord:
 
 class FakeGitHub:
 
-    def __init__(self, prs=(), reviews=(), fail=(), branches=()):
+    def __init__(self, prs=(), reviews=(), fail=(), branches=(), strict=None, main=()):
         self._prs, self._reviews = list(prs), list(reviews)
+        self._strict, self._main = strict, list(main)
+        self.reverts = []
         self._branches = list(branches)
         self.fail = set(fail)
         self.calls, self.opened = [], []
@@ -94,6 +109,23 @@ class FakeGitHub:
 
     def enable_auto_merge(self, pr):
         self._do('auto_merge', pr)
+
+    def strict(self):
+        if self._strict is None:
+            raise P.PortError('rules unreadable')
+        return self._strict
+
+    def main_commits(self):
+        return copy.deepcopy(self._main)
+
+    def revert_pr(self, sha, branch, title, body):
+        self._do('revert_pr', sha)
+        self.reverts.append((sha, branch, title, body))
+        return 950 + len(self.reverts)
+
+    def merge(self, pr, head_sha):
+        self._do('merge', pr)
+        self.merged = getattr(self, 'merged', []) + [(pr, head_sha)]
 
     def update_branch(self, pr):
         self._do('update_branch', pr)

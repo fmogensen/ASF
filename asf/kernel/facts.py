@@ -28,6 +28,11 @@ id-claim question cites (:func:`claim_questions`) are looked up on the record's 
 :mod:`asf.kernel.resolvers` class matches are probed on origin's trunk (``ports.trunk``, when
 the ports have it: :mod:`asf.kernel.trunk`) into ``Facts.resolved``.
 
+The trunk's ruleset strictness (``Facts.strict``, :meth:`asf.kernel.ports.RealGitHub.strict`:
+the rules read once a tick, shared with the required checks) and its newest commits
+(``Facts.main``, :meth:`asf.kernel.ports.RealGitHub.main_commits`) are read when the port has
+them; an unreadable strictness is True (the merge train stays), unreadable commits are none.
+
 A GitHub read that fails (the port has already retried a transient one) leaves no partial PR
 facts: ``prs``, GitHub's reviews and the pushed branches are empty and ``Facts.github_error``
 says why — ``decide`` then plans blind (:func:`asf.kernel.decide.blind_plan`).
@@ -133,6 +138,26 @@ def read_github(ports, items, orphans=None):
     return prs, reviews, pushed, ''
 
 
+def read_trunk(ports):
+    """``(strict, main commits)`` off the GitHub port: True and ``[]`` for what it cannot
+    read (a port without the method, a failed read)."""
+    from asf import gh_limit
+    from asf.kernel.ports import PortError
+    gh = ports.github
+    strict, main = True, []
+    try:
+        if hasattr(gh, 'strict'):
+            strict = bool(gh.strict())
+    except (PortError, OSError, gh_limit.RateLimited):
+        strict = True
+    try:
+        if hasattr(gh, 'main_commits'):
+            main = list(gh.main_commits() or [])
+    except (PortError, OSError, gh_limit.RateLimited):
+        main = []
+    return strict, main
+
+
 def read_facts(ports):
     """The :class:`~asf.kernel.model.Facts` the three ports describe now."""
     record = ports.record
@@ -156,10 +181,11 @@ def read_facts(ports):
                 stranded.append(s)
     sessions = list(ports.sessions.sessions())
     look_bad = getattr(record, 'unreadable', None)
+    strict, main = read_trunk(ports) if not github_error else (True, [])
     return Facts(unreadable=dict(look_bad() or {}) if look_bad else {},
                  items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
                  stranded=stranded, id_claims=read_id_claims(record, items, sessions),
                  resolved=read_resolved(ports, items, sessions),
-                 github_error=github_error, orphan_prs=orphans,
+                 github_error=github_error, orphan_prs=orphans, strict=strict, main=main,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

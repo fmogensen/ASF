@@ -50,7 +50,7 @@ class VerdictTests(unittest.TestCase):
 
     def test_on_every_factory_prefix_passes_legacy_included(self):
         for head in ('worker/T-0001', 'fix/B-0001', 'spec/F-0001', 'plan/F-0001',
-                     'cloud/direct-F-0001', 'old/T-0001'):
+                     'cloud/direct-F-0001', 'old/T-0001', 'revert/T-0001'):
             with self.subTest(head=head):
                 self.assertTrue(factory_only.verdict(ON, 'main', head, 'main', ['a.py'])[0])
 

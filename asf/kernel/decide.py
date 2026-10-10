@@ -30,7 +30,15 @@ item and the actions of one tick. The rules it holds, in the design's words:
   behind or not: such a PR is never updated again until its CI ends. The rest wait in Landing with the plan note
   :data:`TRAIN_NOTE` ("queued for update (merge train, k of n)"), never written to the card.
   Behind is GitHub's ``mergeStateStatus == BEHIND`` only: a PR a non-strict base would merge as
-  is never needs an update.
+  is never needs an update. The train runs only while the trunk's ruleset is strict
+  (``Facts.strict``: "require branches to be up to date"); with it off GitHub merges a green PR
+  behind its base, so a merely BEHIND PR is never updated (that only burns CI), nothing queues,
+  and a conflicting one still goes to its rebase session. The main safety net
+  (:mod:`asf.kernel.mainline`) then watches the trunk's own required checks: a red new since the
+  last green commit reverts its one candidate PR (:class:`RevertPR`, the item back to Ready) or
+  files a Bug for a fix session naming the candidates (:class:`FileBug`); an infra or flaky red
+  is rerun once first. ``Plan.main`` says what (``MAIN RED <sha> -> <action>``). A merged PR
+  the kernel reverted (``Item.reverted``) never makes its item Done.
   Every open PR's item is in Review or Landing (or Ready on a fix round, or Stuck) — never stateless.
 - Red: only ``failure``/``timed_out``, and only on a required check (``config.required_checks``;
   empty: every check counts). A red on any other check holds nothing: it is an item note
@@ -156,6 +164,7 @@ import re
 from asf.kernel import actions as A
 from asf.kernel import idclaims
 from asf.kernel import resolvers
+from asf.kernel import mainline
 from asf.kernel import model as M
 from asf.kernel import reports as R
 from asf.kernel import waits as W
@@ -227,8 +236,8 @@ IDLE_REASONS = {
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
 ORDER = (A.ApplyAnswer, A.ClearStuck, A.EndSession, A.PushStranded, A.NoteItem, A.MarkStuck,
-         A.MintStory, A.ArchiveAndReset, A.ClosePR, A.OpenPR, A.Rerun, A.UpdateBranch,
-         A.EnableAutoMerge, A.Launch)
+         A.MintStory, A.ArchiveAndReset, A.ClosePR, A.RevertPR, A.FileBug, A.OpenPR, A.Rerun, A.UpdateBranch,
+         A.EnableAutoMerge, A.MergePR, A.Launch)
 
 #: the attempt a live session ended past ``Config.max_session_age_h`` leaves on its item
 OVER_AGE = 'session ran past its max age'
@@ -238,7 +247,7 @@ ACTIVE = (State.READY, State.BUILDING, State.REVIEW, State.LANDING, State.STUCK)
 
 #: the actions that move an item (a note or a recorded Stuck moves nothing)
 PROGRESS = (A.Launch, A.ClearStuck, A.ApplyAnswer, A.ArchiveAndReset, A.OpenPR, A.PushStranded,
-            A.ClosePR, A.EndSession, A.UpdateBranch, A.EnableAutoMerge, A.Rerun)
+            A.ClosePR, A.EndSession, A.UpdateBranch, A.EnableAutoMerge, A.Rerun, A.RevertPR, A.MergePR)
 
 #: the most characters of a Stuck reason a LIMBO line carries
 LIMBO_REASON_MAX = 160
@@ -355,13 +364,20 @@ def decide(facts, config):
 
     for iid, (cls, _age) in due.items():  # green, auto-merge on, yet not merged past its target:
         j = judged.get(iid)                # GitHub's listing may call a PR clean that is behind
-        if (cls == 'merge' and j is not None and j.state is State.LANDING
+        if (cls == 'merge' and facts.strict and j is not None and j.state is State.LANDING
                 and j.behind_pr is None and not j.updating):
             j.behind_pr = max((p for p in facts.prs if p.item_id == iid and not p.merged),
                               key=lambda p: p.number, default=None)
     train, notes = _merge_train(items, judged, config, blocks, facts.now,
                                 first={i for i, (c, _a) in due.items() if c in ('train', 'merge')})
     actions += train
+    main_actions, main = mainline.judge(facts, config)
+    for a in main_actions:
+        if isinstance(a, A.RevertPR):  # back to Ready now; relaunched once the revert is on
+            judged[a.item_id] = _Judged(State.READY, hold=True)  # the card (next tick)
+            states[a.item_id] = (State.READY, None)
+        if not (isinstance(a, A.Rerun) and a.run_id in have):
+            actions.append(a)
     actions += _mint(facts, parked)
     queued = {}
     launches, skipped = (([], {}) if facts.paused
@@ -375,7 +391,7 @@ def decide(facts, config):
     return A.Plan(states=states, actions=actions, idle=idle, notes=notes,
                   limbo=limbo(facts, config, judged, states, parked, children, actions, queued,
                               stalled),
-                  breaches=found)
+                  breaches=found, main=main)
 
 
 def blind_plan(facts):
@@ -502,7 +518,7 @@ def _judge(it, facts, config, actions):
                 ended_stuck, asked = ended, s
 
     spec_only = _spec_only(it, prs, config)
-    if open_pr is None and any(p.merged for p in prs) and not it.reopened and not spec_only:
+    if open_pr is None and landed(it, prs) and not it.reopened and not spec_only:
         return _Judged(State.DONE)
     if open_pr is None and not live and not question:
         branch = _pr_branch(it, sessions, pushed, stuck, ended_stuck, facts, config)
@@ -545,7 +561,7 @@ def _judge(it, facts, config, actions):
                       fresh=pushed is not None)
         j.hold = j.hold or hold
         return j
-    if it.state is State.DONE and not it.reopened and not spec_only:
+    if it.state is State.DONE and not it.reopened and not spec_only and not it.reverted:
         return _Judged(State.DONE)
     if it.priority == 'later' or (effective_rank(it.id, facts.items, config.rank != 'own') is None
                                   and it.type not in BUILDABLE):
@@ -553,6 +569,12 @@ def _judge(it, facts, config, actions):
     if it.type not in BUILDABLE and it.type != DOCUMENTED:
         return _Judged(State.NEW, hold=hold)  # only a Feature gets a spec or plan launch
     return _Judged(State.READY, hold=hold, findings=relaunch_findings(it))
+
+
+def landed(it, prs):
+    """Whether one of ``it``'s ``prs`` merged and the kernel did not revert it off a red main
+    (``Item.reverted``)."""
+    return any(p.merged and p.number not in it.reverted for p in prs)
 
 
 def _auto_answer(it, facts, config, text=None):
@@ -926,11 +948,28 @@ def _judge_pr(it, pr, attempts, facts, config, actions, extra=0, granted=False, 
                           actions=actions)
     if not pr.auto_merge:
         actions.append(A.EnableAutoMerge(pr.number))
+    elif auto_merge_idle(pr, config):  # enabled a tick ago, green and CLEAN, not merged
+        actions.append(A.MergePR(pr.number, pr.head_sha))
+        return _Judged(State.LANDING)
     if in_flight(pr, config):  # its CI runs on: no update until it ends (a red: a fix round)
         return _Judged(State.LANDING, updating=True)
-    if pr.behind:
+    if pr.behind and facts.strict:  # not strict: GitHub merges it behind, an update burns CI
         return _Judged(State.LANDING, behind_pr=pr)
     return _Judged(State.LANDING)
+
+
+def auto_merge_idle(pr, config):
+    """Whether approved ``pr`` waits on a GitHub auto-merge that has not fired: auto-merge was
+    already on when this tick read it (enabled a tick ago or more), GitHub says CLEAN, its head
+    is known and every required check completed green on it — the kernel merges it directly
+    (:class:`MergePR`, ``--match-head-commit``)."""
+    if not (pr.auto_merge and pr.clean and pr.head_sha and not pr.merged):
+        return False
+    req = [c for c in pr.checks if required(c.name, config)]
+    names = {c.name for c in req}
+    return bool(req) and all(n in names for n in config.required_checks) and all(
+        c.status == 'completed' and c.conclusion in ('success', 'neutral', 'skipped')
+        for c in req)
 
 
 def conflict_attempt(pr_number, head_sha):
@@ -1378,9 +1417,9 @@ def floor_closes(facts, config):
                                  'its item %s is not on the record' % p.item_id))
     for iid in sorted(facts.items):
         it = facts.items[iid]
-        if it.state is not State.DONE or it.reopened:
-            continue
         prs = [p for p in facts.prs if p.item_id == iid]
+        if it.state is not State.DONE or it.reopened or (it.reverted and not landed(it, prs)):
+            continue
         if _spec_only(it, prs, config) or any(s.item_id == iid and s.alive
                                               for s in facts.sessions):
             continue
@@ -1482,7 +1521,7 @@ def overdue(facts, config, states, same_class=True):
 
 def _item_of(action, facts):
     """The item id ``action`` moves (a PR's or a run's item for a PR action), else None."""
-    if isinstance(action, (A.UpdateBranch, A.EnableAutoMerge)):
+    if isinstance(action, (A.UpdateBranch, A.EnableAutoMerge, A.MergePR)):
         return next((p.item_id for p in facts.prs if p.number == action.pr), None)
     if isinstance(action, A.Rerun):
         return next((p.item_id for p in facts.prs for c in p.checks

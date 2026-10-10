@@ -33,6 +33,8 @@ marker), so every old writer carries them through byte for byte
 - ``kernel_findings``: the review findings handed to the next fix round.
 - ``kernel_answers``: the operator answers already applied; ``kernel_question``: the open one.
 - ``kernel_reopened``: ``true`` when a Done item was reopened (a new PR is accepted).
+- ``kernel_reverted``: the merged PR numbers the kernel reverted off a red trunk
+  (:class:`~asf.kernel.actions.RevertPR`): they no longer make the item Done.
 - ``kernel_notes``: the questions a session asked while its work moved on anyway (a ``done``
   REPORT with a pushed head) — shown by ``asf kernel status``, holding nothing.
 """
@@ -55,10 +57,11 @@ FINDINGS, ANSWERS, QUESTION = 'kernel_findings', 'kernel_answers', 'kernel_quest
 STUCK_REASON, STUCK_OWNER = 'kernel_stuck_reason', 'kernel_stuck_owner'
 STUCK_NEXT, STUCK_SINCE, REOPENED = 'kernel_stuck_next', 'kernel_stuck_since', 'kernel_reopened'
 NOTES, EXTRA_ROUNDS, REBUILDS = 'kernel_notes', 'kernel_extra_rounds', 'kernel_rebuilds'
+REVERTED = 'kernel_reverted'
 #: the machine-block keys that hold a Stuck (cleared together)
 STUCK_KEYS = (STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE)
 KERNEL_KEYS = (STATE, STUCK_REASON, STUCK_OWNER, STUCK_NEXT, STUCK_SINCE, FIX_ROUNDS, ATTEMPTS,
-               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS, REBUILDS)
+               FINDINGS, ANSWERS, QUESTION, REOPENED, NOTES, EXTRA_ROUNDS, REBUILDS, REVERTED)
 
 #: the branch prefix a rebuilt item's old head is pushed under (:class:`ArchiveAndReset`)
 ARCHIVE_PREFIX = 'archive/'
@@ -170,6 +173,7 @@ def item_from_card(rec):
         answers=[str(a) for a in as_list(machine.get(ANSWERS))],
         question=machine.get(QUESTION) or None, reopened=bool(machine.get(REOPENED)),
         notes=[str(n) for n in as_list(machine.get(NOTES))],
+        reverted=[int(n) for n in as_list(machine.get(REVERTED)) if str(n).isdigit()],
         stuck_since=(str(machine.get(STUCK_SINCE)) if stuck is not None and machine.get(STUCK_SINCE)
                      else None))
 
@@ -397,6 +401,23 @@ class RealRecord:
         writer.write_card(rec['path'], new_text)
         rec['meta'], rec['text'] = meta, new_text
 
+    def file_bug(self, key, title, body, rank=None):
+        """Write a Bug card titled ``title`` with ``body`` (which carries ``key``) at ``rank``,
+        unless a card already carries ``key``; returns its id."""
+        from asf.record.core import today
+        from asf.record.ids import mint_id, write_new_item
+        cards = self._load()
+        for iid, rec in cards.items():
+            if key in (rec.get('body') or rec.get('text') or ''):
+                return iid
+        bug_id = mint_id(self.root, cards, 'bug', claimant='asf-kernel')
+        fields = {'title': self._scrub(title)}
+        if isinstance(rank, int):
+            fields['rank'] = rank
+        write_new_item(self.root, cards, 'bug', bug_id, fields, self._scrub(body), today(),
+                       'kernel: main is red')
+        return bug_id
+
     def mint_story(self, feature_id, story_id, title, acceptance):
         from asf.record.core import today
         from asf.record.ids import write_new_item
@@ -566,6 +587,26 @@ def failed_step(log, lines=LOG_TAIL_LINES):
     body = [_ANSI.sub('', _LOG_STAMP.sub('', r[2])).rstrip() for r in rows if r[1].strip() == step]
     body = [b for b in body if b.strip()]
     return step, '\n'.join(body[-lines:])
+
+
+def strict_from_rules(rules):
+    """Whether a branch-rules listing requires branches to be up to date: any
+    ``required_status_checks`` rule with ``strict_required_status_checks_policy`` on (none such:
+    False — nothing requires it)."""
+    return any(isinstance(r, dict) and r.get('type') == 'required_status_checks'
+               and bool((r.get('parameters') or {}).get('strict_required_status_checks_policy'))
+               for r in rules or ())
+
+
+#: the trunk's newest commits the main safety net reads, with their checks and merged PRs (one
+#: GraphQL call a tick)
+MAIN_QUERY = '''query($owner:String!,$name:String!,$ref:String!,$n:Int!){
+ repository(owner:$owner,name:$name){ref(qualifiedName:$ref){target{... on Commit{
+  history(first:$n){nodes{oid messageHeadline
+   associatedPullRequests(first:3){nodes{number headRefName merged files(first:100){nodes{path}}}}
+   statusCheckRollup{contexts(first:100){nodes{__typename
+    ... on CheckRun{name status conclusion detailsUrl startedAt completedAt}
+    ... on StatusContext{context state targetUrl createdAt}}}}}}}}}}}'''
 
 
 def required_from_rules(rules):
@@ -771,6 +812,8 @@ class RealGitHub:
             raise PortError('open PRs unreadable: %s' % r.reason)
         out = []
         for d in r.data or []:
+            if self._revert_branch(d.get('headRefName')):
+                continue  # the kernel's revert of a red trunk: never its item's own PR
             pr = self._open_pr(d)
             if pr is not None:
                 out.append(pr)
@@ -780,7 +823,7 @@ class RealGitHub:
             raise PortError('merged PRs unreadable: %s' % r.reason)
         for d in r.data or []:
             iid = item_of_branch(d.get('headRefName'))
-            if iid:
+            if iid and not self._revert_branch(d.get('headRefName')):
                 out.append(M.PR(number=d['number'], branch=d['headRefName'], item_id=iid,
                                 head_sha=d.get('headRefOid') or '', merged=True))
         return out
@@ -797,6 +840,7 @@ class RealGitHub:
                                or d.get('mergeStateStatus') == 'DIRTY'), files=files,
                   checks=newest_checks(d.get('statusCheckRollup') or []),
                   auto_merge=bool(d.get('autoMergeRequest')),
+                  clean=d.get('mergeStateStatus') == 'CLEAN',
                   auto_merge_at=str((d.get('autoMergeRequest') or {}).get('enabledAt') or ''))
         pr.tree_sha = self._tree(pr.head_sha)
         pr.change_id = self._change(d.get('baseRefName') or self.product.main, pr.head_sha)
@@ -877,16 +921,119 @@ class RealGitHub:
         if job and seen:
             self.cache.put('jobs', job, seen)
 
+    def _rules(self, branch=None):
+        """``rules/branches/<branch>`` (the trunk by default) as a list, or None when
+        unreadable — read once per port (one tick) and shared by :meth:`required_checks` and
+        :meth:`strict`."""
+        branch = branch or self.product.main
+        if not (self.slug and branch):
+            return None
+        memo = self.__dict__.setdefault('_rules_memo', {})
+        if branch not in memo:
+            r = self._gh(['api', 'repos/%s/rules/branches/%s' % (self.slug, branch)])
+            memo[branch] = r.data if r.ok and isinstance(r.data, list) else None
+        return memo[branch]
+
     def required_checks(self, branch=None):
         """The check names GitHub's rules require on ``branch`` (the trunk by default): every
         ``required_status_checks`` rule of ``rules/branches/<branch>``; ``()`` when unreadable."""
-        branch = branch or self.product.main
-        if not (self.slug and branch):
-            return ()
-        r = self._gh(['api', 'repos/%s/rules/branches/%s' % (self.slug, branch)])
-        if not r.ok or not isinstance(r.data, list):
-            return ()
-        return required_from_rules(r.data)
+        return required_from_rules(self._rules(branch) or ())
+
+    def strict(self, branch=None):
+        """Whether the trunk's ruleset requires branches to be up to date
+        (:func:`strict_from_rules`); True when the rules are unreadable (keep the merge train)."""
+        rules = self._rules(branch)
+        return True if rules is None else strict_from_rules(rules)
+
+    def _revert_branch(self, branch):
+        prefix = self.product.conventions.prefix('revert')
+        return bool(prefix) and str(branch or '').startswith(prefix)
+
+    def main_commits(self, limit=15):
+        """The trunk's newest ``limit`` commits (:class:`~asf.kernel.model.MainCommit`, newest
+        first) with the newest run of each check and the merged PR each squashes; the red checks
+        of the newest red commit get their attempt and failed log (:meth:`_red_detail`). ``[]``
+        when unreadable (the safety net then does nothing)."""
+        owner, _, name = str(self.slug or '').partition('/')
+        if not (owner and name):
+            return []
+        r = self._gh(['api', 'graphql', '-f', 'owner=%s' % owner, '-f', 'name=%s' % name,
+                      '-f', 'ref=refs/heads/%s' % self.product.main, '-F', 'n=%d' % limit,
+                      '-f', 'query=%s' % MAIN_QUERY])
+        try:
+            nodes = r.data['data']['repository']['ref']['target']['history']['nodes']
+        except (AttributeError, KeyError, TypeError):
+            return []
+        if not r.ok or not isinstance(nodes, list):
+            return []
+        out, detailed = [], False
+        for n in nodes:
+            rollup = ((n.get('statusCheckRollup') or {}).get('contexts') or {}).get('nodes') or []
+            prs = [p for p in ((n.get('associatedPullRequests') or {}).get('nodes') or [])
+                   if p.get('merged')]
+            p = prs[0] if prs else {}
+            branch = str(p.get('headRefName') or '')
+            c = M.MainCommit(
+                sha=str(n.get('oid') or ''), headline=str(n.get('messageHeadline') or ''),
+                pr=p.get('number'), branch=branch,
+                item_id='' if self._revert_branch(branch) else (item_of_branch(branch) or ''),
+                files=[f.get('path') for f in ((p.get('files') or {}).get('nodes') or [])
+                       if f.get('path')],
+                checks=newest_checks(rollup))
+            reds = [k for k in c.checks if k.status == 'completed'
+                    and k.conclusion in M.RED_CONCLUSIONS and k.run_id]
+            if reds and not detailed:
+                detailed = True
+                jobs = job_keys(rollup)
+                for k in reds:
+                    self._red_detail(k, c.files, jobs.get((k.name, k.run_id)) or '')
+            out.append(c)
+        self.cache.save()
+        return out
+
+    def revert_pr(self, sha, branch, title, body):
+        """Open the PR of ``git revert <sha>`` (a squash commit on the trunk) on ``branch``,
+        through the API alone: a commit with the tree of ``sha``'s parent on top of ``sha`` is
+        merged into a branch at the trunk's head (GitHub's three-way merge; a fast-forward when
+        ``sha`` is the head). An open PR on ``branch`` is reused; a branch already pushed only
+        gets its PR. Returns the PR number; :class:`PortError` on a conflicting revert."""
+        number = self._pr_of(branch)
+        if number is not None:
+            return number
+        main = self.product.main
+        r = self._gh(['api', 'repos/%s/git/ref/heads/%s' % (self.slug, branch)], retry=False)
+        if not (r.ok and isinstance(r.data, dict)):
+            got = self._gh(['api', 'repos/%s/commits/%s' % (self.slug, sha)])
+            parents = (got.data or {}).get('parents') if got.ok and isinstance(got.data, dict) \
+                else None
+            if not parents:
+                raise PortError('revert %s: its parent is unreadable' % sha)
+            tree = self._gh(['api', 'repos/%s/git/commits/%s' % (self.slug, parents[0]['sha'])])
+            tree_sha = ((tree.data or {}).get('tree') or {}).get('sha') if tree.ok else None
+            head = self._gh(['api', 'repos/%s/git/ref/heads/%s' % (self.slug, main)])
+            head_sha = ((head.data or {}).get('object') or {}).get('sha') if head.ok else None
+            if not (tree_sha and head_sha):
+                raise PortError('revert %s: the trunk or the parent tree is unreadable' % sha)
+            msg = 'Revert %s\n\nThis reverts commit %s.' % (title, sha)
+            rc = self._gh(['api', '-X', 'POST', 'repos/%s/git/commits' % self.slug,
+                           '-f', 'message=%s' % msg, '-f', 'tree=%s' % tree_sha,
+                           '-f', 'parents[]=%s' % sha], retry=False)
+            undo = (rc.data or {}).get('sha') if rc.ok and isinstance(rc.data, dict) else None
+            if not undo:
+                raise PortError('revert %s: %s' % (sha, rc.reason))
+            self._write(['api', '-X', 'POST', 'repos/%s/git/refs' % self.slug,
+                         '-f', 'ref=refs/heads/%s' % branch,
+                         '-f', 'sha=%s' % (undo if head_sha == sha else head_sha)],
+                        'push %s' % branch)
+            if head_sha != sha:
+                m = self._gh(['api', '-X', 'POST', 'repos/%s/merges' % self.slug,
+                              '-f', 'base=%s' % branch, '-f', 'head=%s' % undo,
+                              '-f', 'commit_message=%s' % msg], retry=False)
+                if not m.ok:
+                    self._gh(['api', '-X', 'DELETE', 'repos/%s/git/refs/heads/%s'
+                              % (self.slug, branch)], json=False, retry=False)
+                    raise PortError('revert %s conflicts with the trunk: %s' % (sha, m.reason))
+        return self.open_pr(branch, main, title, body)
 
     def reviews(self, prs):
         """GitHub's own reviews on each open PR's current head: ``APPROVED`` / ``CHANGES_REQUESTED``
@@ -939,6 +1086,13 @@ class RealGitHub:
         method = (merge.get('method') if isinstance(merge, dict) else None) or 'squash'
         self._write(['pr', 'merge', str(pr), '-R', self.slug, '--auto', '--' + method],
                     'auto-merge #%d' % pr)
+
+    def merge(self, pr, head_sha):
+        """Merge ``pr`` now with the product's method, only while its head is ``head_sha``."""
+        merge = self.product.conventions.get('merge')
+        method = (merge.get('method') if isinstance(merge, dict) else None) or 'squash'
+        self._write(['pr', 'merge', str(pr), '-R', self.slug, '--' + method,
+                     '--match-head-commit', head_sha], 'merge #%d' % pr)
 
     def update_branch(self, pr):
         self._write(['api', '-X', 'PUT', 'repos/%s/pulls/%d/update-branch' % (self.slug, pr)],
@@ -1609,7 +1763,9 @@ def config_for(product, cfg=None, github=None):
                           and k['waits']['max_review_session_age'] else None),
         max_ci_age_h=(k['waits']['max_ci_age'] / 3600 if k['waits']['breach']
                       and k['waits']['max_ci_age'] else None),
-        close_floor=bool(k['floor']['close_orphan_prs']))
+        close_floor=bool(k['floor']['close_orphan_prs']),
+        main_red_revert=bool(k['landing']['main_red_revert']),
+        revert_branch=conv.prefix('revert'))
 
 
 

@@ -38,6 +38,10 @@ It keeps decide's side of the contract (:mod:`asf.kernel.decide`'s docstring):
   ``archive/<branch>``, close the PR with a comment and delete the branch; then the card's fix
   rounds, extra rounds, attempts and findings are cleared and ``kernel_rebuilds`` goes up by one
   (a failed host step leaves the card as it was: the next tick judges the PR again);
+- a :class:`~asf.kernel.actions.RevertPR` has the host open the revert PR and enable its
+  auto-merge, then adds the PR to ``kernel_reverted`` (it no longer makes the item Done), a
+  :data:`asf.kernel.decide.RELAUNCH` attempt carrying the red (the relaunch's finding) and the
+  note; a :class:`~asf.kernel.actions.FileBug` writes its Bug card (once per key);
 - a session that ended without a REPORT is an attempt :data:`asf.kernel.decide.NO_REPORT` and
   its worktree is kept: the relaunch continues on it;
 - a review session that ended has its report's verdict lines
@@ -61,7 +65,7 @@ from asf.kernel import ports as P
 from asf.kernel import reports as R
 from asf.kernel.briefs import parse_verdict
 from asf.kernel.decide import (API_FAILED, CONTAINERS, CRASH, NEXT_ACTION, NO_REPORT, NOT_PUSHED,
-                               NO_VERDICT, OVER_AGE, answer_attempt, conflict_attempt, host_pushes, host_refuses,
+                               NO_VERDICT, OVER_AGE, RELAUNCH, answer_attempt, conflict_attempt, host_pushes, host_refuses,
                                no_report, rebase_finding)
 from asf.kernel.model import State, Stuck, verdict_holds
 
@@ -114,7 +118,7 @@ class _Applier:
         return {P.ATTEMPTS: list(it.attempts), P.FIX_ROUNDS: it.fix_rounds,
                 P.ANSWERS: list(it.answers), P.NOTES: list(it.notes),
                 P.EXTRA_ROUNDS: it.extra_rounds, P.FINDINGS: list(it.findings),
-                P.REBUILDS: it.rebuilds}.get(key, default)
+                P.REBUILDS: it.rebuilds, P.REVERTED: list(it.reverted)}.get(key, default)
 
     def set(self, iid, **fields):
         self.updates.setdefault(iid, {}).update(fields)
@@ -245,6 +249,25 @@ class _Applier:
             if pr is not None and (pr.conflicting or 'merge conflict' in str(e).lower()):
                 self.attempt(pr.item_id, conflict_attempt(a.pr, pr.head_sha) + str(e))
             raise
+
+    def RevertPR(self, a):
+        number = self.ports.github.revert_pr(a.sha, a.branch, a.title, a.body)
+        self.ports.github.enable_auto_merge(number)
+        reverted = self.field(a.item_id, P.REVERTED, [])
+        if a.pr not in reverted:
+            self.set(a.item_id, **{P.REVERTED: reverted + [a.pr]})
+            if a.finding:  # its relaunch carries the red (decide.relaunch_findings)
+                self.attempt(a.item_id, RELAUNCH + a.finding)
+        notes = self.field(a.item_id, P.NOTES, [])
+        if a.note and a.note not in notes:
+            self.set(a.item_id, **{P.NOTES: notes + [a.note]})
+        return 'revert PR #%s, auto-merge on' % number
+
+    def FileBug(self, a):
+        return 'filed %s' % self.ports.record.file_bug(a.key, a.title, a.body, a.rank)
+
+    def MergePR(self, a):
+        self.ports.github.merge(a.pr, a.head_sha)
 
     def EnableAutoMerge(self, a):
         self.ports.github.enable_auto_merge(a.pr)

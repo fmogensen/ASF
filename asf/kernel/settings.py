@@ -32,9 +32,16 @@ What used to live in a hand-written script, two hand-written plists and a note i
       briefs:     {max_appended_chars: 4000}  # the kernel's findings + answers in a brief,
                                               # newest kept (0: no cap)
       landing:    {update_parallel: 2,        # the merge train: Landing PRs updated at once,
-                                              # most items unblocked (after:) first, then rank
-                   max_wait_h: 2}             # an auto-merge PR waiting this long since
+                                              # most items unblocked (after:) first, then rank;
+                                              # only while the trunk's ruleset is strict
+                                              # (require branches up to date), read each tick
+                   max_wait_h: 2,             # an auto-merge PR waiting this long since
                                               # auto-merge was enabled is first in line
+                   main_red_revert: true}     # main red on a required check, new since its
+                                              # last green commit, with exactly one PR merged
+                                              # in between: revert it (revert/<item>, auto-merge)
+                                              # and send the item back to Ready; false, or
+                                              # several candidates: a Bug for a fix session
       watch:      {interval_s: 600,           # the keep-alive job's StartInterval
                    stale_after_s: 900}        # a plan older than this, and no tick running: kick
       idle_alarm: {enabled: true,             # Plan.idle when seats are free and nothing launches
@@ -152,7 +159,8 @@ SPEC = {
     'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
     'review': {'light_paths': (('docs/**', '*.md'), 'globs')},
     'briefs': {'max_appended_chars': (4000, int)},
-    'landing': {'update_parallel': (2, int), 'max_wait_h': (2.0, float)},
+    'landing': {'update_parallel': (2, int), 'max_wait_h': (2.0, float),
+                'main_red_revert': (True, bool)},
     'watch': {'interval_s': (600, int), 'stale_after_s': (900, int)},
     'idle_alarm': {'enabled': (True, bool), 'min_free_seats': (1, int)},
     'stuck': {'escalate_after_h': (0, float), 'rebuild_after_h': (0, float),

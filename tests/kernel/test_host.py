@@ -107,7 +107,8 @@ class Settings(unittest.TestCase):
                           k['watch']['interval_s'], k['watch']['stale_after_s']),
                          (120, 6, 'inherit', 600, 900))
         self.assertEqual(k['idle_alarm'], {'enabled': True, 'min_free_seats': 1})
-        self.assertEqual(k['landing'], {'update_parallel': 2, 'max_wait_h': 2.0})
+        self.assertEqual(k['landing'], {'update_parallel': 2, 'max_wait_h': 2.0,
+                                        'main_red_revert': True})
         self.assertEqual(P.config_for(env.Product('sample', {'repo_slug': 'o/r'}))
                          .landing_max_wait_h, 2.0)
         self.assertEqual(P.config_for(env.Product('sample', {'repo_slug': 'o/r'})).update_parallel,

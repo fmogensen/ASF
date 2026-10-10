@@ -89,6 +89,8 @@ class Item:
     it afresh (:class:`asf.kernel.actions.ArchiveAndReset`): at most once per item.
     ``stale_stuck`` is set when the card still stores a Stuck the kernel no longer reads (a
     retired card reads as Done): the next tick clears those fields off the card.
+    ``reverted`` are the numbers of the item's merged PRs the kernel reverted off a red main
+    (:mod:`asf.kernel.mainline`): such a merge no longer makes the item Done.
     """
     id: str
     type: str = 'task'
@@ -113,6 +115,7 @@ class Item:
     extra_rounds: int = 0
     rebuilds: int = 0
     stale_stuck: bool = False
+    reverted: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -143,7 +146,8 @@ class PR:
     the PR's base; ``conflicting``: GitHub cannot merge it as is (``mergeable`` CONFLICTING or
     ``mergeStateStatus`` DIRTY; an UNKNOWN ``mergeable`` stays unknown). ``files`` are the
     paths the PR changes. ``auto_merge``: auto-merge is already enabled (``auto_merge_at``:
-    since when, ISO-8601 UTC, '' when unknown); ``merged``: it landed."""
+    since when, ISO-8601 UTC, '' when unknown); ``merged``: it landed. ``clean``: GitHub's
+    ``mergeStateStatus`` is CLEAN (mergeable now, every rule met)."""
     number: int
     branch: str
     item_id: str
@@ -157,6 +161,7 @@ class PR:
     auto_merge: bool = False
     merged: bool = False
     auto_merge_at: str = ''
+    clean: bool = False
 
 
 @dataclasses.dataclass
@@ -254,6 +259,21 @@ class Answer:
 
 
 @dataclasses.dataclass
+class MainCommit:
+    """One commit on the trunk, newest first in ``Facts.main``: its ``sha``, first line
+    (``headline``), the merged PR it squashes (``pr``, its ``branch`` and the ``item_id`` that
+    branch names; None / '' for a direct push), that PR's ``files``, and the newest run of each
+    check on it (``checks``, :class:`Check` values)."""
+    sha: str
+    headline: str = ''
+    pr: int = None
+    branch: str = ''
+    item_id: str = ''
+    files: list = dataclasses.field(default_factory=list)
+    checks: list = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
 class Facts:
     """Everything one tick knows. ``items`` maps id -> :class:`Item` (every type: Epics, Features,
     Stories, Tasks, Bugs). ``specs_landed`` maps a Feature id to the text of its spec, for every
@@ -278,7 +298,13 @@ class Facts:
     live process past its bound is a stall (:func:`asf.kernel.decide.stalls`). ``resolved`` maps
     a :class:`asf.kernel.resolvers.Probe` key to the host's trunk probe result
     (:mod:`asf.kernel.trunk`) for the session questions a resolver matched; a probe not run yet
-    is absent."""
+    is absent. ``strict`` is the trunk ruleset's "require branches to be up to date" (its
+    required status checks' ``strict_required_status_checks_policy``; True when unreadable): only
+    then is a
+    merely BEHIND PR updated, through the merge train — without it GitHub merges a green PR
+    behind its base, so an update would only burn CI. ``main`` are the trunk's newest commits
+    (:class:`MainCommit`, newest first; empty when unread): the main safety net
+    (:mod:`asf.kernel.mainline`) judges the newest completed required checks on them."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -296,6 +322,8 @@ class Facts:
     unreadable: dict = dataclasses.field(default_factory=dict)
     bounds: dict = dataclasses.field(default_factory=dict)
     resolved: dict = dataclasses.field(default_factory=dict)
+    strict: bool = True
+    main: list = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -334,7 +362,11 @@ class Config:
     required CI running this long is cancelled and rerun. Each is only the fallback of a bound
     measured on the wait ledger (``Facts.bounds``): a session past its class's p90 with no push
     (twice it with one), CI past twice its p90. ``close_floor``: an open kernel PR whose item is not on the record, Done or
-    retired is closed with a comment (:class:`asf.kernel.actions.ClosePR`)."""
+    retired is closed with a comment (:class:`asf.kernel.actions.ClosePR`).
+    ``main_red_revert``: a red trunk with exactly one PR merged since its last green commit gets
+    that PR reverted (:class:`asf.kernel.actions.RevertPR`, on ``revert_branch`` + the item);
+    off, or with several candidates, a Bug is filed for a fix session
+    (:class:`asf.kernel.actions.FileBug`)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -361,3 +393,5 @@ class Config:
     max_review_age_h: float = None
     max_ci_age_h: float = None
     close_floor: bool = False
+    main_red_revert: bool = False
+    revert_branch: str = ''
