@@ -1575,7 +1575,10 @@ class ADeadReasonCarriesTheRefusal(_DeadSync):
                                        'F-0001'), why)
         self.assertEqual(cloudpid.why(rec['pid']), why)
         self.assertIn(f'cloud    spec-1                   dead: {why}', lines)
-        self.assertEqual(fake.log_reads(), [])  # the record answered: no log read
+        # naming rewrites the branch: the log is read too (F-0289 C7). Measured: an empty log
+        # makes ``log_tail`` try both flags (``--log-failed`` then ``--log``), so the one
+        # logical read is 2 raw gh calls here, not 1 (PD6 assumed a single call).
+        self.assertTrue(fake.log_reads())
 
 
 class TheRunLogIsReadOnce(_DeadSync):
@@ -1628,3 +1631,110 @@ class TheRunLogIsReadOnce(_DeadSync):
         rls.assert_called_once_with(run, None, 'client')
         with mock.patch.object(remote, 'run_log_summary', side_effect=RuntimeError('x')):
             self.assertEqual(cloud._run_log_tail(run, None, 'client', None), '')
+
+
+class ARefusedRewriteIsNamed(_DeadSync):
+    """F-0289 S-76105: git's own refusal of a push that would rewrite the branch is a refusal
+    kind of its own, and a dead run whose only recorded refusal is a rewrite correction has its
+    own log read for it too — the one case routing cannot reach, a trunk that moved under a run
+    already in the cloud (F-0289 C6)."""
+
+    GIT_REJECT = (' ! [rejected]        worker/T-0064 -> worker/T-0064 (non-fast-forward)\n'
+                  "error: failed to push some refs to 'origin'\n"
+                  'hint: Updates were rejected because the tip of your current branch is behind')
+
+    def correction(self, kind, text, **extra):
+        return dict({'kind': kind, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    'text': text}, **extra)
+
+    def test_recognise_names_git_s_own_refusal(self):
+        from asf.workers import refusals
+        reject_line = '! [rejected]        worker/T-0064 -> worker/T-0064 (non-fast-forward)'
+        got = refusals.recognise(reject_line)
+        self.assertEqual((got.kind, got.line, got.where),
+                         (refusals.NON_FAST_FORWARD, reject_line, 'run log'))
+        hint = refusals.recognise('hint: Updates were rejected because the tip of your current '
+                                  'branch is behind')
+        self.assertEqual(hint.kind, refusals.NON_FAST_FORWARD)
+
+    def test_non_fast_forward_is_in_kinds_and_refguard_still_wins_on_push(self):
+        from asf.workers import refusals
+        self.assertIn(refusals.NON_FAST_FORWARD, refusals.KINDS)
+        got = refusals.recognise('REF GUARD: refused push of worker/T-0001')
+        self.assertEqual(got.kind, refusals.REFGUARD)
+
+    def test_describes_the_ask(self):
+        from asf.workers import refusals
+        for kind in ('conflict', 'copies', 'naming'):
+            self.assertTrue(refusals.describes_the_ask(
+                refusals.Refusal(kind, 'x', where='correction')), kind)
+        self.assertFalse(refusals.describes_the_ask(
+            refusals.Refusal('conflict', 'x', where='ledger')))
+        self.assertFalse(refusals.describes_the_ask(
+            refusals.Refusal('merge', 'x', where='correction')))
+        self.assertFalse(refusals.describes_the_ask(
+            refusals.Refusal('landing-gate', 'x', where='correction')))
+        for kind in refusals.KINDS:  # the sweep is off the ledger (PD7): where='ledger' here
+            self.assertFalse(refusals.describes_the_ask(
+                refusals.Refusal(kind, 'x', where='ledger')), kind)
+
+    def test_a_dead_rewrite_correction_is_named_from_the_run_log(self):
+        from asf.harvest import lane
+        self.launch()
+        fake = LogGh(log=self.GIT_REJECT)
+        self.sync(fake)
+        pool_mod.update_session(self.product, 'spec-1', correction=self.correction(
+            'conflict', lane.conflict_text(1234, 'main', ['asf/views/status.py'])))
+        fake.view_ = {'status': 'completed', 'conclusion': 'succeeded'}
+        (_job, status, why), = self.sync(fake)
+        self.assertEqual(status, cloud.DEAD)
+        self.assertIn('last ASF refusal (non-fast-forward): hint: Updates were rejected '
+                      'because the tip of your current branch is behind', why)
+        self.assertNotIn('conflicts with origin/main', why)  # not the correction's own text
+        self.assertEqual(len(fake.log_reads()), 1)
+
+    def test_no_refusal_in_the_log_falls_back_to_the_record(self):
+        from asf.harvest import lane
+        self.launch()
+        fake = LogGh(log='')
+        self.sync(fake)
+        pool_mod.update_session(self.product, 'spec-1', correction=self.correction(
+            'conflict', lane.conflict_text(1234, 'main', ['asf/views/status.py'])))
+        fake.view_ = {'status': 'completed', 'conclusion': 'succeeded'}
+        (_job, status, why), = self.sync(fake)
+        self.assertEqual(status, cloud.DEAD)
+        self.assertIn('last ASF refusal (conflict', why)
+        self.assertIn('conflicts with origin/main', why)
+
+    def test_a_refusal_off_the_ledger_never_reads_the_log(self):
+        self.launch()
+        fake = LogGh(log=self.GIT_REJECT)
+        self.sync(fake)
+        pool_mod.update_session(self.product, 'spec-1', correction=self.correction(
+            'hook refused', 'lint failed: too many warnings'))
+        fake.view_ = {'status': 'completed', 'conclusion': 'succeeded'}
+        (_job, status, why), = self.sync(fake)
+        self.assertEqual(status, cloud.DEAD)
+        self.assertIn('(hook refused', why)
+        self.assertEqual(fake.log_reads(), [])
+
+    def test_a_claude_remote_dead_run_takes_the_corrected_step(self):
+        # PD5: ``view`` is bound only on the ``actions`` path — the fence must not re-call
+        # ``classify(view, …)`` on this one, or a claude-remote run crashes the whole sync pass
+        from asf.workers import remote
+        from asf.harvest import lane
+        self.launch()
+        pool_mod.update_session(
+            self.product, 'spec-1', pid='remote:trig_1', remote_session_id='cse_1',
+            correction=self.correction(
+                'conflict', lane.conflict_text(1234, 'main', ['asf/views/status.py'])))
+        fake = LogGh(log=self.GIT_REJECT)
+        why0 = f'run cse_1 ended succeeded {cloud.REPORT_MISSING}'
+        with mock.patch.object(remote, 'evidence', return_value=(cloud.DEAD, why0, None)), \
+                mock.patch.object(remote, 'run_log_summary', return_value=self.GIT_REJECT), \
+                mock.patch.object(cloud, 'classify',
+                                  side_effect=AssertionError('classify must not run again')):
+            (_job, status, why), = self.sync(fake)
+        self.assertEqual(status, cloud.DEAD)
+        self.assertIn('last ASF refusal (non-fast-forward): hint: Updates were rejected '
+                      'because the tip of your current branch is behind', why)
