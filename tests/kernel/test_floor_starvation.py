@@ -91,13 +91,14 @@ class MergedSpecIsNotDone(unittest.TestCase):
             plan = decide(B.facts(items, prs=[self.spec_pr()]), B.config())
             self.assertEqual(launches(plan), [('plan', 'F-0001')], card)
 
-    def test_a_merged_plan_still_closes_the_feature(self):
+    def test_a_merged_plan_launches_nothing_and_waits_for_its_tasks(self):
         items = [B.item('F-0001', rank=1)]
         plan = decide(B.facts(items, prs=[self.spec_pr(), B.pr(6, 'F-0001', branch='plan/F-0001',
                                                                 merged=True)],
                               specs_landed={'F-0001': SPEC}), B.config())
         self.assertEqual(launches(plan), [])
-        self.assertEqual(B.state(plan, 'F-0001'), State.DONE)
+        # not Done on its plan: the tick mints the plan's Tasks, the Feature is Done with them
+        self.assertEqual(B.state(plan, 'F-0001'), State.NEW)
 
 
 if __name__ == '__main__':
