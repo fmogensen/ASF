@@ -1802,7 +1802,8 @@ def config_for(product, cfg=None, github=None):
                       and k['waits']['max_ci_age'] else None),
         close_floor=bool(k['floor']['close_orphan_prs']),
         main_red_revert=bool(k['landing']['main_red_revert']),
-        revert_branch=conv.prefix('revert'))
+        revert_branch=conv.prefix('revert'),
+        max_open_prs=int(k['launch']['max_open_prs']) or None)
 
 
 

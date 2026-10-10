@@ -368,7 +368,9 @@ class Config:
     ``main_red_revert``: a red trunk with exactly one PR merged since its last green commit gets
     that PR reverted (:class:`asf.kernel.actions.RevertPR`, on ``revert_branch`` + the item);
     off, or with several candidates, a Bug is filed for a fix session
-    (:class:`asf.kernel.actions.FileBug`)."""
+    (:class:`asf.kernel.actions.FileBug`). ``max_open_prs`` is the WIP cap: while the items in
+    Review plus Landing exceed it, no new build, plan or spec launches — their seats go to fix
+    rounds and reviews (None: no cap — the bare model's default)."""
     doc_branches: tuple = ()
     doc_paths: tuple = ()
     work_branch: str = ''
@@ -399,3 +401,4 @@ class Config:
     close_floor: bool = False
     main_red_revert: bool = False
     revert_branch: str = ''
+    max_open_prs: int = None

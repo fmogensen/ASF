@@ -89,6 +89,7 @@ def summarize(plan, facts, result=None, dry_run=False):
         'escalated': sum(1 for s, st in plan.states.values()
                          if s is State.STUCK and st is not None and st.owner == 'operator'),
         'main': getattr(plan, 'main', None),
+        'wip': getattr(plan, 'wip', None),
     }
 
 
@@ -110,6 +111,15 @@ def idle_line(idle):
         return ''
     return 'IDLE: %d seat(s) free, %d not launched — %s' % (
         idle['free'], idle['waiting'], ', '.join('%s %d' % (r, n) for r, n in idle['reasons']))
+
+
+def wip_line(wip):
+    """The WIP cap's hold as one line (``WIP CAP: 34 open PRs (Review + Landing) > 30 — 12 new
+    build/plan/spec launch(es) wait; seats go to finishing work``), or '' when it holds nothing."""
+    if not wip:
+        return ''
+    return ('WIP CAP: %d open PRs (Review + Landing) > %d — %d new build/plan/spec launch(es) '
+            'wait; seats go to finishing work' % (wip['open'], wip['cap'], wip['held']))
 
 
 def breach_line(b):
@@ -136,6 +146,8 @@ def print_summary(summary, out=print):
         out(questions_line(summary))
     if summary.get('main'):
         out(main_line(summary['main']))
+    if summary.get('wip'):
+        out(wip_line(summary['wip']))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:

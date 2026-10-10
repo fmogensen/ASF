@@ -7,8 +7,11 @@ item and the actions of one tick. The rules it holds, in the design's words:
   else its nearest ancestor's through ``parent`` (Story, Feature, Epic). A Task or Bug whose whole
   lineage is unranked is Ready too, after every ranked item: no rank never means never. Only an
   unranked Feature or Epic (and a declared ``after:`` edge, or ``later``) keeps an item New.
-- Launch: Ready items in launch order alone — (effective rank, own rank, id), unranked last — while ``config.max_sessions`` allows; ``facts.paused``
-  means no :class:`Launch` at all. An item whose own errors repeat is Stuck; the lane never is.
+- Launch: finish first (:data:`FINISH_FIRST`) — fix rounds and rebases on open PRs, reviews,
+  builds, plans, specs — each class in launch order — (effective rank, own rank, id), unranked
+  last — while ``config.max_sessions`` allows; while the items in Review plus Landing exceed
+  ``config.max_open_prs`` (the WIP cap) no build, plan or spec launches (``Plan.wip``);
+  ``facts.paused`` means no :class:`Launch` at all. An item whose own errors repeat is Stuck; the lane never is.
 - Waits: only a declared ``after:`` edge between two visible items, and "two Building items
   with overlapping ``writes``: one at a time".
 - Parked: an item whose own ``priority``, or an ancestor's (through ``parent``), is ``later`` is
@@ -235,6 +238,7 @@ IDLE_REASONS = {
     'paused': 'launches paused',
     'new': 'not ready (new)',
     'seat': 'no free seat',
+    'wip': 'WIP cap: finishing first',
 }
 
 #: the order a plan's actions are applied in: record first, then GitHub, then launches
@@ -383,10 +387,10 @@ def decide(facts, config):
         if not (isinstance(a, A.Rerun) and a.run_id in have):
             actions.append(a)
     actions += _mint(facts, parked_all)
-    queued = {}
+    queued, wip = {}, {}
     launches, skipped = (([], {}) if facts.paused
                          else _launches(facts, config, judged, children, states, parked, blocks,
-                                        due, queued))
+                                        due, queued, wip))
     actions += launches
     actions.sort(key=lambda a: ORDER.index(type(a)))
     idle = _idle(facts, config, judged, states, parked, skipped) if not launches else None
@@ -395,7 +399,7 @@ def decide(facts, config):
     return A.Plan(states=states, actions=actions, idle=idle, notes=notes,
                   limbo=limbo(facts, config, judged, states, parked, children, actions, queued,
                               stalled),
-                  breaches=found, main=main)
+                  breaches=found, main=main, wip=wip or None)
 
 
 def blind_plan(facts):
@@ -1280,15 +1284,35 @@ def _mint(facts, parked):
     return out
 
 
+#: the launch classes, in the order scarce seats fill (finish first): a fix round or rebase on an
+#: open PR, a review, a build of a Task/Bug, a plan, a spec
+FINISH_FIRST = ('fix', 'review', 'build', 'plan', 'spec')
+
+#: the launch classes the WIP cap (``Config.max_open_prs``) holds back: new work
+NEW_WORK = ('build', 'plan', 'spec')
+
+
+def open_prs(judged, on_pr=()):
+    """The WIP the cap counts: the items in Review or Landing, plus those on a fix round of an
+    open PR (Ready or Building with an open PR in ``on_pr``) — finished work not yet landed."""
+    return sum(1 for iid, j in judged.items()
+               if j.state in (State.REVIEW, State.LANDING)
+               or (iid in on_pr and j.state in (State.READY, State.BUILDING)))
+
+
 def _launches(facts, config, judged, children, states, parked, blocks=None, due=None,
-              queued=None):
-    """``(launches, skipped)``: reviews first, then Ready items, each in launch order
-    (:func:`launch_order`) — an item whose wait is over its target (``due``) before the rest, then
-    a relaunch (:func:`relaunch`), the one holding the most others (``blocks``) first — while
-    sessions are free; a Ready item whose ``writes`` overlap a Building (or just launched) visible
-    item waits its turn (``skipped[iid] = 'overlap'``). A review over its target asks for a local
-    seat first (``Launch.local``). ``queued`` (filled when given) maps every review or Ready item
-    left for want of a seat to ``'seat'``, and every overlap to ``'overlap'``."""
+              queued=None, wip=None):
+    """``(launches, skipped)``: while sessions are free, finish first (:data:`FINISH_FIRST`) — a
+    Ready item with an open PR (a fix round, a rebase), then reviews, then builds, plans and specs
+    — each class in launch order (:func:`launch_order`): an item whose wait is over its target
+    (``due``) before the rest, then (not for a review) a relaunch (:func:`relaunch`), the one
+    holding the most others (``blocks``) first. A Ready item whose ``writes`` overlap a Building
+    (or just launched) visible item waits its turn (``skipped[iid] = 'overlap'``). A review over
+    its target asks for a local seat first (``Launch.local``). While the items in Review plus
+    Landing exceed ``config.max_open_prs`` (the WIP cap) no build, plan or spec launches
+    (``skipped[iid] = 'wip'``) and ``wip`` (filled when given) records the hold. ``queued``
+    (filled when given) maps every item left for want of a seat to ``'seat'``, every overlap to
+    ``'overlap'`` and every WIP hold to ``'wip'``."""
     items = facts.items
     free = _free(facts, config)
     inherit = config.rank != 'own'
@@ -1298,23 +1322,32 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
     rank = lambda iid: launch_order(iid, items, inherit)  # noqa: E731
     first = lambda iid: ((iid not in due,),  # noqa: E731
                          (0, -blocks.get(iid, 0)) if relaunch(items[iid]) else (1, 0), rank(iid))
-    reviews = sorted((i for i, j in judged.items() if j.review_branch and not j.hold),
-                     key=lambda iid: (iid not in due, rank(iid)))
-    ready = sorted((i for i, j in judged.items()
-                    if states[i][0] is State.READY and not j.hold and _visible(items, i, parked)
-                    and not _derived(i, items, children)), key=first)
+    on_pr = {p.item_id for p in facts.prs if not p.merged}
+    cands = [('review', iid, (iid not in due, rank(iid))) for iid, j in judged.items()
+             if j.review_branch and not j.hold]
+    for iid, j in judged.items():
+        if (states[iid][0] is State.READY and not j.hold and _visible(items, iid, parked)
+                and not _derived(iid, items, children)):
+            kind = _kind(items[iid], facts, config)
+            cands.append(('fix' if iid in on_pr else kind, iid, first(iid)))
+    cands.sort(key=lambda c: (FINISH_FIRST.index(c[0]), c[2]))
+    cap = config.max_open_prs
+    n_open = open_prs(judged, on_pr)
+    over = cap is not None and n_open > cap
     busy = [items[i].writes for i in items
             if states[i][0] is State.BUILDING and _visible(items, i, parked)]
-    out, skipped = [], {}
-    for iid in reviews:
+    out, skipped, held = [], {}, 0
+    for cls, iid, _key in cands:
+        if over and cls in NEW_WORK:
+            skipped[iid] = queued[iid] = 'wip'
+            held += 1
+            continue
         if free <= 0:
             queued[iid] = 'seat'
             continue
-        out.append(A.Launch('review', iid, judged[iid].review_branch, local=iid in due))
-        free -= 1
-    for iid in ready:
-        if free <= 0:
-            queued[iid] = 'seat'
+        if cls == 'review':
+            out.append(A.Launch('review', iid, judged[iid].review_branch, local=iid in due))
+            free -= 1
             continue
         if any(_overlap(items[iid].writes, w) for w in busy):
             skipped[iid] = queued[iid] = 'overlap'
@@ -1324,6 +1357,8 @@ def _launches(facts, config, judged, children, states, parked, blocks=None, due=
                             list(judged[iid].findings), judged[iid].model))
         busy.append(items[iid].writes)
         free -= 1
+    if held and wip is not None:
+        wip.update({'open': n_open, 'cap': cap, 'held': held})
     return out, skipped
 
 
@@ -1616,6 +1651,8 @@ def _why_no_breach_action(iid, cls, facts, states, judged, queued):
         return 'no free seat'
     if queued.get(iid) == 'overlap':
         return 'file overlap with a Building item'
+    if queued.get(iid) == 'wip':
+        return 'WIP cap: open PRs over kernel.launch.max_open_prs'
     if judged[iid].hold:
         return 'held this tick'
     return {'ci': 'CI in flight', 'merge': 'waits on GitHub auto-merge',
@@ -1710,7 +1747,7 @@ def _stalled(iid, state, stuck, facts, config, j, queued, stalled):
             limbo_reason_stuck(stuck)
     if state is State.BUILDING:
         return '' if live else 'Building with no live session'
-    if live or j.hold or queued.get(iid) in ('seat', 'overlap'):
+    if live or j.hold or queued.get(iid) in ('seat', 'overlap', 'wip'):
         return ''
     if state is State.READY:
         return 'Ready, launches paused' if facts.paused else 'Ready, not launched'

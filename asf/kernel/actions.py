@@ -222,7 +222,9 @@ class Plan:
     class's target: ``{'item', 'class', 'age_s', 'action'}`` each, ``action`` the one line of
     what this tick does about it (:func:`asf.kernel.decide.breaches`). ``main`` is the main
     safety net's verdict when the trunk is red (``{'sha', 'action'}``, logged ``MAIN RED <sha>
-    -> <action>``; None when green or unread: :mod:`asf.kernel.mainline`)."""
+    -> <action>``; None when green or unread: :mod:`asf.kernel.mainline`). ``wip`` is the WIP
+    cap's hold this tick (``{'open', 'cap', 'held'}``: open PRs in Review + Landing, the cap, the
+    new builds/plans/specs that wait; None when it holds nothing back)."""
     states: dict = dataclasses.field(default_factory=dict)
     actions: list = dataclasses.field(default_factory=list)
     idle: dict = None
@@ -230,6 +232,7 @@ class Plan:
     limbo: dict = dataclasses.field(default_factory=dict)
     breaches: list = dataclasses.field(default_factory=list)
     main: dict = None
+    wip: dict = None
 
 
 def describe(action):

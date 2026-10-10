@@ -14,8 +14,13 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # (correct, rebases) takes a local seat. A cloud
                                               # review reports on asf-reviews/<job>, never
                                               # the PR branch, so it restarts no CI
-                   rank: inherit}             # inherit: a Task takes its nearest ancestor's rank;
+                   rank: inherit,             # inherit: a Task takes its nearest ancestor's rank;
                                               # own: only an item's own rank orders it
+                   max_open_prs: 30}          # the WIP cap: while items in Review + Landing
+                                              # exceed it, no new build, plan or spec launches;
+                                              # their seats go to fix rounds and reviews (0: off).
+                                              # Seats always fill finish-first: fix rounds and
+                                              # rebases, reviews, builds, plans, specs
       github:     {retry_delays_s: [2, 5, 10],   # a transient GitHub read (5xx, timeout,
                                               # secondary rate limit) is retried after each
                                               # delay; still failing, the tick is blind: no PR
@@ -162,7 +167,8 @@ SPEC = {
     'launch': {'max_sessions': (6, int), 'rank': ('inherit', ('inherit', 'own')),
                'local_max': (None, int), 'cloud_max': (0, int),
                'cloud_kinds': (('coder', 'fix-bug', 'spec', 'plan', 'review', 'light-review'),
-                               'words')},
+                               'words'),
+               'max_open_prs': (30, int)},
     'github': {'retry_delays_s': ((2, 5, 10), 'seconds'), 'slow_below': (0.15, float)},
     'models': {k: (v, 'text') for k, v in MODEL_KINDS.items()},
     'review': {'light_paths': (('docs/**', '*.md'), 'globs')},

@@ -475,6 +475,12 @@ kernel:
                             # REPORT the report commit it pushes; a failed create falls back local
                             # and counts on the lane's breaker (cloud.fallback_*).
     rank: inherit           # inherit: a Task takes its nearest ancestor's rank; own: only its own
+                            # Seats always fill finish-first: fix rounds and rebases on open PRs,
+                            # then reviews, then builds of Tasks/Bugs, then plans, then specs;
+                            # rank orders each class
+    max_open_prs: 30        # the WIP cap: while the items holding an open PR (Review, Landing, a
+                            # fix round) exceed it, no new build, plan or spec launches — their
+                            # seats go to finishing work; the tick logs `WIP CAP: ...` (0: off)
   github:
     retry_delays_s: [2, 5, 10]   # a GitHub read that fails transiently (a 5xx, a timeout, a
                             # dropped connection, a secondary rate limit) is tried again after
