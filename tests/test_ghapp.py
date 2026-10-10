@@ -348,13 +348,13 @@ class Secrecy(GhappCase):
             self.assertNotIn('INSTALLATION-TOKEN-XYZ', text)
             self.assertNotIn('SECRET-KEY-MARKER-LINE', text)
 
-    def run_scenario(self, product, *, http=None, run=None, dry_run=False):
+    def run_scenario(self, product, *, http=None, run=None, dry_run=False, now=1_700_000_000):
         out = io.StringIO()
         ctx = mutation_guard.active() if dry_run else _noop()
         with ctx, redirect_stdout(out):
             try:
-                expires, why = ghapp.mint(product, now=1_700_000_000, http=http, run=run) \
-                    if not dry_run else ghapp.refresh(product, now=1_700_000_000, http=http, run=run)
+                expires, why = ghapp.mint(product, now=now, http=http, run=run) \
+                    if not dry_run else ghapp.refresh(product, now=now, http=http, run=run)
             except gh_limit.RateLimited as exc:
                 expires, why = '', str(exc)
         meta_raw = ''
@@ -374,13 +374,20 @@ class Secrecy(GhappCase):
                                       b'from ' + self.key_file.encode())),
             dict(http=fake_http((500, 'internal error')), run=fake_run()),
             dict(http=fake_http((201, 'not-json')), run=fake_run()),
-            dict(http=boom, run=boom, dry_run=True),
+            dict(http=boom, run=boom, dry_run=True,
+                 now=ghapp._seconds_left('2026-01-01T01:00:00Z', 0) - 100),
             dict(http=fake_http((403, 'secondary rate limit')), run=fake_run()),
+            dict(http=fake_http((404, 'Not Found')), run=fake_run(), product=self.product()),
         ]
         for scenario in scenarios:
             gh_limit.reset()
-            why, printed, meta_raw = self.run_scenario(product, **scenario)
+            scenario = dict(scenario)
+            scenario_product = scenario.pop('product', product)
+            dry_run = scenario.get('dry_run', False)
+            why, printed, meta_raw = self.run_scenario(scenario_product, **scenario)
             self.assertNothingSecret(why, printed, meta_raw)
+            if dry_run:
+                self.assertEqual(why, 'dry run')
         # the earlier, still-cached token itself is untouched by every failure above
         self.assertEqual(ghapp.token(product), 'INSTALLATION-TOKEN-XYZ')
 
