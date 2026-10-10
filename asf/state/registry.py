@@ -109,6 +109,7 @@ REGISTRY = {
     'paused-clocks.json': _s('asf.scheduler'),
     'network.json': _s('asf.tick.network'),
     'install.json': _s('asf.installs'),
+    'channels.json': _s('asf.channels'),
     'upgrade-pending.json': _s('asf.upgrade'),
     'upgrade-expired.json': _s('asf.upgrade'),
     'alerts.json': _s('asf.security.alerts'),
