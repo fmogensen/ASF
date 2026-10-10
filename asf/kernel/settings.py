@@ -103,8 +103,11 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # the record, Done or retired is closed (comment)
       install:    {shadow: true,              # asf kernel install dry-runs the new venv's tick on
                                               # live facts first: a crash keeps the old plists
-                   max_state_changes: 25}     # more items changing state than this (or Launch
+                   max_state_changes: 25,     # more items changing state than this (or Launch
                                               # dropping to 0 with Ready work) needs --accept-diff
+                   lock_timeout_s: 600}       # install waits this long for a running tick to
+                                              # end (the kernel lock), then holds the lock while
+                                              # launchd switches the plists; past it: refused
 
 :func:`problems` validates the block for :func:`asf.env.product_problems` (a value of the wrong
 type refuses the load; an unknown key is a warning); :func:`read` returns the block with every
@@ -182,7 +185,8 @@ SPEC = {
               'max_review_session_age': ('90m', 'duration'),
               'max_ci_age': ('1h', 'duration'), 'bound_min_samples': (20, int)},
     'floor': {'close_orphan_prs': (True, bool)},
-    'install': {'shadow': (True, bool), 'max_state_changes': (25, int)},
+    'install': {'shadow': (True, bool), 'max_state_changes': (25, int),
+                'lock_timeout_s': (600, int)},
 }
 
 #: the intervals launchd is handed must be at least this many seconds

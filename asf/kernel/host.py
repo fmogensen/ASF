@@ -23,6 +23,11 @@ differs. Launch dropping to 0 while items are Ready, any other action type dropp
 :data:`DROP_MIN` or more to 0, or more items changing state than
 ``kernel.install.max_state_changes`` (default 25) refuses the switch unless ``--accept-diff``.
 
+A reinstall never cuts a running tick mid-apply (:func:`tick_lock`): once the preflight passed,
+install waits up to ``kernel.install.lock_timeout_s`` (default 600) for the product's kernel lock
+and holds it while launchd boots the old jobs out and the new ones in; a tick still running at
+the deadline refuses the switch and the old plists stay.
+
 Install keeps ASF's own footprint clean (:func:`prune_venvs`): of this venv's family (the pipx
 venvs named like it but for the trailing short sha, ``asf-factory-asf-kernel-<sha>``) it keeps
 this one and the :data:`KEEP_PREVIOUS` newest others for a rollback, and any venv a LaunchAgent,
@@ -38,6 +43,7 @@ line per run goes to ``logs/kernel-watch-<p>.log``. Each pass also runs the work
 over and whose work is on origin or the trunk is removed — the ended sessions the tick could not
 free, and orphans no session names (anything holding unpushed work is kept).
 """
+import contextlib
 import datetime
 import fcntl
 import os
@@ -48,6 +54,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 TICK = 'kernel'
 WATCH = 'kernel-watch'
@@ -370,16 +377,58 @@ def install(product, dry_run=False, cfg=None, python=None, out=print, accept_dif
         pending.append(job)
     if pending and not preflight(product, pending, out, accept_diff, run):
         return 1
-    for job in pending:
-        for line in scheduler.install(job):
-            out(line)
-            rc = 1 if 'failed' in line else rc
+    if pending:
+        from asf import env
+        state_dir = os.path.join(env.ASF_HOME, 'state', product.name)
+        timeout = product.kernel['install']['lock_timeout_s']
+        with tick_lock(state_dir, timeout, out) as held:
+            if not held:
+                out('kernel: install refused — a tick still running after %ds '
+                    '(kernel.install.lock_timeout_s); the old plists stay' % timeout)
+                return 1
+            for job in pending:
+                for line in scheduler.install(job):
+                    out(line)
+                    rc = 1 if 'failed' in line else rc
     if not dry_run:
         try:
             prune_venvs(python, out=out)
         except OSError as e:  # the jobs are installed; a prune failure is one line
             out('kernel: venv prune failed — %s' % e)
     return rc
+
+
+#: seconds between two tries for the kernel lock while :func:`install` waits for a tick
+LOCK_POLL_S = 2.0
+
+
+@contextlib.contextmanager
+def tick_lock(state_dir, timeout, out=print, clock=time.monotonic, sleep=time.sleep):
+    """Hold the product's kernel lock (:data:`asf.kernel.loop.LOCK_FILE`) for the ``with`` block,
+    waiting up to ``timeout`` seconds for a running tick to release it: a reinstall's launchd
+    ``bootout`` would otherwise kill a tick mid-apply (cards half written, a launch without its
+    record). Yields True once held, False when the tick still held it at the deadline. A tick
+    the new job starts meanwhile finds the lock taken and skips its turn."""
+    from asf.kernel.loop import LOCK_FILE
+    os.makedirs(state_dir, exist_ok=True)
+    fd = os.open(os.path.join(state_dir, LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        deadline, said = clock() + max(0, timeout), False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if clock() >= deadline:
+                    yield False
+                    return
+                if not said:
+                    out('kernel: waiting for the running tick to end (up to %ds)' % timeout)
+                    said = True
+                sleep(LOCK_POLL_S)
+        yield True
+    finally:
+        os.close(fd)
 
 
 def tick_running(state_dir):

@@ -178,6 +178,73 @@ class Install(Home):
         self.assertEqual(self.lc.calls, [])
 
 
+class InstallWaitsForTheTick(Home):
+    """A reinstall never cuts a running tick mid-apply: it waits for the product's kernel lock
+    (``kernel.install.lock_timeout_s``), then holds it while launchd switches the plists."""
+
+    def hold(self):
+        fd = os.open(os.path.join(self.state, loop.LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+
+    def product_with(self, timeout):
+        return env.Product('sample', {'repo_slug': 'o/r', 'kernel': {
+            'tick': {'interval_s': 90}, 'install': {'lock_timeout_s': timeout}}})
+
+    def test_the_lock_is_held_while_launchd_switches_the_plists(self):
+        seen = []
+        real = self.lc.__call__
+
+        def spy(args, timeout=30):
+            if args[0] in ('bootout', 'bootstrap'):
+                seen.append(host.tick_running(self.state))
+            return real(args, timeout)
+        with mock.patch.object(scheduler, '_launchctl', spy):
+            rc = host.install(self.product, cfg={}, python='/v/bin/python',
+                              out=self.lines.append)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [True] * 4)
+        self.assertFalse(host.tick_running(self.state))  # released after the switch
+
+    def test_a_running_tick_past_the_timeout_keeps_the_old_plists(self):
+        fd = self.hold()
+        self.addCleanup(os.close, fd)
+        rc = host.install(self.product_with(0), cfg={}, python='/v/bin/python',
+                          out=self.lines.append)
+        self.assertEqual(rc, 1)
+        self.assertFalse([c for c in self.lc.calls if c[0] in ('bootstrap', 'bootout')])
+        self.assertFalse(os.path.exists(scheduler.plist_path('asf.sample.kernel')))
+        self.assertTrue(any('tick still running' in x and 'lock_timeout_s' in x
+                            for x in self.lines), self.lines)
+
+    def test_it_waits_for_the_running_tick_to_end_then_switches(self):
+        import threading
+        fd = self.hold()
+        threading.Timer(0.3, lambda: os.close(fd)).start()
+        with mock.patch.object(host, 'LOCK_POLL_S', 0.05):
+            rc = host.install(self.product_with(30), cfg={}, python='/v/bin/python',
+                              out=self.lines.append)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.plist('kernel')['ProgramArguments'][0], '/v/bin/python')
+        self.assertTrue(any('waiting for the running tick' in x for x in self.lines), self.lines)
+
+    def test_nothing_to_switch_or_a_dry_run_never_waits(self):
+        host.install(self.product, cfg={}, python='/v/bin/python', out=self.lines.append)
+        fd = self.hold()
+        self.addCleanup(os.close, fd)
+        self.assertEqual(host.install(self.product_with(0), cfg={}, python='/v/bin/python',
+                                      out=self.lines.append), 0)
+        self.assertEqual(host.install(self.product_with(0), dry_run=True, cfg={},
+                                      python='/w/bin/python', out=self.lines.append), 0)
+
+    def test_the_knob_is_validated_and_defaulted(self):
+        self.assertEqual(settings.read(None)['install']['lock_timeout_s'], 600)
+        bad = ('product: sample\nrepo_slug: o/r\nkernel:\n  install:\n'
+               '    lock_timeout_s: soon\n')
+        self.assertEqual([k for _l, k, _w in env.product_problems(bad)[0]],
+                         ['kernel.install.lock_timeout_s'])
+
+
 class Shadow(Home):
     """The shadow preflight: the new venv's dry run on the live facts gates the switch."""
 
