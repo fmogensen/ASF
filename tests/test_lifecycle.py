@@ -3800,3 +3800,63 @@ class WorktreeStatusSnapshot(unittest.TestCase):
             ev = lc.gather(None, run)
         self.assertEqual(ev.uncommitted, 1)
         self.assertEqual(self._count_status(spy), 1)
+
+
+class GatherHasCommitsOnAFreshCheckoutOfAPushedBranchTests(unittest.TestCase):
+    """B-0584: a branch a prior pass already pushed past the trunk — a cloud session's push, or a
+    worktree this one never saw before — reads `has_commits=False` the first time *this*
+    worktree checks it out: its own reflog holds nothing but `branch: Created from
+    origin/<branch>` (the filtered entry), though the branch itself carries real work. `judge`
+    then reads a report that truthfully says there is nothing new to commit as an empty branch,
+    and F-0097's replan parked twice in 24h on work that was already on origin."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='lifecycle_gather_fresh_')
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        origin, main_repo, self.wt = (os.path.join(self.root, n)
+                                      for n in ('origin.git', 'main', 'wt'))
+        self.git('init', '-q', '--bare', '-b', 'main', origin, cwd=self.root)
+        self.git('clone', '-q', origin, main_repo, cwd=self.root)
+        for k, v in (('user.name', 'T'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.git('config', k, v, cwd=main_repo)
+        self._commit(main_repo, 'seed')
+        self.git('push', '-q', 'origin', 'HEAD:main', cwd=main_repo)
+        # a prior pass pushed its work straight to the branch, past the trunk
+        self.git('checkout', '-q', '-b', 'lane/x', cwd=main_repo)
+        self._commit(main_repo, 'the work')
+        self.git('push', '-q', 'origin', 'lane/x', cwd=main_repo)
+        self.git('checkout', '-q', 'main', cwd=main_repo)
+        self.git('branch', '-q', '-D', 'lane/x', cwd=main_repo)
+        # this worktree checks the branch out for the first time, after that commit is already
+        # on origin — its own reflog is just the branch's creation
+        self.git('worktree', 'add', '-q', '-b', 'lane/x', self.wt, 'origin/lane/x', cwd=main_repo)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', *args], cwd=cwd or self.wt, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def _commit(self, repo, name):
+        with open(os.path.join(repo, name), 'w') as f:
+            f.write('x\n')
+        self.git('add', '-A', cwd=repo)
+        self.git('commit', '-qm', name, cwd=repo)
+
+    def test_a_fresh_checkout_of_a_branch_already_ahead_of_trunk_has_commits(self):
+        reflog = self.git('reflog', 'show', '--format=%gs', 'refs/heads/lane/x')
+        self.assertEqual(reflog, 'branch: Created from origin/lane/x')
+        ev = lc.gather(None, {'worktree': self.wt, 'branch': 'lane/x'})
+        self.assertTrue(ev.has_commits, 'the branch is ahead of main on origin')
+
+    def test_judge_does_not_call_it_an_empty_branch(self):
+        run = {'worktree': self.wt, 'branch': 'lane/x', 'kind': 'replan'}
+        ev = lc.gather(None, run)
+        ev.result = OK
+        self.assertEqual(lc.judge(run, ev), lc.FINISHED)
+
+    def test_a_branch_truly_never_pushed_past_trunk_still_has_no_commits(self):
+        wt2 = os.path.join(self.root, 'wt2')
+        self.git('worktree', 'add', '-q', '-b', 'lane/never', wt2, 'origin/main',
+                 cwd=os.path.join(self.root, 'main'))
+        ev = lc.gather(None, {'worktree': wt2, 'branch': 'lane/never'})
+        self.assertFalse(ev.has_commits)
