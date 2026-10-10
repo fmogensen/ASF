@@ -473,3 +473,44 @@ class TheOperatorCanSee(unittest.TestCase):
                          'wave: launches paused: release freeze (by op1, since ' +
                          pause.held('sample')['at'] + ') — no new session this tick; '
                          'recording and harvesting go on')
+
+
+class ThePreviewAgrees(unittest.TestCase):
+    """B-84029: ``step_wave.would_start`` is the preview ``asf status``'s Ready-to-launch cell
+    and ``asf.dwell``'s ``launchable_idle`` watchdog both read — it must hold a paused row the
+    same way the live wave does (C2, ``docs/reviews/1-t-0651.md``), never report it as starting
+    while a seat sits free."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='pause_test_')
+        self._home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        self.product = env.Product('sample', {})
+
+    def tearDown(self):
+        env.ASF_HOME = self._home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_paused_products_preview_holds_the_row_it_never_starts_it(self):
+        pause.pause('sample', 'release freeze', 'op1')
+        rows = _sample_rows()
+        resolved = capacity.Resolved(sessions=5, sessions_bound='product', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={})
+        cloud = types.SimpleNamespace(on=False, max_inflight=0)
+        with mock.patch.object(step_wave, 'inflight', lambda product: []), \
+                mock.patch.object(step_wave.capacity_mod, 'resolve',
+                                  lambda product, *a, **k: resolved), \
+                mock.patch.object(step_wave, 'cloud_settings', lambda product: cloud), \
+                mock.patch.object(step_wave, 'cloud_readiness',
+                                  lambda product, cl: (False, 'cloud lane off')), \
+                mock.patch.object(step_wave, 'plan_inputs', lambda product, root, items: {}), \
+                mock.patch.object(step_wave, 'gated_plan',
+                                  lambda items, product, running, seats, inputs, out=print:
+                                  (list(rows), set())), \
+                mock.patch.object(step_wave, 'host_hold', lambda planned: (False, '', {})):
+            screened, seats, running = step_wave.would_start(self.product, self.tmp, items={})
+        self.assertTrue(screened)
+        for s in screened:
+            self.assertEqual(s.kind, step_wave.PAUSED, (s.row.item_id, s.kind, s.why))
+            self.assertFalse(s.starts)
+            self.assertIn('held: launches paused: release freeze', s.why)

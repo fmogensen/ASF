@@ -4180,12 +4180,18 @@ def conflict_files(repo, trunk, branch, fetch=True):
 
 def conflict_text(number, trunk, files):
     """The correction for a branch that conflicts with ``trunk`` in ``files``, PR ``number``
-    (None: no PR yet)."""
+    (None: no PR yet). B-83471: never lets a session read a clean ``git status`` as proof there
+    is nothing to do — the launch's own rebase onto the trunk aborts a conflict before the
+    worktree is handed over (:func:`asf.workers.spawn._rebase_onto_trunk`), so the status reads
+    clean whether the conflict stands or not; three correct sessions on T-0654 and T-47334 took
+    that silence for "carry on" and reported done with no commits."""
     what = f'PR #{number}' if number else 'the branch'
     return (f'{what} conflicts with origin/{trunk} in {", ".join(files)} — GitHub runs no '
-            f'pull_request workflow on a conflicting PR, so its required checks never start; '
-            f'rebase the branch onto origin/{trunk} (git rebase origin/{trunk}), never merge; '
-            f'the factory publishes the rebased branch')
+            f'pull_request workflow on a conflicting PR, so its required checks never start. '
+            f'A clean `git status` here proves nothing: a conflicted rebase is always aborted '
+            f'before your worktree existed, never left in place for you to find — rebase the '
+            f'branch onto origin/{trunk} yourself (`git rebase origin/{trunk}`), resolve those '
+            f'files so both sides survive, never merge, then push')
 
 
 def host_reads_dirty(slug, number, head):
