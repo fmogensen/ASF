@@ -432,6 +432,49 @@ class RecordHealthStaleStatusTests(TickTestCase):
         self.assertIsNone(status.stale_cell(self.operator, product))
 
 
+class ReleaseChannelTickTests(unittest.TestCase):
+    """T-0433: once `upgrade.release_report` returns `'installed'`, `'rolled-back'` or
+    `'failed'`, the tick ends right there — the same shape the trunk channel's own
+    install-and-end already uses (P2) — and the trunk channel is never reached in the same
+    tick, the two channels being exclusive (D3)."""
+
+    def setUp(self):
+        # a `repo_dir` that holds no `pyproject.toml` at all: `drift.is_factory_source` must
+        # answer False on its own merits, never on a relative read of the suite's own cwd
+        # (`asf`'s own checkout, `is_factory_source('')`'s accidental True elsewhere).
+        self.tmp = tempfile.mkdtemp(prefix='release_tick_test_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.product = env.Product('p', {'repo_slug': 'a/b', 'ci': {'provider': 'none'},
+                                         'repo_dir': self.tmp})
+
+    def run_tick(self, result):
+        from asf import drift, upgrade
+        out = io.StringIO()
+        ctx = tick.Context(self.product)
+        with contextlib.redirect_stdout(out), \
+                mock.patch.object(upgrade, 'release_report', return_value=result), \
+                mock.patch.object(drift, 'report') as dr, \
+                mock.patch('asf.tick.summary.run'):
+            rc = tick._run_steps(mock.Mock(), self.product, ctx, [], None)
+        dr.assert_not_called()
+        return rc, out.getvalue().splitlines()
+
+    def test_an_installed_or_failed_release_waits_a_tick(self):
+        for result in ('installed', 'rolled-back', 'failed'):
+            with self.subTest(result=result):
+                rc, lines = self.run_tick(result)
+                self.assertEqual(rc, 0)
+                self.assertIn(
+                    'tick: the install was changed under this tick; its steps run on the next tick',
+                    lines)
+
+    def test_none_or_notified_or_held_does_not_end_the_tick_early(self):
+        for result in ('none', 'notified', 'held'):
+            with self.subTest(result=result):
+                _rc, lines = self.run_tick(result)
+                self.assertFalse(any('was changed under this tick' in ln for ln in lines), lines)
+
+
 def _write_index(root, generated):
     """``index.json`` with no live items — only ``generated`` matters to :func:`stale_cell`."""
     with open(os.path.join(root, 'index.json'), 'w', encoding='utf-8') as f:

@@ -111,6 +111,18 @@ class TickPrintsTheDriftLine(DriftTestCase):
         self.assertIn('tick: the install was upgraded under this tick; its steps run on the next tick',
                       lines)
 
+    def test_a_factory_source_product_still_takes_the_drift_report_path(self):
+        """T-0433/D3: the fork `asf.tick.tick._run_steps` added is chosen by
+        `drift.is_factory_source`, never by a product's own declaration — a factory-source
+        product's tick is byte-for-byte unchanged, and the release channel is never called."""
+        from asf import upgrade
+        with mock.patch.object(upgrade, 'release_report') as rr:
+            lines = self.run_tick()
+        rr.assert_not_called()
+        self.assertEqual(lines[0],
+                         f'factory: asf {__version__} ({self.installed[:9]}) · '
+                         f'trunk {__version__} ({self.head[:9]}) · BEHIND by 2 commits')
+
     def test_a_deferred_upgrade_does_not_claim_it_ran(self):
         lines = self.run_tick('auto', mock.Mock(return_value=drift.DEFERRED))
         self.assertFalse(any(ln.startswith('tick: ran asf upgrade') for ln in lines), lines)

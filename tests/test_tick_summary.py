@@ -230,6 +230,27 @@ class TickDigestTests(SummaryTestCase):
         self.assertIn('launches 2, merges 1, relaunches 1', text)
         self.assertNotIn('stalls', text)
 
+    def test_an_upgrade_line_is_the_digests_fourth_line(self):
+        from asf.tick import record_health
+        record_health.record(self.product, False, reason='boom', now='2026-09-22T11:00:00Z')
+        ctx = _ctx(self.product)
+        ctx.upgrade_line = 'UPGRADE AVAILABLE v0.1.62 → v0.1.63'
+        ran = [{'step': 'record', 'ok': True, 'seconds': 3.2}]
+        lines = []
+        summary.run(ctx, None, out=lines.append, now=NOW, alive=lambda pid: True, ran=ran)
+        digest_lines = lines[-1].lstrip('\n').split('\n')
+        self.assertEqual(len(digest_lines), 4)
+        self.assertTrue(digest_lines[2].startswith('STALE since'), digest_lines[2])
+        self.assertEqual(digest_lines[3], 'UPGRADE AVAILABLE v0.1.62 → v0.1.63')
+
+    def test_no_upgrade_line_adds_no_row(self):
+        ctx = _ctx(self.product)
+        ran = [{'step': 'record', 'ok': True, 'seconds': 3.2}]
+        lines = []
+        summary.run(ctx, None, out=lines.append, now=NOW, alive=lambda pid: True, ran=ran)
+        digest_lines = lines[-1].lstrip('\n').split('\n')
+        self.assertEqual(len(digest_lines), 2)
+
 
 OK_RESULT = {'type': 'result', 'subtype': 'success', 'is_error': False,
              'result': 'REPORT\nitem: F-0001\nstatus: done\npushed: yes abc1234\n'}

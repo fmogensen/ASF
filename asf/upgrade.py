@@ -675,6 +675,74 @@ def mid_landing(product):
         return []
 
 
+def _release_state_path(product):
+    """``<state_dir>/upgrade-release.json`` — the release channel's own state for one product
+    (D3): the tag last notified (``notified``), and the last release action taken, if any
+    (``last``: ``from``, ``from_sha``, ``to``, ``at``, ``result`` — Tasks 4 and 5 write it)."""
+    return os.path.join(env.state_dir(product), 'upgrade-release.json')
+
+
+def _read_release_state(product):
+    try:
+        with open(_release_state_path(product), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_release_state(product, data):
+    _write_json(_release_state_path(product), data)
+
+
+def release_report(ctx, out=print, now=None, run=subprocess.run):
+    """The release channel's tick, for every product that is not the factory's own source (D3):
+    one line every tick naming the installed release against the newest tag on the remote, and
+    ``notify``'s ``UPGRADE AVAILABLE`` once per tag — notified once, silent again until a newer
+    tag is cut (:func:`asf.tick.tick._run_steps` chooses this over :func:`asf.drift.report` by
+    structure, never by a product's own declaration).
+
+    Returns one of ``'none' | 'notified' | 'held' | 'installed' | 'rolled-back' | 'failed'``:
+    this function itself returns only the first two — ``'held'``, ``'installed'`` and
+    ``'rolled-back'`` are the install and rollback that Tasks 4 and 5 add to this same body.
+    ``auto`` falls through to the same ``notify`` branch for now (PD15): a product that asked to
+    be upgraded gets the line, not silence, until Task 4 replaces this with the install.
+
+    The whole body is inside one ``try``/``except Exception``, printing ``factory: release check
+    failed (<detail>)`` and returning ``'none'`` — the shape :func:`asf.drift.report` already
+    uses: a version check has never been allowed to stop a tick."""
+    try:
+        product = ctx.product
+        policy = product.upgrade
+        url = repo_url(run)
+        tag, _sha = latest_release(url, now, run)
+        old, old_sha = installed_release()
+        if old is None:
+            tail = 'release unreadable'
+        elif newer(tag, old):
+            tail = 'BEHIND'
+        else:
+            tail = 'current'
+        out(f"factory: asf {old or 'unknown'} @ {(old_sha or 'unknown')[:7]} · "
+            f"release {tag or 'unreadable'} · {tail}")
+        if policy == 'off':
+            return 'none'
+        if not newer(tag, old):
+            return 'none'
+        state = _read_release_state(product)
+        if state.get('notified') == tag:
+            return 'none'
+        upgrade_line = f'UPGRADE AVAILABLE {old} → {tag}'
+        out(upgrade_line)
+        ctx.upgrade_line = upgrade_line
+        state['notified'] = tag
+        _write_release_state(product, state)
+        return 'notified'
+    except Exception as e:  # noqa: BLE001 — a version check never stops a tick
+        out(f"factory: release check failed ({str(e).strip() or type(e).__name__})")
+        return 'none'
+
+
 def _ref_label(ref):
     """``ref`` printed whole when it is a release tag (:data:`RELEASE_RE`), else its first seven
     characters — a tag never prints as a truncated ``v0.1.6``."""
