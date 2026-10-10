@@ -31,7 +31,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 from typing import NamedTuple
@@ -466,13 +465,14 @@ def snapshot(product, version):
         if os.path.isfile(p):
             shutil.copy2(p, os.path.join(backup, os.path.basename(p)))
     if product is not None:
+        from asf import gitops, gitpush, refguard
         from asf.tick import shadow
         product = _product(product)
         clone = shadow.record_dir(product)
         if os.path.isdir(os.path.join(clone, '.git')):
             tag = f'asf-schema-{version - 1}'
-            subprocess.run(['git', 'tag', '-f', tag], cwd=clone, capture_output=True)
-            subprocess.run(['git', 'push', '-q', 'origin', tag], cwd=clone, capture_output=True)
+            gitops.git(['tag', '-f', tag], clone)
+            gitpush.push(['-q', 'origin', tag], clone, guard=refguard.RECORD, refs_only=True)
     return backup
 
 
@@ -502,16 +502,14 @@ def restore(product, version):
             if os.path.basename(p) in names:
                 shutil.copy2(os.path.join(backup, os.path.basename(p)), p)
     if product is not None:
+        from asf import gitops
         from asf.tick import shadow
         product = _product(product)
         clone = shadow.record_dir(product)
         tag = f'asf-schema-{version}'
         if os.path.isdir(os.path.join(clone, '.git')):
-            found = subprocess.run(['git', 'rev-parse', '-q', '--verify', f'refs/tags/{tag}'],
-                                   cwd=clone, capture_output=True, text=True)
-            if found.returncode == 0:
-                subprocess.run(['git', 'checkout', '-q', tag, '--', '.'], cwd=clone,
-                               capture_output=True)
+            if gitops.rev_parse(clone, f'refs/tags/{tag}'):
+                gitops.git(['checkout', '-q', tag, '--', '.'], clone)
                 shadow.commit_local(clone, f'restore: schema snapshot {tag}')
                 shadow.push(clone)
     return backup
