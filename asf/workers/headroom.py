@@ -248,18 +248,21 @@ class CostTable:
     known dollars and no default share (D6).
 
     ``window_usd`` is ``{provider: {window: usd}}`` — the operator's
-    ``quota_guards.window_usd`` merged over the per-provider estimate merged over the pool-wide
-    ``five_h_usd``; ``usd`` is ``{(kind, family): median dollars}``. ``shares`` overrides
+    ``quota_guards.window_usd``, exactly as configured; ``learned_usd`` is ``{provider: usd}``,
+    a kind's own 5h window as :func:`five_h_usd_by_provider` read it, and ``five_h_usd`` the
+    configured pool-wide scalar. The three are tiers of one chain, never merged into each other
+    (:meth:`_window_usd`). ``usd`` is ``{(kind, family): median dollars}``. ``shares`` overrides
     :data:`DEFAULT_COST` per ``(kind, family)``; ``source`` is ``default`` or ``history``."""
 
     def __init__(self, shares=None, five_h_usd=None, allowance=RUNNING_ALLOWANCE,
-                 window_usd=None, usd=None):
+                 window_usd=None, usd=None, learned_usd=None):
         self.shares = dict(shares or {})
         self.five_h_usd = five_h_usd
         self.allowance = float(allowance)
         self.source = 'history' if self.shares else 'default'
         self.window_usd = {k: dict(v) for k, v in (window_usd or {}).items()}
         self.usd = dict(usd or {})
+        self.learned_usd = dict(learned_usd or {})
 
     def cost(self, kind, model):
         fam = family(model)
@@ -271,10 +274,13 @@ class CostTable:
         return table.get(kind, table['*'])
 
     def _window_usd(self, provider, window):
-        """The dollars of 100% of ``window`` on ``provider``'s own scale, first hit wins: the
-        operator's exact ``quota_guards.window_usd[provider][window]``; that kind's own ``five_h``
-        (configured or learned, :func:`table_from_config`) × :data:`WINDOW_RATIO`; the pool-wide
-        :attr:`five_h_usd` × the same ratio; ``None``."""
+        """The dollars of 100% of ``window`` on ``provider``'s own scale — the spec's ``## The
+        design`` §2 chain, six branches, first hit wins: the operator's exact
+        ``quota_guards.window_usd[provider][window]``; that kind's *configured* ``five_h`` ×
+        :data:`WINDOW_RATIO`; the configured pool-wide :attr:`five_h_usd` × the same ratio; that
+        kind's *learned* ``five_h`` × the ratio; the learned pool-wide ``five_h`` × the ratio;
+        ``None``. A kind the operator configured outranks every learned reading; a kind's own
+        learned window outranks the pool-wide one it was learned beside."""
         per = self.window_usd.get(provider) or {}
         if per.get(window) is not None:
             return per[window]
@@ -283,8 +289,10 @@ class CostTable:
             return None
         if per.get('five_h') is not None:
             return per['five_h'] * ratio
-        if self.five_h_usd:
-            return self.five_h_usd * ratio
+        for dollars in (self.five_h_usd, self.learned_usd.get(provider),
+                        self.learned_usd.get('default')):
+            if dollars:
+                return dollars * ratio
         return None
 
     def share(self, kind, model, provider, window):
@@ -306,14 +314,18 @@ class CostTable:
         return None
 
 
-def estimate(runs, window_usd=None, allowance=RUNNING_ALLOWANCE, five_h_usd=None):
+def estimate(runs, window_usd=None, allowance=RUNNING_ALLOWANCE, five_h_usd=None,
+             learned_usd=None):
     """A :class:`CostTable` from ``runs`` (dicts with ``kind``, ``model``, ``usd`` and, for the
     order, ``started``): each ``(kind, family)`` with :data:`MIN_RUNS` known costs gets the
     median dollars of its :data:`RECENT_RUNS` newest (:attr:`CostTable.usd`), learned whether or
-    not ``five_h_usd`` is known. Only over a known ``five_h_usd`` does that same median also
+    not any pool-wide dollars are known. Only over a known pool-wide window — ``five_h_usd`` as
+    configured, else the ``default`` kind's learned ``five_h`` — does that same median also
     become a share of the window, rounded to half a point, at least 1 (:attr:`CostTable.shares`).
-    ``window_usd`` passes through to the table unchanged (:meth:`CostTable.share`)."""
-    have_five_h = bool(five_h_usd) and five_h_usd > 0
+    ``window_usd`` and ``learned_usd`` pass through to the table unchanged, as the separate tiers
+    they are (:meth:`CostTable._window_usd`)."""
+    pool_wide = five_h_usd or (learned_usd or {}).get('default')
+    have_five_h = bool(pool_wide) and pool_wide > 0
     groups = {}
     for r in sorted(runs, key=lambda r: str(r.get('started') or '')):
         if r.get('usd') is None or not r.get('kind'):
@@ -327,10 +339,11 @@ def estimate(runs, window_usd=None, allowance=RUNNING_ALLOWANCE, five_h_usd=None
         dollars = statistics.median(amounts[-RECENT_RUNS:])
         usd[key] = dollars
         if have_five_h:
-            pct = dollars * 100.0 / five_h_usd
+            pct = dollars * 100.0 / pool_wide
             shares[key] = max(1, _num(round(pct * 2) / 2))
-    return CostTable(shares, five_h_usd=five_h_usd if have_five_h else None, allowance=allowance,
-                     window_usd=window_usd, usd=usd)
+    return CostTable(shares, five_h_usd=five_h_usd if (five_h_usd and five_h_usd > 0) else None,
+                     allowance=allowance, window_usd=window_usd, usd=usd,
+                     learned_usd=learned_usd)
 
 
 def five_h_usd_by_provider(samples, runs):
@@ -535,11 +548,13 @@ def _account_providers(cfg):
 def table_from_config(cfg, now=None):
     """The :class:`CostTable` a tick's wave places by: ``quota_guards.five_h_usd`` when set, else
     the window's dollars estimated from the samples; the fixed table when neither is known. Each
-    window's dollars are read per provider kind (``quota_guards.window_usd.<provider>``,
-    :meth:`CostTable.share`), merged over that kind's own learned ``five_h``
-    (:func:`five_h_usd_by_provider`) — each sample's account mapped through the config's own
-    ``{account: provider}`` first, so a kind's dollars are learned from its own accounts'
-    intervals even when the sample line predates provider kinds."""
+    window's dollars are read per provider kind (``quota_guards.window_usd.<provider>``) and
+    learned per kind beside it (:func:`five_h_usd_by_provider`) — each sample's account mapped
+    through the config's own ``{account: provider}`` first, so a kind's dollars are learned from
+    its own accounts' intervals even when the sample line predates provider kinds. The configured
+    table and the learned one are handed over as the separate tiers they are: what the operator
+    configured, pool-wide included, outranks every learned reading (:meth:`CostTable._window_usd`).
+    """
     g = (cfg or {}).get('quota_guards') or {}
     g = g if isinstance(g, dict) else {}
     allowance = g.get('running_allowance', RUNNING_ALLOWANCE)
@@ -552,15 +567,10 @@ def table_from_config(cfg, now=None):
     mapped = [dict(s, provider=account_provider.get(s.get('account'), s.get('provider')))
              for s in samples]
     learned = five_h_usd_by_provider(mapped, runs)
-    usd = g.get('five_h_usd') or learned.get('default')
     configured = g.get('window_usd')
     configured = configured if isinstance(configured, dict) else {}
-    window_usd = {}
-    for provider in set(configured) | set(learned):
-        per = dict(configured.get(provider) or {}) if isinstance(configured.get(provider), dict) else {}
-        if 'five_h' not in per and learned.get(provider) is not None:
-            per['five_h'] = learned[provider]
-        if per:
-            window_usd[provider] = per
-    return estimate(runs, window_usd=window_usd or None,
-                    five_h_usd=float(usd) if usd else None, allowance=allowance)
+    window_usd = {provider: dict(per) for provider, per in configured.items()
+                 if isinstance(per, dict) and per}
+    five_h_usd = g.get('five_h_usd')
+    return estimate(runs, window_usd=window_usd or None, learned_usd=learned or None,
+                    five_h_usd=float(five_h_usd) if five_h_usd else None, allowance=allowance)

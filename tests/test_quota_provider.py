@@ -5,10 +5,12 @@ not have the same window, and one scalar prices a heavy spec the same on both").
   is; unset is the kind ``DEFAULT_PROVIDER``. ``Pool.providers()`` maps every account to its kind;
   ``env.validate_worker_pool`` checks it is a non-blank string.
 * ``CostTable.share(kind, model, provider, window)`` — the launch's own dollars over that
-  window's dollars on that provider's own scale, first hit wins: the operator's
-  ``quota_guards.window_usd[provider][window]``; that kind's own ``five_h`` (configured or
-  learned) × :data:`WINDOW_RATIO`; the pool-wide ``five_h_usd`` × the same ratio; else the fixed
-  table (``five_h``) or that same share spread over a longer window; else ``None``.
+  window's dollars on that provider's own scale, first hit wins over six branches: the operator's
+  ``quota_guards.window_usd[provider][window]``; that kind's *configured* ``five_h`` ×
+  :data:`WINDOW_RATIO`; the configured pool-wide ``five_h_usd`` × the same ratio; that kind's
+  *learned* ``five_h`` × the ratio; the learned pool-wide ``five_h`` × the ratio; else the fixed
+  table (``five_h``) or that same share spread over a longer window; else ``None``. What the
+  operator configured outranks every learned reading.
 * ``record_samples`` writes every window and the provider kind it was read under, so a later
   reading can be attributed; a sample written before this card, or by an account naming none,
   folds into ``'default'``.
@@ -56,10 +58,11 @@ class ProviderConfigTests(unittest.TestCase):
 
 
 class WindowDollarsTests(unittest.TestCase):
-    def table(self, window_usd, five_h_usd=24.0):
+    def table(self, window_usd, five_h_usd=24.0, learned_usd=None):
         runs = [{'kind': 'spec', 'model': 'claude-opus-5', 'usd': u,
                 'started': f'2026-09-25T0{i}:00:00Z'} for i, u in enumerate((4.0, 4.8, 6.0))]
-        return headroom.estimate(runs, window_usd=window_usd, five_h_usd=five_h_usd)
+        return headroom.estimate(runs, window_usd=window_usd, five_h_usd=five_h_usd,
+                                 learned_usd=learned_usd)
 
     def test_the_dollar_median_prices_each_kind_s_own_window(self):
         t = self.table({'plan-small': {'five_h': 12}, 'plan-large': {'five_h': 48}})
@@ -78,6 +81,19 @@ class WindowDollarsTests(unittest.TestCase):
     def test_a_kind_named_nowhere_falls_back_to_the_pool_wide_five_h_usd(self):
         t = self.table({'plan-small': {'five_h': 12}})
         self.assertEqual(t.share('spec', 'Opus', 'plan-medium', 'five_h'), 20)  # 4.8*100/24
+
+    def test_a_configured_pool_wide_window_outranks_a_learned_kind(self):
+        # the kind is configured nowhere, so the operator's own pool-wide scalar answers for it
+        # ahead of what the samples learned about that same kind: 4.8*100/24, not 4.8*100/12.
+        t = self.table(None, five_h_usd=24.0, learned_usd={'plan-small': 12, 'default': 60})
+        self.assertEqual(t.share('spec', 'Opus', 'plan-small', 'five_h'), 20)
+
+    def test_a_learned_kind_outranks_the_learned_pool_wide_window(self):
+        # nothing configured at all: the kind's own learned window prices it, and a kind the
+        # samples never named falls through to the learned pool-wide one.
+        t = self.table(None, five_h_usd=None, learned_usd={'plan-small': 12, 'default': 48})
+        self.assertEqual(t.share('spec', 'Opus', 'plan-small', 'five_h'), 40)
+        self.assertEqual(t.share('spec', 'Opus', 'plan-medium', 'five_h'), 10)
 
     def test_an_unconfigured_long_window_is_derived_from_the_kind_s_own_five_h(self):
         t = self.table({'plan-small': {'five_h': 12}})
