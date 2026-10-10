@@ -281,7 +281,12 @@ def section_lines(sections, name, limit_chars=2000):
 #: left out of the preamble: an irrelevant path is a line the session pays for on every turn.
 REVIEW_KINDS = ('review', 'fixer', 'adjudicate')
 ANSWER_KINDS = ('fixer', 'adjudicate')
-STORY_KINDS = ('spec', 'spec-amend', 'plan', 'review', 'adjudicate', 'spec-plan', 'direct')
+STORY_KINDS = ('spec', 'spec-amend', 'plan', 'review', 'adjudicate', 'spec-plan', 'direct',
+               'replan')
+#: Kinds that get the fuller Stories block — each Story's acceptance bullets, numbered — rather
+#: than the one-line id list: a spec session writes the Stories and a plan session reads the spec
+#: document, which carries the acceptance text; a replan session has neither.
+STORY_ACCEPTANCE_KINDS = ('replan',)
 
 #: The keys of ``repo_facts`` that :func:`collect` reads. :func:`asf.briefs.facts.repo_facts` is
 #: the one function that fills them, and ``tests.test_brief_facts.ContractTests`` holds the two
@@ -411,6 +416,34 @@ def proves_lines(product, items, item):
     return '\n'.join(out)
 
 
+def feature_story_lines(product, items, feature):
+    """Every Story of the Feature, title and acceptance bullets numbered 1-based (starting over
+    at each Story) — the replan brief's fuller twin of :func:`stories_of`:
+
+        S-18750 the claim and its parser: 1 `tests/test_proves.py::ParseTests` passes;
+                2 a malformed claim is a problem, not a silent skip
+
+    The one difference from :func:`proves_lines`: where that one ``continue``s past a Story with
+    no readable bullets, this one keeps the line with an explicit ``(acceptance not readable)``
+    marker — a Story silently missing from a replan brief is the failure this card reports, and
+    nothing refuses it later. ``''`` when the Feature holds no Story."""
+    root = getattr(product, 'backlog_dir', None) if product is not None else None
+    out = []
+    for story_item in ix.children(items, feature, 'story'):
+        sid = story_item.get('id')
+        lead = f"{sid} {story_item.get('title', '')}".rstrip() + ': '
+        pad = ' ' * (len(sid) + 1)
+        card_bullets = proves_mod.card_bullets(root, story_item)
+        if not card_bullets:
+            out.append(f"{lead}(acceptance not readable)")
+            continue
+        for n, bullet in enumerate(card_bullets, 1):
+            sep = ';' if n < len(card_bullets) else ''
+            prefix = lead if n == 1 else pad
+            out.append(f"{prefix}{n} {bullet}{sep}")
+    return '\n'.join(out)
+
+
 def kind_of(row):
     """The row's template kind, or ``''`` when it names none.
 
@@ -514,6 +547,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'members': [member_facts(product, items, i) for i in delivers],
         'tests': named_tests(sections, item, repo_facts),
         'stories': stories_of(items, feature),
+        'story_acceptance': feature_story_lines(product, items, feature),
         'proves_lines': proves_lines(product, items, item),
         'round': read_round,
         'next_round': rnd + 1 if rnd else 1,
@@ -650,7 +684,11 @@ def state_lines(product, facts):
         out.append(f"Delivery: {len(facts['delivers'])} items, in this order — "
                    f"{', '.join(facts['delivers'])}")
     if facts['stories'] and kind in STORY_KINDS:
-        out.append(f"Stories of the Feature: {'; '.join(facts['stories'])}")
+        if kind in STORY_ACCEPTANCE_KINDS and facts['story_acceptance']:
+            out.append('Stories of the Feature, with their acceptance lines:')
+            out += facts['story_acceptance'].splitlines()
+        else:
+            out.append(f"Stories of the Feature: {'; '.join(facts['stories'])}")
     busy = [f"{s.get('item', '?')} ({s.get('kind', '?')}, {s.get('age', '?')})"
             for s in facts['inflight']]
     out.append(f"Sessions in flight: {'; '.join(busy) if busy else NONE}")

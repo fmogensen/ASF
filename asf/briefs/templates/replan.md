@@ -32,7 +32,9 @@ lands and writes the cards itself — you write no card. Its format is binding, 
 
 Every open Task above appears exactly once, as a `### Task` or a `### Drop` section. A Task's
 `writes:` names every file its acceptance needs. Two Tasks whose `writes:` intersect run one
-after the other.
+after the other. A kept Task's `stories:` stays the ids the record holds for it unless the
+decision moves the work, and each section's Acceptance is written against the numbered Story
+lines in the preamble above.
 
 If the decision cannot be carried out without adding scope the spec does not carry, write no
 replan and say so: `NEEDS OPERATOR: {item_id} — <what the decision leaves open>`.
