@@ -59,6 +59,37 @@ class Gh:
         return ''
 
 
+class FlakyGh(Gh):
+    """Fails the first ``fail_cancels`` ``run cancel`` calls and the first ``fail_reruns``
+    ``run rerun`` calls; every call after, of either kind, succeeds."""
+
+    def __init__(self, fail_cancels=0, fail_reruns=0, status='in_progress'):
+        super().__init__(status=status)
+        self.fail_cancels, self.fail_reruns = fail_cancels, fail_reruns
+
+    def gh_try(self, args):
+        self.calls.append(list(args))
+        if args[:2] == ['run', 'rerun']:
+            if self.fail_reruns > 0:
+                self.fail_reruns -= 1
+                return None, 'rerun refused'
+            return '', ''
+        if args[:2] == ['run', 'view']:
+            return self.status, ''
+        return '', ''
+
+    def _gh(self, args):
+        self.calls.append(list(args))
+        if args[:2] == ['run', 'cancel']:
+            if self.fail_cancels > 0:
+                self.fail_cancels -= 1
+                return None
+            return ''
+        if 'status' in ' '.join(args) or args[:2] == ['run', 'view']:
+            return self.status
+        return ''
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -406,6 +437,157 @@ class DoctorNamesWhichWatcherActs(Base):
         self.assertEqual(len(rows), 1, rows)
         _, _, detail = rows[0]
         self.assertIn('reporting only, nothing is cancelled', detail)
+
+
+class ACancelAlreadyMadeFinishesInEitherModeAndARefusalIsRetried(Base):
+    """S-76006: ``_advance`` runs out from under the mode gate, retries a cancel or re-run that
+    was refused up to :data:`ci_stall.RERUN_TRIES` times, and the prune holds a bad-state claim
+    for :data:`ci_stall.BAD_KEEP_S`."""
+
+    def _seed(self, prod, key, **fields):
+        data = ci_stall.load(prod)
+        data['claims'][key] = fields
+        ci_stall.save(prod, data)
+
+    def test_a_cancel_made_in_act_finishes_its_rerun_in_report(self):
+        self.set_mode('act')
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW - 60)
+        self.run_pass({'box-1': [hb(cpu=100.0)]})
+        self.set_mode('report')                 # the frozen owed re-run of P7, gone
+        (_, _), gh = self.run_pass({'box-1': []}, gh=Gh(status='completed'), now=NOW + 60)
+        reruns = [c for c in gh.calls if c[:2] == ['run', 'rerun']]
+        self.assertEqual(reruns, [['run', 'rerun', '77', '-R', 'o/r', '--failed']])
+        self.assertEqual(ci_stall.load(product())['claims']['77:88']['state'], 'rerun')
+        (_, _), gh = self.run_pass({'box-1': []}, gh=Gh(status='completed'), now=NOW + 120)
+        self.assertEqual([c for c in gh.calls if c[:2] == ['run', 'rerun']], [])
+
+    def test_apply_off_makes_no_gh_call_at_all(self):
+        self.set_mode('act')
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW - 60, apply=False)
+        (stalls, cancels), gh = self.run_pass({'box-1': [hb(cpu=100.0)]}, apply=False)
+        self.assertEqual((stalls, cancels), (1, 0))
+        self.assertEqual(gh.calls, [])           # --apply off is a read, nothing advances
+
+    def test_report_mode_with_no_claims_makes_no_gh_call_either(self):
+        self.set_mode('report')
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW - 60)
+        (stalls, cancels), gh = self.run_pass({'box-1': [hb(cpu=100.0)]})
+        self.assertEqual((stalls, cancels), (1, 0))
+        self.assertEqual(gh.calls, [])
+
+    def test_a_cancel_failed_claim_is_retried_and_succeeds(self):
+        prod = product()
+        self._seed(prod, '77:88', run=77, job='gate-tests', runner='r-1',
+                  state='cancel-failed', claimed_at=NOW - 60)
+        self.run_pass({}, gh=FlakyGh(fail_cancels=1), now=NOW)
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(claims['77:88']['state'], 'cancel-failed')
+        self.assertEqual(claims['77:88']['tries'], 2)
+        self.run_pass({}, gh=FlakyGh(), now=NOW + 60)
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(claims['77:88']['state'], 'cancelled')
+        self.assertEqual(claims['77:88']['tries'], 3)
+        cancel_claims = ci_queue.load_claims(env.state_dir('p'))
+        self.assertEqual(cancel_claims['77']['cause'], 'stall')
+        self.assertEqual(cancel_claims['77']['by'], 'stall-watch')
+
+    def test_a_cancel_failed_claim_exhausts_its_retries_and_gives_up(self):
+        prod = product()
+        self._seed(prod, '77:88', run=77, job='gate-tests', runner='r-1',
+                  state='cancel-failed', claimed_at=NOW - 60)
+        gh = FlakyGh(fail_cancels=ci_stall.RERUN_TRIES)
+        for n in range(1, ci_stall.RERUN_TRIES):
+            self.run_pass({}, gh=gh, now=NOW + n * 60)
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(claims['77:88']['state'], 'cancel-failed')
+        self.assertEqual(claims['77:88']['tries'], ci_stall.RERUN_TRIES)
+        self.assertIn('given_up_at', claims['77:88'])
+        before = len([c for c in gh.calls if c[:2] == ['run', 'cancel']])
+        self.run_pass({}, gh=gh, now=NOW + 999)      # exhausted: never retried again
+        after = len([c for c in gh.calls if c[:2] == ['run', 'cancel']])
+        self.assertEqual(before, after)
+
+    def test_a_rerun_failed_claim_is_retried_and_succeeds_then_stops(self):
+        prod = product()
+        self._seed(prod, '77:88', run=77, job='gate-tests', runner='r-1',
+                  state='rerun-failed', claimed_at=NOW - 120, cancelled_at=NOW - 120)
+        self.run_pass({}, gh=FlakyGh(fail_reruns=1), now=NOW)
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(claims['77:88']['state'], 'rerun-failed')
+        self.assertEqual(claims['77:88']['tries'], 2)
+        gh = FlakyGh()
+        self.run_pass({}, gh=gh, now=NOW + 60)
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(claims['77:88']['state'], 'rerun')
+        self.assertEqual(claims['77:88']['tries'], 3)
+        self.run_pass({}, gh=gh, now=NOW + 120)      # rerun: no later pass calls run rerun again
+        self.assertEqual([c for c in gh.calls if c[:2] == ['run', 'rerun']],
+                         [['run', 'rerun', '77', '-R', 'o/r', '--failed']])
+
+    def test_a_gave_up_claim_is_never_touched_again(self):
+        prod = product()
+        self._seed(prod, '77:88', run=77, job='gate-tests', runner='r-1', state='gave-up',
+                  claimed_at=NOW - 60, tries=3, given_up_at=NOW - 60)
+        gh = FlakyGh()
+        self.run_pass({}, gh=gh, now=NOW)
+        self.assertEqual(gh.calls, [])
+        self.assertEqual(ci_stall.load(prod)['claims']['77:88']['state'], 'gave-up')
+
+    def test_a_gave_up_claim_is_never_cancelled_a_second_time(self):
+        self.set_mode('act')
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW - 60)
+        prod = product()
+        self._seed(prod, '77:88', run=77, job='gate-tests', runner='r-1', state='gave-up',
+                  claimed_at=NOW - 60, tries=3, given_up_at=NOW - 60)
+        (_, cancels), gh = self.run_pass({'box-1': [hb(cpu=100.5)]})
+        self.assertEqual(cancels, 0)
+        self.assertEqual([c for c in gh.calls if c[:2] == ['run', 'cancel']], [])
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims['77:88']['state'], 'gave-up')
+
+    def test_an_exhausted_cancel_failed_claim_draws_no_new_cancel(self):
+        self.set_mode('act')
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW - 60)
+        prod = product()
+        self._seed(prod, '77:88', run=77, job='gate-tests', runner='r-1',
+                  state='cancel-failed', claimed_at=NOW - 60, tries=ci_stall.RERUN_TRIES,
+                  given_up_at=NOW - 60)
+        (_, cancels), gh = self.run_pass({'box-1': [hb(cpu=100.5)]})
+        self.assertEqual(cancels, 0)
+        self.assertEqual([c for c in gh.calls if c[:2] == ['run', 'cancel']], [])
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(len(claims), 1)
+
+    def test_an_exhausted_rerun_failed_claim_draws_no_new_cancel(self):
+        self.set_mode('act')
+        self.run_pass({'box-1': [hb(cpu=100.0)]}, now=NOW - 60)
+        prod = product()
+        self._seed(prod, '77:88', run=77, job='gate-tests', runner='r-1',
+                  state='rerun-failed', claimed_at=NOW - 60, tries=ci_stall.RERUN_TRIES,
+                  given_up_at=NOW - 60)
+        (_, cancels), gh = self.run_pass({'box-1': [hb(cpu=100.5)]})
+        self.assertEqual(cancels, 0)
+        self.assertEqual([c for c in gh.calls if c[:2] == ['run', 'cancel']], [])
+        self.assertEqual([c for c in gh.calls if c[:2] == ['run', 'rerun']], [])
+        claims = ci_stall.load(prod)['claims']
+        self.assertEqual(len(claims), 1)
+
+    def test_the_prune_drops_rerun_at_twice_refresh_and_holds_bad_states_to_bad_keep(self):
+        prod = product()
+        self._seed(prod, 'rerun-key', run=201, job='gate-tests', runner='r-1', state='rerun',
+                  claimed_at=NOW - 2 * ci_stall.REFRESH_S - 1)
+        self._seed(prod, 'bad-key', run=202, job='gate-tests', runner='r-1', state='gave-up',
+                  claimed_at=NOW - 2 * ci_stall.REFRESH_S - 1,
+                  given_up_at=NOW - 2 * ci_stall.REFRESH_S)
+        self.run_pass({}, now=NOW)
+        claims = ci_stall.load(prod)['claims']
+        self.assertNotIn('rerun-key', claims)
+        self.assertIn('bad-key', claims)
+        self._seed(prod, 'bad-key', run=202, job='gate-tests', runner='r-1', state='gave-up',
+                  claimed_at=NOW - ci_stall.BAD_KEEP_S - 1, given_up_at=NOW - ci_stall.BAD_KEEP_S)
+        self.run_pass({}, now=NOW)
+        self.assertNotIn('bad-key', ci_stall.load(prod)['claims'])
 
 
 class TheSubcommand(Base):
