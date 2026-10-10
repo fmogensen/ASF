@@ -36,6 +36,14 @@ class PredicateTest(unittest.TestCase):
             self.assertFalse(ok, branch)
             self.assertTrue(why, branch)
 
+    def test_a_product_s_exempt_found_in_flag_overrides_the_default(self):
+        conv = Conventions.from_mapping({'flags': {'regression': {'exempt_found_in': ['prod']}}})
+        items = {'B-0001': {'found_in': 'prod'}}
+        ok, why = regression.gated(conv, items, 'B-0001', 'fix/B-0001',
+                                    ['tests/test_a.py', 'src/a.py'])
+        self.assertFalse(ok)
+        self.assertEqual(why, 'found_in: prod')
+
     def test_a_card_with_no_found_in_field_at_all_is_gated(self):
         items = {'B-0001': {}}
         ok, why = regression.gated(DEFAULT_CONV, items, 'B-0001', 'fix/B-0001',
