@@ -829,6 +829,30 @@ class RetirementRuleTests(ViewsTestCase):
         self.assertNotIn('F-0001', text)
         self.assertIn('F-0003', text)
 
+    def test_epic_filter_keeps_only_that_epics_group(self):
+        """B-0088: ``board.render(root, epic=...)`` is the whole fix — the board grows one row
+        per Feature with no cap (339 lines / 67 KB on the real record), and a console that caps
+        its own output (the operator's terminal, an agent's tool result) cuts it off before the
+        epic the operator asked about ever appears. Filtering to one epic keeps that epic's
+        rows out of the part that gets cut."""
+        self.write({
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'title': 'first goal', 'folder': 'epics',
+                       'state': 'New', 'decided': True, 'rank': 1},
+            'E-0002': {'id': 'E-0002', 'type': 'epic', 'title': 'second goal', 'folder': 'epics',
+                       'state': 'New', 'decided': True, 'rank': 2},
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'in the first epic',
+                       'folder': 'features', 'parent': 'E-0001', 'state': 'New', 'decided': True,
+                       'rank': 1, 'stage': 'card'},
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'title': 'in the second epic',
+                       'folder': 'features', 'parent': 'E-0002', 'state': 'New', 'decided': True,
+                       'rank': 1, 'stage': 'card'},
+        })
+        text = board.render(self.root, epic='E-0002')
+        self.assertIn('F-0002', text)
+        self.assertNotIn('F-0001', text)
+        self.assertNotIn('E-0001', text)
+        self.assertIn('2 Features', text)  # the summary line still counts the whole backlog
+
     def test_a_moved_card_lands_in_the_right_retirement_set(self):
         from asf.views import index_reader as ix
         raw = {

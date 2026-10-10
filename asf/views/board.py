@@ -38,7 +38,11 @@ def epic_title(e):
         else f"{e['id']} — {e['title']}"
 
 
-def render(root, product=None):
+def render(root, product=None, epic=None):
+    """``epic`` (an Epic id, case-insensitive), when given, keeps only that epic's group out of
+    the groups below — the board grows one row per Feature with no cap on its own (339 lines /
+    67 KB on the real record, B-0088), and a console that caps its own output (the operator's
+    terminal, an agent's tool result) cuts it off before a given epic ever appears."""
     import time
     items, generated = ix.load(root)
     feats = ix.of_type(items, 'feature')
@@ -60,8 +64,8 @@ def render(root, product=None):
                  f"{done} Closed / {len(tasks)}" if tasks else '—', prs_cell or '—',
                  "; ".join(f.get('blocked_by_open') or []) or '—', ix.age(f.get('stage_since')),
                  ix.money(ix.usd(ix.subtree(items, f)))]
-        epic = ix.epic_of(items, f)
-        rows.append((epic['id'] if epic else None, f, cells))
+        feat_epic = ix.epic_of(items, f)
+        rows.append((feat_epic['id'] if feat_epic else None, f, cells))
 
     epics = sorted(ix.of_type(items, 'epic'), key=lambda e: (ix.rank(e), e['id']))
     n_spec, n_plan = tot['spec'], tot['plan']
@@ -72,6 +76,8 @@ def render(root, product=None):
            f"{n_plan['draft'] + n_plan['linked']} draft · "
            f"Tasks: {task_done} Closed / {task_n} · index.json generated {ix.local_stamp(generated)}"]
     groups = [(epic_title(e), e['id']) for e in epics] + [("No Epic (needs a parent Epic)", None)]
+    if epic is not None:
+        groups = [(title, eid) for title, eid in groups if eid and eid.lower() == epic.lower()]
     for title, eid in groups:
         group = sorted(((f, cells) for e, f, cells in rows if e == eid), key=lambda r: (ix.rank(r[0]), r[0]['id']))
         if not group:
@@ -89,5 +95,5 @@ def render(root, product=None):
 def cmd_backlog(args, root):
     from asf import env
     product = env.load_product(getattr(args, 'product', None))
-    print(render(root, product), end='')
+    print(render(root, product, epic=getattr(args, 'epic', None)), end='')
     return 0
