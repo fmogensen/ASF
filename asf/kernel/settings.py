@@ -54,6 +54,10 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # ``asf kernel waits`` and counted on the tick line;
                                               # after and parked have none unless set. A duration
                                               # is 30s, 10m, 2h, 1d or whole seconds
+      install:    {shadow: true,              # asf kernel install dry-runs the new venv's tick on
+                                              # live facts first: a crash keeps the old plists
+                   max_state_changes: 25}     # more items changing state than this (or Launch
+                                              # dropping to 0 with Ready work) needs --accept-diff
 
 :func:`problems` validates the block for :func:`asf.env.product_problems` (a value of the wrong
 type refuses the load; an unknown key is a warning); :func:`read` returns the block with every
@@ -120,6 +124,7 @@ SPEC = {
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time')},
     'waits': {'targets': (WAIT_TARGETS, 'targets')},
+    'install': {'shadow': (True, bool), 'max_state_changes': (25, int)},
 }
 
 #: the intervals launchd is handed must be at least this many seconds

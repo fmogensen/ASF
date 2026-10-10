@@ -536,6 +536,14 @@ kernel:
       merge: 10m            # parked. after and parked have no target unless set. A duration is
       conflict: 0m          # 30s, 10m, 2h, 1d or whole seconds
       stuck: 0m
+  install:                  # `asf kernel install`'s shadow preflight
+    shadow: true            # before the plists move to another venv, that venv's
+                            # `asf kernel tick --dry-run` runs on the live facts (read-only); a
+                            # crash or non-zero exit refuses the switch and keeps the old plists.
+                            # Its plan is diffed against the live one (the old venv's dry run,
+                            # else state/<p>/kernel-plan.json): actions by type and item states
+    max_state_changes: 25   # more items changing state than this — or Launch dropping to 0 while
+                            # items are Ready — refuses the switch unless --accept-diff
 
 # token_caps: runaway ceilings on one run's tokens, per dimension, never summed. `default` applies
 # to every job kind; a kind (spec, review, fix, code, plan, ...) narrows or widens single dimensions.

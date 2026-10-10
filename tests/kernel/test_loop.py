@@ -1,6 +1,7 @@
 """The kernel's loop end to end over fake ports: facts -> decide -> apply, and what reaches the
 card, GitHub and the session host."""
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -28,9 +29,9 @@ class Tick(unittest.TestCase):
         self.product = env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
         self.lines = []
 
-    def tick(self, ports, dry_run=False, **kw):
+    def tick(self, ports, dry_run=False, plan_out=None, **kw):
         return loop.tick(self.product, dry_run=dry_run, ports=ports, config=B.config(**kw),
-                         state_dir=self.tmp, out=self.lines.append)
+                         state_dir=self.tmp, out=self.lines.append, plan_out=plan_out)
 
     def test_a_ready_item_is_launched_and_recorded_building(self):
         rec = F.FakeRecord([B.task('T-0001')])
@@ -105,6 +106,19 @@ class Tick(unittest.TestCase):
         self.assertEqual(summary['actions'], {'EndSession': 1, 'EnableAutoMerge': 1,
                                               'Launch': 1, 'MintStory': 1})
         self.assertIn('would launch build T-0001 on worker/T-0001', self.lines)
+
+    def test_dry_run_plan_out_holds_states_and_action_counts(self):
+        rec = F.FakeRecord([B.task('T-0001'), B.task('T-0002', state=State.REVIEW)])
+        gh = F.FakeGitHub(prs=[B.pr(7, 'T-0002')], reviews=[B.review('T-0002')])
+        path = os.path.join(self.tmp, 'shadow.json')
+        self.tick(F.ports(record=rec, github=gh, sessions=F.FakeSessions()), dry_run=True,
+                  plan_out=path)
+        with open(path) as f:
+            data = json.load(f)
+        self.assertEqual(data['states'], {'T-0001': 'ready', 'T-0002': 'landing'})
+        self.assertEqual(data['actions'], {'EnableAutoMerge': 1, 'Launch': 1})
+        self.assertEqual(data['counts'], {'landing': 1, 'ready': 1})
+        self.assertEqual((rec.writes, gh.calls), ([], []))
 
     def test_a_fix_round_counts_and_carries_the_findings(self):
         rec = F.FakeRecord([B.task('T-0001', state=State.REVIEW)])

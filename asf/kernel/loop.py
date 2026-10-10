@@ -161,9 +161,22 @@ def measure_waits(product, state_dir, plan, facts, config, write=True, out=print
         return ''
 
 
-def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=print):
+def write_plan_out(path, plan, summary):
+    """A dry run's plan as JSON at ``path`` (``asf kernel tick --dry-run --plan-out``, read by
+    the install's shadow preflight, :func:`asf.kernel.host.preflight`): each judged item's state,
+    the state counts and the planned actions by type. ``path`` is the caller's file, never the
+    product's state."""
+    data = {'states': {iid: s.value for iid, (s, _st) in sorted(plan.states.items())},
+            'counts': summary['states'], 'actions': summary['actions']}
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+
+
+def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=print,
+         plan_out=None):
     """One tick of the kernel for ``product`` (a name or an :class:`asf.env.Product`). Returns the
-    :func:`summarize` dict; ``{'locked': path}`` when another tick holds the lock."""
+    :func:`summarize` dict; ``{'locked': path}`` when another tick holds the lock. A dry run with
+    ``plan_out`` also writes its plan there (:func:`write_plan_out`)."""
     from asf import env, mutation_guard
     product = _product(product)
     ports = ports or P.real_ports(product)
@@ -179,6 +192,8 @@ def tick(product, dry_run=False, ports=None, config=None, state_dir=None, out=pr
         summary['waits'] = measure_waits(product, state_dir, plan, facts, config, write=False,
                                          out=out)
         print_summary(summary, out)
+        if plan_out:
+            write_plan_out(plan_out, plan, summary)
         return summary
     try:
         with lock(state_dir):

@@ -2,6 +2,7 @@
 in a temp ASF home and a temp LaunchAgents directory."""
 import datetime
 import fcntl
+import json
 import os
 import plistlib
 import shutil
@@ -13,6 +14,38 @@ from unittest import mock
 from asf import env, scheduler
 from asf.kernel import host, loop, settings
 from asf.kernel import ports as P
+
+
+class FakeDryRun:
+    """``asf kernel tick --dry-run`` of each venv: ``plans[python]`` is the plan it writes to
+    ``--plan-out`` (a venv absent there exits 0 with an empty plan); ``rcs[python]`` an exit code
+    (with ``texts[python]`` its output); ``old_cli`` venvs reject ``--plan-out`` and print."""
+
+    def __init__(self):
+        self.plans, self.rcs, self.texts, self.old_cli = {}, {}, {}, set()
+        self.calls = []
+
+    def __call__(self, python, product_name, plan_out=None):
+        self.calls.append((python, product_name, bool(plan_out)))
+        if python in self.rcs:
+            return self.rcs[python], self.texts.get(python, '')
+        plan = self.plans.get(python, {'states': {}, 'counts': {}, 'actions': {}})
+        if python in self.old_cli:
+            if plan_out:
+                return 2, 'asf: error: unrecognized arguments: --plan-out ' + plan_out
+            return 0, 'kernel tick (dry run): %s\nactions: %s\n' % (
+                ', '.join('%s %d' % kv for kv in sorted(plan['counts'].items())) or 'no items',
+                ', '.join('%s %d' % kv for kv in sorted(plan['actions'].items())) or 'none')
+        with open(plan_out, 'w', encoding='utf-8') as f:
+            json.dump(plan, f)
+        return 0, 'kernel tick (dry run): ...'
+
+
+def plan(states, actions):
+    counts = {}
+    for st in states.values():
+        counts[st] = counts.get(st, 0) + 1
+    return {'states': dict(states), 'counts': counts, 'actions': dict(actions)}
 
 
 class FakeLaunchctl:
@@ -50,9 +83,11 @@ class Home(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.lc = FakeLaunchctl()
-        p = mock.patch.object(scheduler, '_launchctl', self.lc)
-        p.start()
-        self.addCleanup(p.stop)
+        self.dry = FakeDryRun()
+        for p in (mock.patch.object(scheduler, '_launchctl', self.lc),
+                  mock.patch.object(host, 'run_dry', self.dry)):
+            p.start()
+            self.addCleanup(p.stop)
         self.product = env.Product('sample', {'repo_slug': 'o/r', 'kernel': {
             'tick': {'interval_s': 90}, 'watch': {'stale_after_s': 300}}})
         self.state = os.path.join(self.asf_home, 'state', 'sample')
@@ -140,6 +175,125 @@ class Install(Home):
         self.assertIn('<string>asf.sample.kernel-watch</string>', text)
         self.assertFalse(os.path.exists(scheduler.plist_path('asf.sample.kernel')))
         self.assertEqual(self.lc.calls, [])
+
+
+class Shadow(Home):
+    """The shadow preflight: the new venv's dry run on the live facts gates the switch."""
+
+    OLD, NEW = '/old/bin/python', '/new/bin/python'
+
+    def setUp(self):
+        super().setUp()
+        for py in (self.OLD, self.NEW):  # the old venv's interpreter must exist to be dry-run
+            path = os.path.join(self.tmp, py.strip('/'))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, 'w').close()
+        self.old_py, self.new_py = (os.path.join(self.tmp, p.strip('/'))
+                                    for p in (self.OLD, self.NEW))
+        host.install(self.product, cfg={}, python=self.old_py, out=self.lines.append)
+        self.lines.clear()
+        self.dry.calls.clear()
+        self.lc.calls.clear()
+
+    def install(self, **kw):
+        return host.install(self.product, cfg={}, python=self.new_py, out=self.lines.append, **kw)
+
+    def switched(self):
+        return self.plist('kernel')['ProgramArguments'][0] == self.new_py
+
+    def test_a_crashing_new_venv_keeps_the_old_plists(self):
+        self.dry.rcs[self.new_py] = 1
+        self.dry.texts[self.new_py] = 'Traceback (most recent call last):\nKeyError: boom\n'
+        self.assertEqual(self.install(), 1)
+        self.assertFalse(self.switched())
+        self.assertFalse([c for c in self.lc.calls if c[0] in ('bootstrap', 'bootout')])
+        text = '\n'.join(self.lines)
+        self.assertIn('failed (exit 1)', text)
+        self.assertIn('KeyError: boom', text)
+        self.assertEqual(self.dry.calls, [(self.new_py, 'sample', True)])
+
+    def test_a_matching_plan_switches_and_prints_the_diff(self):
+        same = plan({'T-1': 'ready', 'T-2': 'review'}, {'Launch': 1})
+        self.dry.plans = {self.old_py: same, self.new_py: plan(
+            {'T-1': 'ready', 'T-2': 'landing'}, {'Launch': 1, 'EnableAutoMerge': 1})}
+        self.assertEqual(self.install(), 0)
+        self.assertTrue(self.switched())
+        text = '\n'.join(self.lines)
+        self.assertIn('shadow: actions (old -> new): EnableAutoMerge 0 -> 1, Launch 1 -> 1', text)
+        self.assertIn('T-2: review -> landing', text)
+        self.assertIn('1 item(s) change state', text)
+
+    def test_launch_dropping_to_zero_with_ready_work_needs_accept_diff(self):
+        self.dry.plans = {self.old_py: plan({'T-1': 'ready'}, {'Launch': 2}),
+                          self.new_py: plan({'T-1': 'ready'}, {})}
+        self.assertEqual(self.install(), 1)
+        self.assertFalse(self.switched())
+        self.assertIn('shadow: Launch drops 2 -> 0 while 1 item(s) are Ready', self.lines)
+        self.lines.clear()
+        self.assertEqual(self.install(accept_diff=True), 0)
+        self.assertTrue(self.switched())
+        self.assertIn('shadow: --accept-diff given — switching', self.lines)
+
+    def test_mass_state_changes_past_the_knob_need_accept_diff(self):
+        self.product = env.Product('sample', {'repo_slug': 'o/r', 'kernel': {
+            'tick': {'interval_s': 90}, 'watch': {'stale_after_s': 300},
+            'install': {'max_state_changes': 2}}})
+        ids = ['T-%d' % i for i in range(3)]
+        self.dry.plans = {self.old_py: plan({i: 'review' for i in ids}, {}),
+                          self.new_py: plan({i: 'stuck' for i in ids}, {})}
+        self.assertEqual(self.install(), 1)
+        self.assertFalse(self.switched())
+        self.assertIn('shadow: 3 items change state (kernel.install.max_state_changes 2)',
+                      self.lines)
+
+    def test_an_old_venv_without_plan_out_is_compared_by_counts_and_the_last_tick(self):
+        with open(os.path.join(self.state, loop.PLAN_FILE), 'w') as f:
+            json.dump({'states': {'T-1': {'state': 'ready'}}}, f)
+        self.dry.old_cli.add(self.old_py)
+        self.dry.plans = {self.old_py: plan({'T-1': 'ready'}, {'Launch': 1}),
+                          self.new_py: plan({'T-1': 'building'}, {'Launch': 1})}
+        self.assertEqual(self.install(), 0)
+        self.assertEqual([c[0] for c in self.dry.calls],
+                         [self.new_py, self.old_py, self.old_py])
+        text = '\n'.join(self.lines)
+        self.assertIn('Launch 1 -> 1', text)
+        self.assertIn('T-1: ready -> building', text)
+
+    def test_shadow_off_or_the_same_venv_runs_no_dry_run(self):
+        host.install(self.product, cfg={}, python=self.old_py, out=self.lines.append)
+        self.assertEqual(self.dry.calls, [])
+        self.product = env.Product('sample', {'repo_slug': 'o/r', 'kernel': {
+            'tick': {'interval_s': 90}, 'install': {'shadow': False}}})
+        self.dry.rcs[self.new_py] = 1
+        self.assertEqual(self.install(), 0)
+        self.assertEqual(self.dry.calls, [])
+        self.assertTrue(self.switched())
+
+
+class DryRunWritesNothing(unittest.TestCase):
+    """The read path a dry run takes never fetches: the id-claim mirror and a session worktree."""
+
+    def test_no_fetch_under_the_mutation_guard(self):
+        from asf import gitops, mutation_guard
+        from asf.record import idclaim
+        from asf.workers import spawn
+        calls = []
+        with mock.patch.object(idclaim, 'fetch', lambda repo: calls.append('claims')), \
+                mock.patch.object(idclaim, 'claims', lambda repo: []), \
+                mock.patch.object(spawn, 'claim_repo', lambda product: '/repo'), \
+                mock.patch.object(gitops, 'git', lambda args, *a, **k: (
+                    calls.append(args[0]), gitops.Result(False, '', 1, '', '', '', 'no'))[1]):
+            rec = P.RealRecord(env.Product('sample', {'repo_slug': 'o/r'}), state_dir='/nonexistent')
+            with mutation_guard.active():
+                rec.id_claims(['S-1'])
+                try:
+                    P.overwritable('/wt', 'a' * 40, 'b' * 40, 'feature/x')
+                except Exception:  # noqa: BLE001 — only the fetch matters here
+                    pass
+            self.assertNotIn('claims', calls)
+            self.assertNotIn('fetch', calls)
+            rec.id_claims(['S-1'])
+            self.assertIn('claims', calls)
 
 
 class Watch(Home):

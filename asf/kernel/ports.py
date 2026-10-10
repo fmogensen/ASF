@@ -310,11 +310,13 @@ class RealRecord:
         from asf import gitops
         from asf.record import idclaim
         from asf.workers import spawn
+        from asf import mutation_guard
         repo = spawn.claim_repo(self.product)
         if not repo:
             return {}
         try:
-            idclaim.fetch(repo)
+            if not mutation_guard.is_active():  # a dry run reads the local mirror, fetches nothing
+                idclaim.fetch(repo)
         except idclaim.ClaimError:
             return {}
         cl = idclaim.claims(repo)
@@ -1131,7 +1133,7 @@ def overwritable(wt, head, origin, branch):
     fast-forward), or of an entry of ``branch``'s reflog (the pre-rebase history the session
     rewrote), or every commit it has that ``head`` lacks is patch-equivalent to one in ``head``
     (``git cherry``). A tip that cannot be read even after a fetch is never overwritten."""
-    from asf import gitops
+    from asf import gitops, mutation_guard
     if not origin or origin == head:
         return ''
 
@@ -1142,7 +1144,8 @@ def overwritable(wt, head, origin, branch):
         return gitops.git(['merge-base', '--is-ancestor', origin, of], wt, timeout=60).ok
 
     if not has(origin):
-        gitops.git(['fetch', '-q', 'origin', branch], wt, timeout=300)
+        if not mutation_guard.is_active():  # a dry run fetches nothing
+            gitops.git(['fetch', '-q', 'origin', branch], wt, timeout=300)
         if not has(origin):
             return 'cannot read origin/%s at %s' % (branch, origin[:12])
     if ancestor(head):

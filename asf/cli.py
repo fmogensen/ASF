@@ -464,6 +464,9 @@ def build_parser():
     p_ktick = kernel_sub.add_parser('tick', help='one tick: read facts, decide, apply (or print)')
     p_ktick.add_argument('--product', required=True)
     p_ktick.add_argument('--dry-run', action='store_true', help='print the plan; write nothing')
+    p_ktick.add_argument('--plan-out', metavar='FILE',
+                         help='with --dry-run: also write the plan (item states, action counts) '
+                              'as JSON to FILE')
     p_kstatus = kernel_sub.add_parser('status', help='Stuck items, states and sessions')
     p_kstatus.add_argument('--product', required=True)
     p_kstatus.add_argument('--live', action='store_true',
@@ -485,6 +488,9 @@ def build_parser():
                         'kernel: block, running this venv')
     p_kinstall.add_argument('--product', required=True)
     p_kinstall.add_argument('--dry-run', action='store_true', help='print the plists; write nothing')
+    p_kinstall.add_argument('--accept-diff', action='store_true',
+                            help="switch even when the new venv's shadow plan differs widely from "
+                                 'the live one (kernel.install.max_state_changes, a Launch drop)')
     p_kwatch = kernel_sub.add_parser('watch', help='keep-alive: load the tick job, kick a stale one')
     p_kwatch.add_argument('--product', required=True)
     p_kgate = kernel_sub.add_parser('gate', help='the proof gate: PASS/FAIL per kernel.gate criterion')
@@ -607,7 +613,7 @@ def _kernel(args):
         product = env.load_product(args.product)
         if args.kernel_command == 'install':
             from asf.kernel import host
-            return host.install(product, dry_run=args.dry_run)
+            return host.install(product, dry_run=args.dry_run, accept_diff=args.accept_diff)
         if args.kernel_command == 'watch':
             from asf.kernel import host
             rc, line = host.watch(product)
@@ -618,7 +624,10 @@ def _kernel(args):
         return gate.gate(product)
     if args.kernel_command == 'tick':
         from asf.kernel.loop import tick
-        summary = tick(args.product, dry_run=args.dry_run)
+        if args.plan_out and not args.dry_run:
+            print('kernel tick: --plan-out needs --dry-run')
+            return 2
+        summary = tick(args.product, dry_run=args.dry_run, plan_out=args.plan_out)
         return 1 if summary.get('locked') or summary.get('failed') else 0
     if args.kernel_command == 'status':
         from asf.kernel.status import status
