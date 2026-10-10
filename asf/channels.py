@@ -17,11 +17,11 @@ channel only chooses among the tags that exist and delays when it chooses.
 * **stable** — ``stable_rows``: the weekly cadence, 48 h on edge, the rehearsal check and no
   S1, each met or unmet with its evidence; promoted only when all four are met.
 
-This module holds the resolver this Task builds — the constants, the ordering key, the pure
-line parser every consumer shares, the one ``git ls-remote`` that feeds it, and ``settings``,
-the overlay for the one settings key the later criteria read their thresholds from. The
-publisher, the edge rule, the stable gate, the log and the daily part are later Tasks of the
-same plan (``docs/plans/f-0308.md``).
+This module holds the resolver — the constants, the ordering key, the pure line parser every
+consumer shares, the one ``git ls-remote`` that feeds it, and ``settings``, the overlay for the
+one settings key the later criteria read their thresholds from — the channel log, and the edge
+half: :func:`edge_candidate` and :func:`publish`. The stable gate and the daily part are later
+Tasks of the same plan (``docs/plans/f-0308.md``).
 """
 import re
 import subprocess
@@ -153,3 +153,42 @@ def note_stable(log, tag, commit, at, rows):
     ``log`` in place and returns it."""
     log['stable'] = {'tag': tag, 'commit': commit, 'at': at, 'promoted_for': list(rows)}
     return log
+
+
+def _last_line(text):
+    """The last non-empty line of ``text``, stripped — a failed push's ``stderr`` boiled down
+    to the one line a report prints."""
+    lines = [ln.strip() for ln in (text or '').splitlines() if ln.strip()]
+    return lines[-1] if lines else ''
+
+
+def edge_candidate(product, url, tags, run=subprocess.run, limit=None):
+    """``(tag, commit, detail)``: the newest of ``tags`` (newest first, at most ``limit`` or
+    ``DEFAULTS['lookback_tags']``) whose every landing check succeeded
+    (:func:`asf.upgrade.ci_verdict`) — the first green wins, and a red or Unknown tag is skipped
+    rather than stopping the scan. ``(None, None, <why>)`` when none did, ``<why>`` naming every
+    verdict examined so the report says what it is waiting for. Unknown is never green: a tag
+    with no CI run at all (``clear``), a pending check or an unreadable ``gh`` call all land here
+    (PD10) — this function writes no verdict logic of its own."""
+    from asf import upgrade
+    seen = []
+    for tag, commit in list(tags)[:limit or DEFAULTS['lookback_tags']]:
+        verdict, detail = upgrade.ci_verdict(url, commit, run=run)
+        if verdict == 'green':
+            return tag, commit, f'{tag} {commit[:7]} green ({detail})'
+        seen.append(f'{tag} {verdict}' + (f' ({detail})' if detail else ''))
+    return None, None, '; '.join(seen) or 'no release tag to examine'
+
+
+def publish(product, name, commit, run=subprocess.run, out=print):
+    """Fast-forward ``refs/heads/releases/<name>`` on origin to ``commit``. ``(ok, detail)``; a
+    guard refusal, a dry run (:func:`asf.mutation_guard.is_active`) and a non-fast-forward are
+    each a detail, never an exception (D1) — the non-fast-forward is left as git's own refusal,
+    the backstop for a candidate chosen from a stale log and what keeps a head from moving
+    backwards."""
+    from asf import gitpush, refguard
+    target = f'{commit}:{REF.format(name=name)}'
+    guard = refguard.Guard(main=product.main, protected=refguard.listed(product.conventions))
+    p = gitpush.push(['-q', 'origin', target], product.repo_dir, guard=guard, refs_only=True,
+                     log=lambda line: out(f'channels: {line}'))
+    return (True, '') if p.returncode == 0 else (False, _last_line(p.stderr) or f'rc {p.returncode}')
