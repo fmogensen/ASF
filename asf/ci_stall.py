@@ -144,7 +144,7 @@ def load(product):
     try:
         with open(_path(product), encoding='utf-8') as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except OSError:
         data = {}
     data = data if isinstance(data, dict) else {}
     for k in ('max', 'cpu', 'claims', 'pass'):

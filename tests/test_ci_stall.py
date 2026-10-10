@@ -372,6 +372,7 @@ class DoctorNamesWhichWatcherActs(Base):
             self.assertIn(state, details)
         self.assertIn('gate-tests on r-1', details)
         self.assertIn('2 tries', details)
+        self.assertIn('19 min', details)
 
     def test_a_claim_in_rerun_draws_no_row_of_its_own(self):
         prod = product()

@@ -571,9 +571,19 @@ class CheckCiStallTests(unittest.TestCase):
     """S-76005: ``asf doctor``'s ``ci stall`` row, immediately after ``ci heartbeat``."""
 
     def test_an_unreadable_ci_stall_file_is_one_unknown_row_and_never_raises(self):
-        # a ci-stall.json that is not JSON: ci_stall.doctor_rows raising is one unknown row
-        with mock.patch('asf.ci_stall.doctor_rows', side_effect=ValueError('not json')):
-            rows = doctor.check_ci_stall(env.Product('x', {}))
+        from asf import ci_stall
+        product = env.Product('x', {})
+        old = env.ASF_HOME
+        with tempfile.TemporaryDirectory() as home:
+            env.ASF_HOME = home
+            try:
+                path = os.path.join(env.state_dir(product.name), ci_stall.STATE_FILE)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write('{not json')
+                rows = doctor.check_ci_stall(product)
+            finally:
+                env.ASF_HOME = old
         self.assertEqual(len(rows), 1, rows)
         required, ok, detail = rows[0]
         self.assertFalse(required)
