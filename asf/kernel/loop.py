@@ -10,6 +10,8 @@ Before ``decide`` the wait ledger's current spells are read into ``Facts.waits``
 class's target is a breach). Every tick line says ``LIMBO n`` (the items and PRs with no action
 and nothing in flight, listed one per line: ``limbo <id>: <why>``) and logs one
 ``BREACH <item> <class> <age> -> <action>`` line per breach (:func:`asf.kernel.decide.breaches`).
+A question the facts answered logs ``RESOLVED <item> <class> -> <answer>``, and the tick counts
+them against the questions still on the console (:func:`questions_line`).
 
 A tick whose GitHub read failed (``Facts.github_error``, after the port's retries) is blind
 (:func:`blind_tick`): it applies :func:`asf.kernel.decide.blind_plan` only, writes no state, keeps
@@ -82,7 +84,21 @@ def summarize(plan, facts, result=None, dry_run=False):
         'idle': plan.idle,
         'limbo': dict(getattr(plan, 'limbo', None) or {}),
         'breaches': list(getattr(plan, 'breaches', None) or []),
+        'resolved': sum(1 for a in plan.actions if isinstance(a, A.ApplyAnswer) and a.by),
+        'escalated': sum(1 for s, st in plan.states.values()
+                         if s is State.STUCK and st is not None and st.owner == 'operator'),
     }
+
+
+def questions_line(summary):
+    """``questions: resolved by code N, to the console M (P% by code)`` — this tick's session
+    questions a fact answered (:mod:`asf.kernel.resolvers`) against those still waiting on the
+    console (operator Stuck); '' when there are none."""
+    done, left = summary.get('resolved') or 0, summary.get('escalated') or 0
+    if not done and not left:
+        return ''
+    return 'questions: resolved by code %d, to the console %d (%d%% by code)' % (
+        done, left, round(100 * done / (done + left)))
 
 
 def idle_line(idle):
@@ -109,6 +125,8 @@ def print_summary(summary, out=print):
         out('  limbo %s: %s' % (key, why))
     for b in summary.get('breaches') or []:
         out(breach_line(b))
+    if questions_line(summary):
+        out(questions_line(summary))
     if summary.get('idle'):
         out(idle_line(summary['idle']))
     if summary['paused']:

@@ -1533,19 +1533,24 @@ def _under(path, parent):
 # ---- the product's ports and knobs --------------------------------------------------------------
 
 class Ports:
-    """The three ports one tick uses, and the brief maker ``brief(item, launch, findings, pr)``
-    a launch hands its session (:class:`asf.kernel.briefs.Briefer` on the real ports)."""
+    """The three ports one tick uses, the brief maker ``brief(item, launch, findings, pr)``
+    a launch hands its session (:class:`asf.kernel.briefs.Briefer` on the real ports), and the
+    trunk probe that answers fact-checkable questions (:class:`asf.kernel.trunk.TrunkProbe`;
+    None: none is probed)."""
 
-    def __init__(self, record, github, sessions, brief=None):
+    def __init__(self, record, github, sessions, brief=None, trunk=None):
         self.record, self.github, self.sessions, self.brief = record, github, sessions, brief
+        self.trunk = trunk
 
 
 def real_ports(product):
     from asf.kernel.briefs import Briefer
+    from asf.kernel.trunk import TrunkProbe
     from asf import env
-    cache = os.path.join(env.ASF_HOME, 'state', product.name, GH_CACHE_FILE)
+    state = os.path.join(env.ASF_HOME, 'state', product.name)
+    cache = os.path.join(state, GH_CACHE_FILE)
     return Ports(RealRecord(product), RealGitHub(product, cache_path=cache),
-                 RealSessions(product), Briefer(product))
+                 RealSessions(product), Briefer(product), TrunkProbe.for_product(product, state))
 
 
 def required_checks_for(product, github=None):
@@ -1595,6 +1600,8 @@ def config_for(product, cfg=None, github=None):
         strong_model=str(k['stuck']['strong_model']),
         id_claim_answer=bool(k['stuck']['id_claim_answer']),
         id_claim_prefixes=tuple(str(p) for p in k['stuck']['id_claim_prefixes']),
+        resolve_trunk_tests=bool(k['resolve']['trunk_tests']),
+        resolve_symbols=bool(k['resolve']['symbols']),
         wait_targets=dict(k['waits']['targets']) if k['waits']['breach'] else {},
         max_session_age_h=(k['waits']['max_session_age'] / 3600 if k['waits']['breach']
                            and k['waits']['max_session_age'] else None),

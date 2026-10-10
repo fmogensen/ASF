@@ -275,7 +275,10 @@ class Facts:
     though not in ``items`` (its PRs are never closed as orphans; it is in LIMBO). ``bounds``
     maps a wait class (``building``, ``review``, ``ci``) to the p90 seconds of its finished
     spells on the wait ledger (:func:`asf.kernel.waits.bounds`; absent with too few spells): a
-    live process past its bound is a stall (:func:`asf.kernel.decide.stalls`)."""
+    live process past its bound is a stall (:func:`asf.kernel.decide.stalls`). ``resolved`` maps
+    a :class:`asf.kernel.resolvers.Probe` key to the host's trunk probe result
+    (:mod:`asf.kernel.trunk`) for the session questions a resolver matched; a probe not run yet
+    is absent."""
     items: dict = dataclasses.field(default_factory=dict)
     prs: list = dataclasses.field(default_factory=list)
     sessions: list = dataclasses.field(default_factory=list)
@@ -292,6 +295,7 @@ class Facts:
     waits: dict = dataclasses.field(default_factory=dict)
     unreadable: dict = dataclasses.field(default_factory=dict)
     bounds: dict = dataclasses.field(default_factory=dict)
+    resolved: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -316,7 +320,10 @@ class Config:
     the bare model's default, so a unit test opts in); ``strong_model`` is the model the one
     extra fix round past the cap runs on. ``id_claim_answer``: a session question that only asks
     whether an id claim covers ids it cites (prefixes ``id_claim_prefixes``) is answered by the
-    kernel from ``Facts.id_claims`` (:mod:`asf.kernel.idclaims`). The product file's ``kernel:`` block sets
+    kernel from ``Facts.id_claims`` (:mod:`asf.kernel.idclaims`). ``resolve_trunk_tests`` /
+    ``resolve_symbols``: a question whether named tests are red on trunk or only in a cloud
+    sandbox, or whether a symbol it says does not exist exists, is answered by the kernel from
+    ``Facts.resolved`` (:mod:`asf.kernel.resolvers`). The product file's ``kernel:`` block sets
     them (:mod:`asf.kernel.settings`; its ``stuck`` defaults are 0).
     ``wait_targets`` maps a wait class (``kernel.waits.targets``: ``seat``, ``review``, ``train``,
     ``stuck``, …) to seconds: an item whose current wait (``Facts.waits``) is older is a breach
@@ -347,6 +354,8 @@ class Config:
     strong_model: str = ''
     id_claim_answer: bool = True
     id_claim_prefixes: tuple = ('S', 'T')
+    resolve_trunk_tests: bool = True
+    resolve_symbols: bool = True
     wait_targets: dict = dataclasses.field(default_factory=dict)
     max_session_age_h: float = None
     max_review_age_h: float = None

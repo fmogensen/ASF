@@ -110,10 +110,13 @@ class ApplyAnswer:
     :func:`asf.kernel.decide.answer_attempt` (the relaunch carries the answer as a finding).
     ``extra_round``: the item was Stuck at its fix-round cap (or on a conflict its rebase session
     could not resolve), so the answer grants one more fix round (``kernel_extra_rounds`` + 1) and
-    drops the spent rebase finding from the card."""
+    drops the spent rebase finding from the card. ``by``: the resolver class whose fact
+    answered (:mod:`asf.kernel.resolvers`: ``id-claim``, ``trunk-tests``, ``symbol``); '' for
+    the operator's own answer."""
     item_id: str
     text: str
     extra_round: bool = False
+    by: str = ''
 
 
 @dataclasses.dataclass
@@ -196,6 +199,9 @@ def describe(action):
     if isinstance(action, EndSession):
         return 'end session %s%s' % (action.job, ' + free worktree' if action.free_worktree else '')
     if isinstance(action, ApplyAnswer):
+        if action.by:
+            return 'RESOLVED %s %s -> %s' % (action.item_id, action.by,
+                                             ' '.join(action.text.split())[:200])
         return 'answer %s' % action.item_id
     if isinstance(action, ClearStuck):
         return 're-judge %s: %s' % (action.item_id, action.attempt)

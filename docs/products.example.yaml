@@ -532,6 +532,23 @@ kernel:
                             # another item) or "re-mint from your current block"; a claim it
                             # cannot read leaves the question with the operator
     id_claim_prefixes: [S, T]   # the id prefixes such a question is checked for
+  resolve:                  # more session questions code answers from a fact, not the console
+    trunk_tests: true       # "are these named tests red on the factory host too, or only in a
+                            # cloud sandbox?": the kernel runs the ids (python -m unittest) on a
+                            # fresh detached worktree of origin's trunk under state/<product>/
+                            # resolve-tmp/ (removed after) and answers "green on trunk at <sha>
+                            # (N tests OK): cloud-sandbox only, not a trunk red; proceed" or "red
+                            # on trunk at <sha>: <ids>; treat as a trunk red"
+    symbols: true           # "was `pkg.mod.Name` meant to exist? it does not": the kernel reads
+                            # the module at trunk (ast) — absent: the session's own proposal
+                            # stands; present: where it is. A question no resolver matches, or one
+                            # whose probe is unsure (timeout, an id that does not load), stays with
+                            # the operator. Each answer logs RESOLVED <item> <class> -> <answer>;
+                            # the tick logs "questions: resolved by code N, to the console M"
+    test_timeout_s: 600     # the test run is killed past this, and the question stays open
+    python: python3         # the interpreter the named tests run under
+    test_runs_per_tick: 1   # test runs per tick (each result is cached by question in
+                            # state/<product>/kernel-resolve.json); the rest wait a tick
   gate:
     window_h: 24            # first-push-green is measured over PRs opened in the last window_h
     first_push_green_min: 0.7

@@ -24,7 +24,9 @@ that rule, so it is the same everywhere. The pushed branches
 refused force-push left (:func:`asf.kernel.decide.stranded`) has its last ended session's kept
 worktree read (``sessions.stranded``, when the port has it) into ``Facts.stranded``. The ids an
 id-claim question cites (:func:`claim_questions`) are looked up on the record's origin
-(``record.id_claims``, when the port has it) into ``Facts.id_claims``.
+(``record.id_claims``, when the port has it) into ``Facts.id_claims``; the questions a
+:mod:`asf.kernel.resolvers` class matches are probed on origin's trunk (``ports.trunk``, when
+the ports have it: :mod:`asf.kernel.trunk`) into ``Facts.resolved``.
 
 A GitHub read that fails (the port has already retried a transient one) leaves no partial PR
 facts: ``prs``, GitHub's reviews and the pushed branches are empty and ``Facts.github_error``
@@ -34,6 +36,7 @@ import datetime
 import string
 
 from asf.kernel import idclaims
+from asf.kernel import resolvers
 
 from asf.kernel.decide import stranded as decide_stranded
 from asf.kernel.model import Facts, State
@@ -55,9 +58,9 @@ def answer_counts(answer, it, last_job=None):
     return it.stuck.owner == 'operator'
 
 
-def claim_questions(items, sessions):
+def open_questions(items, sessions):
     """``[(item id, text)]``: every ended session's question, and every operator-Stuck item's
-    question (else its reason), that :func:`asf.kernel.idclaims.is_claim_question` recognises."""
+    question (else its reason), for an item on the record."""
     out = []
     for s in sessions:
         if s.ended and not s.alive and s.kind != 'review' and s.question:
@@ -66,7 +69,32 @@ def claim_questions(items, sessions):
         it = items[iid]
         if it.state is State.STUCK and it.stuck is not None and it.stuck.owner == 'operator':
             out.append((iid, it.question or it.stuck.reason))
-    return [(iid, t) for iid, t in out if iid in items and idclaims.is_claim_question(t)]
+    return [(iid, t) for iid, t in out if iid in items]
+
+
+def claim_questions(items, sessions):
+    """The :func:`open_questions` that :func:`asf.kernel.idclaims.is_claim_question`
+    recognises."""
+    return [(iid, t) for iid, t in open_questions(items, sessions)
+            if idclaims.is_claim_question(t)]
+
+
+def read_resolved(ports, items, sessions):
+    """``Facts.resolved``: the host's trunk probe (``ports.trunk``, :mod:`asf.kernel.trunk`) of
+    every probe :func:`asf.kernel.resolvers.match` finds in the :func:`open_questions`; ``{}``
+    when none matches, the ports have no probe, or it fails."""
+    probe = getattr(getattr(ports, 'trunk', None), 'probe', None)
+    probes = []
+    for _iid, text in open_questions(items, sessions):
+        p = resolvers.match(text)
+        if p is not None and p not in probes:
+            probes.append(p)
+    if not probe or not probes:
+        return {}
+    try:
+        return dict(probe(probes) or {})
+    except Exception:  # noqa: BLE001 — an unprobed question stays with the operator
+        return {}
 
 
 def read_id_claims(record, items, sessions):
@@ -132,5 +160,6 @@ def read_facts(ports):
                  items=items, prs=prs, sessions=sessions, reviews=reviews,
                  answers=answers, specs_landed=specs, paused=record.paused(), branches=pushed,
                  stranded=stranded, id_claims=read_id_claims(record, items, sessions),
+                 resolved=read_resolved(ports, items, sessions),
                  github_error=github_error, orphan_prs=orphans,
                  now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))

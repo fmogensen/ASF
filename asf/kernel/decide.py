@@ -111,7 +111,11 @@ item and the actions of one tick. The rules it holds, in the design's words:
   answers it from ``Facts.id_claims`` (:class:`ApplyAnswer`; "the claim stands, keep" with the
   refs it verified, or "re-mint from your current block") and the item is relaunched carrying the
   answer, on the tick the session ends or on a recorded operator Stuck. A claim it could not read
-  leaves the question with the operator.
+  leaves the question with the operator. The same holds for the trunk-probe classes of
+  :mod:`asf.kernel.resolvers` (``config.resolve_trunk_tests``, ``config.resolve_symbols``):
+  whether named tests are red on trunk or only in a cloud sandbox, whether a symbol a question
+  says does not exist exists — answered from ``Facts.resolved``; an unprobed or unsure one stays
+  with the operator. Every such answer is an :class:`ApplyAnswer` with ``by`` its class.
 - Record: a landed spec's declared Stories (:func:`asf.kernel.stories.declared_stories`) not on
   the record are minted; pending answers are applied at once.
 
@@ -151,6 +155,7 @@ import re
 
 from asf.kernel import actions as A
 from asf.kernel import idclaims
+from asf.kernel import resolvers
 from asf.kernel import model as M
 from asf.kernel import reports as R
 from asf.kernel import waits as W
@@ -438,7 +443,7 @@ def _judge(it, facts, config, actions):
     answered = granted = False
     extra = it.extra_rounds
     answers = list(facts.answers)
-    auto = _claim_answer(it, facts, config)
+    auto, auto_by = _auto_answer(it, facts, config) or (None, '')
     if auto and not any(a.item_id == it.id for a in answers):
         answers.append(M.Answer(it.id, auto))  # the kernel answers it, as the operator would
     for a in answers:
@@ -446,7 +451,8 @@ def _judge(it, facts, config, actions):
                 a.text not in it.answers or _answers_stuck(a, it)):
             granted = it.state is State.STUCK and capped(it.stuck)
             extra += 1 if granted else 0
-            actions.append(A.ApplyAnswer(it.id, a.text, granted))
+            actions.append(A.ApplyAnswer(it.id, a.text, granted,
+                                         by=auto_by if a.text == auto else ''))
             stuck, question, hold, answered = None, None, True, True
             if it.state is State.STUCK:  # a fresh start: the applier resets the attempts too
                 attempts = [answer_attempt(a.text)]
@@ -511,9 +517,9 @@ def _judge(it, facts, config, actions):
             return _Judged(State.READY, hold=True)
         return _Judged(State.STUCK, _keep(stuck))
     if ended_stuck and ended_stuck.owner == 'operator' and asked is not None and not answered:
-        auto = _claim_answer(it, facts, config, asked.question)
-        if auto:  # an id-claim question the facts answer: relaunched next tick carrying it
-            actions.append(A.ApplyAnswer(it.id, auto))
+        auto, auto_by = _auto_answer(it, facts, config, asked.question) or (None, '')
+        if auto:  # a question the facts answer: relaunched next tick carrying it
+            actions.append(A.ApplyAnswer(it.id, auto, by=auto_by))
             if it.state is not State.STUCK:  # the applier resets only a Stuck card's attempts
                 actions.append(A.ClearStuck(it.id, answer_attempt(auto)))
             return _Judged(State.READY, hold=True)
@@ -549,19 +555,25 @@ def _judge(it, facts, config, actions):
     return _Judged(State.READY, hold=hold, findings=relaunch_findings(it))
 
 
-def _claim_answer(it, facts, config, text=None):
-    """The kernel's answer to a question that only asks whether an id claim covers the ids it
-    cites (:func:`asf.kernel.idclaims.answer`), or None. ``text`` is an ended session's question;
+def _auto_answer(it, facts, config, text=None):
+    """``(answer, resolver class)`` of a question the facts answer, or None: one that only asks
+    whether an id claim covers the ids it cites (:func:`asf.kernel.idclaims.answer`), else one a
+    trunk probe answered (:func:`asf.kernel.resolvers.resolve`: named tests red on trunk or only
+    in a cloud sandbox, a symbol said not to exist). ``text`` is an ended session's question;
     without it, ``it``'s recorded operator Stuck (its question, else its reason) is read, and an
     answer already on the card is never given again."""
-    if not config.id_claim_answer:
-        return None
     if text is None:
         if it.state is not State.STUCK or it.stuck is None or it.stuck.owner != 'operator':
             return None
         text = it.question or it.stuck.reason
-    auto = idclaims.answer(it, text, facts, tuple(config.id_claim_prefixes))
-    return auto if auto and auto not in it.answers else None
+    if config.id_claim_answer:
+        auto = idclaims.answer(it, text, facts, tuple(config.id_claim_prefixes))
+        if auto:
+            return (auto, resolvers.ID_CLAIM) if auto not in it.answers else None
+    enabled = tuple(c for c, on in ((resolvers.TRUNK_TESTS, config.resolve_trunk_tests),
+                                    (resolvers.SYMBOL, config.resolve_symbols)) if on)
+    got = resolvers.resolve(text, facts, enabled)
+    return got if got and got[0] not in it.answers else None
 
 
 def _answers_stuck(answer, it):

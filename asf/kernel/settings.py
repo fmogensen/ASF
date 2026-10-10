@@ -53,6 +53,16 @@ What used to live in a hand-written script, two hand-written plists and a note i
                                               # covers ids it cites: the kernel reads the claim
                                               # refs and answers (keep, or re-mint)
                    id_claim_prefixes: [S, T]} # the id prefixes such a question is checked for
+      resolve:    {trunk_tests: true,         # a question whether named tests are red on the
+                                              # factory host or only in a cloud sandbox: the
+                                              # kernel runs them on a fresh worktree of origin's
+                                              # trunk and answers (asf.kernel.resolvers)
+                   symbols: true,             # a question whether a symbol it says does not
+                                              # exist exists: read at trunk and answered
+                   test_timeout_s: 600,       # the test run is killed past this: no answer
+                   python: python3,           # the interpreter the named tests run under
+                   test_runs_per_tick: 1}     # test runs per tick; the rest wait (cached by
+                                              # question, state/<product>/kernel-resolve.json)
       gate:       {window_h: 24, first_push_green_min: 0.7, landed_min: 5,
                    silent_stuck_max: 0, since: 2026-10-09T14:00:00Z}   # asf kernel gate
       waits:      {targets: {seat: 10m, ci: 10m, review: 30m, train: 30m, merge: 10m,
@@ -148,6 +158,9 @@ SPEC = {
     'stuck': {'escalate_after_h': (0, float), 'rebuild_after_h': (0, float),
               'strong_model': (HEAVY_MODEL, 'text'), 'id_claim_answer': (True, bool),
               'id_claim_prefixes': (('S', 'T'), 'words')},
+    'resolve': {'trunk_tests': (True, bool), 'symbols': (True, bool),
+                'test_timeout_s': (600, int), 'python': ('python3', 'text'),
+                'test_runs_per_tick': (1, int)},
     'gate': {'window_h': (24, float), 'first_push_green_min': (0.7, float), 'landed_min': (5, int),
              'silent_stuck_max': (0, int), 'since': (None, 'time')},
     'waits': {'targets': (WAIT_TARGETS, 'targets'), 'breach': (True, bool),
